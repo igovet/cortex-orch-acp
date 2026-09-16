@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .contracts import StoreError
 from .governance import governance_snapshot
+from .project_storage import StorageLocator
 
 HOOK_SCHEMA = '''
 CREATE TABLE IF NOT EXISTS source_turns (
@@ -100,7 +101,14 @@ class HookStorage:
                     return None
                 binding = child_binding
         project = db.execute("SELECT project_root FROM tasks WHERE id=?", (actor["task_id"],)).fetchone()
-        if project is None or Path(cwd).resolve() != Path(project[0]):
+        if project is None:
+            return None
+        try:
+            # Accepts the bound project's canonical checkout and any of its
+            # verified linked Git worktrees; never falls back to a nearest
+            # or latest task on an ambiguous/forged workspace.
+            StorageLocator(project[0]).verify_workspace(cwd)
+        except StoreError:
             return None
         return dict(task_id=actor["task_id"], thread_id=actor["thread_id"],
                     parent_thread_id=actor["parent_thread_id"], session_id=session_id,

@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import multiprocessing
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -492,6 +493,90 @@ def test_active_hooks_use_project_store_and_reject_cwd_mismatch(tmp_path, monkey
                                   prompt="wrong project"))
     assert code == 1
     with sqlite3.connect(project_b / ".cortex/cortex.sqlite3") as db:
+        assert db.execute("SELECT COUNT(*) FROM hook_events").fetchone()[0] == 0
+
+
+def _git(cwd, home, *args):
+    import subprocess
+    env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1",
+               HOME=str(home))
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                   cwd=cwd, env=env, check=True, capture_output=True)
+
+
+def test_hook_accepts_verified_worktree_cwd_and_uses_the_main_store(tmp_path, monkeypatch):
+    """A worker task bound to the main project may hook from a linked worktree.
+
+    Drives the real ``hooks.py`` CLI entry point end-to-end (like
+    ``test_active_hooks_use_project_store_and_reject_cwd_mismatch`` above): a
+    verified linked Git worktree's cwd is active and uses the main project's
+    single store. A forged ``.git`` worktree cwd, a nonexistent cwd, and an
+    unrelated genuinely bound project cwd are all rejected with the same
+    "failed"/exit-1 outcome an invalid cwd already produced before worktree
+    support -- StoreError from ``logical_project_root`` is never silently
+    absorbed into "inactive"; it propagates to the ordinary failure handler,
+    and no store is created anywhere for any of them.
+    """
+    index = NativeIndex(tmp_path, monkeypatch)
+    project = tmp_path / "project"; project.mkdir()
+    unrelated = tmp_path / "unrelated"; unrelated.mkdir()
+    git_home = tmp_path / "git-home"; git_home.mkdir()
+    _git(project, git_home, "init", "-q")
+    (project / "f.txt").write_text("hi")
+    _git(project, git_home, "add", "f.txt")
+    _git(project, git_home, "commit", "-q", "-m", "init")
+    worktree = tmp_path / "worktree"
+    _git(project, git_home, "worktree", "add", "-q", str(worktree), "-b", "feature")
+
+    session, unrelated_session = identifier(), identifier()
+    index.add(session, project); index.add(unrelated_session, unrelated)
+    server = configured_server()
+    create_task(server, project, session)
+    # An unrelated cwd must itself already be a genuinely bound project with
+    # its own store (matching
+    # test_active_hooks_use_project_store_and_reject_cwd_mismatch above), so
+    # this exercises the real cross-project mismatch rejection rather than a
+    # merely unbound/inactive cwd.
+    create_task(server, unrelated, unrelated_session)
+
+    code, _ = run_hook(hook_event("UserPromptSubmit", session, worktree,
+                                  prompt="continuing from a linked worktree"))
+    assert code == 0
+    with sqlite3.connect(project / ".cortex/cortex.sqlite3") as db:
+        assert db.execute("SELECT COUNT(*) FROM hook_pending_sources").fetchone()[0] == 1
+    assert not (worktree / ".cortex").exists()
+
+    # A forged worktree ".git" file (real worktree metadata dir exists, but
+    # its own backlink does not resolve to this candidate) raises StoreError
+    # from logical_project_root, which now propagates to the ordinary
+    # failure handler exactly like an invalid cwd already did before
+    # worktree support: exit 1, no store created, real project unaffected.
+    forged = tmp_path / "forged-worktree"; forged.mkdir()
+    (forged / ".git").write_text(f"gitdir: {project / '.git' / 'worktrees' / 'feature'}\n")
+    code, _ = run_hook(hook_event("UserPromptSubmit", session, forged,
+                                  prompt="forged worktree cwd"))
+    assert code == 1
+    assert not (forged / ".cortex").exists()
+    with sqlite3.connect(project / ".cortex/cortex.sqlite3") as db:
+        assert db.execute("SELECT COUNT(*) FROM hook_pending_sources").fetchone()[0] == 1
+
+    # A nonexistent cwd fails the same way it always did (canonical_project
+    # itself already required an absolute, existing, canonical directory):
+    # unchanged pre-T004 behavior, exit 1, no store created.
+    missing = tmp_path / "does-not-exist"
+    code, _ = run_hook(hook_event("UserPromptSubmit", session, missing,
+                                  prompt="nonexistent cwd"))
+    assert code == 1
+    assert not missing.exists()
+    with sqlite3.connect(project / ".cortex/cortex.sqlite3") as db:
+        assert db.execute("SELECT COUNT(*) FROM hook_pending_sources").fetchone()[0] == 1
+
+    code, _ = run_hook(hook_event("UserPromptSubmit", session, unrelated,
+                                  prompt="unrelated directory"))
+    assert code == 1
+    with sqlite3.connect(project / ".cortex/cortex.sqlite3") as db:
+        assert db.execute("SELECT COUNT(*) FROM hook_pending_sources").fetchone()[0] == 1
+    with sqlite3.connect(unrelated / ".cortex/cortex.sqlite3") as db:
         assert db.execute("SELECT COUNT(*) FROM hook_events").fetchone()[0] == 0
 
 

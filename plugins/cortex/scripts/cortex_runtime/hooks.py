@@ -703,11 +703,18 @@ def main(stdin=None, stdout=None, stderr=None):
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             raise ValueError("hook input must be an object")
-        from .project_storage import canonical_project, native_project, project_store_directory
+        from .project_storage import logical_project_root, native_project, project_store_directory
         session, cwd = payload.get('session_id'), payload.get('cwd')
         if not _identifier(session):
             raise ValueError('invalid hook session identity')
-        project = canonical_project(cwd)
+        # A verified linked Git worktree resolves to its main checkout's
+        # single project store. A forged, symlinked, or ambiguous ``.git``
+        # layout raises StoreError here exactly like an invalid cwd already
+        # did before worktree support: it propagates to the outer failure
+        # handler below (outcome "failed", exit 1) rather than being
+        # silently absorbed into "inactive" -- fail closed and visible,
+        # never a fallback to a different project.
+        project = logical_project_root(cwd)
         directory = project_store_directory(project)
         if not (directory / "cortex.sqlite3").exists():
             output = {}

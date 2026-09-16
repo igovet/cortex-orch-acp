@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 
 from .contracts import StoreError
+from .project_storage import project_store_directory
 from .store import file_digest, private_directory, sync_directory
 
 
@@ -22,7 +23,7 @@ def finish_deletions(store,db,task):
                 if source["published_digest"] is not None and file_digest(candidate,private=False,validate_utf8=True)!=source["published_digest"]:
                     raise StoreError("draft_conflict","draft_id","retention candidate","bytes matching its accepted SHA-256")
                 candidate.unlink(); sync_directory(candidate.parent)
-        task_root=private_directory(Path(row["project_root"])/".cortex")
+        task_root=private_directory(project_store_directory(row["project_root"]))
         directory=task_root/task
         if directory.exists() or directory.is_symlink():
             info=directory.lstat()
