@@ -1,0 +1,187 @@
+# Markdown storage
+
+Each task has one canonical project and native coordinator binding. Children inherit
+that task only through verified native parent metadata. There is no latest-task
+fallback or model-supplied task selector. Binding receipts expose the selected
+Cortex/normal state. Receipts establish local routing, not authentication against
+a malicious same-user process.
+
+Each canonical project has one private SQLite store at
+`<project>/.cortex/cortex.sqlite3`. It stores metadata, relationships,
+delivery receipts, source revisions and recovery information. Projects do not share
+this store. Writes within one project are serialized by SQLite transactions; stores
+for different projects are independent. Body text remains in real Markdown:
+
+```text
+<project>/.cortex/draft-reports/<draft>.md
+<project>/.cortex/pipeline-drafts/<draft>.md
+<project>/.cortex/cortex.sqlite3
+<project>/.cortex/<task>/pipeline.md
+<project>/.cortex/<task>/<report>.md
+```
+
+The complete Cortex store is owner-private below project `.cortex`; this includes
+the database, immutable task Markdown, pipeline, reports, `draft-reports`, and
+`pipeline-drafts`. Only storage publication writes final task documents. Keep these
+private files out of repository documents and diagnostics.
+
+When a recognized legacy tree exists at `<project>/.codex/cortex`, the runtime
+performs a one-way transfer into missing `.cortex` components before opening the
+project store. It moves the SQLite
+family (`cortex.sqlite3` and recognized sidecars) and published `t_<12 hex>` task
+directories only after validating owner-private identities and acquiring exclusive
+source and destination locks. Any destination component, unsafe identity, or
+ambiguous partial state fails closed without overwriting either copy. The legacy path
+is never reopened as a compatibility fallback, and successful moves are not duplicated.
+Each rename is atomic on the project filesystem, but the multi-entry transfer is not
+globally atomic: interruption can leave a partial state that subsequent attempts
+fail closed.
+
+The native Codex `state_5.sqlite` index locates source records and validates the
+current thread, parent and canonical project. It is not a Cortex metadata store, and the
+runtime does not search a home-wide or environment-selected Cortex directory.
+A fresh MCP process needs the validated native index to locate an archive. An
+already accepted binding can retain its verified project if that index later
+becomes unavailable; conflicting parent or project evidence is rejected. Missing
+rollout content alone does not prevent archive reads. Each process retains at most
+256 accepted thread routes and 16 project store instances.
+
+## Publication and recovery
+
+The draft creator allocates a short identifier, canonical path and required marker,
+and records its task, native owner, device and inode. Only the bound coordinator
+may create a pipeline draft; worker pipeline requests are rejected before draft
+allocation, while ordinary worker report drafts remain available. Actors edit that exact file
+in place. Replacement, deletion, renaming, recreation, symlinks, special files and
+unsafe ownership are rejected. Unfilled packaged guidance markers also prevent
+publication; this is template validation, not a semantic acceptance test.
+
+Publication streams complete UTF-8 in fixed blocks, computes size and SHA-256,
+flushes and fsyncs a private temporary file, atomically renames it, commits metadata,
+and removes the draft. Bytes are not normalized, summarized or truncated. There is
+no total report-size cap beyond the filesystem and available space. Failures before
+commit preserve the draft and roll back uncommitted publications. Pipeline backups
+retain the committed version until restoration or digest confirmation.
+
+There is one pipeline per task. A new complete edition is prepended with a separator,
+leaving older editions below. Ordinary reports are immutable. A publication delivery
+key replays its original accepted receipt; changed arguments or recreated changed
+bytes conflict. Replay does not repeat later state transitions.
+
+New drafts normally omit the optional delivery key and receive a server-generated
+UUID internally. This prevents reused worker contexts from recycling a descriptive
+key from an earlier assignment. Every unkeyed call creates a distinct draft, even
+with identical headings. After an uncertain response, the caller recovers its
+unfinished draft through the bounded own-draft catalogue before creating another.
+Explicit keyed creation still supports exact retries and rejects changed arguments,
+including after publication. No schema migration or report rewrite is involved.
+
+Recovery runs for the resolved task only. It never traverses every task before a
+normal operation. A corrupt neighboring pipeline does not prevent another catalogue
+or report read. Retention and publication recovery use exact registered relationships
+and preserve unknown files and shared directories.
+
+## Bounded reads and checked identities
+
+The newest-first catalogue uses a stable high-water snapshot across bounded cursor
+pages. Report and draft reads use Unicode slices of at most 4,000 characters per
+page, with cursors allowing access to the remaining document. Pipeline updates expire
+its older document cursors; restart from the newest beginning. Ordinary immutable
+report cursors survive process restart.
+
+Each cached project store keeps at most 128 validated file identities and at most 1,024 sparse
+byte offsets per document. Unchanged files avoid complete digest rereads and repeated
+prefix decoding. Identity changes trigger full integrity validation. The reader
+checks identity around page access and does not retain whole report bodies in cache.
+These checks are integrity detection, not a filesystem sandbox.
+
+## Sources and provenance
+
+Task creation obtains exact typed user messages from the current native Codex turn.
+The reader uses the active home's explicitly validated `state_5.sqlite` format,
+matched canonical project and owned regular session file. The first session metadata
+must match the native thread and project. It never guesses a different index or a
+foreign session. Blockwise boundary search and forward streaming replace the fixed
+8 MiB tail; oversized records proven irrelevant to source selection can be skipped.
+Unknown or oversized source records remain explicit gaps.
+
+Relevant event/session JSONL records are limited to 4 MiB; one capture batch is
+limited to 1,000,000 text characters and 1,024 native messages to protect memory. These are source-capture limits, not report pagination limits; a capture
+failure leaves existing reports available with explicit completeness. Distinct native
+message IDs produce distinct source reports even for identical text. The original
+text retains its whitespace and language, except explicitly requested literal
+credential redactions.
+
+Attachments retain an available file/resource and a recovery method, or an explicit
+unavailable entry. A reference is not proof that content was copied or inspected.
+The pipeline separately records the model's interpretation, cancelled conditions,
+assignments, owners and unfinished actions.
+
+Every authored report records the source revision and checked artifact versions
+underlying it. The default source revision is the draft's creation revision, rather
+than silently adopting newer requirements at publication. Artifact versions are
+reported evidence, not automatically executed checks. New sources and observed file
+changes signal reconciliation; the coordinator decides whether prior checks remain
+valid. Bounded catalogue discovery also exposes changes with allowlisted hook-observation
+metadata (known status, exit/session receipts, truncation, actor scope and changed
+paths), and the caller's unfinished
+drafts, each with its own continuation mechanism.
+
+Once the project route is established, host-source errors do not deny archived
+report reads. Operation receipts expose
+complete, partial, unavailable or unattempted capture as applicable. Native source
+capture and metadata commit atomically with the operation; exact retries do not
+collapse distinct native events. `normal` suspends capture and later reactivation
+must skip the inactive interval rather than backfill ordinary conversations.
+Ambiguous boundaries remain explicit gaps.
+
+Hooks share the same services. A documented `UserPromptSubmit` without a unique
+native message receipt records deferred capture, never a guessed identity or raw
+publication that bypasses a later credential redaction. See [hook coverage](../features/lifecycle-hooks/index.md).
+
+## Offline project split
+
+For a legacy shared v11 database, the offline split remains a separate operation.
+With all CLI, Desktop, MCP and hook access stopped, split one canonical project at a time:
+
+```bash
+python3 -B plugins/cortex/scripts/cortex_split.py \
+  --source-storage-dir /absolute/private/legacy-store \
+  --project-root /absolute/existing/project \
+  --backup /absolute/private/cortex-global-v11-backup.sqlite3 \
+  --access-stopped
+```
+
+The source directory must contain the legacy `cortex.sqlite3`; the destination is
+created at `<project>/.cortex/cortex.sqlite3`. `--backup` must name a new
+owner-private file. The command exports only rows belonging to the selected
+canonical project, validates relationships and delivery ownership, and leaves the
+legacy SQLite file and every Markdown file unchanged. It does not remove the source
+store or select a project automatically. The source must have no WAL, shared-memory
+or rollback-journal sidecars, and the existing project report directory must be
+owner-private. Source and destination access locks and a SQLite exclusive transaction
+remain held through publication. A verified backup survives a later export failure;
+an incomplete backup or destination temporary file is removed. Repeat with a new backup for
+each remaining project, then retire the legacy store only after all projects have
+been checked.
+
+## Offline format 10→11 migration
+
+Runtime accepts format 11 only. There is no automatic migration or compatibility
+reader. Stop all CLI, Desktop, MCP and hook access, and back up every affected
+project's task/draft directories. Then run the explicit metadata conversion:
+
+```bash
+python3 -B plugins/cortex/scripts/cortex_migrate.py --storage-dir /absolute/private/store --backup /absolute/private/cortex-v10.sqlite3 --access-stopped
+```
+
+The backup path must be new. The migrator takes an exclusive cooperative access lock
+and database lock, creates and verifies the SQLite backup, adds metadata, initializes
+known source order and marks unknown historical provenance explicitly. It never
+opens or rewrites Markdown. Runtime connections hold shared access locks. Older
+clients must still be stopped; an advisory lock cannot stop an uncooperative process.
+
+Keep SQLite and project directories together for restoration. Failed migration must
+not be treated as permission to start normal access without checking the receipt.
+Retention removes source and hook metadata with the selected task. See
+[security](../../SECURITY.md) and [verification](verification.md).
