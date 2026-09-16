@@ -14,13 +14,24 @@ import uuid
 from .contracts import StoreError
 from .hook_storage import HOOK_SCHEMA
 from .store import APPLICATION_ID, SCHEMA, regular, sync_directory
+from .trusted_channel import IDENTITY_SCHEMA
 
 
 _MUTATIONS = {"create_task", "set_governance", "create_draft", "write_report"}
 
+# Trusted-channel/ownership tables (see trusted_channel.IDENTITY_SCHEMA) are
+# an OPTIONAL group on top of the SCHEMA+HOOK_SCHEMA core: an existing v11
+# store predating T005 has none of them; a store created or opened by the
+# current store.py always has all three. Any other combination (partial
+# presence, or an unexpected extra table) is rejected as unsupported_storage.
+_IDENTITY_TABLES = frozenset({"trusted_channels", "source_events", "task_owners"})
+
 _SELECTIONS = {
     "tasks": "SELECT x.* FROM tasks x WHERE x.project_root=?",
     "thread_bindings": "SELECT x.* FROM thread_bindings x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "task_owners": "SELECT x.* FROM task_owners x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "trusted_channels": "SELECT x.* FROM trusted_channels x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "source_events": "SELECT x.* FROM source_events x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "reports": "SELECT x.* FROM reports x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "source_cursors": "SELECT x.* FROM source_cursors x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "source_messages": "SELECT x.* FROM source_messages x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -43,7 +54,8 @@ _SELECTIONS = {
 }
 
 _COPY_ORDER = (
-    "tasks", "thread_bindings", "reports", "source_cursors", "source_messages",
+    "tasks", "thread_bindings", "task_owners", "trusted_channels", "source_events",
+    "reports", "source_cursors", "source_messages",
     "editions", "governance", "drafts", "pending_source_deletions",
     "pending_deletions", "binding_receipts", "source_resets", "source_revisions",
     "report_provenance", "draft_revisions", "task_changes", "source_turns",
@@ -81,15 +93,27 @@ def _fresh_path(value, code, *, private_parent=True):
     return candidate
 
 
+def _table_names(db):
+    return {
+        row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+
+
+def _identity_present(db):
+    """True only when every identity table exists; false only when none do."""
+    names = _table_names(db) & _IDENTITY_TABLES
+    if names and names != _IDENTITY_TABLES:
+        raise StoreError("unsupported_storage")
+    return names == _IDENTITY_TABLES
+
+
 def _expected_layout():
     db = sqlite3.connect(":memory:")
     try:
-        db.executescript(SCHEMA + HOOK_SCHEMA)
-        tables = {
-            row[0] for row in db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
+        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA)
+        tables = _table_names(db)
         columns = {
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA table_xinfo({_identifier(table)})"))
             for table in tables
@@ -98,7 +122,8 @@ def _expected_layout():
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA foreign_key_list({_identifier(table)})"))
             for table in tables
         }
-        return tables, columns, foreign_keys
+        core = tables - _IDENTITY_TABLES
+        return core, columns, foreign_keys
     finally:
         db.close()
 
@@ -108,12 +133,13 @@ def _validate_format(db):
         raise StoreError("unsupported_storage")
     if db.execute("PRAGMA user_version").fetchone()[0] != 11:
         raise StoreError("unsupported_storage")
-    expected, columns, foreign_keys = _expected_layout()
-    actual = {
-        row[0] for row in db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        )
-    }
+    core, columns, foreign_keys = _expected_layout()
+    actual = _table_names(db)
+    # IDENTITY_SCHEMA tables are one optional, all-or-nothing group on top of
+    # the exact core layout: a pre-T005 v11 store has none of them, a
+    # store.py-created store has all of them; anything else is rejected.
+    identity_present = _identity_present(db)
+    expected = core | (_IDENTITY_TABLES if identity_present else set())
     views = db.execute("SELECT 1 FROM sqlite_master WHERE type='view' LIMIT 1").fetchone()
     if actual != expected or views is not None:
         raise StoreError("unsupported_storage")
@@ -128,7 +154,7 @@ def _validate_format(db):
         raise StoreError("split_source_invalid")
 
 
-def _ensure_relations(db):
+def _ensure_relations(db, identity_present):
     checks = (
         """SELECT 1 FROM thread_bindings b LEFT JOIN thread_bindings p ON p.thread_id=b.parent_thread_id
              WHERE b.parent_thread_id IS NOT NULL AND (p.thread_id IS NULL OR p.task_id!=b.task_id) LIMIT 1""",
@@ -196,6 +222,18 @@ def _ensure_relations(db):
              ) LIMIT 1""",
         """SELECT 1 FROM task_changes x WHERE x.kind='source_pending' AND x.reference IS NOT NULL LIMIT 1""",
     )
+    if identity_present:
+        checks = checks + (
+            """SELECT 1 FROM trusted_channels x WHERE NOT EXISTS (
+                     SELECT 1 FROM thread_bindings b
+                     WHERE b.thread_id=x.principal_thread_id AND b.task_id=x.task_id
+                 ) LIMIT 1""",
+            """SELECT 1 FROM trusted_channels x WHERE x.parent_principal_thread_id IS NOT NULL
+                     AND NOT EXISTS (
+                     SELECT 1 FROM thread_bindings b
+                     WHERE b.thread_id=x.parent_principal_thread_id AND b.task_id=x.task_id
+                 ) LIMIT 1""",
+        )
     for query in checks:
         if db.execute(query).fetchone() is not None:
             raise StoreError("split_source_relations_invalid")
@@ -357,16 +395,26 @@ def _create_destination(source_db, temporary, project_root):
     target.row_factory = sqlite3.Row
     try:
         target.execute("PRAGMA foreign_keys=ON")
-        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA +
+        # Destination initialization always matches what store.py creates for
+        # a fresh store: core SCHEMA+HOOK_SCHEMA plus the identity tables,
+        # regardless of whether the (possibly legacy, pre-T005) source has
+        # them. A legacy source simply leaves them empty in the destination.
+        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA +
                              f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
         target.execute("BEGIN IMMEDIATE")
+        source_identity_present = _identity_present(source_db)
         expected = {}
         for table in _COPY_ORDER:
             columns = [row[1] for row in target.execute(f"PRAGMA table_info({_identifier(table)})")]
             placeholders = ",".join("?" for _ in columns)
             insert = ("INSERT INTO " + _identifier(table) + " (" +
                       ",".join(map(_identifier, columns)) + ") VALUES (" + placeholders + ")")
-            if table == "deliveries":
+            if table in _IDENTITY_TABLES and not source_identity_present:
+                # No identity rows exist to carry; leave the destination's
+                # freshly-created identity tables empty rather than dropping
+                # anything (there is nothing to drop for a legacy source).
+                rows = ()
+            elif table == "deliveries":
                 rows = _selected_deliveries(source_db, project_root)
             else:
                 order = _primary_order(source_db, table, columns)
@@ -476,7 +524,7 @@ def split_project(source_directory, project_root, backup, *, access_stopped=Fals
         source_db.row_factory = sqlite3.Row
         source_db.execute("PRAGMA foreign_keys=ON")
         source_db.execute("BEGIN")
-        _validate_format(source_db); _ensure_relations(source_db)
+        _validate_format(source_db); _ensure_relations(source_db, _identity_present(source_db))
         selected = source_db.execute(
             "SELECT COUNT(*) FROM tasks WHERE project_root=?", (str(project_root),)
         ).fetchone()[0]

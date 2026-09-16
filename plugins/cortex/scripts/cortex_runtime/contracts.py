@@ -271,6 +271,18 @@ ERROR_HELP = {
     "coordinator_only": "Only the bound coordinator can change Cortex participation state.",
     "invalid_source_revision": "Use an existing requirements source revision actually used by the report.",
     "storage_error": "Storage did not complete cleanly. Preserve the draft. Check disk space and access, then retry only the identical request and key because publication may be uncertain.",
+    "channel_unknown": "This trusted channel id and secret pair is not recognized. Use the exact channel_id and secret issued at bootstrap or worker delegation; never guess or reuse another channel's credentials.",
+    "channel_expired": "This trusted channel's validity window has passed. Obtain a fresh channel through bootstrap or explicit delegation; an expired channel cannot be renewed in place.",
+    "channel_revoked": "This trusted channel was explicitly revoked. Obtain a fresh channel through bootstrap or explicit delegation; a revoked channel is never reactivated.",
+    "channel_parent_required": "A worker channel must reference its issuing coordinator channel. Supply the exact parent_channel_id used when this worker was delegated.",
+    "cross_task_channel": "The referenced parent channel belongs to a different task. Issue worker channels only from the coordinator channel of the same task.",
+    "invalid_channel_role": "A trusted channel role must be exactly 'coordinator' or 'worker'. Correct the role and retry.",
+    "stale_ownership_epoch": "This channel's ownership epoch is no longer current; the task's mutating coordinator has changed. Obtain a fresh channel for the current owner before retrying; this mutation was not applied.",
+    "invalid_owner_ref": "The coordination owner reference must be a non-empty string. Correct it and retry.",
+    "invalid_source_event": "The bootstrap source event, initial text, or owner reference does not meet the advertised bounds. Correct the named field and retry; a genuinely new origin/event_id pair creates a new task, and a replayed one never duplicates it.",
+    "ambiguous_identity": "This request carried both native Codex thread metadata and a trusted channel identity. Use exactly one identity mechanism per server process; never combine them.",
+    "channel_task_creation": "A trusted channel cannot create a task. Tasks are created only through durable bootstrap before any channel is issued.",
+    "channel_managed_task": "This task is channel-managed and rejects every native Codex thread/parent identity, for reads and mutations alike. Use its issued trusted channel instead of any thread id.",
 }
 
 

@@ -256,6 +256,7 @@ def sync_directory(path):
 class Store:
     def __init__(self,directory,initialize=True,*,project_root=None):
         from .hook_storage import HOOK_SCHEMA
+        from .trusted_channel import IDENTITY_SCHEMA
         from .project_storage import canonical_project, project_store_directory
         self.project_root=canonical_project(project_root) if project_root is not None else None
         if self.project_root is not None and Path(directory)!=project_store_directory(self.project_root):
@@ -281,7 +282,7 @@ class Store:
             db.commit()
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
 
     def _check_project(self,db,task=None):
         if self.project_root is None:return
@@ -316,7 +317,16 @@ class Store:
             if db is not None:db.close()
             fcntl.flock(lock_fd,fcntl.LOCK_UN); os.close(lock_fd)
 
-    def call(self,operation,args,thread_id,parent_thread_id=None,*,original_request=None,steering_source=None):
+    def call(self,operation,args,thread_id,parent_thread_id=None,*,original_request=None,steering_source=None,trusted=False):
+        """``trusted`` is set only by ``server._dispatch_channeled`` (never
+        from a model argument or ``_meta``) after a channel secret has been
+        verified. A task once owned through ``task_owners``/``trusted_channels``
+        (see ``trusted_channel``/``ownership``) becomes channel-managed and
+        rejects every untrusted (legacy Codex ``_meta``) call — reads and
+        mutations alike, including a legacy child-thread registering under a
+        leaked channel principal as its parent — with ``channel_managed_task``.
+        A legacy-created task (no ``task_owners`` row) is unaffected.
+        """
         validate(operation,args)
         # Pipeline editions are coordinator-owned durable task state. Reject a
         # worker request before entering the transaction so no draft file,
@@ -326,9 +336,9 @@ class Store:
         if operation=="create_draft" and "request_key" not in args:
             args=dict(args,request_key=str(uuid.uuid4()))
         if operation=="create_task" and parent_thread_id is not None:raise StoreError("child_creation")
-        return self._transaction(operation,args,(thread_id,parent_thread_id),original_request,steering_source)
+        return self._transaction(operation,args,(thread_id,parent_thread_id),original_request,steering_source,trusted)
 
-    def _transaction(self,operation,args,context,original_request=None,steering_source=None):
+    def _transaction(self,operation,args,context,original_request=None,steering_source=None,trusted=False):
         rollbacks=[]; staged=[]
         try:
             with self.connection() as db:
@@ -344,14 +354,16 @@ class Store:
                         existing=db.execute("SELECT * FROM thread_bindings WHERE thread_id=?",(thread,)).fetchone()
                         if existing is not None:
                             if existing["parent_thread_id"] is not None: raise StoreError("thread_conflict")
+                            if not trusted and self._channel_managed(db,existing["task_id"]):
+                                raise StoreError("channel_managed_task")
                             receipt=db.execute("SELECT 1 FROM deliveries WHERE scope=? AND operation=? AND delivery_key=?",("new-task:"+thread,operation,args["request_key"])).fetchone()
                             if receipt is None: raise StoreError("task_already_bound")
                     else:
-                        bound["task_id"]=self._resolve_thread(db,thread,parent)
+                        bound["task_id"]=self._resolve_thread(db,thread,parent,trusted)
                         self._check_project(db,bound['task_id'])
                         self._recover(db,bound["task_id"])
                         delivery=db.execute("SELECT 1 FROM deliveries WHERE scope=? AND operation=? AND delivery_key=?",(bound["task_id"],operation,args.get("request_key"))).fetchone()
-                        current_state=self._binding(db,thread)["state"]
+                        current_state=self._binding(db,thread,trusted)["state"]
                         capture_state=args.get("state",current_state)
                         # An accepted delivery recovers its receipt only. Its
                         # historical redactions/state cannot govern later input.
@@ -407,7 +419,7 @@ class Store:
                         db.execute("UPDATE binding_receipts SET state=?,updated_at=? WHERE thread_id IN (SELECT thread_id FROM thread_bindings WHERE task_id=?)",(args["state"],self._now(),task))
                     pending_thread=parent or thread
                     pending_turns=db.execute("SELECT count(*) FROM hook_pending_sources WHERE thread_id=?",(pending_thread,)).fetchone()[0]
-                    result.update(binding=self._binding(db,thread),source_capture=dict(capture,revision=self._revision(db,task),pending_turns=pending_turns),
+                    result.update(binding=self._binding(db,thread,trusted),source_capture=dict(capture,revision=self._revision(db,task),pending_turns=pending_turns),
                                   governance=governance_snapshot(db,task))
                     if operation=="list_reports":
                         result.update(self._discovery(db,task,thread,args))
@@ -422,6 +434,19 @@ class Store:
         except StoreError: raise
         except (sqlite3.Error,OSError,ValueError,UnicodeError):
             raise StoreError("storage_error") from None
+
+    def bootstrap_source(self,db,task,thread,message_id,text,rollbacks,staged):
+        """Publish initial bootstrap input and record its source revision.
+
+        A minimal internal seam for trusted-channel bootstrap (see
+        cortex_runtime.bootstrap.bootstrap_task), reusing the same
+        publish/record path as create_task's plain-text branch rather than
+        duplicating it.
+        """
+        rid,digest_hex,size=self._publish_text(db,task,"Original user request","Original task context.",
+                                                "user request",text,"report",rollbacks,staged)
+        self._record_source(db,task,thread,message_id,rid,[])
+        return rid,digest_hex,size
 
     def _source_receipt(self,db,task,thread,source,report):
         if not hasattr(source,"cursor"):
@@ -486,14 +511,33 @@ class Store:
         return dict(status="partial" if reset else completeness,reason=resume_reason)
 
     @staticmethod
-    def _resolve_thread(db,thread,parent):
+    def _channel_managed(db,task_id):
+        """True once a task has an owner (see ownership.acquire_task_owner_tx).
+
+        Every task bootstrapped through ``bootstrap.bootstrap_task`` acquires
+        a ``task_owners`` row in the same transaction that issues its
+        coordinator channel, so this is equivalent to "this task is
+        channel-managed" without needing to also check ``trusted_channels``.
+        """
+        return db.execute("SELECT 1 FROM task_owners WHERE task_id=? LIMIT 1",(task_id,)).fetchone() is not None
+
+    @staticmethod
+    def _resolve_thread(db,thread,parent,trusted=False):
         existing=db.execute("SELECT * FROM thread_bindings WHERE thread_id=?",(thread,)).fetchone()
         if existing is not None:
             if existing["parent_thread_id"]!=parent: raise StoreError("thread_conflict")
+            if not trusted and Store._channel_managed(db,existing["task_id"]):
+                raise StoreError("channel_managed_task")
             return existing["task_id"]
         if parent is None: raise StoreError("task_not_bound")
         ancestor=db.execute("SELECT task_id FROM thread_bindings WHERE thread_id=?",(parent,)).fetchone()
         if ancestor is None: raise StoreError("parent_not_bound")
+        # Reject a legacy child thread registering under a channel-managed
+        # parent (for example a leaked/guessed principal thread id) before
+        # any row is written; the surrounding transaction still rolls back
+        # on this exception regardless.
+        if not trusted and Store._channel_managed(db,ancestor["task_id"]):
+            raise StoreError("channel_managed_task")
         lifecycle=db.execute("SELECT parent_thread_id,task_id FROM hook_agent_bindings WHERE agent_id=?",(thread,)).fetchone()
         if lifecycle is not None and (lifecycle["parent_thread_id"]!=parent or lifecycle["task_id"]!=ancestor["task_id"]):raise StoreError("thread_conflict")
         db.execute("INSERT INTO thread_bindings VALUES (?,?,?)",(thread,parent,ancestor["task_id"]))
@@ -879,7 +923,7 @@ class Store:
     def _revision(db,task):
         return db.execute("SELECT COALESCE(MAX(revision),0) FROM source_revisions WHERE task_id=?",(task,)).fetchone()[0]
 
-    def _binding(self,db,thread):
+    def _binding(self,db,thread,trusted=False):
         row=db.execute("SELECT * FROM thread_bindings WHERE thread_id=?",(thread,)).fetchone()
         if row is None:raise StoreError("task_not_bound")
         prior=db.execute("SELECT receipt,state FROM binding_receipts WHERE thread_id=?",(thread,)).fetchone()
@@ -890,6 +934,12 @@ class Store:
                 if parent:state=parent[0]
             db.execute("INSERT INTO binding_receipts VALUES (?,?,?,?)",(thread,"b_"+uuid.uuid4().hex,state,self._now()))
             prior=db.execute("SELECT receipt,state FROM binding_receipts WHERE thread_id=?",(thread,)).fetchone()
+        if trusted:
+            # The channel path never discloses the principal thread id or its
+            # durable receipt (either is usable as an impersonation
+            # credential on the legacy path); only participation state is a
+            # legitimate model-visible signal here.
+            return dict(receipt="channel-managed",thread_id="channel-managed",parent_thread_id=None,state=prior["state"])
         return dict(receipt=prior["receipt"],thread_id=thread,parent_thread_id=row["parent_thread_id"],state=prior["state"])
 
     def _change(self,db,task,kind,reference=None):

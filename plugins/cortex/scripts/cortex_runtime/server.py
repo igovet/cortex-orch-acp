@@ -1,4 +1,13 @@
-"""Small newline-delimited JSON-RPC MCP server with value-free diagnostics."""
+"""Small newline-delimited JSON-RPC MCP server with value-free diagnostics.
+
+Two independent identity paths reach ``Store.call``: the legacy Codex
+``_meta`` adapter (``codex_adapter.thread_context``, unfenced by itself —
+see that module's security note) and the trusted-channel path
+(``_dispatch_channeled``, which verifies a channel secret and always passes
+``trusted=True``). Only ``Store`` itself, not this dispatch code, is the
+authority that keeps a channel-managed task off the legacy path; see
+``store.Store._resolve_thread``/``Store._channel_managed``.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -8,32 +17,25 @@ from pathlib import Path
 import re
 import sys
 import time
-import uuid
 from collections import OrderedDict
 
 from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, ERROR_HELP, validate
+from .codex_adapter import thread_context, is_legacy_meta
 from .host_source import original_request, pending_requests
 from .store import Store, private_directory
-from .project_storage import ProjectResolver, migrate_legacy_project_storage, project_store_directory
+from .project_storage import ProjectResolver, migrate_legacy_project_storage, project_store_directory, canonical_project
+from .trusted_channel import resolve_channel
+from .ownership import current_owner_epoch
 from .diagnostic_boundary import emit_bounded_diagnostic, run_passive_diagnostic
 
 PLUGIN = Path(__file__).resolve().parents[2]
 VERSION = json.loads((PLUGIN / '.codex-plugin/plugin.json').read_text())['version']
 CATALOGUE_DIGEST = hashlib.sha256(json.dumps(TOOLS, sort_keys=True).encode()).hexdigest()
 
-
-def thread_context(meta):
-    """Consume only host transport metadata, never model-authored arguments."""
-    if not isinstance(meta,dict) or not isinstance(meta.get('x-codex-turn-metadata'),dict):
-        raise StoreError('thread_metadata_missing')
-    thread=meta.get('threadId')
-    parent=meta['x-codex-turn-metadata'].get('parent_thread_id')
-    for value in [thread]+([parent] if parent is not None else []):
-        try:
-            if not isinstance(value,str) or str(uuid.UUID(value))!=value:raise ValueError
-        except (ValueError,AttributeError):raise StoreError('thread_metadata_invalid') from None
-    if thread==parent:raise StoreError('thread_metadata_invalid')
-    return thread,parent
+# Tools that mutate task-owned state and therefore require the caller's
+# trusted channel to carry the task's current ownership epoch. Reads
+# (list_reports, read_report, read_draft) never require ownership.
+MUTATING_TOOLS = frozenset({'create_draft', 'write_report', 'set_governance'})
 
 
 def safe_observation_fields(operation,arguments,result=None):
@@ -122,12 +124,18 @@ class ProtocolError(Exception):
 
 
 class Server:
-    def __init__(self, *, project_resolver=None):
+    def __init__(self, *, project_resolver=None, channel_credentials=None):
         self.projects = project_resolver or ProjectResolver()
         self.stores = OrderedDict()
         self.store = None
         self.request_source = original_request
         self.steering_source = pending_requests
+        # (channel_id, secret, project_root), read once at construction from
+        # CORTEX_CHANNEL_ID / CORTEX_CHANNEL_SECRET / CORTEX_CHANNEL_PROJECT_ROOT
+        # by main(); never re-read per request, never taken from tool
+        # arguments or _meta. One server process serves one trusted channel
+        # identity for its whole lifetime.
+        self.channel_credentials = channel_credentials
 
     def dispatch(self, method, params):
         if method == 'initialize':
@@ -150,7 +158,16 @@ class Server:
             raise ProtocolError(-32602,'Unknown tool. Call tools/list and use an advertised name; do not reconstruct retired names.')
         try:
             validate(name,params.get('arguments',{}))
-            thread,parent=thread_context(params.get('_meta'))
+            meta=params.get('_meta')
+            legacy=is_legacy_meta(meta)
+            channeled=self.channel_credentials is not None
+            if legacy and channeled:
+                raise StoreError('ambiguous_identity')
+            if channeled:
+                data=self._dispatch_channeled(name,params)
+                observe(name,'success',data.get('replayed',False),None,params.get('arguments'),data)
+                return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
+            thread,parent=thread_context(meta)
             if name=='create_task' and parent is not None:raise StoreError('child_creation')
             project=self.projects.resolve(thread,parent)
             if name=='create_task' and params['arguments']['project_root']!=project:
@@ -184,6 +201,39 @@ class Server:
         observe(name,code,meta=params.get('_meta'),arguments=params.get('arguments'))
         return self.error(failure)
 
+    def _dispatch_channeled(self, name, params):
+        """Resolve identity from a trusted channel instead of Codex ``_meta``.
+
+        The channel's project root is fixed for this whole server process
+        (see ``__init__``); the channel itself supplies the task and
+        principal thread, never a model-supplied selector. Bootstrap tasks
+        own creation, so ``create_task`` is rejected on this path.
+        """
+        channel_id,secret,project_root=self.channel_credentials
+        project=canonical_project(project_root)
+        migrate_legacy_project_storage(project)
+        directory=project_store_directory(project)
+        if not (directory/'cortex.sqlite3').exists():
+            raise StoreError('task_not_bound')
+        store=self.stores.get(project)
+        if store is None:
+            store=Store(directory,initialize=False,project_root=project)
+            self.stores[project]=store
+        self.stores.move_to_end(project)
+        while len(self.stores)>16:self.stores.popitem(last=False)
+        self.store=store
+        context=resolve_channel(store,channel_id,secret)
+        if name=='create_task':
+            raise StoreError('channel_task_creation')
+        if name in MUTATING_TOOLS:
+            with store.connection() as db:
+                current=current_owner_epoch(db,context.task_id)
+            if current!=context.owner_epoch:
+                raise StoreError('stale_ownership_epoch')
+        return store.call(name, params.get('arguments',{}),
+                           context.principal_thread_id, context.parent_principal_thread_id,
+                           original_request=None, steering_source=None, trusted=True)
+
     @staticmethod
     def error(failure):
         def public(value):
@@ -213,7 +263,12 @@ def main():
     from .marketplace_bootstrap import bootstrap
     bootstrap()
     recover_gateway_if_explicitly_enabled()
-    server = Server()
+    channel_id=os.environ.get('CORTEX_CHANNEL_ID')
+    channel_secret=os.environ.get('CORTEX_CHANNEL_SECRET')
+    channel_project_root=os.environ.get('CORTEX_CHANNEL_PROJECT_ROOT')
+    channel_credentials=((channel_id,channel_secret,channel_project_root)
+                          if channel_id and channel_secret and channel_project_root else None)
+    server = Server(channel_credentials=channel_credentials)
     while True:
         line = sys.stdin.buffer.readline(MAX_REQUEST_BYTES+1)
         if not line:
