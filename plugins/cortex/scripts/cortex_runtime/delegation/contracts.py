@@ -151,6 +151,37 @@ COORDINATOR_OPERATIONS = {
     ),
 }
 
+
+def _bounded_integer(description, maximum, *, minimum=0):
+    return dict(type="integer", description=description, minimum=minimum, maximum=maximum)
+
+
+# T018: shared read-only source-history operations, available on *both*
+# coordinator and worker channels (task-scoped by the caller's own channel;
+# see delegation.mcp_tools._shared_read_source/_shared_list_sources). No
+# technical id beyond the opaque source_ref list_sources itself returns.
+SOURCE_OPERATIONS = {
+    "list_sources": _operation(
+        {
+            "after": _bounded_integer("Opaque revision cursor from a prior list_sources result; omit to start from the beginning.", 1_000_000_000),
+            "limit": _bounded_integer("Maximum number of source entries to return in one page.", 200, minimum=1),
+        },
+        [],
+    ),
+    "read_source": _operation(
+        {
+            "source_ref": string(
+                "Opaque source_ref from a prior list_sources entry. Copy it exactly; never construct or guess one.",
+                64,
+            ),
+            "offset": _bounded_integer("Byte/character offset to resume a bounded read from.", 100_000_000),
+            "limit": _bounded_integer("Maximum chunk size to return (bounded to 64 KiB server-side).", 65_536, minimum=1),
+        },
+        ["source_ref"],
+    ),
+}
+COORDINATOR_OPERATIONS.update(SOURCE_OPERATIONS)
+
 WORKER_OPERATIONS = {
     "ask_question": _operation(
         {
@@ -173,6 +204,8 @@ WORKER_OPERATIONS = {
         ["report_ref", "summary"],
     ),
 }
+
+WORKER_OPERATIONS.update(SOURCE_OPERATIONS)
 
 ROLE_KIND_OPERATIONS = {
     "coordinator": COORDINATOR_OPERATIONS,

@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS trusted_channels (
 );
 CREATE TABLE IF NOT EXISTS source_events (
  origin TEXT NOT NULL, event_id TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id),
- captured_at TEXT NOT NULL, PRIMARY KEY(origin,event_id)
+ captured_at TEXT NOT NULL, meta_json TEXT, ledger_state TEXT, PRIMARY KEY(origin,event_id)
 );
 CREATE TABLE IF NOT EXISTS task_owners (
  task_id TEXT PRIMARY KEY REFERENCES tasks(id), owner_ref TEXT NOT NULL,
@@ -47,6 +47,67 @@ CREATE TABLE IF NOT EXISTS task_owners (
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def ensure_source_event_meta_column(db) -> None:
+    """(T018) Idempotently add ``source_events.meta_json`` to an
+    already-open connection whose ``source_events`` table predates it (a
+    store created at/before b19d288). Safe to call on every
+    :class:`store.Store` open; a no-op once the column exists. Mirrors
+    ``delegation.events_store.ensure_task_lifecycle_columns`` exactly."""
+    columns = {row[1] for row in db.execute("PRAGMA table_info(source_events)").fetchall()}
+    if not columns or "meta_json" in columns:
+        return
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("ALTER TABLE source_events ADD COLUMN meta_json TEXT")
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+
+
+def ensure_source_event_ledger_column(db) -> None:
+    """(T018 fresh-review fix, HIGH) Idempotently add
+    ``source_events.ledger_state`` to an already-open connection whose
+    ``source_events`` table predates it, and backfill every pre-existing
+    row as ``'legacy_recorded'``.
+
+    This is the structural fix for the reproduced legacy re-delivery bug:
+    ``acp.replay_store.find_unrecorded_source_events`` (crash recovery
+    between source capture and coordinator delivery -- see
+    ``acp.orchestrating_runtime``) now considers *only* rows with a NULL
+    ``ledger_state``, set the same way for every source event regardless of
+    era (see ``acp.replay_store.record_user_message_event``): non-NULL
+    means "a ``task_events`` ``user_message`` row for this identity has
+    already been durably recorded" -- never re-derived by pattern-matching
+    a ``task_events.dedup_key`` string (the b19d288-era
+    ``user_message:<session_id>:<turn_index>`` shape is not reconstructible
+    from a bare ``source_events`` row, and *any* text-matching heuristic
+    over it would be exactly the bug this fixes).
+
+    Backfilling every pre-existing row as ``'legacy_recorded'`` (rather
+    than leaving it NULL, or trying to infer per-row whether it was
+    actually delivered) is a deliberate, documented decision: **no
+    pre-T018 source event is ever auto-recovered** by this migration --
+    only a source event captured *after* this column exists (and is
+    therefore genuinely NULL until ``record_user_message_event`` marks it)
+    is ever recovery-eligible. This trades a theoretical (and, before this
+    fix, actually reproduced in the opposite direction) missed recovery of
+    a handful of already-upgraded-era rows for never re-delivering a
+    project's entire prompt history on first use after upgrade.
+    """
+    columns = {row[1] for row in db.execute("PRAGMA table_info(source_events)").fetchall()}
+    if not columns or "ledger_state" in columns:
+        return
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("ALTER TABLE source_events ADD COLUMN ledger_state TEXT")
+        db.execute("UPDATE source_events SET ledger_state='legacy_recorded' WHERE ledger_state IS NULL")
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
 
 
 def _hash_secret(secret):

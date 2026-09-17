@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Mapping
 
+from ..acp import replay_store
 from ..contracts import StoreError
 from ..trusted_channel import ChannelContext
 from . import completion as delegation_completion
@@ -208,12 +209,34 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
     return dict(recorded=True, cursor=event.id, superseded=cancelled)
 
 
+def _shared_list_sources(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
+    """T018: task-scoped list of durable source references (text + resolved
+    attachment blocks) for this channel's own task. Never accepts a task id
+    -- always ``channel.task_id`` -- so a channel can never enumerate
+    another task's sources."""
+    after = int(args.get("after") or 0)
+    limit = int(args.get("limit") or 50)
+    return replay_store.list_sources(store, channel.task_id, after, limit)
+
+
+def _shared_read_source(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
+    """T018: bounded read of one source_ref, refused for a ref outside this
+    channel's own task (``replay_store.read_source`` scopes every lookup by
+    ``channel.task_id``, so a cross-task ref simply resolves to
+    ``unknown_source_ref`` -- never leaking whether it exists elsewhere)."""
+    offset = int(args.get("offset") or 0)
+    limit = int(args.get("limit") or replay_store.READ_CHUNK_LIMIT)
+    return replay_store.read_source(store, channel.task_id, args["source_ref"], offset, limit)
+
+
 _COORDINATOR_HANDLERS = dict(
     delegate=_coordinator_delegate, list_events=_coordinator_list_events,
     clarify=_coordinator_clarify, cancel=_coordinator_cancel, decide=_coordinator_decide,
+    list_sources=_shared_list_sources, read_source=_shared_read_source,
 )
 _WORKER_HANDLERS = dict(
     ask_question=_worker_ask_question, publish_result=_worker_publish_result,
+    list_sources=_shared_list_sources, read_source=_shared_read_source,
 )
 _ROLE_HANDLERS = dict(coordinator=_COORDINATOR_HANDLERS, worker=_WORKER_HANDLERS)
 
@@ -227,6 +250,8 @@ _OPERATION_DESCRIPTIONS = dict(
     decide="Record an acceptance/revise/ask_user decision grounded in retained results.",
     ask_question="Ask the delegating coordinator one bounded question; never ask the user directly.",
     publish_result="Publish this assignment's result via an already-acknowledged report reference.",
+    list_sources="List durable source references (user text and resolved attachments) for this task, cursor-paginated.",
+    read_source="Bounded, addressable read of one source_ref (text or attachment) with provenance and trust label.",
 )
 
 
@@ -249,7 +274,7 @@ def tool_definitions(role_kind: str) -> list[dict]:
             description=_OPERATION_DESCRIPTIONS.get(name, f"Delegation operation '{name}'."),
             inputSchema=dict(type="object", properties=schema["properties"],
                               required=schema["required"], additionalProperties=False),
-            annotations=dict(readOnlyHint=name == "list_events", destructiveHint=False,
+            annotations=dict(readOnlyHint=name in ("list_events", "list_sources", "read_source"), destructiveHint=False,
                               idempotentHint=name != "ask_question", openWorldHint=False),
         ))
     return tools

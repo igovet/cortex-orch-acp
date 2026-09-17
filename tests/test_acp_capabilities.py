@@ -26,8 +26,12 @@ def _initialize(proc):
                                   clientInfo=dict(name="t", version="1"))))
     reply = _recv(proc)
     caps = reply["result"]["agentCapabilities"]
-    assert caps["loadSession"] is False
-    assert caps["promptCapabilities"] == dict(image=False, audio=False, embeddedContext=False)
+    # T018: loadSession/embeddedContext are now truthfully advertised --
+    # session/load (display-only replay) and EmbeddedResource prompt
+    # content blocks are implemented; see
+    # docs/acp/input-history-and-replay.md.
+    assert caps["loadSession"] is True
+    assert caps["promptCapabilities"] == dict(image=False, audio=False, embeddedContext=True)
     assert caps["mcpCapabilities"] == dict(http=False, sse=False)
     assert reply["result"]["authMethods"] == []
     return reply
@@ -38,10 +42,10 @@ def test_unsupported_session_lifecycle_methods_return_method_not_found():
     try:
         _initialize(proc)
         for index, method in enumerate((
-            # session/set_config_option is deliberately excluded here: T010
-            # implements it (see test_acp_config_options.py), so it is no
-            # longer in protocol.UNSUPPORTED_METHODS.
-            "session/load", "session/resume", "session/set_mode",
+            # session/set_config_option (T010) and session/load (T018) are
+            # deliberately excluded here -- both are implemented, so
+            # neither is in protocol.UNSUPPORTED_METHODS.
+            "session/resume", "session/set_mode",
             "session/list", "session/fork", "session/close",
         ), start=2):
             _send(proc, dict(jsonrpc="2.0", id=index, method=method, params={}))

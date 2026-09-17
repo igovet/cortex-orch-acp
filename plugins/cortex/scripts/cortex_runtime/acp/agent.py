@@ -38,6 +38,7 @@ from .host_requests import HostRequester
 from .protocol import RpcError
 from .runtime import OrchestrationUnavailable, UnavailableRuntime
 from .transport import StdioTransport, EOF
+from . import replay_store as acp_replay_store
 from ..bootstrap import append_source_event, bootstrap_task
 from ..catalog.model import CatalogEntry
 from ..configuration.resolution import ConfigurationInputs
@@ -145,6 +146,15 @@ class Agent:
             self._runtime_accepts_project_root = 'project_root' in inspect.signature(runtime.start_prompt).parameters
         except (TypeError, ValueError):
             self._runtime_accepts_project_root = False
+        # T018: detected the exact same way as project_root above -- a
+        # runtime (real or FakeRuntime) that has not been updated for T018
+        # simply never receives source_origin/source_event_id and falls
+        # back to its own pre-T018 turn-count identity (see
+        # acp.orchestrating_runtime.start_prompt's docstring).
+        try:
+            self._runtime_accepts_source_identity = 'source_event_id' in inspect.signature(runtime.start_prompt).parameters
+        except (TypeError, ValueError):
+            self._runtime_accepts_source_identity = False
         self.environ = environ if environ is not None else os.environ
         self.version = _agent_version()
         self.stores = {}
@@ -272,6 +282,9 @@ class Agent:
         elif method == "session/set_config_option":
             self._session_set_config_option(request_id, params)
             observe(self.environ, method, "success")
+        elif method == "session/load":
+            self._session_load(request_id, params)
+            observe(self.environ, method, "success")
         elif method in protocol.UNSUPPORTED_METHODS:
             if has_id:
                 self._reply_error(request_id, -32601, f"Method '{method}' is not supported.")
@@ -304,6 +317,16 @@ class Agent:
             raise RpcError(-32602, "cwd must be an absolute, canonical, existing directory.") from None
         migrate_legacy_project_storage(project)
         store = self._store_for(project)
+        # T018 (fresh-review follow-up): opportunistic, best-effort sweep of
+        # any attachment staging temp files orphaned by a prior crashed
+        # process (see acp.replay_store.sweep_orphaned_staging's docstring
+        # for why an age-only sweep here can never touch a referenced
+        # body). Never fails session/new -- a sweep failure is silently
+        # skipped, not surfaced to the client.
+        try:
+            acp_replay_store.sweep_orphaned_staging(project)
+        except Exception:
+            pass
         stripped_servers = protocol.strip_mcp_servers(raw_mcp_servers)
         session_id = new_id("acps_")
         acp_sessions.create_session(store, session_id, project, self.client_info, self.client_capabilities, stripped_servers)
@@ -389,9 +412,9 @@ class Agent:
         return f"{configured}/{len(connections)} connection(s) configured"
 
     def _session_prompt(self, request_id, params):
-        session_id, text = protocol.validate_session_prompt_params(params)
-        raw_blocks = params.get("prompt") if isinstance(params, dict) else None
+        session_id, text, raw_blocks = protocol.validate_session_prompt_params(params)
         recognized = acp_commands.recognize(raw_blocks)
+        meta = params.get("_meta") if isinstance(params, dict) else None
         session = self.sessions.get(session_id)
         if session is None:
             raise RpcError(-32602, "Unknown sessionId.")
@@ -402,17 +425,17 @@ class Agent:
             session["active"] = cancel_event
         worker = threading.Thread(
             target=self._run_prompt, name="acp-prompt",
-            args=(request_id, session_id, session, text, cancel_event, recognized), daemon=True)
+            args=(request_id, session_id, session, text, cancel_event, recognized, raw_blocks, meta), daemon=True)
         with self._workers_lock:
             self._workers.append(worker)
         worker.start()
 
-    def _run_prompt(self, request_id, session_id, session, text, cancel_event, recognized=None):
+    def _run_prompt(self, request_id, session_id, session, text, cancel_event, recognized=None, raw_blocks=None, meta=None):
         try:
             if recognized is not None:
                 self._run_command_body(request_id, session_id, session, recognized, cancel_event)
                 return
-            self._run_prompt_body(request_id, session_id, session, text, cancel_event)
+            self._run_prompt_body(request_id, session_id, session, text, cancel_event, raw_blocks, meta)
         except Exception:
             # Anything unexpected here -- including a failure in
             # _store_for/SimpleNamespace construction *before* the durable-
@@ -426,17 +449,36 @@ class Agent:
             with session["lock"]:
                 session["active"] = None
 
-    def _run_prompt_body(self, request_id, session_id, session, text, cancel_event):
+    def _run_prompt_body(self, request_id, session_id, session, text, cancel_event, raw_blocks=None, meta=None):
         """The actual prompt turn; wrapped by ``_run_prompt`` for the
         catch-all -32603 safety net and the ``session["active"]`` cleanup.
         """
         store = self._store_for(session["project"])
         origin = f"acp:{session_id}"
-        source_event = SimpleNamespace(origin=origin, event_id=str(uuid.uuid4()))
+        event_id = str(uuid.uuid4())
+        source_event = SimpleNamespace(origin=origin, event_id=event_id)
         is_first_prompt = session["task_id"] is None
+        # T018: resolve every non-text content block (EmbeddedResource
+        # 'resource' / 'resource_link') and stage its body to an
+        # owner-private temp file *before* the durable capture transaction
+        # opens (no DB lock held during this file I/O; see
+        # acp.replay_store.resolve_prompt_blocks/stage_blocks -- neither
+        # ever raises, an unexpected per-block failure is recorded as
+        # availability='inaccessible', reason='capture_error', never
+        # dropped). bootstrap_task/append_source_event then records every
+        # staged block's metadata (and renames its body into place)
+        # *inside the same transaction* as the source text/source_events
+        # row -- atomic: a crash before commit persists neither; a crash
+        # after commit has both together (a replay unlinks the staged
+        # bodies instead of recording anything new).
+        staged_blocks = []
+        if raw_blocks:
+            resolved_blocks = acp_replay_store.resolve_prompt_blocks(raw_blocks, session["project"])
+            if resolved_blocks:
+                staged_blocks = acp_replay_store.stage_blocks(session["project"], resolved_blocks)
         try:
             if is_first_prompt:
-                result = bootstrap_task(store, source_event, text, owner_ref=origin)
+                result = bootstrap_task(store, source_event, text, owner_ref=origin, blocks=staged_blocks, meta=meta)
                 session["task_id"] = result.task_id
                 session["owner_epoch"] = result.owner_epoch
                 if result.channel_id is not None:
@@ -446,21 +488,33 @@ class Agent:
                     session["channel"] = (result.channel_id, result.secret)
                 acp_sessions.bind_task(store, session_id, result.task_id)
             else:
-                result = append_source_event(store, source_event, text, session["task_id"])
+                result = append_source_event(store, source_event, text, session["task_id"], blocks=staged_blocks, meta=meta)
                 if result.owner_epoch is not None:
                     session["owner_epoch"] = result.owner_epoch
         except StoreError:
+            acp_replay_store.cleanup_staged(staged_blocks)
             self._reply_error(request_id, -32603, "Durable capture failed; nothing was forwarded to orchestration.")
             observe(self.environ, "session/prompt", "capture_failed")
             return
         task_id = session["task_id"]
+        attachment_descriptors = [
+            dict(source_ref=f"{result.report_id}:{b.capture.block_index}", name=b.capture.name, uri=b.capture.uri,
+                 kind=b.capture.kind, availability=b.capture.availability, reason=b.capture.reason)
+            for b in staged_blocks
+        ] if not result.replayed else []
         if is_first_prompt:
             self._propose_pending_selection_for_new_task(store, session, task_id)
+        acp_replay_store.append_host_transcript(store, session_id, "user_message", text, attachment_descriptors)
 
         def emit_update(chunk_text):
             if cancel_event.is_set() or self.transport is None:
                 return False
             delivered = self.transport.send_notification(protocol.agent_message_chunk(session_id, chunk_text))
+            if delivered:
+                try:
+                    acp_replay_store.append_host_transcript(store, session_id, "agent_message", chunk_text)
+                except StoreError:
+                    pass
             if not delivered:
                 # The client cannot keep up: never grow memory without
                 # bound and never drop a *response* -- only this
@@ -469,8 +523,16 @@ class Agent:
             return delivered
 
         try:
-            if self._runtime_accepts_project_root:
+            if self._runtime_accepts_project_root and self._runtime_accepts_source_identity:
+                reason = self.runtime.start_prompt(
+                    task_id, session_id, text, emit_update, cancel_event,
+                    project_root=session["project"], source_origin=origin, source_event_id=event_id)
+            elif self._runtime_accepts_project_root:
                 reason = self.runtime.start_prompt(task_id, session_id, text, emit_update, cancel_event, project_root=session["project"])
+            elif self._runtime_accepts_source_identity:
+                reason = self.runtime.start_prompt(
+                    task_id, session_id, text, emit_update, cancel_event,
+                    source_origin=origin, source_event_id=event_id)
             else:
                 reason = self.runtime.start_prompt(task_id, session_id, text, emit_update, cancel_event)
         except OrchestrationUnavailable as exc:
@@ -716,6 +778,52 @@ class Agent:
             return
         self.transport.send_response(protocol.result_response(request_id, protocol.set_config_option_response(options)))
         self.transport.send_notification(protocol.config_option_update(session_id, options))
+
+    def _session_load(self, request_id, params):
+        """(T018) Display-only history replay -- see ``acp.replay_store``
+        module docstring and ``docs/acp/input-history-and-replay.md``.
+
+        Pure read over the durable ``acp_host_sessions``/``host_transcript``
+        rows: never calls ``runtime.start_prompt``, never opens an engine
+        session, never writes ``source_events``/``task_events``/
+        ``deliveries``/reports -- this method issues no ``BEGIN IMMEDIATE``
+        transaction at all. Unknown ``sessionId`` (never durably created, or
+        durably created for a different ``cwd``/project) is a plain
+        ``-32602`` error, exactly like an unknown ``sessionId`` on any other
+        method here.
+        """
+        session_id, cwd, raw_mcp_servers = protocol.validate_load_session_params(params)
+        try:
+            project = logical_project_root(canonical_project(cwd))
+        except StoreError:
+            raise RpcError(-32602, "cwd must be an absolute, canonical, existing directory.") from None
+        store = self._store_for(project)
+        durable = acp_sessions.get_session(store, session_id)
+        if durable is None or durable["project_root"] != project:
+            raise RpcError(-32602, "Unknown sessionId.")
+        for entry in acp_replay_store.replay_session(store, session_id):
+            text = entry["text"]
+            for attachment in entry["attachments"]:
+                text += (
+                    f"\n[attachment: {attachment.get('name') or attachment.get('uri') or attachment.get('kind')} "
+                    f"({attachment.get('availability')}) source_ref={attachment.get('source_ref')}]"
+                )
+            if entry["kind"] == "user_message":
+                self.transport.send_notification(protocol.user_message_chunk(session_id, text))
+            else:
+                self.transport.send_notification(protocol.agent_message_chunk(session_id, text))
+        if session_id not in self.sessions:
+            # Best-effort: lets a subsequent session/prompt on this
+            # connection continue the same durable task (via
+            # bootstrap.append_source_event, which needs no held channel
+            # secret) without re-running session/new. Not itself asserted by
+            # any T018 acceptance line -- session/load's own contract is the
+            # replay above; this is only convenience continuity.
+            self.sessions[session_id] = dict(
+                project=project, task_id=durable["task_id"], channel=None, active=None, lock=threading.Lock(),
+                owner_epoch=None, pending_selection=None, default_selection=None,
+                client_capabilities=dict(self.client_capabilities))
+        self.transport.send_response(protocol.result_response(request_id, protocol.load_session_response()))
 
     def _session_cancel(self, params):
         session_id = protocol.validate_session_cancel_params(params)

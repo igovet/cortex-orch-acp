@@ -66,9 +66,16 @@ def _make_capacity_runtime(store, router, *, connection_id, capacity_limit, **kw
 
 def _make_runtime(store, router, **kwargs):
     engine = FakeSessionRuntime(store, router)
+    # T018 fresh-review fix: see the identical rationale in
+    # test_orchestrating_runtime.py's _make_runtime -- this default is only
+    # used by tests expecting a background-executor *success* path; every
+    # test deliberately exercising the short-timeout 'blocked' path passes
+    # its own explicit wait_timeout_seconds. A short wall-clock default
+    # here is a real-thread-scheduling race under CPU contention, not a
+    # deterministic bound.
     runtime = OrchestratingRuntime(
         store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
-        allow_unqualified_delivery=True, wait_timeout_seconds=kwargs.pop("wait_timeout_seconds", 0.3),
+        allow_unqualified_delivery=True, wait_timeout_seconds=kwargs.pop("wait_timeout_seconds", 30.0),
         **kwargs,
     )
     _created_runtimes.append(runtime)
@@ -531,14 +538,24 @@ def test_ambiguous_release_keeps_second_delegation_queued(tmp_path):
         # this must still count against the limit, so the second stays queued.
         # (Bypasses terminate_owned() on purpose, so this deliberately does
         # NOT notify the queued waiter -- it must observe this via its own
-        # next backoff-bounded re-check, same as production; a short,
-        # generous wait_until with an always-false predicate stands in for
-        # "give it a bounded chance to (wrongly) proceed", which is safe
-        # under load since load only makes a false proceed less likely.)
+        # next backoff-bounded re-check, same as production.)
+        attempts_before_ambiguous = len(engine.reserve_attempts)
         delegation_capacity.mark_ambiguous(store, reservation_id, "timeout_alive")
-        engine.wait_until(lambda: False, timeout=1.0)
+        # T018 fresh-review fix: deterministic, event-driven sync point --
+        # wait (generously bounded, never a fixed-duration sleep standing
+        # in for "nothing happened") for proof the queued worker actually
+        # re-attempted reservation *after* the ambiguous mark, then assert
+        # purely on durable state, never on elapsed wall time.
+        assert engine.wait_until(lambda: len(engine.reserve_attempts) > attempts_before_ambiguous, timeout=30)
+        latest_attempt_id, latest_reservation = engine.reserve_attempts[-1]
+        assert latest_reservation is None  # refused: the ambiguous hold still counted against the limit
+        with store.connection() as db:
+            ambiguous_row = db.execute(
+                "SELECT state FROM capacity_reservations WHERE reservation_id=?", (reservation_id,),
+            ).fetchone()
+        assert ambiguous_row["state"] == "ambiguous"
         worker_opens_after_ambiguous = [a for a in engine.open_calls if a and a.startswith("xa_")]
-        assert len(worker_opens_after_ambiguous) == 1  # ambiguous held capacity
+        assert len(worker_opens_after_ambiguous) == 1  # ambiguous held capacity; still no second open
         # Now confirm the release for real -- the second must proceed.
         delegation_capacity.release_confirmed(store, reservation_id, "process_exited")
         hold_second.set()

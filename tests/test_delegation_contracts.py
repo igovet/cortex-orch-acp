@@ -31,12 +31,18 @@ def test_schemas_for_unknown_role_kind():
 
 def test_coordinator_operations_closed_set():
     # T016 adds 'decide' (accept/revise/ask_user) alongside T015's original
-    # four coordinator operations; see delegation.contracts module docstring.
-    assert set(dc.schemas_for("coordinator")) == {"delegate", "list_events", "clarify", "cancel", "decide"}
+    # four coordinator operations; T018 adds the shared read-only
+    # 'list_sources'/'read_source' source-history operations (see
+    # delegation.contracts module docstring and docs/acp/input-history-and-replay.md).
+    assert set(dc.schemas_for("coordinator")) == {
+        "delegate", "list_events", "clarify", "cancel", "decide", "list_sources", "read_source",
+    }
 
 
 def test_worker_operations_closed_set():
-    assert set(dc.schemas_for("worker")) == {"ask_question", "publish_result"}
+    assert set(dc.schemas_for("worker")) == {
+        "ask_question", "publish_result", "list_sources", "read_source",
+    }
 
 
 def test_no_operation_accepts_a_task_attempt_session_channel_workspace_epoch_id_field():

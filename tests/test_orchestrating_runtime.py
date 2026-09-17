@@ -66,9 +66,23 @@ def _publish(store, channel, label, call_index):
 
 def _make_runtime(store, router, **kwargs):
     engine = FakeSessionRuntime(store, router)
+    # T018 fresh-review fix: the default here is only used by tests that
+    # expect a *success* path (a background executor worker actually
+    # finishing and notifying _wait_for_progress's condition variable --
+    # see orchestrating_runtime._wait_for_progress), never by a test
+    # deliberately exercising the short-timeout 'blocked' path (those pass
+    # their own short wait_timeout_seconds explicitly). A short wall-clock
+    # budget here is a real-thread-scheduling race, not a deterministic
+    # bound; under CPU contention (reproduced: 4 CPU hogs + 10x repeats)
+    # the previous 2.0s default occasionally elapsed before the worker
+    # thread pool got scheduled, flipping an expected 'accepted' outcome to
+    # 'blocked'. A generous budget costs nothing on a healthy run (the
+    # condition-variable wait still returns as soon as progress is
+    # notified; see _wait_for_progress's bounded backoff poll) and only
+    # matters when something has gone genuinely, durably wrong.
     runtime = OrchestratingRuntime(
         store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
-        allow_unqualified_delivery=True, wait_timeout_seconds=kwargs.pop("wait_timeout_seconds", 2.0),
+        allow_unqualified_delivery=True, wait_timeout_seconds=kwargs.pop("wait_timeout_seconds", 30.0),
         **kwargs,
     )
     return runtime, engine

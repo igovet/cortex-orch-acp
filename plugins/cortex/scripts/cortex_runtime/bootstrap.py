@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import uuid
 
+from .acp import replay_store
 from .contracts import StoreError
 from .store import unique_identifier, project_draft_directory
 from .ownership import acquire_task_owner_tx, current_owner_epoch
@@ -27,6 +28,13 @@ class BootstrapResult:
     secret: str | None
     replayed: bool
     owner_epoch: OwnershipEpoch | None = None
+    # T018: the report_id of the durably published source body for *this*
+    # call's own source event (None on ``replayed=True`` -- a replay writes
+    # nothing new, see the docstrings below). Lets a caller (see
+    # ``acp.agent``) attach per-block attachment metadata (``acp.replay_store``)
+    # to the exact report this event's text was published into, without a
+    # second read.
+    report_id: str | None = None
 
 
 def _current_owner_epoch_obj(db, task_id):
@@ -48,7 +56,7 @@ def _bounded_text(value, field_name):
     return value
 
 
-def bootstrap_task(store, source_event, user_input, owner_ref):
+def bootstrap_task(store, source_event, user_input, owner_ref, *, blocks=None, meta=None):
     """Create (or recover) exactly one task for ``source_event``.
 
     ``store`` must already be constructed against the target project root.
@@ -58,6 +66,23 @@ def bootstrap_task(store, source_event, user_input, owner_ref):
     ``trusted_channel.issue_channel`` if it lost the original secret. A crash
     before commit leaves nothing persisted; a crash after commit is safely
     recoverable by bootstrapping the identical event again.
+
+    ``blocks`` (T018): an optional ``list[acp.replay_store.StagedBlock]``,
+    already resolved and staged (body bytes already written to owner-private
+    temp files) by the caller *before* this call -- see
+    ``acp.replay_store.resolve_prompt_blocks``/``stage_blocks`` -- so no
+    file write happens while this transaction's ``BEGIN IMMEDIATE`` lock is
+    held, only a fast rename (``acp.replay_store.record_blocks_tx``), inside
+    the *same* transaction as the source text/``source_events`` row: a
+    crash before commit leaves neither the text nor any block row/file; a
+    crash after commit has both together. On replay, every staged block is
+    unlinked (``acp.replay_store.cleanup_staged``) rather than recorded --
+    nothing new is ever written for an already-recorded source event.
+
+    ``meta`` (T018): the raw ``_meta`` object from the originating
+    ``PromptRequest`` (or ``None``), recorded forensically only
+    (``source_events.meta_json``, size-capped -- see
+    ``acp.replay_store.encode_meta``) -- never used for identity or dedup.
     """
     origin = _bounded_text(source_event.origin, "origin")
     event_id = _bounded_text(source_event.event_id, "event_id")
@@ -76,6 +101,7 @@ def bootstrap_task(store, source_event, user_input, owner_ref):
             if existing is not None:
                 owner_epoch = _current_owner_epoch_obj(db, existing["task_id"])
                 db.commit()
+                if blocks: replay_store.cleanup_staged(blocks)
                 return BootstrapResult(task_id=existing["task_id"], channel_id=None, secret=None, replayed=True, owner_epoch=owner_epoch)
             project_draft_directory(project, "report")
             project_draft_directory(project, "pipeline")
@@ -84,13 +110,15 @@ def bootstrap_task(store, source_event, user_input, owner_ref):
             principal = str(uuid.uuid4())
             db.execute("INSERT INTO thread_bindings VALUES (?,NULL,?)", (principal, task))
             rollbacks, staged = [], []
+            if blocks: staged.extend(b.staged_path for b in blocks if b.staged_path is not None)
             try:
-                store.bootstrap_source(db, task, principal, origin+":"+event_id, user_input, rollbacks, staged)
+                report_id, _digest, _size = store.bootstrap_source(db, task, principal, origin+":"+event_id, user_input, rollbacks, staged)
+                if blocks: replay_store.record_blocks_tx(store, db, task, report_id, blocks, rollbacks, staged)
             except BaseException:
                 store._rollback_files(rollbacks)
                 for path in staged: path.unlink(missing_ok=True)
                 raise
-            db.execute("INSERT INTO source_events VALUES (?,?,?,?)", (origin, event_id, task, store._now()))
+            db.execute("INSERT INTO source_events VALUES (?,?,?,?,?,NULL)", (origin, event_id, task, store._now(), replay_store.encode_meta(meta)))
             epoch = acquire_task_owner_tx(db, task, owner_ref, None)
             channel_id, secret = issue_channel_tx(
                 db, task, "coordinator", epoch.epoch, principal_thread_id=principal)
@@ -98,10 +126,10 @@ def bootstrap_task(store, source_event, user_input, owner_ref):
         except BaseException:
             db.rollback(); raise
         store._finalize_files(rollbacks)
-    return BootstrapResult(task_id=task, channel_id=channel_id, secret=secret, replayed=False, owner_epoch=epoch)
+    return BootstrapResult(task_id=task, channel_id=channel_id, secret=secret, replayed=False, owner_epoch=epoch, report_id=report_id)
 
 
-def append_source_event(store, source_event, user_input, task_id):
+def append_source_event(store, source_event, user_input, task_id, *, blocks=None, meta=None):
     """Durably record one later source event on an already-bootstrapped task.
 
     Never creates a new task, principal thread, or coordinator channel --
@@ -111,6 +139,9 @@ def append_source_event(store, source_event, user_input, task_id):
     ``BEGIN IMMEDIATE`` transaction; a crash before commit leaves nothing
     persisted, a crash after commit is safely recoverable by appending the
     identical event again.
+
+    ``blocks``/``meta``: see :func:`bootstrap_task`'s docstring -- identical
+    contract here.
     """
     origin = _bounded_text(source_event.origin, "origin")
     event_id = _bounded_text(source_event.event_id, "event_id")
@@ -128,6 +159,7 @@ def append_source_event(store, source_event, user_input, task_id):
             if existing is not None:
                 owner_epoch = _current_owner_epoch_obj(db, existing["task_id"])
                 db.commit()
+                if blocks: replay_store.cleanup_staged(blocks)
                 return BootstrapResult(task_id=existing["task_id"], channel_id=None, secret=None, replayed=True, owner_epoch=owner_epoch)
             if db.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
                 raise StoreError("task_not_bound")
@@ -138,16 +170,18 @@ def append_source_event(store, source_event, user_input, task_id):
                 raise StoreError("task_not_bound")
             principal = principal["thread_id"]
             rollbacks, staged = [], []
+            if blocks: staged.extend(b.staged_path for b in blocks if b.staged_path is not None)
             try:
-                store.bootstrap_source(db, task_id, principal, origin+":"+event_id, user_input, rollbacks, staged)
+                report_id, _digest, _size = store.bootstrap_source(db, task_id, principal, origin+":"+event_id, user_input, rollbacks, staged)
+                if blocks: replay_store.record_blocks_tx(store, db, task_id, report_id, blocks, rollbacks, staged)
             except BaseException:
                 store._rollback_files(rollbacks)
                 for path in staged: path.unlink(missing_ok=True)
                 raise
-            db.execute("INSERT INTO source_events VALUES (?,?,?,?)", (origin, event_id, task_id, store._now()))
+            db.execute("INSERT INTO source_events VALUES (?,?,?,?,?,NULL)", (origin, event_id, task_id, store._now(), replay_store.encode_meta(meta)))
             owner_epoch = _current_owner_epoch_obj(db, task_id)
             db.commit()
         except BaseException:
             db.rollback(); raise
         store._finalize_files(rollbacks)
-    return BootstrapResult(task_id=task_id, channel_id=None, secret=None, replayed=False, owner_epoch=owner_epoch)
+    return BootstrapResult(task_id=task_id, channel_id=None, secret=None, replayed=False, owner_epoch=owner_epoch, report_id=report_id)

@@ -11,6 +11,7 @@ import sqlite3
 import stat
 import uuid
 
+from .acp.replay_store import REPLAY_SCHEMA
 from .acp.sessions import ACP_SESSION_SCHEMA
 from .catalog.store import CATALOG_SCHEMA
 from .configuration.store import CONFIGURATION_SCHEMA
@@ -79,6 +80,14 @@ _CAPACITY_TABLES = frozenset({"capacity_reservations"})
 # pre-T017 v11 store has none of it, a store.py-created store always has it.
 _EVIDENCE_TABLES = frozenset({"tool_result_observations"})
 
+# source_blocks/source_block_reads/host_transcript (see
+# acp.replay_store.REPLAY_SCHEMA) are a ninth, independent optional group on
+# top of SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+# ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+
+# EVIDENCE_SCHEMA: a pre-T018 v11 store has none of them, a store.py-created
+# store always has all three.
+_REPLAY_TABLES = frozenset({"source_blocks", "source_block_reads", "host_transcript"})
+
 _SELECTIONS = {
     "tasks": "SELECT x.* FROM tasks x WHERE x.project_root=?",
     "thread_bindings": "SELECT x.* FROM thread_bindings x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -114,6 +123,9 @@ _SELECTIONS = {
     "hook_events": "SELECT x.* FROM hook_events x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "hook_hints": "SELECT x.* FROM hook_hints x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "hook_agent_bindings": "SELECT x.* FROM hook_agent_bindings x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "source_blocks": "SELECT x.* FROM source_blocks x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "source_block_reads": "SELECT x.* FROM source_block_reads x JOIN reports r ON r.id=x.report_id JOIN tasks t ON t.id=r.task_id WHERE t.project_root=?",
+    "host_transcript": "SELECT x.* FROM host_transcript x JOIN acp_host_sessions s ON s.session_id=x.session_id WHERE s.project_root=?",
 }
 
 _COPY_ORDER = (
@@ -127,6 +139,7 @@ _COPY_ORDER = (
     "pending_deletions", "binding_receipts", "source_resets", "source_revisions",
     "report_provenance", "draft_revisions", "task_changes", "source_turns",
     "hook_pending_sources", "hook_events", "hook_hints", "hook_agent_bindings",
+    "source_blocks", "source_block_reads", "host_transcript",
     "deliveries",
 )
 
@@ -232,10 +245,18 @@ def _evidence_present(db):
     return names == _EVIDENCE_TABLES
 
 
+def _replay_present(db):
+    """True only when every T018 replay table exists; false only when none do."""
+    names = _table_names(db) & _REPLAY_TABLES
+    if names and names != _REPLAY_TABLES:
+        raise StoreError("unsupported_storage")
+    return names == _REPLAY_TABLES
+
+
 def _expected_layout():
     db = sqlite3.connect(":memory:")
     try:
-        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA)
+        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA)
         tables = _table_names(db)
         columns = {
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA table_xinfo({_identifier(table)})"))
@@ -245,7 +266,7 @@ def _expected_layout():
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA foreign_key_list({_identifier(table)})"))
             for table in tables
         }
-        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES
+        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _REPLAY_TABLES
         return core, columns, foreign_keys
     finally:
         db.close()
@@ -269,6 +290,7 @@ def _validate_format(db):
     task_events_present = _task_events_present(db)
     capacity_present = _capacity_present(db)
     evidence_present = _evidence_present(db)
+    replay_present = _replay_present(db)
     expected = (
         core
         | (_IDENTITY_TABLES if identity_present else set())
@@ -279,6 +301,7 @@ def _validate_format(db):
         | (_TASK_EVENTS_TABLES if task_events_present else set())
         | (_CAPACITY_TABLES if capacity_present else set())
         | (_EVIDENCE_TABLES if evidence_present else set())
+        | (_REPLAY_TABLES if replay_present else set())
     )
     views = db.execute("SELECT 1 FROM sqlite_master WHERE type='view' LIMIT 1").fetchone()
     if actual != expected or views is not None:
@@ -539,7 +562,7 @@ def _create_destination(source_db, temporary, project_root):
         # a fresh store: core SCHEMA+HOOK_SCHEMA plus the identity tables,
         # regardless of whether the (possibly legacy, pre-T005) source has
         # them. A legacy source simply leaves them empty in the destination.
-        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA +
+        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA +
                              f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
         target.execute("BEGIN IMMEDIATE")
         source_identity_present = _identity_present(source_db)
@@ -550,6 +573,7 @@ def _create_destination(source_db, temporary, project_root):
         source_task_events_present = _task_events_present(source_db)
         source_capacity_present = _capacity_present(source_db)
         source_evidence_present = _evidence_present(source_db)
+        source_replay_present = _replay_present(source_db)
         expected = {}
         for table in _COPY_ORDER:
             columns = [row[1] for row in target.execute(f"PRAGMA table_info({_identifier(table)})")]
@@ -592,6 +616,11 @@ def _create_destination(source_db, temporary, project_root):
                 # No tool-result-observation rows exist to carry; leave the
                 # destination's freshly-created evidence table empty for the
                 # same reason.
+                rows = ()
+            elif table in _REPLAY_TABLES and not source_replay_present:
+                # No T018 source-block/host-transcript rows exist to carry;
+                # leave the destination's freshly-created replay tables
+                # empty for the same reason.
                 rows = ()
             elif table == "deliveries":
                 rows = _selected_deliveries(source_db, project_root)

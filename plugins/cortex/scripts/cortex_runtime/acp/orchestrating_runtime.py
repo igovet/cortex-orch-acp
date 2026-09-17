@@ -205,13 +205,29 @@ class OrchestratingRuntime:
 
     # -- IncomingRuntime -----------------------------------------------
 
-    def start_prompt(self, task_id, session_id, content, emit_update, cancel_event) -> StopReason:
+    def start_prompt(
+        self, task_id, session_id, content, emit_update, cancel_event, *,
+        source_origin: str | None = None, source_event_id: str | None = None,
+    ) -> StopReason:
+        """T018: ``source_origin``/``source_event_id`` (when supplied by the
+        caller -- see ``acp.agent.Agent``'s signature detection, mirroring
+        T016's ``project_root``) identify *this exact call's own* already-
+        durably-captured source event (``bootstrap.bootstrap_task``/
+        ``append_source_event``): the coordinator's ``user_message`` event
+        is deduplicated by that identity (``user_message:<origin>:<event_id>``),
+        not a recomputed turn count -- two distinct source events with
+        identical text remain two distinct, both-delivered user_message
+        events; a replayed identical source event (same origin+event_id)
+        is never delivered twice. Omitted (``None``) falls back to the
+        pre-T018 session-turn-count identity for callers that do not (yet)
+        thread a source event through (every existing direct-call test)."""
         with self._lock:
             if task_id in self._active_tasks:
                 raise SecondCoordinatorRefused()
             self._active_tasks.add(task_id)
         try:
-            return self._run(task_id, session_id, content, emit_update, cancel_event)
+            return self._run(task_id, session_id, content, emit_update, cancel_event,
+                              source_origin=source_origin, source_event_id=source_event_id)
         finally:
             with self._lock:
                 self._active_tasks.discard(task_id)
@@ -339,7 +355,10 @@ class OrchestratingRuntime:
 
     # -- main loop ----------------------------------------------------
 
-    def _run(self, task_id, session_id, content, emit_update, cancel_event) -> StopReason:
+    def _run(
+        self, task_id, session_id, content, emit_update, cancel_event, *,
+        source_origin: str | None = None, source_event_id: str | None = None,
+    ) -> StopReason:
         channel, session_ref = self._ensure_coordinator(task_id)
         # T017: a new user prompt is a fresh turn -- surface any explanation
         # a prior blocked/limited/refused turn left behind (resumable, not
@@ -347,14 +366,33 @@ class OrchestratingRuntime:
         # counter for this fresh attempt (see delegation.events_store's
         # T017 column docstring).
         self._emit_resume_context(task_id)
-        with self._store.connection() as db:
-            turn_index = db.execute(
-                "SELECT COUNT(*) AS n FROM task_events WHERE task_id=? AND event_type='user_message' AND origin=?",
-                (task_id, session_id),
-            ).fetchone()["n"]
-        delegation_events.append_event(
-            self._store, task_id, "user_message", f"user_message:{session_id}:{turn_index}",
-            dict(content=content, session_id=session_id), origin=session_id,
+        # T018: recover any source_events durably captured (bootstrap.
+        # bootstrap_task/append_source_event) but never recorded as a
+        # user_message task_events row -- a crash between capture and
+        # recording in a prior process/attempt -- *before* this call's own
+        # message, in captured order, each labeled 'recovered: true'. Never
+        # creates a task/assignment; a source event already recorded (the
+        # normal case) is a no-op here.
+        self._recover_unrecorded_source_events(task_id, exclude=(source_origin, source_event_id))
+        from . import replay_store
+
+        if source_origin is not None and source_event_id is not None:
+            dedup_key = f"user_message:{source_origin}:{source_event_id}"
+            ledger_origin, ledger_event_id = source_origin, source_event_id
+        else:
+            with self._store.connection() as db:
+                turn_index = db.execute(
+                    "SELECT COUNT(*) AS n FROM task_events WHERE task_id=? AND event_type='user_message' AND origin=?",
+                    (task_id, session_id),
+                ).fetchone()["n"]
+            dedup_key = f"user_message:{session_id}:{turn_index}"
+            # No real source identity was threaded through (a caller not
+            # yet updated for T018) -- nothing to mark in the delivery
+            # ledger, but still recorded through the same atomic path.
+            ledger_origin, ledger_event_id = None, None
+        replay_store.record_user_message_event(
+            self._store, task_id, dedup_key, session_id, dict(content=content, session_id=session_id),
+            ledger_origin=ledger_origin, ledger_event_id=ledger_event_id,
         )
         no_progress = 0
         total = 0
@@ -467,6 +505,29 @@ class OrchestratingRuntime:
                 return StopReason.END_TURN
             # else: loop again -- either events already pending or we will
             # wait for progress at the top of the next iteration.
+
+    def _recover_unrecorded_source_events(self, task_id: str, *, exclude: tuple[str | None, str | None] = (None, None)) -> None:
+        from . import replay_store
+
+        for entry in replay_store.find_unrecorded_source_events(self._store, task_id):
+            if (entry["origin"], entry["event_id"]) == exclude:
+                # This call's own just-captured source event (see
+                # acp.agent, which durably captures before invoking
+                # start_prompt): recorded below as this turn's normal,
+                # non-recovered user_message -- never swept in here as a
+                # false 'recovered' label.
+                continue
+            if entry["text"] is None:
+                # The durably published body could not be resolved (should
+                # not happen for a source event this runtime itself will
+                # ever be asked to continue from); skip rather than record a
+                # fabricated empty user_message.
+                continue
+            replay_store.record_user_message_event(
+                self._store, task_id, f"user_message:{entry['origin']}:{entry['event_id']}", entry["origin"],
+                dict(content=entry["text"], session_id=entry["origin"], recovered=True),
+                ledger_origin=entry["origin"], ledger_event_id=entry["event_id"],
+            )
 
     def _emit_resume_context(self, task_id: str) -> None:
         with self._store.connection() as db:

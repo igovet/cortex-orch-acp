@@ -89,8 +89,11 @@ def test_coordinator_tools_list_includes_role_filtered_delegation_tools(tmp_path
     replies = _call(project, channel_id, secret, _init_and("tools/list", {}), tmp_path)
     names = {t["name"] for t in replies[1]["result"]["tools"]}
     assert {"create_task", "write_report", "delegate", "list_events", "clarify", "cancel", "decide"} <= names
+    # T018: list_sources/read_source are shared read-only source-history
+    # operations, available on both coordinator and worker channels.
+    assert {"list_sources", "read_source"} <= names
     assert "ask_question" not in names and "publish_result" not in names
-    assert len(names) == 12
+    assert len(names) == 14
 
 
 def test_worker_tools_list_is_worker_only(tmp_path):

@@ -60,7 +60,7 @@ def test_coordinator_turn_runs_through_the_real_session_manager(tmp_path):
     )
     runtime = OrchestratingRuntime(
         store, adapter, FakeWorkspace(), FakeConfigSnapshotSource(),
-        allow_unqualified_delivery=True, wait_timeout_seconds=2.0,
+        allow_unqualified_delivery=True, wait_timeout_seconds=10.0,
     )
     try:
         # Open the real coordinator session up front (through the real

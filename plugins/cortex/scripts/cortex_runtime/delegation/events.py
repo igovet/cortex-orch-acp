@@ -67,40 +67,57 @@ class TaskEvent:
         )
 
 
-def append_event(
-    store, task_id: str, event_type: str, dedup_key: str, payload: Mapping[str, Any],
+def append_event_tx(
+    db, task_id: str, event_type: str, dedup_key: str, payload: Mapping[str, Any],
     origin: str, *, assignment_ref: str | None = None,
 ) -> TaskEvent:
-    """Append one event, idempotently on ``(task_id, dedup_key)``.
-
-    Returns the (newly inserted or already-existing) :class:`TaskEvent`.
+    """Same as :func:`append_event`, but operates on an already-open
+    transaction (``db``) and performs no transaction control of its own --
+    for a caller (see ``acp.replay_store.record_user_message_event``) that
+    must commit this insert atomically together with another write in the
+    very same transaction.
     """
     if event_type not in EVENT_TYPES:
         raise ValueError(f"unknown event_type {event_type!r}")
     payload_json = json.dumps(dict(payload), sort_keys=True, ensure_ascii=False)
+    existing = db.execute(
+        "SELECT * FROM task_events WHERE task_id=? AND dedup_key=?", (task_id, dedup_key),
+    ).fetchone()
+    if existing is not None:
+        return TaskEvent._from_row(existing)
+    db.execute(
+        "INSERT INTO task_events "
+        "(task_id, event_type, assignment_ref, dedup_key, payload_json, origin, created_at, consumed_by, superseded) "
+        "VALUES (?,?,?,?,?,?,?,NULL,0)",
+        (task_id, event_type, assignment_ref, dedup_key, payload_json, origin, _now()),
+    )
+    row = db.execute(
+        "SELECT * FROM task_events WHERE task_id=? AND dedup_key=?", (task_id, dedup_key),
+    ).fetchone()
+    return TaskEvent._from_row(row)
+
+
+def append_event(
+    store, task_id: str, event_type: str, dedup_key: str, payload: Mapping[str, Any],
+    origin: str, *, assignment_ref: str | None = None,
+) -> TaskEvent:
+    """Append one event, idempotently on ``(task_id, dedup_key)``, in its
+    own standalone transaction (see :func:`append_event_tx` for the
+    shared-transaction variant).
+
+    Returns the (newly inserted or already-existing) :class:`TaskEvent`.
+    """
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
-            existing = db.execute(
-                "SELECT * FROM task_events WHERE task_id=? AND dedup_key=?", (task_id, dedup_key),
-            ).fetchone()
-            if existing is not None:
-                db.commit()
-                return TaskEvent._from_row(existing)
-            db.execute(
-                "INSERT INTO task_events "
-                "(task_id, event_type, assignment_ref, dedup_key, payload_json, origin, created_at, consumed_by, superseded) "
-                "VALUES (?,?,?,?,?,?,?,NULL,0)",
-                (task_id, event_type, assignment_ref, dedup_key, payload_json, origin, _now()),
+            event = append_event_tx(
+                db, task_id, event_type, dedup_key, payload, origin, assignment_ref=assignment_ref,
             )
-            row = db.execute(
-                "SELECT * FROM task_events WHERE task_id=? AND dedup_key=?", (task_id, dedup_key),
-            ).fetchone()
             db.commit()
         except BaseException:
             db.rollback()
             raise
-    return TaskEvent._from_row(row)
+    return event
 
 
 def list_since(store, task_id: str, after: int = 0, limit: int = 200) -> list[TaskEvent]:

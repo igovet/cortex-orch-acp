@@ -99,6 +99,13 @@ class FakeSessionRuntime:
         self._queue_timeout_seconds = capacity_queue_timeout_seconds
         self._reservations = {}
         self._release_kind = {}
+        # T018 fresh-review fix: every delegation_capacity.reserve() attempt
+        # (success or refusal), appended before _notify_activity() -- lets a
+        # test synchronize on "the queued worker actually re-attempted and
+        # was refused" as an explicit event, instead of a fixed-duration
+        # sleep standing in for "nothing happened" (see
+        # test_ambiguous_release_keeps_second_delegation_queued).
+        self.reserve_attempts = []
         self._cancelled_attempts = set()
         self._cancelled_tasks = set()
         self._shutdown_event = threading.Event()
@@ -170,6 +177,7 @@ class FakeSessionRuntime:
                 reservation_id = delegation_capacity.reserve(
                     self._store, self._connection_id, task_id, attempt_id, kind, limit=limit,
                 )
+                self.reserve_attempts.append((attempt_id, reservation_id))
                 self._notify_activity()  # every attempt (success or fail) is observable to wait_until()
                 if reservation_id is not None:
                     break

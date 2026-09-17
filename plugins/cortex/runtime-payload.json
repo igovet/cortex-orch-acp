@@ -15,6 +15,7 @@
     "scripts/cortex_runtime/acp/orchestrating_runtime.py",
     "scripts/cortex_runtime/acp/production_runtime.py",
     "scripts/cortex_runtime/acp/protocol.py",
+    "scripts/cortex_runtime/acp/replay_store.py",
     "scripts/cortex_runtime/acp/runtime.py",
     "scripts/cortex_runtime/acp/sessions.py",
     "scripts/cortex_runtime/acp/transport.py",

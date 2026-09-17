@@ -95,12 +95,18 @@ class ProductionOrchestratingRuntime:
             self._runtimes.setdefault(project_root, runtime)
             return self._runtimes[project_root]
 
-    def start_prompt(self, task_id, session_id, content, emit_update, cancel_event, *, project_root=None):
+    def start_prompt(
+        self, task_id, session_id, content, emit_update, cancel_event, *,
+        project_root=None, source_origin=None, source_event_id=None,
+    ):
         if not project_root:
             raise RouteUnresolved("project_root_unresolved")
         try:
             runtime = self._runtime_for_project(project_root)
-            return runtime.start_prompt(task_id, session_id, content, emit_update, cancel_event)
+            return runtime.start_prompt(
+                task_id, session_id, content, emit_update, cancel_event,
+                source_origin=source_origin, source_event_id=source_event_id,
+            )
         except PortableError as error:
             # Every qualification/configuration/ownership refusal this
             # runtime raises (no_configuration_revision,

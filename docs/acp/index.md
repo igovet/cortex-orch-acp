@@ -25,6 +25,10 @@ check.
   handling, completion gating, claimed-vs-observed evidence, durable
   waiting/resumability, capacity ledger, and what's deferred to
   T020/T021/T023/T028](completion-and-lifecycle.md)
+- [Durable input history and replay (T018): event identity/delivery
+  ledger, crash recovery, attachment availability, trust labels, bounded
+  reads, display-only session/load, and what's deferred to
+  T020/T021/T022/T023](input-history-and-replay.md)
 
 ## Tools
 

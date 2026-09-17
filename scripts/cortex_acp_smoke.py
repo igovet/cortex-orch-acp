@@ -308,11 +308,15 @@ def run_smoke(*, fixture_connection, report):
         report.record("initialize:protocol_version_1", protocol_version_seen == 1,
                        detail=protocol_version_seen)
         caps = result.get("agentCapabilities", {})
-        report.record("initialize:loadSession_false", caps.get("loadSession") is False, detail=caps)
+        # T018: loadSession/embeddedContext are now true (session/load is
+        # implemented, display-only; EmbeddedResource prompt blocks are
+        # accepted with truthful availability metadata) -- see
+        # docs/acp/input-history-and-replay.md. image/audio stay false.
+        report.record("initialize:loadSession_true", caps.get("loadSession") is True, detail=caps)
         prompt_caps = caps.get("promptCapabilities", {})
         report.record(
-            "initialize:text_only_prompt_capabilities",
-            prompt_caps == dict(image=False, audio=False, embeddedContext=False),
+            "initialize:no_image_audio_prompt_capabilities",
+            prompt_caps == dict(image=False, audio=False, embeddedContext=True),
             detail=prompt_caps)
 
         # -- session/new --------------------------------------------------
