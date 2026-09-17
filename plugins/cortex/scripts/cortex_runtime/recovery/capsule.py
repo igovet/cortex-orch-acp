@@ -785,12 +785,102 @@ def _section_continuation_intent(db, task_id: str, recipient: dict) -> dict:
         ).fetchone() is not None
         section["own_assignment_cancel_requested"] = cancel
         section["own_assignment_cancelled"] = cancelled
-    # No model-authored "continuation note" feature exists in this codebase
-    # (see lead decision 2: "if a model-authored continuation note is
-    # supported it is labeled derived_summary and never overrides fields");
-    # this is stated explicitly rather than implying one was consulted.
+    # No adapter currently supplies a model-authored "continuation note" (see
+    # module docstring / lead decision 1) -- this is the honest default.
+    # ``build_capsule``'s optional ``candidate_summary`` parameter (T024)
+    # overwrites this with either a validated ``derived_summary`` note or an
+    # explicit rejection reason -- see that function and
+    # ``recovery.summary_validation`` -- never silently trusted as-is.
     section["continuation_note"] = _unavailable("not_supported_in_this_build")
     return section
+
+
+# --------------------------------------------------------------------
+# T024: optional candidate-summary gate for continuation_note
+# --------------------------------------------------------------------
+
+
+def _known_refs_for_summary(sections: Mapping[str, Any]) -> set[str]:
+    """Every report/source id this capsule itself already resolved --
+    exactly the ids a candidate summary is allowed to reference (see
+    ``summary_validation.validate_summary``'s reference-resolution check)."""
+    refs: set[str] = set()
+    constraints = sections.get("constraints") or {}
+    for item in constraints.get("items", []) if isinstance(constraints, dict) else ():
+        report_id = item.get("report_id")
+        if report_id:
+            refs.add(report_id)
+    pipeline_and_assignments = sections.get("pipeline_and_assignments") or {}
+    if isinstance(pipeline_and_assignments, dict):
+        pipeline = pipeline_and_assignments.get("current_pipeline")
+        if isinstance(pipeline, dict) and pipeline.get("report_id"):
+            refs.add(pipeline["report_id"])
+        for assignment in pipeline_and_assignments.get("assignments", []) or []:
+            if isinstance(assignment, dict) and assignment.get("report_ref"):
+                refs.add(assignment["report_ref"])
+        own = pipeline_and_assignments.get("own_assignment")
+        if isinstance(own, dict) and own.get("report_ref"):
+            refs.add(own["report_ref"])
+    publications = sections.get("publications_and_checks") or {}
+    if isinstance(publications, dict):
+        for results in publications.get("results_by_assignment", {}).values():
+            for result in results:
+                report = result.get("report")
+                if isinstance(report, dict) and report.get("report_ref"):
+                    refs.add(report["report_ref"])
+        for result in publications.get("own_results", []) or []:
+            report = result.get("report")
+            if isinstance(report, dict) and report.get("report_ref"):
+                refs.add(report["report_ref"])
+    return refs
+
+
+def _authoritative_snapshot_for_summary(recipient: Mapping[str, Any], sections: Mapping[str, Any]) -> dict:
+    """The subset of already-computed sections a candidate summary's claims
+    are checked against (see ``summary_validation.validate_summary``'s
+    contradiction checks) -- never a second, independent read of the store,
+    always exactly what this same capsule build already resolved."""
+    constraints = sections.get("constraints") or {}
+    constraint_ids = [
+        item["report_id"] for item in (constraints.get("items", []) if isinstance(constraints, dict) else ())
+        if item.get("report_id")
+    ]
+    identity = sections.get("identity") or {}
+    task_id = identity.get("task_id")
+    if recipient["role"] == "worker":
+        pipeline_and_assignments = sections.get("pipeline_and_assignments") or {}
+        own = pipeline_and_assignments.get("own_assignment") if isinstance(pipeline_and_assignments, dict) else None
+        assignment_status = own.get("state") if isinstance(own, dict) else None
+        publications = sections.get("publications_and_checks") or {}
+        own_results = publications.get("own_results") if isinstance(publications, dict) else None
+        checks = own_results[-1].get("checks", []) if own_results else []
+        return dict(
+            task_id=task_id, assignment_ref=recipient.get("assignment_ref"),
+            assignment_status=assignment_status, completed=assignment_status == "result_published",
+            checks=checks, constraint_ids=constraint_ids,
+        )
+    return dict(task_id=task_id, assignment_status=None, completed=False, checks=[], constraint_ids=constraint_ids)
+
+
+def _apply_candidate_summary(sections: dict, recipient: Mapping[str, Any], candidate_summary: Any) -> None:
+    from . import summary_validation
+
+    known_refs = _known_refs_for_summary(sections)
+    authoritative = _authoritative_snapshot_for_summary(recipient, sections)
+    result = summary_validation.validate_summary(candidate_summary, known_refs=known_refs, authoritative=authoritative)
+    if result.valid and result.summary is not None:
+        # ``note_text`` (never the generic ``text`` key -- see
+        # ``_TEXT_FIELD_TRUST``) so ``render_capsule`` wraps it labeled
+        # ``derived_summary``, never the unrelated ``text`` key's
+        # ``user_direct`` mapping used elsewhere (constraints' own verbatim
+        # source text).
+        sections["continuation_intent"]["continuation_note"] = dict(
+            status="available", trust_label="derived_summary", note_text=result.summary["text"],
+        )
+    else:
+        sections["continuation_intent"]["continuation_note"] = _unavailable(
+            "summary_invalid:" + (",".join(result.violations) or "unknown"),
+        )
 
 
 # --------------------------------------------------------------------
@@ -810,7 +900,10 @@ _SECTION_BUILDERS = (
 )
 
 
-def build_capsule(store, task_id: str, recipient: Mapping[str, Any], at_revision: int | None = None) -> dict:
+def build_capsule(
+    store, task_id: str, recipient: Mapping[str, Any], at_revision: int | None = None,
+    *, candidate_summary: Any = None,
+) -> dict:
     """Build one deterministic recovery capsule for ``recipient``.
 
     ``recipient`` is ``{"role": "coordinator"}`` or ``{"role": "worker",
@@ -820,6 +913,21 @@ def build_capsule(store, task_id: str, recipient: Mapping[str, Any], at_revision
     current durable state -- a full point-in-time snapshot of every
     section is not implemented; this is a documented limitation, not a
     silent one).
+
+    ``candidate_summary`` (T024, optional, default ``None``): a raw
+    model-authored semantic-summary candidate (JSON text or an already
+    -parsed dict) -- see ``recovery.summary_validation``. No current adapter
+    supplies one (see ``recovery.summarizer_policy`` module docstring), so
+    this is exercised directly by callers/tests today, not from a live
+    engine signal. When supplied, it is *never* trusted as-is: it is
+    validated against this exact capsule's own already-resolved sections
+    (never a second, independent read) and either becomes
+    ``sections.continuation_intent.continuation_note`` (labeled
+    ``derived_summary``, structural fields never overridden by it) or is
+    replaced with an explicit ``summary_invalid:<reasons>`` rejection --
+    valid JSON is not semantic correctness, and an omitted/altered
+    constraint or fabricated completion claim can never change any other
+    section's already-computed, authoritative content.
 
     Raises ``StoreError('unknown_task', ...)`` for an unknown ``task_id``
     and ``StoreError('capsule_oversize', ...)`` when the critical sections
@@ -833,6 +941,8 @@ def build_capsule(store, task_id: str, recipient: Mapping[str, Any], at_revision
         sections = {}
         for name, builder in _SECTION_BUILDERS:
             sections[name] = builder(store, db, task_id, normalized, at_revision, watermark)
+    if candidate_summary is not None:
+        _apply_candidate_summary(sections, normalized, candidate_summary)
     # Top-level key is deliberately ``for_task_id``, not ``task_id`` -- the
     # MCP dispatch layer (delegation.mcp_tools.dispatch) refuses any
     # top-level result field named exactly one of a small technical-id
@@ -946,6 +1056,7 @@ _TEXT_FIELD_TRUST = {
     "acceptance": "derived_summary",
     "rationale": "derived_summary",
     "text": "user_direct",
+    "note_text": "derived_summary",
 }
 
 

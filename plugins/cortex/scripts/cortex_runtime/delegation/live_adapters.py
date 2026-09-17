@@ -217,7 +217,9 @@ class EngineSessionManagerAdapter:
             reservation_id = self._reserve_capacity_blocking(record.id, task_id, attempt_id, launch)
         manager = EngineSessionManager(
             record, workspace_root, environ=self._environ,
-            channel_credentials=channel_credentials, **self._manager_kwargs,
+            channel_credentials=channel_credentials,
+            terminal_output_persist=self._persist_terminal_output,
+            **self._manager_kwargs,
         )
         manager.negotiate(_requested_capabilities())
         session_id = manager.create_session(task_id, launch.get("assignment_id") or attempt_id)
@@ -335,6 +337,38 @@ class EngineSessionManagerAdapter:
                 recipient=recipient, assignment_ref=assignment_ref, tier=tier.tier,
             )
             self._pending_generation[session_id] = generation
+
+    def _persist_terminal_output(
+        self, engine_session_id: str, terminal_id: str, data: bytes, *,
+        truncated: bool, exit_code: int | None, signal: str | None, failure: str | None,
+    ) -> str | None:
+        """T024: real ``engine.terminal_bridge.TerminalBridge`` persist sink
+        binding -- looks up this exact session's already-recorded
+        ``task_id``/``recipient``/``assignment_ref`` (see
+        ``_open_generation``, populated before any real terminal can be
+        created) and persists via ``recovery.large_output_store``, scoped
+        by owner exactly like a capsule recipient (``"coordinator"`` or the
+        worker's own ``assignment_ref`` -- never ambiguous, never another
+        assignment's scope). Best-effort: returns ``None`` (no
+        ``large_output_id`` surfaced) rather than raising, if this session's
+        meta or the store is unavailable."""
+        if self._store is None:
+            return None
+        with self._lock:
+            meta = self._session_meta.get(engine_session_id)
+        if meta is None:
+            return None
+        owner_scope = "coordinator" if meta["recipient"] == "coordinator" else meta.get("assignment_ref")
+        if not owner_scope:
+            return None
+        from ..recovery import large_output_store
+
+        record = large_output_store.persist_output(
+            self._store, task_id=meta["task_id"], owner_scope=owner_scope, source_kind="terminal",
+            data=data, source_ref=terminal_id, exit_code=exit_code, signal=signal,
+            failure=failure, truncated=truncated,
+        )
+        return record["id"]
 
     def _reserve_capacity_blocking(self, connection_id: str, task_id: str, attempt_id: str, launch: Mapping[str, object]) -> str:
         """Block (bounded backoff poll, never a model prompt) until a

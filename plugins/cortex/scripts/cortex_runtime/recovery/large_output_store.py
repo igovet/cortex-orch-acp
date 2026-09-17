@@ -28,6 +28,7 @@ record's ``exit_status``, ``failure``, and ``truncated`` flags intact
 """
 from __future__ import annotations
 
+import base64
 import os
 
 from ..portable.identity import new_id
@@ -132,11 +133,23 @@ def read_output(
     regular(path)
     with open(path, "rb") as stream:
         stream.seek(offset)
-        chunk = stream.read(chunk_size)
-    next_offset = offset + len(chunk)
+        raw_chunk = stream.read(chunk_size)
+    next_offset = offset + len(raw_chunk)
+    try:
+        chunk, encoding = raw_chunk.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        # Matches ``acp.replay_store.read_source``'s own binary fallback --
+        # never silently mangles a byte a caller might need exactly (e.g. a
+        # UTF-8-invalid terminal capture), and never splits a multi-byte
+        # sequence across chunk boundaries silently: a caller reading in
+        # fixed-size chunks may see this per-chunk, which is why the raw
+        # byte count (never the decoded length) is always what ``offset``/
+        # ``next_offset``/``byte_count`` are computed from.
+        chunk, encoding = base64.b64encode(raw_chunk).decode("ascii"), "base64"
     return dict(
         id=record_id,
         chunk=chunk,
+        encoding=encoding,
         offset=offset,
         next_offset=next_offset if next_offset < row["byte_count"] else None,
         byte_count=row["byte_count"],

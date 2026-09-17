@@ -42,6 +42,14 @@ KILL_GRACE_SECONDS = 5.0
 DRAIN_JOIN_TIMEOUT_SECONDS = 5.0
 _MINIMAL_BASE_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
 
+# T024: a terminal whose final captured buffer reaches (or was itself
+# truncated below) this many bytes is durably persisted (see
+# ``recovery.large_output_store``) once its exit is observed, so a caller
+# can read it back in bounded chunks after the in-memory ``LocalTerminal``
+# is gone (see module docstring's "Output is bounded per terminal" -- that
+# bound is about what stays in RAM, never about what is durably kept).
+LARGE_OUTPUT_PERSIST_THRESHOLD_BYTES = 8_192
+
 
 class TerminalBridgeError(Exception):
     def __init__(self, code, message):
@@ -62,10 +70,18 @@ def _truncate_from_start(buffer: bytes, limit: int) -> tuple[bytes, bool]:
 
 
 class LocalTerminal:
-    def __init__(self, terminal_id: str, process: subprocess.Popen, *, output_byte_limit: int):
+    def __init__(
+        self, terminal_id: str, process: subprocess.Popen, *, output_byte_limit: int,
+        engine_session_id: str | None = None, persist_sink=None,
+        persist_threshold_bytes: int = LARGE_OUTPUT_PERSIST_THRESHOLD_BYTES,
+    ):
         self.terminal_id = terminal_id
         self.process = process
         self._output_byte_limit = output_byte_limit
+        self._engine_session_id = engine_session_id
+        self._persist_sink = persist_sink
+        self._persist_threshold_bytes = persist_threshold_bytes
+        self._large_output_id: str | None = None
         self._lock = threading.Lock()
         self._buffer = b""
         self._truncated = False
@@ -112,13 +128,40 @@ class LocalTerminal:
             self._exit_status = dict(exitCode=code, signal=signal_name)
             if self._drain_thread.is_alive():
                 self._drain_incomplete = True
+            buffer, truncated, exit_status = self._buffer, self._truncated, dict(self._exit_status)
+        self._maybe_persist(buffer, truncated, exit_status)
         self._exited_event.set()
+
+    def _maybe_persist(self, buffer: bytes, truncated: bool, exit_status: dict) -> None:
+        """T024: once exit is observed, durably persist this terminal's
+        final captured buffer (see ``recovery.large_output_store``) when it
+        reaches the configured threshold or was itself truncated -- never
+        loses ``exitStatus``/``truncated``/byte count in the process (they
+        are captured in this exact same call, from the exact same fields
+        ``output()`` already exposes)."""
+        if self._persist_sink is None or self._engine_session_id is None:
+            return
+        if len(buffer) < self._persist_threshold_bytes and not truncated:
+            return
+        try:
+            record_id = self._persist_sink(
+                self._engine_session_id, self.terminal_id, buffer, truncated=truncated,
+                exit_code=exit_status.get("exitCode"), signal=exit_status.get("signal"), failure=None,
+            )
+        except Exception:
+            # Best-effort: persistence failing never hides the in-memory
+            # output()/exitStatus this call already captured correctly.
+            record_id = None
+        with self._lock:
+            self._large_output_id = record_id
 
     def output(self) -> dict:
         with self._lock:
             result = dict(output=self._buffer.decode("utf-8", errors="replace"), truncated=self._truncated)
             if self._exit_status is not None:
                 result["exitStatus"] = dict(self._exit_status)
+            if self._large_output_id is not None:
+                result["large_output_id"] = self._large_output_id
         return result
 
     def wait_for_exit(self, timeout=None) -> bool:
@@ -150,10 +193,21 @@ class TerminalBridge:
     *different* session (even on the same engine instance) is refused as
     unknown, never resolved."""
 
-    def __init__(self, *, max_per_session: int = MAX_TERMINALS_PER_SESSION):
+    def __init__(
+        self, *, max_per_session: int = MAX_TERMINALS_PER_SESSION, persist_sink=None,
+        persist_threshold_bytes: int = LARGE_OUTPUT_PERSIST_THRESHOLD_BYTES,
+    ):
         self._lock = threading.Lock()
         self._terminals: dict[str, dict[str, LocalTerminal]] = {}
         self._max_per_session = max_per_session
+        # T024: optional ``(engine_session_id, terminal_id, data, *,
+        # truncated, exit_code, signal, failure) -> record_id|None`` sink --
+        # see ``recovery.large_output_store``/``delegation.live_adapters``'s
+        # own binding of this to the real store. ``None`` (the default,
+        # every pre-T024 caller) means "never persist" -- output stays
+        # exactly as bounded/in-memory as before.
+        self._persist_sink = persist_sink
+        self._persist_threshold_bytes = persist_threshold_bytes
 
     def create(self, binding, params, *, output_byte_limit_max: int) -> str:
         command = (params or {}).get("command")
@@ -201,7 +255,11 @@ class TerminalBridge:
                 )
             except OSError as exc:
                 raise TerminalBridgeError(-32602, f"could not start command: {exc}") from exc
-            session_terminals[terminal_id] = LocalTerminal(terminal_id, process, output_byte_limit=limit)
+            session_terminals[terminal_id] = LocalTerminal(
+                terminal_id, process, output_byte_limit=limit,
+                engine_session_id=binding.engine_session_id, persist_sink=self._persist_sink,
+                persist_threshold_bytes=self._persist_threshold_bytes,
+            )
         return terminal_id
 
     def _get(self, engine_session_id: str, terminal_id) -> LocalTerminal:

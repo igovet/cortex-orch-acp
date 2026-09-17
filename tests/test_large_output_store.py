@@ -27,7 +27,8 @@ def test_persist_and_read_round_trips_bytes_exactly(tmp_path):
         source_ref="term_1", exit_code=0, signal=None, failure=None, truncated=False,
     )
     result = read_output(store, task_id=task_id, owner_scope="coordinator", record_id=record["id"], chunk_size=1_000_000)
-    assert result["chunk"] == data
+    assert result["encoding"] == "utf-8"
+    assert result["chunk"] == data.decode("utf-8")
     assert result["byte_count"] == len(data)
     assert result["exit_status"] == dict(exit_code=0, signal=None)
     assert result["truncated"] is False
@@ -48,8 +49,9 @@ def test_truncation_and_failure_and_exit_status_survive_persistence(tmp_path):
 
 
 def test_chunked_reads_cover_the_whole_output(tmp_path):
+    import base64
     store, task_id = _task(tmp_path)
-    data = bytes(range(256)) * 500
+    data = bytes(range(256)) * 500  # not valid UTF-8 -> exercises the base64 fallback
     record = persist_output(
         store, task_id=task_id, owner_scope="coordinator", source_kind="tool_result", data=data,
     )
@@ -57,7 +59,8 @@ def test_chunked_reads_cover_the_whole_output(tmp_path):
     offset = 0
     while True:
         chunk_result = read_output(store, task_id=task_id, owner_scope="coordinator", record_id=record["id"], offset=offset, chunk_size=997)
-        collected += chunk_result["chunk"]
+        assert chunk_result["encoding"] == "base64"
+        collected += base64.b64decode(chunk_result["chunk"])
         # Every chunk still carries the full record's metadata, not only the first/last.
         assert chunk_result["byte_count"] == len(data)
         if chunk_result["next_offset"] is None:
