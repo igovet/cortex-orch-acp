@@ -81,6 +81,12 @@ check.
   genuine engine crash, bounded reconciled-before-retry policy, session/
   cancel's permission-binding invalidation, host-disconnect handling, and
   the bounded owned-resource reaper](failures-and-cancellation.md)
+- [Observability and resource attribution (T029): structured trace events
+  with a basis classification, usage/cost attribution across retries and
+  recovery calls, conservative call/token/concurrency caps (never a
+  fabricated monetary number), declared-availability metrics and the
+  `read_diagnostics` MCP read, the single redaction choke point, and
+  unknown telemetry never gating execution](observability.md)
 
 ## Tools
 

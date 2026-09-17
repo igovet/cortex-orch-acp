@@ -100,8 +100,11 @@ def test_coordinator_tools_list_includes_role_filtered_delegation_tools(tmp_path
     assert "read_large_output" in names
     # T025: integrate is coordinator-only technical application.
     assert "integrate" in names
+    # T029: read_diagnostics is a coordinator-only read-only observability/
+    # usage summary operation.
+    assert "read_diagnostics" in names
     assert "ask_question" not in names and "publish_result" not in names
-    assert len(names) == 17
+    assert len(names) == 18
 
 
 def test_worker_tools_list_is_worker_only(tmp_path):

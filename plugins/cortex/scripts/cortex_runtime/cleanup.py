@@ -79,6 +79,10 @@ def finish_deletions(store,db,task):
         # references either by id, so plain task_id deletes suffice.
         _delete_if_present("attempt_route_audit","task_id=?",(task,))
         _delete_if_present("fallback_consent_records","task_id=?",(task,))
+        # T029 observability_events/usage_records: no other table references
+        # either by id, so plain task_id deletes suffice.
+        _delete_if_present("observability_events","task_id=?",(task,))
+        _delete_if_present("usage_records","task_id=?",(task,))
         # T024 large_outputs/compaction_recovery_events: no other table
         # references either by id, so plain task_id deletes suffice.
         # large_outputs also owns files under this task's storage directory

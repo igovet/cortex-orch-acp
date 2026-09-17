@@ -149,7 +149,7 @@ class EngineProcess:
                     text = line.decode("utf-8", errors="replace")
                 except Exception:
                     text = repr(line)
-                self.logs.stderr.append_line(text)
+                self.logs.stderr_line(text)
         except (OSError, ValueError):
             pass
 

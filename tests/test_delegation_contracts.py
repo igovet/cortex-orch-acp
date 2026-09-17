@@ -37,10 +37,12 @@ def test_coordinator_operations_closed_set():
     # T021 adds the shared read-only 'read_capsule' recovery-capsule operation;
     # T024 adds the shared read-only 'read_large_output' operation.
     # T025 adds 'integrate' (technical application of an isolated worker
-    # workspace onto the main project root).
+    # workspace onto the main project root). T029 adds the coordinator-only
+    # read-only 'read_diagnostics' observability/usage summary.
     assert set(dc.schemas_for("coordinator")) == {
         "delegate", "list_events", "clarify", "cancel", "decide", "integrate",
         "list_sources", "read_source", "read_capsule", "read_large_output",
+        "read_diagnostics",
     }
 
 

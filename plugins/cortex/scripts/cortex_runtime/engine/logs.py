@@ -7,6 +7,13 @@ Neither ever carries a prompt body or a secret value: the observation log
 records only lifecycle transitions and method names (see
 ``session_manager``/``mcp_bridge`` -- the channel secret is only ever placed
 into the launched engine process's *environment*, never written here).
+
+T029: this is the single redaction choke point for both sinks -- every
+``observe()`` field and every raw stderr line passes through
+``observability.redact`` before it ever reaches disk (a launched engine's
+own stderr is untrusted text and may itself contain a credential-shaped
+substring, e.g. echoed from its own environment or a misconfigured
+argument).
 """
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ import time
 from pathlib import Path
 
 from ..connections import registry as connection_registry
+from ..observability import redact
 
 MAX_LOG_BYTES = 256 * 1024
 
@@ -65,8 +73,14 @@ class EngineLogs:
 
     def observe(self, event: str, **fields: object) -> None:
         row = dict(time_ns=time.time_ns(), engine_instance_id=self.engine_instance_id, event=event)
-        row.update(fields)
+        row.update(redact.scrub_mapping(fields))
         try:
             self.observations.append_line(json.dumps(row, sort_keys=True, ensure_ascii=False, default=str))
         except OSError:
             pass
+
+    def stderr_line(self, text: str) -> None:
+        """Append one already-decoded stderr line, redacted (see module
+        docstring). The only call site is
+        ``engine.process.EngineProcess._drain_stderr``."""
+        self.stderr.append_line(redact.scrub_text(text))

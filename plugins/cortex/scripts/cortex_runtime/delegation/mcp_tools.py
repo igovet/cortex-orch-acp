@@ -369,12 +369,24 @@ def _shared_read_large_output(store, channel: ChannelContext, args: Mapping[str,
         ) from error
 
 
+def _coordinator_read_diagnostics(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
+    """T029: this channel's own task's observability diagnostics summary
+    and resource caps (see ``observability.metrics.diagnostics_summary``).
+    Never accepts a task id -- always ``channel.task_id``, same pattern as
+    ``_shared_read_capsule`` -- so a channel can never read another task's
+    usage/attribution data."""
+    from ..observability import metrics as observability_metrics
+
+    return observability_metrics.diagnostics_summary(store, channel.task_id)
+
+
 _COORDINATOR_HANDLERS = dict(
     delegate=_coordinator_delegate, list_events=_coordinator_list_events,
     clarify=_coordinator_clarify, cancel=_coordinator_cancel, decide=_coordinator_decide,
     integrate=_coordinator_integrate,
     list_sources=_shared_list_sources, read_source=_shared_read_source,
     read_capsule=_shared_read_capsule, read_large_output=_shared_read_large_output,
+    read_diagnostics=_coordinator_read_diagnostics,
 )
 _WORKER_HANDLERS = dict(
     ask_question=_worker_ask_question, publish_result=_worker_publish_result,
@@ -401,6 +413,9 @@ _OPERATION_DESCRIPTIONS = dict(
     read_capsule="Read this channel's own deterministic recovery capsule: identity, applied config, exact "
                  "constraints with origins, own assignments/pipeline, confirmed publications/checks, open/"
                  "uncertain actions, newer events, role/tool access, and continuation intent.",
+    read_diagnostics="Read this task's own observability/usage diagnostics summary: resource caps, recovery "
+                     "latency, repeat calls, schema/validation errors, manual interventions, duplicate "
+                     "publications, tokens, and concurrency -- each with its declared unit and availability.",
 )
 
 
@@ -423,7 +438,7 @@ def tool_definitions(role_kind: str) -> list[dict]:
             description=_OPERATION_DESCRIPTIONS.get(name, f"Delegation operation '{name}'."),
             inputSchema=dict(type="object", properties=schema["properties"],
                               required=schema["required"], additionalProperties=False),
-            annotations=dict(readOnlyHint=name in ("list_events", "list_sources", "read_source", "read_capsule"), destructiveHint=False,
+            annotations=dict(readOnlyHint=name in ("list_events", "list_sources", "read_source", "read_capsule", "read_diagnostics"), destructiveHint=False,
                               idempotentHint=name != "ask_question", openWorldHint=False),
         ))
     return tools
@@ -447,7 +462,23 @@ def dispatch(store, channel: ChannelContext, operation: str, args: Mapping[str, 
             ", ".join(sorted(_ROLE_HANDLERS.get(role_kind, {}))),
             f"Use one of this channel's own delegation operations.",
         )
-    validated = delegation_contracts.validate(role_kind, operation, dict(args))
+    try:
+        validated = delegation_contracts.validate(role_kind, operation, dict(args))
+    except StoreError as error:
+        # T029: a schema/contract-validation rejection of one channel's own
+        # tool call arguments -- recorded for the "schema/validation
+        # errors" metric (see observability.metrics). Never blocks the
+        # rejection itself; recording is best-effort only.
+        try:
+            from ..observability.events import append_event as _append_observability_event
+
+            _append_observability_event(
+                store, channel.task_id, "validation", str(error), "observed",
+                attempt_id=channel.attempt_id, detail=dict(operation=operation),
+            )
+        except Exception:
+            pass
+        raise
     result = handlers[operation](store, channel, validated)
     leaked = NO_TECHNICAL_ID_FIELDS & set(result)
     if leaked:  # pragma: no cover - defensive; handlers above never set these

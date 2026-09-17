@@ -295,6 +295,7 @@ class Store:
         from .delegation.workspace_isolation import WORKSPACE_SCHEMA
         from .delegation.integration import INTEGRATION_SCHEMA
         from .routing.store import ROUTING_SCHEMA
+        from .observability.store import OBSERVABILITY_SCHEMA
         from .project_storage import canonical_project, project_store_directory
         self.project_root=canonical_project(project_root) if project_root is not None else None
         if self.project_root is not None and Path(directory)!=project_store_directory(self.project_root):
@@ -320,7 +321,7 @@ class Store:
             db.commit()
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+WORKSPACE_SCHEMA+INTEGRATION_SCHEMA+ROUTING_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+WORKSPACE_SCHEMA+INTEGRATION_SCHEMA+ROUTING_SCHEMA+OBSERVABILITY_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
             if app==APPLICATION_ID:
                 # T017: additive columns for a pre-T017 store that already has
                 # task_events/task_orchestration (CREATE TABLE IF NOT EXISTS
@@ -456,6 +457,50 @@ class Store:
                     " granted_by TEXT NOT NULL, granted_at TEXT NOT NULL, revoked_at TEXT)"
                 )
                 db.execute("CREATE INDEX IF NOT EXISTS fallback_consent_by_task ON fallback_consent_records(task_id, target_connection_id)")
+                # T029: additive observability_events/usage_records tables for
+                # a pre-T029 store (same precedent as attempt_route_audit
+                # above -- CREATE TABLE IF NOT EXISTS in SCHEMA only runs for
+                # a brand new database).
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS observability_events ("
+                    " id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),"
+                    " category TEXT NOT NULL, outcome TEXT NOT NULL,"
+                    " basis TEXT NOT NULL CHECK(basis IN ('observed','engine_reported','derived','estimated','unknown')),"
+                    " assignment_ref TEXT, attempt_id TEXT, engine_session_ref TEXT,"
+                    " context_generation_id TEXT, config_revision_id TEXT, connection_id TEXT,"
+                    " route_engine TEXT, source_event_ref TEXT,"
+                    " detail_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)"
+                )
+                db.execute("CREATE INDEX IF NOT EXISTS observability_events_by_task ON observability_events(task_id, created_at)")
+                db.execute("CREATE INDEX IF NOT EXISTS observability_events_by_attempt ON observability_events(attempt_id)")
+                db.execute(
+                    "CREATE TRIGGER IF NOT EXISTS observability_events_no_update BEFORE UPDATE ON observability_events "
+                    "BEGIN SELECT RAISE(ABORT, 'immutable'); END"
+                )
+                db.execute(
+                    "CREATE TRIGGER IF NOT EXISTS observability_events_no_delete BEFORE DELETE ON observability_events "
+                    "WHEN NOT EXISTS (SELECT 1 FROM pending_deletions d WHERE d.task_id=OLD.task_id) "
+                    "BEGIN SELECT RAISE(ABORT, 'immutable'); END"
+                )
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS usage_records ("
+                    " id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),"
+                    " attempt_id TEXT, engine_session_ref TEXT NOT NULL, call_sequence INTEGER NOT NULL,"
+                    " basis TEXT NOT NULL CHECK(basis IN ('observed','engine_reported','derived','estimated','unknown')),"
+                    " tokens_json TEXT NOT NULL DEFAULT '{}', stop_reason TEXT,"
+                    " failed INTEGER NOT NULL DEFAULT 0 CHECK(failed IN (0,1)), created_at TEXT NOT NULL)"
+                )
+                db.execute("CREATE INDEX IF NOT EXISTS usage_records_by_task ON usage_records(task_id, created_at)")
+                db.execute("CREATE INDEX IF NOT EXISTS usage_records_by_attempt ON usage_records(attempt_id, call_sequence)")
+                db.execute(
+                    "CREATE TRIGGER IF NOT EXISTS usage_records_no_update BEFORE UPDATE ON usage_records "
+                    "BEGIN SELECT RAISE(ABORT, 'immutable'); END"
+                )
+                db.execute(
+                    "CREATE TRIGGER IF NOT EXISTS usage_records_no_delete BEFORE DELETE ON usage_records "
+                    "WHEN NOT EXISTS (SELECT 1 FROM pending_deletions d WHERE d.task_id=OLD.task_id) "
+                    "BEGIN SELECT RAISE(ABORT, 'immutable'); END"
+                )
 
     def _check_project(self,db,task=None):
         if self.project_root is None:return
@@ -927,6 +972,15 @@ class Store:
         previous=db.execute("SELECT digest,content_digest,response FROM deliveries WHERE scope=? AND operation=? AND delivery_key=?",(scope,operation,args["request_key"])).fetchone()
         if previous:
             if previous["digest"]!=arg_hash: raise StoreError("delivery_conflict","request_key",args["request_key"],"unused key or exact prior arguments")
+            if task:
+                # T029: this is an idempotent replay of an already-confirmed
+                # delivery, not a new mutation -- but it is a genuine
+                # *duplicate publication attempt* for the metric (see
+                # observability.metrics._duplicate_publications). Recorded
+                # in this same transaction; never for the pre-task-creation
+                # scope ("new-task:"+thread has no tasks(id) row yet).
+                from .observability.events import record_duplicate_publication_tx
+                record_duplicate_publication_tx(db,task,operation,args["request_key"],created_at=self._now())
             if operation=="write_report":
                 draft=self._draft(db,task,creation_thread,args["draft_id"],published_ok=True)
                 source=self._source(db,task,draft["path"],must_exist=False,kind=draft["kind"],error_field="draft_id",error_value=args["draft_id"])

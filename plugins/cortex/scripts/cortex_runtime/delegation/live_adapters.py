@@ -990,6 +990,9 @@ class EngineSessionManagerAdapter:
             )
         text_parts: list[str] = []
         stop_reason = StopReason.END_TURN
+        usage_basis = None
+        usage_values: dict = {}
+        call_failed = True
         try:
             for event in manager.prompt_turn(session_ref, message):
                 if cancel_event.is_set():
@@ -1021,6 +1024,13 @@ class EngineSessionManagerAdapter:
                 elif event.kind == EngineEventKind.COMPACTION_SIGNAL:
                     if self._store is not None:
                         self._observe_compaction_signal(session_ref, event)
+                elif event.kind == EngineEventKind.USAGE_UPDATE:
+                    # T029: the engine's own most-recent usage_update for
+                    # this call (cumulative counters, per
+                    # engine.session_manager) -- attributed below once the
+                    # call finishes, whether it succeeds or fails.
+                    usage_basis = event.usage_basis
+                    usage_values = dict(event.usage_values or {})
                 elif event.kind == EngineEventKind.ERROR:
                     # T017: a yielded EngineEventKind.ERROR (transport_eof,
                     # timeout_alive -- see engine.session_manager's
@@ -1030,6 +1040,7 @@ class EngineSessionManagerAdapter:
                     raise EngineTurnFailed(event.error_message or "engine_error")
                 elif event.kind == EngineEventKind.TURN_END:
                     stop_reason = event.stop_reason or StopReason.END_TURN
+            call_failed = False
         except PortableError as error:
             if error.code == "engine_session_unusable":
                 # session_manager marks a session "poisoned" after an
@@ -1037,4 +1048,18 @@ class EngineSessionManagerAdapter:
                 # a poisoned session can never usefully be prompted again.
                 raise EngineTurnFailed("poisoned") from error
             raise
+        finally:
+            # T029: exactly one usage_records row per prompt() call --
+            # retry/fallback hops and recovery/clarification deliveries
+            # each call prompt() again and therefore each get their own
+            # row, whether this call succeeded or raised. basis='unknown'
+            # (never zero/free) when no usage_update event was ever seen.
+            if self._store is not None and task_id is not None:
+                from ..observability import usage as observability_usage
+
+                observability_usage.record_call_usage(
+                    self._store, task_id=task_id, attempt_id=attempt_id, engine_session_ref=session_ref,
+                    usage_basis=usage_basis, usage_values=usage_values,
+                    stop_reason=stop_reason.value if not call_failed else None, failed=call_failed,
+                )
         return PromptOutcome(stop_reason, "".join(text_parts))

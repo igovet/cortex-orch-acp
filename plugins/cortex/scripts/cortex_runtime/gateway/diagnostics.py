@@ -8,6 +8,8 @@ from logging.handlers import RotatingFileHandler
 import re
 import uuid
 
+from ..observability import redact
+
 _SAFE = re.compile(r"[^A-Za-z0-9_.:/-]")
 MAX_FIELD = 96
 MAX_LOG_BYTES = 256 * 1024
@@ -32,7 +34,12 @@ def request_id() -> str:
 def safe_value(value: object, default: str = "unspecified") -> str:
     if value is None or value == "":
         return default
-    return _SAFE.sub("_", str(value))[:MAX_FIELD]
+    # T029: scrub credential-shaped substrings first -- _SAFE below only
+    # strips *characters*, not patterns, so an API-key-shaped value using
+    # only allowed characters (letters/digits/./:/-) would otherwise pass
+    # through unredacted (see observability.redact for the single choke
+    # point every other log/observation sink in this runtime also uses).
+    return _SAFE.sub("_", redact.scrub_text(value, max_chars=MAX_FIELD))[:MAX_FIELD]
 
 
 def generated_error(code: str, message: str, *, status: int = 400) -> tuple[int, bytes, dict[str, str]]:

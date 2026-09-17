@@ -240,6 +240,16 @@ LARGE_OUTPUT_OPERATIONS = {
 }
 COORDINATOR_OPERATIONS.update(LARGE_OUTPUT_OPERATIONS)
 
+# T029: coordinator-only read-only diagnostics/usage summary for this
+# channel's own task (see delegation.mcp_tools._coordinator_read_diagnostics
+# -- never accepts a task id, always channel.task_id). Not offered on
+# worker channels: resource attribution/caps are a coordinator-level
+# concern in this runtime (see observability.metrics).
+DIAGNOSTICS_OPERATIONS = {
+    "read_diagnostics": _operation({}, []),
+}
+COORDINATOR_OPERATIONS.update(DIAGNOSTICS_OPERATIONS)
+
 WORKER_OPERATIONS = {
     "ask_question": _operation(
         {
