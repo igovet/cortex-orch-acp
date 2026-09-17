@@ -701,6 +701,19 @@ class Agent:
             if active is not None:
                 active.set()
 
+    def handle_writer_closed(self):
+        """Called (on the transport's writer thread; see
+        ``transport.StdioTransport``'s ``on_writer_closed``) when a write
+        actually failed -- the client's stdout reader is gone, so this
+        agent can never successfully reply to anything again, even though
+        its own stdin may still be open and its reader thread still
+        blocked waiting on it (T012 review item 1: without this, the
+        process would wedge forever in ``join_reader()``, unable to either
+        reply or exit). Treated identically to inbound EOF: cancel every
+        in-flight prompt so workers unblock and ``main`` can proceed to
+        shut down."""
+        self._handle_eof()
+
     def join_workers(self, timeout=_PROMPT_JOIN_TIMEOUT):
         deadline = time.monotonic() + timeout
         with self._workers_lock:
@@ -721,10 +734,32 @@ def main(argv=None, runtime=None, environ=None):
     sys.stdout = sys.stderr
 
     agent = Agent(runtime if runtime is not None else UnavailableRuntime(), environ=environ)
-    transport = StdioTransport(agent.handle_message, raw_stdout)
+    transport = StdioTransport(agent.handle_message, raw_stdout, on_writer_closed=agent.handle_writer_closed)
     agent.bind_transport(transport)
     transport.start()
-    transport.join_reader()
+    # Stop waiting on whichever happens first: the reader hits EOF (normal
+    # client-initiated shutdown) or the writer stops because a write
+    # actually failed (the client's stdout reader is gone -- T012 review
+    # item 1). Blocking only on `join_reader()` would otherwise wedge this
+    # process forever in the writer-closed-but-stdin-still-open case.
+    reason = transport.wait_for_shutdown_signal()
+    if reason == "writer_closed":
+        agent.join_workers()
+        transport.stop_writer()
+        # If stdin is still open, the reader thread may be permanently
+        # blocked in `readline()` with no way for this process to make it
+        # return (only the peer closing its write end can do that, and
+        # this process has no standing to force that). It is a daemon
+        # thread, so it would not stop a normal `sys.exit`/interpreter
+        # shutdown from happening either way -- but CPython's own
+        # finalization sequence has a known race where a daemon thread
+        # still holding a buffered stream's internal lock during shutdown
+        # can abort the process with a fatal error ("could not acquire
+        # lock ... at interpreter shutdown"). Exiting via `os._exit()`
+        # here (there is nothing left worth flushing: the writer already
+        # failed) sidesteps that finalization sequence entirely rather
+        # than trying to force an impossible clean join.
+        os._exit(0)
     agent.join_workers()
     transport.stop_writer()
     return 0

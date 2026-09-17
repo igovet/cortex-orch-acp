@@ -1,0 +1,505 @@
+"""EngineSessionManager: the outgoing ACP client + process/session lifecycle.
+
+Implements ``portable.engine_contract.EngineRuntime`` (structural typing --
+no inheritance) by composing exactly one
+:class:`~.process.EngineProcess`, one :class:`~.client.EngineClient`, and
+one :class:`~.correlation.CorrelationTables` per engine instance. See those
+modules' docstrings for why none of the three is ever shared across engine
+instances (this is what makes identical wire ids across two engines never
+cross-route).
+"""
+from __future__ import annotations
+
+import queue
+import threading
+
+from ..configuration.service import ConfigurationRejected
+from ..portable.engine_contract import EngineCapability, EngineEvent, EngineEventKind, StopReason, UsageBasis
+from ..portable.errors import PortableError, PortableErrorCategory
+from ..portable.identity import new_id
+from . import stub_handlers
+from .client import EngineClient, EngineProtocolError, EngineTimeout, EngineTransportClosed
+from .correlation import CorrelationTables
+from .mcp_bridge import build_mcp_servers
+from .process import EngineProcess
+
+DEFAULT_INITIALIZE_TIMEOUT = 15.0
+DEFAULT_CALL_TIMEOUT = 30.0
+DEFAULT_UPDATE_QUEUE_MAXSIZE = 2048
+DEFAULT_ABANDON_WAIT_SECONDS = 5.0
+
+_STOP_REASON_FROM_WIRE = {
+    "end_turn": StopReason.END_TURN,
+    "max_tokens": StopReason.MAX_TOKENS,
+    "max_turn_requests": StopReason.MAX_TURN_REQUESTS,
+    "refusal": StopReason.REFUSAL,
+    "cancelled": StopReason.CANCELLED,
+}
+
+
+def _default_option_mapping(revision):
+    """Default (route model + supported_parameters) -> ``session/set_config_option``
+    mapping. Used only by tests against the fake engine: the exact,
+    adapter-specific mapping from a ``ConfigurationRevision`` to real engine
+    config option ids/values is T013's responsibility, injected here via the
+    ``option_mapping`` constructor argument (a callable
+    ``revision -> list[(option_id, value)]``)."""
+    mapping = [("model", revision.route.model)]
+    mapping.extend(revision.route.supported_parameters)
+    return mapping
+
+
+def _fail(code, remediation, *, retry_eligible=False, field=None):
+    return PortableError(
+        category=PortableErrorCategory.VALIDATION, code=code, remediation=remediation,
+        retry_eligible=retry_eligible, field=field,
+    )
+
+
+class EngineConfigurationOutcomeUnknown(Exception):
+    """A ``session/set_config_option`` reply gave no evidence of the actual
+    outcome (see ``configure()``'s "no configOptions" branch). A plain
+    exception (never ``ConfigurationRejected``, never a ``PortableError``
+    special-cased by ``ConfigurationService.apply()``) so it always maps to
+    ``indeterminate`` there, the same as a transport timeout/exit."""
+
+
+def _session_unusable_error() -> PortableError:
+    return PortableError(
+        category=PortableErrorCategory.ENGINE_FAILURE,
+        code="engine_session_unusable",
+        remediation=(
+            "A previous turn on this engine session was abandoned while the "
+            "engine's wire session/prompt call never confirmed completion "
+            "within the abandonment bound; this session can never be safely "
+            "reused (a still-outstanding wire turn could otherwise overlap "
+            "with a new one). Release it and create a fresh engine session."
+        ),
+        retry_eligible=False,
+    )
+
+
+class EngineSessionManager:
+    """One outgoing engine instance; launches its own process on demand.
+
+    ``channel_credentials`` -- ``(channel_id, secret, project_root)`` -- is
+    used only to build the single Cortex MCP server entry passed on
+    ``session/new`` (see ``mcp_bridge.build_mcp_servers``); it is never
+    placed into the adapter process's own environment (see
+    ``process.EngineProcess``).
+    """
+
+    def __init__(
+        self,
+        record,
+        workspace_root: str,
+        *,
+        environ=None,
+        channel_credentials=None,
+        option_mapping=None,
+        initialize_timeout: float = DEFAULT_INITIALIZE_TIMEOUT,
+        call_timeout: float = DEFAULT_CALL_TIMEOUT,
+        update_queue_maxsize: int = DEFAULT_UPDATE_QUEUE_MAXSIZE,
+        abandon_wait_seconds: float = DEFAULT_ABANDON_WAIT_SECONDS,
+    ):
+        self._record = record
+        self._workspace_root = workspace_root
+        self._environ = environ
+        self._channel_credentials = channel_credentials
+        self._option_mapping = option_mapping or _default_option_mapping
+        self._initialize_timeout = initialize_timeout
+        self._call_timeout = call_timeout
+        self._update_queue_maxsize = update_queue_maxsize
+        self._abandon_wait_seconds = abandon_wait_seconds
+
+        self._lock = threading.RLock()
+        self._process: EngineProcess | None = None
+        self._client: EngineClient | None = None
+        self.correlation = CorrelationTables()
+        self._agent_capabilities: dict = {}
+        self._negotiated: tuple = ()
+        self._session_config_options: dict[str, list] = {}
+        self._session_locks: dict[str, threading.Lock] = {}
+        self._update_queues: dict[str, tuple[queue.Queue, threading.Event, object]] = {}
+        # F1 (T012 review): per-wire-session turn identity/serialization
+        # bookkeeping so an abandoned (generator-closed mid-stream) turn's
+        # still-outstanding wire call can never deliver updates into, or
+        # overlap in time with, a later turn on the same session.
+        self._active_turn_token: dict[str, object] = {}
+        self._turn_call_done: dict[str, threading.Event] = {}
+        self._poisoned_sessions: set[str] = set()
+        # F2 (T012 review): which engine_session_id currently has a
+        # prompt_turn actively streaming, so release() can deliver a
+        # distinct terminal marker to it.
+        self._in_flight_prompt: dict[str, bool] = {}
+
+    # -- lifecycle -------------------------------------------------------
+
+    def _ensure_started(self) -> None:
+        with self._lock:
+            if self._process is not None:
+                return
+            self._process = EngineProcess(self._record, self._workspace_root, environ=self._environ)
+            self._client = EngineClient(
+                self._process,
+                correlation=self.correlation,
+                on_update=self._on_update,
+                on_client_request=self._handle_client_request,
+                on_unknown_notification=self._on_unknown_notification,
+                logs=self._process.logs,
+            ).start()
+
+    def _handle_client_request(self, method, params, request_id) -> None:
+        self._process.logs.observe("unexpected_client_request", method=method)
+        code, message = stub_handlers.unsupported_client_request_error(method)
+        self._client.reply_error(request_id, code, message)
+
+    def _on_unknown_notification(self, method, params) -> None:
+        self._process.logs.observe("unknown_notification_ignored", method=method)
+
+    # -- EngineRuntime -----------------------------------------------
+
+    def negotiate(self, requested_capabilities: tuple[EngineCapability, ...]) -> tuple[EngineCapability, ...]:
+        self._ensure_started()
+        with self._lock:
+            if not self._agent_capabilities:
+                # Advertise nothing (no fs, no terminal, no session
+                # lifecycle features): an empty clientCapabilities object.
+                result = self._client.call(
+                    "initialize",
+                    dict(protocolVersion=1, clientCapabilities={}),
+                    timeout=self._initialize_timeout,
+                )
+                self._agent_capabilities = result.get("agentCapabilities") or {}
+                self._process.logs.observe("initialized", agent_capabilities=self._agent_capabilities)
+            always_granted = {
+                EngineCapability.PROTOCOL_VERSION,
+                EngineCapability.SESSION_CREATION,
+                EngineCapability.PROMPT_STREAMING,
+                EngineCapability.CANCELLATION,
+            }
+            granted = set()
+            for capability in requested_capabilities:
+                if capability in always_granted:
+                    granted.add(capability)
+                elif capability == EngineCapability.CONFIGURATION_OPTIONS:
+                    # Finalized per-session, gated by whether session/new
+                    # actually returned config options -- see configure().
+                    granted.add(capability)
+                elif capability == EngineCapability.HISTORY_LOAD_WITH_REPLAY and self._agent_capabilities.get("loadSession"):
+                    granted.add(capability)
+                elif capability == EngineCapability.RESUME_WITHOUT_REPLAY and (
+                    (self._agent_capabilities.get("sessionCapabilities") or {}).get("resume")
+                ):
+                    granted.add(capability)
+            self._negotiated = tuple(cap for cap in requested_capabilities if cap in granted)
+            return self._negotiated
+
+    def create_session(self, task_id: str, route_id: str) -> str:
+        self._ensure_started()
+        params: dict = dict(cwd=self._workspace_root)
+        if self._channel_credentials is not None:
+            channel_id, secret, project_root = self._channel_credentials
+            params["mcpServers"] = build_mcp_servers(channel_id, secret, project_root)
+        else:
+            params["mcpServers"] = []
+        with self._lock:
+            result = self._client.call("session/new", params, timeout=self._call_timeout)
+            wire_session_id = result.get("sessionId")
+            if not isinstance(wire_session_id, str) or not wire_session_id:
+                raise _fail("engine_invalid_session_response", "session/new did not return a sessionId.")
+            portable_session_id = new_id("es_")
+            self.correlation.register_session(portable_session_id, wire_session_id)
+            self._session_config_options[portable_session_id] = result.get("configOptions") or []
+            self._session_locks[portable_session_id] = threading.Lock()
+        self._process.logs.observe("session_created", portable_session_id=portable_session_id)
+        return portable_session_id
+
+    def configure(self, engine_session_id: str, revision) -> str:
+        wire_session_id = self.correlation.wire_session_id(engine_session_id)
+        if wire_session_id is None:
+            raise _fail("unknown_engine_session", "engine_session_id is not a live session on this engine instance.")
+        options = self._session_config_options.get(engine_session_id) or []
+        if not options:
+            # Unsupported: never reaches the wire.
+            raise ConfigurationRejected("engine_does_not_support_configuration_options")
+        mapping = list(self._option_mapping(revision))
+        latest_options = options
+        for option_id, value in mapping:
+            try:
+                result = self._client.call(
+                    "session/set_config_option",
+                    dict(sessionId=wire_session_id, configId=option_id, value=value),
+                    timeout=self._call_timeout,
+                )
+            except EngineProtocolError as protocol_error:
+                raise ConfigurationRejected(protocol_error.message or "engine_rejected_configuration") from protocol_error
+            if "configOptions" not in result:
+                # The wire call itself succeeded (no JSON-RPC error), but
+                # the response gives no evidence at all of what -- if
+                # anything -- was actually applied: this is an unknown
+                # outcome, not an explicit rejection. Documented choice
+                # (T012 review F4): raise a plain exception here (never
+                # ConfigurationRejected, never a PortableError this
+                # method's own callers might special-case) so
+                # ConfigurationService.apply()'s catch-all maps it to
+                # 'indeterminate', matching a mutation whose outcome is
+                # genuinely unknown rather than a confirmed engine refusal.
+                raise EngineConfigurationOutcomeUnknown(
+                    f"session/set_config_option for {option_id!r} returned no configOptions; "
+                    "outcome is unknown, not confirmed and not explicitly rejected."
+                )
+            latest_options = result["configOptions"]
+        for option_id, value in mapping:
+            current = next((item.get("currentValue") for item in latest_options if item.get("id") == option_id), None)
+            if current != value:
+                raise ConfigurationRejected(f"engine_did_not_confirm_option:{option_id}")
+        self._session_config_options[engine_session_id] = latest_options
+        pairs = ";".join(f"{option_id}={value}" for option_id, value in mapping)
+        return f"{self._process.engine_instance_id}:{wire_session_id}:{pairs}"
+
+    def prompt_turn(self, engine_session_id: str, prompt: str):
+        if engine_session_id in self._poisoned_sessions:
+            raise _session_unusable_error()
+        wire_session_id = self.correlation.wire_session_id(engine_session_id)
+        if wire_session_id is None:
+            raise _fail("unknown_engine_session", "engine_session_id is not a live session on this engine instance.")
+        session_lock = self._session_locks.setdefault(engine_session_id, threading.Lock())
+        session_lock.acquire()
+        self._in_flight_prompt[engine_session_id] = True
+        lock_released = False
+        turn_gen = self._prompt_turn_locked(wire_session_id, prompt)
+        try:
+            for event in turn_gen:
+                yield event
+        except GeneratorExit:
+            # The caller stopped iterating before TURN_END (closed/abandoned
+            # the generator): never simply drop the session_lock here --
+            # the wire session/prompt call this turn started may still be
+            # outstanding, and releasing the lock immediately would let a
+            # *new* prompt_turn on the same session start while it is,
+            # producing exactly the cross-turn update leak this guards
+            # against (see F1, T012 review).
+            self._abandon_turn(engine_session_id, wire_session_id, turn_gen)
+            lock_released = True
+            raise
+        finally:
+            self._in_flight_prompt.pop(engine_session_id, None)
+            if not lock_released:
+                session_lock.release()
+
+    def _abandon_turn(self, engine_session_id: str, wire_session_id: str, turn_gen) -> None:
+        """Bounded-wait cleanup for a turn whose generator was closed mid-stream.
+
+        Invalidates this turn's active token immediately (any further
+        inbound updates for the abandoned wire call are discarded rather
+        than delivered anywhere -- see ``_on_update``), requests
+        cancellation, and waits up to ``abandon_wait_seconds`` for the
+        in-flight ``session/prompt`` call to actually finish. If it does
+        not finish in time the engine session is marked ``poisoned``
+        (every future ``prompt_turn`` on it raises immediately) rather than
+        ever letting a new turn start while the old one's wire call is
+        still outstanding.
+        """
+        self._process.logs.observe("prompt_turn_abandoned", engine_session_id=engine_session_id, wire_session_id=wire_session_id)
+        self._active_turn_token.pop(wire_session_id, None)
+        self.cancel_wire(wire_session_id)
+        done_event = self._turn_call_done.get(wire_session_id)
+        completed = done_event.wait(self._abandon_wait_seconds) if done_event is not None else True
+        if not completed:
+            self._poisoned_sessions.add(engine_session_id)
+            self._process.logs.observe(
+                "engine_session_poisoned", engine_session_id=engine_session_id, wire_session_id=wire_session_id,
+                reason="abandoned_turn_did_not_confirm_completion",
+            )
+        session_lock = self._session_locks.get(engine_session_id)
+        if session_lock is not None:
+            try:
+                session_lock.release()
+            except RuntimeError:
+                pass
+        try:
+            turn_gen.close()
+        except Exception:  # noqa: BLE001 - best-effort cleanup only
+            pass
+
+    def _prompt_turn_locked(self, wire_session_id: str, prompt: str):
+        update_queue: "queue.Queue" = queue.Queue(maxsize=self._update_queue_maxsize)
+        overflowed = threading.Event()
+        token = object()
+        self._update_queues[wire_session_id] = (update_queue, overflowed, token)
+        self._active_turn_token[wire_session_id] = token
+        call_done = threading.Event()
+        self._turn_call_done[wire_session_id] = call_done
+        try:
+            outcome: dict = {}
+
+            def run_call():
+                try:
+                    outcome["result"] = self._client.call(
+                        "session/prompt",
+                        dict(sessionId=wire_session_id, prompt=[dict(type="text", text=prompt)]),
+                        timeout=self._call_timeout,
+                    )
+                except Exception as exc:  # noqa: BLE001 - surfaced to the generator's caller below
+                    outcome["error"] = exc
+                finally:
+                    call_done.set()
+                    update_queue.put(None)
+
+            call_thread = threading.Thread(target=run_call, name="engine-prompt-call", daemon=True)
+            call_thread.start()
+
+            while True:
+                item = update_queue.get()
+                if item is None:
+                    break
+                yield item
+                if overflowed.is_set():
+                    overflowed.clear()
+                    self.cancel_wire(wire_session_id)
+
+            call_thread.join()
+            if "error" in outcome:
+                error = outcome["error"]
+                if isinstance(error, EngineTransportClosed):
+                    yield EngineEvent(kind=EngineEventKind.ERROR, error_message="transport_eof")
+                    return
+                if isinstance(error, EngineTimeout):
+                    yield EngineEvent(kind=EngineEventKind.ERROR, error_message="timeout_alive")
+                    return
+                raise error
+            result = outcome.get("result") or {}
+            stop_reason = _STOP_REASON_FROM_WIRE.get(result.get("stopReason"))
+            if stop_reason is None:
+                self._process.logs.observe("unknown_stop_reason", stop_reason=result.get("stopReason"))
+                stop_reason = StopReason.END_TURN
+            yield EngineEvent(kind=EngineEventKind.TURN_END, stop_reason=stop_reason)
+        finally:
+            self._update_queues.pop(wire_session_id, None)
+            if self._active_turn_token.get(wire_session_id) is token:
+                self._active_turn_token.pop(wire_session_id, None)
+            self._turn_call_done.pop(wire_session_id, None)
+
+    def cancel(self, engine_session_id: str) -> None:
+        wire_session_id = self.correlation.wire_session_id(engine_session_id)
+        if wire_session_id is None:
+            return
+        self.cancel_wire(wire_session_id)
+
+    def cancel_wire(self, wire_session_id: str) -> None:
+        self._process.logs.observe("cancel_requested", wire_session_id=wire_session_id)
+        try:
+            self._client.notify("session/cancel", dict(sessionId=wire_session_id))
+        except Exception:  # noqa: BLE001 - cancellation is always best-effort
+            pass
+
+    def release(self, engine_session_id: str) -> None:
+        wire_session_id = self.correlation.wire_session_id(engine_session_id)
+        if wire_session_id is not None and self._in_flight_prompt.get(engine_session_id):
+            # F2 (T012 review): a running turn must see a distinct outcome
+            # from release(), not silently vanish or be mistaken for a
+            # transport failure -- deliver an ERROR event carrying
+            # error_message="released_mid_turn" into its update queue
+            # (best-effort: if the queue is momentarily full the observation
+            # below is still recorded) and record the release itself.
+            #
+            # Doc clarification (T012 re-review item 3): this is an early,
+            # in-stream *marker*, not a guaranteed terminal event. release()
+            # only requests cancellation (`cancel_wire` below) -- it cannot
+            # force the wire's still-in-flight `session/prompt` call to stop
+            # immediately -- so a `TURN_END` (or another `ERROR`) may still
+            # follow this marker in the same stream once that call actually
+            # resolves. A caller must not assume iteration stops right after
+            # observing `released_mid_turn`; it only means release() was
+            # requested while this turn was still running.
+            self._process.logs.observe(
+                "release_during_prompt", engine_session_id=engine_session_id, wire_session_id=wire_session_id,
+            )
+            entry = self._update_queues.get(wire_session_id)
+            if entry is not None:
+                update_queue, _overflowed, _token = entry
+                try:
+                    update_queue.put_nowait(EngineEvent(kind=EngineEventKind.ERROR, error_message="released_mid_turn"))
+                except queue.Full:
+                    self._process.logs.observe("release_marker_dropped_queue_full", wire_session_id=wire_session_id)
+            self.cancel_wire(wire_session_id)
+        self.correlation.release_session(engine_session_id)
+        self._session_config_options.pop(engine_session_id, None)
+        self._session_locks.pop(engine_session_id, None)
+        self._poisoned_sessions.discard(engine_session_id)
+        if wire_session_id is not None:
+            self._update_queues.pop(wire_session_id, None)
+            self._active_turn_token.pop(wire_session_id, None)
+        if self._process is not None:
+            self._process.logs.observe("session_released", engine_session_id=engine_session_id)
+
+    def recovery_observation(self, engine_session_id: str):
+        return None
+
+    def shutdown(self, *, grace: float = 5.0) -> None:
+        """Terminate the underlying process; capacity is freed only once
+        the process is *observed* to have actually exited (see
+        ``process.EngineProcess.release``)."""
+        with self._lock:
+            if self._client is not None:
+                self._client.close()
+            if self._process is not None:
+                self._process.release(grace=grace)
+
+    # -- session/update translation ------------------------------------
+
+    def _on_update(self, params) -> None:
+        if not isinstance(params, dict):
+            return
+        wire_session_id = params.get("sessionId")
+        update = params.get("update") or {}
+        entry = self._update_queues.get(wire_session_id)
+        event = self._translate_update(wire_session_id, update)
+        if entry is None:
+            if event is not None:
+                self._process.logs.observe("update_for_inactive_session", wire_session_id=wire_session_id)
+            return
+        if event is None:
+            return
+        update_queue, overflowed, entry_token = entry
+        # F1 (T012 review): an update only ever belongs to the *currently
+        # active* turn for this wire session -- never to a prior, abandoned
+        # turn whose wire call has not yet confirmed completion. This is a
+        # defense-in-depth check on top of `_abandon_turn` invalidating the
+        # token immediately on abandonment: even in a narrow race it is the
+        # last line of defense against delivering a stale turn's updates.
+        if self._active_turn_token.get(wire_session_id) is not entry_token:
+            self._process.logs.observe("discarded_stale_turn_update", wire_session_id=wire_session_id)
+            return
+        try:
+            update_queue.put_nowait(event)
+        except queue.Full:
+            overflowed.set()
+            self._process.logs.observe("update_backpressure_overflow", wire_session_id=wire_session_id)
+
+    def _translate_update(self, wire_session_id, update):
+        kind = update.get("sessionUpdate")
+        if kind == "agent_message_chunk":
+            text = (update.get("content") or {}).get("text", "")
+            return EngineEvent(kind=EngineEventKind.TURN_DELTA, delta_text=text)
+        if kind in ("tool_call", "tool_call_update"):
+            wire_tool_call_id = update.get("toolCallId")
+            ref = (
+                self.correlation.portable_tool_call_ref(wire_session_id, wire_tool_call_id)
+                if wire_tool_call_id else None
+            )
+            return EngineEvent(kind=EngineEventKind.TOOL_CALL_OBSERVED, tool_call_ref=ref)
+        if kind == "usage_update":
+            usage = update.get("usage") or {}
+            values = {key: value for key, value in usage.items() if isinstance(value, int)}
+            return EngineEvent(kind=EngineEventKind.USAGE_UPDATE, usage_basis=UsageBasis.ENGINE_REPORTED, usage_values=values)
+        if kind == "user_message_chunk":
+            # History replay (session/load): never translated into an
+            # EngineEvent, never queued, never re-delivered as a user
+            # input/mutation -- see the T012 acceptance bullet "A history
+            # replay does not cause a mutation or user-input re-delivery."
+            self._process.logs.observe("replay_user_message_chunk_ignored")
+            return None
+        self._process.logs.observe("unrecognized_session_update", update_kind=kind)
+        return None

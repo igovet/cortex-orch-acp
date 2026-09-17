@@ -21,6 +21,7 @@ import json
 import queue
 import sys
 import threading
+import time
 
 MAX_FRAME_BYTES = 2_000_000
 MAX_JSON_DEPTH = 64
@@ -134,13 +135,25 @@ class StdioTransport:
     """
 
     def __init__(self, inbound_handler, raw_stdout, raw_stdin=None,
-                 update_timeout=DEFAULT_UPDATE_TIMEOUT):
+                 update_timeout=DEFAULT_UPDATE_TIMEOUT, on_writer_closed=None):
         self._raw_stdout = raw_stdout
         self._raw_stdin = raw_stdin if raw_stdin is not None else sys.stdin.buffer
         self._inbound_handler = inbound_handler
         self._update_timeout = update_timeout
+        # Called (at most once, from the writer thread) when the writer
+        # stops because a write actually failed -- never on a normal
+        # `stop_writer()` shutdown. This is the "writer-closed" signal a
+        # caller (see `agent.main`, `engine.client.EngineClient`) treats
+        # like inbound EOF: without it, an incoming ACP agent whose stdout
+        # reader has gone away (peer closed its read end) but whose stdin
+        # stays open would otherwise wait forever in `join_reader()` for a
+        # read-side EOF that may never come -- a wedged process able to
+        # neither reply nor exit (T012 review item 1).
+        self._on_writer_closed = on_writer_closed
         self._outbound: "queue.Queue[bytes | None]" = queue.Queue(maxsize=OUTBOUND_QUEUE_MAXSIZE)
         self._closed = threading.Event()
+        self._writer_closed_event = threading.Event()
+        self._reader_eof_event = threading.Event()
         self._reader_thread = threading.Thread(target=self._read_loop, name="acp-reader", daemon=True)
         self._writer_thread = threading.Thread(target=self._write_loop, name="acp-writer", daemon=True)
 
@@ -152,10 +165,49 @@ class StdioTransport:
     def join_reader(self, timeout=None):
         self._reader_thread.join(timeout)
 
+    def writer_closed(self) -> bool:
+        """True once the writer has stopped because a write actually
+        failed (never true after a normal `stop_writer()`)."""
+        return self._writer_closed_event.is_set()
+
+    def wait_for_shutdown_signal(self, timeout=None):
+        """Block until the reader hits EOF or the writer stops because a
+        write failed, whichever happens first; return ``"reader_eof"``,
+        ``"writer_closed"``, or ``None`` on timeout.
+
+        Polls at a short, bounded interval rather than requiring a single
+        primitive that can wait on two independent ``threading.Event``
+        objects at once (the stdlib has none); the poll interval only
+        bounds how promptly this returns after either event fires, not
+        whether it ever does.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        poll_interval = 0.05
+        while True:
+            if self._reader_eof_event.is_set():
+                return "reader_eof"
+            if self._writer_closed_event.is_set():
+                return "writer_closed"
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                poll_interval = min(poll_interval, remaining)
+            self._reader_eof_event.wait(poll_interval)
+
     def stop_writer(self):
-        """Signal the writer to flush and exit after its queue drains."""
-        self._outbound.put(None)
-        self._writer_thread.join()
+        """Signal the writer to flush and exit after its queue drains.
+
+        A no-op (beyond the join, which returns immediately) if the writer
+        already stopped on its own after a write failure. Also safe to call
+        *from* the writer thread itself (for example from an
+        ``on_writer_closed`` callback): a thread can never join itself, so
+        that case skips the join rather than raising.
+        """
+        if not self._writer_closed_event.is_set():
+            self._outbound.put(None)
+        if threading.current_thread() is not self._writer_thread:
+            self._writer_thread.join()
 
     def send_response(self, message: dict) -> None:
         """Enqueue a response/error; blocks until there is room. Never dropped."""
@@ -190,8 +242,26 @@ class StdioTransport:
             try:
                 self._raw_stdout.write(body)
                 self._raw_stdout.flush()
-            except (BrokenPipeError, OSError):
+            except (BrokenPipeError, OSError, ValueError) as error:
+                # The peer or the underlying pipe is gone (a closed pipe
+                # raises BrokenPipeError/OSError; writing to an
+                # already-closed file object raises ValueError). Stop the
+                # writer loop quietly -- one stderr line, no unhandled
+                # exception escaping this thread -- rather than looping
+                # through the remaining queued items only to fail on each
+                # one. `_closed` is set first so `_enqueue` (send_response/
+                # send_notification) stops accepting new work immediately.
                 self._closed.set()
+                self._writer_closed_event.set()
+                print(f"acp: writer stopped after {type(error).__name__} (peer or pipe closed)",
+                      file=sys.stderr, flush=True)
+                if self._on_writer_closed is not None:
+                    try:
+                        self._on_writer_closed()
+                    except Exception as callback_error:  # noqa: BLE001 - never let this kill the writer thread
+                        print(f"acp: on_writer_closed callback raised {type(callback_error).__name__}",
+                              file=sys.stderr, flush=True)
+                break
 
     def _read_loop(self):
         try:
@@ -232,4 +302,5 @@ class StdioTransport:
                     print(f"acp: unexpected error dispatching a message: {type(error).__name__}",
                           file=sys.stderr, flush=True)
         finally:
+            self._reader_eof_event.set()
             self._inbound_handler(EOF, None)

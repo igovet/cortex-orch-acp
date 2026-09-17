@@ -3,6 +3,9 @@ import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'plugins/cortex/scripts'))
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 
+import threading
+import time
+
 import pytest
 
 # --- T009 incident guard -----------------------------------------------
@@ -113,3 +116,48 @@ def _forbid_real_checkout_as_project_root():
     finally:
         for module, name, original in patched:
             setattr(module, name, original)
+
+
+# --- T012 review item 2: no leaked acp-reader/acp-writer threads ----------
+#
+# `acp.transport.StdioTransport` names its two threads "acp-reader" and
+# "acp-writer" (used by both the incoming ACP agent and, via
+# `engine.client.EngineClient`, every outgoing engine connection). A test
+# that constructs one directly or via `engine.process.EngineProcess` +
+# `engine.client.EngineClient` without ever letting it clean up (the
+# original T012 review finding: `EngineProcess.release()`/`terminate()`
+# never stopped the paired `EngineClient`'s writer thread) leaves daemon
+# threads parked in the pytest process for the rest of the run -- harmless
+# individually, but their accumulation is the confirmed root cause of the
+# "process is multi-threaded, use of fork() may lead to deadlocks"
+# DeprecationWarning seen when a later test (e.g.
+# `tests/test_source_reports.py`) forks. This autouse fixture is an
+# explicit, general safety net (not scoped to only the engine tests) so any
+# future test with the same mistake fails immediately and locally rather
+# than only being noticed as an unrelated warning far away in the run.
+_LEAKED_THREAD_NAME_PREFIXES = ("acp-reader", "acp-writer")
+_THREAD_LEAK_JOIN_GRACE_SECONDS = 1.0
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_acp_transport_threads():
+    yield
+    deadline = time.monotonic() + _THREAD_LEAK_JOIN_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        leaked = [
+            thread for thread in threading.enumerate()
+            if thread.is_alive() and thread.name.startswith(_LEAKED_THREAD_NAME_PREFIXES)
+        ]
+        if not leaked:
+            return
+        time.sleep(0.02)
+    leaked = [
+        thread for thread in threading.enumerate()
+        if thread.is_alive() and thread.name.startswith(_LEAKED_THREAD_NAME_PREFIXES)
+    ]
+    assert not leaked, (
+        "test guard (tests/conftest.py): leaked acp-reader/acp-writer thread(s) "
+        f"still alive after the test: {[thread.name for thread in leaked]!r}. "
+        "Always call EngineClient.close() (or let EngineSessionManager.shutdown() "
+        "do it) and/or EngineProcess.release() so both transport threads stop."
+    )

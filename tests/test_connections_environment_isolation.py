@@ -290,3 +290,43 @@ def test_f2_hand_tampered_shared_secret_path_makes_both_connections_invalid(tmp_
         environment.build_process_env(fresh_first, base_env={})
     with pytest.raises(PortableError):
         environment.build_process_env(fresh_second, base_env={})
+
+
+# --- T012 follow-up: build_process_env must honor an explicit `environ` ---
+
+def test_build_process_env_honors_explicit_environ_over_os_environ(tmp_path, monkeypatch):
+    """A caller-supplied ``environ`` mapping -- not ``os.environ`` -- must
+    drive every registry/config/state resolution inside ``build_process_env``.
+
+    ``os.environ``'s own ``HOME`` is monkeypatched to a *different* tmp
+    directory than the one named in the explicit ``environ=`` mapping; only
+    the explicit mapping's tmp root may ever be touched.
+    """
+    wrong_home = tmp_path / "wrong-home-must-stay-empty"
+    wrong_home.mkdir()
+    monkeypatch.setenv("HOME", str(wrong_home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+
+    right_home = tmp_path / "right-home"
+    right_config = right_home / "config"
+    right_state = right_home / "state"
+    for path in (right_home, right_config, right_state):
+        path.mkdir()
+    explicit_environ = {"HOME": str(right_home), "XDG_CONFIG_HOME": str(right_config), "XDG_STATE_HOME": str(right_state)}
+
+    record = onboarding.create_connection(
+        name="explicit-environ-connection", engine="codex-acp", provider="openai-explicit",
+        auth_mode=AuthMode.NATIVE_ACCOUNT, environ=explicit_environ,
+    )
+
+    env = environment.build_process_env(record, base_env={}, environ=explicit_environ)
+    assert env["CODEX_HOME"].startswith(str(right_state))
+
+    # Nothing was ever created under the monkeypatched os.environ HOME.
+    assert list(wrong_home.iterdir()) == []
+
+    # The real registry/state directories exist only under the explicit
+    # environ's own tmp root.
+    assert (right_config / "cortex" / "connections.json").is_file()
+    assert (right_state / "cortex" / "connections" / record.id).is_dir()

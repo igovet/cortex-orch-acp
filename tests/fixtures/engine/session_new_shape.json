@@ -1,0 +1,19 @@
+{
+  "_comment": "Reference fixture (test-only, never loaded by production code): the exact shape of the session/new params this engine runtime sends. mcp_bridge.build_mcp_servers() output is asserted against the 'mcpServers' shape below by tests/test_engine_isolation.py::test_mcp_bridge_matches_session_new_shape_fixture. Placeholder values only; never real credentials.",
+  "method": "session/new",
+  "params": {
+    "cwd": "/abs/workspace/root",
+    "mcpServers": [
+      {
+        "name": "cortex",
+        "command": "/usr/bin/python3",
+        "args": ["-B", "/abs/path/to/plugins/cortex/scripts/cortex.py"],
+        "env": [
+          {"name": "CORTEX_CHANNEL_ID", "value": "ch_000000000000"},
+          {"name": "CORTEX_CHANNEL_SECRET", "value": "PLACEHOLDER_TOKEN_VALUE_ONLY"},
+          {"name": "CORTEX_CHANNEL_PROJECT_ROOT", "value": "/abs/workspace/root"}
+        ]
+      }
+    ]
+  }
+}

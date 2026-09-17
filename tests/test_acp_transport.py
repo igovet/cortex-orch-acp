@@ -12,8 +12,68 @@ from pathlib import Path
 
 import pytest
 
-from cortex_runtime.acp.transport import FrameError, parse_frame, MAX_FRAME_BYTES, MAX_JSON_DEPTH
+from cortex_runtime.acp.transport import FrameError, StdioTransport, parse_frame, MAX_FRAME_BYTES, MAX_JSON_DEPTH
 from acp_fakes import spawn_fake_agent, spawn_flooding_agent, spawn_production_agent
+
+
+# --- F3 (T012 review): writer thread tolerates a closed pipe --------------
+
+def test_writer_thread_tolerates_closed_pipe_and_stops_quietly(capsys):
+    """Closing the read end of the pipe while writes are still queued must
+    make the writer thread stop quietly (one stderr line, no unhandled
+    exception escaping the thread) instead of crashing or spinning."""
+    read_fd, write_fd = os.pipe()
+    write_file = os.fdopen(write_fd, "wb", buffering=0)
+    os.close(read_fd)  # closing the read end makes writes raise BrokenPipeError
+
+    # A second, genuinely closeable pipe for stdin: both ends are kept as
+    # real file objects so the reader thread reliably gets EOF (and this
+    # test leaves no thread behind for the rest of the session -- see the
+    # `_no_leaked_acp_transport_threads` autouse fixture in conftest.py).
+    stdin_read_fd, stdin_write_fd = os.pipe()
+    stdin_read_file = os.fdopen(stdin_read_fd, "rb")
+    stdin_write_file = os.fdopen(stdin_write_fd, "wb")
+
+    transport = StdioTransport(lambda message, error: None, raw_stdout=write_file, raw_stdin=stdin_read_file)
+    transport.start()
+    try:
+        for _ in range(5):
+            transport.send_notification(dict(jsonrpc="2.0", method="session/update", params={}), timeout=1.0)
+        transport._writer_thread.join(timeout=5.0)
+        assert not transport._writer_thread.is_alive()  # the loop stopped, not just blocked
+        assert transport._closed.is_set()
+        captured = capsys.readouterr()
+        assert "acp: writer stopped after" in captured.err
+    finally:
+        stdin_write_file.close()  # unblocks the reader thread's readline() with EOF
+        transport.join_reader(timeout=5.0)
+
+
+def test_agent_exits_within_bound_when_stdout_reader_closes_but_stdin_stays_open():
+    """T012 review item 1: if the client's stdout reader goes away (its
+    read end closed) while the agent's stdin stays open, the agent must
+    still exit within a bound instead of wedging forever in
+    ``join_reader()`` waiting for a read-side EOF that will never come."""
+    proc = spawn_fake_agent()
+    try:
+        proc.stdout.close()  # simulate the peer's stdout reader going away
+        proc.stdin.write(json.dumps(dict(jsonrpc="2.0", id=1, method="initialize",
+                                          params=dict(protocolVersion=1))) + "\n")
+        proc.stdin.flush()
+        # Deliberately never close stdin here: the reader thread would
+        # otherwise get its own EOF and this test would not exercise the
+        # writer-closed path at all.
+        exit_code = proc.wait(timeout=10.0)
+        assert exit_code == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5.0)
+        for stream in (proc.stdin, proc.stderr):
+            try:
+                stream.close()
+            except Exception:
+                pass
 
 
 # --- pure parse_frame unit tests -------------------------------------------

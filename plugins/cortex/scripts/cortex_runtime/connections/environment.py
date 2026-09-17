@@ -134,10 +134,21 @@ def build_process_env(
     *,
     channel_credentials: tuple[str, str, str] | None = None,
     mcp_allowlist: tuple[str, ...] = (),
+    environ: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Construct a least-privilege environment for exactly one connection.
 
-    See the module docstring for the exact, complete list of guarantees.
+    ``environ`` is the explicit mapping used to resolve the connection
+    registry/config/state roots this call re-verifies against (see
+    ``connections.registry.config_root``/``state_root``); it defaults to
+    ``None``, which every registry call below resolves against the real
+    ``os.environ`` (backward compatible with every existing caller that
+    never passed one). A caller that must never touch the real user's
+    ``~/.config/cortex``/``~/.local/state/cortex`` -- for example a test, or
+    ``engine.process.EngineProcess`` resolving one specific connection's own
+    isolated environment -- passes its own ``environ`` explicitly here
+    rather than relying on ``os.environ`` having been monkeypatched by the
+    time this runs.
     """
     if not isinstance(mcp_allowlist, tuple) or not all(isinstance(item, str) for item in mcp_allowlist):
         raise _validation_error("invalid_field", "mcp_allowlist must be a tuple of strings.", field="mcp_allowlist")
@@ -154,9 +165,9 @@ def build_process_env(
     # Re-verify against the on-disk registry -- never trust a caller-held
     # `record` object's `credential_ref` for I/O without re-checking it is
     # still this connection's own id-derived, non-colliding reference.
-    registry_state = registry.read_registry()
+    registry_state = registry.read_registry(environ)
     current = registry_state.connections.get(record.id, record)
-    registry.assert_canonical_and_unique(current, registry_state.connections)
+    registry.assert_canonical_and_unique(current, registry_state.connections, environ)
 
     result: dict[str, str] = {}
     for key in ALLOWLISTED_BASE_ENV_KEYS:
@@ -178,7 +189,7 @@ def build_process_env(
     # is injected regardless of the denylist; both originate solely from
     # this connection's own freshly re-verified record, never from
     # base_env/channel_credentials.
-    result[env_var_name] = _isolation_dir(current)
+    result[env_var_name] = _isolation_dir(current, environ)
     if current.auth_mode == AuthMode.API_KEY:
         if current.key_kind not in KEY_KIND_ENV_VAR:
             raise _validation_error("unsupported_auth_mode", f"Unknown key_kind {current.key_kind!r}.")
@@ -187,10 +198,10 @@ def build_process_env(
     return result
 
 
-def _isolation_dir(record) -> str:
+def _isolation_dir(record, environ: dict[str, str] | None = None) -> str:
     if isinstance(record.credential_ref, EngineNativeDir):
         return record.credential_ref.path
-    return str(registry.connection_state_dir(record.id, record.engine))
+    return str(registry.connection_state_dir(record.id, record.engine, environ))
 
 
 def describe_process_env(env: dict[str, str]) -> tuple[str, ...]:
