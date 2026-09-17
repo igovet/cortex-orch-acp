@@ -55,6 +55,11 @@ check.
   reconciliation, cross-process engine-liveness detection, config/
   permission carry-over and authorized route change, and crash
   boundaries](recovery-and-replacement.md)
+- [Summaries, weak models, and budgets (T024): summarizer trust boundary
+  and adapter findings, semantic-summary validation and bounded
+  deterministic fallback, per-route context budgeting, compaction-loop
+  guard, persisted large outputs, and budget-selected limited-model
+  presentation](summaries-and-budgets.md)
 
 ## Tools
 

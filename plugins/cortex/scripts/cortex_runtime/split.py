@@ -23,6 +23,7 @@ from .delegation.events_store import TASK_EVENTS_SCHEMA
 from .delegation.capacity_store import CAPACITY_SCHEMA
 from .delegation.evidence_store import EVIDENCE_SCHEMA
 from .delegation.generations_store import CONTEXT_GENERATIONS_SCHEMA
+from .recovery.budget_store import LARGE_OUTPUT_SCHEMA
 from .recovery.registry import PROCESS_REGISTRY_SCHEMA
 from .hook_storage import HOOK_SCHEMA
 from .store import APPLICATION_ID, SCHEMA, regular, sync_directory
@@ -128,6 +129,12 @@ _GENERATIONS_TABLES = frozenset({
 # neither, a store.py-created store always has both.
 _PROCESS_REGISTRY_TABLES = frozenset({"attempt_process_registry", "attempt_effective_context"})
 
+# large_outputs/compaction_recovery_events (see recovery.budget_store
+# .LARGE_OUTPUT_SCHEMA) are a fifteenth, independent optional group on top
+# of every group above: a pre-T024 v11 store has neither, a store.py-created
+# store always has both.
+_BUDGET_TABLES = frozenset({"large_outputs", "compaction_recovery_events"})
+
 _SELECTIONS = {
     "tasks": "SELECT x.* FROM tasks x WHERE x.project_root=?",
     "thread_bindings": "SELECT x.* FROM thread_bindings x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -176,6 +183,8 @@ _SELECTIONS = {
     "attempt_process_registry": "SELECT x.* FROM attempt_process_registry x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "attempt_effective_context": "SELECT x.* FROM attempt_effective_context x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "capsule_deliveries": "SELECT x.* FROM capsule_deliveries x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "large_outputs": "SELECT x.* FROM large_outputs x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "compaction_recovery_events": "SELECT x.* FROM compaction_recovery_events x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
 }
 
 _COPY_ORDER = (
@@ -194,6 +203,7 @@ _COPY_ORDER = (
     "task_language", "task_stopped",
     "context_generations", "compaction_owners", "compaction_events_seen", "capsule_deliveries",
     "attempt_process_registry", "attempt_effective_context",
+    "large_outputs", "compaction_recovery_events",
     "deliveries",
 )
 
@@ -348,10 +358,18 @@ def _process_registry_present(db):
     return names == _PROCESS_REGISTRY_TABLES
 
 
+def _budget_present(db):
+    """True only when both T024 large-output/compaction-recovery tables exist."""
+    names = _table_names(db) & _BUDGET_TABLES
+    if names and names != _BUDGET_TABLES:
+        raise StoreError("unsupported_storage")
+    return names == _BUDGET_TABLES
+
+
 def _expected_layout():
     db = sqlite3.connect(":memory:")
     try:
-        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA)
+        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA)
         tables = _table_names(db)
         columns = {
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA table_xinfo({_identifier(table)})"))
@@ -361,7 +379,7 @@ def _expected_layout():
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA foreign_key_list({_identifier(table)})"))
             for table in tables
         }
-        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES - _GENERATIONS_TABLES - _PROCESS_REGISTRY_TABLES
+        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES - _GENERATIONS_TABLES - _PROCESS_REGISTRY_TABLES - _BUDGET_TABLES
         return core, columns, foreign_keys
     finally:
         db.close()
@@ -391,6 +409,7 @@ def _validate_format(db):
     stopped_present = _stopped_present(db)
     generations_present = _generations_present(db)
     process_registry_present = _process_registry_present(db)
+    budget_present = _budget_present(db)
     expected = (
         core
         | (_IDENTITY_TABLES if identity_present else set())
@@ -407,6 +426,7 @@ def _validate_format(db):
         | (_STOPPED_TABLES if stopped_present else set())
         | (_GENERATIONS_TABLES if generations_present else set())
         | (_PROCESS_REGISTRY_TABLES if process_registry_present else set())
+        | (_BUDGET_TABLES if budget_present else set())
     )
     views = db.execute("SELECT 1 FROM sqlite_master WHERE type='view' LIMIT 1").fetchone()
     if actual != expected or views is not None:
@@ -667,7 +687,7 @@ def _create_destination(source_db, temporary, project_root):
         # a fresh store: core SCHEMA+HOOK_SCHEMA plus the identity tables,
         # regardless of whether the (possibly legacy, pre-T005) source has
         # them. A legacy source simply leaves them empty in the destination.
-        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA +
+        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA +
                              f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
         target.execute("BEGIN IMMEDIATE")
         source_identity_present = _identity_present(source_db)
@@ -684,6 +704,7 @@ def _create_destination(source_db, temporary, project_root):
         source_stopped_present = _stopped_present(source_db)
         source_generations_present = _generations_present(source_db)
         source_process_registry_present = _process_registry_present(source_db)
+        source_budget_present = _budget_present(source_db)
         expected = {}
         for table in _COPY_ORDER:
             columns = [row[1] for row in target.execute(f"PRAGMA table_info({_identifier(table)})")]
@@ -756,6 +777,11 @@ def _create_destination(source_db, temporary, project_root):
                 # No T023 attempt-process-registry rows exist to carry;
                 # leave the destination's freshly-created registry tables
                 # empty for the same reason.
+                rows = ()
+            elif table in _BUDGET_TABLES and not source_budget_present:
+                # No T024 large-output/compaction-recovery rows exist to
+                # carry; leave the destination's freshly-created budget
+                # tables empty for the same reason.
                 rows = ()
             elif table == "deliveries":
                 rows = _selected_deliveries(source_db, project_root)

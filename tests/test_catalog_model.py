@@ -50,3 +50,35 @@ def test_snapshot_unavailable_is_immutable_mapping():
     )
     with pytest.raises(TypeError):
         snapshot.unavailable["cn_x"] = "changed"
+
+
+# --- T024: optional context_window_tokens (backward-compatible) -----------
+
+
+def test_context_window_tokens_defaults_to_none_for_every_existing_caller():
+    route = _route()
+    entry = CatalogEntry(
+        route=route, connection_id=route.connection_id, label="l", disambiguated_label="l",
+        evidence=EvidenceState.empty(), catalog_snapshot_id=new_id("cs_"),
+    )
+    assert entry.context_window_tokens is None
+
+
+def test_context_window_tokens_accepts_a_positive_integer():
+    route = _route()
+    entry = CatalogEntry(
+        route=route, connection_id=route.connection_id, label="l", disambiguated_label="l",
+        evidence=EvidenceState.empty(), catalog_snapshot_id=new_id("cs_"), context_window_tokens=128_000,
+    )
+    assert entry.context_window_tokens == 128_000
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, "128000", 1.5, True])
+def test_context_window_tokens_rejects_non_positive_or_wrong_type(bad_value):
+    route = _route()
+    with pytest.raises(PortableError) as excinfo:
+        CatalogEntry(
+            route=route, connection_id=route.connection_id, label="l", disambiguated_label="l",
+            evidence=EvidenceState.empty(), catalog_snapshot_id=new_id("cs_"), context_window_tokens=bad_value,
+        )
+    assert excinfo.value.code == "invalid_field"

@@ -56,12 +56,14 @@ from typing import Any, Mapping
 from ..contracts import StoreError
 from ..store import digest as _sha256_hex
 from ..store import encode as _canonical_json
+# T024: the approx-token figure below uses the one shared, conservative
+# estimator (recovery.token_budget.estimate_tokens) that every other T024
+# budget/loop-guard consumer also uses -- never a second, independently
+# tuned constant. See that module's docstring for why the ratio is
+# conservative (always an over-count) and always rounded up.
+from .token_budget import estimate_tokens as _estimate_tokens
 
 CAPSULE_FORMAT_VERSION = 1
-
-# Rough, conservative token estimate (~4 bytes/token for English/JSON
-# mixed text); documented as an estimate, never claimed exact.
-_BYTES_PER_TOKEN_ESTIMATE = 4
 
 # A capsule whose *critical* sections alone exceed this many bytes refuses
 # outright (``capsule_oversize``) rather than ever dropping/truncating a
@@ -861,7 +863,7 @@ def build_capsule(store, task_id: str, recipient: Mapping[str, Any], at_revision
         sections=sections,
         size_estimate=dict(
             bytes=total_bytes_estimate,
-            approx_tokens=total_bytes_estimate // _BYTES_PER_TOKEN_ESTIMATE,
+            approx_tokens=_estimate_tokens(total_bytes_estimate),
             critical_bytes=critical_bytes,
             oversize=False,
         ),

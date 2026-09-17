@@ -23,6 +23,13 @@ class CatalogEntry:
     disambiguated_label: str
     evidence: EvidenceState
     catalog_snapshot_id: str
+    # T024: optional, backward-compatible route-level context-window budget
+    # hint (in tokens). Absent for every existing caller (no discovery path
+    # observes this from any pinned adapter/route today -- see
+    # ``recovery.token_budget``'s conservative-default fallback, always used
+    # when this is ``None``). When present it is a real evidenced bound, not
+    # a Cortex-invented number, and must be a positive integer.
+    context_window_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.route, ExecutionRoute):
@@ -61,6 +68,18 @@ class CatalogEntry:
                 field="evidence",
             )
         _validate_prefixed_id(self.catalog_snapshot_id, "cs_", "catalog_snapshot_id")
+        if self.context_window_tokens is not None and (
+            not isinstance(self.context_window_tokens, int)
+            or isinstance(self.context_window_tokens, bool)
+            or self.context_window_tokens <= 0
+        ):
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION,
+                code="invalid_field",
+                remediation="'context_window_tokens' must be a positive integer or None.",
+                retry_eligible=False,
+                field="context_window_tokens",
+            )
 
     def is_selectable(self, connection_state: ConnectionState, auth_mode: str) -> bool:
         """True only when this entry may be offered for a new execution.

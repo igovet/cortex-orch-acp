@@ -149,3 +149,26 @@ def test_save_snapshot_records_unavailable_reason_per_connection(tmp_path, monke
     view = catalog_store.load_connection_snapshot(connection.id, snapshot.id)
     assert view.entries == ()
     assert view.unavailable_reason == "discovery_unavailable"
+
+
+# --- T024: optional context_window_tokens round-trip -----------------------
+
+
+def test_context_window_tokens_round_trips_through_saved_snapshot(tmp_path, monkeypatch):
+    import dataclasses
+    _isolate(tmp_path, monkeypatch)
+    snapshot, connection = _snapshot_with_one_entry()
+    entry = dataclasses.replace(snapshot.entries[0], context_window_tokens=200_000)
+    snapshot = dataclasses.replace(snapshot, entries=(entry,))
+    catalog_store.save_snapshot(snapshot)
+    view = catalog_store.load_connection_snapshot(connection.id, snapshot.id)
+    assert view.entries[0].context_window_tokens == 200_000
+
+
+def test_pre_t024_cached_snapshot_without_the_field_deserializes_to_none(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    snapshot, connection = _snapshot_with_one_entry()
+    serialized = catalog_store._serialize_entry(snapshot.entries[0])
+    del serialized["context_window_tokens"]  # simulate a pre-T024 cache file
+    restored = catalog_store._deserialize_entry(serialized)
+    assert restored.context_window_tokens is None
