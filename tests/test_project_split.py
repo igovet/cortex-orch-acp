@@ -328,3 +328,47 @@ def test_split_rejects_unquiesced_sqlite_sidecars_without_removing_them(tmp_path
     with pytest.raises(StoreError, match="split_source_not_quiescent"):
         split_project(source_dir, project, tmp_path / "backup.sqlite3", access_stopped=True)
     assert sidecar.read_bytes() == b"pending"
+
+
+def test_split_carries_task_route_selections_when_present(tmp_path):
+    from cortex_runtime.catalog import store as catalog_store
+    from cortex_runtime.catalog.discovery import build_catalog, parse_observation
+    from cortex_runtime.connections.model import AuthMode, ConnectionRecord, ConnectionState, EngineNativeDir
+
+    source_dir = tmp_path / "global"; source_dir.mkdir(mode=0o700)
+    project = tmp_path / "project"; project.mkdir(); store = Store(source_dir)
+    task, _ = _create(store, project, "only")
+    connection = ConnectionRecord(
+        id="cn_" + "a" * 12, name="Work", engine="codex-acp", provider="acme", auth_mode=AuthMode.NATIVE_ACCOUNT,
+        key_kind=None, endpoint=None, launch_command=None,
+        credential_ref=EngineNativeDir(path="/tmp/cn_a"), approved_fingerprint="fp",
+        state=ConnectionState.CONFIGURED, qualified=True,
+        created_at="2026-01-01T00:00:00+00:00", updated_at="2026-01-01T00:00:00+00:00",
+    )
+    options = [
+        {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "model-a",
+         "options": [{"value": "model-a", "name": "Model A"}]},
+    ]
+    snapshot = build_catalog({connection.id: connection}, {connection.id: parse_observation(options)})
+    catalog_store.record_task_route(store, task, snapshot.entries[0])
+    split_project(source_dir, project, tmp_path / "backup.sqlite3", access_stopped=True)
+    destination = project / ".cortex" / "cortex.sqlite3"
+    with sqlite3.connect(destination) as db:
+        rows = db.execute("SELECT task_id,route_id FROM task_route_selections").fetchall()
+        assert rows == [(task, snapshot.entries[0].route.id)]
+
+
+def test_split_accepts_a_legacy_v11_source_missing_the_catalog_table(tmp_path):
+    source_dir = tmp_path / "global"; source_dir.mkdir(mode=0o700)
+    project = tmp_path / "project"; project.mkdir(); store = Store(source_dir)
+    task, _ = _create(store, project, "only")
+    with store.connection() as db:
+        db.execute("DROP TABLE task_route_selections")
+    split_project(source_dir, project, tmp_path / "backup.sqlite3", access_stopped=True)
+    destination = project / ".cortex" / "cortex.sqlite3"
+    with sqlite3.connect(destination) as db:
+        assert db.execute("SELECT id FROM tasks").fetchall() == [(task,)]
+        assert db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_route_selections'"
+        ).fetchone()
+        assert db.execute("SELECT COUNT(*) FROM task_route_selections").fetchone()[0] == 0

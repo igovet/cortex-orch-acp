@@ -1,0 +1,283 @@
+"""Build a truthful :class:`CatalogSnapshot` from connections and discovery.
+
+``build_catalog`` never synthesizes a route: a route only exists because an
+``Observation`` (a validated, adapter-reported ``configOptions`` payload --
+see the ACP ``SessionConfigOption`` schema) actually listed a model, or
+because a caller explicitly supplied an unverified manual declaration for a
+connection whose ``(engine, auth_mode)`` is a documented/qualified
+combination.  A missing or failed observation for one connection never
+borrows or fabricates routes for it, and never affects any other connection.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+import hashlib
+from typing import Iterable, Mapping, Sequence
+
+from ..connections.model import AuthMode, ConnectionRecord, ConnectionState, SUPPORT_MATRIX
+from ..portable.errors import PortableError, PortableErrorCategory
+from ..portable.identity import ExecutionRoute, new_id
+from .evidence import EvidenceState, Fact, Provenance, ProvenanceSource
+from .labels import build_label, disambiguate_labels
+from .model import CatalogEntry, CatalogSnapshot
+
+_PARAMETER_CATEGORIES = frozenset({"mode", "model_config", "thought_level"})
+_KNOWN_CATEGORIES = _PARAMETER_CATEGORIES | {"model"}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _invalid_observation(detail: str) -> PortableError:
+    return PortableError(
+        category=PortableErrorCategory.VALIDATION,
+        code="invalid_observation",
+        remediation=(
+            "A discovery observation must be a well-formed list of ACP "
+            f"SessionConfigOption payloads; {detail}."
+        ),
+        retry_eligible=False,
+        field="observation",
+    )
+
+
+def _require(condition: bool, detail: str) -> None:
+    if not condition:
+        raise _invalid_observation(detail)
+
+
+def _flatten_select_options(raw_options: object) -> tuple[tuple[str, str], ...]:
+    """Flatten ungrouped or grouped ``SessionConfigSelectOptions`` to ``(value, name)`` pairs."""
+    _require(isinstance(raw_options, list), "'options' must be a list")
+    flattened: list[tuple[str, str]] = []
+    for item in raw_options:
+        _require(isinstance(item, dict), "each option/group must be an object")
+        if "value" in item:
+            value = item.get("value")
+            name = item.get("name")
+            _require(isinstance(value, str) and value, "option 'value' must be a non-empty string")
+            _require(isinstance(name, str) and name, "option 'name' must be a non-empty string")
+            flattened.append((value, name))
+        elif "group" in item:
+            options = item.get("options")
+            _require(isinstance(options, list), "group 'options' must be a list")
+            for sub in options:
+                _require(isinstance(sub, dict), "each grouped option must be an object")
+                value = sub.get("value")
+                name = sub.get("name")
+                _require(isinstance(value, str) and value, "grouped option 'value' must be a non-empty string")
+                _require(isinstance(name, str) and name, "grouped option 'name' must be a non-empty string")
+                flattened.append((value, name))
+        else:
+            raise _invalid_observation("each entry in 'options' must have 'value' or 'group'")
+    return tuple(flattened)
+
+
+@dataclass(frozen=True)
+class _ParsedOption:
+    id: str
+    category: str | None
+    type: str
+    current_value: object
+    select_options: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class Observation:
+    """A validated ``configOptions`` payload for one connection."""
+
+    options: tuple[_ParsedOption, ...]
+
+    def model_options(self) -> tuple[tuple[str, str], ...]:
+        for option in self.options:
+            if option.category == "model" and option.type == "select":
+                return option.select_options
+        return ()
+
+    def parameter_pairs(self) -> tuple[tuple[str, str], ...]:
+        pairs: list[tuple[str, str]] = []
+        for option in self.options:
+            if option.type == "select" and option.category in _PARAMETER_CATEGORIES:
+                pairs.append((option.id, str(option.current_value)))
+            elif option.type == "boolean":
+                pairs.append((option.id, "true" if option.current_value else "false"))
+        return tuple(pairs)
+
+
+def parse_observation(raw: object) -> Observation:
+    """Strictly validate a raw ``configOptions`` list into an :class:`Observation`."""
+    _require(isinstance(raw, list), "the payload must be a JSON array")
+    parsed: list[_ParsedOption] = []
+    seen_ids: set[str] = set()
+    for item in raw:
+        _require(isinstance(item, dict), "each configOption must be an object")
+        option_id = item.get("id")
+        name = item.get("name")
+        option_type = item.get("type")
+        category = item.get("category")
+        _require(isinstance(option_id, str) and option_id, "'id' must be a non-empty string")
+        _require(option_id not in seen_ids, f"duplicate option id {option_id!r}")
+        seen_ids.add(option_id)
+        _require(isinstance(name, str) and name, "'name' must be a non-empty string")
+        _require(category is None or isinstance(category, str), "'category' must be a string or null")
+        if option_type == "select":
+            _require("currentValue" in item, "select option missing 'currentValue'")
+            current_value = item["currentValue"]
+            _require(isinstance(current_value, str) and current_value, "select 'currentValue' must be a non-empty string")
+            select_options = _flatten_select_options(item.get("options"))
+            values = {value for value, _ in select_options}
+            _require(current_value in values, "select 'currentValue' must be one of its own 'options'")
+            parsed.append(_ParsedOption(option_id, category, "select", current_value, select_options))
+        elif option_type == "boolean":
+            _require("currentValue" in item, "boolean option missing 'currentValue'")
+            current_value = item["currentValue"]
+            _require(isinstance(current_value, bool), "boolean 'currentValue' must be true/false")
+            parsed.append(_ParsedOption(option_id, category, "boolean", current_value, ()))
+        else:
+            raise _invalid_observation(f"'type' must be 'select' or 'boolean', got {option_type!r}")
+    return Observation(options=tuple(parsed))
+
+
+@dataclass(frozen=True)
+class ManualDeclaration:
+    """An adapter-supported model declared by hand, unverified until confirmed."""
+
+    connection_id: str
+    model: str
+    parameters: tuple[tuple[str, str], ...] = ()
+
+
+def _registry_fingerprint(connections: Mapping[str, ConnectionRecord]) -> str:
+    hashed = hashlib.sha256()
+    for connection_id in sorted(connections):
+        record = connections[connection_id]
+        hashed.update(connection_id.encode("utf-8"))
+        hashed.update(record.approved_fingerprint.encode("utf-8"))
+        hashed.update(record.state.value.encode("utf-8"))
+    return hashed.hexdigest()
+
+
+def _connection_facts(record: ConnectionRecord, adapter_version: str) -> EvidenceState:
+    state = EvidenceState.empty()
+    if record.state == ConnectionState.CONFIGURED:
+        state = state.promote(
+            Fact.CONFIGURED,
+            Provenance(source=ProvenanceSource.DISCOVERY, adapter_version=adapter_version, observed_at=_now()),
+        )
+    elif record.state == ConnectionState.AUTHORIZATION_REQUIRED:
+        state = state.promote(
+            Fact.AUTHORIZATION_REQUIRED,
+            Provenance(source=ProvenanceSource.DISCOVERY, adapter_version=adapter_version, observed_at=_now()),
+        )
+    return state
+
+
+def build_catalog(
+    connections: Mapping[str, ConnectionRecord],
+    observations: Mapping[str, Observation | None],
+    manual_declarations: Sequence[ManualDeclaration] = (),
+    adapter_versions: Mapping[str, str] | None = None,
+) -> CatalogSnapshot:
+    """Assemble one :class:`CatalogSnapshot`; never crosses connections."""
+    adapter_versions = adapter_versions or {}
+    now = _now()
+    snapshot_id = new_id("cs_")
+    entries: list[CatalogEntry] = []
+    unavailable: dict[str, str] = {}
+    label_pairs: list[tuple[str, str]] = []
+    raw_labels: dict[str, str] = {}
+
+    for connection_id, record in connections.items():
+        adapter_version = adapter_versions.get(connection_id, "unknown")
+        base_facts = _connection_facts(record, adapter_version)
+        observation = observations.get(connection_id)
+        if observation is None:
+            reason = "authorization_required" if record.state == ConnectionState.AUTHORIZATION_REQUIRED else "discovery_unavailable"
+            unavailable[connection_id] = reason
+            continue
+        for model, _model_name in observation.model_options():
+            supported_parameters = observation.parameter_pairs()
+            route = ExecutionRoute(
+                engine=record.engine,
+                connection_id=connection_id,
+                model=model,
+                supported_parameters=supported_parameters,
+            )
+            evidence = base_facts.promote(
+                Fact.CATALOG_OBTAINED,
+                Provenance(source=ProvenanceSource.DISCOVERY, adapter_version=adapter_version, observed_at=now),
+            )
+            label = build_label(record.engine, record.name, model)
+            raw_labels[route.id] = label
+            label_pairs.append((route.id, label))
+            entries.append((route, connection_id, label, evidence))
+
+    for declaration in manual_declarations:
+        record = connections.get(declaration.connection_id)
+        if record is None:
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION,
+                code="unknown_connection",
+                remediation="A manual declaration must reference an existing connection id.",
+                retry_eligible=False,
+                field="connection_id",
+            )
+        support = SUPPORT_MATRIX.get(record.engine, {}).get(record.auth_mode)
+        if support is None or not support.qualified:
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION,
+                code="unsupported_manual_declaration",
+                remediation=(
+                    "A manual declaration is only accepted for a documented/qualified "
+                    "(engine, auth_mode) combination; gateway/unqualified modes are never "
+                    "manually declarable."
+                ),
+                retry_eligible=False,
+                field="connection_id",
+            )
+        if declaration.parameters:
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION,
+                code="unsupported_manual_parameters",
+                remediation=(
+                    "Without a discovery observation there is no confirmed allowed-parameter "
+                    "set for this connection; a manual declaration must supply no parameters."
+                ),
+                retry_eligible=False,
+                field="parameters",
+            )
+        adapter_version = adapter_versions.get(declaration.connection_id, "unknown")
+        route = ExecutionRoute(
+            engine=record.engine,
+            connection_id=declaration.connection_id,
+            model=declaration.model,
+            supported_parameters=(),
+        )
+        evidence = _connection_facts(record, adapter_version)
+        label = build_label(record.engine, record.name, declaration.model)
+        raw_labels[route.id] = label
+        label_pairs.append((route.id, label))
+        entries.append((route, declaration.connection_id, label, evidence))
+
+    disambiguated = disambiguate_labels(label_pairs)
+    catalog_entries = tuple(
+        CatalogEntry(
+            route=route,
+            connection_id=connection_id,
+            label=label,
+            disambiguated_label=disambiguated[route.id],
+            evidence=evidence,
+            catalog_snapshot_id=snapshot_id,
+        )
+        for route, connection_id, label, evidence in entries
+    )
+    return CatalogSnapshot(
+        id=snapshot_id,
+        created_at=now,
+        connection_registry_fingerprint=_registry_fingerprint(connections),
+        entries=catalog_entries,
+        unavailable=unavailable,
+        setup_action="add_connection" if not connections else None,
+    )

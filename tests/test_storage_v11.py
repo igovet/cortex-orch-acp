@@ -99,7 +99,7 @@ def test_offline_migration_needs_new_backup_and_never_changes_markdown(tmp_path)
         # An authentic pre-T005 format-10 layout also predates the trusted-
         # channel/ownership identity tables; drop those too so migrate() must
         # genuinely create them from nothing.
-        for table in ('binding_receipts','source_revisions','report_provenance','draft_revisions','task_changes','source_turns','hook_events','hook_hints','hook_agent_bindings','hook_pending_sources','source_resets','trusted_channels','source_events','task_owners'):
+        for table in ('binding_receipts','source_revisions','report_provenance','draft_revisions','task_changes','source_turns','hook_events','hook_hints','hook_agent_bindings','hook_pending_sources','source_resets','trusted_channels','source_events','task_owners','task_route_selections'):
             db.execute('DROP TABLE '+table)
         db.execute('PRAGMA user_version=10')
     with pytest.raises(StoreError,match='unsupported_storage'):Store(store.directory)
@@ -116,6 +116,10 @@ def test_offline_migration_needs_new_backup_and_never_changes_markdown(tmp_path)
         assert identity_tables=={'trusted_channels','source_events','task_owners'}
         for table in identity_tables:
             assert raw.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0]==0
+        assert raw.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='task_route_selections'"
+        ).fetchone() is not None
+        assert raw.execute('SELECT COUNT(*) FROM task_route_selections').fetchone()[0]==0
     upgraded=Store(store.directory)
     assert call_store(upgraded,'list_reports',dict(task_id=task))['reports']
     replay=call_store(upgraded,'write_report',dict(task_id=task,title='Work',summary='A concise result.',author='worker',draft_id=draft_id,request_key='accepted-v10'))

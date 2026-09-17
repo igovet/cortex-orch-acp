@@ -1,0 +1,62 @@
+{
+  "_fixture_note": "Derived from the PINNED Zed-registry install ~/.local/share/zed/external_agents/registry/npx/codex-acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js (package.json @agentclientprotocol/codex-acp version observed 1.12.0; lead cited 1.11.0, verified against the pinned registry copy which reports 1.12.0), NOT ~/.local/lib/node_modules. mode: id 'index.js:27686' (MODE_CONFIG_ID='mode'); category 'index.js:27768'; option ids/names 'read-only'/'Ask for approval' (index.js:27707-27708), 'agent'/'Approve for me' (index.js:27723-27724), 'agent-full-access'/'Full access' (index.js:27739-27740). collaboration_mode: id 'index.js:27883' (COLLABORATION_MODE_CONFIG_ID='collaboration_mode'); category 'index.js:27891' -- a DISTINCT category from 'mode', excluded from route supported_parameters by design (only mode/model_config/thought_level select categories are folded into a route's parameters; collaboration_mode is recorded as an unrecognized/unsupported category, never invented into a route). Values 'default'/'Default' (index.js:27884,27895) and 'plan'/'Plan' (index.js:27885,27896) are the ONLY two real values -- 'collaborative'/'autonomous' from the prior fixture revision were invented and are removed. model: id 'index.js:30044' (MODEL_CONFIG_ID='model'); category 'index.js:30075'; option VALUES are PLACEHOLDERS ('model-a'/'model-b'), never real or invented vendor model names. reasoning_effort: id 'index.js:30045' (REASONING_EFFORT_CONFIG_ID='reasoning_effort'); category 'index.js:30088' ('thought_level'); currentValue 'medium' is a literal fallback at index.js:28796; 'none' is a literal sentinel at index.js:34546; no other effort string (e.g. 'low'/'high') appears literally in this adapter (supportedReasoningEfforts is populated dynamically from @openai/codex model metadata, not a fixed adapter constant), so only 'none'/'medium' are cited as real. fast-mode: id/category 'index.js:31751-31752' (FAST_MODE_CONFIG_ID='fast-mode', FAST_MODE_CATEGORY='model_config'); boolean variant confirmed at index.js:31766-31773.",
+  "configOptions": [
+    {
+      "id": "mode",
+      "name": "Mode",
+      "description": "Approval and sandboxing preset for the session",
+      "category": "mode",
+      "type": "select",
+      "currentValue": "agent",
+      "options": [
+        {"value": "read-only", "name": "Ask for approval"},
+        {"value": "agent", "name": "Approve for me"},
+        {"value": "agent-full-access", "name": "Full access"}
+      ]
+    },
+    {
+      "id": "collaboration_mode",
+      "name": "Collaboration mode",
+      "description": "How Codex collaborates for subsequent turns",
+      "category": "collaboration_mode",
+      "type": "select",
+      "currentValue": "default",
+      "options": [
+        {"value": "default", "name": "Default"},
+        {"value": "plan", "name": "Plan", "description": "Plan before making changes"}
+      ]
+    },
+    {
+      "id": "model",
+      "name": "Model",
+      "description": "Model Codex uses for the session",
+      "category": "model",
+      "type": "select",
+      "currentValue": "model-a",
+      "options": [
+        {"value": "model-a", "name": "Model A"},
+        {"value": "model-b", "name": "Model B"}
+      ]
+    },
+    {
+      "id": "reasoning_effort",
+      "name": "Reasoning effort",
+      "description": "How much reasoning effort the model should use",
+      "category": "thought_level",
+      "type": "select",
+      "currentValue": "medium",
+      "options": [
+        {"value": "none", "name": "None"},
+        {"value": "medium", "name": "Medium"}
+      ]
+    },
+    {
+      "id": "fast-mode",
+      "name": "Fast mode",
+      "description": "1.5x speed, increased usage",
+      "category": "model_config",
+      "type": "boolean",
+      "currentValue": true
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "_fixture_note": "Derived from the PINNED Zed-registry install ~/.local/share/zed/external_agents/registry/npx/claude-acp/node_modules/@agentclientprotocol/claude-agent-acp/dist/ (package.json version 0.78.0), NOT ~/.local/lib/node_modules. mode: id/category 'session-mode.js:2,40' (MODE_CONFIG_ID/'mode'); option ids 'session-mode.js:190-221' (default/acceptEdits/plan/auto/bypassPermissions -- all real ids/names/descriptions, currentValue 'acceptEdits' per session-mode.js:197 AUTO_MODE_FALLBACK). model: id/category 'session-model.js:179,182' (MODEL_CONFIG_ID/'model'); option VALUES are PLACEHOLDERS ('model-a'/'model-b'), never real or invented vendor model names. effort: id 'session-config-ids.js' EFFORT_CONFIG_ID='effort'; category 'session-effort.js:83' ('thought_level'); option 'default' literal at session-effort.js:59, option 'medium' literal at session-effort.js:60-61 (name 'Medium' via the file's capitalize-per-word formatting); no other effort level string appears literally in this adapter (supportedEffortLevels is populated dynamically from model metadata, not a fixed adapter constant, so only 'default'/'medium' are cited as real). fast: id/category 'acp-agent.js:6768,6838' (FAST_MODE_CONFIG_ID='fast', 'model_config'); boolean variant confirmed at acp-agent.js:6839-6840.",
+  "configOptions": [
+    {
+      "id": "mode",
+      "name": "Mode",
+      "description": "Session permission mode",
+      "category": "mode",
+      "type": "select",
+      "currentValue": "acceptEdits",
+      "options": [
+        {"value": "default", "name": "Manual", "description": "Always ask before making changes"},
+        {"value": "acceptEdits", "name": "Accept edits", "description": "Automatically accept all file edits"},
+        {"value": "plan", "name": "Plan", "description": "Create a plan before making changes"},
+        {"value": "auto", "name": "Auto", "description": "Claude handles permission decisions"},
+        {"value": "bypassPermissions", "name": "Bypass permissions", "description": "Accepts all permissions"}
+      ]
+    },
+    {
+      "id": "model",
+      "name": "Model",
+      "description": "AI model to use",
+      "category": "model",
+      "type": "select",
+      "currentValue": "model-a",
+      "options": [
+        {"value": "model-a", "name": "Model A"},
+        {"value": "model-b", "name": "Model B"}
+      ]
+    },
+    {
+      "id": "effort",
+      "name": "Effort",
+      "description": "Available effort levels for this model",
+      "category": "thought_level",
+      "type": "select",
+      "currentValue": "medium",
+      "options": [
+        {"value": "default", "name": "Default"},
+        {"value": "medium", "name": "Medium"}
+      ]
+    },
+    {
+      "id": "fast",
+      "name": "Fast mode",
+      "description": "Faster responses on supported models",
+      "category": "model_config",
+      "type": "boolean",
+      "currentValue": false
+    }
+  ]
+}

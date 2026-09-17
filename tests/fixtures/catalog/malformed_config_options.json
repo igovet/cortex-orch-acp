@@ -1,0 +1,14 @@
+{
+  "_fixture_note": "A structurally invalid configOptions payload (select option missing 'currentValue'); used to prove parse_observation fails closed rather than guessing.",
+  "configOptions": [
+    {
+      "id": "model",
+      "name": "Model",
+      "category": "model",
+      "type": "select",
+      "options": [
+        {"value": "model-a", "name": "Model A"}
+      ]
+    }
+  ]
+}
