@@ -94,6 +94,22 @@ def _transition(store, reservation_id: str, state: str, observation: str) -> Non
             raise
 
 
+def reservation_for_attempt(store, attempt_id: str) -> str | None:
+    """(T023) The still-active (``reserved``/``ambiguous``) reservation id
+    for ``attempt_id``, or ``None``. Used by a *different* adapter/process
+    instance than the one that originally called :func:`reserve` (see
+    ``delegation.live_adapters.EngineSessionManagerAdapter.terminate_owned``'s
+    cross-process path), which never has that reservation id in its own
+    in-memory state."""
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT reservation_id FROM capacity_reservations WHERE attempt_id=? AND state IN ('reserved','ambiguous') "
+            "ORDER BY reserved_at DESC LIMIT 1",
+            (attempt_id,),
+        ).fetchone()
+    return row["reservation_id"] if row is not None else None
+
+
 def all_active_are_kind(store, connection_id: str, kind: str) -> bool:
     """True iff at least one reservation is active for ``connection_id``
     and every active (``reserved``/``ambiguous``) one has the given

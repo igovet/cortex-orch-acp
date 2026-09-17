@@ -145,14 +145,39 @@ def _coalesce(events: list[delegation_events.TaskEvent], revisions: dict[int, di
     ``delegation.revision``) -- appended as a plain label so the
     coordinator can see a check's evidence is bound to one specific
     revision, never silently assumed still current.
+
+    T023 (fresh review, LOW): a ``worker_result`` published concurrently
+    with ``recovery.worker_reconciliation``'s own ``assignment_failed
+    (recovery_worker_lost)`` write (the narrow window between that
+    module's transactional re-check and a worker's own already-in-flight
+    ``publish_result`` call -- see that module's docstring; the far more
+    common ordering is caught there directly) can still land both events
+    in the *same* claimed batch. Never render the contradictory synthetic
+    failure in that case -- a real result for the assignment always wins;
+    this is scoped to ``recovery_worker_lost`` specifically, never a
+    genuine engine-reported failure, which can legitimately follow a
+    result for a different check/step.
     """
     revisions = revisions or {}
+    superseded_recovery_failures = {
+        event.assignment_ref for event in events
+        if event.event_type == "worker_result" and event.assignment_ref
+    }
     lines = []
     for event in events:
         payload = event.payload
         ref = event.assignment_ref or ""
         if event.event_type == "user_message":
             lines.append(f"User message: {payload.get('content', '')}")
+        elif (
+            event.event_type == "assignment_failed"
+            and payload.get("error") == "recovery_worker_lost"
+            and ref in superseded_recovery_failures
+        ):
+            # Superseded by the worker_result rendered above for the same
+            # assignment in this batch -- never shown as a contradictory
+            # failure (see this function's T023 docstring note).
+            continue
         elif event.event_type == "worker_result":
             line = f"Assignment {ref} result ({payload.get('report_ref')}): {payload.get('summary', '')}"
             checks = payload.get("checks") or []
@@ -254,6 +279,12 @@ class OrchestratingRuntime:
         # SecondCoordinatorRefused guard already prevents two concurrent
         # loops for the same task in this process).
         self._active_cancel_events: dict[str, threading.Event] = {}
+        # T023: set by _ensure_coordinator right after a successful
+        # recovery/replacement, consumed (popped) by the next _run call for
+        # this task_id to emit an honest "new-session recovery" status line
+        # -- never "resume" (see recovery.coordinator_recovery module
+        # docstring and acp.messages' coordinator_recovery_* keys).
+        self._pending_recovery_notice: dict[str, dict] = {}
 
     # -- IncomingRuntime -----------------------------------------------
 
@@ -359,12 +390,12 @@ class OrchestratingRuntime:
                         "INSERT INTO task_orchestration (task_id, state, coordinator_attempt_ref, updated_at) VALUES (?,?,?,?)",
                         (task_id, "provisioning", attempt_ref, _now()),
                     )
-                    channel_id, secret = issue_channel_tx(db, task_id, "coordinator", owner_epoch)
+                    channel_id, secret = issue_channel_tx(db, task_id, "coordinator", owner_epoch, attempt_id=attempt_ref)
                 else:
                     attempt_ref = existing["coordinator_attempt_ref"]
                     row = db.execute(
-                        "SELECT channel_id FROM trusted_channels WHERE task_id=? AND role='coordinator' AND revoked_at IS NULL",
-                        (task_id,),
+                        "SELECT channel_id FROM trusted_channels WHERE task_id=? AND role='coordinator' AND attempt_id=? AND revoked_at IS NULL",
+                        (task_id, attempt_ref),
                     ).fetchone()
                     if row is None:
                         raise PortableError(
@@ -378,14 +409,30 @@ class OrchestratingRuntime:
                 db.rollback()
                 raise
         if secret is None:
-            # Reusing a channel issued by an earlier call in *this* process
-            # (cached above) never reaches here; a genuinely different
-            # process/restart cannot recover the never-persisted secret.
-            raise PortableError(
-                category=PortableErrorCategory.INDETERMINATE_WRITE, code="coordinator_session_not_cached",
-                remediation="This coordinator's channel secret is not held by this runtime instance (a process restart lost it); T017 owns resumable coordinator recovery.",
-                retry_eligible=False,
+            # T023: this process holds neither the channel secret nor an
+            # open session for an already-provisioned coordinator -- almost
+            # always a process restart. Run the full recovery/replacement
+            # sequence (fencing, old-attempt/worker reconciliation, fresh
+            # channel, new session, config/permission-carryover check --
+            # see recovery.coordinator_recovery) instead of failing closed.
+            from ..recovery import coordinator_recovery
+
+            def _open_session(recovery_task_id, recovery_attempt_ref, recovery_channel_id, recovery_secret):
+                return self._open_coordinator_session(
+                    recovery_task_id, recovery_attempt_ref, recovery_channel_id, recovery_secret, role_set,
+                    recovery=True,
+                )
+
+            outcome = coordinator_recovery.recover(
+                self._store, self._engine, task_id,
+                old_owner_epoch=owner_epoch, old_attempt_ref=attempt_ref, open_session=_open_session,
             )
+            channel = outcome["channel"]
+            session_ref = outcome["session_ref"]
+            self._coordinator_channels[task_id] = channel
+            self._coordinator_sessions[task_id] = session_ref
+            self._pending_recovery_notice[task_id] = outcome
+            return channel, session_ref
         from ..trusted_channel import resolve_channel
 
         channel = resolve_channel(self._store, channel_id, secret)
@@ -410,13 +457,23 @@ class OrchestratingRuntime:
         self._coordinator_sessions[task_id] = session_ref
         return channel, session_ref
 
-    def _open_coordinator_session(self, task_id: str, attempt_ref: str, channel_id: str, secret: str, role_set) -> str:
-        return self._engine.open(
-            "shared_project_root",
-            dict(task_id=task_id, attempt_id=attempt_ref, channel_id=channel_id,
-                 channel_secret=secret),
-            role_set.body_portable,
+    def _open_coordinator_session(
+        self, task_id: str, attempt_ref: str, channel_id: str, secret: str, role_set, *, recovery: bool = False,
+    ) -> str:
+        preview = self._config.snapshot(task_id)
+        launch = dict(
+            task_id=task_id, attempt_id=attempt_ref, channel_id=channel_id,
+            channel_secret=secret, config_revision=preview.get("config_revision"),
         )
+        if recovery:
+            # T023: tells a capacity/generation-tracking engine (see
+            # delegation.live_adapters.EngineSessionManagerAdapter.open) this
+            # is a coordinator *replacement*, not this attempt id's first
+            # session -- cause="session_replacement", never "session_open",
+            # regardless of whether this process itself ever opened this
+            # (freshly allocated) attempt id before.
+            launch["recovery"] = True
+        return self._engine.open("shared_project_root", launch, role_set.body_portable)
 
     # -- T022: fresh-generation capsule/role/tool-schema delivery --------
 
@@ -516,6 +573,9 @@ class OrchestratingRuntime:
             prefix = f"{role_blocks_text}\n\n{capsule_text}" if role_blocks_text else capsule_text
         new_prompt_text = f"{prefix}\n\n---\n\n{prompt_text}"
         self._engine.mark_delivery_transmitted(session_ref, delivery["id"])
+        from .. import _fault_injection
+
+        _fault_injection.checkpoint("t023_after_capsule_delivery_transmitted")
         return new_prompt_text, delivery["id"]
 
     def _finalize_generation_delivery(self, session_ref: str, delivery_id: str | None, *, failure_kind: str | None, stop_reason: StopReason | None) -> None:
@@ -561,6 +621,16 @@ class OrchestratingRuntime:
         # below), as opposed to the task's very first prompt.
         pre_existing = acp_steering.orchestration_exists(self._store, task_id)
         channel, session_ref = self._ensure_coordinator(task_id)
+        recovery_notice = self._pending_recovery_notice.pop(task_id, None)
+        if recovery_notice is not None:
+            notice_language = self._resolve_language(task_id, content_hint=content)
+            if recovery_notice.get("route_changed"):
+                self._emit_localized(
+                    task_id, emit_update, notice_language, "coordinator_recovery_new_engine",
+                    engine=recovery_notice.get("engine") or "?",
+                )
+            else:
+                self._emit_localized(task_id, emit_update, notice_language, "coordinator_recovery_new_session")
         # T020: route this prompt against any still-open coordinator
         # question *before* recording it as an ordinary user_message/
         # steering turn -- see docs/acp/steering-and-questions.md's
@@ -752,6 +822,9 @@ class OrchestratingRuntime:
             )
             try:
                 outcome = self._engine.prompt(session_ref, prompt_text, cancel_event)
+                from .. import _fault_injection
+
+                _fault_injection.checkpoint("t023_after_continuation_prompt")
             except EngineTurnFailed as failure:
                 # T017: an engine failure on the coordinator's own turn is
                 # never silently treated as end_turn, and never rerouted to
@@ -871,6 +944,15 @@ class OrchestratingRuntime:
             return StopReason.END_TURN
         channel, session_ref = self._ensure_coordinator(task_id)
         language = self._resolve_language(task_id, content_hint=text)
+        recovery_notice = self._pending_recovery_notice.pop(task_id, None)
+        if recovery_notice is not None:
+            if recovery_notice.get("route_changed"):
+                self._emit_localized(
+                    task_id, emit_update, language, "coordinator_recovery_new_engine",
+                    engine=recovery_notice.get("engine") or "?",
+                )
+            else:
+                self._emit_localized(task_id, emit_update, language, "coordinator_recovery_new_session")
         delegation_events.append_event(
             self._store, task_id, "progress", f"question_answered:{question.id}",
             dict(kind="question_answered", question_id=question.id, answer_text=text), origin="runtime",

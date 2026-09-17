@@ -90,6 +90,11 @@ class ConfigurationServiceSnapshotSource:
             # pinned mapping instead of inventing a second source of truth.
             version="1.12.0" if engine == "codex-acp" else "*",
             config_revision=current.get("id"),
+            # T023: the connection actually selected by this revision --
+            # recovery.coordinator_recovery/registry compares this against
+            # a recorded attempt's own route to detect an unauthorized
+            # silent provider switch.
+            route_connection_id=current.get("route_connection_id"),
         )
 
 
@@ -223,14 +228,69 @@ class EngineSessionManagerAdapter:
             self._attempt_task[attempt_id] = task_id
             if reservation_id is not None:
                 self._reservations[attempt_id] = reservation_id
-            replacement = attempt_id in self._ever_opened_attempts
+            replacement = attempt_id in self._ever_opened_attempts or bool(launch.get("recovery"))
             self._ever_opened_attempts.add(attempt_id)
         if self._store is not None:
+            self._record_process_identity(record, session_id, task_id, attempt_id, launch)
+            self._record_effective_context(record, task_id, attempt_id, launch)
             self._open_generation(
                 manager, record, session_id, task_id, attempt_id, launch,
                 cause="session_replacement" if replacement else "session_open",
             )
         return session_id
+
+    def _record_process_identity(self, record, session_id, task_id, attempt_id, launch) -> None:
+        """T023: durably record enough OS-level identity for this attempt's
+        freshly-launched engine process that a *different* future adapter
+        instance (a Cortex process restart) can tell "still running" apart
+        from "exited" apart from "cannot tell" for a process it never
+        itself launched (see ``engine.process_identity``/
+        ``recovery.registry``) -- otherwise :meth:`lookup_owned` always
+        answers "absent" after a restart regardless of the real OS state.
+        Best-effort only: a manager with no real ``EngineProcess`` (a fake
+        test double) or an unreadable ``/proc`` records nothing, and a
+        later :meth:`lookup_owned` for that attempt then falls back to
+        "unknown" rather than a guessed "alive"/"absent"."""
+        from ..engine import process_identity
+        from ..recovery import registry as recovery_registry
+
+        manager = self._managers.get(attempt_id)
+        process = getattr(manager, "_process", None)
+        popen = getattr(process, "process", None)
+        pid = getattr(popen, "pid", None)
+        if pid is None:
+            return
+        identity = process_identity.capture(pid)
+        if identity is None:
+            return
+        import hashlib
+
+        digest = hashlib.sha256("\x00".join(record.launch_command or []).encode("utf-8")).hexdigest()
+        role = "worker" if launch.get("assignment_id") else "coordinator"
+        recovery_registry.record_process_launch(
+            self._store, attempt_id=attempt_id, task_id=task_id, role=role,
+            pid=identity.pid, pgid=identity.pgid, start_ticks=identity.start_ticks, boot_id=identity.boot_id,
+            launch_command_digest=digest, connection_id=record.id, engine_session_ref=session_id,
+        )
+
+    def _record_effective_context(self, record, task_id, attempt_id, launch) -> None:
+        """T023: durably record the configuration revision and
+        :class:`~..engine.resource_policy.ResourcePolicy` this attempt was
+        actually opened with -- ``recovery.coordinator_recovery`` reads
+        this back to refuse a replacement that would silently broaden
+        rights or switch engine/connection with no new, explicitly
+        selected configuration revision authorizing it."""
+        from ..engine.resource_policy import ResourcePolicy
+        from ..recovery import registry as recovery_registry
+
+        policy = self._manager_kwargs.get("policy") or ResourcePolicy()
+        role = "worker" if launch.get("assignment_id") else "coordinator"
+        config_revision = launch.get("config_revision")
+        recovery_registry.record_effective_context(
+            self._store, attempt_id=attempt_id, task_id=task_id, role=role,
+            selected_config_revision_id=config_revision, effective_config_revision_id=config_revision,
+            route_engine=record.engine, route_connection_id=record.id, resource_policy=policy,
+        )
 
     def _open_generation(self, manager, record, session_id, task_id, attempt_id, launch, *, cause: str) -> None:
         from . import generations as delegation_generations
@@ -352,8 +412,29 @@ class EngineSessionManagerAdapter:
             self.terminate_owned(attempt_id)
 
     def lookup_owned(self, attempt_id: str) -> str:
+        """"alive"/"absent"/"unknown" for the process owned by
+        ``attempt_id``. A same-process manager (this exact adapter instance
+        launched it) is always authoritative and answers "alive"
+        immediately. Otherwise (this adapter never launched it -- almost
+        always because a *different* process/adapter instance did, before a
+        Cortex process restart) falls back to the durable
+        ``recovery.registry`` identity captured at launch time (T023: see
+        that module and ``engine.process_identity`` -- a bare "no record in
+        memory" no longer means "absent" the way it did pre-T023)."""
         with self._lock:
-            return "alive" if attempt_id in self._sessions else "absent"
+            if attempt_id in self._sessions:
+                return "alive"
+        if self._store is None:
+            return "absent"
+        from ..recovery import registry as recovery_registry
+
+        row = recovery_registry.lookup_process(self._store, attempt_id)
+        if row is None:
+            return "absent"
+        state = recovery_registry.probe_liveness(row)
+        if state == "absent":
+            recovery_registry.mark_terminated(self._store, attempt_id, "lookup_owned_absent")
+        return state
 
     def terminate_owned(self, attempt_id: str) -> None:
         with self._lock:
@@ -366,6 +447,42 @@ class EngineSessionManagerAdapter:
             self._pending_generation.pop(session_id, None) if session_id is not None else None
         if manager is not None:
             manager.shutdown(grace=2.0)
+            exited = None
+            process = getattr(manager, "_process", None)
+            # shutdown() above already waited up to its own grace for exit;
+            # a non-blocking check here just reads whatever it observed --
+            # never a second wait, never assumed just because shutdown()
+            # returned (see EngineProcess.release/wait_exited).
+            if process is not None:
+                exited = bool(process.wait_exited(0))
+            if self._store is not None:
+                from ..recovery import registry as recovery_registry
+
+                recovery_registry.mark_terminated(
+                    self._store, attempt_id, "process_exited" if exited else "timeout_alive",
+                )
+        elif self._store is not None:
+            # T023: no same-process manager owns this attempt -- either it
+            # was launched by a *different* process (a restart), or it was
+            # never launched at all. Terminate it directly from the
+            # durable registry record: never a second .wait() (this
+            # process is not that child's parent and cannot reap it), so
+            # exit is confirmed only by re-probing OS-level identity after
+            # signalling, exactly like the ambiguous/confirmed distinction
+            # ``EngineProcess.terminate`` already makes for a same-process
+            # child.
+            exited = self._terminate_cross_process(attempt_id)
+            if reservation_id is None:
+                from . import capacity as delegation_capacity
+
+                # T023: this adapter instance never itself reserved capacity
+                # for this attempt (a different process's own adapter did,
+                # before a restart) -- its reservation id lives only in
+                # capacity_reservations, never in this instance's own
+                # in-memory _reservations dict.
+                reservation_id = delegation_capacity.reservation_for_attempt(self._store, attempt_id)
+        else:
+            exited = None
         if self._store is not None and session_id is not None:
             from . import deliveries as delegation_deliveries
 
@@ -377,12 +494,6 @@ class EngineSessionManagerAdapter:
         if reservation_id is not None and self._store is not None:
             from . import capacity as delegation_capacity
 
-            process = getattr(manager, "_process", None)
-            # shutdown() above already waited up to its own grace for exit;
-            # a non-blocking check here just reads whatever it observed --
-            # never a second wait, never assumed just because shutdown()
-            # returned (see EngineProcess.release/wait_exited).
-            exited = bool(process is not None and process.wait_exited(0))
             if exited:
                 delegation_capacity.release_confirmed(self._store, reservation_id, "process_exited")
             else:
@@ -392,6 +503,49 @@ class EngineSessionManagerAdapter:
             # waiters promptly so they can re-check current capacity
             # instead of sitting on their own backoff interval.
             self._notify_activity()
+
+    def _terminate_cross_process(self, attempt_id: str) -> bool:
+        """Best-effort SIGTERM-then-SIGKILL of an attempt's process group
+        this adapter instance never itself launched, by durable pid/pgid
+        identity alone (see ``recovery.registry``). Returns ``True`` only
+        once its exit is actually re-observed (never assumed from the
+        signal alone); ``False`` (ambiguous, never freed) otherwise --
+        including when there was never a registry record to act on (no
+        capacity was ever reserved for it in that case either)."""
+        import os
+        import signal
+        import time
+
+        from ..engine.process import TERMINATE_GRACE_SECONDS
+        from ..recovery import registry as recovery_registry
+
+        row = recovery_registry.lookup_process(self._store, attempt_id)
+        if row is None:
+            return False
+        if recovery_registry.probe_liveness(row) == "absent":
+            recovery_registry.mark_terminated(self._store, attempt_id, "already_absent")
+            return True
+        try:
+            os.killpg(row["pgid"], signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            if recovery_registry.probe_liveness(row) == "absent":
+                recovery_registry.mark_terminated(self._store, attempt_id, "process_exited")
+                return True
+            time.sleep(0.05)
+        try:
+            os.killpg(row["pgid"], signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            if recovery_registry.probe_liveness(row) == "absent":
+                recovery_registry.mark_terminated(self._store, attempt_id, "process_exited")
+                return True
+            time.sleep(0.05)
+        return False
 
     def _observe_compaction_signal(self, session_ref: str, event) -> None:
         """T022: an observed compaction reaching its terminal phase opens

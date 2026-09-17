@@ -71,6 +71,10 @@ def finish_deletions(store,db,task):
         _delete_if_present("context_generations","task_id=?",(task,))
         _delete_if_present("compaction_owners","task_id=?",(task,))
         _delete_if_present("compaction_events_seen","task_id=?",(task,))
+        # T023 attempt_process_registry/attempt_effective_context: no other
+        # table references either by id, so plain task_id deletes suffice.
+        _delete_if_present("attempt_process_registry","task_id=?",(task,))
+        _delete_if_present("attempt_effective_context","task_id=?",(task,))
         db.execute("DELETE FROM task_events WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_orchestration WHERE task_id=?",(task,))
         db.execute("DELETE FROM capacity_reservations WHERE task_id=?",(task,))

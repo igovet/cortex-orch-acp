@@ -50,6 +50,11 @@ check.
   confirmed/continuation_observed/blocked/superseded delivery ledger, and
   fresh-generation capsule/role/tool-schema
   delivery](context-generations.md)
+- [Recovery races and session replacement (T023): coordinator
+  fencing/reconciliation/replacement sequence, worker-recovery
+  reconciliation, cross-process engine-liveness detection, config/
+  permission carry-over and authorized route change, and crash
+  boundaries](recovery-and-replacement.md)
 
 ## Tools
 

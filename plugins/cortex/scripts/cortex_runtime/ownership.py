@@ -61,3 +61,36 @@ def acquire_task_owner(store, task_id, owner_ref, expected_epoch):
         except BaseException:
             db.rollback(); raise
     return result
+
+
+def reassign_worker_channels_tx(db, task_id, new_epoch):
+    """(T023) Migrate every still-live (non-revoked) *worker* trusted
+    channel for ``task_id`` to ``new_epoch``, inside an already-open
+    transaction (see ``recovery.coordinator_recovery``, which calls this
+    right after ``acquire_task_owner_tx`` bumps the coordinator's own
+    epoch in the same transaction).
+
+    Only a *coordinator* channel is ever revoked-and-reissued during
+    recovery (a fresh secret, since a coordinator's own trusted channel is
+    read by nothing outside this runtime process); an in-flight worker's
+    engine process was launched with its own channel secret baked into an
+    already-running child process's environment (see
+    ``connections.environment.build_process_env`` /
+    ``engine.mcp_bridge.build_mcp_servers``) that cannot be swapped out
+    without replacing that whole process. Fencing every trusted channel to
+    the *task's* single epoch column (see ``trusted_channel.resolve_channel``
+    / ``server.Server._dispatch_channeled``) would otherwise reject that
+    still-legitimate, not-yet-reconciled worker's very next
+    ``publish_result``/``report_progress`` call outright -- silently
+    losing a result that was never actually superseded. Migrating the
+    epoch forward on the *channel row itself* (never issuing a new secret)
+    keeps a worker whose attempt recovery has decided to leave alone
+    (``lookup_owned`` -> alive, not terminated) able to keep using its
+    already-issued, unchanged secret after the coordinator's own epoch
+    bumps; a worker whose attempt recovery instead terminates never gets
+    to use it again regardless of this migration (its channel is revoked
+    at the same time -- see ``recovery.worker_reconciliation``)."""
+    db.execute(
+        "UPDATE trusted_channels SET owner_epoch=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",
+        (new_epoch, task_id),
+    )

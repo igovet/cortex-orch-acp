@@ -90,6 +90,18 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Stopped this task: every assignment, queued open, and pending question was cancelled.",
         "ru": "Задача остановлена: все назначения, ожидающие запуски и открытые вопросы отменены.",
     },
+    "coordinator_recovery_new_session": {
+        "en": "Reconnected this task with a new coordinator session, rebuilt from recorded task state (this is a new session, not a resumed one).",
+        "ru": "Задача переподключена с новой сессией координатора, восстановленной из сохранённого состояния задачи (это новая сессия, а не возобновлённая).",
+    },
+    "coordinator_recovery_new_engine": {
+        "en": "Reconnected this task on a newly authorized engine/route ({engine}), with a new session rebuilt from recorded task state (this is a new session, never a native resume of the prior engine).",
+        "ru": "Задача переподключена на новом разрешённом движке/маршруте ({engine}) с новой сессией, восстановленной из сохранённого состояния задачи (это новая сессия, а не нативное возобновление прежнего движка).",
+    },
+    "coordinator_recovery_worker_lost": {
+        "en": "Assignment {assignment_ref} could not be safely resumed after recovery and was marked failed ({reason}); the coordinator may re-delegate it.",
+        "ru": "Назначение {assignment_ref} не удалось безопасно возобновить после восстановления и оно помечено как неудачное ({reason}); координатор может делегировать его заново.",
+    },
 }
 
 

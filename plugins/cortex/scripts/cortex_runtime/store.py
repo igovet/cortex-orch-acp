@@ -287,6 +287,7 @@ class Store:
         from .delegation.capacity_store import CAPACITY_SCHEMA
         from .delegation.evidence_store import EVIDENCE_SCHEMA
         from .delegation.generations_store import CONTEXT_GENERATIONS_SCHEMA
+        from .recovery.registry import PROCESS_REGISTRY_SCHEMA
         from .acp.replay_store import REPLAY_SCHEMA
         from .acp.questions_store import PENDING_QUESTIONS_SCHEMA
         from .acp.steering import TASK_LANGUAGE_SCHEMA, TASK_STOPPED_SCHEMA
@@ -315,7 +316,7 @@ class Store:
             db.commit()
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+PROCESS_REGISTRY_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
             if app==APPLICATION_ID:
                 # T017: additive columns for a pre-T017 store that already has
                 # task_events/task_orchestration (CREATE TABLE IF NOT EXISTS
@@ -368,6 +369,27 @@ class Store:
                 db.execute(
                     "CREATE TABLE IF NOT EXISTS task_stopped ("
                     " task_id TEXT PRIMARY KEY REFERENCES tasks(id), stopped_at TEXT NOT NULL)"
+                )
+                # T023: additive attempt_process_registry/attempt_effective_context
+                # tables for a pre-T023 store (same precedent as pending_questions
+                # above -- CREATE TABLE IF NOT EXISTS in SCHEMA only runs for a
+                # brand new database).
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS attempt_process_registry ("
+                    " attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),"
+                    " role TEXT NOT NULL, engine_session_ref TEXT, connection_id TEXT,"
+                    " pid INTEGER NOT NULL, pgid INTEGER NOT NULL,"
+                    " start_ticks TEXT NOT NULL, boot_id TEXT NOT NULL,"
+                    " launch_command_digest TEXT NOT NULL,"
+                    " recorded_at TEXT NOT NULL, terminated_at TEXT, termination_reason TEXT)"
+                )
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS attempt_effective_context ("
+                    " attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),"
+                    " role TEXT NOT NULL,"
+                    " selected_config_revision_id TEXT, effective_config_revision_id TEXT,"
+                    " route_engine TEXT NOT NULL, route_connection_id TEXT,"
+                    " resource_policy_json TEXT NOT NULL, recorded_at TEXT NOT NULL)"
                 )
 
     def _check_project(self,db,task=None):
