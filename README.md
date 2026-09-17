@@ -1333,7 +1333,7 @@ Different bytes must not reuse a stamp. The package validator and candidate
 preparation verify it; the server is not a workflow compatibility layer.
 
 The current source candidate is `1.0.0+sha256.9e3a5a2bcfe17e26` (payload
-SHA-256 `9e3a5a2bcfe17e26ddde849c513f4e184850c2a3ab59fe2dde6a569f8915f16f`).
+SHA-256 `9e3a5a2bcfe17e26108f3f123544fc3dc214808ad2720d8b6ab8867035836548`).
 After each successful native spawn, the coordinator must use a successful exact
 native `wait_agent` recorded after that spawn until the owner’s terminal
 handoff/report is consumed; qualification rejects a spawned worker without this
