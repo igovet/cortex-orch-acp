@@ -17,10 +17,10 @@ with a symlinked parent component -- pass the real target path explicitly
 instead), and always writes a timestamped backup first (never overwriting
 a same-second prior backup: a numeric suffix is added on collision).
 
-Also prints the AionUI 2.2.2 Custom Agent recipe text (``--print-aionui-recipe``
--- see ``docs/acp/aionui-custom-agent.md`` for the full, explicitly
-unverified/unknown-marked recipe; this script never attempts to write to
-AionUI's own backend database).
+Also prints the codeg 0.30.8 Custom Agent recipe text (``--print-codeg-recipe``
+-- see ``docs/acp/codeg-custom-agent.md`` for the full, explicitly
+unverified/unknown-marked recipe; this script never attempts to write
+codeg's own configuration).
 """
 from __future__ import annotations
 
@@ -224,53 +224,36 @@ def atomic_write_with_backup(path, new_text):
         os.chmod(path, mode)
 
 
-AIONUI_RECIPE = """\
-AionUI 2.2.2 Custom Agent recipe (partly unverified -- see docs/acp/aionui-custom-agent.md)
-=============================================================================================
+CODEG_RECIPE = """\
+codeg 0.30.8 Custom Agent recipe (unverified -- see docs/acp/codeg-custom-agent.md)
+====================================================================================
 
-AionUI's Custom Agent registration is a GUI flow (Settings -> Agent
-Management -> Custom Agents -> Add Custom Agent) that stores the entry in
-AionUI's own backend database, not a user-editable file; this script cannot
-write to it and only prints the JSON fields to enter by hand.
+codeg's own custom-agent registration path (Settings -> Agents) is documented
+upstream as supporting npx/uvx/binary distribution channels; whether it also
+accepts an arbitrary local command (the same "python3 -B <abs cortex_acp.py>"
+launch Zed uses) is NOT verified by this script and is recorded as an open
+question in docs/acp/codeg-custom-agent.md. Do not assume support.
 
-Manual steps:
+Candidate manual steps (verify against your installed codeg before relying on
+them):
 
-1. Open AionUI -> Settings -> Agent Management -> Custom Agents -> Add
-   Custom Agent.
-2. Fill in the form with these fields (also shown as JSON below for
-   reference -- AionUI's own form UI, not a file, is what actually accepts
-   them):
-   - name: "{name}"
-   - defaultCliPath: {python3}
-   - acpArgs: ["-B", "{entry}"]
-   - env: {{}}
-   - enabled: true
-3. Save. AionUI will list "{name}" as a separate custom agent; it is never
-   auto-activated merely because a ".cortex" directory exists elsewhere.
+1. Open codeg -> Settings -> Agents -> Add custom agent.
+2. If codeg offers a "binary"/local-command channel: point it at
+   {python3} with arguments: -B {entry}
+3. If codeg only offers npx/uvx/registry channels: local script launch is not
+   directly supported yet; packaging a wrapper executable is a possible future
+   step (see T031), not something this script does.
+4. codeg injects its own "codeg-mcp" MCP server into every hosted agent's
+   session; Cortex treats any injected MCP server as untrusted, inert
+   metadata (see cortex_runtime/acp/protocol.py: strip_mcp_servers) and never
+   routes Cortex's own identity through it.
 
-{entry_json}
-
-Unverified (see docs/acp/aionui-custom-agent.md for the open-question list):
-exact clientCapabilities AionUI advertises (fs/terminal), session/load use,
-configOptions rendering, slash-command support, permission UI, embedded
-resources, and whether/how AionUI passes its own mcpServers into the
-session. None of this is assumed here.
-
-This script never writes to AionUI's own backend database or configuration.
-""".format(
-    name=AGENT_NAME,
-    python3=_default_python3(),
-    entry=AGENT_ENTRY,
-    entry_json=json.dumps(
-        {"name": AGENT_NAME, "defaultCliPath": str(_default_python3()),
-         "acpArgs": ["-B", str(AGENT_ENTRY)], "env": {}, "enabled": True},
-        indent=2,
-    ),
-)
+This script never writes codeg's own configuration files.
+""".format(python3=_default_python3(), entry=AGENT_ENTRY)
 
 
-def cmd_print_aionui_recipe():
-    print(AIONUI_RECIPE)
+def cmd_print_codeg_recipe():
+    print(CODEG_RECIPE)
 
 
 def main(argv=None):
@@ -286,12 +269,12 @@ def main(argv=None):
                          help="Allow overwriting an existing, different 'Cortex' agent_servers entry.")
     parser.add_argument("--python3", type=str, default=None,
                          help="Override the detected absolute python3 path (for testing).")
-    parser.add_argument("--print-aionui-recipe", action="store_true",
-                         help="Print the AionUI custom-agent recipe text and exit.")
+    parser.add_argument("--print-codeg-recipe", action="store_true",
+                         help="Print the codeg custom-agent recipe text and exit.")
     args = parser.parse_args(argv)
 
-    if args.print_aionui_recipe:
-        cmd_print_aionui_recipe()
+    if args.print_codeg_recipe:
+        cmd_print_codeg_recipe()
         return 0
 
     entry = build_entry(args.python3)
