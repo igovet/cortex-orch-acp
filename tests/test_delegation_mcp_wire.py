@@ -92,8 +92,11 @@ def test_coordinator_tools_list_includes_role_filtered_delegation_tools(tmp_path
     # T018: list_sources/read_source are shared read-only source-history
     # operations, available on both coordinator and worker channels.
     assert {"list_sources", "read_source"} <= names
+    # T021: read_capsule is a shared read-only recovery-capsule operation,
+    # available on both coordinator and worker channels.
+    assert "read_capsule" in names
     assert "ask_question" not in names and "publish_result" not in names
-    assert len(names) == 14
+    assert len(names) == 15
 
 
 def test_worker_tools_list_is_worker_only(tmp_path):

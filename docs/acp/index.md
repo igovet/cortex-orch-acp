@@ -39,6 +39,11 @@ check.
   question lifecycle and elicitation fallback, language policy and
   heuristic limits, noise policy, and what's deferred to
   T035](steering-and-questions.md)
+- [Deterministic recovery capsules (T021): nine-section derived view,
+  determinism without wall-clock time, worker scoping, trust/provenance
+  and injection-resistant rendering, size bounds, the `read_capsule` MCP
+  tool, and what's deferred to
+  T022](recovery-capsules.md)
 
 ## Tools
 

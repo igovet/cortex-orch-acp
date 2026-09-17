@@ -266,6 +266,36 @@ def _shared_list_sources(store, channel: ChannelContext, args: Mapping[str, Any]
     return replay_store.list_sources(store, channel.task_id, after, limit)
 
 
+def _shared_read_capsule(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
+    """T021: this channel's own deterministic recovery capsule.
+
+    Never accepts a task id or a recipient selector -- the recipient is
+    always derived from the channel's own resolved identity, so a channel
+    can never read another task's or another role's/assignment's capsule
+    (see ``trusted_channel.resolve_channel``, which is the only source of
+    ``channel.task_id``/``channel.role``/``channel.assignment_id``/
+    ``channel.attempt_id`` here)."""
+    from ..recovery.capsule import build_capsule
+
+    at_revision = args.get("at_revision")
+    if channel.role == "coordinator":
+        recipient = dict(role="coordinator")
+    else:
+        with store.connection() as db:
+            row = db.execute(
+                "SELECT idempotency_key FROM delegation_provisioning WHERE assignment_id=? AND task_id=?",
+                (channel.assignment_id, channel.task_id),
+            ).fetchone()
+        if row is None:
+            raise StoreError(
+                "capsule_unavailable", "assignment_id", channel.assignment_id,
+                "a delegation_provisioning row for this worker's own assignment",
+                "This worker's own delegation has not finished being recorded yet; retry shortly.",
+            )
+        recipient = dict(role="worker", assignment_ref=row["idempotency_key"], attempt_id=channel.attempt_id)
+    return build_capsule(store, channel.task_id, recipient, at_revision=at_revision)
+
+
 def _shared_read_source(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
     """T018: bounded read of one source_ref, refused for a ref outside this
     channel's own task (``replay_store.read_source`` scopes every lookup by
@@ -280,10 +310,12 @@ _COORDINATOR_HANDLERS = dict(
     delegate=_coordinator_delegate, list_events=_coordinator_list_events,
     clarify=_coordinator_clarify, cancel=_coordinator_cancel, decide=_coordinator_decide,
     list_sources=_shared_list_sources, read_source=_shared_read_source,
+    read_capsule=_shared_read_capsule,
 )
 _WORKER_HANDLERS = dict(
     ask_question=_worker_ask_question, publish_result=_worker_publish_result,
     list_sources=_shared_list_sources, read_source=_shared_read_source,
+    read_capsule=_shared_read_capsule,
 )
 _ROLE_HANDLERS = dict(coordinator=_COORDINATOR_HANDLERS, worker=_WORKER_HANDLERS)
 
@@ -299,6 +331,9 @@ _OPERATION_DESCRIPTIONS = dict(
     publish_result="Publish this assignment's result via an already-acknowledged report reference.",
     list_sources="List durable source references (user text and resolved attachments) for this task, cursor-paginated.",
     read_source="Bounded, addressable read of one source_ref (text or attachment) with provenance and trust label.",
+    read_capsule="Read this channel's own deterministic recovery capsule: identity, applied config, exact "
+                 "constraints with origins, own assignments/pipeline, confirmed publications/checks, open/"
+                 "uncertain actions, newer events, role/tool access, and continuation intent.",
 )
 
 
@@ -321,7 +356,7 @@ def tool_definitions(role_kind: str) -> list[dict]:
             description=_OPERATION_DESCRIPTIONS.get(name, f"Delegation operation '{name}'."),
             inputSchema=dict(type="object", properties=schema["properties"],
                               required=schema["required"], additionalProperties=False),
-            annotations=dict(readOnlyHint=name in ("list_events", "list_sources", "read_source"), destructiveHint=False,
+            annotations=dict(readOnlyHint=name in ("list_events", "list_sources", "read_source", "read_capsule"), destructiveHint=False,
                               idempotentHint=name != "ask_question", openWorldHint=False),
         ))
     return tools

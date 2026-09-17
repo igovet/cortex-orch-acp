@@ -193,6 +193,25 @@ SOURCE_OPERATIONS = {
 }
 COORDINATOR_OPERATIONS.update(SOURCE_OPERATIONS)
 
+# T021: shared read-only recovery-capsule operation, available on *both*
+# coordinator and worker channels (task/recipient-scoped by the caller's
+# own channel -- see delegation.mcp_tools._shared_read_capsule; a channel
+# can never request another task's or another role's capsule, since no
+# task/recipient id beyond the channel's own binding is ever accepted).
+CAPSULE_OPERATIONS = {
+    "read_capsule": _operation(
+        {
+            "at_revision": _bounded_integer(
+                "Optional: bound the returned constraints section to source revisions "
+                "captured at or before this revision number; omit for current state.",
+                1_000_000_000,
+            ),
+        },
+        [],
+    ),
+}
+COORDINATOR_OPERATIONS.update(CAPSULE_OPERATIONS)
+
 WORKER_OPERATIONS = {
     "ask_question": _operation(
         {
@@ -217,6 +236,7 @@ WORKER_OPERATIONS = {
 }
 
 WORKER_OPERATIONS.update(SOURCE_OPERATIONS)
+WORKER_OPERATIONS.update(CAPSULE_OPERATIONS)
 
 ROLE_KIND_OPERATIONS = {
     "coordinator": COORDINATOR_OPERATIONS,

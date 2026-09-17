@@ -108,6 +108,8 @@
     "scripts/cortex_runtime/portable/version.py",
     "scripts/cortex_runtime/project_storage.py",
     "scripts/cortex_runtime/provider.py",
+    "scripts/cortex_runtime/recovery/__init__.py",
+    "scripts/cortex_runtime/recovery/capsule.py",
     "scripts/cortex_runtime/runtime/__init__.py",
     "scripts/cortex_runtime/runtime/process.py",
     "scripts/cortex_runtime/runtime/state.py",
