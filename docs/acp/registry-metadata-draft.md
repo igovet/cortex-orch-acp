@@ -4,7 +4,7 @@
 fields a future, separate Registry submission task would need. It is not
 itself a submission, and Custom Agent installation (see
 [zed-custom-agent.md](zed-custom-agent.md),
-[codeg-custom-agent.md](codeg-custom-agent.md)) never depends on it — the
+[aionui-custom-agent.md](aionui-custom-agent.md)) never depends on it — the
 whole point of T011 is that Custom Agent registration works without any
 Registry approval.
 

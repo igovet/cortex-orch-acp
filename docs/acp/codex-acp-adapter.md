@@ -61,8 +61,17 @@ trusts a previously-recorded hash without re-checking it) and refuses:
 - any path under `$HOME/.local/share/zed/external_agents` (a
   client-managed registry checkout, refreshed/replaced by Zed itself,
   never something this project pins) or `$HOME/.local/share/app.codeg` /
-  `$HOME/.config/app.codeg` (codeg's own private data directory) —
-  `engine_install_untrusted_location`;
+  `$HOME/.config/app.codeg` (codeg's own private data directory — codeg is
+  no longer a client under active qualification, but these locations
+  remain rejected as harmless, safer defense-in-depth if codeg is still
+  present on a given machine) — `engine_install_untrusted_location`.
+  Whether AionUI (the current second real client, see
+  [aionui-custom-agent.md](aionui-custom-agent.md)) downloads/manages ACP
+  CLI adapters into any concrete, similarly-untrusted location under
+  `$HOME/.config/AionUi` or elsewhere is **UNKNOWN** (not verified from
+  `/opt/AionUi`'s bundled app files, and this task does not read anything
+  under the live `~/.config/AionUi` user data directory); no such rejection
+  is added here until it is confirmed;
 - a hash mismatch on `package.json`, `dist/index.js` (`adapter_entry`), or
   the bundled `codex` binary, or a `package.json` `"version"` field that
   disagrees with the recorded `package_version` — `engine_install_drifted`.

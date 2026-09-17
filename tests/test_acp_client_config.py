@@ -183,13 +183,29 @@ def test_apply_requires_settings_path():
     assert exit_code != 0
 
 
-def test_print_codeg_recipe_runs_and_never_writes_anything(tmp_path, capsys, monkeypatch):
+def test_print_aionui_recipe_runs_and_never_writes_anything(tmp_path, capsys, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    exit_code = helper.main(["--print-codeg-recipe"])
+    exit_code = helper.main(["--print-aionui-recipe"])
     assert exit_code == 0
     out = capsys.readouterr().out
-    assert "codeg" in out.lower()
+    assert "aionui" in out.lower()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_print_aionui_recipe_contains_absolute_paths_and_no_secrets(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    exit_code = helper.main(["--print-aionui-recipe"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert '"defaultCliPath"' in out
+    assert '"acpArgs"' in out
+    entry = helper.build_entry()
+    cli_path = entry[helper.AGENT_NAME]["command"]
+    assert cli_path in out
+    assert Path(cli_path).is_absolute()
+    assert str(helper.AGENT_ENTRY) in out
+    assert Path(helper.AGENT_ENTRY).is_absolute()
+    assert FAKE_SECRET not in out
 
 
 def test_only_operates_on_given_path_no_implicit_default(tmp_path, monkeypatch):

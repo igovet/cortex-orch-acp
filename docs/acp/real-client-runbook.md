@@ -1,8 +1,9 @@
-# Real-client observation runbook (Zed, codeg)
+# Real-client observation runbook (Zed, AionUI)
 
 This runbook is a reproducible, manual (or later scripted) GUI check list
 for qualifying Cortex against the two real ACP clients selected in
-`.cortex/acp-migration/T002/`. **Every row below is `NOT RUN`.** This task
+`.cortex/acp-migration/T002/` (AionUI 2.2.2 supersedes codeg as the second
+client; see `aionui-custom-agent.md`). **Every row below is `NOT RUN`.** This task
 (T011) prepares the runbook and the underlying non-paid harness/config
 tooling; it does not itself perform live GUI qualification. Owner of every
 row: **T035**.
@@ -28,9 +29,9 @@ specific failure mode, not the automated harness.
   the exact version at run time) with Cortex registered via
   `scripts/cortex_acp_client_config.py --apply --i-consent-to-write` or the
   manual snippet in [zed-custom-agent.md](zed-custom-agent.md).
-- codeg 0.30.8 (or the then-current version) with Cortex registered per
-  [codeg-custom-agent.md](codeg-custom-agent.md) — contingent on resolving
-  the UNKNOWN raw-local-command question first.
+- AionUI 2.2.2 (or the then-current version) with Cortex registered per
+  [aionui-custom-agent.md](aionui-custom-agent.md) via Settings → Agent
+  Management → Custom Agents → Add Custom Agent.
 - At least one real, user-approved, non-fake connection configured through
   Cortex's own onboarding for the "selector rendering" and "connection
   repair" rows; a paid model call still requires separate, explicit user
@@ -50,15 +51,15 @@ specific failure mode, not the automated harness.
 | Zed | (record exact) | Progress coherence | Streamed `agent_message_chunk` updates render incrementally and coherently; final `stopReason` matches what the UI shows as "done"/"cancelled" | | | NOT RUN |
 | Zed | (record exact) | Setup/repair messaging | `/cortex-setup` guidance is legible in the UI and never shows a secret; a broken/unauthorized connection shows a truthful repair message, not a silent failure | | | NOT RUN |
 | Zed | (record exact) | Uninstall | Removing the `agent_servers` entry removes Cortex from the panel; no Cortex connection/credential state is affected | | | NOT RUN |
-| codeg | (record exact) | Cortex appears as a separate agent | Same as the Zed row, in codeg's own agent list UI | | | NOT RUN |
-| codeg | (record exact) | Start a session with Cortex | Session opens; codeg's injected `codeg-mcp` server is present in `session/new` params but never trusted/routed by Cortex | | | NOT RUN |
-| codeg | (record exact) | Selector rendering, no connection configured | Same as Zed row | | | NOT RUN |
-| codeg | (record exact) | Selector rendering, one connection configured | Same as Zed row | | | NOT RUN |
-| codeg | (record exact) | Command fallback | Same as Zed row | | | NOT RUN |
-| codeg | (record exact) | Progress coherence | Same as Zed row | | | NOT RUN |
-| codeg | (record exact) | Setup/repair messaging | Same as Zed row | | | NOT RUN |
-| codeg | (record exact) | stdout-clean verification via logs | codeg's own process/log view shows no non-protocol stdout from the Cortex subprocess | | | NOT RUN |
-| codeg | (record exact) | Uninstall | Same as Zed row | | | NOT RUN |
+| AionUI | (record exact) | Cortex appears as a separate agent | Same as the Zed row, in AionUI's own Custom Agents list UI | | | NOT RUN |
+| AionUI | (record exact) | Start a session with Cortex | Session opens; ACP `initialize`/`session/new` succeed; if AionUI injects its own `mcpServers` into `session/new` params (UNKNOWN — see `aionui-custom-agent.md`), confirm it is present but never trusted/routed by Cortex | | | NOT RUN |
+| AionUI | (record exact) | Selector rendering, no connection configured | Same as Zed row | | | NOT RUN |
+| AionUI | (record exact) | Selector rendering, one connection configured | Same as Zed row | | | NOT RUN |
+| AionUI | (record exact) | Command fallback | Same as Zed row (also resolves the UNKNOWN: whether AionUI supports slash commands at all) | | | NOT RUN |
+| AionUI | (record exact) | Progress coherence | Same as Zed row | | | NOT RUN |
+| AionUI | (record exact) | Setup/repair messaging | Same as Zed row | | | NOT RUN |
+| AionUI | (record exact) | stdout-clean verification via logs | AionUI's own process/log view shows no non-protocol stdout from the Cortex subprocess | | | NOT RUN |
+| AionUI | (record exact) | Uninstall | Same as Zed row | | | NOT RUN |
 
 ## Recording instructions for T035
 
