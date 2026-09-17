@@ -188,19 +188,21 @@ def _derive_credential_ref(
     credential_kind: str,
     keyring_service: str | None,
     keyring_account: str | None,
+    environ: dict[str, str] | None = None,
 ) -> CredentialRef:
     if auth_mode == AuthMode.API_KEY:
         if credential_kind == "os_keyring":
             return registry.canonical_credential_ref(
-                connection_id, engine, "os_keyring", keyring_service=keyring_service, keyring_account=keyring_account,
+                connection_id, engine, "os_keyring", keyring_service=keyring_service,
+                keyring_account=keyring_account, environ=environ,
             )
         if credential_kind == "secret_file":
-            return registry.canonical_credential_ref(connection_id, engine, "secret_file")
+            return registry.canonical_credential_ref(connection_id, engine, "secret_file", environ=environ)
         raise _validation_error("unsupported_auth_mode", "credential_kind must be 'secret_file' or 'os_keyring' for api_key connections.", field="credential_kind")
     # native_account and gateway both use engine-native state directory
     # isolation; there is no per-connection filesystem state for os_keyring
     # in those modes (they never carry a Cortex-managed secret).
-    return registry.canonical_credential_ref(connection_id, engine, "engine_native_dir")
+    return registry.canonical_credential_ref(connection_id, engine, "engine_native_dir", environ=environ)
 
 
 def create_connection(
@@ -249,11 +251,12 @@ def create_connection(
         credential_ref = _derive_credential_ref(
             candidate, engine, auth_mode,
             credential_kind=credential_kind, keyring_service=keyring_service, keyring_account=keyring_account,
+            environ=environ,
         )
         if isinstance(credential_ref, EngineNativeDir):
-            registry.ensure_private_dir(Path(credential_ref.path), root=registry.state_root(environ))
+            registry.ensure_private_dir(Path(credential_ref.path), root=registry.state_root(environ), environ=environ)
         elif isinstance(credential_ref, SecretFile):
-            registry.ensure_private_dir(Path(credential_ref.path).parent, root=registry.config_root(environ))
+            registry.ensure_private_dir(Path(credential_ref.path).parent, root=registry.config_root(environ), environ=environ)
 
         record = ConnectionRecord(
             id=candidate,
@@ -316,7 +319,7 @@ def set_api_key(connection_id: str, reader: Callable[[], bytes], *, environ: dic
         secret = reader()
         if not isinstance(secret, (bytes, bytearray)) or len(secret) == 0:
             raise _validation_error("empty_secret", "The supplied API key must be non-empty bytes.", field="secret")
-        registry.ensure_private_dir(path.parent, root=registry.config_root(environ))
+        registry.ensure_private_dir(path.parent, root=registry.config_root(environ), environ=environ)
         registry.atomic_write_private(path, bytes(secret), directory=path.parent)
         del secret
         updated = ConnectionRecord(

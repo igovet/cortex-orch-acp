@@ -147,7 +147,7 @@ def _user_defaults_path(environ: dict[str, str] | None = None):
 def read_user_defaults(environ: dict[str, str] | None = None) -> dict[str, object]:
     """``{"defaults": {...}, "ceiling": PolicyCeiling}``; empty when unset."""
     path = _user_defaults_path(environ)
-    connection_registry.ensure_private_dir(path.parent, root=connection_registry.config_root(environ))
+    connection_registry.ensure_private_dir(path.parent, root=connection_registry.config_root(environ), environ=environ)
     data = connection_registry.read_owner_file(path)
     if data is None:
         return dict(defaults={}, ceiling=PolicyCeiling())
@@ -160,7 +160,7 @@ def read_user_defaults(environ: dict[str, str] | None = None) -> dict[str, objec
 
 def write_user_defaults(defaults: dict[str, object], ceiling: PolicyCeiling, environ: dict[str, str] | None = None) -> None:
     path = _user_defaults_path(environ)
-    connection_registry.ensure_private_dir(path.parent, root=connection_registry.config_root(environ))
+    connection_registry.ensure_private_dir(path.parent, root=connection_registry.config_root(environ), environ=environ)
     payload = _encode({"defaults": defaults, "ceiling": json.loads(serialize_ceiling(ceiling))}).encode("utf-8")
     connection_registry.atomic_write_private(path, payload, directory=path.parent)
 

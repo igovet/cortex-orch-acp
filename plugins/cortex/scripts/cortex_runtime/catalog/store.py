@@ -171,7 +171,7 @@ def save_snapshot(snapshot: CatalogSnapshot, environ: dict[str, str] | None = No
             "entries": [_serialize_entry(entry) for entry in by_connection.get(connection_id, [])],
         }
         directory = _snapshot_dir(connection_id, environ)
-        registry.ensure_private_dir(directory, root=registry.state_root(environ))
+        registry.ensure_private_dir(directory, root=registry.state_root(environ), environ=environ)
         path = _snapshot_path(connection_id, snapshot.id, environ)
         body = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         registry.atomic_write_private(path, body, directory=directory)

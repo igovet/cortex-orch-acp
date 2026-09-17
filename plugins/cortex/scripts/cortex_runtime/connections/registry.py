@@ -81,6 +81,42 @@ def _fail_closed(code: str, remediation: str, *, field: str | None = None) -> Po
 _PROJECT_MARKERS = (".git", ".cortex")
 
 
+def _require_absolute_env_path(value: str, var_name: str) -> Path:
+    """Expand ``~`` and require the result to be an absolute path.
+
+    A relative ``HOME``/``XDG_CONFIG_HOME``/``XDG_STATE_HOME`` would resolve
+    against the current working directory in a way this module's own
+    ancestor-marker walk (``_assert_not_nested_in_project_workspace``)
+    cannot safely reason about at all: for a genuinely relative
+    ``pathlib.Path``, ``Path.anchor`` is the empty string, not the process's
+    actual cwd, so a naive ``Path(anchor) / parts[1:]`` walk silently skips
+    the *first* real path component entirely (it is mistaken for an already
+    consumed anchor) -- a real regression this exact bug enabled: a relative
+    ``HOME`` such as ``"projectdir"`` with ``projectdir/.cortex`` present
+    was never rejected. Rather than teach the walker to also resolve
+    relative-to-cwd paths (implicit, surprising, and unnecessary --
+    ``HOME``/``XDG_*`` should always be absolute in practice), every path
+    this module derives from these variables is required to already be
+    absolute, fully upfront.
+    """
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        raise _fail_closed(
+            "relative_storage_root",
+            f"{var_name} must be an absolute path (got {value!r}); connection "
+            "storage never resolves a relative HOME/XDG_CONFIG_HOME/XDG_STATE_HOME "
+            "against the current working directory.",
+            field=var_name,
+        )
+    return path
+
+
+def _effective_home(environ: dict[str, str] | None = None) -> Path:
+    env = os.environ if environ is None else environ
+    raw = env.get("HOME", str(Path.home()))
+    return _require_absolute_env_path(raw, "HOME")
+
+
 def _assert_no_project_component(path: Path) -> None:
     """Reject any registry/state/secret path that passes through ``.cortex``.
 
@@ -96,7 +132,7 @@ def _assert_no_project_component(path: Path) -> None:
         )
 
 
-def _assert_not_nested_in_project_workspace(path: Path) -> None:
+def _assert_not_nested_in_project_workspace(path: Path, environ: dict[str, str] | None = None) -> None:
     """Reject storage nested anywhere under a directory that is itself a
     project workspace (has a ``.git`` or ``.cortex`` entry directly inside
     it), even when no path component is literally named ``.cortex``.
@@ -104,17 +140,39 @@ def _assert_not_nested_in_project_workspace(path: Path) -> None:
     This defends against ``XDG_CONFIG_HOME``/``XDG_STATE_HOME`` being
     pointed at an arbitrary subdirectory of a project checkout/worktree.
     Every ancestor directory of ``path`` (excluding ``path`` itself) is
-    checked; a user whose own ``$HOME`` is a dotfiles Git repository should
-    set ``XDG_CONFIG_HOME``/``XDG_STATE_HOME`` outside that repository.
+    checked.
+
+    One narrow, explicit exception: a ``.git`` marker directly inside the
+    caller's *effective* ``$HOME`` (``_effective_home(environ)`` -- the
+    exact same ``HOME`` this module's own ``config_root``/``state_root``
+    fall back to) never rejects on its own. This is the ordinary "my
+    dotfiles are a Git repository" pattern; a ``.cortex`` marker anywhere,
+    or a ``.git`` marker in any *other* enclosing directory (a real project
+    checkout/worktree that happens to contain ``$XDG_CONFIG_HOME``/
+    ``$XDG_STATE_HOME``), still rejects. Every caller that can reach this
+    exception (``config_root``/``state_root``) always additionally ensures
+    a ``root/.gitignore`` containing exactly ``*`` (see
+    ``_ensure_root_gitignore``, called from ``ensure_private_dir``) so a
+    Cortex config/state root sitting inside a real Git repository -- HOME
+    or not -- is never accidentally committed.
     """
+    if not path.is_absolute():
+        raise _fail_closed(
+            "relative_storage_root",
+            f"{path} must be an absolute path; connection storage ancestor "
+            "checks never operate on a relative path.",
+        )
+    home = _effective_home(environ)
     current = Path(path.anchor)
     for part in path.parts[1:-1]:
         current = current / part
         for marker in _PROJECT_MARKERS:
             marker_path = current / marker
             try:
-                marker_info = marker_path.lstat()
+                marker_path.lstat()
             except OSError:
+                continue
+            if marker == ".git" and current == home:
                 continue
             raise _fail_closed(
                 "connection_storage_under_project",
@@ -127,20 +185,20 @@ def _assert_not_nested_in_project_workspace(path: Path) -> None:
 def config_root(environ: dict[str, str] | None = None) -> Path:
     env = os.environ if environ is None else environ
     raw = env.get("XDG_CONFIG_HOME")
-    base = Path(raw).expanduser() if raw else Path(env.get("HOME", str(Path.home()))).expanduser() / ".config"
+    base = _require_absolute_env_path(raw, "XDG_CONFIG_HOME") if raw else _effective_home(environ) / ".config"
     root = base / "cortex"
     _assert_no_project_component(root)
-    _assert_not_nested_in_project_workspace(root)
+    _assert_not_nested_in_project_workspace(root, environ)
     return root
 
 
 def state_root(environ: dict[str, str] | None = None) -> Path:
     env = os.environ if environ is None else environ
     raw = env.get("XDG_STATE_HOME")
-    base = Path(raw).expanduser() if raw else Path(env.get("HOME", str(Path.home()))).expanduser() / ".local" / "state"
+    base = _require_absolute_env_path(raw, "XDG_STATE_HOME") if raw else _effective_home(environ) / ".local" / "state"
     root = base / "cortex"
     _assert_no_project_component(root)
-    _assert_not_nested_in_project_workspace(root)
+    _assert_not_nested_in_project_workspace(root, environ)
     return root
 
 
@@ -280,7 +338,49 @@ def _is_root_or_descendant(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def ensure_private_dir(path: Path, *, root: Path) -> None:
+_GITIGNORE_CONTENT = b"*\n"
+
+
+def _ensure_root_gitignore(root: Path) -> None:
+    """Ensure ``root/.gitignore`` exists with exactly ``*\\n`` (0600).
+
+    Defends against ``root`` sitting inside a real Git repository (most
+    notably the ``$HOME``-is-a-dotfiles-repo exception in
+    ``_assert_not_nested_in_project_workspace``, but this runs
+    unconditionally -- "prefer always" -- so it also covers any other
+    enclosing repository this module's own guard did not reject): a stray
+    ``git add -A`` there could otherwise pick up connection references or
+    a Cortex-managed secret file. Idempotent when the file already has
+    this exact content; fails closed (never silently overwrites) when a
+    *different* file is already there.
+    """
+    gitignore_path = root / ".gitignore"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(gitignore_path, flags, 0o600)
+    except FileExistsError:
+        existing = read_owner_file(gitignore_path)
+        if existing != _GITIGNORE_CONTENT:
+            raise _fail_closed(
+                "unsafe_storage",
+                f"{gitignore_path} already exists with unexpected content; refusing "
+                "to overwrite it (it must contain exactly '*').",
+            )
+        return
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(_GITIGNORE_CONTENT)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        try:
+            os.unlink(gitignore_path)
+        except OSError:
+            pass
+        raise
+
+
+def ensure_private_dir(path: Path, *, root: Path, environ: dict[str, str] | None = None) -> None:
     """Create/validate an owner-only (0700) directory, rejecting symlinks.
 
     ``path`` must be exactly ``root`` or a descendant of it (an explicit,
@@ -292,12 +392,20 @@ def ensure_private_dir(path: Path, *, root: Path) -> None:
     unsafe symlink component, mirroring
     ``runtime.state.RuntimePaths.ensure`` which likewise only locks down
     ``CODEX_HOME`` and below, never its ancestors.
+
+    Once ``root`` itself has been created/validated, ``root/.gitignore``
+    (content exactly ``*``) is always ensured too -- unconditionally, not
+    only when the ``$HOME``-is-a-Git-repository exception in
+    ``_assert_not_nested_in_project_workspace`` actually applied -- so a
+    Cortex config/state root can never be accidentally committed to
+    whatever enclosing Git repository (if any) it happens to sit inside
+    (see ``_ensure_root_gitignore``).
     """
     if not path.is_absolute() or not root.is_absolute():
         raise _fail_closed("unsafe_storage", "Connection storage paths must be absolute.")
     if not _is_root_or_descendant(path, root):
         raise _fail_closed("unsafe_storage", f"{path} is not under the Cortex-managed root {root}.")
-    _assert_not_nested_in_project_workspace(path)
+    _assert_not_nested_in_project_workspace(path, environ)
     parts = path.parts
     root_len = len(root.parts)
     current = Path(parts[0])
@@ -318,6 +426,8 @@ def ensure_private_dir(path: Path, *, root: Path) -> None:
             info = current.lstat()
             if info.st_uid != os.getuid() or info.st_mode & 0o077:
                 raise _fail_closed("unsafe_storage", f"{current} must be owner-only and owned by the current user.")
+        if current == root:
+            _ensure_root_gitignore(root)
 
 
 def _safe_existing_file(path: Path) -> os.stat_result | None:
@@ -480,7 +590,7 @@ def _parse_registry_bytes(data: bytes) -> RegistryState:
 def read_registry(environ: dict[str, str] | None = None) -> RegistryState:
     """Read and validate the registry; a missing file is an empty registry."""
     path = registry_path(environ)
-    ensure_private_dir(path.parent, root=config_root(environ))
+    ensure_private_dir(path.parent, root=config_root(environ), environ=environ)
     data = read_owner_file(path)
     if data is None:
         return _empty_state()
@@ -489,7 +599,7 @@ def read_registry(environ: dict[str, str] | None = None) -> RegistryState:
 
 def write_registry(state: RegistryState, environ: dict[str, str] | None = None) -> None:
     path = registry_path(environ)
-    ensure_private_dir(path.parent, root=config_root(environ))
+    ensure_private_dir(path.parent, root=config_root(environ), environ=environ)
     atomic_write_private(path, state.to_json_bytes(), directory=path.parent)
 
 
@@ -501,7 +611,7 @@ def transaction(environ: dict[str, str] | None = None) -> Iterator[RegistryState
     so a failed onboarding/validation step never partially commits.
     """
     lock_path = registry_lock_path(environ)
-    ensure_private_dir(lock_path.parent, root=config_root(environ))
+    ensure_private_dir(lock_path.parent, root=config_root(environ), environ=environ)
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(lock_path, flags, 0o600)
     try:
