@@ -20,6 +20,25 @@ coordination state and the coordinator's own provisioning reference (the
 ``delegation_provisioning.idempotency_key`` used to open the coordinator's
 own engine session, recorded the same way a delegated assignment's
 ``assignment_ref`` is -- see ``acp.orchestrating_runtime``).
+
+T017 additive columns (see :func:`ensure_task_lifecycle_columns`):
+
+- ``task_events.delivered_at`` -- set by ``mark_delivered`` after
+  ``engine.prompt`` for the continuation that claimed a row actually
+  returns, so a crash between ``claim_unconsumed`` and delivery is
+  reconcilable on the next runtime start (``consumed_by`` set but
+  ``delivered_at`` still NULL -> release the claim).
+- ``task_orchestration.wait_reason`` / ``wait_detail_json`` /
+  ``no_progress_count`` -- durable waiting state (see
+  ``acp.orchestrating_runtime``): what a blocked/limited/refused task is
+  waiting for, a JSON detail blob (assignment refs, question, explanation),
+  and a durable no-progress counter reset whenever a new user prompt
+  arrives.
+
+These are additive on top of the table definitions below so both a fresh
+store (columns present from ``CREATE TABLE``) and a pre-T017 store (columns
+added via ``ALTER TABLE ... ADD COLUMN`` the first time it is opened) end up
+with the same shape; no ``user_version`` bump is needed for either change.
 """
 from __future__ import annotations
 
@@ -37,6 +56,7 @@ CREATE TABLE IF NOT EXISTS task_events (
  payload_json TEXT NOT NULL, origin TEXT NOT NULL,
  created_at TEXT NOT NULL, consumed_by TEXT,
  superseded INTEGER NOT NULL DEFAULT 0,
+ delivered_at TEXT,
  UNIQUE(task_id, dedup_key)
 );
 CREATE INDEX IF NOT EXISTS task_events_by_task ON task_events(task_id, id);
@@ -45,6 +65,38 @@ CREATE TABLE IF NOT EXISTS task_orchestration (
  task_id TEXT PRIMARY KEY REFERENCES tasks(id),
  state TEXT NOT NULL,
  coordinator_attempt_ref TEXT,
- updated_at TEXT NOT NULL
+ updated_at TEXT NOT NULL,
+ wait_reason TEXT,
+ wait_detail_json TEXT,
+ no_progress_count INTEGER NOT NULL DEFAULT 0
 );
 '''
+
+
+def ensure_task_lifecycle_columns(db) -> None:
+    """Idempotently add the T017 additive columns to an already-open
+    connection whose ``task_events``/``task_orchestration`` tables predate
+    them (a store created by d301299/T016 or earlier). Safe to call on
+    every :class:`store.Store` open; a no-op once the columns exist.
+    """
+    events_columns = {row[1] for row in db.execute("PRAGMA table_info(task_events)").fetchall()}
+    orchestration_columns = {row[1] for row in db.execute("PRAGMA table_info(task_orchestration)").fetchall()}
+    statements = []
+    if "delivered_at" not in events_columns:
+        statements.append("ALTER TABLE task_events ADD COLUMN delivered_at TEXT")
+    if "wait_reason" not in orchestration_columns:
+        statements.append("ALTER TABLE task_orchestration ADD COLUMN wait_reason TEXT")
+    if "wait_detail_json" not in orchestration_columns:
+        statements.append("ALTER TABLE task_orchestration ADD COLUMN wait_detail_json TEXT")
+    if "no_progress_count" not in orchestration_columns:
+        statements.append("ALTER TABLE task_orchestration ADD COLUMN no_progress_count INTEGER NOT NULL DEFAULT 0")
+    if not statements:
+        return
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        for statement in statements:
+            db.execute(statement)
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise

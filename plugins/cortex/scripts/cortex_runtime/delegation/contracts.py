@@ -41,6 +41,37 @@ ASSIGNMENT_REF = string(
     128,
 )
 
+# T017: one claimed evidence-checkable item. ``tool_call_ref`` is optional --
+# copy it verbatim from a tool call this same attempt's own engine session
+# actually made (never invented); the runtime resolves it against durable
+# engine-observed evidence for this exact attempt (see delegation.evidence)
+# and labels the check claimed/observed/contradicted in the coordinator's
+# continuation -- a claim is never itself treated as confirmed.
+CHECK_ITEM = dict(
+    type="object",
+    properties=dict(
+        name=string("Short name of this checked item (for example a test or acceptance clause).", 200),
+        outcome=string("One of 'passed', 'failed', or 'not_run'.", 16, pattern=r"^(passed|failed|not_run)$"),
+        tool_call_ref=string(
+            "Optional: the exact tool_call_ref of a tool call this attempt's own engine "
+            "session made that evidences this outcome. Copy it exactly; never guess one.",
+            128,
+        ),
+    ),
+    required=["name", "outcome"],
+)
+CHECKS = dict(
+    type="array",
+    description=(
+        "Optional, bounded list of claimed evidence-checkable items for this result. "
+        "Each is stored as a claim; only a check whose tool_call_ref matches a "
+        "completed engine-observed tool call from this same attempt becomes "
+        "'observed', and a matching failed observation is flagged 'contradicted'."
+    ),
+    maxItems=20,
+    items=CHECK_ITEM,
+)
+
 
 def _operation(properties, required):
     properties = dict(properties)
@@ -137,6 +168,7 @@ WORKER_OPERATIONS = {
                 pattern=r"^r_[0-9a-f]{12}$",
             ),
             "summary": string("Concise summary of the published result for the coordinator.", 4_000),
+            "checks": CHECKS,
         },
         ["report_ref", "summary"],
     ),
@@ -236,4 +268,53 @@ def validate(role_kind: str, operation: str, args: dict) -> dict:
                     "invalid_arguments", key, value, f"{rule['minimum']} through {rule['maximum']}",
                     f"Use an integer within the advertised bound for {key}.",
                 )
+        elif rule["type"] == "array":
+            if not isinstance(value, list):
+                raise StoreError("invalid_arguments", key, _received(value), "JSON array", f"Use a JSON array for {key}.")
+            if len(value) > rule["maxItems"]:
+                raise StoreError(
+                    "invalid_arguments", key, f"{len(value)} items", f"at most {rule['maxItems']} items",
+                    f"Shorten {key} to the advertised bound.",
+                )
+            item_schema = rule["items"]
+            for index, item in enumerate(value):
+                _validate_object_item(key, index, item, item_schema)
     return args
+
+
+def _validate_object_item(field: str, index: int, item, item_schema: dict) -> None:
+    label = f"{field}[{index}]"
+    if not isinstance(item, dict):
+        raise StoreError("invalid_arguments", label, _received(item), "JSON object", f"Use a JSON object for {label}.")
+    properties = item_schema["properties"]
+    unknown = set(item) - set(properties)
+    if unknown:
+        raise StoreError(
+            "invalid_arguments", f"{label}: " + ", ".join(sorted(unknown)), "unadvertised field(s)",
+            ", ".join(sorted(properties)),
+            f"Remove unadvertised fields from {label} and resend using only its advertised fields.",
+        )
+    missing = set(item_schema["required"]) - set(item)
+    if missing:
+        raise StoreError(
+            "invalid_arguments", f"{label}: " + ", ".join(sorted(missing)), "missing", "required field(s)",
+            f"Add every required field to {label}.",
+        )
+    for key, value in item.items():
+        rule = properties[key]
+        item_label = f"{label}.{key}"
+        if rule["type"] != "string":
+            raise StoreError("invalid_arguments", item_label, _received(value), "JSON string", f"Use a JSON string for {item_label}.")
+        if not isinstance(value, str):
+            raise StoreError("invalid_arguments", item_label, _received(value), "JSON string", f"Use a JSON string for {item_label}.")
+        if len(value) < rule.get("minLength", 1) or len(value) > rule["maxLength"]:
+            raise StoreError(
+                "invalid_arguments", item_label, f"{len(value)} Unicode characters",
+                f"{rule.get('minLength', 1)} through {rule['maxLength']} Unicode characters",
+                f"Shorten or lengthen {item_label} to the advertised bound.",
+            )
+        if "pattern" in rule:
+            import re
+
+            if not re.match(rule["pattern"], value):
+                raise StoreError("invalid_arguments", item_label, _received(value), rule["pattern"], f"Match {item_label} to the advertised pattern.")

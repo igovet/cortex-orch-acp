@@ -49,10 +49,17 @@ def _assignment_title(store, channel):
 
 
 def _publish(store, channel, label, call_index):
+    """Insert a ``reports`` row *and* write its file, matching real
+    ``write_report`` storage (``<task_dir>/<report_id>.md``) -- T017's
+    completion gate (``delegation.completion.gate``) requires the file to
+    actually resolve on disk, not only a DB row."""
     report_id = "r_" + uuid.uuid4().hex[:12]
+    filename = report_id + ".md"
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
-        db.execute("INSERT INTO reports VALUES (?,?,?,?,?)", (report_id, channel.task_id, "report", f"reports/{label}.md", store._now()))
+        task_dir = store._task_directory(db, channel.task_id)
+        (task_dir / filename).write_text(f"# {label}\n", encoding="utf-8")
+        db.execute("INSERT INTO reports VALUES (?,?,?,?,?)", (report_id, channel.task_id, "report", filename, store._now()))
         db.commit()
     mcp_tools.dispatch(store, channel, "publish_result", dict(report_ref=report_id, summary=f"{label} finished", request_key=f"pub-{label}-{call_index}"))
 

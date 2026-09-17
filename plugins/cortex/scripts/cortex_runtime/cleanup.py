@@ -35,6 +35,8 @@ def finish_deletions(store,db,task):
         db.execute("DELETE FROM delegation_provisioning WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_events WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_orchestration WHERE task_id=?",(task,))
+        db.execute("DELETE FROM capacity_reservations WHERE task_id=?",(task,))
+        db.execute("DELETE FROM tool_result_observations WHERE task_id=?",(task,))
         db.execute("DELETE FROM acp_host_sessions WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_route_selections WHERE task_id=?",(task,))
         db.execute("DELETE FROM configuration_revisions WHERE task_id=?",(task,))

@@ -21,6 +21,10 @@ check.
 - [Model-owned coordination and managed workers (T016): process boundary,
   event types/states, waiting without paid polling, explicit acceptance,
   and what's deferred to T017/T020/T025](orchestration.md)
+- [Completion, waiting, and resource lifecycle (T017): turn-outcome
+  handling, completion gating, claimed-vs-observed evidence, durable
+  waiting/resumability, capacity ledger, and what's deferred to
+  T020/T021/T023/T028](completion-and-lifecycle.md)
 
 ## Tools
 

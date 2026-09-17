@@ -198,6 +198,61 @@ def mark_superseded(store, task_id: str, assignment_ref: str) -> int:
     return count
 
 
+def mark_delivered(store, task_id: str, continuation_id: str) -> int:
+    """Mark every row still claimed by ``continuation_id`` as delivered,
+    once ``engine.prompt`` for that continuation has actually returned.
+
+    T017 crash recovery (see :func:`reconcile_undelivered_claims`): a claim
+    (``consumed_by`` set) with ``delivered_at`` still NULL means the process
+    crashed between claiming the batch and the ``engine.prompt`` call
+    returning -- "delivered" is at-least-once to the model, but only ever
+    recorded here, never assumed. Returns the number of rows marked.
+    """
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = db.execute(
+                "UPDATE task_events SET delivered_at=? WHERE task_id=? AND consumed_by=? AND delivered_at IS NULL",
+                (_now(), task_id, continuation_id),
+            )
+            count = cursor.rowcount
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+    return count
+
+
+def reconcile_undelivered_claims(store, task_id: str | None = None) -> int:
+    """Release every claim (``consumed_by`` set) whose delivery was never
+    confirmed (``delivered_at`` still NULL) -- a crash between
+    :func:`claim_unconsumed` and the matching :func:`mark_delivered`.
+
+    Call once when a runtime instance first handles a task (see
+    ``acp.orchestrating_runtime.OrchestratingRuntime._ensure_coordinator``);
+    idempotent and safe to call with no crash pending (a no-op). Returns the
+    number of rows released back to unconsumed.
+    """
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if task_id is None:
+                cursor = db.execute(
+                    "UPDATE task_events SET consumed_by=NULL WHERE consumed_by IS NOT NULL AND delivered_at IS NULL AND superseded=0",
+                )
+            else:
+                cursor = db.execute(
+                    "UPDATE task_events SET consumed_by=NULL WHERE task_id=? AND consumed_by IS NOT NULL AND delivered_at IS NULL AND superseded=0",
+                    (task_id,),
+                )
+            count = cursor.rowcount
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+    return count
+
+
 def has_unconsumed(store, task_id: str) -> bool:
     with store.connection() as db:
         row = db.execute(

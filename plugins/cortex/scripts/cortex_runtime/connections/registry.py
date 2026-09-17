@@ -56,6 +56,10 @@ _RECORD_KEYS = {
     "created_at",
     "updated_at",
 }
+# T017: optional, backward-compatible key -- a record persisted before this
+# field existed omits it (defaults to 4 on read, see _record_from_dict); a
+# record persisted since always carries it explicitly (see _record_to_dict).
+_OPTIONAL_RECORD_KEYS = {"max_concurrent_sessions"}
 _HISTORY_ENTRY_KEYS = {
     "fingerprint",
     "previous_fingerprint",
@@ -500,8 +504,15 @@ def _record_to_dict(record: ConnectionRecord) -> dict[str, object]:
 
 
 def _record_from_dict(data: object) -> ConnectionRecord:
-    if not isinstance(data, dict) or set(data) != _RECORD_KEYS:
+    if (
+        not isinstance(data, dict)
+        or not _RECORD_KEYS.issubset(data)
+        or not set(data) <= _RECORD_KEYS | _OPTIONAL_RECORD_KEYS
+    ):
         raise _fail_closed("invalid_connection_record", "A connection record has an unexpected or missing field set.")
+    if "max_concurrent_sessions" in data and (isinstance(data["max_concurrent_sessions"], bool) or not isinstance(data["max_concurrent_sessions"], int)):
+        raise _fail_closed("invalid_connection_record", "max_concurrent_sessions must be an integer.")
+    max_concurrent_sessions = data.get("max_concurrent_sessions", 4)
     try:
         auth_mode = AuthMode(data["auth_mode"])
         state = ConnectionState(data["state"])
@@ -527,6 +538,7 @@ def _record_from_dict(data: object) -> ConnectionRecord:
         qualified=data["qualified"],
         created_at=data["created_at"],
         updated_at=data["updated_at"],
+        max_concurrent_sessions=max_concurrent_sessions,
     )
 
 

@@ -329,6 +329,11 @@ class ConnectionRecord:
     qualified: bool
     created_at: str
     updated_at: str
+    # T017: optional, validated, backward-compatible concurrency limit --
+    # the maximum number of simultaneously owned engine processes/sessions
+    # for this connection (see delegation.capacity). A record predating
+    # this field (see connections.registry._record_from_dict) defaults to 4.
+    max_concurrent_sessions: int = 4
 
     def __post_init__(self) -> None:
         _validate_prefixed_id(self.id, "cn_")
@@ -374,6 +379,14 @@ class ConnectionRecord:
                 remediation="'qualified' must be an explicit bool.",
                 retry_eligible=False,
                 field="qualified",
+            )
+        if isinstance(self.max_concurrent_sessions, bool) or not isinstance(self.max_concurrent_sessions, int) or not 1 <= self.max_concurrent_sessions <= 64:
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION,
+                code="invalid_field",
+                remediation="'max_concurrent_sessions' must be an integer from 1 through 64.",
+                retry_eligible=False,
+                field="max_concurrent_sessions",
             )
 
 

@@ -17,6 +17,8 @@ from .configuration.store import CONFIGURATION_SCHEMA
 from .contracts import StoreError
 from .delegation.store import DELEGATION_SCHEMA
 from .delegation.events_store import TASK_EVENTS_SCHEMA
+from .delegation.capacity_store import CAPACITY_SCHEMA
+from .delegation.evidence_store import EVIDENCE_SCHEMA
 from .hook_storage import HOOK_SCHEMA
 from .store import APPLICATION_ID, SCHEMA, regular, sync_directory
 from .trusted_channel import IDENTITY_SCHEMA
@@ -63,6 +65,20 @@ _DELEGATION_TABLES = frozenset({"delegation_provisioning", "delegation_effects"}
 # table, a store.py-created store always has both.
 _TASK_EVENTS_TABLES = frozenset({"task_events", "task_orchestration"})
 
+# capacity_reservations (see delegation.capacity_store.CAPACITY_SCHEMA) is a
+# seventh, independent optional group on top of
+# SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+# ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA: a pre-T017 v11
+# store has none of it, a store.py-created store always has it.
+_CAPACITY_TABLES = frozenset({"capacity_reservations"})
+
+# tool_result_observations (see delegation.evidence_store.EVIDENCE_SCHEMA)
+# is an eighth, independent optional group on top of
+# SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+# ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA: a
+# pre-T017 v11 store has none of it, a store.py-created store always has it.
+_EVIDENCE_TABLES = frozenset({"tool_result_observations"})
+
 _SELECTIONS = {
     "tasks": "SELECT x.* FROM tasks x WHERE x.project_root=?",
     "thread_bindings": "SELECT x.* FROM thread_bindings x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -77,6 +93,8 @@ _SELECTIONS = {
     "delegation_effects": "SELECT x.* FROM delegation_effects x JOIN delegation_provisioning p ON p.idempotency_key=x.idempotency_key JOIN tasks t ON t.id=p.task_id WHERE t.project_root=?",
     "task_events": "SELECT x.* FROM task_events x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "task_orchestration": "SELECT x.* FROM task_orchestration x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "capacity_reservations": "SELECT x.* FROM capacity_reservations x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "tool_result_observations": "SELECT x.* FROM tool_result_observations x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "reports": "SELECT x.* FROM reports x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "source_cursors": "SELECT x.* FROM source_cursors x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "source_messages": "SELECT x.* FROM source_messages x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -103,7 +121,7 @@ _COPY_ORDER = (
     "task_route_selections", "configuration_revisions", "project_configuration_defaults",
     "acp_host_sessions",
     "delegation_provisioning", "delegation_effects",
-    "task_events", "task_orchestration",
+    "task_events", "task_orchestration", "capacity_reservations", "tool_result_observations",
     "reports", "source_cursors", "source_messages",
     "editions", "governance", "drafts", "pending_source_deletions",
     "pending_deletions", "binding_receipts", "source_resets", "source_revisions",
@@ -198,10 +216,26 @@ def _task_events_present(db):
     return names == _TASK_EVENTS_TABLES
 
 
+def _capacity_present(db):
+    """True only when every capacity table exists; false only when none do."""
+    names = _table_names(db) & _CAPACITY_TABLES
+    if names and names != _CAPACITY_TABLES:
+        raise StoreError("unsupported_storage")
+    return names == _CAPACITY_TABLES
+
+
+def _evidence_present(db):
+    """True only when every evidence table exists; false only when none do."""
+    names = _table_names(db) & _EVIDENCE_TABLES
+    if names and names != _EVIDENCE_TABLES:
+        raise StoreError("unsupported_storage")
+    return names == _EVIDENCE_TABLES
+
+
 def _expected_layout():
     db = sqlite3.connect(":memory:")
     try:
-        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA)
+        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA)
         tables = _table_names(db)
         columns = {
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA table_xinfo({_identifier(table)})"))
@@ -211,7 +245,7 @@ def _expected_layout():
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA foreign_key_list({_identifier(table)})"))
             for table in tables
         }
-        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _TASK_EVENTS_TABLES
+        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES
         return core, columns, foreign_keys
     finally:
         db.close()
@@ -233,6 +267,8 @@ def _validate_format(db):
     acp_present = _acp_present(db)
     delegation_present = _delegation_present(db)
     task_events_present = _task_events_present(db)
+    capacity_present = _capacity_present(db)
+    evidence_present = _evidence_present(db)
     expected = (
         core
         | (_IDENTITY_TABLES if identity_present else set())
@@ -241,6 +277,8 @@ def _validate_format(db):
         | (_ACP_TABLES if acp_present else set())
         | (_DELEGATION_TABLES if delegation_present else set())
         | (_TASK_EVENTS_TABLES if task_events_present else set())
+        | (_CAPACITY_TABLES if capacity_present else set())
+        | (_EVIDENCE_TABLES if evidence_present else set())
     )
     views = db.execute("SELECT 1 FROM sqlite_master WHERE type='view' LIMIT 1").fetchone()
     if actual != expected or views is not None:
@@ -501,7 +539,7 @@ def _create_destination(source_db, temporary, project_root):
         # a fresh store: core SCHEMA+HOOK_SCHEMA plus the identity tables,
         # regardless of whether the (possibly legacy, pre-T005) source has
         # them. A legacy source simply leaves them empty in the destination.
-        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA +
+        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA +
                              f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
         target.execute("BEGIN IMMEDIATE")
         source_identity_present = _identity_present(source_db)
@@ -510,6 +548,8 @@ def _create_destination(source_db, temporary, project_root):
         source_acp_present = _acp_present(source_db)
         source_delegation_present = _delegation_present(source_db)
         source_task_events_present = _task_events_present(source_db)
+        source_capacity_present = _capacity_present(source_db)
+        source_evidence_present = _evidence_present(source_db)
         expected = {}
         for table in _COPY_ORDER:
             columns = [row[1] for row in target.execute(f"PRAGMA table_info({_identifier(table)})")]
@@ -542,6 +582,16 @@ def _create_destination(source_db, temporary, project_root):
             elif table in _TASK_EVENTS_TABLES and not source_task_events_present:
                 # No task-event rows exist to carry; leave the destination's
                 # freshly-created task-event tables empty for the same reason.
+                rows = ()
+            elif table in _CAPACITY_TABLES and not source_capacity_present:
+                # No capacity reservation rows exist to carry; leave the
+                # destination's freshly-created capacity table empty for the
+                # same reason.
+                rows = ()
+            elif table in _EVIDENCE_TABLES and not source_evidence_present:
+                # No tool-result-observation rows exist to carry; leave the
+                # destination's freshly-created evidence table empty for the
+                # same reason.
                 rows = ()
             elif table == "deliveries":
                 rows = _selected_deliveries(source_db, project_root)

@@ -100,3 +100,64 @@ def test_release_claim_never_touches_a_later_claimers_rows(tmp_path):
     released = delegation_events.release_claim(store, task_id, "cont-1")
     assert released == 0
     assert delegation_events.has_unconsumed(store, task_id) is False
+
+
+def test_existing_pre_t017_database_gains_the_additive_columns_on_open(tmp_path):
+    """A store whose task_events/task_orchestration tables predate T017
+    (created by d301299/T016's TASK_EVENTS_SCHEMA, with no wait_reason/
+    wait_detail_json/no_progress_count/delivered_at columns) gains them via
+    ALTER TABLE the next time store.Store opens it -- no data loss, no
+    user_version bump."""
+    import sqlite3
+
+    from cortex_runtime.store import APPLICATION_ID, SCHEMA, private_directory
+
+    directory = private_directory(tmp_path / ".cortex")
+    path = directory / "cortex.sqlite3"
+    db = sqlite3.connect(path)
+    try:
+        # The pre-T017 shape: task_events/task_orchestration without the new
+        # columns (mirrors the original T016 TASK_EVENTS_SCHEMA exactly).
+        pre_t017_task_events_schema = '''
+        CREATE TABLE IF NOT EXISTS task_events (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         task_id TEXT NOT NULL REFERENCES tasks(id),
+         event_type TEXT NOT NULL,
+         assignment_ref TEXT, dedup_key TEXT NOT NULL,
+         payload_json TEXT NOT NULL, origin TEXT NOT NULL,
+         created_at TEXT NOT NULL, consumed_by TEXT,
+         superseded INTEGER NOT NULL DEFAULT 0,
+         UNIQUE(task_id, dedup_key)
+        );
+        CREATE TABLE IF NOT EXISTS task_orchestration (
+         task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+         state TEXT NOT NULL,
+         coordinator_attempt_ref TEXT,
+         updated_at TEXT NOT NULL
+        );
+        '''
+        db.executescript("BEGIN;\n" + SCHEMA + pre_t017_task_events_schema + f"PRAGMA application_id={APPLICATION_ID};\nPRAGMA user_version=11;\nCOMMIT;")
+        db.execute("INSERT INTO tasks VALUES (?,?,?)", ("t_legacy0000", str(tmp_path), "2020-01-01T00:00:00.000000"))
+        db.execute("INSERT INTO task_orchestration VALUES (?,?,?,?)", ("t_legacy0000", "running", "co_x", "2020-01-01T00:00:00.000000"))
+        db.commit()
+        before_columns = {row[1] for row in db.execute("PRAGMA table_info(task_orchestration)")}
+        assert "wait_reason" not in before_columns
+    finally:
+        db.close()
+        import os
+
+        os.chmod(path, 0o600)
+
+    store = Store(directory, project_root=tmp_path)
+    with store.connection() as db:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(task_orchestration)")}
+        event_columns = {row[1] for row in db.execute("PRAGMA table_info(task_events)")}
+        row = db.execute("SELECT state, wait_reason, no_progress_count FROM task_orchestration WHERE task_id=?", ("t_legacy0000",)).fetchone()
+    assert {"wait_reason", "wait_detail_json", "no_progress_count"} <= columns
+    assert "delivered_at" in event_columns
+    assert row["state"] == "running"  # pre-existing data preserved
+    assert row["wait_reason"] is None
+    assert row["no_progress_count"] == 0
+
+    # Idempotent: opening again (columns already present) is a no-op, not an error.
+    Store(directory, project_root=tmp_path)

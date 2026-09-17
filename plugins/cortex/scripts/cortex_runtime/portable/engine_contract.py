@@ -97,6 +97,11 @@ class EngineEvent:
     usage_values: Mapping[str, int] | None = None
     compaction_reason: str | None = None
     error_message: str | None = None
+    # T017: populated only for kind=TOOL_CALL_OBSERVED -- the wire tool
+    # call's own kind/title/status (never raw tool output/arguments/result).
+    tool_call_kind: str | None = None
+    tool_call_title: str | None = None
+    tool_call_status: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, EngineEventKind):

@@ -24,8 +24,10 @@ from typing import Any, Mapping
 
 from ..contracts import StoreError
 from ..trusted_channel import ChannelContext
+from . import completion as delegation_completion
 from . import contracts as delegation_contracts
 from . import events as delegation_events
+from . import evidence as delegation_evidence
 
 NO_TECHNICAL_ID_FIELDS = frozenset({
     "task_id", "attempt_id", "channel_id", "workspace_binding_id",
@@ -128,6 +130,20 @@ def _coordinator_decide(store, channel: ChannelContext, args: Mapping[str, Any])
                 "an assignment_ref with a retained worker_result event",
                 "Only accept an assignment after a (non-superseded) worker_result event exists for it.",
             )
+    if decision == "accept" and assignment_ref == "task":
+        # T017 completion gating: refuse to even record a task-level accept
+        # when it is visibly ungrounded at call time (the runtime rechecks
+        # this same gate defensively before honoring an already-recorded
+        # decision -- see delegation.completion module docstring).
+        ok, reasons = delegation_completion.gate(store, channel.task_id)
+        if not ok:
+            raise StoreError(
+                "acceptance_refused", "assignment_ref", "task",
+                "every non-superseded assignment terminal, no unconsumed meaningful "
+                "events, and every accepted assignment's report_ref resolved to a "
+                "stored report file",
+                "Task-level accept refused: " + " ".join(reasons),
+            )
     dedup_key = f"decide:{args['request_key']}"
     event = delegation_events.append_event(
         store, channel.task_id, "coordinator_decision", dedup_key,
@@ -167,9 +183,20 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
             "AND event_type='assignment_cancelled' LIMIT 1",
             (channel.task_id, assignment_ref),
         ).fetchone() is not None
+    # T017: each claimed check is stored as claimed; 'observed'/'contradicted'
+    # is resolved strictly against this exact attempt's own durable
+    # tool_result_observations (delegation.evidence) -- a claim never
+    # becomes confirmed without that link (see delegation.evidence docstring).
+    checks = []
+    for item in args.get("checks") or []:
+        label = delegation_evidence.resolve_check(store, assignment_ref, item.get("tool_call_ref"))
+        checks.append(dict(
+            name=item["name"], outcome=item["outcome"],
+            tool_call_ref=item.get("tool_call_ref"), evidence=label,
+        ))
     event = delegation_events.append_event(
         store, channel.task_id, "worker_result", dedup_key,
-        dict(report_ref=report_ref, summary=args["summary"]),
+        dict(report_ref=report_ref, summary=args["summary"], checks=checks),
         origin=channel.channel_id, assignment_ref=assignment_ref,
     )
     if cancelled and not event.superseded:

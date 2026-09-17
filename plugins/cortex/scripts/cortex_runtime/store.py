@@ -262,6 +262,8 @@ class Store:
         from .acp.sessions import ACP_SESSION_SCHEMA
         from .delegation.store import DELEGATION_SCHEMA
         from .delegation.events_store import TASK_EVENTS_SCHEMA
+        from .delegation.capacity_store import CAPACITY_SCHEMA
+        from .delegation.evidence_store import EVIDENCE_SCHEMA
         from .project_storage import canonical_project, project_store_directory
         self.project_root=canonical_project(project_root) if project_root is not None else None
         if self.project_root is not None and Path(directory)!=project_store_directory(self.project_root):
@@ -287,7 +289,13 @@ class Store:
             db.commit()
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+            if app==APPLICATION_ID:
+                # T017: additive columns for a pre-T017 store that already has
+                # task_events/task_orchestration (CREATE TABLE IF NOT EXISTS
+                # above never adds columns to an existing table).
+                from .delegation.events_store import ensure_task_lifecycle_columns
+                ensure_task_lifecycle_columns(db)
 
     def _check_project(self,db,task=None):
         if self.project_root is None:return

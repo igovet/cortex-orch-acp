@@ -10,6 +10,7 @@ to use.
 from __future__ import annotations
 
 import threading
+import time
 
 from cortex_runtime.acp.orchestrating_runtime import PromptOutcome
 from cortex_runtime.delegation import mcp_tools
@@ -73,16 +74,122 @@ class FakeSessionRuntime:
     "model" does on each turn, including calling ``mcp_tools.dispatch``.
     """
 
-    def __init__(self, store, router):
+    def __init__(self, store, router, *, connection_id=None, capacity_limit=None, capacity_queue_timeout_seconds=30.0):
         self._store = store
         self._router = router
         self.sessions = {}
         self._owned = {}
         self._counter = 0
         self.prompt_calls = []
+        self.open_calls = []
+        self.terminate_calls = []
         self._lock = threading.Lock()
+        # T017 (lead follow-up): when configured, exercise the SAME
+        # production capacity ledger (delegation.capacity) a real
+        # EngineSessionManagerAdapter uses -- open() blocks (bounded
+        # backoff poll, recording one capacity_queued progress event, never
+        # raising/failing on ordinary contention) until a reservation is
+        # free, mirroring
+        # EngineSessionManagerAdapter._reserve_capacity_blocking exactly,
+        # including its cancellation/starvation/timeout handling (T017
+        # fresh review); terminate_owned() releases per a test-controlled
+        # confirmed/ambiguous outcome (default confirmed).
+        self._connection_id = connection_id
+        self._capacity_limit = capacity_limit
+        self._queue_timeout_seconds = capacity_queue_timeout_seconds
+        self._reservations = {}
+        self._release_kind = {}
+        self._cancelled_attempts = set()
+        self._cancelled_tasks = set()
+        self._shutdown_event = threading.Event()
+        # T017 (load-test determinism fix): notified on every reserve
+        # attempt (success or fail), every open, every release, and every
+        # cancel/shutdown signal -- tests wait_until() on this instead of a
+        # fixed sleep-then-poll, and the queue loop itself wakes on it
+        # instead of relying purely on its own backoff interval.
+        self._activity_cond = threading.Condition()
+
+    def _notify_activity(self):
+        with self._activity_cond:
+            self._activity_cond.notify_all()
+
+    def wait_until(self, predicate, timeout=30.0):
+        """Test helper: block until ``predicate()`` is true or ``timeout``
+        (generous upper bound; returns as soon as an activity notification
+        makes the predicate true, never a fixed sleep). Returns the
+        predicate's final truthiness."""
+        deadline = time.monotonic() + timeout
+        with self._activity_cond:
+            result = predicate()
+            while not result and time.monotonic() < deadline:
+                self._activity_cond.wait(timeout=max(0.0, min(0.5, deadline - time.monotonic())))
+                result = predicate()
+        return result
+
+    def set_release_kind(self, attempt_id, kind):
+        """Test hook: force the *next* terminate_owned(attempt_id) to
+        release 'confirmed' or leave it 'ambiguous' (never auto-released)."""
+        self._release_kind[attempt_id] = kind
+
+    def cancel_attempt(self, attempt_id):
+        self._cancelled_attempts.add(attempt_id)
+        self._notify_activity()
+
+    def cancel_task(self, task_id):
+        self._cancelled_tasks.add(task_id)
+        self._notify_activity()
+
+    def shutdown(self):
+        self._shutdown_event.set()
+        self._notify_activity()
+        for attempt_id in list(self._owned):
+            self.terminate_owned(attempt_id)
 
     def open(self, workspace_binding_id, launch, instructions):
+        from cortex_runtime.delegation.live_adapters import QueuedOpenCancelled
+
+        attempt_id = launch.get("attempt_id")
+        task_id = launch["task_id"]
+        if self._connection_id is not None:
+            from cortex_runtime.delegation import capacity as delegation_capacity
+            from cortex_runtime.delegation import events as delegation_events
+
+            limit = self._capacity_limit or delegation_capacity.DEFAULT_MAX_CONCURRENT_SESSIONS
+            kind = "worker" if launch.get("assignment_id") else "coordinator"
+            queued_note_recorded = False
+            backoff = 0.05
+            reservation_id = None
+            deadline = time.monotonic() + self._queue_timeout_seconds
+            while reservation_id is None:
+                if self._shutdown_event.is_set():
+                    raise QueuedOpenCancelled("shutdown")
+                if attempt_id in self._cancelled_attempts:
+                    raise QueuedOpenCancelled("attempt")
+                if task_id in self._cancelled_tasks:
+                    raise QueuedOpenCancelled("task")
+                reservation_id = delegation_capacity.reserve(
+                    self._store, self._connection_id, task_id, attempt_id, kind, limit=limit,
+                )
+                self._notify_activity()  # every attempt (success or fail) is observable to wait_until()
+                if reservation_id is not None:
+                    break
+                if not queued_note_recorded:
+                    delegation_events.append_event(
+                        self._store, task_id, "progress", f"capacity_queued:{attempt_id}",
+                        dict(note=f"Attempt {attempt_id} is queued: capacity is full."), origin="runtime",
+                    )
+                    queued_note_recorded = True
+                if kind == "worker" and delegation_capacity.count_active(self._store, self._connection_id) >= limit:
+                    if delegation_capacity.all_active_are_kind(self._store, self._connection_id, "coordinator"):
+                        raise QueuedOpenCancelled("capacity_unsatisfiable")
+                if time.monotonic() > deadline:
+                    raise QueuedOpenCancelled("capacity_timeout")
+                with self._activity_cond:
+                    self._activity_cond.wait(timeout=backoff)
+                backoff = min(backoff * 2, 0.5)
+            self._reservations[attempt_id] = reservation_id
+        self.open_calls.append(attempt_id)
+        self._notify_activity()
         with self._lock:
             self._counter += 1
             session_ref = f"es_{self._counter}"
@@ -97,7 +204,17 @@ class FakeSessionRuntime:
         return "alive" if attempt_id in self._owned else "absent"
 
     def terminate_owned(self, attempt_id):
+        self.terminate_calls.append(attempt_id)
         self._owned.pop(attempt_id, None)
+        reservation_id = self._reservations.pop(attempt_id, None)
+        if reservation_id is not None:
+            from cortex_runtime.delegation import capacity as delegation_capacity
+
+            if self._release_kind.pop(attempt_id, "confirmed") == "confirmed":
+                delegation_capacity.release_confirmed(self._store, reservation_id, "process_exited")
+            else:
+                delegation_capacity.mark_ambiguous(self._store, reservation_id, "timeout_alive")
+            self._notify_activity()
 
     def prompt(self, session_ref, message, cancel_event):
         info = self.sessions[session_ref]

@@ -779,7 +779,15 @@ class EngineSessionManager:
                 self.correlation.portable_tool_call_ref(wire_session_id, wire_tool_call_id)
                 if wire_tool_call_id else None
             )
-            return EngineEvent(kind=EngineEventKind.TOOL_CALL_OBSERVED, tool_call_ref=ref)
+            title = update.get("title")
+            if isinstance(title, str) and len(title) > 200:
+                title = title[:200]
+            return EngineEvent(
+                kind=EngineEventKind.TOOL_CALL_OBSERVED, tool_call_ref=ref,
+                tool_call_kind=update.get("kind") if isinstance(update.get("kind"), str) else None,
+                tool_call_title=title if isinstance(title, str) else None,
+                tool_call_status=update.get("status") if isinstance(update.get("status"), str) else None,
+            )
         if kind == "usage_update":
             usage = update.get("usage") or {}
             values = {key: value for key, value in usage.items() if isinstance(value, int)}

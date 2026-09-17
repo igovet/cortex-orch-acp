@@ -677,7 +677,33 @@ class ProvisioningService:
                 context_snapshot_ref=row["context_snapshot_ref"],
                 channel_secret=channel_secret,
             )
-            session_ref = self._engine.open(row["workspace_binding_id"], launch, role_set.body_portable)
+            try:
+                session_ref = self._engine.open(row["workspace_binding_id"], launch, role_set.body_portable)
+            except Exception as error:
+                # T017 (fresh review, MEDIUM/starvation): a queued open
+                # that never reserves (cancelled, or provably
+                # unsatisfiable/timed-out capacity -- see
+                # delegation.live_adapters.QueuedOpenCancelled, identified
+                # here only by its ``kind`` attribute so this module never
+                # imports the live/adapter-specific exception type) must
+                # never leave this idempotency_key's row stuck mid-claim
+                # forever; fail it explicitly, non-retryably. Any *other*
+                # open() exception (a genuine crash/transport failure) is
+                # deliberately left exactly as before -- uncaught, so a
+                # same-process retry under the identical request_key can
+                # still recover via lookup_owned (see this method's
+                # existing has_intent/has_outcome branch above and the
+                # provisioning-recovery tests).
+                kind = getattr(error, "kind", None)
+                if kind not in ("capacity_unsatisfiable", "capacity_timeout", "attempt", "task", "shutdown"):
+                    raise
+                self._fail(idempotency_key, kind)
+                raise PortableError(
+                    category=PortableErrorCategory.TRANSPORT,
+                    code=kind,
+                    remediation="This delegation's engine session could not be opened (capacity or cancellation); start a new delegation with a new request_key if it is still needed.",
+                    retry_eligible=False,
+                ) from error
             # open() succeeded: the secret has now been handed to the
             # engine's own launch env; stop holding it in memory. (The
             # already-alive/lookup_owned branch above never populates or
