@@ -53,7 +53,7 @@ def _inject_portable_noreplace(cli, monkeypatch):
 
 
 def test_stamped_package_and_profiles():
-    assert validate().startswith('1.16.0+codex.sha256.')
+    assert validate().startswith('1.0.0+sha256.')
     assert len(list((PLUGIN/'agents').glob('*.toml')))==23
     payload=json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
     assert all((PLUGIN/path).is_file() for path in payload)
@@ -938,7 +938,7 @@ def test_coordinator_native_worker_tracking_is_distinct_from_app_task_management
     assert 'scripts/cortex_runtime/hooks.py' in payload
     assert (PLUGIN/'skills/orchestrator/SKILL.md').is_file()
     package_version = json.loads((PLUGIN/'.codex-plugin/plugin.json').read_text())['version']
-    assert package_version.startswith('1.16.0+codex.sha256.')
+    assert package_version.startswith('1.0.0+sha256.')
     assert payload_digest(PLUGIN).startswith(package_version.rsplit('.', 1)[-1])
     for path, body in expected_profiles().items():
         if path.stem == 'senior-consultant':

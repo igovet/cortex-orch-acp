@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0 (unreleased)
+
+Cortex is now an ACP project unrelated to Codex. Reset the semantic version and
+reset the package/runtime version scheme accordingly: stamps move from
+`1.16.0+codex.sha256.<16 hex>` to `1.0.0+sha256.<16 hex>`, where the 16 hex
+characters remain the first 16 characters of the unchanged payload-digest
+computation. The manifest, MCP server, package validator/candidate preparation
+and the worker-skill live execution gate now accept only the new format.
+
 ## 1.15.9
 
 Stable release candidate `1.15.9+codex.sha256.e4f332d43bf38024` is release-ready

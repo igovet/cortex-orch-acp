@@ -42,7 +42,7 @@ registered-file integrity violations and the narrow worker private-root executio
 boundary may deny a patch; no other workflow decision is enforced. Hook metadata
 and model actions remain separately observable.
 
-Use semantic version 1.16.0 for this release. Recompute the complete payload hash
+Use semantic version 1.0.0 for this release. Recompute the complete payload hash
 before package checks or tests after every installable edit. Run release-sensitive
 checks sequentially. Do not modify stable Codex configuration or plugin caches.
 Use the dedicated isolated candidate launcher for real-host verification.

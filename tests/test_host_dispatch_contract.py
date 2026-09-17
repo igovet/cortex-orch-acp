@@ -141,7 +141,7 @@ def test_exact_manifest_bound_active_skill_read_precedes_private_operand_deny(tm
     skill.write_text("complete worker skill\n")
     manifest = root / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir()
-    manifest.write_text('{"name":"cortex","version":"1.16.0+codex.sha256.0123456789abcdef","skills":"./skills/"}')
+    manifest.write_text('{"name":"cortex","version":"1.0.0+sha256.0123456789abcdef","skills":"./skills/"}')
     resource = {"path": str(skill)}
     allowed = authorize_pre_dispatch(
         "read_file", resource, actor_kind="native_worker", role="worker",
@@ -202,7 +202,7 @@ def test_worker_skill_read_accepts_declared_leaves_and_rejects_neighbors(tmp_pat
     reference_link.symlink_to(reference)
     manifest = root / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir()
-    manifest.write_text('{"name":"cortex","version":"1.16.0+codex.sha256.0123456789abcdef","skills":"./skills/"}')
+    manifest.write_text('{"name":"cortex","version":"1.0.0+sha256.0123456789abcdef","skills":"./skills/"}')
     context = dict(actor_kind="native_worker", role="worker", task_id="task", assignment_id="bound",
                    route="native_hook", capabilities=WORKER_CAPABILITIES, cwd=str(tmp_path),
                    project_root=str(tmp_path), expected_skill="skills/worker-backend-dev/SKILL.md")

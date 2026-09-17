@@ -56,6 +56,11 @@ as equivalent merely because both arms carry the same receipt.
 Use a new absolute output directory for every preparation. All lock arguments
 are required; there are no inferred equivalence values.
 
+> The example below still shows the legacy `<semver>+codex.sha256.<digest-prefix>`
+> Codex-era candidate format. Cortex is now an ACP project and current stamps use
+> `1.0.0+sha256.<digest-prefix>` (see `scripts/cortex_package.py`); this Phase 2
+> tooling and example are deferred legacy material (T034) and unchanged here.
+
 ```bash
 python3 scripts/phase2_cli_runner.py \
   --source-repo /absolute/source \

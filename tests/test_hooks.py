@@ -256,7 +256,7 @@ def test_worker_skill_read_pretool_to_result_receipt_allows_exact_leaf_only(acti
     skill.write_text("# Backend worker\n")
     manifest = skill_root / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir()
-    manifest.write_text('{"name":"cortex","version":"1.16.0+codex.sha256.0123456789abcdef","skills":"./skills/"}')
+    manifest.write_text('{"name":"cortex","version":"1.0.0+sha256.0123456789abcdef","skills":"./skills/"}')
     handler.handle(event(root, "SubagentStart", agent_id="child", agent_type="backend_dev"))
     command = f"bash -lc {shlex.quote(f'cat {skill}')}"
     pre = handler.handle(event(root, "PreToolUse", tool_name=tool_name, tool_use_id="skill-read",
@@ -284,7 +284,7 @@ def test_worker_skill_read_accepts_exact_read_file_leaf_without_shell_syntax(act
     skill.write_text("# Backend worker\n")
     manifest = skill_root / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir()
-    manifest.write_text('{"name":"cortex","version":"1.16.0+codex.sha256.0123456789abcdef","skills":"./skills/"}')
+    manifest.write_text('{"name":"cortex","version":"1.0.0+sha256.0123456789abcdef","skills":"./skills/"}')
     handler.handle(event(root, "SubagentStart", agent_id="child", agent_type="backend_dev"))
     pre = handler.handle(event(root, "PreToolUse", tool_name="read_file", tool_use_id="skill-read",
                                agent_id="child", agent_type="backend_dev", tool_input={"path":str(skill)}))

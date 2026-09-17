@@ -16,7 +16,7 @@ from plugins.cortex.scripts.cortex_runtime.runtime.state import dependency_ident
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT/'plugins/cortex'
-BASE = '1.16.0'
+BASE = '1.0.0'
 
 
 def _assert_no_symlink_tree(path, *, label='candidate'):
@@ -90,7 +90,7 @@ def dependency_lock_entries(plugin=PLUGIN):
 def stamp():
     path=PLUGIN/'.codex-plugin/plugin.json'
     value=json.loads(path.read_text())
-    value['version']=BASE+'+codex.sha256.'+payload_digest(PLUGIN)[:16]
+    value['version']=BASE+'+sha256.'+payload_digest(PLUGIN)[:16]
     path.write_text(json.dumps(value,indent=2)+'\n')
     return value['version']
 
@@ -98,7 +98,7 @@ def stamp():
 def validate(plugin=PLUGIN):
     check_agent_profiles(plugin)
     value=json.loads((plugin/'.codex-plugin/plugin.json').read_text())
-    if value['name']!='cortex' or value['version']!=BASE+'+codex.sha256.'+payload_digest(plugin)[:16]:
+    if value['name']!='cortex' or value['version']!=BASE+'+sha256.'+payload_digest(plugin)[:16]:
         raise ValueError('invalid package identity or stale cache stamp')
     requirements = plugin/'requirements.txt'
     if not requirements.is_file():

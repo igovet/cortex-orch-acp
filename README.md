@@ -20,7 +20,7 @@ Cortex lifecycle policy findings are advisory: hooks do not veto host tool calls
         evidence assessment, user steering, and completion.
       </p>
       <p>
-        <img src="https://img.shields.io/badge/Cortex-1.16.0-7c3aed" alt="Cortex 1.16.0" />
+        <img src="https://img.shields.io/badge/Cortex-1.0.0-7c3aed" alt="Cortex 1.0.0" />
         <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab" alt="Python 3.11+" />
         <img src="https://img.shields.io/badge/Codex-Desktop%20%7C%20CLI-111827" alt="Codex Desktop and CLI" />
         <img src="https://img.shields.io/badge/Storage-Markdown%20%2B%20SQLite-0f766e" alt="Markdown files and SQLite metadata" />
@@ -218,7 +218,7 @@ Python versions and launch environments. Bundled lifecycle hooks use the host’
 ### Required Codex configuration
 
 > [!IMPORTANT]
-> Configure Codex before the first Cortex 1.16.0 orchestration, then start a **new task**.
+> Configure Codex before the first Cortex 1.0.0 orchestration, then start a **new task**.
 > Cortex requires available native subagents. It does not require Luna or a
 > change to the user's global default subagent model.
 
@@ -408,7 +408,7 @@ CLI, use `$cortex:orchestrator` or `/skills`.
 
 | Command | Purpose | Example |
 | --- | --- | --- |
-| `$cortex:orchestrator <task>` | Start ordinary Cortex 1.16.0 coordination | `$cortex:orchestrator Find the race condition and fix it with tests` |
+| `$cortex:orchestrator <task>` | Start ordinary Cortex 1.0.0 coordination | `$cortex:orchestrator Find the race condition and fix it with tests` |
 | `$cortex:orchestrator help` | Show read-only help without changing the project or task storage | `$cortex:orchestrator help` |
 | `$cortex:orchestrator harvest` | Update missing or stale source-backed project knowledge | `$cortex:orchestrator harvest` |
 | `$cortex:orchestrator harvest-refresh` | Re-audit and rebuild project knowledge documentation | `$cortex:orchestrator harvest-refresh` |
@@ -434,7 +434,7 @@ $cortex:orchestrator harvest-refresh
 > ### Knowledge maintenance is an explicit route, not a lifecycle prerequisite
 >
 > Run `$cortex:orchestrator harvest` when an existing repository needs a
-> source-backed knowledge baseline. Cortex 1.16.0 never blocks ordinary coordination
+> source-backed knowledge baseline. Cortex 1.0.0 never blocks ordinary coordination
 > because harvest has not run or project documentation is incomplete.
 
 Start the knowledge update with:
@@ -1326,14 +1326,14 @@ SQLite and task directories together while storage access is stopped.
 
 ### Versioning
 
-This release uses semantic version **1.16.0**. The manifest
-and MCP server advertise `1.16.0+codex.sha256.<digest-prefix>`, computed from the
+This release uses semantic version **1.0.0**. The manifest
+and MCP server advertise `1.0.0+sha256.<digest-prefix>`, computed from the
 complete installable payload. Regenerate the suffix whenever that payload changes.
 Different bytes must not reuse a stamp. The package validator and candidate
 preparation verify it; the server is not a workflow compatibility layer.
 
-The current source candidate is `1.16.0+codex.sha256.5445b95361d15a5e` (payload
-SHA-256 `5445b95361d15a5e1a5465f6644d2627024f1f5233a57119befd5b3f06326a35`).
+The current source candidate is `1.0.0+sha256.9e3a5a2bcfe17e26` (payload
+SHA-256 `9e3a5a2bcfe17e26ddde849c513f4e184850c2a3ab59fe2dde6a569f8915f16f`).
 After each successful native spawn, the coordinator must use a successful exact
 native `wait_agent` recorded after that spawn until the owner’s terminal
 handoff/report is consumed; qualification rejects a spawned worker without this

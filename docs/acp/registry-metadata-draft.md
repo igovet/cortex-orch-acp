@@ -14,7 +14,7 @@ Registry approval.
 | --- | --- | --- |
 | Agent name | `Cortex` | Matches the `agent_servers`/custom-agent display name used in this task. |
 | Package identifier | (not decided) | Depends on the packaging approach chosen in a later task (T031-adjacent); no npm/PyPI package exists yet. |
-| Version | Plugin's own `1.16.0+codex.sha256.<hash>` stamp (`plugins/cortex/.codex-plugin/plugin.json`) | Whether Registry versioning reuses this exact string or a separate scheme is undecided. |
+| Version | Plugin's own `1.0.0+sha256.<hash>` stamp (`plugins/cortex/.codex-plugin/plugin.json`) | Whether Registry versioning reuses this exact string or a separate scheme is undecided. |
 | Launch command | `python3 -B <abs>/plugins/cortex/scripts/cortex_acp.py` | Real, already-working launch command (this task); Registry distribution channel (binary/npx/uvx) not decided. |
 | Protocol version | `1` (`cortex_runtime/acp/protocol.py: PROTOCOL_VERSION`) | |
 | Capabilities summary | `loadSession: false`; text-only prompt content; no HTTP/SSE MCP transport | From `protocol.initialize_result`; must stay truthful/in sync with the actual implementation at submission time. |

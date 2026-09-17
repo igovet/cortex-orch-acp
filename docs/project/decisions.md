@@ -34,7 +34,8 @@
   no-impact evidence exists.
 - Keep explicit retention cleanup as a host-side command with project isolation.
 - Preserve semantic version 1.16.0 for this release; update the payload hash after
-  every installable payload edit.
+  every installable payload edit. Superseded 2026-09-17 by the ACP versioning reset
+  below.
 - Bind tasks to host MCP thread metadata after real CLI/Desktop observation; no model-authored task selector or latest-task fallback.
 
 - Make report-template validation and publication recovery storage guarantees;
@@ -94,3 +95,9 @@ the contradictory language-table reference to coordinator-authored synthesis was
 - Measure compact instructions and hook effects separately in a 3×4 pilot; preserve
   cached token accounting and missing measurements. Historical experiments are not
   evidence for a different payload.
+- The 2026-09-17 decision reset versioning to 1.0.0+sha256 for the ACP project.
+  Cortex is now an ACP project unrelated to Codex, so the prior `1.16.0+codex.sha256.<16 hex>`
+  scheme is retired; the manifest, MCP server and package/runtime stampers now use
+  `1.0.0+sha256.<16 hex>`, where the 16 hex characters remain the first 16 characters
+  of the unchanged payload-digest computation. This supersedes the earlier
+  "Preserve semantic version 1.16.0" decision above.

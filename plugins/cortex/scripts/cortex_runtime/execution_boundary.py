@@ -91,7 +91,7 @@ def _candidate_skill_root(path: Path):
         if (isinstance(value, dict) and value.get("name") == "cortex"
                 and value.get("skills") == "./skills/"
                 and isinstance(value.get("version"), str)
-                and re.fullmatch(r"1\.16\.0\+codex\.sha256\.[0-9a-f]{16}", value["version"])):
+                and re.fullmatch(r"1\.0\.0\+sha256\.[0-9a-f]{16}", value["version"])):
             return parent
         return None
     return None
