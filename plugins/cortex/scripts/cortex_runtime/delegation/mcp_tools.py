@@ -156,6 +156,29 @@ def _coordinator_decide(store, channel: ChannelContext, args: Mapping[str, Any])
     return dict(assignment_ref=assignment_ref, decision=decision, recorded=True, cursor=event.id)
 
 
+def _coordinator_integrate(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
+    """T025: records a ``progress`` event (``payload["kind"] ==
+    'integration_requested'`` -- see ``delegation.events
+    .INTEGRATION_PROGRESS_KINDS``) only; this module runs inside the MCP
+    subprocess and must never itself touch the project tree (see module
+    docstring). The *main* process's
+    ``acp.orchestrating_runtime.OrchestratingRuntime`` reacts to this event
+    asynchronously (see its ``_integrate_assignment``), performs the
+    actual technical application via ``delegation.integration.integrate``,
+    and appends the coordinator-visible ``integration_applied``/
+    ``integration_conflict`` outcome (also a ``progress`` event) this same
+    ``request_key`` resolves to (idempotent: a retry with the same key
+    returns the exact same recorded outcome, never re-applies)."""
+    assignment_ref = args["assignment_ref"]
+    dedup_key = f"integrate:{args['request_key']}"
+    event = delegation_events.append_event(
+        store, channel.task_id, "progress", dedup_key,
+        dict(kind="integration_requested", assignment_ref=assignment_ref, request_key=args["request_key"]),
+        origin=channel.channel_id, assignment_ref=assignment_ref,
+    )
+    return dict(assignment_ref=assignment_ref, recorded=True, cursor=event.id)
+
+
 def _worker_ask_question(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
     assignment_ref = channel.attempt_id
     dedup_key = f"ask_question:{channel.channel_id}:{args['request_key']}"
@@ -309,6 +332,7 @@ def _shared_read_source(store, channel: ChannelContext, args: Mapping[str, Any])
 _COORDINATOR_HANDLERS = dict(
     delegate=_coordinator_delegate, list_events=_coordinator_list_events,
     clarify=_coordinator_clarify, cancel=_coordinator_cancel, decide=_coordinator_decide,
+    integrate=_coordinator_integrate,
     list_sources=_shared_list_sources, read_source=_shared_read_source,
     read_capsule=_shared_read_capsule,
 )
@@ -327,6 +351,9 @@ _OPERATION_DESCRIPTIONS = dict(
     clarify="Send a clarification/steering message to a previously delegated worker.",
     cancel="Cancel a previously delegated assignment; late results are recorded superseded.",
     decide="Record an acceptance/revise/ask_user decision grounded in retained results.",
+    integrate="Request technical application of a delegated worker's isolated workspace changes onto "
+              "the main project root, against its known base; idempotent, conflict-checked, never "
+              "last-write-wins -- the outcome (applied/conflict/noop) appears as a later durable event.",
     ask_question="Ask the delegating coordinator one bounded question; never ask the user directly.",
     publish_result="Publish this assignment's result via an already-acknowledged report reference.",
     list_sources="List durable source references (user text and resolved attachments) for this task, cursor-paginated.",

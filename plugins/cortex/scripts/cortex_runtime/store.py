@@ -412,7 +412,8 @@ class Store:
                     " assignment_ref TEXT NOT NULL, request_key TEXT NOT NULL, attempt_id TEXT NOT NULL,"
                     " workspace_binding_id TEXT, status TEXT NOT NULL,"
                     " applied_paths_json TEXT NOT NULL, conflict_paths_json TEXT NOT NULL,"
-                    " integrated_head TEXT, integrated_dirty_digest TEXT, created_at TEXT NOT NULL,"
+                    " integrated_head TEXT, integrated_dirty_digest TEXT,"
+                    " host_buffer_state TEXT NOT NULL DEFAULT 'unknown', created_at TEXT NOT NULL,"
                     " UNIQUE(assignment_ref, request_key))"
                 )
 

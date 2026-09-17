@@ -160,6 +160,12 @@ COORDINATOR_OPERATIONS = {
         },
         ["assignment_ref", "decision", "rationale"],
     ),
+    "integrate": _operation(
+        {
+            "assignment_ref": ASSIGNMENT_REF,
+        },
+        ["assignment_ref"],
+    ),
 }
 
 

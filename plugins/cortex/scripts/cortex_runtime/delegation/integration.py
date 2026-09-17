@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS workspace_integrations (
  conflict_paths_json TEXT NOT NULL,
  integrated_head TEXT,
  integrated_dirty_digest TEXT,
+ host_buffer_state TEXT NOT NULL DEFAULT 'unknown',
  created_at TEXT NOT NULL,
  UNIQUE(assignment_ref, request_key)
 );
@@ -115,21 +116,22 @@ def _result_from_row(row) -> dict:
         applied_paths=json.loads(row["applied_paths_json"]),
         conflict_paths=json.loads(row["conflict_paths_json"]),
         integrated_head=row["integrated_head"], integrated_dirty_digest=row["integrated_dirty_digest"],
+        host_buffer_state=row["host_buffer_state"],
     )
 
 
 def _record(store, *, task_id, assignment_ref, request_key, attempt_id, workspace_binding_id,
-            status, applied_paths, conflict_paths, integrated) -> dict:
+            status, applied_paths, conflict_paths, integrated, host_buffer_state) -> dict:
     row_id = "wi_" + uuid.uuid4().hex[:12]
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
             db.execute(
-                "INSERT INTO workspace_integrations VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO workspace_integrations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (row_id, task_id, assignment_ref, request_key, attempt_id, workspace_binding_id, status,
                  json.dumps(sorted(applied_paths)), json.dumps(conflict_paths, sort_keys=True),
                  integrated.get("head") if integrated else None,
-                 integrated.get("dirty_digest") if integrated else None, _now()),
+                 integrated.get("dirty_digest") if integrated else None, host_buffer_state, _now()),
             )
             db.commit()
         except BaseException:
@@ -137,7 +139,8 @@ def _record(store, *, task_id, assignment_ref, request_key, attempt_id, workspac
             raise
     return dict(id=row_id, status=status, applied_paths=sorted(applied_paths),
                 conflict_paths=conflict_paths, integrated_head=integrated.get("head") if integrated else None,
-                integrated_dirty_digest=integrated.get("dirty_digest") if integrated else None)
+                integrated_dirty_digest=integrated.get("dirty_digest") if integrated else None,
+                host_buffer_state=host_buffer_state)
 
 
 # -- path-scoped filesystem reads (main project root) -----------------------
@@ -314,6 +317,13 @@ def integrate(
     if existing is not None:
         return _result_from_row(existing)
 
+    # T025 (lead follow-up): a host that never negotiated fs (or whose
+    # capability the caller does not have a live requester for) means this
+    # integration cannot know whether an unsaved buffer exists for any
+    # touched path -- recorded as a visible, durable limitation rather than
+    # silently treated the same as "checked, no conflict".
+    host_buffer_state = "checked" if host_fs_checker is not None else "unknown"
+
     provisioner = workspace_isolation.IsolatedSnapshotWorkspaceProvisioner(store, project_root, task_id)
     binding_row = provisioner.row_for_binding(workspace_binding_id)
     if binding_row is None:
@@ -328,7 +338,7 @@ def integrate(
         return _record(
             store, task_id=task_id, assignment_ref=assignment_ref, request_key=request_key,
             attempt_id=attempt_id, workspace_binding_id=workspace_binding_id, status="noop",
-            applied_paths=[], conflict_paths={}, integrated=integrated,
+            applied_paths=[], conflict_paths={}, integrated=integrated, host_buffer_state=host_buffer_state,
         )
 
     workspace_root = binding_row["root_path"]
@@ -408,7 +418,7 @@ def integrate(
         return _record(
             store, task_id=task_id, assignment_ref=assignment_ref, request_key=request_key,
             attempt_id=attempt_id, workspace_binding_id=workspace_binding_id, status="conflict",
-            applied_paths=[], conflict_paths=conflicts, integrated=None,
+            applied_paths=[], conflict_paths=conflicts, integrated=None, host_buffer_state=host_buffer_state,
         )
 
     applied = []
@@ -436,7 +446,7 @@ def integrate(
         store, task_id=task_id, assignment_ref=assignment_ref, request_key=request_key,
         attempt_id=attempt_id, workspace_binding_id=workspace_binding_id,
         status="applied" if applied else "noop",
-        applied_paths=applied, conflict_paths={}, integrated=integrated,
+        applied_paths=applied, conflict_paths={}, integrated=integrated, host_buffer_state=host_buffer_state,
     )
 
 

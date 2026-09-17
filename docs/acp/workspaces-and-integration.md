@@ -43,6 +43,26 @@ copies: a write into one is never observable from, or able to overwrite,
 the other's copy or the real project tree — only an explicit, later
 `delegation.integration.integrate` call ever touches the main tree.
 
+### Snapshot location vs. `fs_bridge`/`terminal_bridge` containment
+
+The snapshot's `work` directory lives *under* the main project's own
+`.cortex/workspaces/<attempt_id>/work` — a descendant of the very
+`.cortex` directory `engine.fs_bridge.FsBridge`/
+`engine.terminal_bridge.TerminalBridge` refuse a path/`cwd` for containing
+a `.git`/`.cortex` *component*. Verified (see
+`tests/test_workspace_fs_bridge_containment.py`): both
+bridges' checks are always computed *relative to* the bound
+`ResourceBinding.workspace_root`, never by walking workspace_root's own
+ancestor path components — a path inside the snapshot's `work` dir
+(`os.path.relpath(path, workspace_root)`) never contains a `.git`/`.cortex`
+segment itself (the resulting relative path is just `a.txt`, `sub/b.txt`,
+...), so a worker bound to a snapshot root can read/write its own files
+and run terminal commands normally. The *main* project's real
+`.cortex/cortex.sqlite3` is a sibling subtree, not a path under that
+binding's `workspace_root`, so plain containment (not the technical-storage
+check) already refuses it — confirmed explicitly by test, not merely
+inferred.
+
 ### `SerializedSharedRootWorkspaceProvisioner` (fallback)
 
 When a snapshot cannot be safely taken (a cap exceeded, or an unreadable
@@ -66,6 +86,30 @@ host_fs_checker=None)` is the one technical-application entry point,
 idempotent per `(assignment_ref, request_key)` (`workspace_integrations`
 table — a retry returns the exact previously recorded outcome, never
 re-applies or re-decides).
+
+### Coordinator MCP operation
+
+A coordinator channel calls the `integrate(assignment_ref, request_key)`
+MCP operation (`delegation.contracts.COORDINATOR_OPERATIONS`,
+`delegation.mcp_tools._coordinator_integrate`). Matching every other
+delegation operation's process-boundary rule (see `delegation.mcp_tools`
+module docstring), the MCP-subprocess-side handler only records a durable
+`progress` event (`payload["kind"] == "integration_requested"`) — it never
+touches the project tree itself. The *main* process's
+`acp.orchestrating_runtime.OrchestratingRuntime._process_new_events` picks
+up that event on its next pass (the same polling seam `delegation_requested`/
+`assignment_cancel_requested` already use), calls
+`delegation.integration.integrate` for real, and appends the outcome as its
+own coordinator-visible `progress` event —
+`payload["kind"] == "integration_applied"` (status `applied`/`noop`, with
+`applied_paths`/`integrated_head`/`integrated_dirty_digest`) or
+`integration_conflict` (with the full `conflict_paths` report). These are
+carried as `progress` rows rather than a new `task_events.event_type`
+because that column has a DB-level `CHECK` constraint fixed at table
+creation — widening it would need a destructive rebuild for every existing
+pre-T025 store, which this task does not do (see
+`delegation.events.INTEGRATION_PROGRESS_KINDS`). `list_events` and the
+continuation-text renderer both surface these two kinds explicitly.
 
 Algorithm:
 
@@ -103,16 +147,29 @@ read of the *host's* own negotiated buffer for one project-relative path
 host-visible coordinator binding). When it returns content that differs
 from the path's current on-disk bytes, that path is refused
 (`unsaved_host_buffer`) — an old engine-side result is never allowed to
-silently overwrite newer, unsaved editor content. When the host has no fs
-capability negotiated (`host_fs_checker=None`, or it returns `None` for a
-path), the check is skipped and integration falls back to the disk-vs-base
-comparison alone — a documented limitation (see T014's own report: "host
-buffers vs disk revisions... capture only; integration later").
+silently overwrite newer, unsaved editor content.
 
-Live wiring of a real host connection's `fs/read_text_file` into
-`host_fs_checker` is not part of this task's automated scope (see T014's
-own live boundary and T035–T037); this task delivers and tests the
-precondition mechanism itself with a fake forwarder.
+`OrchestratingRuntime` accepts an optional constructor-level
+`host_fs_requester` — the exact same `(method, params) -> dict` shape as
+`acp.host_requests.HostRequester`, following the identical "`None` means
+not negotiated/available, never guessed" convention as the existing
+`host_elicitor` (T020) — supplied only once a real incoming ACP connection
+has actually negotiated an `fs` capability. When present,
+`_make_host_fs_checker` builds the per-path check by reusing the existing
+T014 `engine.fs_bridge.HostFsForwarder`/`RevisionLog` abstraction directly
+(never a bespoke second wire protocol), and every recorded integration's
+`host_buffer_state` is `"checked"`. When no requester is supplied (the
+host never negotiated fs, or no live connection is wired to this runtime
+yet), `host_buffer_state` is durably recorded as `"unknown"` — a visible
+limitation, not silently treated the same as "checked, no conflict" (see
+T014's own report: "host buffers vs disk revisions... capture only;
+integration later", now closed for the case where a host connection is
+actually wired). Live wiring of a real ACP host's negotiated `fs`
+capability into `cortex_acp.py`'s own construction of
+`OrchestratingRuntime` remains T035–T037's scope; this task delivers and
+tests the full production seam (constructor parameter through to the
+`HostFsForwarder` call) with a fake forwarder function standing in for the
+real host connection.
 
 ## Revision binding and re-verification
 
@@ -146,18 +203,30 @@ durably recorded for it or the assignment was cancelled outright.
 
 ## Tests
 
-`tests/test_workspace_isolation.py`, `tests/test_workspace_integration.py`.
+`tests/test_workspace_isolation.py`, `tests/test_workspace_integration.py`,
+`tests/test_workspace_fs_bridge_containment.py`,
+`tests/test_workspace_mcp_integration.py`.
 Covers: two workers editing the same file in isolated workspaces (second
-integration conflicts, first worker's applied content never overwritten);
-a non-overlapping concurrent main-root change merging cleanly; a
-conflicting overlapping edit surfaced, never last-write-wins; dirty/
-uncommitted user files surviving snapshot and integration untouched; an
-unsaved host buffer blocking an otherwise-clean overwrite; integration
-idempotency by `request_key`; a worker's own execution files excluding
-`.cortex` while a real publish still lands in the main project's logical
-store; revision A not certifying a differing revision B (both the
-"integration hasn't happened yet" and the "main drifted after a clean
-integration" cases); the no-isolation serialized-writer fallback (visible
-`mode` column, a real `fcntl.flock`-backed exclusive lock, and integration
-degrading to a documented no-op); and cleanup removing only the
-Cortex-owned snapshot directories it created.
+integration conflicts, first worker's applied content never overwritten) --
+both at the `delegation.integration.integrate` function level and, in
+`test_workspace_mcp_integration.py`, end to end over the real coordinator
+`integrate` MCP operation and `OrchestratingRuntime` (idempotent dispatch,
+coordinator-only enforcement, applied/conflict outcomes appearing as
+durable `progress` events); a non-overlapping concurrent main-root change
+merging cleanly; a conflicting overlapping edit surfaced, never
+last-write-wins; dirty/uncommitted user files surviving snapshot and
+integration untouched; an unsaved host buffer blocking an otherwise-clean
+overwrite, both directly and through the real `host_fs_requester`
+production seam with a fake forwarder (plus `host_buffer_state: "unknown"`
+when no requester is wired); integration idempotency by `request_key`; a
+worker `ResourceBinding` rooted at the snapshot `work` dir actually
+reading/writing through `FsBridge` and running a contained terminal
+command, while the real project `.cortex` store stays unreachable; a
+worker's own execution files excluding `.cortex` while a real publish still
+lands in the main project's logical store; revision A not certifying a
+differing revision B (both the "integration hasn't happened yet" and the
+"main drifted after a clean integration" cases); the no-isolation
+serialized-writer fallback (visible `mode` column, a real
+`fcntl.flock`-backed exclusive lock, and integration degrading to a
+documented no-op); and cleanup removing only the Cortex-owned snapshot
+directories it created.

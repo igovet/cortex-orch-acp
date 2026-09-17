@@ -20,12 +20,14 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+import os
 import threading
 import time
 from typing import Any, Callable, Mapping, Protocol
 
 from ..contracts import StoreError
 from ..delegation import events as delegation_events
+from ..delegation import integration as delegation_integration
 from ..delegation import revision as delegation_revision
 from ..delegation import workspace_isolation as delegation_workspace_isolation
 from ..delegation.deliveries import MAX_DELIVERY_RETRIES
@@ -201,11 +203,38 @@ def _coalesce(events: list[delegation_events.TaskEvent], revisions: dict[int, di
             lines.append(f"Assignment {ref} is now running.")
         elif event.event_type == "coordinator_clarification":
             lines.append(f"(delivered) Your clarification to assignment {ref}: {payload.get('message', '')}")
+        elif event.event_type == "progress" and payload.get("kind") == "integration_applied":
+            paths = ", ".join(payload.get("applied_paths") or []) or "(no changes needed)"
+            lines.append(
+                f"Integration of assignment {ref} ({payload.get('request_key')}): "
+                f"{payload.get('status')}. Paths: {paths}. "
+                f"host_buffer_state={payload.get('host_buffer_state')}."
+            )
+        elif event.event_type == "progress" and payload.get("kind") == "integration_conflict":
+            conflicts = payload.get("conflict_paths") or {}
+            rendered = "; ".join(f"{path}: {detail.get('reason')}" for path, detail in conflicts.items())
+            lines.append(
+                f"Integration of assignment {ref} ({payload.get('request_key')}) CONFLICTED, "
+                f"nothing was written: {rendered}. host_buffer_state={payload.get('host_buffer_state')}."
+            )
         elif event.event_type == "progress":
             lines.append(f"Progress: {payload.get('note', '')}")
         # delegation_requested / coordinator_decision are the coordinator's
         # own prior tool calls; they need no echo back to the coordinator.
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class _IntegrationHostBinding:
+    """Minimal stand-in for ``engine.resource_binding.ResourceBinding``
+    (T025): ``engine.fs_bridge.HostFsForwarder.read_text_file`` only ever
+    reads ``binding.workspace_binding_id`` (its ``RevisionLog`` key) --
+    coordinator-side integration has no real per-attempt ``ResourceBinding``
+    to reuse, so this supplies just that one field, scoped to the task
+    rather than any one attempt (a single project-root-wide "integration"
+    revision-log bucket)."""
+
+    workspace_binding_id: str
 
 
 class OrchestratingRuntime:
@@ -224,6 +253,7 @@ class OrchestratingRuntime:
         worker_pool_size: int = DEFAULT_WORKER_POOL_SIZE,
         wait_timeout_seconds: float = DEFAULT_WAIT_TIMEOUT_SECONDS,
         host_elicitor: HostElicitor | None = None,
+        host_fs_requester: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> None:
         self._store = store
         self._engine = session_runtime
@@ -235,6 +265,18 @@ class OrchestratingRuntime:
         # wiring passes a real one only once acp.agent's per-connection
         # HostRequester exists -- see acp.production_runtime).
         self._elicitor = host_elicitor
+        # T025 (lead follow-up): optional ``(method, params) -> dict``
+        # outbound call on the incoming ACP connection (see
+        # ``acp.host_requests.HostRequester``), supplied by the caller only
+        # when the connected host actually negotiated an ``fs`` capability
+        # -- exactly the same "None means not negotiated/available, never
+        # guessed" convention as ``host_elicitor`` above. Used by
+        # ``_integrate_assignment`` to build a per-path unsaved-buffer
+        # check via the existing T014 ``engine.fs_bridge.HostFsForwarder``;
+        # ``None`` here durably records ``host_buffer_state: 'unknown'`` on
+        # every integration instead of silently treating "no host fs" the
+        # same as "checked, no conflict".
+        self._host_fs_requester = host_fs_requester
         # T020: per-task de-duplication of identical consecutive runtime
         # status lines (never persisted -- see acp.messages.Dedup).
         self._status_dedup = acp_messages.Dedup()
@@ -263,6 +305,7 @@ class OrchestratingRuntime:
         # while the first effect is still in flight) submit a duplicate.
         self._dispatched_delegations: set[str] = set()
         self._dispatched_cancels: set[str] = set()
+        self._dispatched_integrations: set[int] = set()
         self._delivered_clarification_ids: set[int] = set()
         # T017: attempt_ids whose owning process has already been asked to
         # terminate after reaching a terminal state (worker_result or
@@ -1376,6 +1419,17 @@ class OrchestratingRuntime:
                 "SELECT * FROM task_events WHERE task_id=? AND event_type='coordinator_clarification' ORDER BY id",
                 (task_id,),
             ).fetchall()
+            # T025: carried as 'progress' rows (see delegation.events
+            # .INTEGRATION_PROGRESS_KINDS docstring on why a brand new
+            # event_type is not used); the 'integrate:' dedup_key prefix is
+            # this operation's own reserved namespace (see mcp_tools
+            # ._coordinator_integrate), never colliding with an unrelated
+            # progress note.
+            integrations = db.execute(
+                "SELECT * FROM task_events WHERE task_id=? AND event_type='progress' "
+                "AND dedup_key LIKE 'integrate:%' ORDER BY id",
+                (task_id,),
+            ).fetchall()
         import json
 
         with self._lock:
@@ -1409,6 +1463,13 @@ class OrchestratingRuntime:
                 future = self._executor.submit(self._deliver_clarification, task_id, key, session_ref, message, cancel_event, row["id"])
                 self._running.setdefault(task_id, set()).add(future)
                 future.add_done_callback(lambda f, t=task_id: self._on_worker_done(t, f))
+
+            for row in integrations:
+                if row["id"] in self._dispatched_integrations:
+                    continue
+                self._dispatched_integrations.add(row["id"])
+                payload = json.loads(row["payload_json"])
+                self._integrate_assignment(task_id, payload["assignment_ref"], payload["request_key"])
 
         self._terminate_completed_workers(task_id)
 
@@ -1631,3 +1692,91 @@ class OrchestratingRuntime:
         # self._lock (a plain, non-reentrant Lock shared with self._cond);
         # a waiting coordinator observes the new event via its own bounded
         # DB poll instead (see _wait_for_progress).
+
+    def _make_host_fs_checker(self, project_root: str, task_id: str):
+        """T025 (lead follow-up): builds the per-path unsaved-host-buffer
+        check ``delegation.integration.integrate`` consults, reusing the
+        existing T014 ``engine.fs_bridge.HostFsForwarder``/``RevisionLog``
+        abstraction (never a bespoke second wire protocol) rather than
+        calling ``self._host_fs_requester`` directly. Returns ``None`` when
+        no host fs requester was ever supplied to this runtime (host never
+        negotiated fs, or no live connection is wired yet -- see this
+        class's own constructor docstring); the caller then durably
+        records ``host_buffer_state: 'unknown'`` instead of silently
+        treating "unknown" the same as "checked, no conflict"."""
+        if self._host_fs_requester is None:
+            return None
+        from ..engine.fs_bridge import HostFsForwarder
+
+        forwarder = HostFsForwarder(host_fs_requester=self._host_fs_requester)
+        binding_stub = _IntegrationHostBinding(f"integration:{task_id}")
+
+        def checker(relpath: str):
+            absolute_path = os.path.join(project_root, relpath)
+            try:
+                result = forwarder.read_text_file(binding_stub, dict(path=absolute_path))
+            except Exception:
+                # The host has no buffer for this exact path (or an
+                # unrelated transport hiccup) -- never treated as a
+                # positive "matches disk" signal; simply not consulted for
+                # this one path (see integrate()'s own None handling).
+                return None
+            content = result.get("content") if isinstance(result, dict) else None
+            if content is None:
+                return None
+            return content.encode("utf-8", "surrogateescape")
+
+        return checker
+
+    def _integrate_assignment(self, task_id: str, assignment_ref: str, request_key: str) -> None:
+        """T025 (lead follow-up): performs the actual technical application
+        (``delegation.integration.integrate``) for an ``integrate``
+        request, then appends the coordinator-visible outcome as its own
+        durable ``progress`` event (never silently absorbed) --
+        ``payload["kind"]`` is ``integration_applied`` (status
+        ``applied``/``noop``) or ``integration_conflict`` (status
+        ``conflict``), each dedup-keyed by ``request_key`` so a retried
+        request never double-appends (see ``delegation.events
+        .INTEGRATION_PROGRESS_KINDS`` on why these are ``progress`` rows,
+        not a new ``event_type``)."""
+        with self._store.connection() as db:
+            provisioning_row = db.execute(
+                "SELECT attempt_id, workspace_binding_id, task_id FROM delegation_provisioning "
+                "WHERE idempotency_key=?", (assignment_ref,),
+            ).fetchone()
+            task_row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if provisioning_row is None or task_row is None or provisioning_row["workspace_binding_id"] is None:
+            delegation_events.append_event(
+                self._store, task_id, "progress", f"integration_conflict:{request_key}",
+                dict(kind="integration_conflict", assignment_ref=assignment_ref, request_key=request_key,
+                     conflict_paths={"*": {"reason": "unknown_assignment_or_workspace"}},
+                     host_buffer_state="unknown"),
+                origin="runtime", assignment_ref=assignment_ref,
+            )
+            return
+        project_root = task_row["project_root"]
+        host_fs_checker = self._make_host_fs_checker(project_root, task_id)
+        result = delegation_integration.integrate(
+            self._store, task_id=task_id, project_root=project_root, assignment_ref=assignment_ref,
+            request_key=request_key, attempt_id=provisioning_row["attempt_id"],
+            workspace_binding_id=provisioning_row["workspace_binding_id"], host_fs_checker=host_fs_checker,
+        )
+        if result["status"] == "conflict":
+            delegation_events.append_event(
+                self._store, task_id, "progress", f"integration_conflict:{request_key}",
+                dict(kind="integration_conflict", assignment_ref=assignment_ref, request_key=request_key,
+                     conflict_paths=result["conflict_paths"], host_buffer_state=result["host_buffer_state"]),
+                origin="runtime", assignment_ref=assignment_ref,
+            )
+        else:
+            delegation_events.append_event(
+                self._store, task_id, "progress", f"integration_applied:{request_key}",
+                dict(kind="integration_applied", assignment_ref=assignment_ref, request_key=request_key,
+                     status=result["status"], applied_paths=result["applied_paths"],
+                     integrated_head=result["integrated_head"],
+                     integrated_dirty_digest=result["integrated_dirty_digest"],
+                     host_buffer_state=result["host_buffer_state"]),
+                origin="runtime", assignment_ref=assignment_ref,
+            )
+        # Not self._notify() here -- same reasoning as _cancel_assignment
+        # above (called while _process_new_events holds self._lock).
