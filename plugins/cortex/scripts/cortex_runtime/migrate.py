@@ -17,6 +17,7 @@ from .delegation.store import DELEGATION_SCHEMA
 from .delegation.events_store import TASK_EVENTS_SCHEMA
 from .delegation.capacity_store import CAPACITY_SCHEMA
 from .delegation.evidence_store import EVIDENCE_SCHEMA
+from .routing.store import ROUTING_SCHEMA
 from .hook_storage import HOOK_SCHEMA
 from .store import APPLICATION_ID, SCHEMA, private_directory, regular, sync_directory
 from .trusted_channel import IDENTITY_SCHEMA
@@ -51,7 +52,7 @@ def migrate(directory, backup, *, access_stopped=False):
         sync_directory(backup.parent)
         # Existing v10 tables and immutable Markdown are untouched. Add metadata,
         # initialize known source order and mark older authored provenance unknown (0).
-        db.executescript("BEGIN EXCLUSIVE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA)
+        db.executescript("BEGIN EXCLUSIVE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+ROUTING_SCHEMA)
         db.execute("PRAGMA foreign_keys=ON")
         rows=db.execute("SELECT thread_id FROM thread_bindings").fetchall()
         for (thread,) in rows:

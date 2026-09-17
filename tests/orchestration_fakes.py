@@ -74,9 +74,17 @@ class FakeSessionRuntime:
     "model" does on each turn, including calling ``mcp_tools.dispatch``.
     """
 
-    def __init__(self, store, router, *, connection_id=None, capacity_limit=None, capacity_queue_timeout_seconds=30.0):
+    def __init__(self, store, router, *, connection_id=None, capacity_limit=None, capacity_queue_timeout_seconds=30.0, connections=None):
         self._store = store
         self._router = router
+        # T027: optional {connection_id: object-with-.provider/.engine/.id}
+        # map, used only by attempt_fallback below to run the SAME real
+        # routing.authorization.authorize_fallback check a production
+        # EngineSessionManagerAdapter runs -- the fake engine's own open()
+        # never discriminates by connection, only this authorization step
+        # does.
+        self._connections = connections or {}
+        self.fallback_calls = []
         self.sessions = {}
         self._owned = {}
         self._counter = 0
@@ -206,6 +214,31 @@ class FakeSessionRuntime:
         self.sessions[session_ref] = dict(channel=channel, behavior=behavior, calls=0, attempt_id=launch.get("attempt_id"))
         if launch.get("attempt_id"):
             self._owned[launch["attempt_id"]] = session_ref
+        # T027: audit every *non*-fallback attempt this fake ever opens the
+        # same way a production EngineSessionManagerAdapter.open does --
+        # attempt_fallback (above) records its own 'fallback' row itself,
+        # never duplicated here.
+        config_revision = launch.get("config_revision")
+        if config_revision and launch.get("route_override") is None:
+            from cortex_runtime.configuration import store as configuration_store
+            from cortex_runtime.routing import authorization as routing_authorization
+            from cortex_runtime.routing import store as routing_store
+
+            with self._store.connection() as db:
+                row = db.execute("SELECT * FROM configuration_revisions WHERE id=?", (config_revision,)).fetchone()
+            if row is not None:
+                revision = configuration_store._row_dict(row)
+                extras = routing_store.get_route_extras(self._store, config_revision)
+                connection = self._connections.get(revision["route_connection_id"])
+                routing_store.record_attempt_audit(
+                    self._store, attempt_id=launch.get("attempt_id") or session_ref, task_id=task_id,
+                    role="worker" if launch.get("assignment_id") else "coordinator",
+                    engine=(connection.engine if connection is not None else revision["route_engine"]),
+                    connection_id=revision["route_connection_id"],
+                    model=(extras["route_model"] if extras is not None else "unknown"),
+                    params_fingerprint=routing_authorization.fingerprint_params(launch.get("parameters") or {}),
+                    config_revision_id=config_revision, decision="authorized", detail={},
+                )
         return session_ref
 
     def lookup_owned(self, attempt_id):
@@ -233,6 +266,51 @@ class FakeSessionRuntime:
         if behavior is None:
             return PromptOutcome(StopReason.END_TURN, "")
         return behavior(self._store, info["channel"], session_ref, message, call_index)
+
+    def attempt_fallback(
+        self, *, old_attempt_id, new_attempt_id, task_id, role, failure_class,
+        target_connection_id, target_route_id, workspace_binding_id, launch, instructions, target_model=None,
+    ):
+        """T027: the fake-engine equivalent of
+        ``delegation.live_adapters.EngineSessionManagerAdapter
+        .attempt_fallback`` -- runs the real
+        ``routing.authorization.authorize_fallback`` check (never a
+        scripted/stubbed authorization result) against this task's actual
+        stored configuration revision/route-profile/ceiling, and only on
+        success opens a fresh fake session via the SAME ``open()`` this
+        class already uses for every other attempt."""
+        from cortex_runtime.configuration import store as configuration_store
+        from cortex_runtime.configuration.policy import RouteProfile
+        from cortex_runtime.routing import authorization as routing_authorization
+        from cortex_runtime.routing import store as routing_store
+
+        self.fallback_calls.append((old_attempt_id, new_attempt_id, failure_class, target_route_id))
+        config_revision = launch.get("config_revision")
+        with self._store.connection() as db:
+            row = db.execute("SELECT * FROM configuration_revisions WHERE id=?", (config_revision,)).fetchone()
+        revision = configuration_store._row_dict(row)
+        extras = routing_store.get_route_extras(self._store, config_revision)
+        route_profile = extras["route_profile"] if extras is not None else RouteProfile()
+        current_connection = self._connections[revision["route_connection_id"]]
+        target_connection = self._connections[target_connection_id]
+        routing_authorization.authorize_fallback(
+            self._store, task_id=task_id, ceiling=revision["ceiling_snapshot"], failure_class=failure_class,
+            role=role, route_profile=route_profile, coordinator_route_id=revision["route_id"],
+            current_connection=current_connection, target_connection=target_connection, target_route_id=target_route_id,
+        )
+        fallback_launch = dict(launch)
+        fallback_launch["attempt_id"] = new_attempt_id
+        fallback_launch["route_override"] = dict(connection_id=target_connection_id, model=target_model)
+        fallback_launch["fallback_of"] = old_attempt_id
+        session_ref = self.open(workspace_binding_id, fallback_launch, instructions)
+        routing_store.record_attempt_audit(
+            self._store, attempt_id=new_attempt_id, task_id=task_id, role=role, engine=target_connection.engine,
+            connection_id=target_connection_id, model=target_model or "unknown",
+            params_fingerprint=routing_authorization.fingerprint_params(launch.get("parameters") or {}),
+            config_revision_id=config_revision, decision="fallback", detail=dict(failure_class=failure_class),
+            predecessor_attempt_id=old_attempt_id,
+        )
+        return session_ref
 
 
 def coordinator_prompt_count(fake: FakeSessionRuntime, coordinator_session_ref: str) -> int:

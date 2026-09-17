@@ -313,6 +313,22 @@ def test_worker_resolution_default_permitted_and_forbidden_override(tmp_path):
         service.resolve_worker(task, "reviewer", {"allows_role_alternates": False}, override)
     assert excinfo.value.code == "forbidden_worker_override"
 
+    # T027: default (single-route) profile still forbids a *different*
+    # route even when the legacy allows_role_alternates flag says True --
+    # the stored route profile is now the authoritative source of truth.
+    with pytest.raises(PortableError) as excinfo:
+        service.resolve_worker(task, "reviewer", {"allows_role_alternates": True}, override)
+    assert excinfo.value.code == "forbidden_worker_override"
+
+    # Only an explicit mixed-team route profile naming this role/route
+    # authorizes the override.
+    from cortex_runtime.configuration.policy import RouteProfile
+
+    row2 = service.propose(
+        task, entry, ConfigurationInputs(route=entry.route, parameters={}), expected_revision=1, current_epoch=epoch,
+        route_profile=RouteProfile(role_routes={"reviewer": {worker_route.id}}),
+    )
+    service.apply(task, row2["id"], _FakeAdapter("confirm"), "es_" + "a" * 12, epoch)
     permitted = service.resolve_worker(task, "reviewer", {"allows_role_alternates": True}, override)
     assert permitted["route_id"] == worker_route.id
 

@@ -70,6 +70,12 @@ check.
   only, with its full dist evidence chain and wiring path), capability
   matrix vs codex-acp, and the opt-in, never-run coordinator probe
   documenting the remaining T035/T036 live-execution gate](claude-agent-acp-adapter.md)
+- [Mixed-team routing and authorized fallback (T027): the per-task route
+  profile authorizing which role may use which route, the per-attempt
+  route/model/parameter-fingerprint audit trail (including fallback
+  predecessors), pre-dispatch role/capability/attempt-budget enforcement,
+  and the narrow, consent-gated conditions under which an authorized
+  fallback ever opens a different route](routing-and-fallback.md)
 
 ## Tools
 

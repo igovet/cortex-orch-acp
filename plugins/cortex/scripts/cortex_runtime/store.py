@@ -294,6 +294,7 @@ class Store:
         from .acp.steering import TASK_LANGUAGE_SCHEMA, TASK_STOPPED_SCHEMA
         from .delegation.workspace_isolation import WORKSPACE_SCHEMA
         from .delegation.integration import INTEGRATION_SCHEMA
+        from .routing.store import ROUTING_SCHEMA
         from .project_storage import canonical_project, project_store_directory
         self.project_root=canonical_project(project_root) if project_root is not None else None
         if self.project_root is not None and Path(directory)!=project_store_directory(self.project_root):
@@ -319,7 +320,7 @@ class Store:
             db.commit()
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+WORKSPACE_SCHEMA+INTEGRATION_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+WORKSPACE_SCHEMA+INTEGRATION_SCHEMA+ROUTING_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
             if app==APPLICATION_ID:
                 # T017: additive columns for a pre-T017 store that already has
                 # task_events/task_orchestration (CREATE TABLE IF NOT EXISTS
@@ -417,6 +418,44 @@ class Store:
                     " host_buffer_state TEXT NOT NULL DEFAULT 'unknown', created_at TEXT NOT NULL,"
                     " UNIQUE(assignment_ref, request_key))"
                 )
+                # T027: additive configuration_route_extras/attempt_route_audit/
+                # fallback_consent_records tables for a pre-T027 store (same
+                # precedent as attempt_process_registry above -- CREATE TABLE
+                # IF NOT EXISTS in SCHEMA only runs for a brand new database).
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS configuration_route_extras ("
+                    " revision_id TEXT PRIMARY KEY REFERENCES configuration_revisions(id),"
+                    " task_id TEXT NOT NULL REFERENCES tasks(id),"
+                    " route_model TEXT NOT NULL, route_profile_json TEXT NOT NULL,"
+                    " route_details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)"
+                )
+                db.execute("CREATE INDEX IF NOT EXISTS configuration_route_extras_by_task ON configuration_route_extras(task_id)")
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS attempt_route_audit ("
+                    " id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id),"
+                    " role TEXT NOT NULL, engine TEXT NOT NULL, connection_id TEXT NOT NULL,"
+                    " model TEXT NOT NULL, params_fingerprint TEXT NOT NULL, config_revision_id TEXT,"
+                    " decision TEXT NOT NULL CHECK(decision IN ('authorized','fallback')),"
+                    " decision_detail_json TEXT NOT NULL, predecessor_attempt_id TEXT, recorded_at TEXT NOT NULL)"
+                )
+                db.execute("CREATE INDEX IF NOT EXISTS attempt_route_audit_by_task ON attempt_route_audit(task_id, recorded_at)")
+                db.execute("CREATE INDEX IF NOT EXISTS attempt_route_audit_by_attempt ON attempt_route_audit(attempt_id)")
+                db.execute(
+                    "CREATE TRIGGER IF NOT EXISTS attempt_route_audit_no_update BEFORE UPDATE ON attempt_route_audit "
+                    "BEGIN SELECT RAISE(ABORT, 'immutable'); END"
+                )
+                db.execute(
+                    "CREATE TRIGGER IF NOT EXISTS attempt_route_audit_no_delete BEFORE DELETE ON attempt_route_audit "
+                    "WHEN NOT EXISTS (SELECT 1 FROM pending_deletions d WHERE d.task_id=OLD.task_id) "
+                    "BEGIN SELECT RAISE(ABORT, 'immutable'); END"
+                )
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS fallback_consent_records ("
+                    " id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),"
+                    " target_connection_id TEXT NOT NULL, target_provider TEXT NOT NULL, data_scope TEXT NOT NULL,"
+                    " granted_by TEXT NOT NULL, granted_at TEXT NOT NULL, revoked_at TEXT)"
+                )
+                db.execute("CREATE INDEX IF NOT EXISTS fallback_consent_by_task ON fallback_consent_records(task_id, target_connection_id)")
 
     def _check_project(self,db,task=None):
         if self.project_root is None:return

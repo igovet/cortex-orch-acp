@@ -16,10 +16,11 @@ from ..catalog.model import CatalogEntry
 from ..connections import registry as connection_registry
 from ..connections.model import ConnectionState
 from ..portable.errors import PortableError, PortableErrorCategory
-from ..portable.identity import OwnershipEpoch
+from ..portable.identity import ExecutionRoute, OwnershipEpoch
 from . import store as configuration_store
-from .policy import PolicyCeiling, require_narrowing
+from .policy import PolicyCeiling, RouteProfile, require_narrowing
 from .resolution import ConfigurationInputs, merge_layers, rederive_on_route_change, validate_dependent_settings
+from ..routing import store as routing_store
 
 
 def _fail(category: PortableErrorCategory, code: str, remediation: str, retry_eligible: bool, *, field: str | None = None) -> PortableError:
@@ -105,6 +106,8 @@ class ConfigurationService:
         *,
         user_layer: Mapping[str, object] | None = None,
         project_layer: Mapping[str, object] | None = None,
+        route_profile: RouteProfile | None = None,
+        route_details: Mapping[str, ExecutionRoute] | None = None,
     ) -> dict[str, object]:
         """Propose (select) a new configuration revision.
 
@@ -113,6 +116,27 @@ class ConfigurationService:
         empty defaults and an unrestricted ceiling (never widening what a
         narrower layer already set -- an absent layer is simply skipped by
         the merge, not "unrestricted wins").
+
+        ``route_profile`` (T027) is this revision's explicit mixed-team
+        route authorization: ``None`` (the default) means every worker
+        role only ever inherits this revision's own ``inputs.route`` --
+        see :class:`~.policy.RouteProfile`. Every route id named anywhere
+        in a non-default profile must already be a member of the
+        *effective* ceiling's ``allowed_routes`` (when the ceiling
+        restricts it at all); a profile naming an out-of-ceiling route is
+        rejected atomically with the rest of this proposal, exactly like
+        any other ceiling-narrowing violation.
+
+        ``route_details`` (T027) maps every route id named in a non-default
+        ``route_profile`` to the :class:`~..portable.identity
+        .ExecutionRoute` it identifies -- the durable record the fallback-
+        trigger wiring (``acp.orchestrating_runtime.OrchestratingRuntime
+        ._attempt_worker_route_fallback``) later reads back to resolve a
+        candidate target route id to an actual engine/connection/model (a
+        bare route id is an opaque content fingerprint; nothing recovers
+        those from it alone). A route named in ``route_profile`` with no
+        entry here is still accepted for authorization purposes, but can
+        never later be *chosen* as a fallback target.
         """
         user_layer = user_layer or dict(defaults={}, ceiling=PolicyCeiling())
         # A project ceiling may only narrow the user ceiling; an expansion is
@@ -155,6 +179,24 @@ class ConfigurationService:
                     raise _fail(PortableErrorCategory.VALIDATION, "route_catalog_mismatch",
                                 "catalog_entry.route must match inputs.route exactly.", False, field="route")
                 row = configuration_store.insert_revision_tx(db, task_id, latest_number + 1, inputs.route, parameters, candidate_ceiling)
+                profile = route_profile if route_profile is not None else RouteProfile(role_routes=None)
+                if profile.role_routes is not None and candidate_ceiling.allowed_routes is not None:
+                    every_named_route = frozenset().union(*profile.role_routes.values()) if profile.role_routes else frozenset()
+                    if not every_named_route.issubset(candidate_ceiling.allowed_routes):
+                        raise _fail(PortableErrorCategory.VALIDATION, "ceiling_violation",
+                                    "route_profile names a route outside the effective ceiling's allowed_routes.", False, field="route_profile")
+                encoded_details = {
+                    route_id: dict(engine=route.engine, connection_id=route.connection_id, model=route.model)
+                    for route_id, route in (route_details or {}).items()
+                }
+                encoded_details.setdefault(
+                    inputs.route.id,
+                    dict(engine=inputs.route.engine, connection_id=inputs.route.connection_id, model=inputs.route.model),
+                )
+                routing_store.insert_route_extras_tx(
+                    db, revision_id=row["id"], task_id=task_id, route_model=inputs.route.model, route_profile=profile,
+                    route_details=encoded_details,
+                )
                 db.commit()
             except BaseException:
                 db.rollback()
@@ -379,12 +421,22 @@ class ConfigurationService:
         self,
         task_id: str,
         role: str,
-        role_profile: Mapping[str, object],
+        role_profile: Mapping[str, object] | None = None,
         explicit_override=None,
     ) -> dict[str, object]:
-        """Coordinator's active route by default; override only if permitted.
+        """Coordinator's active route by default; override only within the
+        active revision's own T027 :class:`~.policy.RouteProfile`.
 
-        ``role_profile`` is ``{"allows_role_alternates": bool}``.
+        ``role_profile`` is accepted only for call-site backward
+        compatibility (``{"allows_role_alternates": bool}``, pre-T027) and,
+        when supplied with ``allows_role_alternates`` falsy, forbids any
+        override outright before the route-profile check ever runs -- it
+        can never *widen* what the stored route profile itself authorizes.
+        The authoritative source of truth is always the active
+        configuration revision's own persisted route profile (T027,
+        ``routing.store.get_route_extras``): a role absent from a non-
+        default profile, or every role under the default single-route
+        profile, is only ever authorized for the coordinator's own route.
         ``explicit_override`` is a full :class:`ConfigurationInputs`-shaped
         route/parameters choice; never accepts any cost field (see
         :class:`~.resolution.ConfigurationInputs`, which has none).
@@ -395,9 +447,19 @@ class ConfigurationService:
                         "The coordinator has no active configuration to inherit for role '%s'." % role, False, field="task_id")
         if explicit_override is None:
             return coordinator
-        if not role_profile.get("allows_role_alternates", False):
+        if role_profile is not None and not role_profile.get("allows_role_alternates", True):
             raise _fail(PortableErrorCategory.AUTHORIZATION, "forbidden_worker_override",
                         f"role '{role}' is not permitted to override the coordinator's active route.", False, field="explicit_override")
+        extras = routing_store.get_route_extras(self.store, coordinator["id"])
+        profile = extras["route_profile"] if extras is not None else RouteProfile(role_routes=None)
+        allowed = profile.allowed_routes_for(role, coordinator["route_id"])
+        if coordinator["ceiling_snapshot"].allowed_routes is not None:
+            allowed = allowed & coordinator["ceiling_snapshot"].allowed_routes
+        if explicit_override.route.id not in allowed:
+            raise _fail(PortableErrorCategory.AUTHORIZATION, "forbidden_worker_override",
+                        f"role '{role}' is not authorized for route {explicit_override.route.id!r}; "
+                        f"only {{{', '.join(sorted(allowed))}}} is authorized under this task's route profile.",
+                        False, field="explicit_override")
         require_narrowing(explicit_override.ceiling_override or coordinator["ceiling_snapshot"], coordinator["ceiling_snapshot"])
         return dict(
             route_id=explicit_override.route.id,

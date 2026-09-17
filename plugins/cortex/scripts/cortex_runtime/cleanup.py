@@ -75,6 +75,10 @@ def finish_deletions(store,db,task):
         # table references either by id, so plain task_id deletes suffice.
         _delete_if_present("attempt_process_registry","task_id=?",(task,))
         _delete_if_present("attempt_effective_context","task_id=?",(task,))
+        # T027 attempt_route_audit/fallback_consent_records: no other table
+        # references either by id, so plain task_id deletes suffice.
+        _delete_if_present("attempt_route_audit","task_id=?",(task,))
+        _delete_if_present("fallback_consent_records","task_id=?",(task,))
         # T024 large_outputs/compaction_recovery_events: no other table
         # references either by id, so plain task_id deletes suffice.
         # large_outputs also owns files under this task's storage directory
@@ -109,6 +113,9 @@ def finish_deletions(store,db,task):
         _delete_if_present("host_transcript","session_id IN (SELECT session_id FROM acp_host_sessions WHERE task_id=?)",(task,))
         db.execute("DELETE FROM acp_host_sessions WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_route_selections WHERE task_id=?",(task,))
+        # T027 configuration_route_extras references configuration_revisions(id)
+        # -- must go before that table's own delete.
+        _delete_if_present("configuration_route_extras","task_id=?",(task,))
         db.execute("DELETE FROM configuration_revisions WHERE task_id=?",(task,))
         # T005 identity/ownership group -- previously never deleted at all
         # (pre-existing gap, T015 report; closed here).

@@ -27,6 +27,7 @@ from .recovery.budget_store import LARGE_OUTPUT_SCHEMA
 from .recovery.registry import PROCESS_REGISTRY_SCHEMA
 from .delegation.workspace_isolation import WORKSPACE_SCHEMA
 from .delegation.integration import INTEGRATION_SCHEMA
+from .routing.store import ROUTING_SCHEMA
 from .hook_storage import HOOK_SCHEMA
 from .store import APPLICATION_ID, SCHEMA, regular, sync_directory
 from .trusted_channel import IDENTITY_SCHEMA
@@ -141,6 +142,12 @@ _WORKSPACE_TABLES = frozenset({"workspace_snapshots", "workspace_integrations"})
 # store always has both.
 _BUDGET_TABLES = frozenset({"large_outputs", "compaction_recovery_events"})
 
+# configuration_route_extras/attempt_route_audit/fallback_consent_records
+# (see routing.store.ROUTING_SCHEMA) are a sixteenth, independent optional
+# group on top of every group above: a pre-T027 v11 store has none of them,
+# a store.py-created store always has all three.
+_ROUTING_TABLES = frozenset({"configuration_route_extras", "attempt_route_audit", "fallback_consent_records"})
+
 _SELECTIONS = {
     "tasks": "SELECT x.* FROM tasks x WHERE x.project_root=?",
     "thread_bindings": "SELECT x.* FROM thread_bindings x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -193,6 +200,9 @@ _SELECTIONS = {
     "compaction_recovery_events": "SELECT x.* FROM compaction_recovery_events x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "workspace_snapshots": "SELECT x.* FROM workspace_snapshots x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "workspace_integrations": "SELECT x.* FROM workspace_integrations x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "configuration_route_extras": "SELECT x.* FROM configuration_route_extras x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "attempt_route_audit": "SELECT x.* FROM attempt_route_audit x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "fallback_consent_records": "SELECT x.* FROM fallback_consent_records x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
 }
 
 _COPY_ORDER = (
@@ -213,6 +223,7 @@ _COPY_ORDER = (
     "attempt_process_registry", "attempt_effective_context",
     "large_outputs", "compaction_recovery_events",
     "workspace_snapshots", "workspace_integrations",
+    "configuration_route_extras", "attempt_route_audit", "fallback_consent_records",
     "deliveries",
 )
 
@@ -383,10 +394,18 @@ def _workspace_present(db):
     return names == _WORKSPACE_TABLES
 
 
+def _routing_present(db):
+    """True only when all three T027 routing tables exist."""
+    names = _table_names(db) & _ROUTING_TABLES
+    if names and names != _ROUTING_TABLES:
+        raise StoreError("unsupported_storage")
+    return names == _ROUTING_TABLES
+
+
 def _expected_layout():
     db = sqlite3.connect(":memory:")
     try:
-        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA)
+        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA)
         tables = _table_names(db)
         columns = {
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA table_xinfo({_identifier(table)})"))
@@ -396,7 +415,7 @@ def _expected_layout():
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA foreign_key_list({_identifier(table)})"))
             for table in tables
         }
-        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES - _GENERATIONS_TABLES - _PROCESS_REGISTRY_TABLES - _BUDGET_TABLES - _WORKSPACE_TABLES
+        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES - _GENERATIONS_TABLES - _PROCESS_REGISTRY_TABLES - _BUDGET_TABLES - _WORKSPACE_TABLES - _ROUTING_TABLES
         return core, columns, foreign_keys
     finally:
         db.close()
@@ -428,6 +447,7 @@ def _validate_format(db):
     process_registry_present = _process_registry_present(db)
     budget_present = _budget_present(db)
     workspace_present = _workspace_present(db)
+    routing_present = _routing_present(db)
     expected = (
         core
         | (_IDENTITY_TABLES if identity_present else set())
@@ -446,6 +466,7 @@ def _validate_format(db):
         | (_PROCESS_REGISTRY_TABLES if process_registry_present else set())
         | (_BUDGET_TABLES if budget_present else set())
         | (_WORKSPACE_TABLES if workspace_present else set())
+        | (_ROUTING_TABLES if routing_present else set())
     )
     views = db.execute("SELECT 1 FROM sqlite_master WHERE type='view' LIMIT 1").fetchone()
     if actual != expected or views is not None:
@@ -706,7 +727,7 @@ def _create_destination(source_db, temporary, project_root):
         # a fresh store: core SCHEMA+HOOK_SCHEMA plus the identity tables,
         # regardless of whether the (possibly legacy, pre-T005) source has
         # them. A legacy source simply leaves them empty in the destination.
-        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA +
+        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA +
                              f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
         target.execute("BEGIN IMMEDIATE")
         source_identity_present = _identity_present(source_db)
@@ -725,6 +746,7 @@ def _create_destination(source_db, temporary, project_root):
         source_process_registry_present = _process_registry_present(source_db)
         source_budget_present = _budget_present(source_db)
         source_workspace_present = _workspace_present(source_db)
+        source_routing_present = _routing_present(source_db)
         expected = {}
         for table in _COPY_ORDER:
             columns = [row[1] for row in target.execute(f"PRAGMA table_info({_identifier(table)})")]
@@ -807,6 +829,11 @@ def _create_destination(source_db, temporary, project_root):
                 # No T025 workspace-snapshot/integration rows exist to
                 # carry; leave the destination's freshly-created workspace
                 # tables empty for the same reason.
+                rows = ()
+            elif table in _ROUTING_TABLES and not source_routing_present:
+                # No T027 route-profile/audit/consent rows exist to carry;
+                # leave the destination's freshly-created routing tables
+                # empty for the same reason.
                 rows = ()
             elif table == "deliveries":
                 rows = _selected_deliveries(source_db, project_root)

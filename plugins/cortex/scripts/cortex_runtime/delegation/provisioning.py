@@ -675,7 +675,7 @@ class ProvisioningService:
                 task_id=row["task_id"], assignment_id=row["assignment_id"], attempt_id=attempt_id,
                 channel_id=row["channel_id"], config_revision=row["config_revision"],
                 context_snapshot_ref=row["context_snapshot_ref"],
-                channel_secret=channel_secret,
+                channel_secret=channel_secret, role_id=row["role_id"],
             )
             try:
                 session_ref = self._engine.open(row["workspace_binding_id"], launch, role_set.body_portable)

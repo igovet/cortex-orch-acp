@@ -311,7 +311,26 @@ class EngineSessionManagerAdapter:
             (channel_id, channel_secret, workspace_root)
             if channel_id and channel_secret else None
         )
-        record = self._connection_record_factory(task_id)
+        route_override = launch.get("route_override")
+        if route_override is not None:
+            # T027: an already-authorized fallback attempt (see
+            # ``routing.authorization.authorize_fallback``, always called by
+            # the caller *before* setting this key) targets a specific,
+            # explicitly-chosen connection instead of this task's current
+            # configuration -- never the factory's own route.
+            from ..connections import registry as connection_registry
+
+            state = connection_registry.read_registry(self._environ)
+            record = state.connections.get(route_override["connection_id"])
+            if record is None:
+                raise RuntimeError(
+                    f"EngineSessionManagerAdapter.open: route_override connection "
+                    f"{route_override['connection_id']!r} no longer exists."
+                )
+        else:
+            record = self._connection_record_factory(task_id)
+        if self._store is not None:
+            self._authorize_dispatch(record, task_id, launch)
         reservation_id = None
         if self._store is not None:
             reservation_id = self._reserve_capacity_blocking(record.id, task_id, attempt_id, launch)
@@ -352,11 +371,71 @@ class EngineSessionManagerAdapter:
         if self._store is not None:
             self._record_process_identity(record, session_id, task_id, attempt_id, launch)
             self._record_effective_context(record, task_id, attempt_id, launch)
+            self._record_route_audit(record, task_id, attempt_id, launch)
             self._open_generation(
                 manager, record, session_id, task_id, attempt_id, launch,
                 cause="session_replacement" if replacement else "session_open",
             )
         return session_id
+
+    def attempt_fallback(
+        self, *, old_attempt_id: str, new_attempt_id: str, task_id: str, role: str, failure_class: str,
+        target_connection_id: str, target_route_id: str, workspace_binding_id: str, launch: Mapping[str, object],
+        instructions: str, target_model: str | None = None,
+    ) -> str:
+        """T027: the only production path that ever opens a *different*
+        route/connection for the same task than the one its active
+        configuration currently selects.
+
+        Requires ``self._store`` (raises otherwise -- never authorizes a
+        fallback with no durable state to check policy/consent/budget
+        against). Authorizes strictly via
+        ``routing.authorization.authorize_fallback`` against this task's
+        *current* effective ceiling/route-profile before ever calling
+        :meth:`open`; on any authorization failure this raises the
+        resulting :class:`~..portable.errors.PortableError` and opens
+        nothing. On success, reconciliation of ``old_attempt_id`` is the
+        caller's own responsibility (see ``recovery.worker_reconciliation``/
+        ``recovery.coordinator_recovery``) -- this method only ever
+        dispatches the *new* attempt, recorded with
+        ``decision='fallback'`` and ``predecessor_attempt_id=old_attempt_id``
+        (see :meth:`_record_route_audit`).
+        """
+        if self._store is None:
+            raise RuntimeError("attempt_fallback requires a real Store (self._store is None).")
+        from ..configuration import store as configuration_store
+        from ..configuration.policy import RouteProfile
+        from ..connections import registry as connection_registry
+        from ..routing import authorization as routing_authorization
+        from ..routing import store as routing_store
+
+        config_revision = launch.get("config_revision")
+        if not config_revision:
+            raise RuntimeError("attempt_fallback requires launch['config_revision'].")
+        with self._store.connection() as db:
+            row = db.execute("SELECT * FROM configuration_revisions WHERE id=?", (config_revision,)).fetchone()
+        if row is None:
+            raise RuntimeError("attempt_fallback: config_revision not found.")
+        revision = configuration_store._row_dict(row)
+        extras = routing_store.get_route_extras(self._store, config_revision)
+        route_profile = extras["route_profile"] if extras is not None else RouteProfile(role_routes=None)
+        state = connection_registry.read_registry(self._environ)
+        current_connection = state.connections.get(revision["route_connection_id"])
+        target_connection = state.connections.get(target_connection_id)
+        if current_connection is None or target_connection is None:
+            raise RuntimeError("attempt_fallback: current or target connection no longer exists.")
+        routing_authorization.authorize_fallback(
+            self._store, task_id=task_id, ceiling=revision["ceiling_snapshot"], failure_class=failure_class,
+            role=role, route_profile=route_profile, coordinator_route_id=revision["route_id"],
+            current_connection=current_connection, target_connection=target_connection, target_route_id=target_route_id,
+        )
+        fallback_launch = dict(launch)
+        fallback_launch["attempt_id"] = new_attempt_id
+        fallback_launch["route_override"] = dict(connection_id=target_connection_id, model=target_model)
+        fallback_launch["fallback_of"] = old_attempt_id
+        fallback_launch["fallback_failure_class"] = failure_class
+        fallback_launch["resolved_route_id"] = target_route_id
+        return self.open(workspace_binding_id, fallback_launch, instructions)
 
     def _record_process_identity(self, record, session_id, task_id, attempt_id, launch) -> None:
         """T023: durably record enough OS-level identity for this attempt's
@@ -409,6 +488,87 @@ class EngineSessionManagerAdapter:
             self._store, attempt_id=attempt_id, task_id=task_id, role=role,
             selected_config_revision_id=config_revision, effective_config_revision_id=config_revision,
             route_engine=record.engine, route_connection_id=record.id, resource_policy=policy,
+        )
+
+    def _authorize_dispatch(self, record, task_id, launch) -> None:
+        """T027: refuse *before* any capacity reservation/process launch
+        when this attempt's role is not authorized for the route it is
+        about to use, or this task has already exhausted a tracked
+        ``PolicyCeiling.limits['attempts']`` budget. A no-op when this
+        launch carries no ``config_revision`` (a fake/test double with no
+        real configuration behind it) -- never a substitute for the real
+        checks in ``configuration.service.ConfigurationService.propose``/
+        ``resolve_worker``, which already ran before this launch was ever
+        constructed."""
+        config_revision = launch.get("config_revision")
+        if not config_revision:
+            return
+        from ..configuration import store as configuration_store
+        from ..configuration.policy import RouteProfile
+        from ..routing import authorization as routing_authorization
+        from ..routing import store as routing_store
+
+        with self._store.connection() as db:
+            row = db.execute("SELECT * FROM configuration_revisions WHERE id=?", (config_revision,)).fetchone()
+        if row is None:
+            return
+        revision = configuration_store._row_dict(row)
+        extras = routing_store.get_route_extras(self._store, config_revision)
+        route_profile = extras["route_profile"] if extras is not None else RouteProfile(role_routes=None)
+        # T027 review fix (HIGH): the real, resolved role id (e.g.
+        # "reviewer") when the caller threaded one through
+        # (``delegation.provisioning``'s launch, or a fallback launch --
+        # see ``attempt_fallback``/``_attempt_worker_route_fallback``),
+        # never just the coarse "worker"/"coordinator" bucket -- a profile
+        # that names (and denies) a specific role must actually bind that
+        # role's own name, or a denied role would silently fall through to
+        # RouteProfile's generic-bucket default and dispatch anyway.
+        role = launch.get("role_id") or ("worker" if launch.get("assignment_id") else "coordinator")
+        # A fallback attempt (route_override present) is authorized
+        # up-front by the caller via ``routing.authorization
+        # .authorize_fallback`` -- never re-derived/re-checked here against
+        # the *original* route's profile, which would incorrectly forbid
+        # the very route change fallback just authorized.
+        if launch.get("route_override") is not None:
+            return
+        candidate_route_id = launch.get("resolved_route_id") or revision["route_id"]
+        routing_authorization.authorize_dispatch(
+            self._store, task_id=task_id, role=role, route_profile=route_profile,
+            coordinator_route_id=revision["route_id"], candidate_route_id=candidate_route_id,
+            ceiling=revision["ceiling_snapshot"],
+        )
+
+    def _record_route_audit(self, record, task_id, attempt_id, launch) -> None:
+        """T027: durably audit the actual engine/connection/model/params
+        fingerprint/config-revision every attempt (coordinator, worker, or
+        fallback) was dispatched with -- see ``routing.store
+        .record_attempt_audit``. A fallback attempt (``route_override``
+        present) is audited with ``decision='fallback'`` and its
+        predecessor attempt id; every other attempt is audited
+        ``'authorized'``."""
+        from ..routing import authorization as routing_authorization
+        from ..routing import store as routing_store
+
+        config_revision = launch.get("config_revision")
+        role = launch.get("role_id") or ("worker" if launch.get("assignment_id") else "coordinator")
+        route_override = launch.get("route_override")
+        model = (route_override or {}).get("model")
+        if model is None:
+            model = "unknown"
+            if config_revision:
+                extras = routing_store.get_route_extras(self._store, config_revision)
+                if extras is not None:
+                    model = extras["route_model"]
+        fingerprint = routing_authorization.fingerprint_params(launch.get("parameters") or {})
+        is_fallback = launch.get("route_override") is not None
+        detail = dict(role=role, route_connection_id=record.id)
+        if is_fallback:
+            detail["failure_class"] = launch.get("fallback_failure_class")
+        routing_store.record_attempt_audit(
+            self._store, attempt_id=attempt_id, task_id=task_id, role=role, engine=record.engine,
+            connection_id=record.id, model=model, params_fingerprint=fingerprint,
+            config_revision_id=config_revision, decision="fallback" if is_fallback else "authorized",
+            detail=detail, predecessor_attempt_id=launch.get("fallback_of"),
         )
 
     def _open_generation(self, manager, record, session_id, task_id, attempt_id, launch, *, cause: str) -> None:

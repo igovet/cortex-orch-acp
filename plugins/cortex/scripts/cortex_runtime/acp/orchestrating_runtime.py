@@ -241,6 +241,13 @@ class _IntegrationHostBinding:
 class OrchestratingRuntime:
     """Model-owned coordination loop; implements ``acp.runtime.IncomingRuntime``."""
 
+    # T027: defensive hard ceiling on consecutive fallback hops for one
+    # worker prompt. ``_attempt_worker_route_fallback`` already excludes
+    # every previously-tried connection via the predecessor chain, so this
+    # never binds for any realistic route-profile size; it only guards
+    # against a pathological/corrupt chain ever looping unbounded.
+    _MAX_FALLBACK_HOPS = 8
+
     def __init__(
         self,
         store,
@@ -1796,6 +1803,179 @@ class OrchestratingRuntime:
                 pending.discard(future)
             self._cond.notify_all()
 
+    def _attempt_worker_route_fallback(
+        self, task_id: str, assignment_ref: str, assignment_id: str, role_id: str, old_attempt_id: str,
+        workspace_binding_id: str, config_revision: str | None, failure_class: str,
+        instructions: str,
+    ) -> tuple[str | None, bool, str | None]:
+        """T027: on a fallback-eligible worker failure, consult the durable
+        route profile/ceiling/fallback policy this task's active
+        configuration revision actually recorded and, only when a fresh
+        :func:`routing.authorization.authorize_fallback` check on the
+        engine adapter's own :meth:`SessionRuntime.attempt_fallback`
+        authorizes it, open a replacement attempt on the single
+        deterministic next allowed target route.
+
+        Never tries a second candidate route on refusal (that would be
+        exactly the silent route-shopping this task forbids): returns
+        ``(None, explicitly_refused)`` on any refusal, missing policy/
+        consent, exhausted budget, or a candidate this configuration
+        revision never recorded a resolvable ``(engine, connection_id,
+        model)`` for. ``explicitly_refused`` is ``True`` only once a real
+        configuration revision/route profile was actually consulted and a
+        concrete, coordinator-visible ``assignment_failed:...:fallback``
+        reason was already recorded for it (the caller must never write a
+        second, generic one in that case); ``False`` means fallback was
+        never evaluated at all (no configuration revision resolvable, or
+        this engine has no ``attempt_fallback`` -- the caller's own plain
+        failure message is the only one written). Reconciles the old
+        attempt first (T023's own worker-lost
+        primitives) so a confirmed/ambiguous capacity reservation and its
+        trusted channel are never left dangling; re-derives canonical
+        context via the normal :meth:`SessionRuntime.open` generation-
+        delivery path (``cause='session_replacement'``, T021/T022) for the
+        new engine.
+        """
+        def _refuse(reason: str) -> None:
+            delegation_events.append_event(
+                self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}:fallback",
+                dict(error=f"fallback_refused:{reason}", failure_class=failure_class), origin="runtime",
+                assignment_ref=assignment_ref,
+            )
+
+        attempt_fallback = getattr(self._engine, "attempt_fallback", None)
+        if attempt_fallback is None or not config_revision:
+            # Fallback was never even evaluated (no real configuration
+            # revision to consult at all -- e.g. a test double or a task
+            # whose engine adapter never implements attempt_fallback): the
+            # caller's own plain failure message is the only one written.
+            return None, False, None
+        from ..configuration import store as configuration_store
+        from ..routing import authorization as routing_authorization
+        from ..routing import store as routing_store
+
+        with self._store.connection() as db:
+            row = db.execute("SELECT * FROM configuration_revisions WHERE id=?", (config_revision,)).fetchone()
+        if row is None:
+            return None, False, None
+        revision = configuration_store._row_dict(row)
+        extras = routing_store.get_route_extras(self._store, config_revision)
+        if extras is None:
+            return None, False, None
+        ceiling = revision["ceiling_snapshot"]
+        allowed = routing_authorization.allowed_routes_for_role(
+            extras["route_profile"], ceiling, role_id, revision["route_id"],
+        )
+        fallback_targets = ceiling.fallback_policy.allowed_target_routes
+        candidates = allowed if fallback_targets is None else (allowed & fallback_targets)
+        # T027 review fix (MEDIUM): never re-select a connection already
+        # tried for THIS assignment -- walk the predecessor chain from
+        # ``old_attempt_id`` (every prior fallback hop, not just the
+        # original coordinator route) collecting each hop's own audited
+        # connection id, bounded so a corrupt/cyclic chain can never loop
+        # forever.
+        tried_connection_ids = {revision["route_connection_id"]}
+        current_attempt_id, seen = old_attempt_id, set()
+        while current_attempt_id and current_attempt_id not in seen and len(seen) < 50:
+            seen.add(current_attempt_id)
+            hops = routing_store.list_audit_for_attempt(self._store, current_attempt_id)
+            if not hops:
+                break
+            last = hops[-1]
+            tried_connection_ids.add(last["connection_id"])
+            current_attempt_id = last["predecessor_attempt_id"]
+        candidates = {
+            route_id for route_id in candidates
+            if route_id in extras["route_details"]
+            and extras["route_details"][route_id]["connection_id"] not in tried_connection_ids
+        }
+        if not candidates:
+            _refuse("no_untried_authorized_route")
+            return None, True, None
+        target_route_id = sorted(candidates)[0]
+        detail = extras["route_details"][target_route_id]
+
+        from ..recovery import worker_reconciliation
+
+        worker_reconciliation._best_effort_terminate(self._store, self._engine, old_attempt_id)
+        worker_reconciliation._revoke_worker_channel(self._store, task_id, old_attempt_id)
+
+        # T027 (scout finding): a fallback attempt needs its OWN worker
+        # channel -- the old attempt's channel was just revoked above, and
+        # a channel is never valid for a different attempt id -- so its own
+        # Cortex MCP subprocess can actually authenticate against the new
+        # session, exactly like a first-time delegation's own
+        # delegation.provisioning._step_channel.
+        from .. import ownership
+        from ..trusted_channel import issue_channel_tx
+
+        new_attempt_id = new_id("xa_")
+        coordinator_channel = self._coordinator_channels.get(task_id)
+        try:
+            with self._store.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    owner_epoch = ownership.current_owner_epoch(db, task_id)
+                    channel_id, channel_secret = issue_channel_tx(
+                        db, task_id, "worker", owner_epoch,
+                        parent_channel_id=coordinator_channel.channel_id if coordinator_channel is not None else None,
+                        assignment_id=assignment_id, attempt_id=new_attempt_id, workspace_binding_id=workspace_binding_id,
+                    )
+                    db.commit()
+                except BaseException:
+                    db.rollback()
+                    raise
+            launch = dict(
+                task_id=task_id, assignment_id=assignment_id, attempt_id=new_attempt_id, config_revision=config_revision,
+                channel_id=channel_id, channel_secret=channel_secret, role_id=role_id,
+            )
+            new_session_ref = attempt_fallback(
+                old_attempt_id=old_attempt_id, new_attempt_id=new_attempt_id, task_id=task_id, role=role_id,
+                failure_class=failure_class, target_connection_id=detail["connection_id"],
+                target_route_id=target_route_id, workspace_binding_id=workspace_binding_id, launch=launch,
+                instructions=instructions, target_model=detail.get("model"),
+            )
+        except PortableError as error:
+            # Never silently retried on a third route: one deterministic
+            # candidate, one authorization decision, surfaced verbatim.
+            _refuse(error.code)
+            return None, True, None
+        except BaseException as error:
+            # An unexpected (non-PortableError) failure while attempting
+            # fallback must still produce a durable, coordinator-visible
+            # event -- never a silently lost assignment (same precedent as
+            # this method's own first-prompt BaseException handler).
+            _refuse(f"unexpected_error:{type(error).__name__}")
+            return None, True, None
+        self._worker_sessions[(task_id, assignment_ref)] = new_session_ref
+        # delegation.completion.gate's own worker-event bridge resolves a
+        # coordinator-facing assignment_ref (this delegation's idempotency
+        # key) to the *provisioned* attempt_id before ever looking up a
+        # worker_result/worker_question event (those are always keyed by
+        # attempt_id, never the hash) -- update it here so the fallback
+        # attempt's own worker-facing events resolve, exactly as if this
+        # had been the delegation's attempt_id from the start.
+        with self._store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute(
+                    "UPDATE delegation_provisioning SET attempt_id=?, engine_session_ref=?, updated_at=? WHERE idempotency_key=?",
+                    (new_attempt_id, new_session_ref, _now(), assignment_ref),
+                )
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        delegation_events.append_event(
+            self._store, task_id, "progress", f"fallback_dispatched:{assignment_ref}:{new_attempt_id}",
+            dict(
+                note=f"Assignment {assignment_ref} fell over to an authorized alternate route after {failure_class}.",
+                predecessor_attempt_id=old_attempt_id, new_attempt_id=new_attempt_id, target_route_id=target_route_id,
+            ),
+            origin="runtime", assignment_ref=assignment_ref,
+        )
+        return new_session_ref, True, new_attempt_id
+
     def _provision_and_prompt(self, task_id: str, coordinator_channel: ChannelContext, payload: Mapping[str, Any], cancel_event: threading.Event) -> None:
         # T017: capacity queuing happens *inside* SessionRuntime.open() (see
         # delegation.live_adapters.EngineSessionManagerAdapter.open) -- never
@@ -1812,11 +1992,47 @@ class OrchestratingRuntime:
                 payload["acceptance"], payload["request_key"],
             )
         except PortableError as error:
-            delegation_events.append_event(
-                self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
-                dict(error=error.code), origin="runtime", assignment_ref=assignment_ref,
-            )
-            return
+            result = None
+            if error.code in ("capacity_unsatisfiable", "capacity_timeout"):
+                # T027: this delegation's own attempt was allocated (and its
+                # capacity reservation/channel opened) before open() itself
+                # refused it -- resolvable via the identical idempotency key
+                # delegate() itself derives, never a guess.
+                from ..delegation.provisioning import _idempotency_key
+
+                idempotency_key = _idempotency_key(task_id, coordinator_channel.channel_id, payload["request_key"])
+                with self._store.connection() as db:
+                    provisioning_row = db.execute(
+                        "SELECT * FROM delegation_provisioning WHERE idempotency_key=?", (idempotency_key,),
+                    ).fetchone()
+                if provisioning_row is not None and provisioning_row["attempt_id"]:
+                    from ..portable.roles import load_role
+
+                    role_set = load_role(provisioning_row["role_id"])
+                    new_session_ref, fallback_refused, new_attempt_id = self._attempt_worker_route_fallback(
+                        task_id, assignment_ref, provisioning_row["assignment_id"], provisioning_row["role_id"],
+                        provisioning_row["attempt_id"], provisioning_row["workspace_binding_id"],
+                        provisioning_row["config_revision"], "capacity_unavailable", role_set.body_portable,
+                    )
+                    if new_session_ref is not None:
+                        from types import SimpleNamespace
+
+                        result = SimpleNamespace(
+                            engine_session_ref=new_session_ref, attempt_id=new_attempt_id,
+                            assignment_id=provisioning_row["assignment_id"], role_id=provisioning_row["role_id"],
+                            workspace_binding_id=provisioning_row["workspace_binding_id"],
+                            config_revision=provisioning_row["config_revision"],
+                        )
+                    elif fallback_refused:
+                        # _attempt_worker_route_fallback already recorded
+                        # the concrete refusal reason itself.
+                        return
+            if result is None:
+                delegation_events.append_event(
+                    self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
+                    dict(error=error.code), origin="runtime", assignment_ref=assignment_ref,
+                )
+                return
         delegation_events.append_event(
             self._store, task_id, "assignment_ready", f"assignment_ready:{assignment_ref}",
             dict(engine_session_ref=result.engine_session_ref), origin="runtime", assignment_ref=assignment_ref,
@@ -1828,39 +2044,92 @@ class OrchestratingRuntime:
         self._worker_sessions[(task_id, assignment_ref)] = result.engine_session_ref
         brief = f"{payload['title']}\n\n{payload['brief']}\n\nAcceptance: {payload['acceptance']}"
         generation_delivery_id = None
-        try:
-            brief, generation_delivery_id, delivery_blocked = self._begin_generation_delivery(
-                task_id, result.engine_session_ref, payload["role"], brief,
-            )
-            if delivery_blocked:
+        # T027 review fix (MEDIUM): a loop, not a single hardcoded retry --
+        # each EngineTurnFailed may fall over to a *different* untried
+        # route (``_attempt_worker_route_fallback`` itself excludes every
+        # already-tried connection via the predecessor chain, so this
+        # always terminates: the number of authorized routes is finite).
+        # ``_MAX_FALLBACK_HOPS`` is only a defensive hard ceiling, never
+        # expected to bind in practice.
+        for _hop in range(self._MAX_FALLBACK_HOPS + 1):
+            try:
+                brief, generation_delivery_id, delivery_blocked = self._begin_generation_delivery(
+                    task_id, result.engine_session_ref, payload["role"], brief,
+                )
+                if delivery_blocked:
+                    delegation_events.append_event(
+                        self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
+                        dict(error="context_budget_blocked"), origin="runtime", assignment_ref=assignment_ref,
+                    )
+                    return
+                outcome = self._engine.prompt(result.engine_session_ref, brief, cancel_event)
+                break
+            except EngineTurnFailed as failure:
+                # T017: a worker's own engine turn failing (transport
+                # closed, timed out, poisoned session, ...) must produce an
+                # assignment_failed event -- unless T027's own
+                # authorize_fallback explicitly permits a deterministic,
+                # never-yet-tried alternate route for the 'engine_failure'
+                # class; a route this task never authorized/recorded, or a
+                # task with no fallback policy at all, still gets the
+                # ordinary assignment_failed and is never silently retried
+                # on the same route.
+                self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind=failure.kind, stop_reason=None)
+                old_attempt_id = getattr(result, "attempt_id", None)
+                new_session_ref = None
+                fallback_refused = False
+                new_attempt_id = None
+                role_id = getattr(result, "role_id", payload["role"])
+                assignment_id = getattr(result, "assignment_id", None)
+                workspace_binding_id = getattr(result, "workspace_binding_id", None)
+                config_revision = getattr(result, "config_revision", None)
+                if old_attempt_id is not None and _hop < self._MAX_FALLBACK_HOPS:
+                    from ..portable.roles import load_role
+
+                    role_set = load_role(role_id)
+                    new_session_ref, fallback_refused, new_attempt_id = self._attempt_worker_route_fallback(
+                        task_id, assignment_ref, assignment_id, role_id, old_attempt_id,
+                        workspace_binding_id, config_revision, "engine_failure", role_set.body_portable,
+                    )
+                if new_session_ref is None:
+                    if not fallback_refused:
+                        # Fallback was never even consulted (no attempt id
+                        # to reconcile/replace, no real configuration
+                        # revision to evaluate it against, or the hop
+                        # ceiling was reached) -- the ordinary engine-
+                        # failure event is the only one written for this
+                        # path.
+                        delegation_events.append_event(
+                            self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
+                            dict(error=f"engine_failure:{failure.kind}", kind=failure.kind),
+                            origin="runtime", assignment_ref=assignment_ref,
+                        )
+                    # Else: _attempt_worker_route_fallback already recorded
+                    # the concrete refusal reason itself -- never a second,
+                    # duplicate assignment_failed event for the same failure.
+                    return
+                # Re-deliver the identical brief to the fallback attempt's
+                # fresh session on the next loop iteration -- the same
+                # canonical instructions/capsule path a first-time worker
+                # prompt uses (T021/T022), never a retried in-flight prompt
+                # against the dead session.
+                self._worker_sessions[(task_id, assignment_ref)] = new_session_ref
+                from types import SimpleNamespace
+
+                result = SimpleNamespace(
+                    engine_session_ref=new_session_ref, attempt_id=new_attempt_id, assignment_id=assignment_id,
+                    role_id=role_id, workspace_binding_id=workspace_binding_id, config_revision=config_revision,
+                )
+            except BaseException as error:
+                # T017 fix: this call was previously unwrapped -- any other
+                # exception from a worker's prompt silently lost the
+                # assignment (no durable record at all). Record it instead.
+                self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind="unexpected_exception", stop_reason=None)
                 delegation_events.append_event(
                     self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
-                    dict(error="context_budget_blocked"), origin="runtime", assignment_ref=assignment_ref,
+                    dict(error=type(error).__name__), origin="runtime", assignment_ref=assignment_ref,
                 )
                 return
-            outcome = self._engine.prompt(result.engine_session_ref, brief, cancel_event)
-        except EngineTurnFailed as failure:
-            # T017: a worker's own engine turn failing (transport closed,
-            # timed out, poisoned session, ...) must produce an
-            # assignment_failed event -- never silently drop the assignment
-            # and never re-route it to a second engine/connection.
-            self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind=failure.kind, stop_reason=None)
-            delegation_events.append_event(
-                self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
-                dict(error=f"engine_failure:{failure.kind}", kind=failure.kind),
-                origin="runtime", assignment_ref=assignment_ref,
-            )
-            return
-        except BaseException as error:
-            # T017 fix: this call was previously unwrapped -- any other
-            # exception from a worker's first prompt silently lost the
-            # assignment (no durable record at all). Record it instead.
-            self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind="unexpected_exception", stop_reason=None)
-            delegation_events.append_event(
-                self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
-                dict(error=type(error).__name__), origin="runtime", assignment_ref=assignment_ref,
-            )
-            return
         self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind=None, stop_reason=outcome.stop_reason)
         if outcome.stop_reason == StopReason.REFUSAL:
             # A worker refusal is the coordinator's to evaluate, never

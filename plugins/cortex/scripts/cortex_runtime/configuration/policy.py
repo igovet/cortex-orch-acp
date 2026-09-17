@@ -39,6 +39,17 @@ PROVIDER_RESTRICTION = "provider_restriction"
 # Never eligible for fallback, regardless of what any fallback_policy allows.
 FALLBACK_HARD_DENYLIST = frozenset({CANCELLATION, REFUSAL, AUTHORIZATION_LOSS, PROVIDER_RESTRICTION})
 
+# T027: the only two failure classes a durable fallback_policy may actually
+# name (see the task's own lead decision #4) -- distinct from the hard
+# denylist above, which can never be overridden. A fallback_policy naming
+# any *other* class is still accepted by FallbackPolicy itself (it only
+# rejects the hard denylist), but ``routing.authorization.authorize_fallback``
+# refuses to act on any class outside this pair, closing the "arbitrary
+# failure class" gap the hard denylist alone does not cover.
+ENGINE_FAILURE = "engine_failure"
+CAPACITY_UNAVAILABLE = "capacity_unavailable"
+KNOWN_FALLBACK_ELIGIBLE_CLASSES = frozenset({ENGINE_FAILURE, CAPACITY_UNAVAILABLE})
+
 _LIMIT_NAMES = frozenset({"attempts", "calls", "tokens", "concurrency"})
 
 
@@ -253,6 +264,69 @@ class PolicyCeiling:
             spend_limit_enforceable=spend_enforceable if spend_limit is not None else False,
             fallback_policy=self.fallback_policy.intersect(other.fallback_policy),
         )
+
+
+@dataclass(frozen=True)
+class RouteProfile:
+    """T027: the user-authorized mixed-team route assignment for one
+    configuration revision.
+
+    ``role_routes is None`` (the default) means *single-route inheritance*:
+    every role, including every worker, is only ever authorized for the
+    coordinator's own active route -- no mixed-team profile is in effect.
+    An explicit, non-``None`` ``role_routes`` maps a role name to the
+    closed set of route ids that role may be dispatched on. A *named*
+    role (anything other than the generic ``"worker"``/``"coordinator"``
+    buckets -- e.g. a resolved portable role id like ``"reviewer"``)
+    absent from the mapping is denied by default (empty set): a mixed-team
+    profile is a closed allowlist, not "unlisted roles inherit the
+    coordinator route". The generic buckets keep the single-route-
+    inheritance default only when no role-specific identity was available
+    to the caller (a legacy/no-role-id call site) -- never used to bypass
+    a profile that names the real role. An empty set for a role is a
+    deliberate "this role may never be dispatched" -- distinct from the
+    role being absent.
+
+    This never encodes a universal vendor/role ranking: every id here must
+    already be a route the ``PolicyCeiling.allowed_routes`` at the same
+    layer permits (checked separately by
+    ``routing.authorization.allowed_routes_for_role``, never by this
+    dataclass, which has no ceiling of its own).
+    """
+
+    role_routes: Mapping[str, frozenset] | None = None
+
+    # Roles with no resolved, role-specific identity (a caller that never
+    # threaded a real portable role id through) -- the only roles that
+    # still fall back to the coordinator's own route when absent from an
+    # explicit role_routes mapping.
+    _GENERIC_ROLES = frozenset({"worker", "coordinator"})
+
+    def __post_init__(self) -> None:
+        if self.role_routes is not None:
+            normalized = {role: frozenset(ids) for role, ids in self.role_routes.items()}
+            object.__setattr__(self, "role_routes", normalized)
+
+    def allowed_routes_for(self, role: str, coordinator_route_id: str) -> frozenset:
+        """The closed set of route ids ``role`` may be dispatched on.
+
+        Never returns an unbounded/None set: absent a mixed-team profile
+        (``role_routes is None``) the result is always exactly
+        ``{coordinator_route_id}``. With an explicit profile, a *named*
+        role missing from it is denied (empty set); only the generic
+        ``"worker"``/``"coordinator"`` buckets still default to the
+        coordinator's own route when absent.
+        """
+        if self.role_routes is None:
+            return frozenset({coordinator_route_id})
+        if role in self.role_routes:
+            return self.role_routes[role]
+        if role in self._GENERIC_ROLES:
+            return frozenset({coordinator_route_id})
+        return frozenset()
+
+    def is_default_single_route(self) -> bool:
+        return self.role_routes is None
 
 
 def require_narrowing(candidate: PolicyCeiling, ceiling: PolicyCeiling) -> None:
