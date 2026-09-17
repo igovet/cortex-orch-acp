@@ -551,6 +551,13 @@ class Store:
         # delivery receipt, or other task state is created for the attempt.
         if operation=="create_draft" and args.get("template")=="pipeline" and parent_thread_id is not None:
             raise StoreError("coordinator_pipeline_only")
+        # T030 (security audit): governance is a coordinator-owned advisory
+        # decision for the whole task, not a per-worker one. Without this
+        # check any worker channel could call set_governance and overwrite
+        # the task's governance mode/rationale -- reject before entering the
+        # transaction so no report/governance row is created for the attempt.
+        if operation=="set_governance" and parent_thread_id is not None:
+            raise StoreError("coordinator_governance_only")
         if operation=="create_draft" and "request_key" not in args:
             args=dict(args,request_key=str(uuid.uuid4()))
         if operation=="create_task" and parent_thread_id is not None:raise StoreError("child_creation")
@@ -640,7 +647,7 @@ class Store:
                     result.update(binding=self._binding(db,thread,trusted),source_capture=dict(capture,revision=self._revision(db,task),pending_turns=pending_turns),
                                   governance=governance_snapshot(db,task))
                     if operation=="list_reports":
-                        result.update(self._discovery(db,task,thread,args))
+                        result.update(self._discovery(db,task,thread,args,trusted))
                     db.commit()
                 except BaseException:
                     db.rollback(); self._rollback_files(rollbacks)
@@ -1271,18 +1278,18 @@ class Store:
         db.execute("INSERT OR REPLACE INTO report_provenance VALUES (?,?,?)",(sequence,revision,"[]"))
         return revision
 
-    def _discovery(self,db,task,thread,args):
+    def _discovery(self,db,task,thread,args,trusted=False):
         limit=args.get("limit",25)
         after=args.get("changes_after",0)
         changes=db.execute("SELECT c.sequence,c.kind,c.reference,c.created_at,h.event_name,h.thread_id AS hook_thread_id,h.metadata AS hook_metadata FROM task_changes c LEFT JOIN hook_events h ON c.task_id=h.task_id AND c.reference=h.event_key AND c.kind IN ('hook','artifact') WHERE c.task_id=? AND c.sequence>? ORDER BY c.sequence LIMIT ?",(task,after,limit+1)).fetchall()
         page=changes[:limit]
         drafts=db.execute("SELECT id AS draft_id,path AS draft_path,kind,template,created_at FROM drafts WHERE task_id=? AND owner_thread_id=? AND published_report_id IS NULL AND id>? ORDER BY id LIMIT ?",(task,thread,args.get("drafts_after",""),limit+1)).fetchall()
         own=drafts[:limit]
-        return dict(changes=[self._change_metadata(row) for row in page],changes_next=page[-1]["sequence"] if len(changes)>limit else None,
+        return dict(changes=[self._change_metadata(row,thread,trusted) for row in page],changes_next=page[-1]["sequence"] if len(changes)>limit else None,
                     own_drafts=[dict(row) for row in own],drafts_next=own[-1]["draft_id"] if len(drafts)>limit else None)
 
     @staticmethod
-    def _change_metadata(row):
+    def _change_metadata(row,thread=None,trusted=False):
         result={key:row[key] for key in ("sequence","kind","reference","created_at")}
         result["observation"]=None
         if row["hook_metadata"] is None:return result
@@ -1304,8 +1311,24 @@ class Store:
         exit_code=metadata.get("exit_code")
         status=metadata.get("status")
         if status not in {"failed","exited","running","unverified","completed"}:status="unverified"
+        # T030 (security audit): a hook-recorded actor_thread_id is the same
+        # internal principal thread id trusted_channel deliberately never
+        # discloses to a channel-managed caller (see ``_binding`` above,
+        # which masks it to "channel-managed" for exactly this reason -- a
+        # leaked principal is a usable impersonation credential on the
+        # unfenced legacy path). A channel-managed caller therefore only
+        # ever learns whether an observation was its *own* action, never any
+        # other thread's raw id; an untrusted/legacy caller keeps the prior
+        # unmasked behavior (its own thread id is already directly visible
+        # elsewhere on that path).
+        if trusted:
+            actor_thread_id=None
+            actor_is_self=actor is not None and actor==thread
+        else:
+            actor_thread_id=actor
+            actor_is_self=actor is not None and actor==thread
         result["observation"]=dict(source="hook",event_name=row["event_name"],actor_scope=scope,
-            actor_thread_id=actor,parent_session_id=bounded("parent_session_id"),
+            actor_thread_id=actor_thread_id,actor_is_self=actor_is_self,parent_session_id=bounded("parent_session_id"),
             binding_origin=bounded("binding_origin",32),tool_name=bounded("tool_name",128),
             exit_code=exit_code if type(exit_code) is int else None,
             command_session_id=bounded("command_session_id"),status=status,

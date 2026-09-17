@@ -39,6 +39,25 @@ CATALOGUE_DIGEST = hashlib.sha256(json.dumps(TOOLS, sort_keys=True).encode()).he
 # (list_reports, read_report, read_draft) never require ownership.
 MUTATING_TOOLS = frozenset({'create_draft', 'write_report', 'set_governance'})
 
+# T030 (security audit): delegation MCP operations (``delegate``,
+# ``clarify``, ``cancel``, ``decide``, ``integrate``, ``ask_question``,
+# ``publish_result``) mutate durable task/assignment state exactly like
+# MUTATING_TOOLS above, but were dispatched via a separate branch
+# (``delegation_mcp_tools.dispatch``) that never checked the caller's
+# channel epoch against the task's current owner epoch -- only explicit
+# channel *revocation* stood between a stale, un-revoked channel and a live
+# mutation. Ordinary recovery normally revokes the old coordinator channel
+# in the same step it bumps the epoch (``recovery.coordinator_recovery
+# .recover``), but that revoke is a *separate* transaction from the epoch
+# bump; a crash/restart in the window between them left an un-revoked,
+# stale-epoch coordinator channel fully able to call every delegation
+# operation, silently broadening access past a completed recovery. Reads
+# here never needed a live epoch (same reasoning as MUTATING_TOOLS above).
+DELEGATION_READ_OPERATIONS = frozenset({
+    'list_events', 'list_sources', 'read_source', 'read_capsule',
+    'read_large_output', 'read_diagnostics',
+})
+
 
 def safe_observation_fields(operation,arguments,result=None):
     """Expose only bounded routing selectors needed to audit agent behavior."""
@@ -211,6 +230,11 @@ class Server:
             role_operations = _delegation_operation_names(channel.role)
             if name in role_operations:
                 try:
+                    if name not in DELEGATION_READ_OPERATIONS:
+                        with self.store.connection() as db:
+                            current = current_owner_epoch(db, channel.task_id)
+                        if current != channel.owner_epoch:
+                            raise StoreError('stale_ownership_epoch')
                     arguments = params.get('arguments', {})
                     if not isinstance(arguments, dict):
                         raise StoreError('invalid_arguments','arguments',str(type(arguments).__name__),'JSON object','Send one object matching the advertised inputSchema.')

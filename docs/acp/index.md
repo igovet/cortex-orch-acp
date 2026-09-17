@@ -87,6 +87,10 @@ check.
   fabricated monetary number), declared-availability metrics and the
   `read_diagnostics` MCP read, the single redaction choke point, and
   unknown telemetry never gating execution](observability.md)
+- [Security boundary audit (T030): enforced trust/credential/permission
+  boundaries, real attacks attempted (stale-epoch delegation bypass and a
+  principal-thread-id leak found and fixed), and accurately stated
+  remaining containment limitations](security-boundaries.md)
 
 ## Tools
 
