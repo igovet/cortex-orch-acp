@@ -1,0 +1,12 @@
+{
+  "_comment": "Shape-only template for --install-record; every value below is a PLACEHOLDER, never a real pinned hash/path. See README.md in this directory.",
+  "node_binary": "/ABSOLUTE/PATH/TO/node",
+  "adapter_entry": "/ABSOLUTE/PATH/TO/@agentclientprotocol/codex-acp/dist/index.js",
+  "package_json": "/ABSOLUTE/PATH/TO/@agentclientprotocol/codex-acp/package.json",
+  "package_version": "1.12.0",
+  "package_json_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "adapter_entry_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "bundled_codex_version": "PLACEHOLDER",
+  "bundled_codex_binary": "/ABSOLUTE/PATH/TO/@openai/codex-linux-x64/vendor/PLATFORM/bin/codex",
+  "bundled_codex_binary_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+}

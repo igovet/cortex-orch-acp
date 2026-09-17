@@ -155,7 +155,16 @@ class FakeEngine:
         _result(request_id, payload)
 
     def _handle_set_config_option(self, request_id, params) -> None:
-        behavior = self.scenario.get("configure_behavior", "accept")
+        config_id = params.get("configId")
+        # "configure_behavior_by_option" (opt-in, defaults to {}) lets a
+        # scenario script a *different* behavior per configId, layered over
+        # the scenario-wide "configure_behavior" default -- needed to
+        # exercise a partial multi-option configure() (e.g. the first
+        # option accepted, a later one rejected) without changing any
+        # existing scenario's uniform behavior.
+        behavior = (self.scenario.get("configure_behavior_by_option") or {}).get(
+            config_id, self.scenario.get("configure_behavior", "accept")
+        )
         if behavior == "hang":
             return
         if behavior == "error":
@@ -168,7 +177,6 @@ class FakeEngine:
             _result(request_id, {})
             return
         options = list(self.scenario.get("config_options") or [])
-        config_id = params.get("configId")
         value = params.get("value")
         updated = []
         for option in options:
@@ -176,6 +184,17 @@ class FakeEngine:
             if option.get("id") == config_id:
                 option["currentValue"] = value if behavior == "accept" else "unchanged-mismatch-value"
             updated.append(option)
+        # "remove_options_on_apply" (opt-in, defaults to {}): once
+        # ``config_id`` is accepted, drop the named option id(s) from every
+        # subsequent (and this) configOptions response -- models a
+        # dynamically-narrowing option set (e.g. codex-acp's reasoning
+        # effort choices depending on the selected model) so a caller can
+        # exercise "an earlier-observed option is no longer offered after
+        # an application earlier in the same configure() call".
+        remove_map = self.scenario.get("remove_options_on_apply") or {}
+        if behavior == "accept" and config_id in remove_map:
+            to_remove = set(remove_map[config_id])
+            updated = [option for option in updated if option.get("id") not in to_remove]
         self.scenario["config_options"] = updated
         _result(request_id, dict(configOptions=updated))
 

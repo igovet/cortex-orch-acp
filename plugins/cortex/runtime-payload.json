@@ -42,6 +42,8 @@
     "scripts/cortex_runtime/diagnostic_boundary.py",
     "scripts/cortex_runtime/engine/__init__.py",
     "scripts/cortex_runtime/engine/client.py",
+    "scripts/cortex_runtime/engine/codex_adapter_acp.py",
+    "scripts/cortex_runtime/engine/codex_install.py",
     "scripts/cortex_runtime/engine/correlation.py",
     "scripts/cortex_runtime/engine/logs.py",
     "scripts/cortex_runtime/engine/mcp_bridge.py",

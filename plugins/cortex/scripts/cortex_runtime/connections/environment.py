@@ -26,6 +26,21 @@
 5. ``mcp_allowlist`` is validated but never forwarded into the process
    environment: there is no wholesale MCP server/credential forwarding
    here.
+6. ``pinned_engine_vars`` is a narrow, engine-specific escape hatch used
+   only by ``engine.process.EngineProcess`` when launching a verified
+   codex-acp install (see ``engine.codex_install``/
+   ``engine.codex_adapter_acp.build_codex_launch``): it is accepted only
+   for ``record.engine == "codex-acp"``, and only as exactly the two names
+   ``{"CODEX_PATH", "NO_BROWSER"}`` -- ``CODEX_PATH`` must be an absolute
+   path to an existing file (the caller is responsible for it being the
+   verified install's own ``bundled_codex_binary``; this function only
+   checks shape/existence, not install identity) and ``NO_BROWSER`` must be
+   exactly ``"1"``. These two names are the only ones ever allowed to
+   bypass ``DENYLIST_PATTERN``, and only via this explicit parameter --
+   never through ``base_env``/``channel_credentials``. No other name or
+   engine may use this parameter; nothing here ever sets
+   ``OPENAI_API_KEY``, ``CODEX_CONFIG``, ``MODEL_PROVIDER``,
+   ``DEFAULT_AUTH_REQUEST``, ``INITIAL_AGENT_MODE``, or ``APP_SERVER_LOGS``.
 """
 from __future__ import annotations
 
@@ -128,6 +143,44 @@ def _validate_channel_credentials(channel_credentials: tuple[str, str, str]) -> 
     }
 
 
+_PINNED_ENGINE_VAR_NAMES = {"CODEX_PATH", "NO_BROWSER"}
+_PINNED_ENGINE_VAR_ENGINE = "codex-acp"
+
+
+def _apply_pinned_engine_vars(record, result: dict[str, str], pinned_engine_vars: dict[str, str] | None) -> None:
+    if pinned_engine_vars is None:
+        return
+    if record.engine != _PINNED_ENGINE_VAR_ENGINE:
+        raise _validation_error(
+            "invalid_field",
+            f"pinned_engine_vars is only accepted for engine {_PINNED_ENGINE_VAR_ENGINE!r}, not {record.engine!r}.",
+            field="pinned_engine_vars",
+        )
+    if not isinstance(pinned_engine_vars, dict) or set(pinned_engine_vars) != _PINNED_ENGINE_VAR_NAMES:
+        raise _validation_error(
+            "invalid_field",
+            f"pinned_engine_vars for {_PINNED_ENGINE_VAR_ENGINE!r} must be exactly the keys {sorted(_PINNED_ENGINE_VAR_NAMES)}.",
+            field="pinned_engine_vars",
+        )
+    codex_path = pinned_engine_vars["CODEX_PATH"]
+    if not isinstance(codex_path, str) or not codex_path.startswith("/") or not Path(codex_path).is_file():
+        raise _validation_error(
+            "invalid_field",
+            "pinned_engine_vars['CODEX_PATH'] must be an absolute path to an existing file.",
+            field="pinned_engine_vars",
+        )
+    no_browser = pinned_engine_vars["NO_BROWSER"]
+    if no_browser != "1":
+        raise _validation_error(
+            "invalid_field", "pinned_engine_vars['NO_BROWSER'] must be exactly '1'.", field="pinned_engine_vars",
+        )
+    # Explicit bypass of DENYLIST_PATTERN for exactly these two names --
+    # documented in guarantee 6 above -- never through base_env/
+    # channel_credentials, and never for any other name or engine.
+    result["CODEX_PATH"] = codex_path
+    result["NO_BROWSER"] = no_browser
+
+
 def build_process_env(
     record,
     base_env: dict[str, str],
@@ -135,6 +188,7 @@ def build_process_env(
     channel_credentials: tuple[str, str, str] | None = None,
     mcp_allowlist: tuple[str, ...] = (),
     environ: dict[str, str] | None = None,
+    pinned_engine_vars: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Construct a least-privilege environment for exactly one connection.
 
@@ -194,6 +248,8 @@ def build_process_env(
         if current.key_kind not in KEY_KIND_ENV_VAR:
             raise _validation_error("unsupported_auth_mode", f"Unknown key_kind {current.key_kind!r}.")
         result[KEY_KIND_ENV_VAR[current.key_kind]] = _read_secret_value(current.credential_ref)
+
+    _apply_pinned_engine_vars(current, result, pinned_engine_vars)
 
     return result
 

@@ -19,6 +19,7 @@ import uuid
 
 from ..connections.environment import build_process_env
 from ..portable.errors import PortableError, PortableErrorCategory
+from . import codex_install
 from .logs import EngineLogs
 
 TERMINATE_GRACE_SECONDS = 5.0
@@ -46,7 +47,21 @@ class EngineProcess:
     and is included in ``configure()``'s evidence_ref format.
     """
 
-    def __init__(self, record, cwd, *, environ=None):
+    def __init__(self, record, cwd, *, environ=None, install=None):
+        """``install`` -- a :class:`~.codex_install.CodexAcpInstall`, or
+        ``None`` -- is only ever meaningful for ``record.engine ==
+        "codex-acp"``. When supplied it is re-verified fresh (see
+        ``codex_install.verify_install``) before anything is launched:
+        ``record.launch_command`` must already equal
+        ``codex_install.launch_command_for`` of the *verified* install (a
+        mismatch is refused, never silently overridden), and the verified
+        install's ``bundled_codex_binary`` is pinned into this process's own
+        environment as ``CODEX_PATH`` (with ``NO_BROWSER=1``) via
+        ``build_process_env``'s ``pinned_engine_vars``. Omitting ``install``
+        for a codex-acp connection launches exactly as any other engine
+        (no pinned vars, no install verification) -- callers that need the
+        pinned-install guarantee must pass it explicitly.
+        """
         if record.launch_command is None:
             raise _validation_error(
                 "engine_launch_command_missing",
@@ -67,6 +82,28 @@ class EngineProcess:
                 "An explicit absolute workspace directory is required to launch an engine process.",
                 field="cwd",
             )
+        pinned_engine_vars = None
+        if install is not None:
+            if record.engine != "codex-acp":
+                raise _validation_error(
+                    "engine_install_not_applicable",
+                    "An install record is only meaningful for engine 'codex-acp'.",
+                    field="install",
+                )
+            verified_install = codex_install.verify_install(install, environ)
+            expected_command = codex_install.launch_command_for(verified_install)
+            if tuple(command) != tuple(expected_command):
+                raise _validation_error(
+                    "engine_launch_command_mismatch",
+                    "record.launch_command does not match codex_install.launch_command_for() of the "
+                    "verified install; a launch command is never silently substituted.",
+                    field="launch_command",
+                )
+            pinned_engine_vars = {
+                "CODEX_PATH": verified_install.bundled_codex_binary,
+                "NO_BROWSER": "1",
+            }
+
         base_env = dict(os.environ if environ is None else environ)
         # Pass this connection's own resolution ``environ`` through
         # explicitly (never rely on ``os.environ`` having been
@@ -74,7 +111,9 @@ class EngineProcess:
         # re-verifies the connection registry against exactly this mapping
         # (default ``None`` -> real ``os.environ``, for backward
         # compatibility with every other existing caller).
-        process_env = build_process_env(record, base_env, channel_credentials=None, environ=environ)
+        process_env = build_process_env(
+            record, base_env, channel_credentials=None, environ=environ, pinned_engine_vars=pinned_engine_vars,
+        )
 
         self.engine_instance_id = "eirt_" + uuid.uuid4().hex[:12]
         self.logs = EngineLogs(self.engine_instance_id, environ)

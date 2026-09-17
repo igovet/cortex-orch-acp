@@ -11,6 +11,8 @@ check.
 - [codeg 0.30.8 custom-agent recipe (partly unverified)](codeg-custom-agent.md)
 - [Real-client observation runbook (live rows NOT RUN, owner T035)](real-client-runbook.md)
 - [Registry metadata draft (not submitted, not published)](registry-metadata-draft.md)
+- [codex-acp outgoing adapter (T013): pinned install, env/option mapping,
+  evidence levels, opt-in probe](codex-acp-adapter.md)
 
 ## Tools
 

@@ -37,13 +37,38 @@ _STOP_REASON_FROM_WIRE = {
 }
 
 
-def _default_option_mapping(revision):
+def _option_currently_supported(observed_config_options, option_id, value) -> bool:
+    """Generic (engine-agnostic) re-check: is ``option_id=value`` present in
+    ``observed_config_options`` right now? Used by ``configure()`` (F3, T013
+    review) to catch an engine's option set narrowing *mid-call* (e.g. as a
+    direct effect of an earlier option in the same call being applied) --
+    distinct from, and in addition to, whatever pre-check an adapter-specific
+    ``option_mapping`` (e.g. ``engine.codex_adapter_acp.codex_option_mapping``)
+    already did against the *original* observed options before this call
+    started."""
+    for item in observed_config_options or ():
+        if not isinstance(item, dict) or item.get("id") != option_id:
+            continue
+        if item.get("type") == "boolean":
+            return isinstance(value, bool)
+        allowed = {choice.get("value") for choice in (item.get("options") or []) if isinstance(choice, dict)}
+        return value in allowed
+    return False
+
+
+def _default_option_mapping(revision, observed_config_options):
     """Default (route model + supported_parameters) -> ``session/set_config_option``
     mapping. Used only by tests against the fake engine: the exact,
     adapter-specific mapping from a ``ConfigurationRevision`` to real engine
-    config option ids/values is T013's responsibility, injected here via the
+    config option ids/values is T013's responsibility (see
+    ``engine.codex_adapter_acp.codex_option_mapping``), injected here via the
     ``option_mapping`` constructor argument (a callable
-    ``revision -> list[(option_id, value)]``)."""
+    ``(revision, observed_config_options) -> list[(option_id, value)]``).
+    ``observed_config_options`` is accepted for signature parity with a real
+    adapter mapping but is unused by this default (it performs no
+    engine-specific pre-check of its own -- callers relying on that must
+    supply their own ``option_mapping``)."""
+    del observed_config_options
     mapping = [("model", revision.route.model)]
     mapping.extend(revision.route.supported_parameters)
     return mapping
@@ -62,6 +87,23 @@ class EngineConfigurationOutcomeUnknown(Exception):
     exception (never ``ConfigurationRejected``, never a ``PortableError``
     special-cased by ``ConfigurationService.apply()``) so it always maps to
     ``indeterminate`` there, the same as a transport timeout/exit."""
+
+
+class EngineConfigurationPartiallyApplied(Exception):
+    """F3 (T013 review): at least one option in this same ``configure()``
+    call was already confirmed applied on the engine before a later option
+    in the same call was rejected, mismatched, errored, or became
+    unsupported. Raising plain ``ConfigurationRejected`` here would be
+    wrong: :meth:`configuration.service.ConfigurationService.apply` maps a
+    ``ConfigurationRejected`` to the revision's terminal ``failed`` state,
+    which would falsely claim *nothing* was applied when the engine is
+    actually left in a mixed state (some requested options confirmed,
+    others not). A plain exception -- never ``ConfigurationRejected``,
+    never a ``PortableError`` special-cased there -- so ``apply()``'s
+    catch-all maps it to ``indeterminate`` instead, the same family as a
+    transport timeout/exit or an unconfirmed-outcome reply, prompting an
+    explicit ``reconcile()`` using fresh engine evidence rather than a
+    silent false 'failed'."""
 
 
 def _session_unusable_error() -> PortableError:
@@ -97,16 +139,23 @@ class EngineSessionManager:
         environ=None,
         channel_credentials=None,
         option_mapping=None,
+        install=None,
         initialize_timeout: float = DEFAULT_INITIALIZE_TIMEOUT,
         call_timeout: float = DEFAULT_CALL_TIMEOUT,
         update_queue_maxsize: int = DEFAULT_UPDATE_QUEUE_MAXSIZE,
         abandon_wait_seconds: float = DEFAULT_ABANDON_WAIT_SECONDS,
     ):
+        """``install`` -- a
+        :class:`~.codex_install.CodexAcpInstall`, or ``None`` -- is passed
+        straight through to :class:`~.process.EngineProcess` on first
+        launch (see that class's own docstring); only meaningful for
+        ``record.engine == "codex-acp"``."""
         self._record = record
         self._workspace_root = workspace_root
         self._environ = environ
         self._channel_credentials = channel_credentials
         self._option_mapping = option_mapping or _default_option_mapping
+        self._install = install
         self._initialize_timeout = initialize_timeout
         self._call_timeout = call_timeout
         self._update_queue_maxsize = update_queue_maxsize
@@ -139,7 +188,7 @@ class EngineSessionManager:
         with self._lock:
             if self._process is not None:
                 return
-            self._process = EngineProcess(self._record, self._workspace_root, environ=self._environ)
+            self._process = EngineProcess(self._record, self._workspace_root, environ=self._environ, install=self._install)
             self._client = EngineClient(
                 self._process,
                 correlation=self.correlation,
@@ -223,9 +272,31 @@ class EngineSessionManager:
         if not options:
             # Unsupported: never reaches the wire.
             raise ConfigurationRejected("engine_does_not_support_configuration_options")
-        mapping = list(self._option_mapping(revision))
+        # ``options`` (this session's already-observed configOptions) is
+        # passed through to the mapping callable so an adapter-specific
+        # mapping (see ``engine.codex_adapter_acp.codex_option_mapping``)
+        # can pre-check a requested option id/value against what this
+        # engine instance actually advertised and raise
+        # ConfigurationRejected before any wire call, not only after one.
+        mapping = list(self._option_mapping(revision, options))
         latest_options = options
+        applied_pairs: list[tuple[str, object]] = []
         for option_id, value in mapping:
+            # F3 (T013 review): re-validate this option against the *most
+            # recently observed* configOptions -- which may have narrowed
+            # since session creation as a direct result of an earlier
+            # option in this same call being applied (codex-acp's
+            # reasoning_effort choices depend on the selected model) --
+            # before ever sending it. If an earlier option in this same
+            # call already succeeded, a now-unsupported later option is a
+            # partial application, never a clean rejection: nothing is
+            # sent for it either way.
+            if applied_pairs and not _option_currently_supported(latest_options, option_id, value):
+                raise EngineConfigurationPartiallyApplied(
+                    f"session/set_config_option for {option_id!r} is no longer offered (or {value!r} is no "
+                    f"longer an allowed value) after {applied_pairs!r} were already applied in this same "
+                    "configure() call; never sent."
+                )
             try:
                 result = self._client.call(
                     "session/set_config_option",
@@ -233,6 +304,12 @@ class EngineSessionManager:
                     timeout=self._call_timeout,
                 )
             except EngineProtocolError as protocol_error:
+                if applied_pairs:
+                    raise EngineConfigurationPartiallyApplied(
+                        f"session/set_config_option for {option_id!r} was rejected by the engine "
+                        f"({protocol_error.message or 'engine_rejected_configuration'!r}) after "
+                        f"{applied_pairs!r} were already applied in this same configure() call."
+                    ) from protocol_error
                 raise ConfigurationRejected(protocol_error.message or "engine_rejected_configuration") from protocol_error
             if "configOptions" not in result:
                 # The wire call itself succeeded (no JSON-RPC error), but
@@ -245,15 +322,24 @@ class EngineSessionManager:
                 # ConfigurationService.apply()'s catch-all maps it to
                 # 'indeterminate', matching a mutation whose outcome is
                 # genuinely unknown rather than a confirmed engine refusal.
+                # F3: this is also correct -- and never a bare
+                # ConfigurationRejected -- for the *first* option, since
+                # "unknown" is exactly the right label whether or not
+                # anything else in this call already applied.
                 raise EngineConfigurationOutcomeUnknown(
                     f"session/set_config_option for {option_id!r} returned no configOptions; "
                     "outcome is unknown, not confirmed and not explicitly rejected."
                 )
             latest_options = result["configOptions"]
-        for option_id, value in mapping:
             current = next((item.get("currentValue") for item in latest_options if item.get("id") == option_id), None)
             if current != value:
+                if applied_pairs:
+                    raise EngineConfigurationPartiallyApplied(
+                        f"engine_did_not_confirm_option:{option_id} after {applied_pairs!r} were already "
+                        "applied in this same configure() call."
+                    )
                 raise ConfigurationRejected(f"engine_did_not_confirm_option:{option_id}")
+            applied_pairs.append((option_id, value))
         self._session_config_options[engine_session_id] = latest_options
         pairs = ";".join(f"{option_id}={value}" for option_id, value in mapping)
         return f"{self._process.engine_instance_id}:{wire_session_id}:{pairs}"
