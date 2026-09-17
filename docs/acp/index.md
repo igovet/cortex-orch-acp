@@ -55,6 +55,10 @@ check.
   reconciliation, cross-process engine-liveness detection, config/
   permission carry-over and authorized route change, and crash
   boundaries](recovery-and-replacement.md)
+- [Parallel workspaces and safe integration (T025): isolated per-attempt
+  snapshot copies, the serialized shared-root fallback, pure-Python
+  three-way merge/conflict detection against a known base, unsaved-host-
+  buffer preconditions, and revision-bound re-verification](workspaces-and-integration.md)
 
 ## Tools
 

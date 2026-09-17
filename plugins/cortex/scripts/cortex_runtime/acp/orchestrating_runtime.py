@@ -27,6 +27,7 @@ from typing import Any, Callable, Mapping, Protocol
 from ..contracts import StoreError
 from ..delegation import events as delegation_events
 from ..delegation import revision as delegation_revision
+from ..delegation import workspace_isolation as delegation_workspace_isolation
 from ..delegation.deliveries import MAX_DELIVERY_RETRIES
 from ..delegation.provisioning import ProvisioningService
 from ..engine.instruction_delivery_registry import delivery_for
@@ -1207,11 +1208,27 @@ class OrchestratingRuntime:
 
     def _capture_result_revisions(self, task_id: str, claimed) -> dict[int, dict]:
         """T019: for every ``worker_result`` in ``claimed``, durably capture
-        (and return, keyed by event id) the observed artifact revision of
-        the task's (shared) project root at this exact instant, bound to
-        that assignment's attempt id (see ``delegation.revision``). A task
-        with no resolvable project root (should not happen for a bound
-        task) yields no captures rather than raising."""
+        (and return, keyed by event id) the observed artifact revision at
+        this exact instant, bound to that assignment's attempt id (see
+        ``delegation.revision``). A task with no resolvable project root
+        (should not happen for a bound task) yields no captures rather than
+        raising.
+
+        T025: when this assignment's attempt actually ran in an isolated
+        snapshot workspace (see ``delegation.workspace_isolation``), the
+        revision captured here is that workspace's own tree -- not the
+        shared project root's -- because that is the tree the worker's
+        checks actually ran against. Since the tree digest is computed over
+        *relative* paths/content (identical either way), a later successful
+        ``delegation.integration.integrate`` of that exact tree onto an
+        unchanged project root reproduces the same digest (still bound,
+        never stale); an integration that merges in a concurrent main-root
+        change, or a conflicting worker, necessarily changes the digest --
+        the existing ``stale_verification`` comparison below then correctly
+        refuses to let a revision-A report certify revision B. An
+        attempt with no isolated workspace (serialized fallback, or
+        pre-T025 data) falls back to the shared project root exactly as
+        before."""
         worker_results = [event for event in claimed if event.event_type == "worker_result"]
         if not worker_results:
             return {}
@@ -1219,13 +1236,23 @@ class OrchestratingRuntime:
             row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
         if row is None:
             return {}
-        workspace_root = row["project_root"]
-        return {
-            event.id: delegation_revision.record_attempt_revision(
+        shared_root = row["project_root"]
+        captures = {}
+        for event in worker_results:
+            if event.assignment_ref is None:
+                continue
+            # A worker_result event's own ``assignment_ref`` is keyed by the
+            # provisioned attempt id itself (see ``delegation.completion``'s
+            # ``gate`` docstring on the same worker-facing-vs-coordinator-
+            # facing distinction) -- resolved directly, no
+            # delegation_provisioning bridge needed here.
+            workspace_root = delegation_workspace_isolation.resolve_attempt_root(
+                self._store, task_id, event.assignment_ref,
+            ) or shared_root
+            captures[event.id] = delegation_revision.record_attempt_revision(
                 self._store, event.assignment_ref, f"worker_result:{event.id}", workspace_root,
             )
-            for event in worker_results if event.assignment_ref is not None
-        }
+        return captures
 
     def _check_terminal_decision(self, task_id: str):
         with self._store.connection() as db:
@@ -1420,8 +1447,54 @@ class OrchestratingRuntime:
                 self._engine.terminate_owned(attempt_id)
             except Exception:
                 pass
+            self._cleanup_isolated_workspace_if_integrated(task_id, attempt_id)
         if newly_terminal:
             self._notify()
+
+    def _cleanup_isolated_workspace_if_integrated(self, task_id: str, attempt_id: str) -> None:
+        """T025 design decision 5: remove only a Cortex-owned isolated
+        snapshot workspace, and only once this attempt is both terminal
+        (already established by the caller) and its integration outcome is
+        durably recorded (``workspace_integrations`` has *some* row for its
+        assignment -- applied, conflict, or noop; a cancelled assignment
+        with no integration ever attempted is also eligible, since there is
+        nothing left to integrate). An attempt whose isolated workspace was
+        never even created (serialized fallback, or isolation never used)
+        is a silent no-op here. Never touches ``project_root`` or any
+        user-owned path -- see ``workspace_isolation.IsolatedSnapshotWorkspaceProvisioner
+        .cleanup_binding``."""
+        with self._store.connection() as db:
+            snapshot = db.execute(
+                "SELECT workspace_binding_id, mode FROM workspace_snapshots WHERE task_id=? AND attempt_id=? "
+                "AND cleaned_up_at IS NULL ORDER BY created_at DESC LIMIT 1",
+                (task_id, attempt_id),
+            ).fetchone()
+            if snapshot is None or snapshot["mode"] != "isolated_snapshot":
+                return
+            provisioning = db.execute(
+                "SELECT idempotency_key FROM delegation_provisioning WHERE attempt_id=?", (attempt_id,),
+            ).fetchone()
+            cancelled = db.execute(
+                "SELECT 1 FROM task_events WHERE task_id=? AND event_type='assignment_cancelled' "
+                "AND assignment_ref=?", (task_id, provisioning["idempotency_key"] if provisioning else None),
+            ).fetchone() if provisioning else None
+            integrated = db.execute(
+                "SELECT 1 FROM workspace_integrations WHERE workspace_binding_id=?",
+                (snapshot["workspace_binding_id"],),
+            ).fetchone()
+        if integrated is None and cancelled is None:
+            return
+        try:
+            delegation_workspace_isolation.IsolatedSnapshotWorkspaceProvisioner(
+                self._store, self._task_project_root(task_id),
+            ).cleanup_binding(snapshot["workspace_binding_id"], reason="attempt_terminal_integrated")
+        except Exception:
+            pass
+
+    def _task_project_root(self, task_id: str) -> str:
+        with self._store.connection() as db:
+            row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
+        return row["project_root"]
 
     def _deliver_clarification(self, task_id, key, session_ref, message, cancel_event, event_row_id) -> None:
         generation_delivery_id = None

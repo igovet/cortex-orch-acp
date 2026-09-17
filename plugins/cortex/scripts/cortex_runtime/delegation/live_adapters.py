@@ -150,10 +150,21 @@ class EngineSessionManagerAdapter:
         store=None,
         capacity_limit: int | None = None,
         capacity_queue_timeout_seconds: float = 600.0,
+        workspace_resolver: Callable[[str, Mapping[str, object]], str] | None = None,
         **manager_kwargs,
     ) -> None:
         self._connection_record_factory = connection_record_factory
         self._workspace_root_factory = workspace_root_factory
+        # T025 (optional, opt-in -- every existing caller keeps its
+        # single-argument ``workspace_root_factory(task_id)`` behaviour
+        # unchanged): when supplied, resolves the *actual* per-attempt
+        # workspace root from this open()'s own ``workspace_binding_id``
+        # (the ref ``delegation.provisioning.WorkspaceProvisioner.create``
+        # returned -- see ``delegation.workspace_isolation
+        # .IsolatedSnapshotWorkspaceProvisioner``) instead of the
+        # task-wide shared root, so two attempts of the same task can
+        # actually run against two different, non-overlapping directories.
+        self._workspace_resolver = workspace_resolver
         self._environ = environ
         self._manager_kwargs = manager_kwargs
         self._store = store
@@ -206,7 +217,10 @@ class EngineSessionManagerAdapter:
                 "the freshly-issued secret or fail the delegation explicitly instead of "
                 "calling open()."
             )
-        workspace_root = self._workspace_root_factory(task_id)
+        if self._workspace_resolver is not None:
+            workspace_root = self._workspace_resolver(workspace_binding_id, launch)
+        else:
+            workspace_root = self._workspace_root_factory(task_id)
         channel_credentials = (
             (channel_id, channel_secret, workspace_root)
             if channel_id and channel_secret else None
