@@ -121,7 +121,7 @@ class FakeEngine:
             if method == "initialize":
                 self._handle_initialize(request_id)
             elif method == "session/new":
-                self._handle_session_new(request_id)
+                self._handle_session_new(request_id, message.get("params") or {})
             elif method == "session/set_config_option":
                 self._handle_set_config_option(request_id, message.get("params") or {})
             elif method == "session/prompt":
@@ -200,7 +200,18 @@ class FakeEngine:
                     return session_ids[index]
         return self.scenario["session_id"]
 
-    def _handle_session_new(self, request_id) -> None:
+    def _handle_session_new(self, request_id, params) -> None:
+        # T026 (additive, opt-in, default None -- every pre-T026 scenario is
+        # unaffected): dumps this exact session/new call's own full params
+        # (including any "_meta") to a scenario-named file, so a test can
+        # assert on the real wire-level payload a qualified adapter-specific
+        # delivery channel (e.g. claude-agent-acp's session/new
+        # _meta.systemPrompt) actually sent -- never only asserting the
+        # in-process DeliveryPlan/registry classification.
+        dump_path = self.scenario.get("session_new_params_dump_path")
+        if dump_path:
+            with open(dump_path, "w", encoding="utf-8") as handle:
+                json.dump(params, handle)
         session_id = self._next_session_id()
         for update in self.scenario.get("replay_updates") or []:
             _notify("session/update", dict(sessionId=session_id, update=update))

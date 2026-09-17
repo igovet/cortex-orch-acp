@@ -64,6 +64,12 @@ check.
   snapshot copies, the serialized shared-root fallback, pure-Python
   three-way merge/conflict detection against a known base, unsaved-host-
   buffer preconditions, and revision-bound re-verification](workspaces-and-integration.md)
+- [claude-agent-acp outgoing adapter (T026): the second, non-Codex engine —
+  pinned install, env/option mapping, evidence levels, the QUALIFIED
+  `session/new _meta.systemPrompt` instruction-delivery finding (0.78.0
+  only, with its full dist evidence chain and wiring path), capability
+  matrix vs codex-acp, and the opt-in, never-run coordinator probe
+  documenting the remaining T035/T036 live-execution gate](claude-agent-acp-adapter.md)
 
 ## Tools
 

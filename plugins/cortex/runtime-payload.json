@@ -68,6 +68,8 @@
     "scripts/cortex_runtime/delegation/workspace_isolation.py",
     "scripts/cortex_runtime/diagnostic_boundary.py",
     "scripts/cortex_runtime/engine/__init__.py",
+    "scripts/cortex_runtime/engine/claude_adapter_acp.py",
+    "scripts/cortex_runtime/engine/claude_install.py",
     "scripts/cortex_runtime/engine/client.py",
     "scripts/cortex_runtime/engine/codex_adapter_acp.py",
     "scripts/cortex_runtime/engine/codex_install.py",

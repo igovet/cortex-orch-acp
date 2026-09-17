@@ -31,10 +31,22 @@ class DeliveryQualification(str, Enum):
     """How confidently an adapter/version delivers instructions to the engine.
 
     qualified
-        Live evidence (see T035-T037) confirms the engine actually treats
-        the delivered content as instructions distinct from ordinary user
-        text -- for example a confirmed system-role channel or a documented,
-        version-pinned engine behavior.
+        Either live evidence (see T035-T037), or a rigorously confirmed
+        *static* system-role channel -- traced through the actual
+        distributed adapter's own call chain (who reads the delivered
+        value, what first-class field/argument it becomes, and that it is
+        kept distinct from ordinary conversation content at every layer,
+        not merely documented/asserted) -- confirms the engine treats the
+        delivered content as instructions distinct from ordinary user
+        text. See ``engine.instruction_delivery_registry`` for a worked
+        example of the latter: a second pinned adapter's own full evidence
+        chain (adapter module -> vendor SDK -> spawned subprocess control
+        protocol), established without executing the engine, versus a
+        first pinned adapter's own UNQUALIFIED leading-block channel,
+        whose evidence never distinguishes it from ordinary user text at
+        any layer. A version-pinned engine behavior documented only in
+        prose (never read in code) is never sufficient on its own for
+        either case.
     unqualified
         A concrete delivery mechanism exists and is exercised (for example
         a leading prompt block), but nothing in available evidence confirms
@@ -51,13 +63,25 @@ class DeliveryQualification(str, Enum):
 
 @dataclass(frozen=True)
 class DeliveryPlan:
-    """The concrete blocks/arguments an adapter would send, plus its qualification."""
+    """The concrete blocks/arguments an adapter would send, plus its qualification.
+
+    ``session_new_meta`` (T026, additive, default ``None``): an
+    adapter-defined, session-creation-level side-channel payload, for an
+    adapter whose qualified channel is applied there instead of (or in
+    addition to) a leading ``session/prompt`` block -- see
+    ``engine.instruction_delivery_registry`` for the one current producer
+    and ``delegation.live_adapters`` for the one current consumer. ``None``
+    for every mechanism with no such channel (every mechanism predating
+    T026); never itself sent anywhere without a QUALIFIED
+    ``qualification``.
+    """
 
     qualification: DeliveryQualification
     engine: str
     version: str
     channel: str
     blocks: tuple[dict, ...] = ()
+    session_new_meta: dict | None = None
 
 
 class InstructionDelivery(Protocol):

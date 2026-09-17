@@ -42,6 +42,92 @@ import threading
 import time
 from typing import Callable, Mapping
 
+# No real installed-version discovery is wired into ``ConnectionRecord``
+# yet (T026 note, matching the pre-existing T016 codex-acp-only comment
+# this dict replaces): each pinned, evidence-qualified engine resolves to
+# its own exact pinned version here (matching
+# ``engine.instruction_delivery_registry``'s/``delegation.generations``'s
+# own exact registrations for the same engine names), so
+# ``delivery_for``/``tier_for`` are looked up precisely rather than always
+# falling through to a wildcard entry. Any other/unknown engine name still
+# resolves to ``"*"`` -- never a guessed/interpolated version.
+_PINNED_ENGINE_VERSION: dict[str, str] = {
+    "codex-acp": "1.12.0",
+    "claude-agent-acp": "0.78.0",
+}
+
+
+def _pinned_version_for(engine: str) -> str:
+    return _PINNED_ENGINE_VERSION.get(engine, "*")
+
+
+def _option_mapping_for(engine: str):
+    """The adapter-specific ``option_mapping`` callable for ``engine``, or
+    ``None`` for any engine with no pinned adapter mapping (falls back to
+    ``engine.session_manager._default_option_mapping``, unchanged).
+
+    T026 fix: :meth:`EngineSessionManagerAdapter.open` previously always
+    used the generic default mapping (route model + supported_parameters
+    round-tripped verbatim, with no adapter-specific rejection) for
+    *every* engine, including codex-acp -- silently ignoring T013's own
+    ``codex_option_mapping`` in the one production code path that actually
+    launches a real engine. This is the single dispatch point fixing that
+    for both pinned engines; a caller-supplied ``option_mapping=`` in
+    ``EngineSessionManagerAdapter``'s own constructor kwargs (used by
+    tests exercising a scenario against the generic default on purpose)
+    always takes precedence and is never overridden here.
+    """
+    if engine == "codex-acp":
+        from ..engine.codex_adapter_acp import codex_option_mapping
+
+        return codex_option_mapping
+    if engine == "claude-agent-acp":
+        from ..engine.claude_adapter_acp import claude_option_mapping
+
+        return claude_option_mapping
+    return None
+
+
+def _session_new_meta_for(engine: str, version: str, instructions: str | None):
+    """The ``session/new`` ``_meta`` payload this engine's own qualified
+    delivery mechanism builds for ``instructions``, or ``None``.
+
+    Only ever non-``None`` for an engine+version whose
+    ``engine.instruction_delivery_registry`` mechanism is QUALIFIED via a
+    session/new-level ``_meta`` channel (today: claude-agent-acp 0.78.0's
+    real, code-confirmed ``_meta.systemPrompt`` -- see
+    ``engine.instruction_delivery_registry.ClaudeAgentAcp0_78Delivery``'s
+    own docstring for the full evidence chain). codex-acp's own mechanism
+    delivers via a leading ``session/prompt`` block instead (a different
+    channel, applied at prompt time, not here), so this is always ``None``
+    for codex-acp.
+    """
+    if not instructions:
+        return None
+    from ..engine.instruction_delivery_registry import delivery_for
+    from ..portable.instruction_delivery import DeliveryQualification
+
+    mechanism = delivery_for(engine, version)
+    plan = mechanism.plan(_InstructionsOnlyRole(instructions), [])
+    if plan.qualification != DeliveryQualification.QUALIFIED:
+        return None
+    return plan.session_new_meta
+
+
+class _InstructionsOnlyRole:
+    """A minimal stand-in for ``portable.roles.RoleInstructionSet`` carrying
+    only the one field every current ``InstructionDelivery.plan()``
+    implementation actually reads (``body_portable``) -- used here because
+    this call site only ever has the already-resolved instructions string
+    (``delegation.provisioning``'s own ``role_set.body_portable``), never
+    the full ``RoleInstructionSet`` object itself (see
+    ``EngineSessionOpener.open``'s ``instructions: str`` parameter, a
+    deliberately narrow protocol boundary -- see
+    ``docs/acp/roles-and-delegation.md``)."""
+
+    def __init__(self, body_portable: str) -> None:
+        self.body_portable = body_portable
+
 
 class SharedProjectRootWorkspaceProvisioner:
     """Non-isolated ``WorkspaceProvisioner``: every attempt shares the task's
@@ -88,7 +174,7 @@ class ConfigurationServiceSnapshotSource:
             # pin, T013); configuration_revisions does not itself track a
             # downstream engine version column, so this mirrors the one
             # pinned mapping instead of inventing a second source of truth.
-            version="1.12.0" if engine == "codex-acp" else "*",
+            version=_pinned_version_for(engine),
             config_revision=current.get("id"),
             # T023: the connection actually selected by this revision --
             # recovery.coordinator_recovery/registry compares this against
@@ -229,14 +315,31 @@ class EngineSessionManagerAdapter:
         reservation_id = None
         if self._store is not None:
             reservation_id = self._reserve_capacity_blocking(record.id, task_id, attempt_id, launch)
+        manager_kwargs = dict(self._manager_kwargs)
+        # T026: route each connection's own pinned adapter option_mapping
+        # (never a caller-supplied one, which always wins) -- see
+        # _option_mapping_for's own docstring for why this was previously
+        # always the generic default for every engine including codex-acp.
+        if "option_mapping" not in manager_kwargs:
+            mapping = _option_mapping_for(record.engine)
+            if mapping is not None:
+                manager_kwargs["option_mapping"] = mapping
         manager = EngineSessionManager(
             record, workspace_root, environ=self._environ,
             channel_credentials=channel_credentials,
             terminal_output_persist=self._persist_terminal_output,
-            **self._manager_kwargs,
+            **manager_kwargs,
         )
         manager.negotiate(_requested_capabilities())
-        session_id = manager.create_session(task_id, launch.get("assignment_id") or attempt_id)
+        # T026: this engine's own qualified session/new _meta delivery
+        # channel (today: claude-agent-acp only -- see
+        # _session_new_meta_for's own docstring). codex-acp's own leading-
+        # block channel is applied at prompt time, not session/new, so this
+        # is always None for it.
+        session_new_meta = _session_new_meta_for(record.engine, _pinned_version_for(record.engine), instructions)
+        session_id = manager.create_session(
+            task_id, launch.get("assignment_id") or attempt_id, session_new_meta=session_new_meta,
+        )
         with self._lock:
             self._managers[attempt_id] = manager
             self._sessions[attempt_id] = session_id
@@ -330,14 +433,15 @@ class EngineSessionManagerAdapter:
                 ).fetchone()
             assignment_ref = row["idempotency_key"] if row is not None else None
         # Same documented pinned-version convention as
-        # ``ConfigurationServiceSnapshotSource.snapshot`` (T016): no real
-        # installed-version discovery is wired into ``ConnectionRecord``
-        # yet, so codex-acp resolves to its one pinned evidence-qualified
-        # version and every other engine resolves to the wildcard tier
-        # entry (see ``delegation.generations.tier_for``'s own fallback --
-        # an engine with no wildcard evidence still correctly falls to
+        # ``ConfigurationServiceSnapshotSource.snapshot`` (T016/T026, see
+        # ``_PINNED_ENGINE_VERSION`` above): no real installed-version
+        # discovery is wired into ``ConnectionRecord`` yet, so each pinned,
+        # evidence-qualified engine resolves to its own exact pinned
+        # version and any other engine resolves to the wildcard tier entry
+        # (see ``delegation.generations.tier_for``'s own fallback -- an
+        # engine with no wildcard evidence still correctly falls to
         # ``controlled_boundary``/``unqualified``, never a guessed tier).
-        version = "1.12.0" if record.engine == "codex-acp" else "*"
+        version = _pinned_version_for(record.engine)
         tier = delegation_generations.ensure_owner(
             self._store, task_id=task_id, engine_session_ref=session_id, engine=record.engine, version=version,
         )

@@ -432,7 +432,23 @@ class EngineSessionManager:
             self._negotiated = tuple(cap for cap in requested_capabilities if cap in granted)
             return self._negotiated
 
-    def create_session(self, task_id: str, route_id: str) -> str:
+    def create_session(self, task_id: str, route_id: str, *, session_new_meta: dict | None = None) -> str:
+        """``route_id`` is accepted for signature/traceability parity with
+        every other caller (never itself sent over the wire here).
+
+        ``session_new_meta`` (T026, additive, default ``None`` -- every
+        pre-T026 caller is unaffected): when supplied, sent verbatim as
+        this ``session/new`` call's own ``_meta`` field. The only current
+        producer is
+        ``delegation.live_adapters._session_new_meta_for``, which never
+        builds one for an engine/version whose
+        ``engine.instruction_delivery_registry`` mechanism is not
+        QUALIFIED via exactly this channel (today: claude-agent-acp 0.78.0
+        only, its real ``_meta.systemPrompt`` channel -- see that
+        registry's own docstring for the dist evidence). Never validated
+        here beyond "is a dict" -- the producer is solely responsible for
+        its shape.
+        """
         self._ensure_started()
         params: dict = dict(cwd=self._workspace_root)
         if self._channel_credentials is not None:
@@ -440,6 +456,10 @@ class EngineSessionManager:
             params["mcpServers"] = build_mcp_servers(channel_id, secret, project_root)
         else:
             params["mcpServers"] = []
+        if session_new_meta is not None:
+            if not isinstance(session_new_meta, dict):
+                raise _fail("invalid_field", "session_new_meta must be a dict.", field="session_new_meta")
+            params["_meta"] = session_new_meta
         with self._lock:
             result = self._client.call("session/new", params, timeout=self._call_timeout)
             wire_session_id = result.get("sessionId")
