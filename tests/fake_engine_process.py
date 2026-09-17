@@ -66,6 +66,11 @@ class FakeEngine:
         self.scenario = scenario
         self._cancel_events: dict[str, threading.Event] = {}
         self._client_request_id = 1_000_000
+        # T014: pending requests *this* fake engine issued to the client
+        # (session/request_permission, fs/*, terminal/*), keyed by the id
+        # it chose, so replies can be correlated and (optionally) logged.
+        self._client_pending: dict[object, dict] = {}
+        self._client_pending_lock = threading.Lock()
 
     def run(self) -> None:
         env_dump_path = self.scenario.get("env_dump_path")
@@ -103,6 +108,9 @@ class FakeEngine:
                 continue
             method = message.get("method")
             request_id = message.get("id")
+            if method is None and "id" in message and ("result" in message or "error" in message):
+                self._handle_client_response(message)
+                continue
             request_log_path = self.scenario.get("request_log_path")
             if request_log_path and isinstance(method, str):
                 try:
@@ -133,6 +141,39 @@ class FakeEngine:
             # SIGKILL.
             time.sleep(300)
 
+    def _handle_client_response(self, message) -> None:
+        request_id = message.get("id")
+        log_path = self.scenario.get("client_reply_log_path")
+        if log_path:
+            try:
+                with open(log_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(message) + "\n")
+            except OSError:
+                pass
+        with self._client_pending_lock:
+            entry = self._client_pending.get(request_id)
+        if entry is not None:
+            entry["response"] = message
+            entry["event"].set()
+
+    def _send_client_request(self, request, *, wait_timeout=5.0):
+        """Send one agent->client request (T014: permission/fs/terminal),
+        wait up to ``wait_timeout`` for its reply, and return it (or
+        ``None`` on timeout). ``request`` may set an explicit ``id`` (to
+        exercise a duplicate-id scenario) or omit it for an auto id."""
+        request_id = request.get("id")
+        if request_id is None:
+            self._client_request_id += 1
+            request_id = self._client_request_id
+        event = threading.Event()
+        with self._client_pending_lock:
+            self._client_pending[request_id] = dict(event=event, response=None)
+        _write_json(dict(jsonrpc="2.0", id=request_id, method=request["method"], params=request.get("params") or {}))
+        event.wait(wait_timeout)
+        with self._client_pending_lock:
+            entry = self._client_pending.pop(request_id, None)
+        return entry["response"] if entry is not None else None
+
     def _handle_initialize(self, request_id) -> None:
         malformed = self.scenario.get("malformed_mode")
         if malformed:
@@ -145,10 +186,25 @@ class FakeEngine:
         caps = self.scenario.get("agent_capabilities") or {}
         _result(request_id, dict(agentCapabilities=caps))
 
+    def _next_session_id(self) -> str:
+        """``session_ids`` (a list, T014 multi-session scenarios) is
+        consumed one id per ``session/new`` call, in order; falls back to
+        the single fixed ``session_id`` once exhausted (or if unset), same
+        as every pre-T014 scenario."""
+        session_ids = self.scenario.get("session_ids")
+        if session_ids:
+            with self._client_pending_lock:
+                index = self.scenario.setdefault("_session_ids_consumed", 0)
+                if index < len(session_ids):
+                    self.scenario["_session_ids_consumed"] = index + 1
+                    return session_ids[index]
+        return self.scenario["session_id"]
+
     def _handle_session_new(self, request_id) -> None:
+        session_id = self._next_session_id()
         for update in self.scenario.get("replay_updates") or []:
-            _notify("session/update", dict(sessionId=self.scenario["session_id"], update=update))
-        payload = dict(sessionId=self.scenario["session_id"])
+            _notify("session/update", dict(sessionId=session_id, update=update))
+        payload = dict(sessionId=session_id)
         options = self.scenario.get("config_options")
         if options:
             payload["configOptions"] = options
@@ -222,7 +278,9 @@ class FakeEngine:
         # fresh cancellable turn).
         cancel_event = self._cancel_events.setdefault(session_id, threading.Event())
         cancel_event.clear()
-        behavior = self.scenario.get("prompt_behavior", "normal")
+        behavior = (self.scenario.get("prompt_behavior_by_session") or {}).get(
+            session_id, self.scenario.get("prompt_behavior", "normal")
+        )
 
         if behavior == "hang":
             return  # never reply, never emit -- caller times out
@@ -266,6 +324,33 @@ class FakeEngine:
             request = self.scenario.get("client_request") or dict(method="request_permission", params={})
             self._client_request_id += 1
             _write_json(dict(jsonrpc="2.0", id=self._client_request_id, method=request["method"], params=request.get("params") or {}))
+        elif behavior == "client_requests_sequence":
+            # T014: send each scripted agent->client request in turn,
+            # waiting for (and logging, if client_reply_log_path is set)
+            # each reply before sending the next.
+            for request in self.scenario.get("client_requests") or []:
+                self._send_client_request(request, wait_timeout=request.get("wait_timeout", 5.0))
+        elif behavior == "client_requests_fire":
+            # T014 review: send every scripted request back-to-back with no
+            # wait in between (to exercise a client-side concurrency cap),
+            # then wait (bounded) for replies to arrive so
+            # client_reply_log_path captures them before this turn ends.
+            pending_ids = []
+            for request in self.scenario.get("client_requests") or []:
+                request_id = request.get("id")
+                if request_id is None:
+                    self._client_request_id += 1
+                    request_id = self._client_request_id
+                with self._client_pending_lock:
+                    self._client_pending[request_id] = dict(event=threading.Event(), response=None)
+                pending_ids.append(request_id)
+                _write_json(dict(jsonrpc="2.0", id=request_id, method=request["method"], params=request.get("params") or {}))
+            deadline = time.time() + self.scenario.get("client_requests_fire_wait", 3.0)
+            while time.time() < deadline:
+                with self._client_pending_lock:
+                    if not any(rid in self._client_pending for rid in pending_ids):
+                        break
+                time.sleep(0.02)
 
         stop_reason = "cancelled" if (honor_cancel and cancel_event.is_set()) else self.scenario.get("prompt_stop_reason", "end_turn")
 

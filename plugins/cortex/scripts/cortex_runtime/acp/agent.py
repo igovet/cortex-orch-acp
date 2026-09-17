@@ -30,6 +30,7 @@ from . import commands as acp_commands
 from . import config_options as acp_config_options
 from . import protocol
 from . import sessions as acp_sessions
+from .host_requests import HostRequester
 from .protocol import RpcError
 from .runtime import OrchestrationUnavailable, UnavailableRuntime
 from .transport import StdioTransport, EOF
@@ -134,6 +135,7 @@ class Agent:
         self.stores = {}
         self.sessions = {}
         self.transport = None
+        self.host_requester = None
         self.initialized = False
         self.client_info = {}
         self.client_capabilities = {}
@@ -143,6 +145,12 @@ class Agent:
 
     def bind_transport(self, transport):
         self.transport = transport
+        # T014: this agent can also *initiate* a request to the host (for
+        # example relaying a downstream engine's session/request_permission
+        # -- see engine.permissions.PermissionBridge), tracked in a
+        # namespace ("hr_"-prefixed ids) disjoint from any id the host
+        # itself chooses for its own requests to this agent.
+        self.host_requester = HostRequester(transport)
 
     def _track_request_id(self, request_id):
         """Record ``request_id`` as used on this connection; return whether
@@ -187,6 +195,13 @@ class Agent:
             return
         if error is not None:
             self._reply_error(error.request_id, error.code, error.message)
+            return
+        if "id" in message and "method" not in message and ("result" in message or "error" in message):
+            # A response, not a request/notification: only ever a reply to
+            # one of this agent's own HostRequester calls (T014). Never
+            # dispatched as a method call and never replied to again.
+            if self.host_requester is None or not self.host_requester.handle_response(message):
+                sys.stderr.write("acp: unmatched response-shaped message ignored\n")
             return
         has_id = "id" in message
         request_id = message.get("id") if has_id else None
@@ -695,6 +710,8 @@ class Agent:
 
     def _handle_eof(self):
         """Cancel every in-flight prompt; the caller (see ``main``) joins workers."""
+        if self.host_requester is not None:
+            self.host_requester.close()
         for session in list(self.sessions.values()):
             with session["lock"]:
                 active = session["active"]

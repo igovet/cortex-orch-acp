@@ -20,13 +20,25 @@ from ..portable.identity import new_id
 from . import stub_handlers
 from .client import EngineClient, EngineProtocolError, EngineTimeout, EngineTransportClosed
 from .correlation import CorrelationTables
+from .fs_bridge import FsBridge, FsBridgeError
 from .mcp_bridge import build_mcp_servers
+from .permissions import DuplicateEnginePermissionRequestId, PermissionBridge
 from .process import EngineProcess
+from .resource_binding import BindingRegistry, ResourceBinding
+from .resource_policy import ResourcePolicy
+from .terminal_bridge import TerminalBridge, TerminalBridgeError
 
 DEFAULT_INITIALIZE_TIMEOUT = 15.0
 DEFAULT_CALL_TIMEOUT = 30.0
 DEFAULT_UPDATE_QUEUE_MAXSIZE = 2048
 DEFAULT_ABANDON_WAIT_SECONDS = 5.0
+# T014 review (LOW): a bound on concurrent agent-to-client request handler
+# threads per engine instance -- an engine that floods
+# permission/fs/terminal requests must never be able to spawn unbounded
+# threads; excess requests are refused immediately (never queued/blocked)
+# instead.
+DEFAULT_MAX_CONCURRENT_CLIENT_REQUESTS = 16
+DEFAULT_CLIENT_REQUEST_JOIN_TIMEOUT = 5.0
 
 _STOP_REASON_FROM_WIRE = {
     "end_turn": StopReason.END_TURN,
@@ -144,12 +156,27 @@ class EngineSessionManager:
         call_timeout: float = DEFAULT_CALL_TIMEOUT,
         update_queue_maxsize: int = DEFAULT_UPDATE_QUEUE_MAXSIZE,
         abandon_wait_seconds: float = DEFAULT_ABANDON_WAIT_SECONDS,
+        policy: ResourcePolicy | None = None,
+        host_permission_requester=None,
+        max_concurrent_client_requests: int = DEFAULT_MAX_CONCURRENT_CLIENT_REQUESTS,
     ):
         """``install`` -- a
         :class:`~.codex_install.CodexAcpInstall`, or ``None`` -- is passed
         straight through to :class:`~.process.EngineProcess` on first
         launch (see that class's own docstring); only meaningful for
-        ``record.engine == "codex-acp"``."""
+        ``record.engine == "codex-acp"``.
+
+        ``policy`` (T014) -- a :class:`~.resource_policy.ResourcePolicy`,
+        default all-off -- governs both what ``clientCapabilities`` this
+        engine instance advertises on ``initialize`` and which of
+        ``fs/*``/``terminal/*`` agent-to-client requests are ever serviced
+        rather than refused with ``-32601``. ``host_permission_requester``
+        -- ``(engine_session_id, params, timeout) -> dict`` or ``None`` --
+        is the injected seam to the actual incoming ACP host that owns each
+        engine session (see :class:`~.permissions.PermissionBridge`); when
+        ``None`` every ``session/request_permission`` is answered
+        ``cancelled`` without ever reaching a host.
+        """
         self._record = record
         self._workspace_root = workspace_root
         self._environ = environ
@@ -160,11 +187,24 @@ class EngineSessionManager:
         self._call_timeout = call_timeout
         self._update_queue_maxsize = update_queue_maxsize
         self._abandon_wait_seconds = abandon_wait_seconds
+        self._policy = policy if policy is not None else ResourcePolicy()
+        self._host_permission_requester = host_permission_requester
 
         self._lock = threading.RLock()
         self._process: EngineProcess | None = None
         self._client: EngineClient | None = None
         self.correlation = CorrelationTables()
+        # T014: resource-binding/permission/fs/terminal bridging.
+        self.bindings = BindingRegistry()
+        self._permission_bridge: PermissionBridge | None = None
+        self._fs_bridge: FsBridge | None = None
+        self._terminal_bridge: TerminalBridge | None = None
+        # T014 review (LOW): bounded concurrency for client-request handler
+        # threads, plus tracking so shutdown() can join them with a bounded
+        # timeout rather than leaking daemon threads past process release.
+        self._client_request_semaphore = threading.Semaphore(max_concurrent_client_requests)
+        self._client_request_threads: list[threading.Thread] = []
+        self._client_request_threads_lock = threading.Lock()
         self._agent_capabilities: dict = {}
         self._negotiated: tuple = ()
         self._session_config_options: dict[str, list] = {}
@@ -189,6 +229,12 @@ class EngineSessionManager:
             if self._process is not None:
                 return
             self._process = EngineProcess(self._record, self._workspace_root, environ=self._environ, install=self._install)
+            self._permission_bridge = PermissionBridge(
+                correlation=self.correlation, bindings=self.bindings, logs=self._process.logs,
+                host_permission_requester=self._host_permission_requester, call_timeout=self._call_timeout,
+            )
+            self._fs_bridge = FsBridge()
+            self._terminal_bridge = TerminalBridge()
             self._client = EngineClient(
                 self._process,
                 correlation=self.correlation,
@@ -199,12 +245,148 @@ class EngineSessionManager:
             ).start()
 
     def _handle_client_request(self, method, params, request_id) -> None:
-        self._process.logs.observe("unexpected_client_request", method=method)
-        code, message = stub_handlers.unsupported_client_request_error(method)
-        self._client.reply_error(request_id, code, message)
+        # T014: never service an agent-to-client request on the transport's
+        # own reader thread -- a permission/fs/terminal handler may block
+        # (on a host round-trip or process I/O), and other sessions on this
+        # same engine instance (or their own engines entirely) must keep
+        # making progress while it does.
+        #
+        # T014 review (LOW): bounded concurrency -- an engine flooding
+        # requests must never spawn unbounded threads. A non-blocking
+        # semaphore acquire (never waits on the reader thread) that fails
+        # is answered immediately: 'busy' as a JSON-RPC error for fs/
+        # terminal, a cancelled outcome for a permission request (never
+        # left unanswered either way).
+        if not self._client_request_semaphore.acquire(blocking=False):
+            self._process.logs.observe("client_request_capacity_exceeded", method=method)
+            self._reply_busy(method, request_id)
+            return
+        worker = threading.Thread(
+            target=self._run_client_request, name="engine-client-request",
+            args=(method, params, request_id), daemon=True,
+        )
+        with self._client_request_threads_lock:
+            self._client_request_threads = [t for t in self._client_request_threads if t.is_alive()]
+            self._client_request_threads.append(worker)
+        worker.start()
+
+    def _reply_busy(self, method, request_id) -> None:
+        if method == "session/request_permission":
+            self._client.reply_result(request_id, dict(outcome=dict(outcome="cancelled")))
+            return
+        self._client.reply_error(request_id, -32000, "busy: too many concurrent client requests on this engine instance.")
+
+    def _run_client_request(self, method, params, request_id) -> None:
+        try:
+            self._dispatch_client_request(method, params, request_id)
+        finally:
+            self._client_request_semaphore.release()
+
+    def _dispatch_client_request(self, method, params, request_id) -> None:
+        try:
+            wire_session_id = (params or {}).get("sessionId") if isinstance(params, dict) else None
+            engine_session_id = self.correlation.portable_session_id(wire_session_id) if wire_session_id else None
+            if method == "session/request_permission":
+                self._dispatch_permission(request_id, wire_session_id, engine_session_id, params)
+                return
+            if method in ("fs/read_text_file", "fs/write_text_file"):
+                self._dispatch_fs(method, request_id, engine_session_id, params)
+                return
+            if method.startswith("terminal/"):
+                self._dispatch_terminal(method, request_id, engine_session_id, params)
+                return
+            self._process.logs.observe("unexpected_client_request", method=method)
+            code, message = stub_handlers.unsupported_client_request_error(method)
+            self._client.reply_error(request_id, code, message)
+        except Exception:  # noqa: BLE001 - a client request must always get a reply
+            self._process.logs.observe("client_request_dispatch_error", method=method)
+            try:
+                self._client.reply_error(request_id, -32603, "internal_error")
+            except Exception:  # noqa: BLE001 - transport may already be closed
+                pass
+
+    def _dispatch_permission(self, request_id, wire_session_id, engine_session_id, params) -> None:
+        if engine_session_id is None:
+            self._process.logs.observe("permission_unknown_wire_session", wire_session_id=wire_session_id)
+            self._client.reply_result(request_id, dict(outcome=dict(outcome="cancelled")))
+            return
+        try:
+            result = self._permission_bridge.handle(
+                engine_session_id=engine_session_id, wire_session_id=wire_session_id,
+                wire_request_id=request_id, params=params,
+            )
+        except DuplicateEnginePermissionRequestId:
+            self._client.reply_error(request_id, -32600, "duplicate_request_id")
+            return
+        self._client.reply_result(request_id, result)
+
+    def _dispatch_fs(self, method, request_id, engine_session_id, params) -> None:
+        if not self._policy.fs_local:
+            code, message = stub_handlers.unsupported_client_request_error(method)
+            self._client.reply_error(request_id, code, message)
+            return
+        binding = self.bindings.get(engine_session_id) if engine_session_id else None
+        if binding is None:
+            self._client.reply_error(request_id, -32001, "no_resource_binding_for_session")
+            return
+        try:
+            if method == "fs/read_text_file":
+                result = self._fs_bridge.read_text_file(binding, params)
+            else:
+                result = self._fs_bridge.write_text_file(binding, params)
+        except FsBridgeError as error:
+            self._client.reply_error(request_id, error.code, error.message)
+            return
+        self._client.reply_result(request_id, result)
+
+    def _dispatch_terminal(self, method, request_id, engine_session_id, params) -> None:
+        if not self._policy.terminal:
+            code, message = stub_handlers.unsupported_client_request_error(method)
+            self._client.reply_error(request_id, code, message)
+            return
+        binding = self.bindings.get(engine_session_id) if engine_session_id else None
+        if binding is None:
+            self._client.reply_error(request_id, -32001, "no_resource_binding_for_session")
+            return
+        terminal_id = (params or {}).get("terminalId")
+        try:
+            if method == "terminal/create":
+                new_terminal_id = self._terminal_bridge.create(
+                    binding, params, output_byte_limit_max=self._policy.output_byte_limit_max)
+                self._client.reply_result(request_id, dict(terminalId=new_terminal_id))
+            elif method == "terminal/output":
+                self._client.reply_result(request_id, self._terminal_bridge.output(engine_session_id, terminal_id))
+            elif method == "terminal/wait_for_exit":
+                self._client.reply_result(request_id, self._terminal_bridge.wait_for_exit(engine_session_id, terminal_id))
+            elif method == "terminal/kill":
+                self._client.reply_result(request_id, self._terminal_bridge.kill(engine_session_id, terminal_id))
+            elif method == "terminal/release":
+                self._client.reply_result(request_id, self._terminal_bridge.release(engine_session_id, terminal_id))
+            else:
+                code, message = stub_handlers.unsupported_client_request_error(method)
+                self._client.reply_error(request_id, code, message)
+        except TerminalBridgeError as error:
+            self._client.reply_error(request_id, error.code, error.message)
 
     def _on_unknown_notification(self, method, params) -> None:
         self._process.logs.observe("unknown_notification_ignored", method=method)
+
+    # -- T014: resource binding registration/invalidation ----------------
+
+    def bind_resource(self, binding: ResourceBinding) -> None:
+        self.bindings.bind(binding)
+
+    def invalidate_session(self, engine_session_id: str, reason: str | None = None) -> None:
+        self.bindings.invalidate_session(engine_session_id, reason)
+
+    def invalidate_epoch(self, workspace_binding_id: str, new_epoch: str) -> None:
+        self.bindings.invalidate_epoch(workspace_binding_id, new_epoch)
+
+    def invalidate_generation(self, engine_session_id: str, new_generation: str) -> None:
+        self.bindings.invalidate_generation(engine_session_id, new_generation)
+
+    def invalidate_action(self, engine_session_id: str, action_key: str) -> None:
+        self.bindings.invalidate_action(engine_session_id, action_key)
 
     # -- EngineRuntime -----------------------------------------------
 
@@ -212,11 +394,12 @@ class EngineSessionManager:
         self._ensure_started()
         with self._lock:
             if not self._agent_capabilities:
-                # Advertise nothing (no fs, no terminal, no session
-                # lifecycle features): an empty clientCapabilities object.
+                # T014: advertise exactly what self._policy opts into (fs/
+                # terminal); default policy advertises nothing, matching
+                # T012's original empty clientCapabilities object.
                 result = self._client.call(
                     "initialize",
-                    dict(protocolVersion=1, clientCapabilities={}),
+                    dict(protocolVersion=1, clientCapabilities=self._policy.client_capabilities()),
                     timeout=self._initialize_timeout,
                 )
                 self._agent_capabilities = result.get("agentCapabilities") or {}
@@ -517,6 +700,14 @@ class EngineSessionManager:
         if wire_session_id is not None:
             self._update_queues.pop(wire_session_id, None)
             self._active_turn_token.pop(wire_session_id, None)
+        # T014: a released session's resource binding is invalidated
+        # immediately (any permission request still in flight on it can
+        # never be relayed as "selected" after this point -- see
+        # permissions.PermissionBridge) and every terminal it opened is
+        # killed and freed.
+        self.bindings.release(engine_session_id)
+        if self._terminal_bridge is not None:
+            self._terminal_bridge.release_session(engine_session_id)
         if self._process is not None:
             self._process.logs.observe("session_released", engine_session_id=engine_session_id)
 
@@ -526,12 +717,25 @@ class EngineSessionManager:
     def shutdown(self, *, grace: float = 5.0) -> None:
         """Terminate the underlying process; capacity is freed only once
         the process is *observed* to have actually exited (see
-        ``process.EngineProcess.release``)."""
+        ``process.EngineProcess.release``).
+
+        T014: engine exit invalidates every still-bound resource binding on
+        this engine instance and cleans up every terminal it opened,
+        exactly like an individual session release (see
+        ``BindingRegistry.release``/``TerminalBridge.release_session``)."""
         with self._lock:
             if self._client is not None:
                 self._client.close()
             if self._process is not None:
                 self._process.release(grace=grace)
+            for engine_session_id in self.bindings.all_session_ids():
+                self.bindings.release(engine_session_id)
+                if self._terminal_bridge is not None:
+                    self._terminal_bridge.release_session(engine_session_id)
+            with self._client_request_threads_lock:
+                threads = list(self._client_request_threads)
+            for thread in threads:
+                thread.join(timeout=DEFAULT_CLIENT_REQUEST_JOIN_TIMEOUT)
 
     # -- session/update translation ------------------------------------
 

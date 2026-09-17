@@ -13,6 +13,8 @@ check.
 - [Registry metadata draft (not submitted, not published)](registry-metadata-draft.md)
 - [codex-acp outgoing adapter (T013): pinned install, env/option mapping,
   evidence levels, opt-in probe](codex-acp-adapter.md)
+- [Permission/filesystem/terminal bridge (T014): binding, invalidation,
+  containment, and UX-vs-actual-containment limitations](permissions-and-containment.md)
 
 ## Tools
 
