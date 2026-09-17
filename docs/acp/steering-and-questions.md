@@ -225,7 +225,7 @@ are not.
 
 ## UNKNOWNs (owned by T035)
 
-- Whether Zed/AionUI render `session/cancel` promptly in their own UI while
+- Whether Zed/codeg render `session/cancel` promptly in their own UI while
   a coordinator turn is mid-`engine.prompt()` (Cortex's own handling is
   covered above and tested against fakes; the host's own UX during that
   window is unverified against a real client).

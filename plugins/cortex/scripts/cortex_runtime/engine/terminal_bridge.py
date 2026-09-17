@@ -31,6 +31,15 @@ import uuid
 
 MAX_TERMINALS_PER_SESSION = 8
 KILL_GRACE_SECONDS = 5.0
+# Bound on how long ``_wait`` will block joining the drain thread after
+# ``process.wait()`` returns, so that exit becomes observable (exitStatus,
+# wait_for_exit, kill short-circuit) only once stdout has actually been
+# fully drained into the buffer -- see module docstring. A grandchild that
+# keeps the read end of the pipe open (so ``stream.read`` never returns
+# EOF) must not hang exit observability forever: past this bound, exit is
+# still reported (the ACP terminal schema has no field for a partial
+# capture) but ``LocalTerminal._drain_incomplete`` is set for diagnostics.
+DRAIN_JOIN_TIMEOUT_SECONDS = 5.0
 _MINIMAL_BASE_ENV = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
 
 
@@ -62,7 +71,12 @@ class LocalTerminal:
         self._truncated = False
         self._exit_status: dict | None = None
         self._exited_event = threading.Event()
-        threading.Thread(target=self._drain, daemon=True, name="terminal-drain").start()
+        # Set (diagnostics only, never part of the ACP-facing ``output()``
+        # dict) if ``_wait`` had to give up joining the drain thread --
+        # meaning the buffer may not hold every byte the process wrote.
+        self._drain_incomplete = False
+        self._drain_thread = threading.Thread(target=self._drain, daemon=True, name="terminal-drain")
+        self._drain_thread.start()
         threading.Thread(target=self._wait, daemon=True, name="terminal-wait").start()
 
     def _drain(self) -> None:
@@ -87,8 +101,17 @@ class LocalTerminal:
             except ValueError:
                 signal_name = str(-code)
             code = None
+        # The process has exited, but ``_drain`` may still have buffered
+        # (or not-yet-read) stdout in flight -- join it first so that once
+        # exit becomes observable (exitStatus set / wait_for_exit true /
+        # kill short-circuit), ``output()`` already reflects everything the
+        # process wrote (up to the byte limit). Bounded so a grandchild
+        # holding the pipe open cannot hang exit observability forever.
+        self._drain_thread.join(DRAIN_JOIN_TIMEOUT_SECONDS)
         with self._lock:
             self._exit_status = dict(exitCode=code, signal=signal_name)
+            if self._drain_thread.is_alive():
+                self._drain_incomplete = True
         self._exited_event.set()
 
     def output(self) -> dict:

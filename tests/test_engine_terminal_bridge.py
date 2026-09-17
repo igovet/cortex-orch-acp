@@ -148,6 +148,64 @@ def test_max_concurrent_terminals_per_session_enforced(tmp_path):
     bridge.release("es_a", second)
 
 
+def test_wait_for_exit_reports_complete_output_despite_slow_drain(tmp_path, monkeypatch):
+    """Regression for the drain/wait race: ``process.wait()`` can return
+    (and previously made exit observable) before the drain thread has
+    finished reading stdout into the buffer. Delay the drain loop's start
+    so the process reliably exits first, then assert exit only becomes
+    observable once the buffer already holds the full output."""
+    from cortex_runtime.engine import terminal_bridge as tb_module
+
+    def delayed_drain(self):
+        time.sleep(0.3)  # the echo process will have already exited by now
+        stream = self.process.stdout
+        try:
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    break
+                with self._lock:
+                    self._buffer, was_truncated = tb_module._truncate_from_start(
+                        self._buffer + chunk, self._output_byte_limit
+                    )
+                    self._truncated = self._truncated or was_truncated
+        except (OSError, ValueError):
+            pass
+
+    monkeypatch.setattr(tb_module.LocalTerminal, "_drain", delayed_drain)
+    bridge = TerminalBridge()
+    binding = _binding(tmp_path)
+    terminal_id = bridge.create(binding, dict(command="/bin/echo", args=["race-output-present"]), output_byte_limit_max=4096)
+    assert bridge.wait_for_exit("es_a", terminal_id, timeout=5.0) is not None
+    result = bridge.output("es_a", terminal_id)
+    assert "race-output-present" in result["output"]
+    bridge.release("es_a", terminal_id)
+
+
+def test_wait_for_exit_bounded_when_grandchild_holds_stdout_open(tmp_path, monkeypatch):
+    """A detached grandchild that keeps the write end of the stdout pipe
+    open (so ``_drain``'s ``read()`` never sees EOF) must not hang exit
+    observability forever -- ``wait_for_exit`` still returns within the
+    (test-shortened) join bound."""
+    from cortex_runtime.engine import terminal_bridge as tb_module
+
+    monkeypatch.setattr(tb_module, "DRAIN_JOIN_TIMEOUT_SECONDS", 0.2)
+    bridge = TerminalBridge()
+    binding = _binding(tmp_path)
+    terminal_id = bridge.create(
+        binding,
+        dict(command="/bin/sh", args=["-c", "(sleep 30 &) ; exit 0"]),
+        output_byte_limit_max=4096,
+    )
+    start = time.time()
+    assert bridge.wait_for_exit("es_a", terminal_id, timeout=5.0) is not None
+    elapsed = time.time() - start
+    assert elapsed < 2.0
+    with bridge._lock:  # test-only introspection
+        assert bridge._terminals["es_a"][terminal_id]._drain_incomplete is True
+    bridge.release("es_a", terminal_id)
+
+
 def test_release_session_kills_and_frees_every_orphaned_terminal(tmp_path):
     bridge = TerminalBridge()
     binding = _binding(tmp_path)
