@@ -21,6 +21,8 @@ from collections import OrderedDict
 
 from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, ERROR_HELP, validate
 from .codex_adapter import thread_context, is_legacy_meta
+from .delegation import contracts as delegation_contracts
+from .delegation import mcp_tools as delegation_mcp_tools
 from .host_source import original_request, pending_requests
 from .store import Store, private_directory
 from .project_storage import ProjectResolver, migrate_legacy_project_storage, project_store_directory, canonical_project
@@ -118,6 +120,13 @@ def recover_gateway_if_explicitly_enabled() -> None:
             supervisor.ensure()
 
 
+def _delegation_operation_names(role_kind):
+    try:
+        return set(delegation_contracts.schemas_for(role_kind))
+    except StoreError:
+        return set()
+
+
 class ProtocolError(Exception):
     def __init__(self, code, message):
         self.code=code;self.message=message
@@ -136,6 +145,40 @@ class Server:
         # arguments or _meta. One server process serves one trusted channel
         # identity for its whole lifetime.
         self.channel_credentials = channel_credentials
+        # Lazily resolved once per process (a server process serves exactly
+        # one trusted channel identity for its whole lifetime -- see
+        # channel_credentials' own docstring above); cached so tools/list and
+        # every subsequent tools/call reuse the same resolved role/context
+        # instead of re-querying the store per call.
+        self._resolved_channel = None
+
+    def _channel_context(self):
+        """Resolve (and cache) this process's own trusted channel, if any.
+
+        Returns ``None`` when this server was not launched with channel
+        credentials (the legacy/native ``_meta`` path); raises ``StoreError``
+        (mapped to a JSON-RPC error by callers) if channel credentials are
+        present but do not resolve to a live channel.
+        """
+        if self._resolved_channel is not None:
+            return self._resolved_channel
+        if self.channel_credentials is None:
+            return None
+        channel_id, secret, project_root = self.channel_credentials
+        project = canonical_project(project_root)
+        migrate_legacy_project_storage(project)
+        directory = project_store_directory(project)
+        if not (directory/'cortex.sqlite3').exists():
+            raise StoreError('task_not_bound')
+        store = self.stores.get(project)
+        if store is None:
+            store = Store(directory, initialize=False, project_root=project)
+            self.stores[project] = store
+        self.stores.move_to_end(project)
+        while len(self.stores)>16: self.stores.popitem(last=False)
+        self.store = store
+        self._resolved_channel = resolve_channel(store, channel_id, secret)
+        return self._resolved_channel
 
     def dispatch(self, method, params):
         if method == 'initialize':
@@ -146,13 +189,37 @@ class Server:
         if method == 'ping':
             return {}
         if method == 'tools/list':
-            return dict(tools=TOOLS)
+            try:
+                channel = self._channel_context()
+            except StoreError as exc:
+                raise ProtocolError(-32001, ERROR_HELP.get(str(exc), ERROR_HELP['storage_error'])) from None
+            if channel is None:
+                return dict(tools=TOOLS)
+            return dict(tools=TOOLS + delegation_mcp_tools.tool_definitions(channel.role))
         if method != 'tools/call':
             raise ProtocolError(-32601,'Unknown method. Use initialize, ping, tools/list or tools/call; discover tool names through tools/list.')
         if not isinstance(params, dict) or set(params)-{'name','arguments','_meta'} or not isinstance(params.get('name'), str) or ('arguments' in params and not isinstance(params['arguments'],dict)):
             observe('tools/call','invalid_arguments')
             raise ProtocolError(-32602,'Malformed tools/call parameters. Supply name as a string and arguments as an object; only name, arguments and _meta are allowed.')
         name = params['name']
+        if self.channel_credentials is not None:
+            try:
+                channel = self._channel_context()
+            except StoreError as exc:
+                observe('tools/call', str(exc))
+                return self.error(exc)
+            role_operations = _delegation_operation_names(channel.role)
+            if name in role_operations:
+                try:
+                    arguments = params.get('arguments', {})
+                    if not isinstance(arguments, dict):
+                        raise StoreError('invalid_arguments','arguments',str(type(arguments).__name__),'JSON object','Send one object matching the advertised inputSchema.')
+                    data = delegation_mcp_tools.dispatch(self.store, channel, name, arguments)
+                    observe(name,'success',False,None,arguments,data)
+                    return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
+                except StoreError as exc:
+                    observe(name, str(exc), meta=params.get('_meta'), arguments=params.get('arguments'))
+                    return self.error(exc)
         if name not in BY_NAME:
             observe('tools/call','unknown_tool')
             raise ProtocolError(-32602,'Unknown tool. Call tools/list and use an advertised name; do not reconstruct retired names.')

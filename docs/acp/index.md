@@ -18,6 +18,9 @@ check.
 - [Portable role instructions and delegation provisioning (T015): canonical
   sources, native markers, instruction-delivery qualification, delegation
   operations, and recoverable provisioning](roles-and-delegation.md)
+- [Model-owned coordination and managed workers (T016): process boundary,
+  event types/states, waiting without paid polling, explicit acceptance,
+  and what's deferred to T017/T020/T025](orchestration.md)
 
 ## Tools
 

@@ -7,9 +7,12 @@ every log/banner goes to stderr (or the optional
 ``CORTEX_OBSERVATION_DIR`` value-free JSONL sink, mirroring
 ``server._write_observation``).
 
-``main(runtime=...)`` is the only way to inject a non-production runtime: the
-production entry point (``cortex_acp.py``) never passes ``runtime=``, so it
-always gets :class:`runtime.UnavailableRuntime`. Tests that need
+``main(runtime=...)`` injects the runtime this agent orchestrates with. The
+production entry point (``cortex_acp.py``, T016) passes a real
+``acp.production_runtime.ProductionOrchestratingRuntime``; omitting
+``runtime=`` (as every non-orchestration test that does not need a live
+runtime does) falls back to :class:`runtime.UnavailableRuntime`, which
+fails closed on every prompt. Tests that need
 ``tests.acp_fakes.FakeRuntime`` import it themselves and pass it explicitly
 (see ``tests/test_acp_*.py``); this module never imports anything from
 ``tests/``.
@@ -17,6 +20,7 @@ always gets :class:`runtime.UnavailableRuntime`. Tests that need
 from __future__ import annotations
 
 import collections
+import inspect
 import json
 import os
 import sys
@@ -130,6 +134,17 @@ class Agent:
 
     def __init__(self, runtime, *, environ=None):
         self.runtime = runtime
+        # T016: a multi-project-capable runtime (see
+        # acp.production_runtime.ProductionOrchestratingRuntime) accepts an
+        # optional 'project_root' kwarg to resolve its own per-project
+        # store/route; detected once here (never per-call) so every other
+        # IncomingRuntime (UnavailableRuntime, tests.acp_fakes.FakeRuntime)
+        # keeps receiving the exact same 5-positional-argument call it
+        # always has.
+        try:
+            self._runtime_accepts_project_root = 'project_root' in inspect.signature(runtime.start_prompt).parameters
+        except (TypeError, ValueError):
+            self._runtime_accepts_project_root = False
         self.environ = environ if environ is not None else os.environ
         self.version = _agent_version()
         self.stores = {}
@@ -454,11 +469,21 @@ class Agent:
             return delivered
 
         try:
-            reason = self.runtime.start_prompt(task_id, session_id, text, emit_update, cancel_event)
-        except OrchestrationUnavailable:
+            if self._runtime_accepts_project_root:
+                reason = self.runtime.start_prompt(task_id, session_id, text, emit_update, cancel_event, project_root=session["project"])
+            else:
+                reason = self.runtime.start_prompt(task_id, session_id, text, emit_update, cancel_event)
+        except OrchestrationUnavailable as exc:
+            # str(exc) is "orchestration_unavailable" for the default
+            # UnavailableRuntime (unchanged wire behavior); a
+            # ProductionOrchestratingRuntime instead names the concrete,
+            # non-silent reason (e.g. "no_configuration_revision",
+            # "instruction_delivery_unqualified") so the client sees what
+            # is actually missing rather than a generic refusal.
+            reason_code = str(exc) or "orchestration_unavailable"
             self.transport.send_response(protocol.error_response(
-                request_id, RpcError(-32001, "orchestration_unavailable", data={"retryable": False})))
-            observe(self.environ, "session/prompt", "orchestration_unavailable")
+                request_id, RpcError(-32001, "orchestration_unavailable", data={"retryable": False, "reason": reason_code})))
+            observe(self.environ, "session/prompt", reason_code)
             return
         except Exception:
             if cancel_event.is_set():

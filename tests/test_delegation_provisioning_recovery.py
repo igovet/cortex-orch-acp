@@ -60,9 +60,14 @@ class FakeEngineSessionOpener:
         self.open_calls = 0
         self.raise_on_open = False
         self.lookup_override = None
+        self.launch_channel_secrets = []
+        self.refuse_missing_secret = False
 
     def open(self, workspace_binding_id, launch, instructions):
         self.open_calls += 1
+        self.launch_channel_secrets.append(launch.get("channel_secret"))
+        if self.refuse_missing_secret and launch.get("channel_id") and not launch.get("channel_secret"):
+            raise RuntimeError("refuses to open with a channel_id but no channel_secret")
         if self.raise_on_open:
             self.raise_on_open = False
             raise RuntimeError("simulated crash during engine open")
@@ -329,3 +334,141 @@ def test_idempotency_key_reused_for_different_task_or_role_is_rejected(tmp_path)
     with pytest.raises(PortableError) as excinfo:
         svc.delegate(channel, "Title", "Brief", "frontend-dev", "Acceptance", key)
     assert excinfo.value.code == "idempotency_key_reused"
+
+
+def test_same_process_retry_after_open_failure_passes_the_real_secret(tmp_path):
+    """T016 review (HIGH): the channel secret must survive a failed open()
+    so a same-process retry never launches a worker with no credentials."""
+    store, result, channel = _channel(tmp_path)
+    ws, eng, cfg = FakeWorkspace(), FakeEngineSessionOpener(), FakeConfigSnapshotSource()
+    eng.raise_on_open = True
+    svc = ProvisioningService(store, ws, eng, cfg, allow_unqualified_delivery=True)
+    key = new_key()
+    with pytest.raises(RuntimeError):
+        svc.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", key)
+    assert eng.open_calls == 1
+    assert eng.launch_channel_secrets[0] is not None  # the failed attempt still had it
+
+    outcome = svc.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", key)
+    assert outcome.status == "ready"
+    assert eng.open_calls == 2
+    # The retry's own open() call also received the real secret -- never None.
+    assert eng.launch_channel_secrets[1] is not None
+    assert eng.launch_channel_secrets[0] == eng.launch_channel_secrets[1]
+
+
+def test_new_process_retry_with_no_held_secret_fails_explicitly_never_opens_uncredentialed(tmp_path):
+    """T016 review (HIGH): a brand-new ProvisioningService instance (simulating
+    a new process resuming a crashed delegation) never holds the plaintext
+    secret from the crashed attempt's channel issuance. It must fail closed
+    with a non-retryable, explicit code -- never call open() with a missing
+    secret."""
+    store, result, channel = _channel(tmp_path)
+    ws = FakeWorkspace()
+    eng = FakeEngineSessionOpener()
+    eng.refuse_missing_secret = True
+    cfg = FakeConfigSnapshotSource()
+    first_service = ProvisioningService(store, ws, eng, cfg, allow_unqualified_delivery=True)
+    key = new_key()
+
+    # Advance the row through workspace+channel (the channel is issued and
+    # its secret recorded only in first_service's own memory), then simulate
+    # a crash by constructing a brand-new ProvisioningService before the
+    # engine_session step ever runs.
+    import cortex_runtime.delegation.provisioning as provisioning_module
+
+    original_step_engine_session = provisioning_module.ProvisioningService._step_engine_session
+    calls = {"n": 0}
+
+    def stop_before_engine_session(self, idempotency_key, row, coordinator_channel, role_set):
+        calls["n"] += 1
+        raise RuntimeError("simulated process crash before the engine_session step")
+
+    provisioning_module.ProvisioningService._step_engine_session = stop_before_engine_session
+    try:
+        with pytest.raises(RuntimeError):
+            first_service.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", key)
+    finally:
+        provisioning_module.ProvisioningService._step_engine_session = original_step_engine_session
+    assert eng.open_calls == 0
+
+    second_service = ProvisioningService(store, ws, eng, cfg, allow_unqualified_delivery=True)
+    with pytest.raises(PortableError) as excinfo:
+        second_service.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", key)
+    assert excinfo.value.code == "channel_secret_unavailable"
+    assert excinfo.value.retry_eligible is False
+    # Never opened an engine session with a missing secret.
+    assert eng.open_calls == 0
+
+    # And the row is durably marked failed -- a further retry keeps failing
+    # the same way rather than looping forever.
+    with pytest.raises(PortableError) as excinfo2:
+        second_service.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", key)
+    assert excinfo2.value.code == "channel_secret_unavailable"
+    assert eng.open_calls == 0
+
+
+def test_stale_ownership_epoch_failure_releases_the_pending_secret(tmp_path):
+    """T016 review (fixup): every non-retryable failure -- not only a
+    retried open() -- must stop holding the freshly-issued channel secret."""
+    store, result, channel = _channel(tmp_path)
+    ws, eng, cfg = FakeWorkspace(), FakeEngineSessionOpener(), FakeConfigSnapshotSource()
+    svc = ProvisioningService(store, ws, eng, cfg, allow_unqualified_delivery=True)
+    key = new_key()
+
+    import cortex_runtime.delegation.provisioning as provisioning_module
+    from cortex_runtime.ownership import acquire_task_owner
+
+    original = provisioning_module.ProvisioningService._step_context_snapshot
+
+    def bump_epoch_then_continue(self, idempotency_key, row, role_set):
+        original(self, idempotency_key, row, role_set)
+        # Simulate ownership changing hands after the channel (and its
+        # secret) were already issued, but before the engine_session step.
+        acquire_task_owner(store, row["task_id"], "new-owner", expected_epoch=channel.owner_epoch)
+
+    provisioning_module.ProvisioningService._step_context_snapshot = bump_epoch_then_continue
+    try:
+        with pytest.raises(PortableError) as excinfo:
+            svc.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", key)
+    finally:
+        provisioning_module.ProvisioningService._step_context_snapshot = original
+    assert excinfo.value.code == "stale_ownership_epoch"
+    assert svc._pending_channel_secrets == {}
+    assert eng.open_calls == 0
+
+
+def test_indeterminate_engine_lookup_failure_releases_the_pending_secret(tmp_path):
+    """T016 review (fixup): the provisioning_indeterminate fail-closed path
+    must also stop holding the pending secret. Mirrors the existing
+    test_engine_session_lookup_unknown_fails_indeterminate recovery shape:
+    a retryable open() failure leaves an intent-without-outcome effect, and
+    an "unknown" lookup on retry fails closed non-retryably."""
+    store, result, channel = _channel(tmp_path)
+    ws, eng, cfg = FakeWorkspace(), FakeEngineSessionOpener(), FakeConfigSnapshotSource()
+    eng.raise_on_open = True
+    svc = ProvisioningService(store, ws, eng, cfg, allow_unqualified_delivery=True)
+    key = new_key()
+    with pytest.raises(RuntimeError):
+        svc.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", key)
+    assert svc._pending_channel_secrets  # retryable failure -- still held
+
+    eng.lookup_override = "unknown"
+    with pytest.raises(PortableError) as excinfo:
+        svc.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", key)
+    assert excinfo.value.code == "provisioning_indeterminate"
+    assert svc._pending_channel_secrets == {}
+    assert eng.open_calls == 1  # only the first (raise_on_open) attempt ever called open()
+
+
+def test_retryable_open_failure_still_holds_the_pending_secret(tmp_path):
+    """Contrast case: a *retryable* open() failure must still leave the
+    secret in place for the next retry (see the same-process-retry test)."""
+    store, result, channel = _channel(tmp_path)
+    ws, eng, cfg = FakeWorkspace(), FakeEngineSessionOpener(), FakeConfigSnapshotSource()
+    eng.raise_on_open = True
+    svc = ProvisioningService(store, ws, eng, cfg, allow_unqualified_delivery=True)
+    key = new_key()
+    with pytest.raises(RuntimeError):
+        svc.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", key)
+    assert svc._pending_channel_secrets  # not a _fail() path -- still held

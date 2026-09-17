@@ -98,6 +98,26 @@ COORDINATOR_OPERATIONS = {
         },
         ["assignment_ref", "reason"],
     ),
+    "decide": _operation(
+        {
+            "assignment_ref": string(
+                "Opaque assignment reference from a prior 'delegate' result, or the "
+                "literal 'task' for an overall task-level acceptance decision that "
+                "covers every retained assignment result.",
+                128,
+            ),
+            "decision": string(
+                "One of 'accept', 'revise', or 'ask_user'.", 16,
+                pattern=r"^(accept|revise|ask_user)$",
+            ),
+            "rationale": string("Concrete rationale grounded in retained results/events.", 4_000),
+            "question": string(
+                "Required only when decision='ask_user': the exact question for the user.",
+                4_000,
+            ),
+        },
+        ["assignment_ref", "decision", "rationale"],
+    ),
 }
 
 WORKER_OPERATIONS = {

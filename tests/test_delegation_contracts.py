@@ -30,7 +30,9 @@ def test_schemas_for_unknown_role_kind():
 
 
 def test_coordinator_operations_closed_set():
-    assert set(dc.schemas_for("coordinator")) == {"delegate", "list_events", "clarify", "cancel"}
+    # T016 adds 'decide' (accept/revise/ask_user) alongside T015's original
+    # four coordinator operations; see delegation.contracts module docstring.
+    assert set(dc.schemas_for("coordinator")) == {"delegate", "list_events", "clarify", "cancel", "decide"}
 
 
 def test_worker_operations_closed_set():

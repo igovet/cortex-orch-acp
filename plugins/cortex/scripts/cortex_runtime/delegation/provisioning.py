@@ -199,6 +199,15 @@ class ProvisioningService:
         self._engine = engine_session_opener
         self._config = config_snapshot_source
         self._allow_unqualified_delivery = bool(allow_unqualified_delivery)
+        # T016: a freshly-issued worker channel's plaintext secret, held only
+        # in this process's memory for the span between _step_channel
+        # issuing it and _step_engine_session consuming it into `launch`
+        # (never persisted -- see trusted_channel's "returned exactly once"
+        # security model). Absent (None) on any retry that adopts an
+        # already-issued channel; a retry's engine-session step only ever
+        # reconciles via lookup_owned in that case, never calling
+        # EngineSessionOpener.open() again, so it never needs the secret.
+        self._pending_channel_secrets: dict[str, str] = {}
 
     # -- claim/resume plumbing -------------------------------------------------
 
@@ -402,17 +411,29 @@ class ProvisioningService:
         )
 
     def _fail(self, idempotency_key: str, error_code: str) -> None:
-        with self._store.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            try:
-                db.execute(
-                    "UPDATE delegation_provisioning SET status='failed', error_code=?, updated_at=? WHERE idempotency_key=?",
-                    (error_code, _now(), idempotency_key),
-                )
-                db.commit()
-            except BaseException:
-                db.rollback()
-                raise
+        try:
+            with self._store.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    db.execute(
+                        "UPDATE delegation_provisioning SET status='failed', error_code=?, updated_at=? WHERE idempotency_key=?",
+                        (error_code, _now(), idempotency_key),
+                    )
+                    db.commit()
+                except BaseException:
+                    db.rollback()
+                    raise
+        finally:
+            # T016 review (fixup): every non-retryable failure is recorded
+            # through this one method, so it is the single place that must
+            # stop holding a freshly-issued channel's plaintext secret --
+            # there is no future retry under this idempotency_key to hand
+            # it to (a 'failed' row is never resumed; delegate() raises
+            # immediately on it -- see delegate()'s own status=='failed'
+            # check). Popped even if the DB update above raises, so a
+            # failed *write* of the failure itself still never leaks the
+            # secret past this call.
+            self._pending_channel_secrets.pop(idempotency_key, None)
 
     def _run_steps(self, idempotency_key: str, channel: ChannelContext, role_set) -> ProvisioningResult:
         while True:
@@ -512,12 +533,13 @@ class ProvisioningService:
                 db.execute("BEGIN IMMEDIATE")
                 try:
                     _record_effect(db, idempotency_key, "channel", "intent", dict(attempt_id=attempt_id))
-                    channel_id, _secret = issue_channel_tx(
+                    channel_id, secret = issue_channel_tx(
                         db, row["task_id"], "worker", row["owner_epoch"],
                         parent_channel_id=coordinator_channel.channel_id,
                         assignment_id=row["assignment_id"], attempt_id=attempt_id,
                         workspace_binding_id=row["workspace_binding_id"],
                     )
+                    self._pending_channel_secrets[idempotency_key] = secret
                     _record_effect(db, idempotency_key, "channel", "outcome", dict(channel_id=channel_id))
                     db.execute(
                         "UPDATE delegation_provisioning SET channel_id=?, step='config_snapshot', updated_at=? WHERE idempotency_key=?",
@@ -617,6 +639,34 @@ class ProvisioningService:
         )
         delivery_label = plan.qualification.value
         if session_ref is None:
+            # Peek (never pop yet): a worker engine session must never be
+            # opened without its channel credentials (T016 review, HIGH).
+            # The secret is only removed from memory after open() actually
+            # succeeds, a few lines below -- so a raise from open() (this
+            # attempt's crash/failure) leaves it available to a same-process
+            # retry instead of silently discarding it and letting a retry
+            # launch an uncredentialed worker.
+            channel_secret = self._pending_channel_secrets.get(idempotency_key)
+            if channel_secret is None:
+                # This process no longer holds the plaintext secret (never
+                # persisted -- see trusted_channel's "returned exactly once"
+                # model): either this is a genuinely new process/instance
+                # resuming a crashed delegation, or a same-process retry
+                # after this same idempotency_key's secret was already
+                # consumed by an earlier *successful* open() (which should
+                # be unreachable here, since a successful open() also
+                # advances status to 'ready' and this branch is only
+                # reached for a still-not-ready row). Revoking the old
+                # channel and issuing a fresh one for the same attempt is
+                # not implemented; fail explicitly and non-retryably rather
+                # than ever open a session with no credentials.
+                self._fail(idempotency_key, "channel_secret_unavailable")
+                raise PortableError(
+                    category=PortableErrorCategory.INDETERMINATE_WRITE,
+                    code="channel_secret_unavailable",
+                    remediation="This process no longer holds this delegation's worker channel secret (channel revocation/reissue on retry is not implemented); start a new delegation with a new request_key instead of retrying this one.",
+                    retry_eligible=False,
+                )
             with self._store.connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 _record_effect(db, idempotency_key, "engine_session", "intent", dict(attempt_id=attempt_id))
@@ -625,8 +675,16 @@ class ProvisioningService:
                 task_id=row["task_id"], assignment_id=row["assignment_id"], attempt_id=attempt_id,
                 channel_id=row["channel_id"], config_revision=row["config_revision"],
                 context_snapshot_ref=row["context_snapshot_ref"],
+                channel_secret=channel_secret,
             )
             session_ref = self._engine.open(row["workspace_binding_id"], launch, role_set.body_portable)
+            # open() succeeded: the secret has now been handed to the
+            # engine's own launch env; stop holding it in memory. (The
+            # already-alive/lookup_owned branch above never populates or
+            # needs this dict entry, so no pop is needed there; every
+            # non-retryable failure path pops it via _fail() instead --
+            # see that method's docstring.)
+            self._pending_channel_secrets.pop(idempotency_key, None)
         with self._store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             try:

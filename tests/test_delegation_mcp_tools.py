@@ -1,0 +1,132 @@
+"""T016: delegation.mcp_tools -- role-filtered delegation operation handlers.
+
+Exercises the handler layer directly (in-process), the same way the T016
+fake-model tests in test_orchestrating_runtime.py call it: never a real MCP
+subprocess, never a real engine. Every Store is rooted at tmp_path.
+"""
+from __future__ import annotations
+
+import uuid
+
+import pytest
+
+from cortex_runtime.bootstrap import bootstrap_task
+from cortex_runtime.contracts import StoreError
+from cortex_runtime.delegation import events as delegation_events
+from cortex_runtime.delegation import mcp_tools
+from cortex_runtime.ownership import current_owner_epoch
+from cortex_runtime.portable.identity import SourceEvent
+from cortex_runtime.store import Store
+from cortex_runtime.trusted_channel import issue_channel_tx, resolve_channel
+
+
+def _task(tmp_path):
+    store = Store(tmp_path / ".cortex", project_root=tmp_path)
+    result = bootstrap_task(store, SourceEvent(origin="cli", event_id=str(uuid.uuid4())), "Build a page.", "owner-1")
+    coordinator = resolve_channel(store, result.channel_id, result.secret)
+    return store, result.task_id, coordinator
+
+
+def _worker_channel(store, task_id, coordinator, attempt_id="xa_test1"):
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        epoch = current_owner_epoch(db, task_id)
+        channel_id, secret = issue_channel_tx(
+            db, task_id, "worker", epoch, parent_channel_id=coordinator.channel_id,
+            assignment_id="a_test1", attempt_id=attempt_id,
+        )
+        db.commit()
+    return resolve_channel(store, channel_id, secret)
+
+
+def _report(store, task_id, report_id="r_" + "a" * 12):
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "INSERT INTO reports VALUES (?,?,?,?,?)",
+            (report_id, task_id, "report", "reports/x.md", store._now()),
+        )
+        db.commit()
+    return report_id
+
+
+def test_delegate_returns_deterministic_assignment_ref_and_is_idempotent(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    args = dict(title="T", brief="B", role="backend-dev", acceptance="A", request_key="k1")
+    first = mcp_tools.dispatch(store, coordinator, "delegate", args)
+    second = mcp_tools.dispatch(store, coordinator, "delegate", args)
+    assert first["assignment_ref"] == second["assignment_ref"]
+    assert first["status"] == "provisioning"
+    events = delegation_events.list_since(store, task_id)
+    assert len([e for e in events if e.event_type == "delegation_requested"]) == 1
+
+
+def test_worker_channel_cannot_call_coordinator_operations(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator)
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, worker, "delegate", dict(title="T", brief="B", role="backend-dev", acceptance="A", request_key="k"))
+    assert str(excinfo.value) == "unknown_operation"
+
+
+def test_coordinator_channel_cannot_call_worker_operations(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, coordinator, "ask_question", dict(question="huh?", request_key="k"))
+    assert str(excinfo.value) == "unknown_operation"
+
+
+def test_decide_accept_requires_an_existing_worker_result(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, coordinator, "decide", dict(assignment_ref="ax", decision="accept", rationale="looks done", request_key="k"))
+    assert str(excinfo.value) == "no_result_to_accept"
+
+
+def test_decide_accept_succeeds_after_worker_result(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    delegation_events.append_event(
+        store, task_id, "worker_result", "wr1", dict(report_ref="r_x", summary="done"),
+        origin="worker-ch", assignment_ref="ax",
+    )
+    result = mcp_tools.dispatch(store, coordinator, "decide", dict(assignment_ref="ax", decision="accept", rationale="looks done", request_key="k"))
+    assert result["recorded"] is True
+
+
+def test_decide_ask_user_requires_a_question(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, coordinator, "decide", dict(assignment_ref="task", decision="ask_user", rationale="need budget approval", request_key="k"))
+    assert str(excinfo.value) == "missing_question"
+
+
+def test_worker_publish_result_requires_a_real_report_of_this_task(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator)
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, worker, "publish_result", dict(report_ref="r_" + "b" * 12, summary="done", request_key="k"))
+    assert str(excinfo.value) == "unknown_report_ref"
+
+
+def test_worker_publish_result_and_ask_question_carry_no_technical_ids(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator)
+    report_id = _report(store, task_id)
+    result = mcp_tools.dispatch(store, worker, "publish_result", dict(report_ref=report_id, summary="done", request_key="k1"))
+    assert set(result) == {"recorded", "cursor", "superseded"}
+    question = mcp_tools.dispatch(store, worker, "ask_question", dict(question="Which env?", request_key="k2"))
+    assert set(question) == {"recorded", "cursor"}
+
+
+def test_worker_result_after_cancellation_is_recorded_superseded(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator, attempt_id="xa_cancelled")
+    delegation_events.append_event(
+        store, task_id, "assignment_cancelled", "cancel1", dict(reason="pipeline revised"),
+        origin="runtime", assignment_ref=worker.attempt_id,
+    )
+    report_id = _report(store, task_id, report_id="r_" + "c" * 12)
+    result = mcp_tools.dispatch(store, worker, "publish_result", dict(report_ref=report_id, summary="late", request_key="k"))
+    assert result["superseded"] is True
+    claimed = delegation_events.claim_unconsumed(store, task_id, "cont")
+    assert not any(e.event_type == "worker_result" for e in claimed)
