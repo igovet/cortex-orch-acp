@@ -33,6 +33,8 @@ from ..delegation import revision as delegation_revision
 from ..delegation import workspace_isolation as delegation_workspace_isolation
 from ..delegation.deliveries import MAX_DELIVERY_RETRIES
 from ..delegation.provisioning import ProvisioningService
+from ..engine import failure_classification
+from ..engine import reaper as engine_reaper
 from ..engine.instruction_delivery_registry import delivery_for
 from ..portable.engine_contract import StopReason
 from ..portable.errors import PortableError, PortableErrorCategory
@@ -337,6 +339,15 @@ class OrchestratingRuntime:
         # -- never "resume" (see recovery.coordinator_recovery module
         # docstring and acp.messages' coordinator_recovery_* keys).
         self._pending_recovery_notice: dict[str, dict] = {}
+        # T028: the most recent ACP session_id -> task_id this process has
+        # seen start a turn for (start_prompt/answer_question), so
+        # cancel(session_id) -- called synchronously on the transport
+        # reader thread the instant a session/cancel notification arrives,
+        # concurrently with the in-flight turn -- can find the coordinator
+        # engine session to invalidate without waiting on that turn at all.
+        # Never cleared (a session_id is effectively unique for the life of
+        # this process); a stale/unknown session_id is simply a no-op below.
+        self._session_task: dict[str, str] = {}
 
     # -- IncomingRuntime -----------------------------------------------
 
@@ -371,6 +382,7 @@ class OrchestratingRuntime:
                 raise SecondCoordinatorRefused()
             self._active_tasks.add(task_id)
             self._active_cancel_events[task_id] = cancel_event
+            self._session_task[session_id] = task_id
         try:
             return self._run(task_id, session_id, content, emit_update, cancel_event,
                               source_origin=source_origin, source_event_id=source_event_id, host_elicitor=elicitor)
@@ -381,13 +393,108 @@ class OrchestratingRuntime:
                     del self._active_cancel_events[task_id]
 
     def cancel(self, session_id: str) -> None:
-        # cancel_event (passed per start_prompt call) is the primary
-        # cancellation path the loop below observes promptly; this method
-        # is a best-effort hook for a session with no in-flight start_prompt
-        # call in this process. Full out-of-band cancel plumbing (stopping
-        # a coordinator/worker turn from a *different* process) is T020/T028
-        # scope; documented, not fabricated here.
+        """T028 (session/cancel, distinct from the task-wide ``/cortex-stop``
+        in :meth:`stop_task`): best-effort, in-process only.
+
+        ``cancel_event`` (set by the caller -- ``acp.agent.Agent
+        ._session_cancel`` -- around this same call) is the primary path
+        the continuation loop itself observes promptly between steps; that
+        alone does *not* interrupt a coordinator turn already blocked
+        inside a synchronous host round trip (a permission request via
+        ``engine.permissions.PermissionBridge``, or a structured
+        elicitation via ``HostElicitor``) -- those keep waiting on their own
+        bounded timeout regardless of ``cancel_event``. This method closes
+        that specific gap for the one engine session this exact turn is
+        using: :meth:`SessionRuntime.invalidate_session` (a duck-typed
+        optional hook -- see
+        ``delegation.live_adapters.EngineSessionManagerAdapter``) marks
+        that engine session's own :class:`engine.resource_binding.BindingRegistry`
+        entry released, so a permission reply this bridge is still waiting
+        to relay (or a late one arriving after this call) is answered
+        ``cancelled`` instead of ever being relayed as if still authorized
+        (see ``ResourceBinding.is_current``). Never touches any *other*
+        task's or session's engine sessions, never cancels an independent,
+        already-dispatched worker assignment this task delegated (scope
+        isolation -- see :meth:`stop_task` for the task-wide equivalent),
+        and never rolls back anything already applied.
+
+        A ``session_id`` this process never saw start a turn (unknown, or
+        only ever handled by a *different* process before a restart) is a
+        documented no-op -- true out-of-band cross-process cancellation is
+        not this method's job (see the historical note this replaces)."""
+        task_id = self._session_task.get(session_id)
+        if task_id is None:
+            return None
+        with self._lock:
+            active_event = self._active_cancel_events.get(task_id)
+        if active_event is not None:
+            active_event.set()
+        session_ref = self._coordinator_sessions.get(task_id)
+        if session_ref is not None:
+            from .. import _fault_injection
+
+            _fault_injection.checkpoint("t028_cancel_before_permission_invalidate")
+            invalidate = getattr(self._engine, "invalidate_session", None)
+            if invalidate is not None:
+                try:
+                    invalidate(session_ref, "session_cancelled")
+                except Exception:
+                    pass
         return None
+
+    def disconnect_session(self, session_id: str) -> None:
+        """T028 (host transport EOF/writer-closed): called once per
+        session on the disconnected ACP connection (see ``acp.agent.Agent
+        ._handle_eof``/``handle_writer_closed``). State up to this point is
+        already durable (every mutation this runtime performs is committed
+        before it is ever visible); this call itself:
+
+        1. signals this task's in-flight turn (if any, *in this process*)
+           to stop via the same ``cancel_event``/binding-invalidation path
+           :meth:`cancel` uses -- STOPS starting any new paid work for this
+           task by default, per the task's own "no hidden paid work"
+           requirement, rather than continuing a coordinator turn no one
+           can any longer observe the result of;
+        2. records a durable ``progress`` event naming what was actually
+           paused/cancelled/unconfirmed -- never silently continuing
+           without a trace;
+        3. runs the bounded owned-resource reaper sweep
+           (:mod:`engine.reaper`) so any capacity reservation or isolated
+           workspace a crash concurrent with the disconnect left ambiguous
+           is re-probed promptly, never assumed released.
+
+        An unknown ``session_id`` (never started a turn in this process) is
+        a no-op beyond the reaper sweep, which is unconditional and safe to
+        call redundantly (idempotent, bounded)."""
+        task_id = self._session_task.get(session_id)
+        if task_id is not None:
+            with self._lock:
+                active_event = self._active_cancel_events.get(task_id)
+                session_ref = self._coordinator_sessions.get(task_id)
+            turn_state = "cancel_event_set" if active_event is not None else "no_active_turn_in_process"
+            if active_event is not None:
+                active_event.set()
+            permission_invalidated = False
+            if session_ref is not None:
+                invalidate = getattr(self._engine, "invalidate_session", None)
+                if invalidate is not None:
+                    try:
+                        invalidate(session_ref, "host_disconnected")
+                        permission_invalidated = True
+                    except Exception:
+                        pass
+            try:
+                delegation_events.append_event(
+                    self._store, task_id, "progress", f"disconnect:{session_id}:{time.monotonic_ns()}",
+                    dict(note="host disconnected", turn=turn_state, permission_invalidated=permission_invalidated),
+                    origin="runtime",
+                )
+            except Exception:
+                pass
+        try:
+            engine_reaper.sweep(self._store, self._engine)
+        except Exception:
+            pass
 
     def shutdown(self) -> None:
         """T017 (fresh review, MEDIUM): signal every queued-for-capacity
@@ -2075,6 +2182,16 @@ class OrchestratingRuntime:
                 # ordinary assignment_failed and is never silently retried
                 # on the same route.
                 self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind=failure.kind, stop_reason=None)
+                # T028: classify this failure before ever considering
+                # fallback -- only a genuine ENGINE_FAILURE classification
+                # is fallback-eligible (see engine.failure_classification's
+                # module docstring). A rate-limit/auth-loss/provider-
+                # restriction/refusal/cancellation/indeterminate reading of
+                # the same failure.kind text never reaches
+                # _attempt_worker_route_fallback at all -- it is refused
+                # here, before any route/consent lookup, not merely relying
+                # on routing.authorization's own denylist as the only gate.
+                failure_class = failure_classification.classify(failure.kind)
                 old_attempt_id = getattr(result, "attempt_id", None)
                 new_session_ref = None
                 fallback_refused = False
@@ -2083,25 +2200,29 @@ class OrchestratingRuntime:
                 assignment_id = getattr(result, "assignment_id", None)
                 workspace_binding_id = getattr(result, "workspace_binding_id", None)
                 config_revision = getattr(result, "config_revision", None)
-                if old_attempt_id is not None and _hop < self._MAX_FALLBACK_HOPS:
+                if (
+                    old_attempt_id is not None and _hop < self._MAX_FALLBACK_HOPS
+                    and failure_classification.is_fallback_eligible(failure_class)
+                ):
                     from ..portable.roles import load_role
 
                     role_set = load_role(role_id)
                     new_session_ref, fallback_refused, new_attempt_id = self._attempt_worker_route_fallback(
                         task_id, assignment_ref, assignment_id, role_id, old_attempt_id,
-                        workspace_binding_id, config_revision, "engine_failure", role_set.body_portable,
+                        workspace_binding_id, config_revision, failure_class, role_set.body_portable,
                     )
                 if new_session_ref is None:
                     if not fallback_refused:
                         # Fallback was never even consulted (no attempt id
                         # to reconcile/replace, no real configuration
-                        # revision to evaluate it against, or the hop
-                        # ceiling was reached) -- the ordinary engine-
-                        # failure event is the only one written for this
-                        # path.
+                        # revision to evaluate it against, the hop ceiling
+                        # was reached, or this failure_class is not
+                        # fallback-eligible at all) -- the ordinary
+                        # engine-failure event is the only one written for
+                        # this path, carrying the distinguishable class.
                         delegation_events.append_event(
                             self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
-                            dict(error=f"engine_failure:{failure.kind}", kind=failure.kind),
+                            dict(error=f"engine_failure:{failure.kind}", kind=failure.kind, failure_class=failure_class),
                             origin="runtime", assignment_ref=assignment_ref,
                         )
                     # Else: _attempt_worker_route_fallback already recorded

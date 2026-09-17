@@ -376,6 +376,9 @@ class IsolatedSnapshotWorkspaceProvisioner:
                     candidate.relative_to(state_root)
                 except ValueError:
                     raise StoreError("unsafe_storage") from None
+        from .. import _fault_injection
+
+        _fault_injection.checkpoint("t028_cleanup_before_remove_owned_tree")
         for path in (row["root_path"], row["base_path"]):
             if path is not None:
                 _remove_owned_tree(path)

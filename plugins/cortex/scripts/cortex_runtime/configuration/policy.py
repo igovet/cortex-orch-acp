@@ -38,6 +38,17 @@ PROVIDER_RESTRICTION = "provider_restriction"
 
 # Never eligible for fallback, regardless of what any fallback_policy allows.
 FALLBACK_HARD_DENYLIST = frozenset({CANCELLATION, REFUSAL, AUTHORIZATION_LOSS, PROVIDER_RESTRICTION})
+# T028: engine.failure_classification.RATE_LIMITED is *not* added here (a
+# pre-existing test, test_configuration_ceiling_layers.py, already uses the
+# literal string "rate_limited" as an arbitrary example fallback_policy
+# class name unrelated to T028's own taxonomy -- adding it to this
+# constructor-time-validated denylist would reject that fixture). Rate-limit
+# non-eligibility is instead enforced the same way every T028 class other
+# than ENGINE_FAILURE already is: KNOWN_FALLBACK_ELIGIBLE_CLASSES below only
+# ever contains ENGINE_FAILURE/CAPACITY_UNAVAILABLE, and
+# routing.authorization.authorize_fallback refuses any failure_class outside
+# it unconditionally -- see engine.failure_classification's module docstring
+# and its own test coverage (tests/test_t028_failures_cancellation_disconnects.py).
 
 # T027: the only two failure classes a durable fallback_policy may actually
 # name (see the task's own lead decision #4) -- distinct from the hard

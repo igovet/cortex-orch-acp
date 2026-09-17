@@ -76,6 +76,11 @@ check.
   predecessors), pre-dispatch role/capability/attempt-budget enforcement,
   and the narrow, consent-gated conditions under which an authorized
   fallback ever opens a different route](routing-and-fallback.md)
+- [Failures, cancellation, and disconnects (T028): the closed failure-class
+  taxonomy distinguishing rate limits/auth loss/provider restrictions from a
+  genuine engine crash, bounded reconciled-before-retry policy, session/
+  cancel's permission-binding invalidation, host-disconnect handling, and
+  the bounded owned-resource reaper](failures-and-cancellation.md)
 
 ## Tools
 

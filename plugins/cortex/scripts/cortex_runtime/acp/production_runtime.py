@@ -110,6 +110,18 @@ class ProductionOrchestratingRuntime:
                 workspace_provisioner.root_for(binding_id) or str(project)
             ),
         )
+        # T028: bounded owned-resource reaper sweep, once per project at
+        # first use in this process (see engine.reaper's module docstring)
+        # -- re-probes any capacity reservation/isolated workspace a prior
+        # crash left ambiguous/uncleaned; never touches a process/path this
+        # Cortex process did not itself own, and never blocks start_prompt
+        # on anything beyond this one bounded pass.
+        try:
+            from ..engine import reaper as engine_reaper
+
+            engine_reaper.sweep(store, adapter)
+        except Exception:
+            pass
         runtime = OrchestratingRuntime(
             store, adapter, workspace_provisioner,
             ConfigurationServiceSnapshotSource(configuration_service),
@@ -141,6 +153,13 @@ class ProductionOrchestratingRuntime:
     def cancel(self, session_id):
         for runtime in list(self._runtimes.values()):
             runtime.cancel(session_id)
+
+    def disconnect(self, session_id):
+        """T028: forwarded from ``acp.agent.Agent._handle_eof``/
+        ``handle_writer_closed`` for every session on the disconnected
+        connection -- see ``OrchestratingRuntime.disconnect_session``."""
+        for runtime in list(self._runtimes.values()):
+            runtime.disconnect_session(session_id)
 
     # -- T020 /cortex-stop / /cortex-answer entrypoints ------------------
 

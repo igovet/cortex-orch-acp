@@ -712,6 +712,25 @@ class EngineSessionManagerAdapter:
         self._cancelled_tasks.add(task_id)
         self._notify_activity()
 
+    def invalidate_session(self, engine_session_ref: str, reason: str | None = None) -> None:
+        """T028: duck-typed optional hook (see
+        ``acp.orchestrating_runtime.OrchestratingRuntime.cancel``) --
+        forwards to the exact ``EngineSessionManager`` that owns
+        ``engine_session_ref`` (via ``_session_to_attempt``/``_managers``,
+        the same lookup :meth:`prompt` itself uses), invalidating only that
+        one session's ``BindingRegistry`` entry (see
+        ``engine.resource_binding.BindingRegistry.invalidate_session``) so
+        a permission/fs/terminal request already in flight for it is
+        answered as cancelled rather than relayed. A session this adapter
+        instance never opened (unknown ref, or opened by a different
+        process before a restart) is a silent no-op -- there is no
+        in-memory manager to invalidate a binding on."""
+        with self._lock:
+            attempt_id = self._session_to_attempt.get(engine_session_ref)
+            manager = self._managers.get(attempt_id) if attempt_id is not None else None
+        if manager is not None:
+            manager.invalidate_session(engine_session_ref, reason)
+
     def shutdown(self) -> None:
         """Signal every queued open to abort, then terminate every owned
         engine process with a confirmed/ambiguous release (never a
@@ -805,7 +824,9 @@ class EngineSessionManagerAdapter:
             delegation_deliveries.supersede_session_deliveries(self._store, session_id, "attempt_terminated")
         if reservation_id is not None and self._store is not None:
             from . import capacity as delegation_capacity
+            from .. import _fault_injection
 
+            _fault_injection.checkpoint("t028_between_terminate_and_capacity_release")
             if exited:
                 delegation_capacity.release_confirmed(self._store, reservation_id, "process_exited")
             else:
@@ -972,6 +993,18 @@ class EngineSessionManagerAdapter:
         try:
             for event in manager.prompt_turn(session_ref, message):
                 if cancel_event.is_set():
+                    from .. import _fault_injection
+
+                    # T028: any event still arriving on this iteration
+                    # (including a TURN_END success) after cancel_event was
+                    # observed set is a "late success after cancel" -- the
+                    # caller (acp.agent.Agent._run_prompt_body) always
+                    # forces StopReason.CANCELLED regardless of what this
+                    # loop returns once cancel_event is set, so a late
+                    # success here is recorded (its own durable events/
+                    # deliveries still land normally) but never reported as
+                    # having completed the turn or used to revive it.
+                    _fault_injection.checkpoint("t028_late_event_after_cancel")
                     manager.cancel(session_ref)
                 if event.kind == EngineEventKind.TURN_DELTA and event.delta_text:
                     text_parts.append(event.delta_text)

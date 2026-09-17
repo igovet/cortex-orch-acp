@@ -1161,6 +1161,9 @@ class Agent:
 
     def _handle_eof(self):
         """Cancel every in-flight prompt; the caller (see ``main``) joins workers."""
+        from .. import _fault_injection
+
+        _fault_injection.checkpoint("t028_disconnect_before_cancel")
         if self.host_requester is not None:
             self.host_requester.close()
         for session in list(self.sessions.values()):
@@ -1168,6 +1171,20 @@ class Agent:
                 active = session["active"]
             if active is not None:
                 active.set()
+        # T028: stop this connection's tasks from starting any new paid
+        # work and run the bounded owned-resource reaper -- see
+        # acp.production_runtime.ProductionOrchestratingRuntime.disconnect/
+        # acp.orchestrating_runtime.OrchestratingRuntime.disconnect_session.
+        # A runtime that predates T028 (UnavailableRuntime, most
+        # FakeRuntime test doubles) simply has no ``disconnect`` attribute
+        # -- never required, never fabricated here.
+        disconnect = getattr(self.runtime, "disconnect", None)
+        if disconnect is not None:
+            for session_id in list(self.sessions):
+                try:
+                    disconnect(session_id)
+                except Exception:
+                    pass
 
     def handle_writer_closed(self):
         """Called (on the transport's writer thread; see
