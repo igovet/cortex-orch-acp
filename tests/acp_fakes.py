@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -26,6 +27,25 @@ from cortex_runtime.portable.engine_contract import StopReason
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "plugins" / "cortex" / "scripts"
 TESTS_DIR = ROOT / "tests"
+
+# T010 (ACP configuration UI) added connection/catalog/user-default reads to
+# the agent's session/new and session/set_config_option handling, which by
+# default resolve under $XDG_CONFIG_HOME/$XDG_STATE_HOME/$HOME. Every
+# spawned agent subprocess below defaults those three to a *fresh*
+# process-private tmp directory (outside this repo, never reused across
+# spawns) so that a test that does not care about connections/catalog state
+# never reads or creates anything under the real user's actual
+# ~/.config/cortex or ~/.local/state/cortex -- see the T010 task card's "no
+# real ~/.config/cortex or ~/.local/state/cortex" invariant. A caller that
+# *does* care (e.g. a config-options test) still passes its own
+# XDG_CONFIG_HOME/XDG_STATE_HOME/HOME via ``env=`` and that value always
+# wins (see the ``full_env.update`` below, applied after these defaults).
+
+
+def _isolated_home_env() -> dict[str, str]:
+    home = tempfile.mkdtemp(prefix="cortex-acp-fake-home-")
+    return {"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, "config"),
+            "XDG_STATE_HOME": os.path.join(home, "state")}
 
 
 class FakeRuntime:
@@ -103,6 +123,7 @@ def spawn_fake_agent(*, chunks=("Hello", " world"), stop_reason="end_turn", dela
         f"main(runtime=FakeRuntime(chunks={tuple(chunks)!r}, stop_reason=StopReason({stop_reason!r}), delay={delay!r}))\n"
     )
     full_env = dict(os.environ)
+    full_env.update(_isolated_home_env())
     if env:
         full_env.update(env)
     return subprocess.Popen(
@@ -122,6 +143,7 @@ def spawn_flooding_agent(*, total=200_000, env=None):
         f"main(runtime=FloodingRuntime(total={int(total)}))\n"
     )
     full_env = dict(os.environ)
+    full_env.update(_isolated_home_env())
     if env:
         full_env.update(env)
     return subprocess.Popen(
@@ -133,6 +155,7 @@ def spawn_flooding_agent(*, total=200_000, env=None):
 def spawn_production_agent(*, env=None):
     """Start the real ``cortex_acp.py`` entry point (no fake runtime)."""
     full_env = dict(os.environ)
+    full_env.update(_isolated_home_env())
     if env:
         full_env.update(env)
     return subprocess.Popen(

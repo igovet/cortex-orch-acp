@@ -38,8 +38,11 @@ def test_unsupported_session_lifecycle_methods_return_method_not_found():
     try:
         _initialize(proc)
         for index, method in enumerate((
+            # session/set_config_option is deliberately excluded here: T010
+            # implements it (see test_acp_config_options.py), so it is no
+            # longer in protocol.UNSUPPORTED_METHODS.
             "session/load", "session/resume", "session/set_mode",
-            "session/set_config_option", "session/list", "session/fork", "session/close",
+            "session/list", "session/fork", "session/close",
         ), start=2):
             _send(proc, dict(jsonrpc="2.0", id=index, method=method, params={}))
             reply = _recv(proc)
@@ -57,6 +60,7 @@ def test_image_content_block_rejected_with_invalid_params(tmp_path):
         _send(proc, dict(jsonrpc="2.0", id=2, method="session/new",
                           params=dict(cwd=str(tmp_path), mcpServers=[])))
         session_id = _recv(proc)["result"]["sessionId"]
+        _recv(proc)  # available_commands_update notification (T010)
         _send(proc, dict(jsonrpc="2.0", id=3, method="session/prompt",
                           params=dict(sessionId=session_id,
                                       prompt=[dict(type="image", data="Zm9v", mimeType="image/png")])))
@@ -75,6 +79,7 @@ def test_resource_link_and_text_blocks_accepted(tmp_path):
         _send(proc, dict(jsonrpc="2.0", id=2, method="session/new",
                           params=dict(cwd=str(tmp_path), mcpServers=[])))
         session_id = _recv(proc)["result"]["sessionId"]
+        _recv(proc)  # available_commands_update notification (T010)
         _send(proc, dict(jsonrpc="2.0", id=3, method="session/prompt",
                           params=dict(sessionId=session_id, prompt=[
                               dict(type="text", text="Look at this:"),

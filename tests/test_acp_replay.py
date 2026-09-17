@@ -8,7 +8,9 @@ reaching the runtime.
 """
 import json
 import sqlite3
+import tempfile
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 from cortex_runtime.bootstrap import append_source_event, bootstrap_task
@@ -138,6 +140,7 @@ def test_resent_request_id_is_rejected_before_capture_and_creates_no_new_event(t
         _send(proc, dict(jsonrpc="2.0", id=2, method="session/new",
                           params=dict(cwd=str(tmp_path), mcpServers=[])))
         session_id = _recv(proc)["result"]["sessionId"]
+        _recv(proc)  # available_commands_update notification (T010)
 
         _send(proc, dict(jsonrpc="2.0", id=3, method="session/prompt",
                           params=dict(sessionId=session_id, prompt=[dict(type="text", text="hello")])))
@@ -172,6 +175,7 @@ def test_different_request_id_identical_text_creates_a_new_source_event(tmp_path
         _send(proc, dict(jsonrpc="2.0", id=2, method="session/new",
                           params=dict(cwd=str(tmp_path), mcpServers=[])))
         session_id = _recv(proc)["result"]["sessionId"]
+        _recv(proc)  # available_commands_update notification (T010)
 
         _send(proc, dict(jsonrpc="2.0", id=3, method="session/prompt",
                           params=dict(sessionId=session_id, prompt=[dict(type="text", text="same text")])))
@@ -289,7 +293,17 @@ def test_run_prompt_replies_internal_error_when_store_lookup_raises(tmp_path, mo
 
 def test_duplicate_id_while_first_prompt_genuinely_in_flight(tmp_path):
     runtime = _ReleasableRuntime()
-    agent = Agent(runtime)
+    # T010's session/new now reads the connection registry/catalog (see
+    # config_options.py); an isolated environ here (never the inherited
+    # real os.environ, and never nested under the project workspace itself
+    # -- connection storage must be user-scoped, never inside a project;
+    # see registry._assert_not_nested_in_project_workspace) keeps this
+    # in-process Agent from ever touching the real ~/.config/cortex or
+    # ~/.local/state/cortex.
+    fake_home = Path(tempfile.mkdtemp(prefix="cortex-acp-fake-home-"))
+    environ = dict(HOME=str(fake_home), XDG_CONFIG_HOME=str(fake_home / "config"),
+                   XDG_STATE_HOME=str(fake_home / "state"))
+    agent = Agent(runtime, environ=environ)
     transport = _RecordingTransport()
     agent.bind_transport(transport)
     agent.initialized = True

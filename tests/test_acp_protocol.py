@@ -36,6 +36,8 @@ def test_initialize_session_prompt_stream_and_cancel(tmp_path):
                           params=dict(cwd=str(tmp_path), mcpServers=[])))
         session_id = _recv(proc)["result"]["sessionId"]
         assert session_id.startswith("acps_")
+        commands_update = _recv(proc)
+        assert commands_update["params"]["update"]["sessionUpdate"] == "available_commands_update"
 
         _send(proc, dict(jsonrpc="2.0", id=3, method="session/prompt",
                           params=dict(sessionId=session_id,

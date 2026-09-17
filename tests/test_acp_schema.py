@@ -61,6 +61,8 @@ def test_every_emitted_message_matches_the_pinned_schema(tmp_path):
         new_reply = _recv(proc)
         response_validator.validate(new_reply)
         session_id = new_reply["result"]["sessionId"]
+        commands_update = _recv(proc)
+        notification_validator.validate(commands_update)
 
         _send(proc, dict(jsonrpc="2.0", id=3, method="session/prompt",
                           params=dict(sessionId=session_id, prompt=[dict(type="text", text="go")])))
