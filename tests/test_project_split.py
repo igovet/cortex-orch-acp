@@ -371,4 +371,47 @@ def test_split_accepts_a_legacy_v11_source_missing_the_catalog_table(tmp_path):
         assert db.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_route_selections'"
         ).fetchone()
+
+
+def test_split_carries_configuration_revisions_and_project_defaults_when_present(tmp_path):
+    from cortex_runtime.configuration import store as configuration_store
+    from cortex_runtime.configuration.policy import PolicyCeiling
+    from cortex_runtime.portable.identity import ExecutionRoute
+
+    source_dir = tmp_path / "global"; source_dir.mkdir(mode=0o700)
+    project = tmp_path / "project"; project.mkdir(); store = Store(source_dir)
+    task, _ = _create(store, project, "only")
+    configuration_store.write_project_defaults(store, str(project), {"effort": "medium"}, PolicyCeiling())
+    route = ExecutionRoute(engine="codex-acp", connection_id="cn_" + "a" * 12, model="model-a")
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        configuration_store.insert_revision_tx(db, task, 1, route, {}, PolicyCeiling())
+        db.commit()
+    split_project(source_dir, project, tmp_path / "backup.sqlite3", access_stopped=True)
+    destination = project / ".cortex" / "cortex.sqlite3"
+    with sqlite3.connect(destination) as db:
+        rows = db.execute("SELECT task_id,route_id FROM configuration_revisions").fetchall()
+        assert rows == [(task, route.id)]
+        defaults = db.execute(
+            "SELECT project_root,defaults FROM project_configuration_defaults"
+        ).fetchall()
+        assert defaults == [(str(project), '{"effort":"medium"}')]
+
+
+def test_split_accepts_a_legacy_v11_source_missing_the_configuration_tables(tmp_path):
+    source_dir = tmp_path / "global"; source_dir.mkdir(mode=0o700)
+    project = tmp_path / "project"; project.mkdir(); store = Store(source_dir)
+    task, _ = _create(store, project, "only")
+    with store.connection() as db:
+        db.execute("DROP TABLE configuration_revisions")
+        db.execute("DROP TABLE project_configuration_defaults")
+    split_project(source_dir, project, tmp_path / "backup.sqlite3", access_stopped=True)
+    destination = project / ".cortex" / "cortex.sqlite3"
+    with sqlite3.connect(destination) as db:
+        assert db.execute("SELECT id FROM tasks").fetchall() == [(task,)]
+        for table in ("configuration_revisions", "project_configuration_defaults"):
+            assert db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            assert db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
         assert db.execute("SELECT COUNT(*) FROM task_route_selections").fetchone()[0] == 0

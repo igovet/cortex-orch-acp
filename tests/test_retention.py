@@ -71,6 +71,25 @@ def test_retention_command_uses_only_selected_project_store(tmp_path, monkeypatc
     assert global_store.path.read_bytes()==before
 
 
+def test_retention_deletes_configuration_revisions_with_task_but_keeps_project_defaults(tmp_path):
+    from cortex_runtime.configuration import store as configuration_store
+    from cortex_runtime.configuration.policy import PolicyCeiling
+    from cortex_runtime.portable.identity import ExecutionRoute
+
+    store=Store(tmp_path/'private');project=tmp_path/'project';project.mkdir()
+    task=call_store(store,'create_task',dict(project_root=str(project),request='r',request_key='k'))['task_id']
+    configuration_store.write_project_defaults(store,str(project),{'effort':'medium'},PolicyCeiling())
+    route=ExecutionRoute(engine='codex-acp',connection_id='cn_'+'a'*12,model='model-a')
+    with store.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        configuration_store.insert_revision_tx(db,task,1,route,{},PolicyCeiling())
+        db.commit()
+    clear_tasks(store,str(project),0)
+    with store.connection() as db:
+        assert not db.execute('SELECT 1 FROM configuration_revisions WHERE task_id=?',(task,)).fetchone()
+    assert configuration_store.read_project_defaults(store,str(project)) is not None
+
+
 def test_retention_command_inactive_project_has_no_storage_side_effects(tmp_path, monkeypatch, capsys):
     import json
     monkeypatch.setattr('sys.argv',['cortex_clear.py','--project-root',str(tmp_path),'--days','7'])
