@@ -1,0 +1,22 @@
+tests/fixtures/acp/schema-1.4.0.json
+====================================
+
+This file is a verbatim, unmodified copy of the JSON Schema published by the
+Agent Client Protocol (ACP) TypeScript SDK, used here only as a fixture to
+validate this repository's own ACP wire messages in tests
+(tests/test_acp_schema.py). It is test-fixture content, not part of this
+project's shipped runtime.
+
+Source package : @agentclientprotocol/sdk
+Source version : 1.4.0
+Source path    : node_modules/@agentclientprotocol/sdk/schema/schema.json
+                 (as installed under
+                 ~/.local/share/zed/external_agents/registry/npx/claude-acp/)
+License        : Apache License, Version 2.0
+Copyright      : Zed Industries and the Agent Client Protocol contributors
+
+The Apache License, Version 2.0 text is available at
+http://www.apache.org/licenses/LICENSE-2.0 and in the source package's own
+LICENSE file (node_modules/@agentclientprotocol/sdk/LICENSE). No changes
+were made to schema.json; it is copied here byte-for-byte under a renamed
+filename for local fixture use only.

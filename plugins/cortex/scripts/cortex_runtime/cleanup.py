@@ -31,6 +31,7 @@ def finish_deletions(store,db,task):
                 raise StoreError("unsafe_storage","task_directory",str(directory),"owned project task directory")
             if not shutil.rmtree.avoids_symlink_attacks: raise StoreError("unsafe_storage")
             shutil.rmtree(directory); sync_directory(task_root)
+        db.execute("DELETE FROM acp_host_sessions WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_route_selections WHERE task_id=?",(task,))
         db.execute("DELETE FROM configuration_revisions WHERE task_id=?",(task,))
         db.execute("DELETE FROM report_provenance WHERE edition_sequence IN (SELECT e.sequence FROM editions e JOIN reports r ON r.id=e.report_id WHERE r.task_id=?)",(task,))

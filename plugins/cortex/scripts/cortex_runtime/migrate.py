@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import uuid
 
+from .acp.sessions import ACP_SESSION_SCHEMA
 from .catalog.store import CATALOG_SCHEMA
 from .configuration.store import CONFIGURATION_SCHEMA
 from .contracts import StoreError
@@ -46,7 +47,7 @@ def migrate(directory, backup, *, access_stopped=False):
         sync_directory(backup.parent)
         # Existing v10 tables and immutable Markdown are untouched. Add metadata,
         # initialize known source order and mark older authored provenance unknown (0).
-        db.executescript("BEGIN EXCLUSIVE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA)
+        db.executescript("BEGIN EXCLUSIVE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA)
         db.execute("PRAGMA foreign_keys=ON")
         rows=db.execute("SELECT thread_id FROM thread_bindings").fetchall()
         for (thread,) in rows:

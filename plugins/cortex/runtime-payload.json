@@ -1,11 +1,18 @@
 {
   "files": [
     "scripts/cortex.py",
+    "scripts/cortex_acp.py",
     "scripts/cortex_clear.py",
     "scripts/cortex_gateway.py",
     "scripts/cortex_hook.py",
     "scripts/cortex_migrate.py",
     "scripts/cortex_runtime/__init__.py",
+    "scripts/cortex_runtime/acp/__init__.py",
+    "scripts/cortex_runtime/acp/agent.py",
+    "scripts/cortex_runtime/acp/protocol.py",
+    "scripts/cortex_runtime/acp/runtime.py",
+    "scripts/cortex_runtime/acp/sessions.py",
+    "scripts/cortex_runtime/acp/transport.py",
     "scripts/cortex_runtime/advisory_lane.py",
     "scripts/cortex_runtime/bootstrap.py",
     "scripts/cortex_runtime/capability_policy.py",

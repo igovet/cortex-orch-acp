@@ -83,3 +83,53 @@ def bootstrap_task(store, source_event, user_input, owner_ref):
             db.rollback(); raise
         store._finalize_files(rollbacks)
     return BootstrapResult(task_id=task, channel_id=channel_id, secret=secret, replayed=False)
+
+
+def append_source_event(store, source_event, user_input, task_id):
+    """Durably record one later source event on an already-bootstrapped task.
+
+    Never creates a new task, principal thread, or coordinator channel --
+    only ``bootstrap_task`` does that. Dedup is by ``(origin, event_id)``,
+    exactly like ``bootstrap_task``: a replayed event returns the existing
+    ``task_id`` with ``replayed=True`` and writes nothing new. One
+    ``BEGIN IMMEDIATE`` transaction; a crash before commit leaves nothing
+    persisted, a crash after commit is safely recoverable by appending the
+    identical event again.
+    """
+    origin = _bounded_text(source_event.origin, "origin")
+    event_id = _bounded_text(source_event.event_id, "event_id")
+    if not isinstance(user_input, str) or not user_input:
+        raise StoreError("invalid_source_event", "user_input", user_input, "non-empty string")
+    task_id = _bounded_text(task_id, "task_id")
+    if store.project_root is None:
+        raise StoreError("project_context_unavailable")
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            existing = db.execute(
+                "SELECT task_id FROM source_events WHERE origin=? AND event_id=?",
+                (origin, event_id)).fetchone()
+            if existing is not None:
+                db.commit()
+                return BootstrapResult(task_id=existing["task_id"], channel_id=None, secret=None, replayed=True)
+            if db.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
+                raise StoreError("task_not_bound")
+            principal = db.execute(
+                "SELECT thread_id FROM thread_bindings WHERE task_id=? AND parent_thread_id IS NULL LIMIT 1",
+                (task_id,)).fetchone()
+            if principal is None:
+                raise StoreError("task_not_bound")
+            principal = principal["thread_id"]
+            rollbacks, staged = [], []
+            try:
+                store.bootstrap_source(db, task_id, principal, origin+":"+event_id, user_input, rollbacks, staged)
+            except BaseException:
+                store._rollback_files(rollbacks)
+                for path in staged: path.unlink(missing_ok=True)
+                raise
+            db.execute("INSERT INTO source_events VALUES (?,?,?,?)", (origin, event_id, task_id, store._now()))
+            db.commit()
+        except BaseException:
+            db.rollback(); raise
+        store._finalize_files(rollbacks)
+    return BootstrapResult(task_id=task_id, channel_id=None, secret=None, replayed=False)

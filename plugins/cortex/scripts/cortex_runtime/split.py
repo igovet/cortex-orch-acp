@@ -11,6 +11,7 @@ import sqlite3
 import stat
 import uuid
 
+from .acp.sessions import ACP_SESSION_SCHEMA
 from .catalog.store import CATALOG_SCHEMA
 from .configuration.store import CONFIGURATION_SCHEMA
 from .contracts import StoreError
@@ -40,6 +41,12 @@ _CATALOG_TABLES = frozenset({"task_route_selections"})
 # both.
 _CONFIGURATION_TABLES = frozenset({"configuration_revisions", "project_configuration_defaults"})
 
+# acp_host_sessions (see acp.sessions.ACP_SESSION_SCHEMA) is a fourth,
+# independent optional group on top of
+# SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA: a
+# pre-T009 v11 store has none of it, a store.py-created store always has it.
+_ACP_TABLES = frozenset({"acp_host_sessions"})
+
 _SELECTIONS = {
     "tasks": "SELECT x.* FROM tasks x WHERE x.project_root=?",
     "thread_bindings": "SELECT x.* FROM thread_bindings x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -49,6 +56,7 @@ _SELECTIONS = {
     "task_route_selections": "SELECT x.* FROM task_route_selections x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "configuration_revisions": "SELECT x.* FROM configuration_revisions x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "project_configuration_defaults": "SELECT x.* FROM project_configuration_defaults x WHERE x.project_root=?",
+    "acp_host_sessions": "SELECT x.* FROM acp_host_sessions x WHERE x.project_root=?",
     "reports": "SELECT x.* FROM reports x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "source_cursors": "SELECT x.* FROM source_cursors x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "source_messages": "SELECT x.* FROM source_messages x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -73,6 +81,7 @@ _SELECTIONS = {
 _COPY_ORDER = (
     "tasks", "thread_bindings", "task_owners", "trusted_channels", "source_events",
     "task_route_selections", "configuration_revisions", "project_configuration_defaults",
+    "acp_host_sessions",
     "reports", "source_cursors", "source_messages",
     "editions", "governance", "drafts", "pending_source_deletions",
     "pending_deletions", "binding_receipts", "source_resets", "source_revisions",
@@ -143,10 +152,18 @@ def _configuration_present(db):
     return names == _CONFIGURATION_TABLES
 
 
+def _acp_present(db):
+    """True only when every ACP session table exists; false only when none do."""
+    names = _table_names(db) & _ACP_TABLES
+    if names and names != _ACP_TABLES:
+        raise StoreError("unsupported_storage")
+    return names == _ACP_TABLES
+
+
 def _expected_layout():
     db = sqlite3.connect(":memory:")
     try:
-        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA)
+        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA)
         tables = _table_names(db)
         columns = {
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA table_xinfo({_identifier(table)})"))
@@ -156,7 +173,7 @@ def _expected_layout():
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA foreign_key_list({_identifier(table)})"))
             for table in tables
         }
-        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES
+        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES
         return core, columns, foreign_keys
     finally:
         db.close()
@@ -175,11 +192,13 @@ def _validate_format(db):
     identity_present = _identity_present(db)
     catalog_present = _catalog_present(db)
     configuration_present = _configuration_present(db)
+    acp_present = _acp_present(db)
     expected = (
         core
         | (_IDENTITY_TABLES if identity_present else set())
         | (_CATALOG_TABLES if catalog_present else set())
         | (_CONFIGURATION_TABLES if configuration_present else set())
+        | (_ACP_TABLES if acp_present else set())
     )
     views = db.execute("SELECT 1 FROM sqlite_master WHERE type='view' LIMIT 1").fetchone()
     if actual != expected or views is not None:
@@ -440,12 +459,13 @@ def _create_destination(source_db, temporary, project_root):
         # a fresh store: core SCHEMA+HOOK_SCHEMA plus the identity tables,
         # regardless of whether the (possibly legacy, pre-T005) source has
         # them. A legacy source simply leaves them empty in the destination.
-        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA +
+        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA +
                              f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
         target.execute("BEGIN IMMEDIATE")
         source_identity_present = _identity_present(source_db)
         source_catalog_present = _catalog_present(source_db)
         source_configuration_present = _configuration_present(source_db)
+        source_acp_present = _acp_present(source_db)
         expected = {}
         for table in _COPY_ORDER:
             columns = [row[1] for row in target.execute(f"PRAGMA table_info({_identifier(table)})")]
@@ -464,6 +484,11 @@ def _create_destination(source_db, temporary, project_root):
             elif table in _CONFIGURATION_TABLES and not source_configuration_present:
                 # No configuration rows exist to carry; leave the destination's
                 # freshly-created configuration tables empty for the same reason.
+                rows = ()
+            elif table in _ACP_TABLES and not source_acp_present:
+                # No ACP host session rows exist to carry; leave the
+                # destination's freshly-created ACP tables empty for the
+                # same reason.
                 rows = ()
             elif table == "deliveries":
                 rows = _selected_deliveries(source_db, project_root)

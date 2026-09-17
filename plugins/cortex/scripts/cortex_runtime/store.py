@@ -259,6 +259,7 @@ class Store:
         from .trusted_channel import IDENTITY_SCHEMA
         from .catalog.store import CATALOG_SCHEMA
         from .configuration.store import CONFIGURATION_SCHEMA
+        from .acp.sessions import ACP_SESSION_SCHEMA
         from .project_storage import canonical_project, project_store_directory
         self.project_root=canonical_project(project_root) if project_root is not None else None
         if self.project_root is not None and Path(directory)!=project_store_directory(self.project_root):
@@ -284,7 +285,7 @@ class Store:
             db.commit()
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
 
     def _check_project(self,db,task=None):
         if self.project_root is None:return
