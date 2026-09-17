@@ -44,6 +44,12 @@ check.
   and injection-resistant rendering, size bounds, the `read_capsule` MCP
   tool, and what's deferred to
   T022](recovery-capsules.md)
+- [Context generations and qualified recovery delivery (T022): adapter
+  compaction-support tiers with dist evidence, one compaction owner per
+  session, deduplicated generation tracking, the built/transmitted/
+  confirmed/continuation_observed/blocked/superseded delivery ledger, and
+  fresh-generation capsule/role/tool-schema
+  delivery](context-generations.md)
 
 ## Tools
 

@@ -165,6 +165,17 @@ class EngineSessionManagerAdapter:
         self._cancelled_attempts: set[str] = set()
         self._cancelled_tasks: set[str] = set()
         self._shutdown_event = threading.Event()
+        # T022: context-generation/delivery tracking, active only when
+        # ``store`` is supplied (same gate T017's capacity tracking uses --
+        # a caller/test with no store gets the pre-T022 behavior
+        # unchanged). ``_ever_opened_attempts`` distinguishes a brand new
+        # attempt's first session (cause=session_open) from a retried
+        # attempt reopening a session (cause=session_replacement).
+        # ``_pending_generation``/``_session_meta`` are keyed by portable
+        # ``session_ref``.
+        self._ever_opened_attempts: set[str] = set()
+        self._pending_generation: dict[str, dict] = {}
+        self._session_meta: dict[str, dict] = {}
         # T017 (load-test fix): notified on every confirmed/ambiguous
         # release and every cancel/shutdown signal, so a queued open wakes
         # promptly instead of relying purely on its own backoff poll
@@ -212,7 +223,58 @@ class EngineSessionManagerAdapter:
             self._attempt_task[attempt_id] = task_id
             if reservation_id is not None:
                 self._reservations[attempt_id] = reservation_id
+            replacement = attempt_id in self._ever_opened_attempts
+            self._ever_opened_attempts.add(attempt_id)
+        if self._store is not None:
+            self._open_generation(
+                manager, record, session_id, task_id, attempt_id, launch,
+                cause="session_replacement" if replacement else "session_open",
+            )
         return session_id
+
+    def _open_generation(self, manager, record, session_id, task_id, attempt_id, launch, *, cause: str) -> None:
+        from . import generations as delegation_generations
+
+        recipient = "worker" if launch.get("assignment_id") else "coordinator"
+        # NOTE: ``launch["assignment_id"]`` is ``delegation_provisioning.
+        # assignment_id`` (a distinct column from its primary key). Every
+        # other consumer of a generation's own recorded ``assignment_ref``
+        # (``recovery.capsule``'s ``recipient["assignment_ref"]``,
+        # ``task_events.assignment_ref``, ...) means the provisioning row's
+        # ``idempotency_key`` instead (see
+        # ``acp.orchestrating_runtime.DelegateResult.assignment_ref`` /
+        # ``ProvisioningService.delegate``) -- resolved here by
+        # ``attempt_id`` so the generation's own ``assignment_ref`` column
+        # actually matches what a later capsule build looks up.
+        assignment_ref = None
+        if recipient == "worker":
+            with self._store.connection() as db:
+                row = db.execute(
+                    "SELECT idempotency_key FROM delegation_provisioning WHERE attempt_id=?", (attempt_id,),
+                ).fetchone()
+            assignment_ref = row["idempotency_key"] if row is not None else None
+        # Same documented pinned-version convention as
+        # ``ConfigurationServiceSnapshotSource.snapshot`` (T016): no real
+        # installed-version discovery is wired into ``ConnectionRecord``
+        # yet, so codex-acp resolves to its one pinned evidence-qualified
+        # version and every other engine resolves to the wildcard tier
+        # entry (see ``delegation.generations.tier_for``'s own fallback --
+        # an engine with no wildcard evidence still correctly falls to
+        # ``controlled_boundary``/``unqualified``, never a guessed tier).
+        version = "1.12.0" if record.engine == "codex-acp" else "*"
+        tier = delegation_generations.ensure_owner(
+            self._store, task_id=task_id, engine_session_ref=session_id, engine=record.engine, version=version,
+        )
+        generation = delegation_generations.open_generation(
+            self._store, task_id=task_id, engine_session_ref=session_id, recipient=recipient,
+            cause=cause, evidence_source=f"engine_session_manager:{cause}", assignment_ref=assignment_ref,
+        )
+        with self._lock:
+            self._session_meta[session_id] = dict(
+                task_id=task_id, attempt_id=attempt_id, engine=record.engine, version=version,
+                recipient=recipient, assignment_ref=assignment_ref, tier=tier.tier,
+            )
+            self._pending_generation[session_id] = generation
 
     def _reserve_capacity_blocking(self, connection_id: str, task_id: str, attempt_id: str, launch: Mapping[str, object]) -> str:
         """Block (bounded backoff poll, never a model prompt) until a
@@ -300,8 +362,18 @@ class EngineSessionManagerAdapter:
             reservation_id = self._reservations.pop(attempt_id, None)
             if session_id is not None:
                 self._session_to_attempt.pop(session_id, None)
+            self._session_meta.pop(session_id, None) if session_id is not None else None
+            self._pending_generation.pop(session_id, None) if session_id is not None else None
         if manager is not None:
             manager.shutdown(grace=2.0)
+        if self._store is not None and session_id is not None:
+            from . import deliveries as delegation_deliveries
+
+            # T022: a released session's not-yet-``continuation_observed``
+            # deliveries can never later report confirmation from a stale
+            # in-flight call -- "stale session (released/replaced) -> never
+            # confirmed".
+            delegation_deliveries.supersede_session_deliveries(self._store, session_id, "attempt_terminated")
         if reservation_id is not None and self._store is not None:
             from . import capacity as delegation_capacity
 
@@ -321,6 +393,93 @@ class EngineSessionManagerAdapter:
             # instead of sitting on their own backoff interval.
             self._notify_activity()
 
+    def _observe_compaction_signal(self, session_ref: str, event) -> None:
+        """T022: an observed compaction reaching its terminal phase opens
+        (at most once per evidence id -- see
+        ``delegation.generations.record_compaction_event``) a fresh
+        generation, queued the same way ``open()`` queues its own initial
+        one -- picked up by :meth:`pending_delivery` on the *next*
+        continuation, never mid-turn (Cortex cannot rewrite a turn already
+        in flight)."""
+        from . import generations as delegation_generations
+
+        with self._lock:
+            meta = self._session_meta.get(session_ref)
+        if meta is None or event.tool_call_ref is None:
+            return
+        phase = "completed" if event.compaction_reason == "completed" else (
+            "failed" if event.compaction_reason in ("failed",) else "in_progress"
+        )
+        generation = delegation_generations.record_compaction_event(
+            self._store, task_id=meta["task_id"], engine_session_ref=session_ref,
+            evidence_id=event.tool_call_ref, phase=phase,
+            evidence_source="tool_call_meta_contextCompaction", recipient=meta["recipient"],
+            assignment_ref=meta["assignment_ref"],
+        )
+        if generation is not None:
+            with self._lock:
+                self._pending_generation[session_ref] = generation
+
+    def pending_delivery(self, session_ref: str) -> Mapping[str, object] | None:
+        """T022 (optional ``SessionRuntime`` extension, checked via
+        ``getattr`` by ``acp.orchestrating_runtime`` -- never required):
+        the queued fresh :class:`context_generations` row for
+        ``session_ref``, if any, that has not yet been acknowledged via
+        :meth:`begin_delivery`/:meth:`clear_pending_delivery`."""
+        with self._lock:
+            generation = self._pending_generation.get(session_ref)
+            meta = self._session_meta.get(session_ref)
+        if generation is None or meta is None:
+            return None
+        return dict(
+            generation=generation, recipient=meta["recipient"], task_id=meta["task_id"],
+            attempt_id=meta.get("attempt_id"),
+        )
+
+    def begin_delivery(self, session_ref: str, capsule_revision: str) -> dict | None:
+        from . import deliveries as delegation_deliveries
+
+        with self._lock:
+            generation = self._pending_generation.get(session_ref)
+            meta = self._session_meta.get(session_ref)
+        if generation is None or meta is None or self._store is None:
+            return None
+        return delegation_deliveries.record_built(
+            self._store, recipient=meta["recipient"], context_generation_id=generation["id"],
+            capsule_revision=capsule_revision, task_id=meta["task_id"], engine_session_ref=session_ref,
+            evidence_source="orchestrating_runtime:generation_delivery_build",
+            assignment_ref=meta["assignment_ref"],
+        )
+
+    def mark_delivery_transmitted(self, session_ref: str, delivery_id: str) -> None:
+        from . import deliveries as delegation_deliveries
+
+        if self._store is not None:
+            delegation_deliveries.mark_transmitted(self._store, delivery_id, "session_prompt_call_issued")
+
+    def mark_delivery_confirmed(self, session_ref: str, delivery_id: str) -> None:
+        from . import deliveries as delegation_deliveries
+
+        if self._store is not None:
+            delegation_deliveries.mark_delivery_confirmed(self._store, delivery_id, "session_prompt_response_received")
+        with self._lock:
+            self._pending_generation.pop(session_ref, None)
+
+    def mark_delivery_uncertain(self, session_ref: str, delivery_id: str, reason: str) -> None:
+        from . import deliveries as delegation_deliveries
+
+        if self._store is not None:
+            delegation_deliveries.mark_receipt_uncertain(self._store, delivery_id, reason)
+
+    def mark_delivery_blocked(self, session_ref: str, delivery_id: str, reason: str, *, permanent: bool = False) -> None:
+        from . import deliveries as delegation_deliveries
+
+        if self._store is not None:
+            delegation_deliveries.mark_blocked(self._store, delivery_id, reason, "orchestrating_runtime:generation_delivery_blocked")
+        if permanent:
+            with self._lock:
+                self._pending_generation.pop(session_ref, None)
+
     def prompt(self, session_ref: str, message: str, cancel_event: threading.Event):
         from ..acp.orchestrating_runtime import EngineTurnFailed, PromptOutcome
         from ..portable.engine_contract import EngineEventKind, StopReason
@@ -332,6 +491,16 @@ class EngineSessionManagerAdapter:
         if manager is None:
             raise RuntimeError(f"prompt() called on an unopened/terminated session {session_ref!r}.")
         task_id = self._attempt_task.get(attempt_id)
+        if self._store is not None:
+            from . import deliveries as delegation_deliveries
+
+            # T022: initiating a new turn on this session is itself the
+            # "subsequent engine turn" evidence for any delivery this
+            # session already confirmed but had not yet observed a
+            # continuation for.
+            delegation_deliveries.mark_continuation_observed_if_pending(
+                self._store, session_ref, "next_session_prompt_call_initiated",
+            )
         text_parts: list[str] = []
         stop_reason = StopReason.END_TURN
         try:
@@ -350,6 +519,9 @@ class EngineSessionManagerAdapter:
                             self._store, task_id, attempt_id, event.tool_call_ref,
                             event.tool_call_kind, event.tool_call_title, event.tool_call_status,
                         )
+                elif event.kind == EngineEventKind.COMPACTION_SIGNAL:
+                    if self._store is not None:
+                        self._observe_compaction_signal(session_ref, event)
                 elif event.kind == EngineEventKind.ERROR:
                     # T017: a yielded EngineEventKind.ERROR (transport_eof,
                     # timeout_alive -- see engine.session_manager's

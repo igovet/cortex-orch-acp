@@ -24,15 +24,18 @@ import threading
 import time
 from typing import Any, Callable, Mapping, Protocol
 
+from ..contracts import StoreError
 from ..delegation import events as delegation_events
 from ..delegation import revision as delegation_revision
+from ..delegation.deliveries import MAX_DELIVERY_RETRIES
 from ..delegation.provisioning import ProvisioningService
 from ..engine.instruction_delivery_registry import delivery_for
 from ..portable.engine_contract import StopReason
 from ..portable.errors import PortableError, PortableErrorCategory
 from ..portable.identity import new_id
-from ..portable.instruction_delivery import qualify_delivery
+from ..portable.instruction_delivery import DeliveryQualification, qualify_delivery
 from ..portable.roles import load_role
+from ..recovery.capsule import build_capsule, render_capsule
 from ..trusted_channel import ChannelContext, issue_channel_tx
 from . import messages as acp_messages
 from . import questions_store
@@ -415,6 +418,125 @@ class OrchestratingRuntime:
             role_set.body_portable,
         )
 
+    # -- T022: fresh-generation capsule/role/tool-schema delivery --------
+
+    def _role_id_for_pending(self, task_id: str, pending: Mapping[str, Any]) -> str | None:
+        """Resolve the role_id for a pending worker generation from its
+        original ``delegation_requested`` event payload -- the same source
+        ``recovery.capsule._section_role_and_tool_access`` reads. Returns
+        ``None`` (no redelivery attempted) only if that event was somehow
+        never recorded -- never guesses a role."""
+        generation = pending["generation"]
+        assignment_ref = generation.get("assignment_ref")
+        if pending["recipient"] == "coordinator":
+            return COORDINATOR_ROLE_ID
+        if not assignment_ref:
+            return None
+        import json as _json
+
+        with self._store.connection() as db:
+            row = db.execute(
+                "SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref=? "
+                "AND event_type='delegation_requested' ORDER BY id LIMIT 1",
+                (task_id, assignment_ref),
+            ).fetchone()
+        if row is None:
+            return None
+        return _json.loads(row["payload_json"]).get("role")
+
+    def _begin_generation_delivery(self, task_id: str, session_ref: str, role_id: str, prompt_text: str) -> tuple[str, str | None]:
+        """If ``session_ref`` has a queued fresh context generation (see
+        ``delegation.live_adapters.EngineSessionManagerAdapter.pending_delivery``
+        -- an optional ``SessionRuntime`` extension, never required),
+        prefix ``prompt_text`` with the T021 capsule plus current role
+        instructions (via the T015 delivery mechanism, which also
+        re-asserts current tool-schema access -- see
+        ``recovery.capsule._section_role_and_tool_access``) as the first
+        blocks of the continuation for that generation, and mark the
+        delivery ``built``/``transmitted``. Returns ``(prompt_text,
+        delivery_id)`` -- ``delivery_id`` is ``None`` when nothing was
+        pending, already permanently blocked, or the engine offers no
+        delivery tracking at all (every pre-T022 fake/test session runtime).
+        """
+        pending_delivery = getattr(self._engine, "pending_delivery", None)
+        if pending_delivery is None:
+            return prompt_text, None
+        pending = pending_delivery(session_ref)
+        if not pending:
+            return prompt_text, None
+        generation = pending["generation"]
+        recipient = pending["recipient"]
+        if recipient == "worker" and not (generation.get("assignment_ref") and pending.get("attempt_id")):
+            # A worker capsule recipient requires both a recorded
+            # assignment_ref and attempt_id (see
+            # recovery.capsule._normalize_recipient); a generation that
+            # somehow lacks either (never expected in practice -- this is
+            # defense in depth) is never redelivered rather than raising.
+            return prompt_text, None
+        recipient_map: dict[str, Any] = dict(role=recipient)
+        if recipient == "worker":
+            recipient_map["assignment_ref"] = generation["assignment_ref"]
+            recipient_map["attempt_id"] = pending["attempt_id"]
+        try:
+            capsule = build_capsule(self._store, task_id, recipient_map)
+        except StoreError as error:
+            if str(error) != "capsule_oversize":
+                raise
+            capsule_revision = f"oversize:{generation['id']}"
+            delivery = self._engine.begin_delivery(session_ref, capsule_revision)
+            if delivery is None:
+                return prompt_text, None
+            if delivery["state"] == "blocked":
+                if delivery["retry_count"] >= MAX_DELIVERY_RETRIES:
+                    self._engine.mark_delivery_blocked(session_ref, delivery["id"], "capsule_oversize", permanent=True)
+                return prompt_text, None
+            self._engine.mark_delivery_blocked(session_ref, delivery["id"], "capsule_oversize")
+            return prompt_text, None
+        delivery = self._engine.begin_delivery(session_ref, capsule["capsule_revision"])
+        if delivery is None:
+            return prompt_text, None
+        if delivery["state"] not in ("built",):
+            # Already transmitted/confirmed/continuation_observed for this
+            # exact (recipient, generation, capsule_revision) -- redelivery
+            # is idempotent, never resent.
+            return prompt_text, None
+        role_set = load_role(role_id)
+        preview = self._config.snapshot(task_id)
+        plan = qualify_delivery(
+            role_set, delivery_for(preview["engine"], preview["version"]), [],
+            allow_unqualified_delivery=self._allow_unqualified_delivery,
+        )
+        capsule_text = render_capsule(capsule)
+        if plan.qualification == DeliveryQualification.UNSUPPORTED:
+            prefix = capsule_text
+        else:
+            role_blocks_text = "\n\n".join(
+                block.get("text", "") for block in plan.blocks if isinstance(block, dict) and block.get("type") == "text"
+            )
+            prefix = f"{role_blocks_text}\n\n{capsule_text}" if role_blocks_text else capsule_text
+        new_prompt_text = f"{prefix}\n\n---\n\n{prompt_text}"
+        self._engine.mark_delivery_transmitted(session_ref, delivery["id"])
+        return new_prompt_text, delivery["id"]
+
+    def _finalize_generation_delivery(self, session_ref: str, delivery_id: str | None, *, failure_kind: str | None, stop_reason: StopReason | None) -> None:
+        if delivery_id is None:
+            return
+        if failure_kind is not None:
+            # T022: receipt timeout / transport failure -- the row stays
+            # 'transmitted' with uncertainty recorded, never promoted to
+            # 'delivery_confirmed' on a guess.
+            self._engine.mark_delivery_uncertain(session_ref, delivery_id, f"engine_turn_failed:{failure_kind}")
+            return
+        if stop_reason in (StopReason.MAX_TOKENS, StopReason.MAX_TURN_REQUESTS):
+            # T022: immediate overflow right after delivery -- explicit
+            # blocked state with a reason; bounded retries happen on the
+            # next ordinary continuation (see _begin_generation_delivery /
+            # delegation.deliveries.MAX_DELIVERY_RETRIES), never a loop
+            # within this same turn.
+            self._engine.mark_delivery_blocked(session_ref, delivery_id, f"engine_limit_after_delivery:{stop_reason.value}")
+            return
+        self._engine.mark_delivery_confirmed(session_ref, delivery_id)
+
     # -- main loop ----------------------------------------------------
 
     def _run(
@@ -625,6 +747,9 @@ class OrchestratingRuntime:
                 acp_steering.supersede_undelivered_steering(self._store, task_id)
                 return StopReason.CANCELLED
             prompt_text = _coalesce(claimed, revisions) if claimed else content
+            prompt_text, generation_delivery_id = self._begin_generation_delivery(
+                task_id, session_ref, COORDINATOR_ROLE_ID, prompt_text,
+            )
             try:
                 outcome = self._engine.prompt(session_ref, prompt_text, cancel_event)
             except EngineTurnFailed as failure:
@@ -632,6 +757,7 @@ class OrchestratingRuntime:
                 # never silently treated as end_turn, and never rerouted to
                 # a second engine/connection -- record it durably and stop
                 # with an honest blocker instead of a fabricated success.
+                self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind=failure.kind, stop_reason=None)
                 if claimed:
                     delegation_events.release_claim(self._store, task_id, continuation_id)
                 explanation = acp_messages.render("engine_failure", language, kind=failure.kind)
@@ -648,9 +774,11 @@ class OrchestratingRuntime:
                 # so the next continuation reclaims and delivers them
                 # exactly once, instead of silently losing them, then
                 # propagate -- this turn genuinely failed.
+                self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind="unexpected_exception", stop_reason=None)
                 if claimed:
                     delegation_events.release_claim(self._store, task_id, continuation_id)
                 raise
+            self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind=None, stop_reason=outcome.stop_reason)
             if claimed:
                 delegation_events.mark_delivered(self._store, task_id, continuation_id)
             if outcome.text:
@@ -1214,15 +1342,26 @@ class OrchestratingRuntime:
             self._notify()
 
     def _deliver_clarification(self, task_id, key, session_ref, message, cancel_event, event_row_id) -> None:
+        generation_delivery_id = None
         try:
+            pending_delivery = getattr(self._engine, "pending_delivery", None)
+            role_id = None
+            if pending_delivery is not None:
+                pending = pending_delivery(session_ref)
+                if pending:
+                    role_id = self._role_id_for_pending(task_id, pending)
+            if role_id is not None:
+                message, generation_delivery_id = self._begin_generation_delivery(task_id, session_ref, role_id, message)
             self._engine.prompt(session_ref, message, cancel_event)
         except EngineTurnFailed as failure:
+            self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind=failure.kind, stop_reason=None)
             delegation_events.append_event(
                 self._store, task_id, "assignment_failed", f"assignment_failed:{key[1]}",
                 dict(error=f"engine_failure:{failure.kind}", kind=failure.kind),
                 origin="runtime", assignment_ref=key[1],
             )
             return
+        self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind=None, stop_reason=StopReason.END_TURN)
         delegation_events.append_event(
             self._store, task_id, "progress", f"clarification_delivered:{event_row_id}",
             dict(note="clarification delivered"), origin="runtime", assignment_ref=key[1],
@@ -1266,13 +1405,18 @@ class OrchestratingRuntime:
         # worker's ChannelContext, only its engine session ref.
         self._worker_sessions[(task_id, assignment_ref)] = result.engine_session_ref
         brief = f"{payload['title']}\n\n{payload['brief']}\n\nAcceptance: {payload['acceptance']}"
+        generation_delivery_id = None
         try:
+            brief, generation_delivery_id = self._begin_generation_delivery(
+                task_id, result.engine_session_ref, payload["role"], brief,
+            )
             outcome = self._engine.prompt(result.engine_session_ref, brief, cancel_event)
         except EngineTurnFailed as failure:
             # T017: a worker's own engine turn failing (transport closed,
             # timed out, poisoned session, ...) must produce an
             # assignment_failed event -- never silently drop the assignment
             # and never re-route it to a second engine/connection.
+            self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind=failure.kind, stop_reason=None)
             delegation_events.append_event(
                 self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
                 dict(error=f"engine_failure:{failure.kind}", kind=failure.kind),
@@ -1283,11 +1427,13 @@ class OrchestratingRuntime:
             # T017 fix: this call was previously unwrapped -- any other
             # exception from a worker's first prompt silently lost the
             # assignment (no durable record at all). Record it instead.
+            self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind="unexpected_exception", stop_reason=None)
             delegation_events.append_event(
                 self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
                 dict(error=type(error).__name__), origin="runtime", assignment_ref=assignment_ref,
             )
             return
+        self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind=None, stop_reason=outcome.stop_reason)
         if outcome.stop_reason == StopReason.REFUSAL:
             # A worker refusal is the coordinator's to evaluate, never
             # silently retried on another engine/connection/model.

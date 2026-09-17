@@ -159,3 +159,103 @@ def test_delegation_effects_phase_check_constraint(tmp_path):
                 (key, "workspace", "not-a-real-phase", "{}", "2026-01-01T00:00:00.000000Z"),
             )
         db.rollback()
+
+
+# --------------------------------------------------------------------
+# T022: context_generations/compaction_owners/compaction_events_seen/
+# capsule_deliveries -- same additive-optional-group precedent as above.
+# --------------------------------------------------------------------
+
+
+def test_fresh_store_has_t022_generation_tables_and_user_version_11(tmp_path):
+    store = Store(tmp_path / ".cortex", project_root=tmp_path)
+    with store.connection() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 11
+        tables = {
+            row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND "
+                "name IN ('context_generations','compaction_owners','compaction_events_seen','capsule_deliveries')"
+            )
+        }
+    assert tables == {"context_generations", "compaction_owners", "compaction_events_seen", "capsule_deliveries"}
+
+
+def _insert_generation_and_delivery(store, task_id, *, gen_id="cg_" + "a" * 12, session_ref="es_split_test"):
+    now = store._now()
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "INSERT INTO context_generations (id,engine_session_ref,task_id,assignment_ref,recipient,sequence,cause,evidence_source,evidence_id,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)", (gen_id, session_ref, task_id, None, "coordinator", 1, "session_open", "test", None, now),
+        )
+        db.execute(
+            "INSERT INTO compaction_owners (engine_session_ref,task_id,owner,tier,engine,engine_version,limitation,set_at) "
+            "VALUES (?,?,?,?,?,?,?,?)", (session_ref, task_id, "engine_adapter", "automatic", "codex-acp", "1.12.0", None, now),
+        )
+        db.execute(
+            "INSERT INTO compaction_events_seen (engine_session_ref,evidence_id,task_id,phase,observed_at,generation_id) "
+            "VALUES (?,?,?,?,?,?)", (session_ref, "tc_split", task_id, "completed", now, gen_id),
+        )
+        db.execute(
+            "INSERT INTO capsule_deliveries (id,recipient,context_generation_id,capsule_revision,task_id,assignment_ref,engine_session_ref,state,evidence_source,uncertainty,reason,retry_count,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("cd_" + "b" * 12, "coordinator", gen_id, "rev_split", task_id, None, session_ref, "built", "test", None, None, 0, now, now),
+        )
+        db.commit()
+
+
+def test_split_project_carries_context_generation_rows_for_the_selected_project(tmp_path):
+    from cortex_runtime.host_source import NativeSource
+
+    source_dir = tmp_path / "legacy"
+    source_dir.mkdir(mode=0o700)
+    store = Store(source_dir)
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    source = NativeSource("request-a", {"offset": "a"},
+                           [dict(id="message-a", turn="turn-a", text="request-a", attachments=[])])
+    store.call("create_task", dict(project_root=str(project_root), request_key="create-a"),
+               "thread-a", original_request=lambda: source)
+    with store.connection() as db:
+        task_id = db.execute("SELECT task_id FROM thread_bindings WHERE thread_id=?", ("thread-a",)).fetchone()[0]
+    _insert_generation_and_delivery(store, task_id)
+
+    backup = tmp_path / "backup.sqlite3"
+    outcome = split_project(str(source_dir), str(project_root), str(backup), access_stopped=True)
+    assert outcome["schema_version"] == 11
+
+    destination = Store(project_root / ".cortex", project_root=project_root)
+    with destination.connection() as db:
+        generation = db.execute("SELECT * FROM context_generations WHERE id=?", ("cg_" + "a" * 12,)).fetchone()
+        assert generation is not None
+        assert generation["task_id"] == task_id
+        delivery = db.execute("SELECT * FROM capsule_deliveries WHERE context_generation_id=?", ("cg_" + "a" * 12,)).fetchone()
+        assert delivery is not None
+        owner = db.execute("SELECT * FROM compaction_owners WHERE engine_session_ref=?", ("es_split_test",)).fetchone()
+        assert owner is not None and owner["tier"] == "automatic"
+        seen = db.execute("SELECT * FROM compaction_events_seen WHERE engine_session_ref=?", ("es_split_test",)).fetchone()
+        assert seen is not None
+
+
+def test_clear_tasks_removes_t022_generation_rows_with_the_task(tmp_path):
+    from cortex_runtime.host_source import NativeSource
+
+    store = Store(tmp_path / "private")
+    project = tmp_path / "project"
+    project.mkdir()
+    source = NativeSource("request-x", {"offset": "x"},
+                           [dict(id="message-x", turn="turn-x", text="request-x", attachments=[])])
+    store.call("create_task", dict(project_root=str(project), request_key="create-x"),
+               "thread-x", original_request=lambda: source)
+    with store.connection() as db:
+        task_id = db.execute("SELECT task_id FROM thread_bindings WHERE thread_id=?", ("thread-x",)).fetchone()[0]
+    _insert_generation_and_delivery(store, task_id, gen_id="cg_" + "z" * 12, session_ref="es_clear_test")
+
+    clear_tasks(store, str(project), 0)
+
+    with store.connection() as db:
+        assert not db.execute("SELECT 1 FROM context_generations WHERE id=?", ("cg_" + "z" * 12,)).fetchone()
+        assert not db.execute("SELECT 1 FROM capsule_deliveries WHERE engine_session_ref=?", ("es_clear_test",)).fetchone()
+        assert not db.execute("SELECT 1 FROM compaction_owners WHERE engine_session_ref=?", ("es_clear_test",)).fetchone()
+        assert not db.execute("SELECT 1 FROM compaction_events_seen WHERE engine_session_ref=?", ("es_clear_test",)).fetchone()
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []

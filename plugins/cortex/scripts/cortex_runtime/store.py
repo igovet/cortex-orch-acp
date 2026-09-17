@@ -286,6 +286,7 @@ class Store:
         from .delegation.events_store import TASK_EVENTS_SCHEMA
         from .delegation.capacity_store import CAPACITY_SCHEMA
         from .delegation.evidence_store import EVIDENCE_SCHEMA
+        from .delegation.generations_store import CONTEXT_GENERATIONS_SCHEMA
         from .acp.replay_store import REPLAY_SCHEMA
         from .acp.questions_store import PENDING_QUESTIONS_SCHEMA
         from .acp.steering import TASK_LANGUAGE_SCHEMA, TASK_STOPPED_SCHEMA
@@ -314,7 +315,7 @@ class Store:
             db.commit()
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
             if app==APPLICATION_ID:
                 # T017: additive columns for a pre-T017 store that already has
                 # task_events/task_orchestration (CREATE TABLE IF NOT EXISTS

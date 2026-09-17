@@ -217,6 +217,20 @@ def test_clear_tasks_end_to_end_removes_every_group_row_with_integrity_ok(tmp_pa
             db.execute(
                 "INSERT INTO hook_command_sessions (task_id,worker_thread_id,parent_thread_id,command_session_id,cwd,created_at) "
                 "VALUES (?,?,?,?,?,?)", (task, 'wt_1', 'pt_1', 'cs_1', str(project), now))
+            # T022 context_generations/compaction_owners/compaction_events_seen/capsule_deliveries
+            db.execute(
+                "INSERT INTO context_generations (id,engine_session_ref,task_id,assignment_ref,recipient,sequence,cause,evidence_source,evidence_id,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)", ('cg_1', 'es_1', task, None, 'coordinator', 1, 'session_open', 'test', None, now))
+            db.execute(
+                "INSERT INTO compaction_owners (engine_session_ref,task_id,owner,tier,engine,engine_version,limitation,set_at) "
+                "VALUES (?,?,?,?,?,?,?,?)", ('es_1', task, 'engine_adapter', 'automatic', 'codex-acp', '1.12.0', None, now))
+            db.execute(
+                "INSERT INTO compaction_events_seen (engine_session_ref,evidence_id,task_id,phase,observed_at,generation_id) "
+                "VALUES (?,?,?,?,?,?)", ('es_1', 'tc_compact_1', task, 'completed', now, 'cg_1'))
+            db.execute(
+                "INSERT INTO capsule_deliveries (id,recipient,context_generation_id,capsule_revision,task_id,assignment_ref,engine_session_ref,state,evidence_source,uncertainty,reason,retry_count,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ('cd_1', 'coordinator', 'cg_1', 'rev_1', task, None, 'es_1', 'built', 'test', None, None, 0, now, now))
             db.commit()
         except BaseException:
             db.rollback(); raise
@@ -254,6 +268,10 @@ def test_clear_tasks_end_to_end_removes_every_group_row_with_integrity_ok(tmp_pa
         ('task_owners', 'task_id=?', (task,)),
         ('reports', 'task_id=?', (task,)),
         ('thread_bindings', 'task_id=?', (task,)),
+        ('context_generations', 'task_id=?', (task,)),
+        ('compaction_owners', 'task_id=?', (task,)),
+        ('compaction_events_seen', 'task_id=?', (task,)),
+        ('capsule_deliveries', 'task_id=?', (task,)),
     ]
     with store.connection() as db:
         populated = {t for t, where, params in _lookups if db.execute(f"SELECT 1 FROM {t} WHERE {where}", params).fetchone()}

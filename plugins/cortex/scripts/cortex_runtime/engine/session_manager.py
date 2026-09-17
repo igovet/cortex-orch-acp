@@ -779,6 +779,18 @@ class EngineSessionManager:
                 self.correlation.portable_tool_call_ref(wire_session_id, wire_tool_call_id)
                 if wire_tool_call_id else None
             )
+            # T022: a tool_call/tool_call_update carrying `_meta.contextCompaction`
+            # is codex-acp's and claude-agent-acp's shared (legacy-presentation)
+            # signal for their own internal context compaction -- see
+            # delegation.generations module docstring for the exact static dist
+            # evidence. Reported as a distinct COMPACTION_SIGNAL (never also as
+            # an ordinary TOOL_CALL_OBSERVED -- this synthetic entry is not real
+            # tool evidence), keyed by the same stable portable tool_call_ref as
+            # the dedup/evidence id, phase carried in compaction_reason.
+            meta = update.get("_meta")
+            if isinstance(meta, dict) and isinstance(meta.get("contextCompaction"), dict) and ref is not None:
+                status = update.get("status") if isinstance(update.get("status"), str) else "unknown"
+                return EngineEvent(kind=EngineEventKind.COMPACTION_SIGNAL, tool_call_ref=ref, compaction_reason=status)
             title = update.get("title")
             if isinstance(title, str) and len(title) > 200:
                 title = title[:200]

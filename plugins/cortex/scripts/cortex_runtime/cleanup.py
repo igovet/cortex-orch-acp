@@ -64,6 +64,13 @@ def finish_deletions(store,db,task):
         _delete_if_present("pending_questions","task_id=?",(task,))
         _delete_if_present("task_language","task_id=?",(task,))
         _delete_if_present("task_stopped","task_id=?",(task,))
+        # T022 context_generations/capsule_deliveries/compaction_owners/
+        # compaction_events_seen: capsule_deliveries references
+        # context_generations(id), so it must go first.
+        _delete_if_present("capsule_deliveries","task_id=?",(task,))
+        _delete_if_present("context_generations","task_id=?",(task,))
+        _delete_if_present("compaction_owners","task_id=?",(task,))
+        _delete_if_present("compaction_events_seen","task_id=?",(task,))
         db.execute("DELETE FROM task_events WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_orchestration WHERE task_id=?",(task,))
         db.execute("DELETE FROM capacity_reservations WHERE task_id=?",(task,))

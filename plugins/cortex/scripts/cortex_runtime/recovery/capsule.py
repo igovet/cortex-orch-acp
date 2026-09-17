@@ -692,7 +692,7 @@ def _section_role_and_tool_access(db, task_id: str, recipient: dict) -> dict:
         ).fetchone()
         if orchestration is not None:
             provisioning = db.execute(
-                "SELECT instruction_delivery FROM delegation_provisioning WHERE idempotency_key=?",
+                "SELECT instruction_delivery, engine_session_ref FROM delegation_provisioning WHERE idempotency_key=?",
                 (orchestration["coordinator_attempt_ref"],),
             ).fetchone()
     else:
@@ -703,7 +703,7 @@ def _section_role_and_tool_access(db, task_id: str, recipient: dict) -> dict:
         ).fetchone()
         role_id = json.loads(request_row["payload_json"])["role"] if request_row is not None else None
         provisioning = db.execute(
-            "SELECT instruction_delivery FROM delegation_provisioning WHERE idempotency_key=?",
+            "SELECT instruction_delivery, engine_session_ref FROM delegation_provisioning WHERE idempotency_key=?",
             (recipient["assignment_ref"],),
         ).fetchone()
     section: dict = dict(role_id=role_id, role_kind=recipient["role"])
@@ -720,6 +720,32 @@ def _section_role_and_tool_access(db, task_id: str, recipient: dict) -> dict:
         section["allowed_mcp_tools"] = sorted(delegation_contracts.schemas_for(recipient["role"]))
     except StoreError:
         section["allowed_mcp_tools"] = _unavailable("unknown_role_kind")
+    # T022: compaction-support tier/owner and current context-generation
+    # sequence for this recipient's engine session, when one has already
+    # been recorded (delegation.generations) -- trivially available here
+    # since delegation_provisioning already carries engine_session_ref.
+    engine_session_ref = provisioning["engine_session_ref"] if provisioning is not None else None
+    if engine_session_ref:
+        owner = db.execute(
+            "SELECT owner, tier, engine, engine_version, limitation FROM compaction_owners WHERE engine_session_ref=?",
+            (engine_session_ref,),
+        ).fetchone()
+        generation = db.execute(
+            "SELECT id, sequence, cause FROM context_generations WHERE engine_session_ref=? ORDER BY sequence DESC LIMIT 1",
+            (engine_session_ref,),
+        ).fetchone()
+        section["compaction_support"] = (
+            dict(owner=owner["owner"], tier=owner["tier"], engine=owner["engine"],
+                 engine_version=owner["engine_version"], limitation=owner["limitation"])
+            if owner is not None else _unavailable("no_compaction_owner_recorded_yet")
+        )
+        section["context_generation"] = (
+            dict(id=generation["id"], sequence=generation["sequence"], cause=generation["cause"])
+            if generation is not None else _unavailable("no_context_generation_recorded_yet")
+        )
+    else:
+        section["compaction_support"] = _unavailable("engine_session_not_recorded_for_this_assignment")
+        section["context_generation"] = _unavailable("engine_session_not_recorded_for_this_assignment")
     return section
 
 
