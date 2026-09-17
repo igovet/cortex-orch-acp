@@ -212,6 +212,28 @@ CAPSULE_OPERATIONS = {
 }
 COORDINATOR_OPERATIONS.update(CAPSULE_OPERATIONS)
 
+# T024: shared read-only large-output operation, available on *both*
+# coordinator and worker channels (owner-scoped by the caller's own channel
+# -- see delegation.mcp_tools._shared_read_large_output; a channel can
+# never read another assignment's/the other role's persisted output, since
+# no owner id beyond the channel's own binding is ever accepted).
+LARGE_OUTPUT_OPERATIONS = {
+    "read_large_output": _operation(
+        {
+            "large_output_id": string(
+                "Opaque large_output_id from a terminal/tool-result reference (for "
+                "example a terminal/output response's own large_output_id). Copy it "
+                "exactly; never construct or guess one.",
+                20,
+            ),
+            "offset": _bounded_integer("Byte offset to resume a bounded read from.", 1_000_000_000),
+            "limit": _bounded_integer("Maximum chunk size to return (bounded to 64 KiB server-side).", 65_536, minimum=1),
+        },
+        ["large_output_id"],
+    ),
+}
+COORDINATOR_OPERATIONS.update(LARGE_OUTPUT_OPERATIONS)
+
 WORKER_OPERATIONS = {
     "ask_question": _operation(
         {
@@ -237,6 +259,7 @@ WORKER_OPERATIONS = {
 
 WORKER_OPERATIONS.update(SOURCE_OPERATIONS)
 WORKER_OPERATIONS.update(CAPSULE_OPERATIONS)
+WORKER_OPERATIONS.update(LARGE_OUTPUT_OPERATIONS)
 
 ROLE_KIND_OPERATIONS = {
     "coordinator": COORDINATOR_OPERATIONS,

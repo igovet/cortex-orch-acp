@@ -75,6 +75,14 @@ def finish_deletions(store,db,task):
         # table references either by id, so plain task_id deletes suffice.
         _delete_if_present("attempt_process_registry","task_id=?",(task,))
         _delete_if_present("attempt_effective_context","task_id=?",(task,))
+        # T024 large_outputs/compaction_recovery_events: no other table
+        # references either by id, so plain task_id deletes suffice.
+        # large_outputs also owns files under this task's storage directory
+        # (see recovery.large_output_store) -- the caller deletes those
+        # files as part of the same task-directory teardown this cleanup
+        # already performs; this only removes the metadata rows.
+        _delete_if_present("large_outputs","task_id=?",(task,))
+        _delete_if_present("compaction_recovery_events","task_id=?",(task,))
         db.execute("DELETE FROM task_events WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_orchestration WHERE task_id=?",(task,))
         db.execute("DELETE FROM capacity_reservations WHERE task_id=?",(task,))

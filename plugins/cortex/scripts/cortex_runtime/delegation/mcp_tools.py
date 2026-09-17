@@ -306,16 +306,56 @@ def _shared_read_source(store, channel: ChannelContext, args: Mapping[str, Any])
     return replay_store.read_source(store, channel.task_id, args["source_ref"], offset, limit)
 
 
+def _shared_read_large_output(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
+    """T024: bounded, owner-scoped read of one persisted large output.
+
+    Never accepts an owner selector -- the owner scope is always derived
+    from the channel's own resolved identity (``"coordinator"`` or this
+    worker's own ``assignment_ref``, same resolution as
+    ``_shared_read_capsule``), so a channel can never read another
+    assignment's or the other role's persisted terminal/tool output."""
+    from ..recovery.large_output_store import LargeOutputError, read_output
+
+    if channel.role == "coordinator":
+        owner_scope = "coordinator"
+    else:
+        with store.connection() as db:
+            row = db.execute(
+                "SELECT idempotency_key FROM delegation_provisioning WHERE assignment_id=? AND task_id=?",
+                (channel.assignment_id, channel.task_id),
+            ).fetchone()
+        if row is None:
+            raise StoreError(
+                "large_output_unavailable", "assignment_id", channel.assignment_id,
+                "a delegation_provisioning row for this worker's own assignment",
+                "This worker's own delegation has not finished being recorded yet; retry shortly.",
+            )
+        owner_scope = row["idempotency_key"]
+    offset = int(args.get("offset") or 0)
+    limit = int(args.get("limit") or 65_536)
+    try:
+        return read_output(
+            store, task_id=channel.task_id, owner_scope=owner_scope,
+            record_id=args["large_output_id"], offset=offset, chunk_size=limit,
+        )
+    except LargeOutputError as error:
+        raise StoreError(
+            "unknown_large_output_ref", "large_output_id", args["large_output_id"],
+            "a large_output_id this channel's own owner scope actually persisted",
+            "Copy the large_output_id exactly from the terminal/tool-result reference that reported it.",
+        ) from error
+
+
 _COORDINATOR_HANDLERS = dict(
     delegate=_coordinator_delegate, list_events=_coordinator_list_events,
     clarify=_coordinator_clarify, cancel=_coordinator_cancel, decide=_coordinator_decide,
     list_sources=_shared_list_sources, read_source=_shared_read_source,
-    read_capsule=_shared_read_capsule,
+    read_capsule=_shared_read_capsule, read_large_output=_shared_read_large_output,
 )
 _WORKER_HANDLERS = dict(
     ask_question=_worker_ask_question, publish_result=_worker_publish_result,
     list_sources=_shared_list_sources, read_source=_shared_read_source,
-    read_capsule=_shared_read_capsule,
+    read_capsule=_shared_read_capsule, read_large_output=_shared_read_large_output,
 )
 _ROLE_HANDLERS = dict(coordinator=_COORDINATOR_HANDLERS, worker=_WORKER_HANDLERS)
 

@@ -227,3 +227,65 @@ def test_release_session_kills_and_frees_every_orphaned_terminal(tmp_path):
     assert gone
     with pytest.raises(TerminalBridgeError):
         bridge.output("es_a", terminal_id)
+
+
+# --- T024: persisted large output ------------------------------------------
+
+
+def test_output_above_threshold_is_persisted_with_exit_status_and_truncation_intact(tmp_path):
+    calls = []
+
+    def sink(engine_session_id, terminal_id, data, *, truncated, exit_code, signal, failure):
+        calls.append(dict(
+            engine_session_id=engine_session_id, terminal_id=terminal_id, data=data,
+            truncated=truncated, exit_code=exit_code, signal=signal, failure=failure,
+        ))
+        return "lo_test0000001"
+
+    bridge = TerminalBridge(persist_sink=sink, persist_threshold_bytes=10)
+    binding = _binding(tmp_path)
+    terminal_id = bridge.create(
+        binding, dict(command="/bin/sh", args=["-c", "printf 'well over ten bytes of output'; exit 0"]),
+        output_byte_limit_max=4096,
+    )
+    bridge.wait_for_exit("es_a", terminal_id, timeout=5.0)
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["engine_session_id"] == "es_a" and call["terminal_id"] == terminal_id
+    assert b"well over ten bytes" in call["data"]
+    assert call["truncated"] is False
+    assert call["exit_code"] == 0 and call["signal"] is None
+    result = bridge.output("es_a", terminal_id)
+    assert result["large_output_id"] == "lo_test0000001"
+    assert result["exitStatus"] == dict(exitCode=0, signal=None)
+    bridge.release("es_a", terminal_id)
+
+
+def test_output_below_threshold_is_never_persisted(tmp_path):
+    calls = []
+
+    def sink(*args, **kwargs):
+        calls.append(1)
+        return "lo_should_not_be_called"
+
+    bridge = TerminalBridge(persist_sink=sink, persist_threshold_bytes=1_000_000)
+    binding = _binding(tmp_path)
+    terminal_id = bridge.create(binding, dict(command="/bin/echo", args=["short"]), output_byte_limit_max=4096)
+    bridge.wait_for_exit("es_a", terminal_id, timeout=5.0)
+    assert calls == []
+    assert "large_output_id" not in bridge.output("es_a", terminal_id)
+    bridge.release("es_a", terminal_id)
+
+
+def test_persist_sink_failure_never_hides_in_memory_output(tmp_path):
+    def failing_sink(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    bridge = TerminalBridge(persist_sink=failing_sink, persist_threshold_bytes=1)
+    binding = _binding(tmp_path)
+    terminal_id = bridge.create(binding, dict(command="/bin/echo", args=["hello-terminal"]), output_byte_limit_max=4096)
+    bridge.wait_for_exit("es_a", terminal_id, timeout=5.0)
+    result = bridge.output("es_a", terminal_id)
+    assert "hello-terminal" in result["output"]
+    assert "large_output_id" not in result
+    bridge.release("es_a", terminal_id)

@@ -102,6 +102,18 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Assignment {assignment_ref} could not be safely resumed after recovery and was marked failed ({reason}); the coordinator may re-delegate it.",
         "ru": "Назначение {assignment_ref} не удалось безопасно возобновить после восстановления и оно помечено как неудачное ({reason}); координатор может делегировать его заново.",
     },
+    "budget_overflow": {
+        "en": "Context overflow on {limit_name} ({context_window_tokens} tokens, {context_window_basis}): {message} No content or constraint was silently dropped.",
+        "ru": "Переполнение контекста по лимиту {limit_name} ({context_window_tokens} токенов, {context_window_basis}): {message} Ни одно содержимое или ограничение не было незаметно отброшено.",
+    },
+    "compaction_blocked": {
+        "en": "Compaction stopped ({reason}): {message}",
+        "ru": "Сжатие контекста остановлено ({reason}): {message}",
+    },
+    "summarizer_fallback": {
+        "en": "Using the deterministic recovery capsule instead of a model-authored summary ({reason}); no requirement or status was invented.",
+        "ru": "Вместо резюме, составленного моделью, используется детерминированная капсула восстановления ({reason}); ни одно требование или статус не были придуманы.",
+    },
 }
 
 

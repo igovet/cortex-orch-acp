@@ -159,6 +159,7 @@ class EngineSessionManager:
         policy: ResourcePolicy | None = None,
         host_permission_requester=None,
         max_concurrent_client_requests: int = DEFAULT_MAX_CONCURRENT_CLIENT_REQUESTS,
+        terminal_output_persist=None,
     ):
         """``install`` -- a
         :class:`~.codex_install.CodexAcpInstall`, or ``None`` -- is passed
@@ -189,6 +190,10 @@ class EngineSessionManager:
         self._abandon_wait_seconds = abandon_wait_seconds
         self._policy = policy if policy is not None else ResourcePolicy()
         self._host_permission_requester = host_permission_requester
+        # T024: optional sink -- see ``engine.terminal_bridge.TerminalBridge``
+        # and ``delegation.live_adapters``'s real binding of this to
+        # ``recovery.large_output_store``; ``None`` (default) never persists.
+        self._terminal_output_persist = terminal_output_persist
 
         self._lock = threading.RLock()
         self._process: EngineProcess | None = None
@@ -234,7 +239,7 @@ class EngineSessionManager:
                 host_permission_requester=self._host_permission_requester, call_timeout=self._call_timeout,
             )
             self._fs_bridge = FsBridge()
-            self._terminal_bridge = TerminalBridge()
+            self._terminal_bridge = TerminalBridge(persist_sink=self._terminal_output_persist)
             self._client = EngineClient(
                 self._process,
                 correlation=self.correlation,

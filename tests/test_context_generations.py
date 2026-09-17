@@ -8,6 +8,7 @@ convention -- see ``engine_fakes``/``fake_engine_process.py``).
 """
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 
@@ -624,6 +625,119 @@ def test_immediate_overflow_after_delivery_is_blocked_with_bounded_retries(tmp_p
     delivery = delegation_deliveries.for_generation(store, "coordinator", generation["id"])[0]
     assert delivery["state"] == "blocked"
     assert delivery["reason"].startswith("engine_limit_after_delivery")
+
+
+# --------------------------------------------------------------------
+# 4. T024: budget planning + compaction-loop guard wired into
+#    _begin_generation_delivery, end-to-end through OrchestratingRuntime.
+# --------------------------------------------------------------------
+
+
+def test_repeated_observed_compactions_are_blocked_with_explicit_localized_message(tmp_path):
+    """A session that keeps reporting a fresh compaction every turn (never
+    meaningfully recovering: 'before' is always estimated from the full
+    capsule size, 'after' is always the same small mandatory reconstruction,
+    so recovery never drops below the frequency window) trips
+    recovery.compaction_guard's bounded frequency check and stops -- no
+    unbounded loop of ever-more compactions."""
+    from cortex_runtime.recovery import compaction_guard
+
+    seen_messages = []
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        seen_messages.append(message)
+        return PromptOutcome(StopReason.END_TURN, "ok")
+
+    def router(store, channel, session_ref, launch, instructions):
+        return coordinator_behavior if channel is not None and channel.role == "coordinator" else None
+
+    store, task_id = _task_with_store(tmp_path)
+    runtime, engine = _make_runtime(store, router)
+    cancel_event = threading.Event()
+    runtime.start_prompt(task_id, "s1", "Build a page.", lambda text: True, cancel_event)
+    session_ref = runtime._coordinator_sessions[task_id]
+
+    # Bounded upper loop count: some real, bounded compaction-guard reason
+    # (frequency, immediate refill, or consecutive low recovery -- see
+    # recovery.compaction_guard) must trip well within this many attempts,
+    # never an unbounded loop of ever-more compactions/prompts.
+    max_attempts = compaction_guard.MAX_COMPACTIONS_PER_WINDOW + 2
+    result = None
+    for index in range(max_attempts):
+        engine.trigger_compaction(session_ref, f"tc-{index}", phase="completed")
+        result = runtime.start_prompt(task_id, "s1", f"still building {index}", lambda text: True, cancel_event)
+        orchestration = _orchestration_row(store, task_id)
+        if orchestration["state"] == "blocked":
+            break
+
+    assert result == StopReason.END_TURN
+    orchestration = _orchestration_row(store, task_id)
+    assert orchestration["state"] == "blocked"
+    assert orchestration["wait_reason"].startswith("limit:")
+    reason = orchestration["wait_reason"].split(":", 1)[1]
+    assert reason in ("compaction_frequency_exceeded", "immediate_refill", "consecutive_low_recovery")
+    # The prompt that finally tripped the guard was still delivered without
+    # ever escalating to a second/more-expensive route -- and no further
+    # attempt happened after the blocked state was recorded.
+    assert len(seen_messages) < max_attempts + 1
+    explanation = json.loads(orchestration["wait_detail_json"])["explanation"]
+    assert reason in explanation
+
+
+def test_budget_overflow_reports_the_concrete_limit_and_never_truncates_constraints(tmp_path, monkeypatch):
+    """A tiny (test-forced) context window makes even the ordinary fresh-
+    generation mandatory content (role rules + capsule + tool schemas)
+    exceed the usable budget -- an explicit, coordinator-facing 'overflow'
+    message naming the limit, never a silently truncated capsule/role."""
+    from cortex_runtime.delegation.deliveries import MAX_DELIVERY_RETRIES
+    from cortex_runtime.recovery import token_budget
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        return PromptOutcome(StopReason.END_TURN, "ok")
+
+    def router(store, channel, session_ref, launch, instructions):
+        return coordinator_behavior if channel is not None and channel.role == "coordinator" else None
+
+    store, task_id = _task_with_store(tmp_path)
+    runtime, engine = _make_runtime(store, router)
+    cancel_event = threading.Event()
+    # First turn delivers normally (default window is generous).
+    runtime.start_prompt(task_id, "s1", "Build a page.", lambda text: True, cancel_event)
+    session_ref = runtime._coordinator_sessions[task_id]
+    # A fresh observed compaction queues a new pending generation to
+    # redeliver -- then shrink the route's usable context window so that
+    # very generation's own mandatory content (role rules + capsule + tool
+    # schemas) alone overflows it.
+    engine.trigger_compaction(session_ref, "tc-overflow", phase="completed")
+    monkeypatch.setattr(token_budget, "DEFAULT_CONTEXT_WINDOW_TOKENS", 10)
+    # Repeated direct redelivery attempts for this exact, unchanged pending
+    # generation (task state itself never advances between these calls --
+    # exactly the "same capsule_revision" bounded-retry case
+    # _block_generation_delivery documents) exercise the real production
+    # method exactly as OrchestratingRuntime's own continuation loop would.
+    blocked = False
+    for _ in range(MAX_DELIVERY_RETRIES + 2):
+        _, _, blocked = runtime._begin_generation_delivery(
+            task_id, session_ref, COORDINATOR_ROLE_ID, "same pending content",
+        )
+        if blocked:
+            break
+
+    assert blocked
+    orchestration = _orchestration_row(store, task_id)
+    assert orchestration["state"] == "blocked"
+    assert orchestration["wait_reason"] == "limit:budget_overflow"
+    explanation = json.loads(orchestration["wait_detail_json"])["explanation"]
+    assert "context_window_tokens" in explanation
+    assert "split the assignment" in explanation
+
+
+def _orchestration_row(store, task_id):
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT state, wait_reason, wait_detail_json FROM task_orchestration WHERE task_id=?", (task_id,),
+        ).fetchone()
+    return dict(row)
 
 
 def test_capsule_oversize_is_blocked_with_a_named_reason(tmp_path, monkeypatch):

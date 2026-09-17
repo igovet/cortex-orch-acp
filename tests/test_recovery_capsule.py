@@ -443,3 +443,79 @@ def test_at_revision_bounds_constraints_section(tmp_path):
     full = build_capsule(store, task_id, dict(role="coordinator"))
     bounded = build_capsule(store, task_id, dict(role="coordinator"), at_revision=next_revision - 1)
     assert full["sections"]["constraints"]["count"] == bounded["sections"]["constraints"]["count"] + 1
+
+
+# -- T024: optional candidate_summary gate on continuation_note -------------
+
+
+def test_no_candidate_summary_is_the_unchanged_default(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    cap = build_capsule(store, task_id, dict(role="coordinator"))
+    note = cap["sections"]["continuation_intent"]["continuation_note"]
+    assert note == dict(status="unavailable", reason="not_supported_in_this_build")
+
+
+def _constraint_ids(cap):
+    return [item["report_id"] for item in cap["sections"]["constraints"]["items"]]
+
+
+def test_valid_candidate_summary_becomes_a_labeled_continuation_note(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    baseline = build_capsule(store, task_id, dict(role="coordinator"))
+    good = dict(
+        provenance="derived_summary", text="Coordinator is waiting on the backend worker.",
+        references=[], claims={}, checks=[], constraints_acknowledged=_constraint_ids(baseline),
+    )
+    cap = build_capsule(store, task_id, dict(role="coordinator"), candidate_summary=good)
+    note = cap["sections"]["continuation_intent"]["continuation_note"]
+    assert note["status"] == "available"
+    assert note["trust_label"] == "derived_summary"
+    assert note["note_text"] == good["text"]
+    rendered = render_capsule(cap)
+    assert "CORTEX_CAPSULE_DATA_BEGIN(trust=derived_summary" in rendered
+    assert good["text"] in rendered
+
+
+def test_fabricated_completion_in_candidate_summary_is_rejected_never_changes_state(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    delegated = _delegate(store, coordinator)
+    worker = _provision_worker(store, task_id, coordinator, delegated["assignment_ref"])
+    real = build_capsule(store, task_id, dict(role="worker", assignment_ref=delegated["assignment_ref"], attempt_id="xa_test1"))
+    fabricated = dict(
+        provenance="derived_summary", text="All done!",
+        references=[], claims=dict(completed=True), checks=[], constraints_acknowledged=_constraint_ids(real),
+    )
+    gated = build_capsule(
+        store, task_id, dict(role="worker", assignment_ref=delegated["assignment_ref"], attempt_id="xa_test1"),
+        candidate_summary=fabricated,
+    )
+    note = gated["sections"]["continuation_intent"]["continuation_note"]
+    assert note["status"] == "unavailable"
+    assert "fabricated_completion_claim" in note["reason"]
+    # Every other section is byte-identical to the real (no-summary) build --
+    # a rejected summary can never change actual recovered state.
+    real_other = {k: v for k, v in real["sections"].items() if k != "continuation_intent"}
+    gated_other = {k: v for k, v in gated["sections"].items() if k != "continuation_intent"}
+    assert real_other == gated_other
+
+
+def test_unresolvable_reference_in_candidate_summary_is_rejected(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    baseline = build_capsule(store, task_id, dict(role="coordinator"))
+    bad = dict(
+        provenance="derived_summary", text="See the report.",
+        references=[{"ref": "r_totallyfabricated"}], claims={}, checks=[],
+        constraints_acknowledged=_constraint_ids(baseline),
+    )
+    cap = build_capsule(store, task_id, dict(role="coordinator"), candidate_summary=bad)
+    note = cap["sections"]["continuation_intent"]["continuation_note"]
+    assert note["status"] == "unavailable"
+    assert "unresolved_reference" in note["reason"]
+
+
+def test_invalid_json_candidate_summary_is_rejected_with_deterministic_fallback(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    cap = build_capsule(store, task_id, dict(role="coordinator"), candidate_summary="not valid json {{{")
+    note = cap["sections"]["continuation_intent"]["continuation_note"]
+    assert note["status"] == "unavailable"
+    assert "not_valid_json" in note["reason"]

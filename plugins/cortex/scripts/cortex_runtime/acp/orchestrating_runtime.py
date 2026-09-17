@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+import json
 import threading
 import time
 from typing import Any, Callable, Mapping, Protocol
@@ -501,7 +502,95 @@ class OrchestratingRuntime:
             return None
         return _json.loads(row["payload_json"]).get("role")
 
-    def _begin_generation_delivery(self, task_id: str, session_ref: str, role_id: str, prompt_text: str) -> tuple[str, str | None]:
+    def _resolve_context_window_tokens(self, task_id: str, preview: Mapping[str, Any]) -> int | None:
+        """T024: the real, evidenced context-window budget for this task's
+        currently selected route, when the catalog actually recorded one
+        (``catalog.model.CatalogEntry.context_window_tokens`` -- see that
+        module; absent for every route no discovery path has populated it
+        for yet). Best-effort/never raises: any lookup failure (no route
+        selected, no cached snapshot, a test double with no catalog state
+        at all) falls back to :mod:`recovery.token_budget`'s labeled
+        conservative default, never a guessed number."""
+        try:
+            from ..catalog import store as catalog_store
+
+            selection = catalog_store.current_task_route(self._store, task_id)
+            if selection is None:
+                return None
+            connection_id = preview.get("route_connection_id")
+            if not connection_id:
+                return None
+            view = catalog_store.load_connection_snapshot(connection_id, selection["catalog_snapshot_id"])
+            if view is None:
+                return None
+            for entry in view.entries:
+                if entry.route.id == selection["route_id"]:
+                    return entry.context_window_tokens
+        except Exception:
+            return None
+        return None
+
+    def _block_generation_delivery(
+        self, task_id: str, session_ref: str, generation: Mapping[str, Any], capsule_revision: str,
+        reason: str, message_key: str, message_params: Mapping[str, Any],
+        emit_update: Callable[[str], bool] | None, language: str | None,
+    ) -> bool:
+        """Shared bounded-retry blocked-delivery path for both a
+        ``capsule_oversize`` and a T024 ``budget_overflow`` condition (see
+        :meth:`_block_generation_immediately` for the distinct, already-
+        bounded ``compaction_blocked`` case): begin/re-check a delivery row
+        for ``capsule_revision``, and only once :data:`MAX_DELIVERY_RETRIES` is
+        reached, permanently block it *and* durably record + (when a real
+        channel is available) emit the localized explicit message -- never
+        silently, and never more than once per bounded-retry exhaustion.
+        Returns ``True`` once permanently blocked (caller must not prompt
+        the engine this turn), ``False`` while still within bounded retries
+        (caller proceeds without the oversized/overflowing content this
+        turn, exactly like the pre-T024 ``capsule_oversize`` path)."""
+        delivery = self._engine.begin_delivery(session_ref, capsule_revision)
+        if delivery is None:
+            return False
+        # T024: check the row's *current* retry_count directly, regardless
+        # of whether ``begin_delivery`` just reopened it to ``built`` (this
+        # attempt) or returned it unchanged still ``blocked`` (a caller
+        # that fell through from an already-exhausted row -- see
+        # ``_begin_generation_delivery``'s own state check) -- either shape
+        # carries the accurate count for "how many times has this exact
+        # generation/capsule_revision been retried".
+        if delivery["retry_count"] >= MAX_DELIVERY_RETRIES:
+            self._engine.mark_delivery_blocked(session_ref, delivery["id"], reason, permanent=True)
+            explanation = acp_messages.render(message_key, language or "en", **message_params)
+            self._set_state(task_id, "blocked", wait_reason=f"limit:{reason}", wait_detail=dict(explanation=explanation))
+            if emit_update is not None:
+                self._emit_localized(task_id, emit_update, language or "en", message_key, **message_params)
+            return True
+        self._engine.mark_delivery_blocked(session_ref, delivery["id"], reason)
+        return False
+
+    def _block_generation_immediately(
+        self, task_id: str, session_ref: str, capsule_revision: str, reason: str,
+        message_key: str, message_params: Mapping[str, Any],
+        emit_update: Callable[[str], bool] | None, language: str | None,
+    ) -> None:
+        """T024: unlike :meth:`_block_generation_delivery`'s bounded-retry
+        path (appropriate when redelivering the *same* content again next
+        turn might legitimately differ, e.g. task state changed), a
+        ``recovery.compaction_guard`` block is already the final verdict of
+        its own bounded window/ratio history -- it is recorded and
+        surfaced permanently on the very first sighting, never after a
+        second round of otherwise-pointless retries."""
+        delivery = self._engine.begin_delivery(session_ref, capsule_revision)
+        if delivery is not None:
+            self._engine.mark_delivery_blocked(session_ref, delivery["id"], reason, permanent=True)
+        explanation = acp_messages.render(message_key, language or "en", **message_params)
+        self._set_state(task_id, "blocked", wait_reason=f"limit:{reason}", wait_detail=dict(explanation=explanation))
+        if emit_update is not None:
+            self._emit_localized(task_id, emit_update, language or "en", message_key, **message_params)
+
+    def _begin_generation_delivery(
+        self, task_id: str, session_ref: str, role_id: str, prompt_text: str,
+        *, emit_update: Callable[[str], bool] | None = None, language: str | None = None,
+    ) -> tuple[str, str | None, bool]:
         """If ``session_ref`` has a queued fresh context generation (see
         ``delegation.live_adapters.EngineSessionManagerAdapter.pending_delivery``
         -- an optional ``SessionRuntime`` extension, never required),
@@ -510,17 +599,38 @@ class OrchestratingRuntime:
         re-asserts current tool-schema access -- see
         ``recovery.capsule._section_role_and_tool_access``) as the first
         blocks of the continuation for that generation, and mark the
-        delivery ``built``/``transmitted``. Returns ``(prompt_text,
-        delivery_id)`` -- ``delivery_id`` is ``None`` when nothing was
-        pending, already permanently blocked, or the engine offers no
-        delivery tracking at all (every pre-T022 fake/test session runtime).
+        delivery ``built``/``transmitted``.
+
+        T024: before transmitting, plans the full mandatory budget (role
+        instructions + tool schemas + capsule's critical sections + chat/
+        continuation + reserves -- see ``recovery.token_budget.plan_budget``)
+        against the route's real (catalog) or conservatively-estimated
+        context window, and -- only for a generation whose ``cause`` is an
+        actual observed/controlled compaction, never an ordinary
+        session_open/session_replacement -- runs the compaction-loop guard
+        (``recovery.compaction_guard.evaluate_compaction``). A ``fits``
+        budget proceeds unchanged; ``needs_reference_mode`` applies the
+        budget-selected compact role presentation
+        (``recovery.presentation.select_presentation``) rather than
+        dropping any mandatory content; ``overflow`` or a compaction-guard
+        block goes through :meth:`_block_generation_delivery`'s identical
+        bounded-retry/explicit-message path the pre-existing
+        ``capsule_oversize`` case already uses -- never a silent loop or a
+        silently truncated constraint.
+
+        Returns ``(prompt_text, delivery_id, blocked)``. ``delivery_id`` is
+        ``None`` when nothing was pending, already permanently blocked, or
+        the engine offers no delivery tracking at all (every pre-T022
+        fake/test session runtime). ``blocked`` is ``True`` only once this
+        exact generation has just become permanently blocked -- the caller
+        must end the turn without prompting the engine.
         """
         pending_delivery = getattr(self._engine, "pending_delivery", None)
         if pending_delivery is None:
-            return prompt_text, None
+            return prompt_text, None, False
         pending = pending_delivery(session_ref)
         if not pending:
-            return prompt_text, None
+            return prompt_text, None, False
         generation = pending["generation"]
         recipient = pending["recipient"]
         if recipient == "worker" and not (generation.get("assignment_ref") and pending.get("attempt_id")):
@@ -529,7 +639,7 @@ class OrchestratingRuntime:
             # recovery.capsule._normalize_recipient); a generation that
             # somehow lacks either (never expected in practice -- this is
             # defense in depth) is never redelivered rather than raising.
-            return prompt_text, None
+            return prompt_text, None, False
         recipient_map: dict[str, Any] = dict(role=recipient)
         if recipient == "worker":
             recipient_map["assignment_ref"] = generation["assignment_ref"]
@@ -539,24 +649,31 @@ class OrchestratingRuntime:
         except StoreError as error:
             if str(error) != "capsule_oversize":
                 raise
-            capsule_revision = f"oversize:{generation['id']}"
-            delivery = self._engine.begin_delivery(session_ref, capsule_revision)
-            if delivery is None:
-                return prompt_text, None
-            if delivery["state"] == "blocked":
-                if delivery["retry_count"] >= MAX_DELIVERY_RETRIES:
-                    self._engine.mark_delivery_blocked(session_ref, delivery["id"], "capsule_oversize", permanent=True)
-                return prompt_text, None
-            self._engine.mark_delivery_blocked(session_ref, delivery["id"], "capsule_oversize")
-            return prompt_text, None
+            blocked = self._block_generation_delivery(
+                task_id, session_ref, generation, f"oversize:{generation['id']}", "capsule_oversize",
+                "budget_overflow", dict(
+                    limit_name="capsule_bytes", context_window_tokens=0, context_window_basis="estimated",
+                    message="The recovery capsule's own critical sections exceed the hard byte cap.",
+                ),
+                emit_update, language,
+            )
+            return prompt_text, None, blocked
         delivery = self._engine.begin_delivery(session_ref, capsule["capsule_revision"])
         if delivery is None:
-            return prompt_text, None
-        if delivery["state"] not in ("built",):
+            return prompt_text, None, False
+        if delivery["state"] not in ("built", "blocked"):
             # Already transmitted/confirmed/continuation_observed for this
             # exact (recipient, generation, capsule_revision) -- redelivery
             # is idempotent, never resent.
-            return prompt_text, None
+            return prompt_text, None, False
+        # T024: a still-``blocked`` row here means ``record_built`` refused
+        # to reopen it -- its bounded retries (see
+        # ``_block_generation_delivery``) are already exhausted. Never
+        # silently short-circuit that case: fall through and recompute
+        # today's decision fresh (deterministic given unchanged task state)
+        # so the eventual permanent-block message stays accurate, then
+        # ``_block_generation_delivery``'s own retry-count check finalizes
+        # it below instead of looping forever.
         role_set = load_role(role_id)
         preview = self._config.snapshot(task_id)
         plan = qualify_delivery(
@@ -565,18 +682,87 @@ class OrchestratingRuntime:
         )
         capsule_text = render_capsule(capsule)
         if plan.qualification == DeliveryQualification.UNSUPPORTED:
-            prefix = capsule_text
+            role_blocks_text = ""
         else:
             role_blocks_text = "\n\n".join(
                 block.get("text", "") for block in plan.blocks if isinstance(block, dict) and block.get("type") == "text"
             )
-            prefix = f"{role_blocks_text}\n\n{capsule_text}" if role_blocks_text else capsule_text
+
+        # -- T024: budget planning + compaction-loop guard ----------------
+        from ..delegation import contracts as delegation_contracts
+        from ..recovery import compaction_guard, token_budget
+        from ..recovery.presentation import select_presentation
+
+        size_estimate = capsule.get("size_estimate", {})
+        critical_bytes = size_estimate.get("critical_bytes", len(capsule_text.encode("utf-8")))
+        total_capsule_bytes = size_estimate.get("bytes", critical_bytes)
+        reference_bytes = max(total_capsule_bytes - critical_bytes, 0)
+        try:
+            tool_schemas_bytes = len(json.dumps(delegation_contracts.schemas_for(recipient), sort_keys=True).encode("utf-8"))
+        except StoreError:
+            tool_schemas_bytes = 0
+        context_window_tokens = self._resolve_context_window_tokens(task_id, preview)
+        decision = token_budget.plan_budget(
+            context_window_tokens=context_window_tokens,
+            role_instructions_bytes=len(role_blocks_text.encode("utf-8")),
+            tool_schemas_bytes=tool_schemas_bytes,
+            chat_history_bytes=len(prompt_text.encode("utf-8")),
+            capsule_bytes=critical_bytes,
+            reference_candidate_bytes=reference_bytes,
+        )
+        if decision.decision == "overflow":
+            blocked = self._block_generation_delivery(
+                task_id, session_ref, generation, capsule["capsule_revision"], "budget_overflow",
+                "budget_overflow", dict(
+                    limit_name=decision.limit_name, context_window_tokens=decision.context_window_tokens,
+                    context_window_basis=decision.context_window_basis, message=decision.message,
+                ),
+                emit_update, language,
+            )
+            return prompt_text, None, blocked
+        if decision.decision == "needs_reference_mode" and role_blocks_text:
+            # Large *evidence* (bounded non-critical capsule content, e.g. a
+            # long publications/checks list) is already delivered as an
+            # addressable ref by the capsule's own section builders (see
+            # recovery.capsule's _MAX_LIST_ENTRIES bounding); this only
+            # additionally compacts the role presentation to leave more
+            # headroom, never touching a mandatory constraint/acceptance
+            # criterion (see recovery.presentation module docstring).
+            remaining = max(decision.context_window_tokens - (decision.mandatory_tokens - token_budget.estimate_tokens(len(role_blocks_text.encode("utf-8")))), 0)
+            presentation = select_presentation(
+                role_text=role_blocks_text, brief_text="", acceptance_text="", remaining_budget_tokens=remaining,
+            )
+            role_blocks_text = presentation.role_text
+
+        if generation.get("cause") in ("observed_compaction", "observed_reset", "controlled_boundary_refresh"):
+            last_usage = getattr(self._engine, "last_usage", None)
+            usage = last_usage(session_ref) if last_usage is not None else None
+            if usage and usage.get("tokens") is not None:
+                before_tokens, before_basis = usage["tokens"], usage.get("basis", token_budget.ENGINE_REPORTED_BASIS)
+            else:
+                before_tokens, before_basis = token_budget.estimate_tokens(total_capsule_bytes), token_budget.ESTIMATED_BASIS
+            usable_window = int(decision.context_window_tokens * token_budget.SAFETY_MARGIN_FRACTION)
+            guard_result = compaction_guard.evaluate_compaction(
+                self._store, task_id=task_id, engine_session_ref=session_ref, generation_id=generation["id"],
+                before_tokens=before_tokens, before_basis=before_basis,
+                after_tokens=decision.mandatory_tokens, after_basis=token_budget.ESTIMATED_BASIS,
+                mandatory_tokens_after=decision.mandatory_tokens, usable_window_tokens=usable_window,
+            )
+            if guard_result["status"] == "blocked":
+                self._block_generation_immediately(
+                    task_id, session_ref, capsule["capsule_revision"], guard_result["reason"],
+                    "compaction_blocked", dict(reason=guard_result["reason"], message=guard_result["message"]),
+                    emit_update, language,
+                )
+                return prompt_text, None, True
+
+        prefix = f"{role_blocks_text}\n\n{capsule_text}" if role_blocks_text else capsule_text
         new_prompt_text = f"{prefix}\n\n---\n\n{prompt_text}"
         self._engine.mark_delivery_transmitted(session_ref, delivery["id"])
         from .. import _fault_injection
 
         _fault_injection.checkpoint("t023_after_capsule_delivery_transmitted")
-        return new_prompt_text, delivery["id"]
+        return new_prompt_text, delivery["id"], False
 
     def _finalize_generation_delivery(self, session_ref: str, delivery_id: str | None, *, failure_kind: str | None, stop_reason: StopReason | None) -> None:
         if delivery_id is None:
@@ -817,9 +1003,18 @@ class OrchestratingRuntime:
                 acp_steering.supersede_undelivered_steering(self._store, task_id)
                 return StopReason.CANCELLED
             prompt_text = _coalesce(claimed, revisions) if claimed else content
-            prompt_text, generation_delivery_id = self._begin_generation_delivery(
+            prompt_text, generation_delivery_id, delivery_blocked = self._begin_generation_delivery(
                 task_id, session_ref, COORDINATOR_ROLE_ID, prompt_text,
+                emit_update=emit_update, language=language,
             )
+            if delivery_blocked:
+                # T024: a permanent budget-overflow/compaction-loop block --
+                # the explicit localized message and blocked task state were
+                # already recorded/emitted inside _begin_generation_delivery;
+                # never prompt the engine with an oversized/looping turn.
+                if claimed:
+                    delegation_events.release_claim(self._store, task_id, continuation_id)
+                return StopReason.END_TURN
             try:
                 outcome = self._engine.prompt(session_ref, prompt_text, cancel_event)
                 from .. import _fault_injection
@@ -1433,7 +1628,18 @@ class OrchestratingRuntime:
                 if pending:
                     role_id = self._role_id_for_pending(task_id, pending)
             if role_id is not None:
-                message, generation_delivery_id = self._begin_generation_delivery(task_id, session_ref, role_id, message)
+                message, generation_delivery_id, delivery_blocked = self._begin_generation_delivery(
+                    task_id, session_ref, role_id, message,
+                )
+                if delivery_blocked:
+                    # T024: permanently blocked (budget overflow / compaction
+                    # loop) -- never prompt this worker with it; the
+                    # explicit blocked task state was already recorded.
+                    delegation_events.append_event(
+                        self._store, task_id, "assignment_failed", f"assignment_failed:{key[1]}",
+                        dict(error="context_budget_blocked"), origin="runtime", assignment_ref=key[1],
+                    )
+                    return
             self._engine.prompt(session_ref, message, cancel_event)
         except EngineTurnFailed as failure:
             self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind=failure.kind, stop_reason=None)
@@ -1489,9 +1695,15 @@ class OrchestratingRuntime:
         brief = f"{payload['title']}\n\n{payload['brief']}\n\nAcceptance: {payload['acceptance']}"
         generation_delivery_id = None
         try:
-            brief, generation_delivery_id = self._begin_generation_delivery(
+            brief, generation_delivery_id, delivery_blocked = self._begin_generation_delivery(
                 task_id, result.engine_session_ref, payload["role"], brief,
             )
+            if delivery_blocked:
+                delegation_events.append_event(
+                    self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
+                    dict(error="context_budget_blocked"), origin="runtime", assignment_ref=assignment_ref,
+                )
+                return
             outcome = self._engine.prompt(result.engine_session_ref, brief, cancel_event)
         except EngineTurnFailed as failure:
             # T017: a worker's own engine turn failing (transport closed,
