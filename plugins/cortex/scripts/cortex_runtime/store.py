@@ -287,6 +287,8 @@ class Store:
         from .delegation.capacity_store import CAPACITY_SCHEMA
         from .delegation.evidence_store import EVIDENCE_SCHEMA
         from .acp.replay_store import REPLAY_SCHEMA
+        from .acp.questions_store import PENDING_QUESTIONS_SCHEMA
+        from .acp.steering import TASK_LANGUAGE_SCHEMA, TASK_STOPPED_SCHEMA
         from .project_storage import canonical_project, project_store_directory
         self.project_root=canonical_project(project_root) if project_root is not None else None
         if self.project_root is not None and Path(directory)!=project_store_directory(self.project_root):
@@ -312,7 +314,7 @@ class Store:
             db.commit()
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
             if app==APPLICATION_ID:
                 # T017: additive columns for a pre-T017 store that already has
                 # task_events/task_orchestration (CREATE TABLE IF NOT EXISTS
@@ -334,6 +336,38 @@ class Store:
                     " kind TEXT NOT NULL, head TEXT, dirty_digest TEXT, detail TEXT)"
                 )
                 db.execute("CREATE INDEX IF NOT EXISTS attempt_revisions_by_attempt ON attempt_revisions(attempt_id,captured_at)")
+                # T020: additive pending_questions/pending_question_late_answers
+                # tables for a pre-T020 store (same precedent as
+                # attempt_revisions above -- plain db.execute per statement,
+                # not executescript, so this never opens an implicit nested
+                # transaction here).
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS pending_questions ("
+                    " id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),"
+                    " assignment_ref TEXT, dedup_key TEXT NOT NULL, text TEXT NOT NULL,"
+                    " options_json TEXT, status TEXT NOT NULL DEFAULT 'open',"
+                    " answer_text TEXT, answer_source TEXT, created_at TEXT NOT NULL,"
+                    " answered_at TEXT, UNIQUE(task_id, dedup_key))"
+                )
+                db.execute("CREATE INDEX IF NOT EXISTS pending_questions_by_task ON pending_questions(task_id, status, id)")
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS pending_question_late_answers ("
+                    " id INTEGER PRIMARY KEY AUTOINCREMENT, question_id TEXT NOT NULL,"
+                    " task_id TEXT NOT NULL, answer_text TEXT NOT NULL, answer_source TEXT NOT NULL,"
+                    " received_at TEXT NOT NULL)"
+                )
+                # T020: additive task_language table for a pre-T020 store
+                # (same precedent as pending_questions above).
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS task_language ("
+                    " task_id TEXT PRIMARY KEY REFERENCES tasks(id), language TEXT)"
+                )
+                # T020 fresh-review fix: additive task_stopped table for a
+                # pre-fix store (same precedent).
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS task_stopped ("
+                    " task_id TEXT PRIMARY KEY REFERENCES tasks(id), stopped_at TEXT NOT NULL)"
+                )
 
     def _check_project(self,db,task=None):
         if self.project_root is None:return

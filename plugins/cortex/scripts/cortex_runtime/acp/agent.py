@@ -32,9 +32,11 @@ from types import SimpleNamespace
 
 from . import commands as acp_commands
 from . import config_options as acp_config_options
+from . import messages as acp_messages
 from . import protocol
 from . import sessions as acp_sessions
-from .host_requests import HostRequester
+from . import steering as acp_steering
+from .host_requests import HostRequestClosed, HostRequester, HostRequestError, HostRequestTimeout
 from .protocol import RpcError
 from .runtime import OrchestrationUnavailable, UnavailableRuntime
 from .transport import StdioTransport, EOF
@@ -112,6 +114,62 @@ def observe(environ, operation, outcome):
     )
 
 
+class _RealHostElicitor:
+    """T020: the real ``acp.orchestrating_runtime.HostElicitor`` -- relays a
+    coordinator ``ask_user`` question through the connected host's own
+    ``elicitation/create`` request over that connection's own
+    ``HostRequester`` (see ``Agent._make_elicitor``, which only ever
+    constructs this when the host advertised
+    ``clientCapabilities.elicitation.form`` at ``initialize``).
+
+    Request shape (pinned schema-1.4.0 ``CreateElicitationRequest``, form
+    mode, session scope): ``{"message", "mode": "form", "requestedSchema":
+    {"type": "object", "properties": {"answer": {"type": "string", ...}},
+    "required": ["answer"]}, "sessionId"}`` -- a single required text
+    field, or (when ``options`` were given) a single-select enum on that
+    same field (``StringPropertySchema``'s ``enum``). Response shape
+    (``CreateElicitationResponse``): ``{"action": "accept", "content":
+    {"answer": "..."}}`` on accept; ``{"action": "decline"}`` or
+    ``{"action": "cancel"}`` otherwise -- both, plus a timeout/closed
+    transport, map to ``None`` (the caller's plain-text fallback), never
+    raised.
+    """
+
+    def __init__(self, host_requester: HostRequester, *, timeout: float = 30.0) -> None:
+        self._host_requester = host_requester
+        self._timeout = timeout
+
+    def elicit(self, session_id: str, question: str, options: list[str] | None) -> str | None:
+        answer_schema: dict = {"type": "string"}
+        if options:
+            answer_schema["enum"] = list(options)
+        params = dict(
+            message=question,
+            mode="form",
+            requestedSchema=dict(
+                type="object",
+                properties=dict(answer=answer_schema),
+                required=["answer"],
+            ),
+            sessionId=session_id,
+        )
+        try:
+            result = self._host_requester.request("elicitation/create", params, timeout=self._timeout)
+        except (HostRequestTimeout, HostRequestClosed, HostRequestError):
+            return None
+        except Exception:
+            # A malformed/unexpected host reply is a decline-equivalent,
+            # never an exception that aborts the coordinator's turn.
+            return None
+        if not isinstance(result, dict) or result.get("action") != "accept":
+            return None
+        content = result.get("content")
+        if not isinstance(content, dict):
+            return None
+        answer = content.get("answer")
+        return answer if isinstance(answer, str) and answer else None
+
+
 class Agent:
     """One ACP connection's worth of state: sessions, stores, dispatch.
 
@@ -133,7 +191,33 @@ class Agent:
     this guard's job.
     """
 
-    def __init__(self, runtime, *, environ=None):
+    #: Default (production) ``elicitation/create`` request timeout in
+    #: seconds -- see ``_make_elicitor``/``elicitation_timeout_seconds``.
+    DEFAULT_ELICITATION_TIMEOUT_SECONDS = 30.0
+    #: Bounds a caller-supplied ``elicitation_timeout_seconds`` (T020
+    #: fresh-review fix: previously an unbounded os.environ lookup in
+    #: production code -- see the constructor docstring).
+    _MIN_ELICITATION_TIMEOUT_SECONDS = 0.05
+    _MAX_ELICITATION_TIMEOUT_SECONDS = 300.0
+
+    def __init__(self, runtime, *, environ=None, elicitation_timeout_seconds=None):
+        """``elicitation_timeout_seconds`` (T020 fresh-review fix, MEDIUM):
+        an explicit constructor parameter for the real
+        ``elicitation/create`` request timeout (see ``_make_elicitor``) --
+        never an ``os.environ`` lookup in production code. ``None`` (every
+        production caller) uses ``DEFAULT_ELICITATION_TIMEOUT_SECONDS``; a
+        test that needs a short, bounded wait (see
+        ``tests/test_acp_elicitation.py``) passes a small value directly.
+        Validated positive and bounded -- an out-of-range value is rejected
+        immediately (construction-time, never a silent clamp)."""
+        if elicitation_timeout_seconds is None:
+            elicitation_timeout_seconds = self.DEFAULT_ELICITATION_TIMEOUT_SECONDS
+        elif not (self._MIN_ELICITATION_TIMEOUT_SECONDS <= elicitation_timeout_seconds <= self._MAX_ELICITATION_TIMEOUT_SECONDS):
+            raise ValueError(
+                f"elicitation_timeout_seconds must be between {self._MIN_ELICITATION_TIMEOUT_SECONDS} and "
+                f"{self._MAX_ELICITATION_TIMEOUT_SECONDS}; got {elicitation_timeout_seconds!r}."
+            )
+        self._elicitation_timeout_seconds = float(elicitation_timeout_seconds)
         self.runtime = runtime
         # T016: a multi-project-capable runtime (see
         # acp.production_runtime.ProductionOrchestratingRuntime) accepts an
@@ -155,6 +239,13 @@ class Agent:
             self._runtime_accepts_source_identity = 'source_event_id' in inspect.signature(runtime.start_prompt).parameters
         except (TypeError, ValueError):
             self._runtime_accepts_source_identity = False
+        # T020: detected the same way -- a runtime not updated for T020
+        # (every FakeRuntime) simply never receives host_elicitor and
+        # stays on the plain-text ask_user fallback unconditionally.
+        try:
+            self._runtime_accepts_host_elicitor = 'host_elicitor' in inspect.signature(runtime.start_prompt).parameters
+        except (TypeError, ValueError):
+            self._runtime_accepts_host_elicitor = False
         self.environ = environ if environ is not None else os.environ
         self.version = _agent_version()
         self.stores = {}
@@ -333,7 +424,7 @@ class Agent:
         session = dict(
             project=project, task_id=None, channel=None, active=None, lock=threading.Lock(),
             owner_epoch=None, pending_selection=None, default_selection=None,
-            client_capabilities=dict(self.client_capabilities))
+            pending_language=None, client_capabilities=dict(self.client_capabilities))
         self.sessions[session_id] = session
         # A prior explicit choice persisted as the *normal* T008 user-default
         # route/parameters (see _apply_pre_task_selection) is only ever this
@@ -400,10 +491,54 @@ class Agent:
                         revision=None, parameters=default.get("parameters") or {})
         return None
 
+    def _default_language_from_user_defaults(self):
+        """The last explicit ``/cortex-language``/``set_config_option``
+        choice persisted pre-task (see ``_apply_language_selection``), or
+        ``None`` (meaning "auto") -- mirrors ``_default_selection_from_user_defaults``."""
+        defaults = configuration_store.read_user_defaults(self.environ)["defaults"]
+        value = defaults.get("language") if isinstance(defaults, dict) else None
+        return value if value in ("en", "ru") else None
+
+    def _make_elicitor(self, session_id):
+        """T020: a real ``_RealHostElicitor`` iff the host advertised
+        ``clientCapabilities.elicitation.form`` at ``initialize`` --
+        schema-1.4.0's own convention: ``form`` omitted or ``null`` means
+        no support; ``{}`` (present but empty) already means support (see
+        ``ElicitationCapabilities.form``'s pinned description). ``None``
+        otherwise -- the caller's plain-text ask_user fallback.
+
+        The request timeout is ``self._elicitation_timeout_seconds`` (an
+        explicit, validated constructor parameter -- T020 fresh-review fix,
+        MEDIUM: previously an unbounded ``os.environ`` lookup reachable in
+        production code; see ``__init__``)."""
+        capabilities = self.client_capabilities if isinstance(self.client_capabilities, dict) else {}
+        elicitation = capabilities.get("elicitation")
+        if not isinstance(elicitation, dict) or elicitation.get("form", None) is None:
+            return None
+        if self.host_requester is None:
+            return None
+        return _RealHostElicitor(self.host_requester, timeout=self._elicitation_timeout_seconds)
+
+    def _current_language_for_session(self, store, session):
+        """T020: the ``language`` SessionConfigOption's current value for
+        this session -- the task's own durable per-task override once a
+        task exists (``acp.steering.get_language_override``), else this
+        session's own not-yet-applied pending choice, else the inherited
+        persisted user default; ``None`` at every level means "auto"."""
+        task_id = session["task_id"]
+        if task_id is not None:
+            return acp_steering.get_language_override(store, task_id)
+        pending = session.get("pending_language")
+        if pending is not None:
+            return pending
+        return self._default_language_from_user_defaults()
+
     def _config_options_for_session(self, session, store):
         entries, _connections = self._selectable_entries_and_connections()
         current = self._current_selection_context(store, session)
-        return acp_config_options.build_config_options(entries, current)
+        language_current = self._current_language_for_session(store, session)
+        return acp_config_options.build_config_options(
+            entries, current, include_language=True, language_current=language_current)
 
     def _connection_setup_summary(self, connections):
         if not connections:
@@ -522,19 +657,23 @@ class Agent:
                 cancel_event.set()
             return delivered
 
+        start_prompt_kwargs = {}
+        if self._runtime_accepts_project_root:
+            start_prompt_kwargs["project_root"] = session["project"]
+        if self._runtime_accepts_source_identity:
+            start_prompt_kwargs["source_origin"] = origin
+            start_prompt_kwargs["source_event_id"] = event_id
+        if self._runtime_accepts_host_elicitor:
+            # T020: only a real, per-connection HostRequester-backed
+            # elicitor when the host actually advertised
+            # clientCapabilities.elicitation.form at initialize -- see
+            # _make_elicitor. None (the ordinary case for every host that
+            # doesn't advertise it, and every pre-T020 runtime) falls back
+            # to the runtime's own constructor default (also None), which
+            # is the unconditional plain-text ask_user fallback.
+            start_prompt_kwargs["host_elicitor"] = self._make_elicitor(session_id)
         try:
-            if self._runtime_accepts_project_root and self._runtime_accepts_source_identity:
-                reason = self.runtime.start_prompt(
-                    task_id, session_id, text, emit_update, cancel_event,
-                    project_root=session["project"], source_origin=origin, source_event_id=event_id)
-            elif self._runtime_accepts_project_root:
-                reason = self.runtime.start_prompt(task_id, session_id, text, emit_update, cancel_event, project_root=session["project"])
-            elif self._runtime_accepts_source_identity:
-                reason = self.runtime.start_prompt(
-                    task_id, session_id, text, emit_update, cancel_event,
-                    source_origin=origin, source_event_id=event_id)
-            else:
-                reason = self.runtime.start_prompt(task_id, session_id, text, emit_update, cancel_event)
+            reason = self.runtime.start_prompt(task_id, session_id, text, emit_update, cancel_event, **start_prompt_kwargs)
         except OrchestrationUnavailable as exc:
             # str(exc) is "orchestration_unavailable" for the default
             # UnavailableRuntime (unchanged wire behavior); a
@@ -627,22 +766,39 @@ class Agent:
         if command_id == acp_commands.CORTEX_SETUP:
             _reply(acp_commands.build_setup_text())
             return
+        if command_id == acp_commands.CORTEX_STOP:
+            self._run_cortex_stop(request_id, session_id, session, cancel_event, _reply)
+            return
+        if command_id == acp_commands.CORTEX_ANSWER:
+            self._run_cortex_answer(request_id, session_id, session, argument, cancel_event, _reply)
+            return
+        if command_id == acp_commands.CORTEX_NEW_TASK:
+            self._run_cortex_new_task(request_id, session_id, session, argument, cancel_event)
+            return
 
-        # cortex-model / cortex-effort: share the exact selection code path
-        # with session/set_config_option (see _apply_config_selection).
-        entries, _connections = self._selectable_entries_and_connections()
-        if command_id == acp_commands.CORTEX_MODEL:
-            config_id = acp_config_options.MODEL_OPTION_ID
-            resolved = acp_commands.resolve_model_argument(argument, entries)
+        # cortex-model / cortex-effort / cortex-language: share the exact
+        # selection code path with session/set_config_option (see
+        # _apply_config_selection).
+        if command_id == acp_commands.CORTEX_LANGUAGE:
+            config_id = acp_config_options.LANGUAGE_OPTION_ID
+            resolved = acp_commands.resolve_language_argument(argument)
             if resolved is None:
-                _reply(f"No matching model for {argument!r}. Use /cortex-status to see the current options.")
+                _reply("Usage: /cortex-language auto|en|ru")
                 return
         else:
-            config_id = acp_config_options.THOUGHT_LEVEL_OPTION_ID
-            resolved = argument.strip() or None
-            if resolved is None:
-                _reply("/cortex-effort requires a value. Use /cortex-status to see the current options.")
-                return
+            entries, _connections = self._selectable_entries_and_connections()
+            if command_id == acp_commands.CORTEX_MODEL:
+                config_id = acp_config_options.MODEL_OPTION_ID
+                resolved = acp_commands.resolve_model_argument(argument, entries)
+                if resolved is None:
+                    _reply(f"No matching model for {argument!r}. Use /cortex-status to see the current options.")
+                    return
+            else:
+                config_id = acp_config_options.THOUGHT_LEVEL_OPTION_ID
+                resolved = argument.strip() or None
+                if resolved is None:
+                    _reply("/cortex-effort requires a value. Use /cortex-status to see the current options.")
+                    return
 
         if session["task_id"] is not None:
             # Durable capture first, mirroring an ordinary prompt turn (see
@@ -667,6 +823,140 @@ class Agent:
             return
         self.transport.send_notification(protocol.config_option_update(session_id, options))
         _reply(f"{command_id} set to {resolved!r} (pending — applies to the next run).")
+
+    # -- T020 steering commands ------------------------------------------
+
+    def _runtime_call_kwargs(self, method_name, **candidate_kwargs):
+        """Only pass kwargs the bound runtime method actually declares (the
+        same detect-then-pass pattern as ``project_root``/``source_origin``
+        elsewhere in this class) -- lets a plain ``OrchestratingRuntime``
+        (no ``project_root`` concept; used directly in tests) and the
+        multi-project ``ProductionOrchestratingRuntime`` share this code."""
+        method = getattr(self.runtime, method_name, None)
+        if method is None:
+            return None, {}
+        try:
+            accepted = set(inspect.signature(method).parameters)
+        except (TypeError, ValueError):
+            accepted = set()
+        return method, {key: value for key, value in candidate_kwargs.items() if key in accepted}
+
+    def _run_cortex_stop(self, request_id, session_id, session, cancel_event, reply):
+        task_id = session["task_id"]
+        if task_id is None:
+            reply("There is no active task on this session to stop.")
+            return
+        method, kwargs = self._runtime_call_kwargs("stop_task", project_root=session["project"])
+        if method is None:
+            reply("This runtime does not support /cortex-stop.")
+            return
+        try:
+            method(task_id, session_id, lambda text: True, **kwargs)
+        except Exception:
+            self._reply_error(request_id, -32603, "Failed to stop the task.")
+            observe(self.environ, "session/prompt", "cortex_stop_failed")
+            return
+        language = acp_messages.select_language(None, [])
+        reply(acp_messages.render("stop_confirmed", language))
+
+    def _run_cortex_answer(self, request_id, session_id, session, argument, cancel_event, reply):
+        task_id = session["task_id"]
+        parsed = acp_commands.parse_answer_argument(argument)
+        if task_id is None or parsed is None:
+            reply("Usage: /cortex-answer <question-number> <answer text>")
+            return
+        index, text = parsed
+        list_method, list_kwargs = self._runtime_call_kwargs("list_open_questions", project_root=session["project"])
+        answer_method, answer_kwargs = self._runtime_call_kwargs("answer_question", project_root=session["project"])
+        if list_method is None or answer_method is None:
+            reply("This runtime does not support /cortex-answer.")
+            return
+        open_questions = list_method(task_id, **list_kwargs)
+        if not open_questions:
+            reply(acp_messages.render("question_answer_none_open", acp_messages.select_language(None, [])))
+            return
+        if index < 1 or index > len(open_questions):
+            reply(acp_messages.render("question_answer_unknown_index", acp_messages.select_language(None, [])))
+            return
+        question = open_questions[index - 1]
+        store = self._store_for(session["project"])
+        origin = f"acp-command:{session_id}"
+        source_event = SimpleNamespace(origin=origin, event_id=str(uuid.uuid4()))
+        try:
+            append_source_event(store, source_event, f"/cortex-answer {argument}".rstrip(), task_id)
+        except StoreError:
+            self._reply_error(request_id, -32603, "Durable capture failed; the answer was not applied.")
+            observe(self.environ, "session/prompt", "capture_failed")
+            return
+
+        def emit_update(chunk_text):
+            if cancel_event.is_set() or self.transport is None:
+                return False
+            return self.transport.send_notification(protocol.agent_message_chunk(session_id, chunk_text))
+
+        try:
+            reason = answer_method(task_id, session_id, question, text, emit_update, cancel_event, **answer_kwargs)
+        except Exception:
+            self._reply_error(request_id, -32603, "Failed to deliver the answer.")
+            observe(self.environ, "session/prompt", "cortex_answer_failed")
+            return
+        self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(reason.value)))
+        observe(self.environ, "session/prompt", "command:" + acp_commands.CORTEX_ANSWER)
+
+    def _run_cortex_new_task(self, request_id, session_id, session, argument, cancel_event):
+        """T020: creates a brand-new, separate task from ``argument`` and
+        gives it its own first coordinator turn -- ``session["task_id"]``
+        (the active task) is never read or mutated here. Continuing this
+        new task from a later ordinary prompt on the same ACP session is
+        out of this task's scope (see docs/acp/steering-and-questions.md's
+        UNKNOWNs) -- this command's own turn is this new task's only
+        guaranteed turn for now."""
+        text = argument.strip()
+        if not text:
+            if self.transport is not None:
+                self.transport.send_notification(protocol.agent_message_chunk(session_id, "Usage: /cortex-new-task <task text>"))
+                self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(StopReason.END_TURN.value)))
+            return
+        store = self._store_for(session["project"])
+        origin = f"acp-new-task:{session_id}"
+        source_event = SimpleNamespace(origin=origin, event_id=str(uuid.uuid4()))
+        try:
+            result = bootstrap_task(store, source_event, text, owner_ref=origin)
+        except StoreError:
+            self._reply_error(request_id, -32603, "Durable capture failed; the new task was not created.")
+            observe(self.environ, "session/prompt", "capture_failed")
+            return
+        new_task_id = result.task_id
+
+        def emit_update(chunk_text):
+            if cancel_event.is_set() or self.transport is None:
+                return False
+            return self.transport.send_notification(protocol.agent_message_chunk(session_id, chunk_text))
+
+        try:
+            if self._runtime_accepts_project_root and self._runtime_accepts_source_identity:
+                reason = self.runtime.start_prompt(
+                    new_task_id, session_id, text, emit_update, cancel_event,
+                    project_root=session["project"], source_origin=origin, source_event_id=source_event.event_id)
+            elif self._runtime_accepts_project_root:
+                reason = self.runtime.start_prompt(new_task_id, session_id, text, emit_update, cancel_event, project_root=session["project"])
+            else:
+                reason = self.runtime.start_prompt(new_task_id, session_id, text, emit_update, cancel_event)
+        except OrchestrationUnavailable as exc:
+            self.transport.send_response(protocol.error_response(
+                request_id, RpcError(-32001, "orchestration_unavailable", data={"retryable": False, "reason": str(exc) or "orchestration_unavailable"})))
+            observe(self.environ, "session/prompt", "cortex_new_task_unavailable")
+            return
+        except Exception:
+            self._reply_error(request_id, -32603, "Failed to start the new task.")
+            observe(self.environ, "session/prompt", "cortex_new_task_failed")
+            return
+        language = acp_messages.select_language(None, [])
+        if self.transport is not None:
+            self.transport.send_notification(protocol.agent_message_chunk(
+                session_id, acp_messages.render("new_task_created", language, task_id=new_task_id)))
+            self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(reason.value)))
+        observe(self.environ, "session/prompt", "command:" + acp_commands.CORTEX_NEW_TASK)
 
     @staticmethod
     def _portable_error_to_rpc(error: PortableError) -> RpcError:
@@ -695,6 +985,16 @@ class Agent:
         allowed_values = {item["value"] for item in option.get("options", [])}
         if value not in allowed_values:
             return False, previous_options, RpcError(-32602, f"{value!r} is not a valid value for configId {config_id!r}.")
+
+        if config_id == acp_config_options.LANGUAGE_OPTION_ID:
+            # T020: an independent settings axis -- never a route/parameter
+            # override, never gated on model selectability, and (unlike
+            # model/thought_level) never revision-gated against
+            # ConfigurationService history: this value lives on a single
+            # durable task_orchestration column (or, pre-task, the same
+            # plain T008 user-default row model/thought_level use), so
+            # there is no concurrent-revision race to detect/reject here.
+            return self._apply_language_selection(store, session, value)
 
         if config_id == acp_config_options.MODEL_OPTION_ID:
             target_route_id = value
@@ -763,6 +1063,24 @@ class Agent:
             return False, previous_options, self._portable_error_to_rpc(violation)
         return True, self._config_options_for_session(session, store), None
 
+    def _apply_language_selection(self, store, session, value):
+        """``value`` is already validated against ``_LANGUAGE_VALUES`` by
+        the caller (``_apply_config_selection``). ``"auto"`` is stored as
+        ``None`` everywhere (task column and user-default row alike) --
+        the same "unset means auto" convention
+        ``acp.messages.select_language`` already uses."""
+        normalized = None if value == "auto" else value
+        task_id = session["task_id"]
+        if task_id is None:
+            current = configuration_store.read_user_defaults(self.environ)
+            defaults = dict(current["defaults"])
+            defaults["language"] = normalized
+            configuration_store.write_user_defaults(defaults, current["ceiling"], self.environ)
+            session["pending_language"] = normalized
+        else:
+            acp_steering.set_language_override(store, task_id, normalized)
+        return True, self._config_options_for_session(session, store), None
+
     def _session_set_config_option(self, request_id, params):
         session_id, config_id, kind, value = protocol.validate_set_config_option_params(params)
         session = self.sessions.get(session_id)
@@ -822,7 +1140,7 @@ class Agent:
             self.sessions[session_id] = dict(
                 project=project, task_id=durable["task_id"], channel=None, active=None, lock=threading.Lock(),
                 owner_epoch=None, pending_selection=None, default_selection=None,
-                client_capabilities=dict(self.client_capabilities))
+                pending_language=None, client_capabilities=dict(self.client_capabilities))
         self.transport.send_response(protocol.result_response(request_id, protocol.load_session_response()))
 
     def _session_cancel(self, params):

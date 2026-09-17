@@ -34,6 +34,9 @@ from ..portable.identity import new_id
 from ..portable.instruction_delivery import qualify_delivery
 from ..portable.roles import load_role
 from ..trusted_channel import ChannelContext, issue_channel_tx
+from . import messages as acp_messages
+from . import questions_store
+from . import steering as acp_steering
 
 COORDINATOR_ROLE_ID = "orchestrator"
 DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS = 3
@@ -59,6 +62,24 @@ class PromptOutcome:
 
     stop_reason: StopReason
     text: str = ""
+
+
+class HostElicitor(Protocol):
+    """T020: optional structured-input dependency, injected the same way
+    ``SessionRuntime`` is (never required -- every existing caller/test
+    passes none and gets the text-fallback path unconditionally). A real
+    implementation (see ``acp.agent``) relays through the connected host's
+    ``elicitation/create`` request via that connection's own
+    ``HostRequester``, scoped to one ACP session, only when the host
+    advertised ``clientCapabilities.elicitation.form`` at ``initialize``.
+
+    ``elicit`` must never raise for an ordinary decline/cancel/timeout/
+    unsupported outcome -- it returns ``None`` for all of those (the caller
+    then falls back to the plain text question), and only a genuine bug
+    propagates as an exception (also treated as ``None`` by the caller, see
+    ``OrchestratingRuntime._handle_ask_user``)."""
+
+    def elicit(self, session_id: str, question: str, options: list[str] | None) -> str | None: ...
 
 
 class SessionRuntime(Protocol):
@@ -173,12 +194,21 @@ class OrchestratingRuntime:
         max_total_continuations: int = DEFAULT_MAX_TOTAL_CONTINUATIONS,
         worker_pool_size: int = DEFAULT_WORKER_POOL_SIZE,
         wait_timeout_seconds: float = DEFAULT_WAIT_TIMEOUT_SECONDS,
+        host_elicitor: HostElicitor | None = None,
     ) -> None:
         self._store = store
         self._engine = session_runtime
         self._workspace = workspace_provisioner
         self._config = config_snapshot_source
         self._allow_unqualified_delivery = bool(allow_unqualified_delivery)
+        # T020: optional structured-elicitation dependency (see
+        # HostElicitor); None for every pre-T020 construction (production
+        # wiring passes a real one only once acp.agent's per-connection
+        # HostRequester exists -- see acp.production_runtime).
+        self._elicitor = host_elicitor
+        # T020: per-task de-duplication of identical consecutive runtime
+        # status lines (never persisted -- see acp.messages.Dedup).
+        self._status_dedup = acp_messages.Dedup()
         self._provisioning = ProvisioningService(
             store, workspace_provisioner, session_runtime, config_snapshot_source,
             allow_unqualified_delivery=allow_unqualified_delivery,
@@ -212,12 +242,22 @@ class OrchestratingRuntime:
         # once per attempt.
         self._terminated_attempts: set[str] = set()
         self._executor = ThreadPoolExecutor(max_workers=worker_pool_size, thread_name_prefix="cortex-worker")
+        # T020 (stop-race fix): the cancel_event of whichever start_prompt/
+        # answer_question call currently owns this task's continuation loop
+        # *in this process* -- lets stop_task() signal that loop to exit
+        # promptly instead of only relying on the next ordinary prompt to
+        # observe stopped_at. Registered/deregistered under self._lock;
+        # never more than one entry per task_id (start_prompt's own
+        # SecondCoordinatorRefused guard already prevents two concurrent
+        # loops for the same task in this process).
+        self._active_cancel_events: dict[str, threading.Event] = {}
 
     # -- IncomingRuntime -----------------------------------------------
 
     def start_prompt(
         self, task_id, session_id, content, emit_update, cancel_event, *,
         source_origin: str | None = None, source_event_id: str | None = None,
+        host_elicitor: HostElicitor | None = None,
     ) -> StopReason:
         """T018: ``source_origin``/``source_event_id`` (when supplied by the
         caller -- see ``acp.agent.Agent``'s signature detection, mirroring
@@ -230,17 +270,29 @@ class OrchestratingRuntime:
         events; a replayed identical source event (same origin+event_id)
         is never delivered twice. Omitted (``None``) falls back to the
         pre-T018 session-turn-count identity for callers that do not (yet)
-        thread a source event through (every existing direct-call test)."""
+        thread a source event through (every existing direct-call test).
+
+        ``host_elicitor`` (T020, per-call -- never stored as instance state:
+        ``OrchestratingRuntime`` is one long-lived instance per project,
+        shared across every ACP connection for that project, while a
+        ``HostElicitor`` is scoped to exactly one connection's own
+        ``HostRequester`` -- see ``acp.agent``) overrides the constructor's
+        own ``host_elicitor`` default for this call only; ``None`` (the
+        default -- every pre-T020 caller) falls back to that default."""
+        elicitor = host_elicitor if host_elicitor is not None else self._elicitor
         with self._lock:
             if task_id in self._active_tasks:
                 raise SecondCoordinatorRefused()
             self._active_tasks.add(task_id)
+            self._active_cancel_events[task_id] = cancel_event
         try:
             return self._run(task_id, session_id, content, emit_update, cancel_event,
-                              source_origin=source_origin, source_event_id=source_event_id)
+                              source_origin=source_origin, source_event_id=source_event_id, host_elicitor=elicitor)
         finally:
             with self._lock:
                 self._active_tasks.discard(task_id)
+                if self._active_cancel_events.get(task_id) is cancel_event:
+                    del self._active_cancel_events[task_id]
 
     def cancel(self, session_id: str) -> None:
         # cancel_event (passed per start_prompt call) is the primary
@@ -368,8 +420,39 @@ class OrchestratingRuntime:
     def _run(
         self, task_id, session_id, content, emit_update, cancel_event, *,
         source_origin: str | None = None, source_event_id: str | None = None,
+        host_elicitor: HostElicitor | None = None,
     ) -> StopReason:
+        # T020: an urgent /cortex-stop takes precedence over everything --
+        # a stopped task never resumes through an ordinary prompt/steering/
+        # answer. This message is durably recorded (never silently dropped)
+        # but pre-marked superseded so it can never be claimed/delivered.
+        if acp_steering.is_stopped(self._store, task_id):
+            acp_steering.record_post_stop_message(
+                self._store, task_id, source_origin or session_id, source_event_id or new_id("post_"), content,
+            )
+            language = self._resolve_language(task_id, content_hint=content)
+            emit_update(acp_messages.render("task_stopped", language))
+            return StopReason.END_TURN
+        # T020: a task_orchestration row already existing *before* this call
+        # opens/reuses the coordinator session means this is a follow-up
+        # prompt on an already-started task -- steering-eligible (see
+        # below), as opposed to the task's very first prompt.
+        pre_existing = acp_steering.orchestration_exists(self._store, task_id)
         channel, session_ref = self._ensure_coordinator(task_id)
+        # T020: route this prompt against any still-open coordinator
+        # question *before* recording it as an ordinary user_message/
+        # steering turn -- see docs/acp/steering-and-questions.md's
+        # "question lifecycle" section. Two or more open questions is never
+        # guessed at: the user is asked to disambiguate with
+        # /cortex-answer, and this prompt's text is not itself recorded as
+        # an answer or as steering.
+        open_questions = questions_store.list_open(self._store, task_id)
+        language = self._resolve_language(task_id, content_hint=content)
+        if len(open_questions) >= 2:
+            listing = "\n".join(f"{index + 1}. {q.text}" for index, q in enumerate(open_questions))
+            emit_update(acp_messages.render("question_ambiguous", language, questions=listing))
+            return StopReason.END_TURN
+        answering_question = open_questions[0] if len(open_questions) == 1 else None
         # T017: a new user prompt is a fresh turn -- surface any explanation
         # a prior blocked/limited/refused turn left behind (resumable, not
         # repeated once delivered), and reset the durable no-progress
@@ -404,21 +487,82 @@ class OrchestratingRuntime:
             self._store, task_id, dedup_key, session_id, dict(content=content, session_id=session_id),
             ledger_origin=ledger_origin, ledger_event_id=ledger_event_id,
         )
+        # T020: this exact prompt is either (a) the answer to the single
+        # open question, (b) steering on an already-active task, or (c) the
+        # task's ordinary first turn -- never more than one of these for
+        # the same prompt. Recorded *after* the durable user_message above
+        # (itself already persisted before any delivery -- see the T018
+        # dedup_key/record_user_message_event call above) so "steering
+        # persists before delivery" holds for both the coalescing text and
+        # this extra bookkeeping event.
+        if answering_question is not None:
+            questions_store.answer(self._store, answering_question.id, content, "text")
+            delegation_events.append_event(
+                self._store, task_id, "progress", f"question_answered:{answering_question.id}",
+                dict(kind="question_answered", question_id=answering_question.id, answer_text=content),
+                origin="runtime",
+            )
+        elif pre_existing:
+            acp_steering.record_steering(
+                self._store, task_id, source_origin or session_id, source_event_id or dedup_key, content,
+            )
+        return self._continuation_loop(task_id, session_id, channel, session_ref, content, emit_update, cancel_event, language, host_elicitor)
+
+    def _continuation_loop(
+        self, task_id, session_id, channel, session_ref, content, emit_update, cancel_event, language,
+        host_elicitor: HostElicitor | None = None,
+    ) -> StopReason:
+        """The coordinator continuation loop proper: claim/coalesce/prompt/
+        process, repeated until a terminal outcome. Factored out of
+        :meth:`_run` (T020) so :meth:`answer_question` -- an out-of-band
+        ``/cortex-answer`` delivery that must never re-run the open-question
+        gating or steering/first-turn detection in :meth:`_run`'s preamble
+        (its own answer event is already durably recorded by the caller) --
+        can drive the exact same loop starting from an already-ensured
+        coordinator session."""
         no_progress = 0
         total = 0
         first = True
         while True:
             if cancel_event.is_set():
-                # T017 (fresh review, MEDIUM): a queued-for-capacity open
-                # must observe task cancellation promptly, not poll forever.
+                if acp_steering.is_stopped(self._store, task_id):
+                    # T020: an urgent /cortex-stop (possibly issued from a
+                    # *different* session/thread in this same process --
+                    # see stop_task(), which looks this exact cancel_event
+                    # up via self._active_cancel_events and sets it) always
+                    # takes precedence: stop_task() already set the
+                    # authoritative "stopped" state and is cancelling every
+                    # assignment itself -- this loop just exits without
+                    # overwriting that state or delivering anything further.
+                    return StopReason.CANCELLED
+                # T020: session/cancel interrupts *this coordination turn*
+                # only; it never cancels/terminates an already-*running*
+                # assignment (that would need SessionRuntime.terminate_owned/
+                # cancel_attempt, never called here -- see stop_task() for
+                # the urgent, everything-cancelling /cortex-stop path
+                # instead) and the task stays active ("interrupted", not
+                # "cancelled"): worker events keep accumulating durably and
+                # the next ordinary prompt delivers them coalesced with any
+                # steering in one continuation (see
+                # docs/acp/steering-and-questions.md). The one exception
+                # (T017, pre-existing, unchanged by this task): a worker
+                # still only *queued* for capacity (its engine session
+                # never actually opened yet) must still observe task
+                # cancellation promptly rather than leak that reservation
+                # forever -- cancel_task() only affects that queued-open
+                # wait loop (delegation.capacity/EngineSessionManagerAdapter),
+                # never an already-opened session's in-flight prompt.
                 cancel_task = getattr(self._engine, "cancel_task", None)
                 if cancel_task is not None:
                     cancel_task(task_id)
-                self._set_state(task_id, "cancelled")
+                self._set_state(
+                    task_id, "interrupted", wait_reason="interrupted",
+                    wait_detail=dict(explanation="Coordination turn interrupted by session/cancel; already-running workers keep running."),
+                )
                 return StopReason.CANCELLED
             total += 1
             if total > self._max_total:
-                self._emit_and_record(task_id, emit_update, "Stopping: exceeded the maximum number of coordination continuations for one prompt.")
+                self._emit_localized(task_id, emit_update, language, "max_total_continuations")
                 self._set_state(task_id, "blocked", wait_reason="limit:max_total_continuations")
                 return StopReason.END_TURN
             continuation_id = new_id("cont_")
@@ -433,13 +577,29 @@ class OrchestratingRuntime:
             revisions = self._capture_result_revisions(task_id, claimed)
             meaningful = [e for e in claimed if e.event_type in delegation_events.MEANINGFUL_EVENT_TYPES]
             if not meaningful and not first:
+                # T020 (stop-race fix): if a /cortex-stop landed in this
+                # exact window (this batch was claimed but was never going
+                # to be delivered anyway, since it carries no meaningful
+                # event), release it and supersede any steering rather than
+                # leaving it claimed-but-undelivered forever, and exit
+                # without ever reaching another engine.prompt call. Never
+                # released in the ordinary (not-stopped) case -- that would
+                # change the pre-existing no-progress-budget timing (an
+                # informative-only claimed batch intentionally stays
+                # claimed, never redelivered, until a later meaningful
+                # event's own claim naturally supersedes/consumes it).
+                if acp_steering.is_stopped(self._store, task_id):
+                    if claimed:
+                        delegation_events.release_claim(self._store, task_id, continuation_id)
+                    acp_steering.supersede_undelivered_steering(self._store, task_id)
+                    return StopReason.CANCELLED
                 progressed = self._wait_for_progress(task_id, cancel_event)
                 if not progressed:
                     no_progress += 1
                     self._set_state(task_id, "blocked", wait_reason="workers_running", no_progress_count=no_progress)
                     if no_progress >= self._max_no_progress:
-                        explanation = "Blocked: no new worker result, question, or user input arrived after repeated waiting."
-                        self._emit_and_record(task_id, emit_update, explanation)
+                        explanation = acp_messages.render("blocked_no_progress", language)
+                        self._emit_localized(task_id, emit_update, language, "blocked_no_progress")
                         self._set_state(
                             task_id, "blocked", wait_reason="blocked",
                             wait_detail=dict(explanation=explanation), no_progress_count=no_progress,
@@ -448,6 +608,22 @@ class OrchestratingRuntime:
                 continue
             first = False
             no_progress = 0
+            # T020 (stop-race fix): re-check immediately before ever calling
+            # the coordinator's engine again -- a /cortex-stop that lands
+            # between this iteration's own top-of-loop check and here (for
+            # example while claim_unconsumed/_capture_result_revisions ran)
+            # must still prevent one more engine.prompt call and must never
+            # let a just-claimed-but-undelivered steering batch reach the
+            # coordinator. The claim is released (not lost -- a stopped
+            # task's undelivered events stay superseded/inert, never
+            # resurrected) and any steering in this exact batch is marked
+            # superseded the same way stop_task() marks it for anything it
+            # was still unclaimed.
+            if acp_steering.is_stopped(self._store, task_id):
+                if claimed:
+                    delegation_events.release_claim(self._store, task_id, continuation_id)
+                acp_steering.supersede_undelivered_steering(self._store, task_id)
+                return StopReason.CANCELLED
             prompt_text = _coalesce(claimed, revisions) if claimed else content
             try:
                 outcome = self._engine.prompt(session_ref, prompt_text, cancel_event)
@@ -458,8 +634,8 @@ class OrchestratingRuntime:
                 # with an honest blocker instead of a fabricated success.
                 if claimed:
                     delegation_events.release_claim(self._store, task_id, continuation_id)
-                explanation = f"Coordinator engine turn failed ({failure.kind})."
-                self._emit_and_record(task_id, emit_update, explanation)
+                explanation = acp_messages.render("engine_failure", language, kind=failure.kind)
+                self._emit_localized(task_id, emit_update, language, "engine_failure", kind=failure.kind)
                 self._set_state(
                     task_id, "blocked", wait_reason=f"engine_failure:{failure.kind}",
                     wait_detail=dict(explanation=explanation),
@@ -492,10 +668,20 @@ class OrchestratingRuntime:
             if terminal == "accepted":
                 self._set_state(task_id, "accepted")
                 return StopReason.END_TURN
-            if terminal is not None and terminal.startswith("waiting_for_user:"):
-                question = terminal.split(":", 1)[1]
-                emit_update(question)
-                self._set_state(task_id, "waiting_for_user", wait_reason="user_input_required", wait_detail=dict(question=question))
+            if isinstance(terminal, dict) and terminal.get("kind") == "ask_user":
+                # T020: persist-then-try-elicitation-then-fallback -- see
+                # _handle_ask_user. A resolved question (elicitation accept)
+                # continues the SAME turn with the answer coalesced into the
+                # next continuation; an unresolved one ends the turn with
+                # the plain question (existing pre-T020 behavior).
+                resolved = self._handle_ask_user(task_id, session_id, emit_update, language, terminal, host_elicitor)
+                if resolved:
+                    no_progress = 0
+                    continue
+                self._set_state(
+                    task_id, "waiting_for_user", wait_reason="user_input_required",
+                    wait_detail=dict(question=terminal["question"], pending_question_id=terminal["question_id"]),
+                )
                 return StopReason.END_TURN
             if outcome.stop_reason == StopReason.CANCELLED:
                 self._set_state(task_id, "cancelled")
@@ -509,9 +695,9 @@ class OrchestratingRuntime:
                 # events, a running worker) actually exists; otherwise this
                 # is an honest limit blocker, never a fabricated idle wait.
                 kind = outcome.stop_reason.value
-                self._emit_and_record(task_id, emit_update, f"Coordinator turn ended: {kind} limit reached.")
+                self._emit_localized(task_id, emit_update, language, "coordinator_turn_limit", kind=kind)
                 if not has_unconsumed and not running:
-                    explanation = f"Blocked on a {kind} limit with no unfinished action or new event."
+                    explanation = acp_messages.render("blocked_limit", language, kind=kind)
                     self._set_state(
                         task_id, "blocked", wait_reason=f"limit:{kind}",
                         wait_detail=dict(explanation=explanation),
@@ -523,6 +709,129 @@ class OrchestratingRuntime:
                 return StopReason.END_TURN
             # else: loop again -- either events already pending or we will
             # wait for progress at the top of the next iteration.
+
+    # -- /cortex-answer / /cortex-stop entrypoints (T020) ----------------
+
+    def answer_question(
+        self, task_id: str, session_id: str, question: questions_store.PendingQuestion, text: str,
+        emit_update: Callable[[str], bool], cancel_event: threading.Event,
+    ) -> StopReason:
+        """Deliver an explicit ``/cortex-answer`` (see ``acp.commands``) for
+        one specific, already-disambiguated open ``question`` -- used when
+        two or more questions are open and an ordinary prompt cannot be
+        auto-matched to one of them (see ``_run``'s ``question_ambiguous``
+        path). ``question`` must be one this exact task's own still-``open``
+        row (the caller -- ``acp.agent`` -- resolves the 1-based index the
+        user typed against ``questions_store.list_open`` immediately before
+        calling this).
+
+        A stopped task's late answer is recorded and inert, exactly like an
+        ordinary prompt after ``/cortex-stop`` (see ``_run``)."""
+        if acp_steering.is_stopped(self._store, task_id):
+            acp_steering.record_post_stop_message(self._store, task_id, session_id, new_id("post_"), text)
+            language = self._resolve_language(task_id, content_hint=text)
+            emit_update(acp_messages.render("task_stopped", language))
+            return StopReason.END_TURN
+        if not questions_store.answer(self._store, question.id, text, "text"):
+            # Resolved/superseded/cancelled between the caller's own
+            # list_open() read and this call (a genuine race, or a stale
+            # /cortex-answer against an already-answered question) -- a
+            # late answer, recorded and otherwise inert.
+            questions_store.record_late_answer(self._store, question.id, task_id, text, "text")
+            language = self._resolve_language(task_id, content_hint=text)
+            emit_update(acp_messages.render("question_answer_unknown_index", language))
+            return StopReason.END_TURN
+        channel, session_ref = self._ensure_coordinator(task_id)
+        language = self._resolve_language(task_id, content_hint=text)
+        delegation_events.append_event(
+            self._store, task_id, "progress", f"question_answered:{question.id}",
+            dict(kind="question_answered", question_id=question.id, answer_text=text), origin="runtime",
+        )
+        # A user_message (meaningful) event, distinct from the informative
+        # progress row above, so the continuation loop's claim/coalesce
+        # gating (delegation_events.MEANINGFUL_EVENT_TYPES) actually wakes
+        # for it -- exactly like an ordinary prompt's own user_message.
+        delegation_events.append_event(
+            self._store, task_id, "user_message", f"cortex_answer:{question.id}",
+            dict(content=f"Answered question ({question.text!r}): {text}", session_id=session_id),
+            origin=session_id,
+        )
+        with self._lock:
+            self._active_cancel_events[task_id] = cancel_event
+        try:
+            return self._continuation_loop(task_id, session_id, channel, session_ref, text, emit_update, cancel_event, language)
+        finally:
+            with self._lock:
+                if self._active_cancel_events.get(task_id) is cancel_event:
+                    del self._active_cancel_events[task_id]
+
+    def stop_task(self, task_id: str, session_id: str, emit_update: Callable[[str], bool]) -> bool:
+        """T020 ``/cortex-stop``: an urgent safety stop, routed through
+        cancellation -- never a normal steering queue entry. Takes
+        precedence over an in-flight coordinator loop for this same task
+        *in this process*: signals that loop's own cancel_event (see
+        ``self._active_cancel_events``/``start_prompt``/``answer_question``)
+        so it exits promptly without delivering queued steering or starting
+        a new delegation (see ``_continuation_loop``'s stopped-state
+        checks), then independently cancels every non-terminal assignment
+        (and any capacity-queued open, via ``engine.cancel_task``),
+        invalidates every still-open pending question, and marks any
+        not-yet-delivered steering event superseded so it can never be
+        delivered after this point (see
+        ``acp.steering.supersede_undelivered_steering``). Idempotent: a
+        second call on an already-stopped task is a no-op (returns
+        ``False``) rather than a second cancellation wave.
+
+        Raises :class:`PortableError` (code ``unknown_task``) for a
+        ``task_id`` that does not exist at all -- never a false "stopped"
+        confirmation for a task that was never real (T020 fresh-review
+        fix)."""
+        try:
+            transitioned = acp_steering.mark_stopped(self._store, task_id)
+        except LookupError:
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION, code="unknown_task",
+                remediation="This task id does not exist; there is nothing to stop.",
+                retry_eligible=False,
+            ) from None
+        if not transitioned:
+            return False
+        with self._lock:
+            active_event = self._active_cancel_events.get(task_id)
+        if active_event is not None:
+            active_event.set()
+        cancel_task = getattr(self._engine, "cancel_task", None)
+        if cancel_task is not None:
+            try:
+                cancel_task(task_id)
+            except Exception:
+                pass
+        with self._store.connection() as db:
+            open_refs = db.execute(
+                "SELECT DISTINCT assignment_ref FROM task_events WHERE task_id=? AND event_type='delegation_requested'",
+                (task_id,),
+            ).fetchall()
+            terminal_refs = db.execute(
+                "SELECT DISTINCT assignment_ref FROM task_events WHERE task_id=? "
+                "AND event_type IN ('worker_result','assignment_failed','assignment_cancelled')",
+                (task_id,),
+            ).fetchall()
+        terminal = {row["assignment_ref"] for row in terminal_refs}
+        for row in open_refs:
+            assignment_ref = row["assignment_ref"]
+            if assignment_ref in terminal:
+                continue
+            self._cancel_assignment(task_id, assignment_ref, "urgent stop (/cortex-stop)")
+            questions_store.cancel_for_assignment(self._store, task_id, assignment_ref, "task stopped")
+        questions_store.supersede_open(self._store, task_id, "task stopped")
+        acp_steering.supersede_undelivered_steering(self._store, task_id)
+        self._set_state(
+            task_id, "stopped", wait_reason="stopped",
+            wait_detail=dict(explanation="Stopped by /cortex-stop."),
+        )
+        language = self._resolve_language(task_id)
+        emit_update(acp_messages.render("stop_confirmed", language))
+        return True
 
     def _recover_unrecorded_source_events(self, task_id: str, *, exclude: tuple[str | None, str | None] = (None, None)) -> None:
         from . import replay_store
@@ -552,7 +861,11 @@ class OrchestratingRuntime:
             row = db.execute(
                 "SELECT wait_reason, wait_detail_json FROM task_orchestration WHERE task_id=?", (task_id,),
             ).fetchone()
-        if row is None or not row["wait_reason"] or row["wait_reason"] in ("workers_running", "idle_awaiting_user"):
+        # T020: "interrupted" (session/cancel) needs no resume-context echo
+        # -- the interrupted turn's own accumulated events are already
+        # delivered coalesced by the normal claim/coalesce path on the next
+        # continuation; a resume_context line here would just be noise.
+        if row is None or not row["wait_reason"] or row["wait_reason"] in ("workers_running", "idle_awaiting_user", "interrupted"):
             return
         import json
 
@@ -564,6 +877,13 @@ class OrchestratingRuntime:
             origin="runtime",
         )
         self._set_state(task_id, "running", wait_reason=None, wait_detail=None, no_progress_count=0)
+
+    def _resolve_language(self, task_id: str, *, content_hint: str | None = None) -> str:
+        explicit = acp_steering.get_language_override(self._store, task_id)
+        texts = acp_steering.recent_user_direct_texts(self._store, task_id)
+        if content_hint:
+            texts = list(texts) + [content_hint]
+        return acp_messages.select_language(explicit, texts)
 
     def _set_state(
         self, task_id: str, state: str, *, wait_reason: str | None | object = _UNSET,
@@ -601,10 +921,79 @@ class OrchestratingRuntime:
                 raise
 
     def _emit_and_record(self, task_id: str, emit_update: Callable[[str], bool], text: str) -> None:
-        emit_update(text)
+        # T020: never repeat the exact same status line back to back (same
+        # task, same text) -- see acp.messages.Dedup. Still recorded
+        # durably every time it is *called* (the durable event log is never
+        # deduplicated by this guard, only the host-visible chunk is), so
+        # nothing is lost from the audit trail, only from the live stream.
+        if self._status_dedup.should_emit(task_id, "text", dict(text=text)):
+            emit_update(text)
         delegation_events.append_event(
             self._store, task_id, "progress", f"progress:{new_id('p_')}", dict(note=text), origin="runtime",
         )
+
+    def _emit_localized(self, task_id: str, emit_update: Callable[[str], bool], language: str, key: str, **params) -> None:
+        """Like :meth:`_emit_and_record` but selects EN/RU text from
+        ``acp.messages`` and de-duplicates by ``(key, params)`` -- not the
+        rendered text -- so a dedup decision never depends on which
+        language happened to be selected."""
+        if self._status_dedup.should_emit(task_id, key, params):
+            emit_update(acp_messages.render(key, language, **params))
+        delegation_events.append_event(
+            self._store, task_id, "progress", f"progress:{new_id('p_')}",
+            dict(note=acp_messages.render(key, language, **params), message_key=key, message_params=params),
+            origin="runtime",
+        )
+
+    def _handle_ask_user(
+        self, task_id: str, session_id: str, emit_update: Callable[[str], bool], language: str, decision: dict,
+        elicitor: HostElicitor | None,
+    ) -> bool:
+        """T020: persist the pending question *before* any host contact,
+        then try structured elicitation (only when a ``HostElicitor`` was
+        injected -- see the class docstring), falling back to the plain
+        text question otherwise. Returns ``True`` iff an answer was
+        captured (the caller then continues the SAME turn instead of
+        ending it), ``False`` otherwise."""
+        question = questions_store.create_if_absent(
+            self._store, task_id, f"ask_user:{decision['decision_id']}", decision["question"],
+            options=decision.get("options"),
+        )
+        decision["question_id"] = question.id
+        if question.status != "open":
+            # Already resolved/superseded by an earlier call for this exact
+            # decision (crash-recovery re-check) -- treat as unresolved
+            # here; the caller's normal terminal-decision recheck on the
+            # next loop iteration observes the real state.
+            return False
+        if elicitor is not None:
+            try:
+                answer_text = elicitor.elicit(session_id, decision["question"], decision.get("options"))
+            except Exception:
+                answer_text = None
+            if answer_text is not None:
+                if questions_store.answer(self._store, question.id, answer_text, "elicitation"):
+                    delegation_events.append_event(
+                        self._store, task_id, "progress", f"question_answered:{question.id}",
+                        dict(kind="question_answered", question_id=question.id, answer_text=answer_text),
+                        origin="runtime",
+                    )
+                    # A user_message (meaningful) event, distinct from the
+                    # informative progress row above, so the continuation
+                    # loop's claim/coalesce gating
+                    # (delegation_events.MEANINGFUL_EVENT_TYPES) actually
+                    # delivers this answer to the coordinator on the next
+                    # iteration -- exactly like acp.orchestrating_runtime
+                    # .answer_question's own /cortex-answer text-fallback
+                    # delivery.
+                    delegation_events.append_event(
+                        self._store, task_id, "user_message", f"elicitation_answer:{question.id}",
+                        dict(content=f"Answered question ({question.text!r}) via elicitation: {answer_text}", session_id=session_id),
+                        origin=session_id,
+                    )
+                    return True
+        emit_update(decision["question"])
+        return False
 
     def _capture_result_revisions(self, task_id: str, claimed) -> dict[int, dict]:
         """T019: for every ``worker_result`` in ``claimed``, durably capture
@@ -643,7 +1032,11 @@ class OrchestratingRuntime:
         if payload.get("decision") == "accept" and payload.get("assignment_ref") == "task":
             return self._recheck_accept(task_id, row["id"])
         if payload.get("decision") == "ask_user":
-            return "waiting_for_user:" + (payload.get("question") or "")
+            options = payload.get("options")
+            return dict(
+                kind="ask_user", decision_id=row["id"], question=payload.get("question") or "",
+                options=list(options) if isinstance(options, list) else None,
+            )
         return None
 
     def _recheck_accept(self, task_id: str, decision_row_id: int):

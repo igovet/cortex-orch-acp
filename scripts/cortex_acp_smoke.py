@@ -329,13 +329,19 @@ def run_smoke(*, fixture_connection, report):
         report.record("session/new:has_session_id", isinstance(session_id, str) and bool(session_id))
 
         config_options = new_result.get("configOptions")
+        ids = {opt.get("id") for opt in (config_options or [])}
         if fixture_connection:
-            ids = {opt.get("id") for opt in (config_options or [])}
             report.record("session/new:configOptions_with_fixture", {"model", "thought_level"} <= ids,
                            detail=config_options)
         else:
-            report.record("session/new:no_model_option_without_connections", config_options is None,
-                           detail=config_options)
+            # T020: model/thought_level stay gated on connection/model
+            # selectability (absent here), but "language" is never gated
+            # on either -- it is always offered, even with zero
+            # connections.
+            report.record(
+                "session/new:no_model_option_without_connections",
+                "model" not in ids and "thought_level" not in ids and ids == {"language"},
+                detail=config_options)
 
         _line, commands_notification = session.recv()
         _validate(report, validators, "notification", commands_notification, "available_commands_update")

@@ -108,7 +108,7 @@ class ProductionOrchestratingRuntime:
 
     def start_prompt(
         self, task_id, session_id, content, emit_update, cancel_event, *,
-        project_root=None, source_origin=None, source_event_id=None,
+        project_root=None, source_origin=None, source_event_id=None, host_elicitor=None,
     ):
         if not project_root:
             raise RouteUnresolved("project_root_unresolved")
@@ -116,7 +116,7 @@ class ProductionOrchestratingRuntime:
             runtime = self._runtime_for_project(project_root)
             return runtime.start_prompt(
                 task_id, session_id, content, emit_update, cancel_event,
-                source_origin=source_origin, source_event_id=source_event_id,
+                source_origin=source_origin, source_event_id=source_event_id, host_elicitor=host_elicitor,
             )
         except PortableError as error:
             # Every qualification/configuration/ownership refusal this
@@ -129,3 +129,19 @@ class ProductionOrchestratingRuntime:
     def cancel(self, session_id):
         for runtime in list(self._runtimes.values()):
             runtime.cancel(session_id)
+
+    # -- T020 /cortex-stop / /cortex-answer entrypoints ------------------
+
+    def stop_task(self, task_id, session_id, emit_update, *, project_root):
+        runtime = self._runtime_for_project(project_root)
+        return runtime.stop_task(task_id, session_id, emit_update)
+
+    def answer_question(self, task_id, session_id, question, text, emit_update, cancel_event, *, project_root):
+        runtime = self._runtime_for_project(project_root)
+        return runtime.answer_question(task_id, session_id, question, text, emit_update, cancel_event)
+
+    def list_open_questions(self, task_id, *, project_root):
+        runtime = self._runtime_for_project(project_root)
+        from . import questions_store
+
+        return questions_store.list_open(runtime._store, task_id)

@@ -211,13 +211,18 @@ def _new_agent(tmp_path, environ):
     return agent, transport
 
 
-def test_session_new_omits_config_options_with_no_connections(tmp_path, monkeypatch):
+def test_session_new_omits_model_options_with_no_connections_but_offers_language(tmp_path, monkeypatch):
+    """T020: model/thought_level stay gated on selectability, but
+    ``language`` is never gated on a connection/model -- it is always
+    offered, even with zero connections."""
     environ = _isolate(tmp_path, monkeypatch)
     project = tmp_path / "project"
     project.mkdir()
     agent, _transport = _new_agent(tmp_path, environ)
     result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
-    assert "configOptions" not in result
+    ids = {option["id"] for option in result["configOptions"]}
+    assert ids == {"language"}
+    assert result["configOptions"][0]["currentValue"] == "auto"
 
 
 def test_session_new_includes_model_and_thought_level_options(tmp_path, monkeypatch):
@@ -229,7 +234,7 @@ def test_session_new_includes_model_and_thought_level_options(tmp_path, monkeypa
     agent, _transport = _new_agent(tmp_path, environ)
     result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
     ids = {option["id"] for option in result["configOptions"]}
-    assert ids == {"model", "thought_level"}
+    assert ids == {"model", "thought_level", "language"}
     validator = _schema_validator("SessionConfigOption")
     for option in result["configOptions"]:
         validator.validate(option)
@@ -247,7 +252,9 @@ def test_available_commands_update_sent_after_session_new(tmp_path, monkeypatch)
     assert update["sessionUpdate"] == "available_commands_update"
     names = {item["name"] for item in update["availableCommands"]}
     assert names == {acp_commands.CORTEX_STATUS, acp_commands.CORTEX_MODEL,
-                      acp_commands.CORTEX_EFFORT, acp_commands.CORTEX_SETUP}
+                      acp_commands.CORTEX_EFFORT, acp_commands.CORTEX_SETUP,
+                      acp_commands.CORTEX_NEW_TASK, acp_commands.CORTEX_STOP,
+                      acp_commands.CORTEX_ANSWER, acp_commands.CORTEX_LANGUAGE}
     validator = _schema_validator("AvailableCommandsUpdate")
     validator.validate(update)
 

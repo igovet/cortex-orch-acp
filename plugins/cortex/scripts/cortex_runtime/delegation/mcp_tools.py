@@ -150,7 +150,7 @@ def _coordinator_decide(store, channel: ChannelContext, args: Mapping[str, Any])
     event = delegation_events.append_event(
         store, channel.task_id, "coordinator_decision", dedup_key,
         dict(assignment_ref=assignment_ref, decision=decision, rationale=args["rationale"],
-             question=args.get("question")),
+             question=args.get("question"), options=args.get("options")),
         origin=channel.channel_id, assignment_ref=assignment_ref,
     )
     return dict(assignment_ref=assignment_ref, decision=decision, recorded=True, cursor=event.id)

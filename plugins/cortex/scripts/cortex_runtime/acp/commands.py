@@ -33,14 +33,26 @@ CORTEX_STATUS = "cortex-status"
 CORTEX_MODEL = "cortex-model"
 CORTEX_EFFORT = "cortex-effort"
 CORTEX_SETUP = "cortex-setup"
+# T020 (see acp.orchestrating_runtime / acp.steering / docs/acp/steering-
+# and-questions.md): explicit, exact-prefix-only commands -- never inferred
+# from free text -- for the steering/urgent-stop/question-disambiguation
+# channel.
+CORTEX_NEW_TASK = "cortex-new-task"
+CORTEX_STOP = "cortex-stop"
+CORTEX_ANSWER = "cortex-answer"
+CORTEX_LANGUAGE = "cortex-language"
 
 # Trigger text as typed by a user, in recognition priority order (longest
 # first so "/cortex-model" is never mistaken for a shorter prefix).
 _TRIGGERS: tuple[tuple[str, str], ...] = (
     ("/cortex-status", CORTEX_STATUS),
+    ("/cortex-new-task", CORTEX_NEW_TASK),
+    ("/cortex-language", CORTEX_LANGUAGE),
     ("/cortex-model", CORTEX_MODEL),
     ("/cortex-effort", CORTEX_EFFORT),
     ("/cortex-setup", CORTEX_SETUP),
+    ("/cortex-stop", CORTEX_STOP),
+    ("/cortex-answer", CORTEX_ANSWER),
 )
 
 AVAILABLE_COMMANDS: tuple[dict, ...] = (
@@ -48,7 +60,18 @@ AVAILABLE_COMMANDS: tuple[dict, ...] = (
     dict(name=CORTEX_MODEL, description="Select the model by its route label or route id.", input=dict(hint="<route label or route id>")),
     dict(name=CORTEX_EFFORT, description="Select the thought_level (reasoning effort) value for the current model.", input=dict(hint="<value>")),
     dict(name=CORTEX_SETUP, description="Show onboarding guidance for connecting a model provider. Never changes anything, never prints a secret.", input=None),
+    dict(name=CORTEX_NEW_TASK, description="Start a brand-new, separate task without touching the current active task.", input=dict(hint="<task text>")),
+    dict(name=CORTEX_STOP, description="Urgently stop the active task: cancels every assignment, queued open, and open question. Does not restart through a later message.", input=None),
+    dict(name=CORTEX_ANSWER, description="Answer one specific open coordinator question by its listed number (use when more than one question is open).", input=dict(hint="<question-number> <answer text>")),
+    dict(name=CORTEX_LANGUAGE, description="Set the language Cortex uses for its own status/question/stop lines: auto, en, or ru.", input=dict(hint="auto|en|ru")),
 )
+
+
+def resolve_language_argument(argument: str) -> str | None:
+    """Parse a ``/cortex-language auto|en|ru`` argument (case-insensitive);
+    ``None`` for anything else (never a silent guess)."""
+    value = (argument or "").strip().lower()
+    return value if value in ("auto", "en", "ru") else None
 
 
 def recognize(blocks: object) -> tuple[str, str] | None:
@@ -90,6 +113,22 @@ def resolve_model_argument(argument: str, selectable_entries: Sequence[CatalogEn
         if entry.disambiguated_label.lower() == lowered or entry.label.lower() == lowered:
             return entry.route.id
     return None
+
+
+def parse_answer_argument(argument: str) -> tuple[int, str] | None:
+    """Parse a ``/cortex-answer <question-number> <text>`` argument into a
+    1-based ``(index, text)`` pair; ``None`` when the number is missing or
+    not a positive integer (never a silent guess)."""
+    parts = (argument or "").split(None, 1)
+    if len(parts) < 2 or not parts[0].isdigit():
+        return None
+    index = int(parts[0])
+    if index < 1:
+        return None
+    text = parts[1].strip()
+    if not text:
+        return None
+    return index, text
 
 
 def build_status_text(*, config_options: Sequence[Mapping[str, object]], connection_setup_summary: str) -> str:

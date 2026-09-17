@@ -35,6 +35,15 @@ from ..connections.model import ConnectionRecord
 
 MODEL_OPTION_ID = "model"
 THOUGHT_LEVEL_OPTION_ID = "thought_level"
+# T020: a third, independent configId -- never tied to model/route
+# selectability (unlike model/thought_level, always offered once a caller
+# opts in via build_config_options(..., include_language=True), including
+# before any connection/model exists). See acp.steering.get_language_override/
+# set_language_override (per-task) and acp.commands.CORTEX_LANGUAGE (the
+# slash-command equivalent for a host without SessionConfigOption support).
+LANGUAGE_OPTION_ID = "language"
+_LANGUAGE_VALUES = ("auto", "en", "ru")
+_LANGUAGE_NAMES = {"auto": "Auto (detect from your messages)", "en": "English", "ru": "Russian"}
 
 # _meta._cortex.state values meaning "the saved/selected route is no longer
 # selectable and currentValue is a substitute, never the saved choice" --
@@ -204,38 +213,66 @@ def build_thought_level_option(
     return option
 
 
+def build_language_option(current_value: str | None) -> dict:
+    """The ``language`` SessionConfigOption -- ``auto``/``en``/``ru``.
+    ``current_value`` is the stored override (``None`` means "auto", the
+    default); any other/unknown stored value also falls back to shown as
+    ``"auto"`` rather than fabricating an unlisted value."""
+    current = current_value if current_value in _LANGUAGE_VALUES else "auto"
+    return dict(
+        id=LANGUAGE_OPTION_ID, name="Language", type="select", category="other",
+        currentValue=current,
+        description="Language for Cortex's own status/question/stop lines; auto detects from your messages.",
+        options=[dict(value=value, name=_LANGUAGE_NAMES[value]) for value in _LANGUAGE_VALUES],
+    )
+
+
 def build_config_options(
     selectable_entries: Sequence[CatalogEntry],
     current: Mapping[str, object] | None = None,
+    *, include_language: bool = False, language_current: str | None = None,
 ) -> list[dict]:
-    """The full ordered ``configOptions`` list (model, then thought_level).
+    """The full ordered ``configOptions`` list (model, then thought_level,
+    then -- only when ``include_language`` is explicitly requested (see
+    ``acp.agent._config_options_for_session``, which always sets it) --
+    ``language``).
 
     ``current`` is ``None`` or ``{"route_id", "state", "revision", "parameters"}``
     describing the most recent live selection (see
     ``_LIVE_SELECTION_STATES``); a task-less session (no selection yet) is
     represented as ``current=None`` and simply shows the first selectable
     entry as the (unstated, non-pending) default.
+
+    ``include_language``/``language_current`` are keyword-only and default
+    to omitting the language option entirely -- every pre-T020 direct call
+    (and every existing test of this exact function) keeps returning ``[]``
+    for "nothing selectable, no language requested", unchanged. Unlike
+    model/thought_level, the language option is appended even when
+    ``selectable_entries`` is empty (no model is selectable yet): language
+    is never gated on route/connection availability.
     """
     current = current or {}
+    options: list[dict] = []
     model_option = build_model_option(
         selectable_entries, current.get("route_id"), current.get("state"), current.get("revision"))
-    options: list[dict] = []
-    if model_option is None:
-        return options
-    options.append(model_option)
-    chosen_route_id = model_option["currentValue"]
-    chosen_entry = next((entry for entry in selectable_entries if entry.route.id == chosen_route_id), None)
-    # Always the model option's own *effective* state (never the raw
-    # current["state"]): when the saved/selected route is unavailable, the
-    # model option's state is already "default_unavailable"/
-    # "selection_unavailable" (see build_model_option), and
-    # build_thought_level_option must see that same effective state to
-    # carry the identical marker instead of presenting a stale saved value.
-    model_effective_state = model_option.get("_meta", {}).get("_cortex", {}).get("state", current.get("state"))
-    thought_option = build_thought_level_option(
-        chosen_entry, current.get("parameters") or {}, model_effective_state, current.get("revision"))
-    if thought_option is not None:
-        options.append(thought_option)
+    if model_option is not None:
+        options.append(model_option)
+        chosen_route_id = model_option["currentValue"]
+        chosen_entry = next((entry for entry in selectable_entries if entry.route.id == chosen_route_id), None)
+        # Always the model option's own *effective* state (never the raw
+        # current["state"]): when the saved/selected route is unavailable,
+        # the model option's state is already "default_unavailable"/
+        # "selection_unavailable" (see build_model_option), and
+        # build_thought_level_option must see that same effective state to
+        # carry the identical marker instead of presenting a stale saved
+        # value.
+        model_effective_state = model_option.get("_meta", {}).get("_cortex", {}).get("state", current.get("state"))
+        thought_option = build_thought_level_option(
+            chosen_entry, current.get("parameters") or {}, model_effective_state, current.get("revision"))
+        if thought_option is not None:
+            options.append(thought_option)
+    if include_language:
+        options.append(build_language_option(language_current))
     return options
 
 

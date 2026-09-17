@@ -1,0 +1,151 @@
+"""T020: a small, explicitly bounded message catalog for the Cortex
+system lines the runtime itself authors (never a worker report, never the
+coordinator's own free-form text -- those already carry whatever language
+the coordinator chose and are passed through verbatim).
+
+Selection (see ``select_language``):
+
+1. An explicit session/task ``language`` option (``"en"`` or ``"ru"``) --
+   see ``acp.commands.CORTEX_LANGUAGE`` -- always wins.
+2. Otherwise ``"auto"``: the script of the most recent ``user_direct``
+   source text (Cyrillic letters >= 30% of all letters -> ``"ru"``, else
+   ``"en"``). This is a *limited heuristic* covering only these Cortex
+   system lines -- the coordinator model itself decides everything else it
+   says (see docs/acp/steering-and-questions.md's "language policy and
+   heuristic limits" section).
+
+Never emits a worker's raw report/chunk text (that would defeat this
+module's entire purpose) -- callers pass only a message *key* and bounded
+parameters, never worker-authored free text, through this catalog.
+"""
+from __future__ import annotations
+
+from typing import Mapping
+
+DEFAULT_LANGUAGE = "en"
+SUPPORTED_LANGUAGES = ("en", "ru")
+
+_CATALOG: dict[str, dict[str, str]] = {
+    "blocked_no_progress": {
+        "en": "Blocked: no new worker result, question, or user input arrived after repeated waiting.",
+        "ru": "Заблокировано: после многократного ожидания не появилось ни нового результата исполнителя, ни вопроса, ни ввода пользователя.",
+    },
+    "blocked_limit": {
+        "en": "Blocked on a {kind} limit with no unfinished action or new event.",
+        "ru": "Заблокировано из-за лимита {kind}: нет незавершённых действий или новых событий.",
+    },
+    "coordinator_turn_limit": {
+        "en": "Coordinator turn ended: {kind} limit reached.",
+        "ru": "Ход координатора завершён: достигнут лимит {kind}.",
+    },
+    "engine_failure": {
+        "en": "Coordinator engine turn failed ({kind}).",
+        "ru": "Ход координатора завершился ошибкой движка ({kind}).",
+    },
+    "max_total_continuations": {
+        "en": "Stopping: exceeded the maximum number of coordination continuations for one prompt.",
+        "ru": "Остановка: превышено максимальное число продолжений координации для одного запроса.",
+    },
+    "acceptance_refused_newer_event": {
+        "en": "Acceptance refused: a newer {event_type} event (id {event_id}) arrived after this accept decision (id {decision_id}).",
+        "ru": "Принятие отклонено: после этого решения о принятии (id {decision_id}) поступило более новое событие {event_type} (id {event_id}).",
+    },
+    "acceptance_refused_running": {
+        "en": "Acceptance refused: assignment(s) still running/queued for this task.",
+        "ru": "Принятие отклонено: по этой задаче ещё выполняются или ожидают назначения.",
+    },
+    "acceptance_refused_gate": {
+        "en": "Acceptance refused: {reasons}",
+        "ru": "Принятие отклонено: {reasons}",
+    },
+    "resume_context": {
+        "en": "Resuming after a prior wait ({wait_reason}): {explanation}",
+        "ru": "Возобновление после ожидания ({wait_reason}): {explanation}",
+    },
+    "steering_ack": {
+        "en": "Noted your new guidance (revision {revision}); the coordinator will apply it at the next checkpoint.",
+        "ru": "Новое указание принято (ревизия {revision}); координатор применит его на ближайшей контрольной точке.",
+    },
+    "task_stopped": {
+        "en": "This task was stopped and will not resume. Start a new task with /cortex-new-task <text> to continue.",
+        "ru": "Эта задача остановлена и не будет возобновлена. Начните новую задачу командой /cortex-new-task <текст>.",
+    },
+    "question_ambiguous": {
+        "en": "There is more than one open question for this task; answer with /cortex-answer <question-number> <text>.\n{questions}",
+        "ru": "По этой задаче открыто более одного вопроса; ответьте командой /cortex-answer <номер вопроса> <текст>.\n{questions}",
+    },
+    "question_answer_unknown_index": {
+        "en": "No open question with that number. Use /cortex-status or check the open questions listed above.",
+        "ru": "Нет открытого вопроса с таким номером. Используйте /cortex-status или посмотрите список открытых вопросов выше.",
+    },
+    "question_answer_none_open": {
+        "en": "There is no open question to answer right now.",
+        "ru": "Сейчас нет открытого вопроса для ответа.",
+    },
+    "new_task_created": {
+        "en": "Started a new, separate task ({task_id}); the active task is unaffected.",
+        "ru": "Начата новая, отдельная задача ({task_id}); активная задача не затронута.",
+    },
+    "stop_confirmed": {
+        "en": "Stopped this task: every assignment, queued open, and pending question was cancelled.",
+        "ru": "Задача остановлена: все назначения, ожидающие запуски и открытые вопросы отменены.",
+    },
+}
+
+
+def _cyrillic_ratio(text: str) -> float:
+    letters = [ch for ch in text if ch.isalpha()]
+    if not letters:
+        return 0.0
+    cyrillic = sum(1 for ch in letters if "Ѐ" <= ch <= "ӿ")
+    return cyrillic / len(letters)
+
+
+def detect_script(text: str) -> str:
+    """"ru" when Cyrillic letters are >= 30% of all letters in ``text``,
+    else "en". Empty/letterless text is "en" (no signal to override the
+    default)."""
+    return "ru" if _cyrillic_ratio(text) >= 0.30 else "en"
+
+
+def select_language(explicit: str | None, recent_user_direct_texts) -> str:
+    """``explicit`` (a stored ``"en"``/``"ru"``/``"auto"``/``None`` option
+    value) wins when it names a supported language; ``"auto"`` or ``None``
+    falls back to the script of the most recent (last in iteration order)
+    non-empty ``user_direct`` source text, defaulting to English when there
+    is none yet."""
+    if explicit in SUPPORTED_LANGUAGES:
+        return explicit
+    last_text = None
+    for text in recent_user_direct_texts:
+        if text:
+            last_text = text
+    if last_text is None:
+        return DEFAULT_LANGUAGE
+    return detect_script(last_text)
+
+
+def render(key: str, language: str, **params) -> str:
+    entry = _CATALOG.get(key)
+    if entry is None:
+        raise KeyError(f"unknown message key {key!r}")
+    template = entry.get(language, entry.get(DEFAULT_LANGUAGE))
+    return template.format(**params)
+
+
+class Dedup:
+    """Per-task in-memory guard against repeating the exact same runtime
+    status line back to back (same message key + params) -- never persisted
+    (a fresh runtime instance/process starts with no memory, which only
+    means a boundary case emits one extra identical line, never a lost
+    one)."""
+
+    def __init__(self) -> None:
+        self._last: dict[str, tuple[str, tuple]] = {}
+
+    def should_emit(self, task_id: str, key: str, params: Mapping[str, object]) -> bool:
+        signature = (key, tuple(sorted(params.items())))
+        if self._last.get(task_id) == signature:
+            return False
+        self._last[task_id] = signature
+        return True

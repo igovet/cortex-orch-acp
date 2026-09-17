@@ -68,16 +68,34 @@ CREATE TABLE IF NOT EXISTS task_orchestration (
  updated_at TEXT NOT NULL,
  wait_reason TEXT,
  wait_detail_json TEXT,
- no_progress_count INTEGER NOT NULL DEFAULT 0
+ no_progress_count INTEGER NOT NULL DEFAULT 0,
+ requirement_revision INTEGER NOT NULL DEFAULT 0,
+ stopped_at TEXT,
+ language TEXT
 );
 '''
 
 
 def ensure_task_lifecycle_columns(db) -> None:
-    """Idempotently add the T017 additive columns to an already-open
+    """Idempotently add the T017/T020 additive columns to an already-open
     connection whose ``task_events``/``task_orchestration`` tables predate
     them (a store created by d301299/T016 or earlier). Safe to call on
     every :class:`store.Store` open; a no-op once the columns exist.
+
+    T020 additions: ``task_orchestration.requirement_revision`` (a
+    monotonically increasing counter bumped once per steering prompt --
+    see ``acp.steering``). ``stopped_at`` and ``language`` were an initial
+    T020 attempt at storing the urgent-stop marker and a per-task language
+    override as columns here; both were superseded before release by
+    independent tables (``acp.steering.TASK_STOPPED_SCHEMA``/
+    ``task_stopped`` and ``TASK_LANGUAGE_SCHEMA``/``task_language``,
+    respectively), never gated on this table's own lazy
+    provisioning-lifecycle ownership -- see that module's docstrings
+    (``mark_stopped`` in particular documents the reproduced bug a
+    column-on-``task_orchestration`` design caused: a stop issued before
+    the coordinator's first-ever provisioning updated zero rows and was
+    silently lost). Both columns are left in place, unused, rather than
+    attempting a SQLite column drop.
     """
     events_columns = {row[1] for row in db.execute("PRAGMA table_info(task_events)").fetchall()}
     orchestration_columns = {row[1] for row in db.execute("PRAGMA table_info(task_orchestration)").fetchall()}
@@ -90,6 +108,12 @@ def ensure_task_lifecycle_columns(db) -> None:
         statements.append("ALTER TABLE task_orchestration ADD COLUMN wait_detail_json TEXT")
     if "no_progress_count" not in orchestration_columns:
         statements.append("ALTER TABLE task_orchestration ADD COLUMN no_progress_count INTEGER NOT NULL DEFAULT 0")
+    if "requirement_revision" not in orchestration_columns:
+        statements.append("ALTER TABLE task_orchestration ADD COLUMN requirement_revision INTEGER NOT NULL DEFAULT 0")
+    if "stopped_at" not in orchestration_columns:
+        statements.append("ALTER TABLE task_orchestration ADD COLUMN stopped_at TEXT")
+    if "language" not in orchestration_columns:
+        statements.append("ALTER TABLE task_orchestration ADD COLUMN language TEXT")
     if not statements:
         return
     db.execute("BEGIN IMMEDIATE")

@@ -34,6 +34,11 @@ check.
   fault-injection-tested crash recovery, observed artifact revision
   binding, and entrypoint immutability/scope
   audit](publications-and-consistency.md)
+- [Steering, urgent stop, questions, and coherent conversation (T020):
+  cancel vs stop vs steering vs new task vs answers, delivery boundaries,
+  question lifecycle and elicitation fallback, language policy and
+  heuristic limits, noise policy, and what's deferred to
+  T035](steering-and-questions.md)
 
 ## Tools
 

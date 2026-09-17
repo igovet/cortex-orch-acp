@@ -12,6 +12,8 @@ import stat
 import uuid
 
 from .acp.replay_store import REPLAY_SCHEMA
+from .acp.questions_store import PENDING_QUESTIONS_SCHEMA
+from .acp.steering import TASK_LANGUAGE_SCHEMA, TASK_STOPPED_SCHEMA
 from .acp.sessions import ACP_SESSION_SCHEMA
 from .catalog.store import CATALOG_SCHEMA
 from .configuration.store import CONFIGURATION_SCHEMA
@@ -88,6 +90,27 @@ _EVIDENCE_TABLES = frozenset({"tool_result_observations"})
 # store always has all three.
 _REPLAY_TABLES = frozenset({"source_blocks", "source_block_reads", "host_transcript"})
 
+# pending_questions/pending_question_late_answers (see
+# acp.questions_store.PENDING_QUESTIONS_SCHEMA) are a tenth, independent
+# optional group on top of
+# SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+# ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+
+# EVIDENCE_SCHEMA+REPLAY_SCHEMA: a pre-T020 v11 store has neither table, a
+# store.py-created store always has both.
+_QUESTIONS_TABLES = frozenset({"pending_questions", "pending_question_late_answers"})
+
+# task_language (see acp.steering.TASK_LANGUAGE_SCHEMA) is an eleventh,
+# independent optional group on top of
+# SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+# ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+
+# EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA: a pre-T020 v11
+# store has none of it, a store.py-created store always has it.
+_LANGUAGE_TABLES = frozenset({"task_language"})
+
+# task_stopped (see acp.steering.TASK_STOPPED_SCHEMA) is a twelfth,
+# independent optional group, same precedent as _LANGUAGE_TABLES above.
+_STOPPED_TABLES = frozenset({"task_stopped"})
+
 _SELECTIONS = {
     "tasks": "SELECT x.* FROM tasks x WHERE x.project_root=?",
     "thread_bindings": "SELECT x.* FROM thread_bindings x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -126,6 +149,10 @@ _SELECTIONS = {
     "source_blocks": "SELECT x.* FROM source_blocks x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "source_block_reads": "SELECT x.* FROM source_block_reads x JOIN reports r ON r.id=x.report_id JOIN tasks t ON t.id=r.task_id WHERE t.project_root=?",
     "host_transcript": "SELECT x.* FROM host_transcript x JOIN acp_host_sessions s ON s.session_id=x.session_id WHERE s.project_root=?",
+    "pending_questions": "SELECT x.* FROM pending_questions x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "pending_question_late_answers": "SELECT x.* FROM pending_question_late_answers x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "task_language": "SELECT x.* FROM task_language x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "task_stopped": "SELECT x.* FROM task_stopped x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
 }
 
 _COPY_ORDER = (
@@ -140,6 +167,8 @@ _COPY_ORDER = (
     "report_provenance", "draft_revisions", "task_changes", "source_turns",
     "hook_pending_sources", "hook_events", "hook_hints", "hook_agent_bindings",
     "source_blocks", "source_block_reads", "host_transcript",
+    "pending_questions", "pending_question_late_answers",
+    "task_language", "task_stopped",
     "deliveries",
 )
 
@@ -253,10 +282,35 @@ def _replay_present(db):
     return names == _REPLAY_TABLES
 
 
+def _questions_present(db):
+    """True only when every T020 pending-question table exists; false only
+    when none do."""
+    names = _table_names(db) & _QUESTIONS_TABLES
+    if names and names != _QUESTIONS_TABLES:
+        raise StoreError("unsupported_storage")
+    return names == _QUESTIONS_TABLES
+
+
+def _language_present(db):
+    """True only when the T020 task_language table exists."""
+    names = _table_names(db) & _LANGUAGE_TABLES
+    if names and names != _LANGUAGE_TABLES:
+        raise StoreError("unsupported_storage")
+    return names == _LANGUAGE_TABLES
+
+
+def _stopped_present(db):
+    """True only when the T020 task_stopped table exists."""
+    names = _table_names(db) & _STOPPED_TABLES
+    if names and names != _STOPPED_TABLES:
+        raise StoreError("unsupported_storage")
+    return names == _STOPPED_TABLES
+
+
 def _expected_layout():
     db = sqlite3.connect(":memory:")
     try:
-        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA)
+        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA)
         tables = _table_names(db)
         columns = {
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA table_xinfo({_identifier(table)})"))
@@ -266,7 +320,7 @@ def _expected_layout():
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA foreign_key_list({_identifier(table)})"))
             for table in tables
         }
-        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _REPLAY_TABLES
+        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES
         return core, columns, foreign_keys
     finally:
         db.close()
@@ -291,6 +345,9 @@ def _validate_format(db):
     capacity_present = _capacity_present(db)
     evidence_present = _evidence_present(db)
     replay_present = _replay_present(db)
+    questions_present = _questions_present(db)
+    language_present = _language_present(db)
+    stopped_present = _stopped_present(db)
     expected = (
         core
         | (_IDENTITY_TABLES if identity_present else set())
@@ -302,6 +359,9 @@ def _validate_format(db):
         | (_CAPACITY_TABLES if capacity_present else set())
         | (_EVIDENCE_TABLES if evidence_present else set())
         | (_REPLAY_TABLES if replay_present else set())
+        | (_QUESTIONS_TABLES if questions_present else set())
+        | (_LANGUAGE_TABLES if language_present else set())
+        | (_STOPPED_TABLES if stopped_present else set())
     )
     views = db.execute("SELECT 1 FROM sqlite_master WHERE type='view' LIMIT 1").fetchone()
     if actual != expected or views is not None:
@@ -562,7 +622,7 @@ def _create_destination(source_db, temporary, project_root):
         # a fresh store: core SCHEMA+HOOK_SCHEMA plus the identity tables,
         # regardless of whether the (possibly legacy, pre-T005) source has
         # them. A legacy source simply leaves them empty in the destination.
-        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA +
+        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA +
                              f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
         target.execute("BEGIN IMMEDIATE")
         source_identity_present = _identity_present(source_db)
@@ -574,6 +634,9 @@ def _create_destination(source_db, temporary, project_root):
         source_capacity_present = _capacity_present(source_db)
         source_evidence_present = _evidence_present(source_db)
         source_replay_present = _replay_present(source_db)
+        source_questions_present = _questions_present(source_db)
+        source_language_present = _language_present(source_db)
+        source_stopped_present = _stopped_present(source_db)
         expected = {}
         for table in _COPY_ORDER:
             columns = [row[1] for row in target.execute(f"PRAGMA table_info({_identifier(table)})")]
@@ -621,6 +684,21 @@ def _create_destination(source_db, temporary, project_root):
                 # No T018 source-block/host-transcript rows exist to carry;
                 # leave the destination's freshly-created replay tables
                 # empty for the same reason.
+                rows = ()
+            elif table in _QUESTIONS_TABLES and not source_questions_present:
+                # No T020 pending-question rows exist to carry; leave the
+                # destination's freshly-created question tables empty for
+                # the same reason.
+                rows = ()
+            elif table in _LANGUAGE_TABLES and not source_language_present:
+                # No T020 task_language rows exist to carry; leave the
+                # destination's freshly-created language table empty for
+                # the same reason.
+                rows = ()
+            elif table in _STOPPED_TABLES and not source_stopped_present:
+                # No T020 task_stopped rows exist to carry; leave the
+                # destination's freshly-created stopped table empty for
+                # the same reason.
                 rows = ()
             elif table == "deliveries":
                 rows = _selected_deliveries(source_db, project_root)

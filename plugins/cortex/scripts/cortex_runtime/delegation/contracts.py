@@ -146,6 +146,17 @@ COORDINATOR_OPERATIONS = {
                 "Required only when decision='ask_user': the exact question for the user.",
                 4_000,
             ),
+            "options": dict(
+                type="array",
+                description=(
+                    "Optional, bounded list of short answer choices to offer the user "
+                    "alongside decision='ask_user' (rendered as a single-select form field "
+                    "when the host supports structured elicitation, else listed in the "
+                    "text fallback). Omit for a free-text question."
+                ),
+                maxItems=8,
+                items=string("One short answer choice.", 200),
+            ),
         },
         ["assignment_ref", "decision", "rationale"],
     ),
@@ -311,8 +322,29 @@ def validate(role_kind: str, operation: str, args: dict) -> dict:
                 )
             item_schema = rule["items"]
             for index, item in enumerate(value):
-                _validate_object_item(key, index, item, item_schema)
+                if item_schema.get("type") == "string":
+                    _validate_string_item(key, index, item, item_schema)
+                else:
+                    _validate_object_item(key, index, item, item_schema)
     return args
+
+
+def _validate_string_item(field: str, index: int, item, item_schema: dict) -> None:
+    """T020: a plain scalar (string) array item -- for example ``decide``'s
+    optional ``options`` list (short answer choices) -- as opposed to
+    :func:`_validate_object_item`'s pre-T020 object-item convention (for
+    example ``CHECKS``)."""
+    label = f"{field}[{index}]"
+    if not isinstance(item, str):
+        raise StoreError("invalid_arguments", label, _received(item), "JSON string", f"Use a JSON string for {label}.")
+    max_length = item_schema.get("maxLength", 4_000)
+    min_length = item_schema.get("minLength", 1)
+    if len(item) < min_length or len(item) > max_length:
+        raise StoreError(
+            "invalid_arguments", label, f"{len(item)} Unicode characters",
+            f"{min_length} through {max_length} Unicode characters",
+            f"Shorten or lengthen {label} to the advertised bound.",
+        )
 
 
 def _validate_object_item(field: str, index: int, item, item_schema: dict) -> None:

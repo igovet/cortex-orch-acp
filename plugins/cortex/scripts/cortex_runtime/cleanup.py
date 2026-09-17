@@ -31,17 +31,56 @@ def finish_deletions(store,db,task):
                 raise StoreError("unsafe_storage","task_directory",str(directory),"owned project task directory")
             if not shutil.rmtree.avoids_symlink_attacks: raise StoreError("unsafe_storage")
             shutil.rmtree(directory); sync_directory(task_root)
+        # T020 fresh-review fix (MEDIUM, reproduced): every optional-group
+        # table that references tasks(id) directly or indirectly (via a
+        # table that itself references tasks(id)) must be deleted here, in
+        # dependency order (children before the row they reference), only
+        # when that group's table(s) actually exist for this store's
+        # schema version -- see tests/test_retention.py's
+        # test_finish_deletions_covers_every_fk_to_tasks_table, which
+        # derives the authoritative table list from PRAGMA
+        # foreign_key_list/sqlite_master at runtime and fails closed if
+        # any such table is ever added without a matching delete here.
+        # Earlier gap (T015 report, also closed here): trusted_channels/
+        # source_events/task_owners (identity/ownership group) were never
+        # deleted at all -- a bootstrap-created task's owner epoch/channel
+        # rows outlived the task itself.
+        existing_tables={row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+        def _delete_if_present(table,where,params):
+            if table in existing_tables:
+                db.execute(f"DELETE FROM {table} WHERE {where}",params)
+        # attempt_revisions (T019) has no declared FK (attempt_id, not
+        # task_id) but is logically scoped to this task's own delegation
+        # attempts -- must be removed before delegation_provisioning
+        # itself (the subquery needs it still present).
+        _delete_if_present("attempt_revisions","attempt_id IN (SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND attempt_id IS NOT NULL)",(task,))
         db.execute("DELETE FROM delegation_effects WHERE idempotency_key IN (SELECT idempotency_key FROM delegation_provisioning WHERE task_id=?)",(task,))
         db.execute("DELETE FROM delegation_provisioning WHERE task_id=?",(task,))
+        # pending_questions/pending_question_late_answers (T020): the late-
+        # answers table has no declared FK of its own (a deliberately inert
+        # audit row -- see acp.questions_store) but carries its own
+        # task_id column; delete both directly.
+        _delete_if_present("pending_question_late_answers","task_id=?",(task,))
+        _delete_if_present("pending_questions","task_id=?",(task,))
+        _delete_if_present("task_language","task_id=?",(task,))
+        _delete_if_present("task_stopped","task_id=?",(task,))
         db.execute("DELETE FROM task_events WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_orchestration WHERE task_id=?",(task,))
         db.execute("DELETE FROM capacity_reservations WHERE task_id=?",(task,))
         db.execute("DELETE FROM tool_result_observations WHERE task_id=?",(task,))
+        # host_transcript (T018) references acp_host_sessions(session_id),
+        # not tasks(id) directly -- must go before acp_host_sessions.
+        _delete_if_present("host_transcript","session_id IN (SELECT session_id FROM acp_host_sessions WHERE task_id=?)",(task,))
         db.execute("DELETE FROM acp_host_sessions WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_route_selections WHERE task_id=?",(task,))
         db.execute("DELETE FROM configuration_revisions WHERE task_id=?",(task,))
+        # T005 identity/ownership group -- previously never deleted at all
+        # (pre-existing gap, T015 report; closed here).
+        db.execute("DELETE FROM trusted_channels WHERE task_id=?",(task,))
+        db.execute("DELETE FROM source_events WHERE task_id=?",(task,))
+        db.execute("DELETE FROM task_owners WHERE task_id=?",(task,))
         db.execute("DELETE FROM report_provenance WHERE edition_sequence IN (SELECT e.sequence FROM editions e JOIN reports r ON r.id=e.report_id WHERE r.task_id=?)",(task,))
-        for table in ("source_turns","source_resets","hook_events","hook_hints","hook_agent_bindings","hook_pending_sources"):
+        for table in ("source_turns","source_resets","hook_events","hook_hints","hook_agent_bindings","hook_pending_sources","hook_command_sessions"):
             db.execute(f"DELETE FROM {table} WHERE task_id=?",(task,))
         db.execute("DELETE FROM source_revisions WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_changes WHERE task_id=?",(task,))
@@ -52,6 +91,10 @@ def finish_deletions(store,db,task):
         db.execute("DELETE FROM governance WHERE task_id=?",(task,))
         db.execute("DELETE FROM source_messages WHERE task_id=?",(task,))
         db.execute("DELETE FROM source_cursors WHERE task_id=?",(task,))
+        # source_block_reads (T018) references reports(report_id), not
+        # tasks(id) directly -- must go before reports/source_blocks.
+        _delete_if_present("source_block_reads","report_id IN (SELECT id FROM reports WHERE task_id=?)",(task,))
+        _delete_if_present("source_blocks","task_id=?",(task,))
         db.execute("DELETE FROM editions WHERE report_id IN (SELECT id FROM reports WHERE task_id=?)",(task,))
         db.execute("DELETE FROM reports WHERE task_id=?",(task,))
         db.execute("DELETE FROM deliveries WHERE scope=? OR (operation=? AND json_extract(response,?)=?)",(task,"create_task","$.task_id",task))
