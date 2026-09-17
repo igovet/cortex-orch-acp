@@ -14,6 +14,7 @@ execution and semantic judgment. The complete runtime is packaged below
 - [MCP contract review](mcp-contract-review.md)
 - [Markdown coordination feature](../features/markdown-reports/index.md)
 - [Optional Advisory Lane](../features/advisory-lane/index.md)
+- [ACP client integration](../acp/index.md)
 - [Release evidence](../release-readiness.md)
 
 The implementation consists of the advertised [contracts](../../plugins/cortex/scripts/cortex_runtime/contracts.py),

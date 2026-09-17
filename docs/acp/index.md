@@ -1,0 +1,44 @@
+# ACP client integration (T011)
+
+Cortex is an incoming ACP v1 stdio agent (`plugins/cortex/scripts/cortex_acp.py`,
+implemented in `plugins/cortex/scripts/cortex_runtime/acp/`). This section
+covers registering Cortex as a selectable Custom Agent in a real ACP client,
+without any Registry submission dependency, and the no-paid startup smoke
+harness that validates the launch/protocol surface before any live client
+check.
+
+- [Zed 1.20.1 Custom Agent setup](zed-custom-agent.md)
+- [codeg 0.30.8 custom-agent recipe (partly unverified)](codeg-custom-agent.md)
+- [Real-client observation runbook (live rows NOT RUN, owner T035)](real-client-runbook.md)
+- [Registry metadata draft (not submitted, not published)](registry-metadata-draft.md)
+
+## Tools
+
+- `scripts/cortex_acp_client_config.py` — non-destructive Zed `agent_servers`
+  registration helper (default dry-run; `--apply --i-consent-to-write` for a
+  real, backed-up, atomic write to an explicitly given settings path) and
+  `--print-codeg-recipe`.
+- `scripts/cortex_acp_smoke.py` — no-paid startup smoke harness: spawns the
+  real `cortex_acp.py` entry point against a fresh temporary project and a
+  fresh temporary `HOME`/`XDG_CONFIG_HOME`/`XDG_STATE_HOME`, validates every
+  emitted message against the pinned ACP schema fixture when `jsonschema` is
+  importable, and proves no hidden provider/model call is reachable
+  (`session/prompt` on a fresh connection-less agent fails closed with
+  `-32001 orchestration_unavailable`; see
+  `cortex_runtime.acp.runtime.UnavailableRuntime`, the production entry
+  point's only runtime).
+
+## Activation model
+
+Cortex only activates when a client explicitly selects/launches it as its
+own agent (`agent_servers`/custom-agent entry). No client that merely
+detects a `.cortex` directory elsewhere ever activates Cortex orchestration
+(see `AGENTS.md`: "Do not activate orchestration merely because this
+repository is named Cortex").
+
+## Live boundary
+
+This task (T011) delivers the integration/harness scope only. Real client
+GUI rendering (Zed/codeg) is qualified in T035 — see
+[real-client-runbook.md](real-client-runbook.md), whose rows are all
+`NOT RUN` here on purpose. Mock/harness output above is not GUI evidence.
