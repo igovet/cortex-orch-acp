@@ -60,6 +60,10 @@ check.
   deterministic fallback, per-route context budgeting, compaction-loop
   guard, persisted large outputs, and budget-selected limited-model
   presentation](summaries-and-budgets.md)
+- [Parallel workspaces and safe integration (T025): isolated per-attempt
+  snapshot copies, the serialized shared-root fallback, pure-Python
+  three-way merge/conflict detection against a known base, unsaved-host-
+  buffer preconditions, and revision-bound re-verification](workspaces-and-integration.md)
 
 ## Tools
 

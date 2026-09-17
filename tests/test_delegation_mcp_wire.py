@@ -98,8 +98,10 @@ def test_coordinator_tools_list_includes_role_filtered_delegation_tools(tmp_path
     # T024: read_large_output is a shared read-only large-output operation,
     # available on both coordinator and worker channels.
     assert "read_large_output" in names
+    # T025: integrate is coordinator-only technical application.
+    assert "integrate" in names
     assert "ask_question" not in names and "publish_result" not in names
-    assert len(names) == 16
+    assert len(names) == 17
 
 
 def test_worker_tools_list_is_worker_only(tmp_path):

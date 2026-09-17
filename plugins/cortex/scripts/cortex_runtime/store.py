@@ -292,6 +292,8 @@ class Store:
         from .acp.replay_store import REPLAY_SCHEMA
         from .acp.questions_store import PENDING_QUESTIONS_SCHEMA
         from .acp.steering import TASK_LANGUAGE_SCHEMA, TASK_STOPPED_SCHEMA
+        from .delegation.workspace_isolation import WORKSPACE_SCHEMA
+        from .delegation.integration import INTEGRATION_SCHEMA
         from .project_storage import canonical_project, project_store_directory
         self.project_root=canonical_project(project_root) if project_root is not None else None
         if self.project_root is not None and Path(directory)!=project_store_directory(self.project_root):
@@ -317,7 +319,7 @@ class Store:
             db.commit()
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+WORKSPACE_SCHEMA+INTEGRATION_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
             if app==APPLICATION_ID:
                 # T017: additive columns for a pre-T017 store that already has
                 # task_events/task_orchestration (CREATE TABLE IF NOT EXISTS
@@ -391,6 +393,29 @@ class Store:
                     " selected_config_revision_id TEXT, effective_config_revision_id TEXT,"
                     " route_engine TEXT NOT NULL, route_connection_id TEXT,"
                     " resource_policy_json TEXT NOT NULL, recorded_at TEXT NOT NULL)"
+                )
+                # T025: additive workspace_snapshots/workspace_integrations
+                # tables for a pre-T025 store (same precedent as
+                # attempt_process_registry above -- CREATE TABLE IF NOT
+                # EXISTS in SCHEMA only runs for a brand new database).
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS workspace_snapshots ("
+                    " workspace_binding_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),"
+                    " attempt_id TEXT NOT NULL, project_root TEXT NOT NULL,"
+                    " root_path TEXT, base_path TEXT, mode TEXT NOT NULL, manifest_json TEXT NOT NULL,"
+                    " base_kind TEXT NOT NULL, base_head TEXT, base_dirty_digest TEXT,"
+                    " created_at TEXT NOT NULL, cleaned_up_at TEXT, cleanup_reason TEXT)"
+                )
+                db.execute("CREATE INDEX IF NOT EXISTS workspace_snapshots_by_attempt ON workspace_snapshots(attempt_id, created_at)")
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS workspace_integrations ("
+                    " id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),"
+                    " assignment_ref TEXT NOT NULL, request_key TEXT NOT NULL, attempt_id TEXT NOT NULL,"
+                    " workspace_binding_id TEXT, status TEXT NOT NULL,"
+                    " applied_paths_json TEXT NOT NULL, conflict_paths_json TEXT NOT NULL,"
+                    " integrated_head TEXT, integrated_dirty_digest TEXT,"
+                    " host_buffer_state TEXT NOT NULL DEFAULT 'unknown', created_at TEXT NOT NULL,"
+                    " UNIQUE(assignment_ref, request_key))"
                 )
 
     def _check_project(self,db,task=None):

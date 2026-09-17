@@ -21,8 +21,9 @@ from .orchestrating_runtime import OrchestratingRuntime
 from .runtime import OrchestrationUnavailable
 from ..configuration.service import ConfigurationService
 from ..delegation.live_adapters import (
-    ConfigurationServiceSnapshotSource, EngineSessionManagerAdapter, SharedProjectRootWorkspaceProvisioner,
+    ConfigurationServiceSnapshotSource, EngineSessionManagerAdapter,
 )
+from ..delegation.workspace_isolation import IsolatedSnapshotWorkspaceProvisioner
 from ..contracts import StoreError
 from ..portable.errors import PortableError
 from ..project_storage import canonical_project, migrate_legacy_project_storage, project_store_directory
@@ -95,11 +96,22 @@ class ProductionOrchestratingRuntime:
         except StoreError as error:
             self.last_reconcile = str(error)
         configuration_service = ConfigurationService(store)
+        # T025: one isolated-snapshot provisioner per project (not per task
+        # -- ``WorkspaceProvisioner.create`` only ever receives an
+        # ``attempt_id``; see that class's own docstring for how it
+        # resolves the owning task). Falls back to the pre-T025 shared
+        # project root automatically (recorded, visible) whenever a
+        # snapshot cannot safely be taken.
+        workspace_provisioner = IsolatedSnapshotWorkspaceProvisioner(store, str(project))
         adapter = EngineSessionManagerAdapter(
-            self._connection_record_factory(configuration_service), lambda task_id: str(project), environ=self._environ,
+            self._connection_record_factory(configuration_service), lambda task_id: str(project),
+            environ=self._environ,
+            workspace_resolver=lambda binding_id, launch: (
+                workspace_provisioner.root_for(binding_id) or str(project)
+            ),
         )
         runtime = OrchestratingRuntime(
-            store, adapter, SharedProjectRootWorkspaceProvisioner(),
+            store, adapter, workspace_provisioner,
             ConfigurationServiceSnapshotSource(configuration_service),
         )
         with self._lock:

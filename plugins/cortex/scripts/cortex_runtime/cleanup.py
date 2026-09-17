@@ -83,6 +83,23 @@ def finish_deletions(store,db,task):
         # already performs; this only removes the metadata rows.
         _delete_if_present("large_outputs","task_id=?",(task,))
         _delete_if_present("compaction_recovery_events","task_id=?",(task,))
+        # T025 workspace_snapshots/workspace_integrations: the actual
+        # snapshot/base directories on disk (Cortex-owned, under this
+        # project's own .cortex/workspaces/<attempt_id>/) are removed
+        # first -- a plain DB delete alone would leak them -- then both
+        # rows. workspace_integrations has no other table referencing it.
+        if "workspace_snapshots" in existing_tables:
+            from .delegation.workspace_isolation import _remove_owned_tree
+            for snapshot_row in db.execute(
+                "SELECT root_path, base_path FROM workspace_snapshots WHERE task_id=? AND cleaned_up_at IS NULL",
+                (task,),
+            ).fetchall():
+                for path in (snapshot_row["root_path"], snapshot_row["base_path"]):
+                    if path is not None:
+                        try: _remove_owned_tree(path)
+                        except StoreError: pass
+        _delete_if_present("workspace_integrations","task_id=?",(task,))
+        _delete_if_present("workspace_snapshots","task_id=?",(task,))
         db.execute("DELETE FROM task_events WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_orchestration WHERE task_id=?",(task,))
         db.execute("DELETE FROM capacity_reservations WHERE task_id=?",(task,))

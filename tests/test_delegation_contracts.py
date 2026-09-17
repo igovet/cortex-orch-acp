@@ -36,9 +36,11 @@ def test_coordinator_operations_closed_set():
     # delegation.contracts module docstring and docs/acp/input-history-and-replay.md);
     # T021 adds the shared read-only 'read_capsule' recovery-capsule operation;
     # T024 adds the shared read-only 'read_large_output' operation.
+    # T025 adds 'integrate' (technical application of an isolated worker
+    # workspace onto the main project root).
     assert set(dc.schemas_for("coordinator")) == {
-        "delegate", "list_events", "clarify", "cancel", "decide", "list_sources", "read_source", "read_capsule",
-        "read_large_output",
+        "delegate", "list_events", "clarify", "cancel", "decide", "integrate",
+        "list_sources", "read_source", "read_capsule", "read_large_output",
     }
 
 

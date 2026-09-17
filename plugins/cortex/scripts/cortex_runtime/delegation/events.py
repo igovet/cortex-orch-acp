@@ -30,6 +30,18 @@ EVENT_TYPES = frozenset({
     "coordinator_decision", "user_message", "progress",
 })
 
+# T025: integrate() request/outcome events are carried as 'progress' rows
+# (see EVENT_TYPES above -- its DB-level CHECK constraint is baked into
+# task_events at table-creation time and a pre-T025 store already has the
+# narrower list; adding a brand new event_type would need a destructive
+# table rebuild for every existing store, which this task does not do).
+# Distinguished by payload["kind"] and a "integrate:"/"integration_applied:"/
+# "integration_conflict:" dedup_key prefix -- see
+# acp.orchestrating_runtime._process_new_events/_integrate_assignment.
+INTEGRATION_PROGRESS_KINDS = frozenset({
+    "integration_requested", "integration_applied", "integration_conflict",
+})
+
 # Event types that require a coordinator continuation (see
 # acp.orchestrating_runtime); "progress" and provisioning-transition events
 # are informative only and never by themselves wake a waiting coordinator.
