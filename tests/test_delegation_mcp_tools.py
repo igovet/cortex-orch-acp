@@ -50,6 +50,29 @@ def _report(store, task_id, report_id="r_" + "a" * 12):
     return report_id
 
 
+def _worker_report(store, worker, body="Worker's own result.", request_key=None):
+    """T019: a report published the real way, from this exact worker
+    channel's own draft (trusted path -- see server._dispatch_channeled),
+    so ``drafts.owner_thread_id`` binds it to ``worker.principal_thread_id``."""
+    from pathlib import Path
+
+    key = request_key or uuid.uuid4().hex
+    draft = store.call(
+        "create_draft", dict(template="general", request_key="draft-" + key),
+        worker.principal_thread_id, worker.parent_principal_thread_id, trusted=True,
+    )
+    path = Path(draft["draft_path"])
+    marker = path.read_bytes().split(b"\n\n", 1)[0] + b"\n\n"
+    path.write_bytes(marker + body.encode())
+    result = store.call(
+        "write_report",
+        dict(title="Work", summary="A concise result.", author="worker",
+             draft_id=draft["draft_id"], request_key=key),
+        worker.principal_thread_id, worker.parent_principal_thread_id, trusted=True,
+    )
+    return result["report_id"]
+
+
 def test_delegate_returns_deterministic_assignment_ref_and_is_idempotent(tmp_path):
     store, task_id, coordinator = _task(tmp_path)
     args = dict(title="T", brief="B", role="backend-dev", acceptance="A", request_key="k1")
@@ -111,7 +134,7 @@ def test_worker_publish_result_requires_a_real_report_of_this_task(tmp_path):
 def test_worker_publish_result_and_ask_question_carry_no_technical_ids(tmp_path):
     store, task_id, coordinator = _task(tmp_path)
     worker = _worker_channel(store, task_id, coordinator)
-    report_id = _report(store, task_id)
+    report_id = _worker_report(store, worker)
     result = mcp_tools.dispatch(store, worker, "publish_result", dict(report_ref=report_id, summary="done", request_key="k1"))
     assert set(result) == {"recorded", "cursor", "superseded"}
     question = mcp_tools.dispatch(store, worker, "ask_question", dict(question="Which env?", request_key="k2"))
@@ -125,8 +148,83 @@ def test_worker_result_after_cancellation_is_recorded_superseded(tmp_path):
         store, task_id, "assignment_cancelled", "cancel1", dict(reason="pipeline revised"),
         origin="runtime", assignment_ref=worker.attempt_id,
     )
-    report_id = _report(store, task_id, report_id="r_" + "c" * 12)
+    report_id = _worker_report(store, worker)
     result = mcp_tools.dispatch(store, worker, "publish_result", dict(report_ref=report_id, summary="late", request_key="k"))
     assert result["superseded"] is True
     claimed = delegation_events.claim_unconsumed(store, task_id, "cont")
     assert not any(e.event_type == "worker_result" for e in claimed)
+
+
+def test_worker_cannot_publish_result_for_a_report_it_did_not_author(tmp_path):
+    """T019: report_ref binding -- a worker can only publish_result for a
+    report published from its own draft, never a coordinator report or
+    another worker's report."""
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator, attempt_id="xa_self")
+    other_worker = _worker_channel(store, task_id, coordinator, attempt_id="xa_other")
+    coordinator_report = _report(store, task_id)
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, worker, "publish_result", dict(report_ref=coordinator_report, summary="done", request_key="k1"))
+    assert str(excinfo.value) == "report_not_own"
+    other_report = _worker_report(store, other_worker)
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, worker, "publish_result", dict(report_ref=other_report, summary="done", request_key="k2"))
+    assert str(excinfo.value) == "report_not_own"
+
+
+def test_worker_publish_result_is_idempotent_and_rejects_changed_payload(tmp_path):
+    """T019: same attempt + same report_ref + identical payload returns the
+    same canonical event exactly once; a changed payload for the same
+    report_ref is a delivery_conflict, never a silent second publication."""
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator)
+    report_id = _worker_report(store, worker)
+    args = dict(report_ref=report_id, summary="done", request_key="k1")
+    first = mcp_tools.dispatch(store, worker, "publish_result", args)
+    second = mcp_tools.dispatch(store, worker, "publish_result", dict(args))
+    assert first["cursor"] == second["cursor"]
+    events = [e for e in delegation_events.list_since(store, task_id) if e.event_type == "worker_result"]
+    assert len(events) == 1
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, worker, "publish_result", dict(report_ref=report_id, summary="changed", request_key="k2"))
+    assert str(excinfo.value) == "delivery_conflict"
+    events = [e for e in delegation_events.list_since(store, task_id) if e.event_type == "worker_result"]
+    assert len(events) == 1
+
+
+def test_a_different_attempt_cannot_claim_a_report_refs_publication(tmp_path):
+    """T019: even if a second attempt somehow reused the identical
+    report_ref (for example a replayed channel), a different assignment
+    attempt is refused rather than silently taking over the first attempt's
+    canonical publication."""
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator, attempt_id="xa_first")
+    report_id = _worker_report(store, worker)
+    mcp_tools.dispatch(store, worker, "publish_result", dict(report_ref=report_id, summary="done", request_key="k1"))
+    impersonator = _worker_channel(store, task_id, coordinator, attempt_id="xa_second")
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("UPDATE drafts SET owner_thread_id=? WHERE published_report_id=?",
+                   (impersonator.principal_thread_id, report_id))
+        db.commit()
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, impersonator, "publish_result", dict(report_ref=report_id, summary="done", request_key="k2"))
+    assert str(excinfo.value) == "report_ref_already_published"
+
+
+def test_dispatch_refuses_a_handler_result_that_would_leak_technical_metadata(tmp_path, monkeypatch):
+    """T019 entrypoint audit: mcp_tools.dispatch's own defensive
+    NO_TECHNICAL_ID_FIELDS check (never exercised in normal operation,
+    since no real handler sets these fields) actually fires if a handler
+    ever regresses -- a delegation MCP tool result can never carry
+    task_id/attempt_id/channel_id/etc, even accidentally."""
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator)
+
+    def leaking_handler(store, channel, args):
+        return dict(recorded=True, cursor=1, task_id=channel.task_id)
+
+    monkeypatch.setitem(mcp_tools._WORKER_HANDLERS, "ask_question", leaking_handler)
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, worker, "ask_question", dict(question="leak?", request_key="k"))
+    assert str(excinfo.value) == "internal_leak"

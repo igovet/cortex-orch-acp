@@ -95,6 +95,27 @@ def test_cortex_directory_refused(tmp_path):
         bridge.read_text_file(_binding(tmp_path), dict(path=str(tmp_path / ".cortex" / "state.db")))
 
 
+@pytest.mark.parametrize("relative", [
+    ".cortex/cortex.sqlite3", ".cortex/cortex.sqlite3-wal", ".cortex/t_deadbeef0001/report.md",
+    ".cortex/t_deadbeef0001/pipeline.md", ".cortex/t_deadbeef0001/.orphaned/x.md.abc123abc123",
+    ".cortex/.source_blocks_staging/blk_1", ".cortex/draft-reports/d_1.md", ".cortex/pipeline-drafts/d_2.md",
+])
+def test_cortex_technical_storage_subpaths_refused_for_read_and_write(tmp_path, relative):
+    """T019 entrypoint audit: every concrete .cortex/** technical-storage
+    subpath (SQLite metadata, per-task report/pipeline bodies, the new
+    T019 orphan-quarantine directory, source-block staging, and draft
+    directories) is refused through the worker's own fs_bridge channel --
+    never only the bare '.cortex' prefix in the abstract."""
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"technical content")
+    bridge = FsBridge()
+    with pytest.raises(FsBridgeError):
+        bridge.read_text_file(_binding(tmp_path), dict(path=str(path)))
+    with pytest.raises(FsBridgeError):
+        bridge.write_text_file(_binding(tmp_path), dict(path=str(path), content="x"))
+
+
 def test_read_write_roundtrip_records_disk_revision(tmp_path):
     revision_log = RevisionLog()
     bridge = FsBridge(revision_log=revision_log)

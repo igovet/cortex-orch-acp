@@ -194,6 +194,67 @@ def test_recovery_restores_invalid_utf8_pipeline_and_removes_unindexed_first_edi
     assert not orphan.exists()
 
 
+def test_orphan_pipeline_and_report_bodies_are_quarantined_not_deleted(tmp_path):
+    store=Store(tmp_path/'private');task=create(store,tmp_path)
+    task_dir=tmp_path/'.cortex'/task
+    orphan_pipeline=task_dir/'pipeline.md'
+    orphan_pipeline.write_text('Uncommitted first edition');orphan_pipeline.chmod(0o600)
+    orphan_report=task_dir/'r_orphanorphan.md'
+    orphan_report.write_text('Never indexed body');orphan_report.chmod(0o600)
+    body_digest=hashlib.sha256(b'Never indexed body').hexdigest()[:12]
+    call_store(Store(store.directory),'list_reports',dict(task_id=task))
+    assert not orphan_pipeline.exists() and not orphan_report.exists()
+    quarantine=task_dir/'.orphaned'
+    names={p.name for p in quarantine.iterdir()}
+    assert 'pipeline.md.'+hashlib.sha256(b'Uncommitted first edition').hexdigest()[:12] in names
+    assert 'r_orphanorphan.md.'+body_digest in names
+    with store.connection() as db:
+        kinds=[r['kind'] for r in db.execute("SELECT kind FROM task_changes WHERE task_id=?",(task,)).fetchall()]
+    assert kinds.count('orphan_quarantined')==2
+    # A duplicate orphan with identical content is discarded, never
+    # overwriting the existing quarantine entry.
+    (task_dir/'r_orphanorphan.md').write_text('Never indexed body')
+    (task_dir/'r_orphanorphan.md').chmod(0o600)
+    call_store(Store(store.directory),'list_reports',dict(task_id=task))
+    assert {p.name for p in quarantine.iterdir()}==names
+
+
+def test_reconcile_reports_restored_quarantined_and_deleted_temps(tmp_path):
+    store=Store(tmp_path/'private');task=create(store,tmp_path)
+    write(store,task,'Committed',kind='pipeline')
+    task_dir=tmp_path/'.cortex'/task
+    pipeline=task_dir/'pipeline.md'
+    saved=pipeline.read_bytes();backup=pipeline.parent/'.backup_pipeline_test.md'
+    backup.write_bytes(saved);backup.chmod(0o600);pipeline.write_bytes(saved+b'\xff')
+    orphan=task_dir/'r_orphanorphan2.md'
+    orphan.write_text('orphan body');orphan.chmod(0o600)
+    temp=task_dir/'.pending_abc123.tmp'
+    temp.write_bytes(b'incomplete');temp.chmod(0o600)
+    fresh=Store(store.directory)
+    report=fresh.reconcile(task)
+    assert pipeline.read_bytes()==saved
+    assert len(report['confirmed_restored'])==1 and report['confirmed_restored'][0]['task_id']==task
+    assert len(report['quarantined'])==1 and report['quarantined'][0]['task_id']==task
+    assert str(temp) in report['deleted_temps']
+    assert not temp.exists() and not orphan.exists()
+    assert report['indeterminate']==[]
+    with fresh.connection() as db:
+        assert db.execute("PRAGMA integrity_check").fetchone()[0]=='ok'
+
+
+def test_reconcile_all_tasks_reports_indeterminate_pipeline_conflict(tmp_path):
+    store=Store(tmp_path/'private');task=create(store,tmp_path)
+    write(store,task,'Committed',kind='pipeline')
+    other=create(store,tmp_path)
+    pipeline=tmp_path/'.cortex'/task/'pipeline.md'
+    pipeline.write_bytes(b'\xff\xfe')
+    fresh=Store(store.directory)
+    report=fresh.reconcile()
+    assert any(item['task_id']==task and item['reason']=='file_conflict' for item in report['indeterminate'])
+    # The other, healthy task is unaffected by the first task's conflict.
+    assert call_store(fresh,'list_reports',dict(task_id=other))['reports']
+
+
 def test_pending_deletion_commits_metadata_before_rejecting_task(tmp_path):
     store=Store(tmp_path/'private');task=create(store,tmp_path)
     with store.connection() as db:db.execute('INSERT INTO pending_deletions VALUES (?)',(task,))
@@ -296,3 +357,138 @@ def test_accepted_write_replay_does_not_apply_old_redactions_to_new_source(tmp_p
     assert len(calls)==1 and refreshed['source_capture']['revision']==accepted['source_capture']['revision']+1
     bodies=[store.call('read_report',dict(report_id=row['report_id']),thread)['markdown'] for row in refreshed['reports']]
     assert 'Use [REDACTED]' in bodies and 'Add a new requirement' in bodies
+
+
+# --- regular()/Store.connection() sidecar-file race (T019 follow-up) ------
+#
+# Root cause (see the standalone stress reproduction that found it):
+# sqlite3's WAL mode deletes and recreates its -wal/-shm sidecar files as
+# the last/first connection to a database closes/opens. Under real
+# multi-process contention this has a well-known, benign kernel race: a
+# concurrent lstat() of the exact sidecar path can observe the
+# just-unlinked inode (still owned by us, still a regular file, still
+# mode 0600) with st_nlink==0 for a brief window before the directory
+# entry is gone from this process's view. ``regular()`` used to treat that
+# indistinguishably from a genuine hardlink/symlink/foreign-owner attack
+# and raised ``unsafe_storage``, which ``Store.connection()`` propagated
+# out of ``OrchestratingRuntime._wait_for_progress`` -> ``has_unconsumed``.
+# The fix tolerates st_nlink==0 (never a hardlink attack -- those only
+# ever increase nlink, never produce zero) as "does not exist right now"
+# while still refusing every genuinely unsafe file below.
+
+def _make_regular_target(tmp_path,mode=0o600):
+    path=tmp_path/'sidecar'
+    path.write_bytes(b'x');path.chmod(mode)
+    return path
+
+
+def test_regular_tolerates_transient_unlinked_inode_as_absent(tmp_path,monkeypatch):
+    import cortex_runtime.store as module
+    path=_make_regular_target(tmp_path)
+    real_lstat=Path.lstat
+    class FakeStat:
+        def __init__(self,info):self._info=info
+        def __getattr__(self,name):
+            if name=='st_nlink':return 0
+            return getattr(self._info,name)
+    def fake_lstat(self,*a,**k):
+        info=real_lstat(self,*a,**k)
+        if self==path:return FakeStat(info)
+        return info
+    monkeypatch.setattr(Path,'lstat',fake_lstat)
+    with pytest.raises(FileNotFoundError):
+        module.regular(path)
+
+
+def test_regular_still_refuses_symlink(tmp_path):
+    import cortex_runtime.store as module
+    real=tmp_path/'real';real.write_bytes(b'x');real.chmod(0o600)
+    link=tmp_path/'link';link.symlink_to(real)
+    with pytest.raises(StoreError,match='unsafe_storage'):
+        module.regular(link)
+
+
+def test_regular_still_refuses_hardlinked_file(tmp_path):
+    import cortex_runtime.store as module
+    original=_make_regular_target(tmp_path)
+    hardlink=tmp_path/'second_name'
+    import os as _os
+    _os.link(original,hardlink)
+    with pytest.raises(StoreError,match='unsafe_storage'):
+        module.regular(original)
+    assert original.stat().st_nlink==2
+
+
+def test_regular_still_refuses_group_or_other_readable_mode(tmp_path):
+    import cortex_runtime.store as module
+    path=_make_regular_target(tmp_path,mode=0o644)
+    with pytest.raises(StoreError,match='unsafe_storage'):
+        module.regular(path)
+
+
+def test_regular_still_refuses_foreign_uid(tmp_path,monkeypatch):
+    import cortex_runtime.store as module
+    path=_make_regular_target(tmp_path)
+    real_lstat=Path.lstat
+    class FakeStat:
+        def __init__(self,info):self._info=info
+        def __getattr__(self,name):
+            if name=='st_uid':return self._info.st_uid+1
+            return getattr(self._info,name)
+    def fake_lstat(self,*a,**k):
+        info=real_lstat(self,*a,**k)
+        if self==path:return FakeStat(info)
+        return info
+    monkeypatch.setattr(Path,'lstat',fake_lstat)
+    with pytest.raises(StoreError,match='unsafe_storage'):
+        module.regular(path)
+
+
+def test_regular_still_refuses_non_regular_file(tmp_path):
+    import cortex_runtime.store as module
+    fifo=tmp_path/'fifo'
+    import os as _os
+    _os.mkfifo(fifo,0o600)
+    with pytest.raises(StoreError,match='unsafe_storage'):
+        module.regular(fifo)
+
+
+def _wal_churn_worker(directory,iterations,queue):
+    import cortex_runtime.store as module
+    errors=0
+    try:
+        store=module.Store(directory,initialize=False)
+        for _ in range(iterations):
+            try:
+                with store.connection() as db:
+                    db.execute('SELECT 1').fetchone()
+            except module.StoreError as error:
+                if str(error)=='unsafe_storage':errors+=1
+    finally:
+        queue.put(errors)
+
+
+def test_connection_wal_shm_churn_under_multiprocess_load_raises_no_unsafe_storage(tmp_path):
+    """Regression for the sidecar-file race: hammer Store.connection() (the
+    exact call has_unconsumed()/_wait_for_progress make) from several real
+    OS processes at once -- the mechanism that actually reproduced the
+    original failure (a single process's threads share one address space
+    and never observed it; see the stress reproduction). Deterministic
+    pass criteria: zero unsafe_storage errors and completion well inside
+    the 60s budget."""
+    import multiprocessing as mp
+    import time
+    import cortex_runtime.store as module
+    directory=tmp_path/'private'
+    module.Store(directory,initialize=True)
+    ctx=mp.get_context('fork')
+    queue=ctx.Queue()
+    processes=[ctx.Process(target=_wal_churn_worker,args=(directory,600,queue)) for _ in range(6)]
+    started=time.time()
+    for p in processes:p.start()
+    total_errors=sum(queue.get() for _ in processes)
+    for p in processes:p.join(timeout=30)
+    elapsed=time.time()-started
+    assert all(p.exitcode==0 for p in processes)
+    assert total_errors==0
+    assert elapsed<60

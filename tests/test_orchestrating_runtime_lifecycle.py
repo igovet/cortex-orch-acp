@@ -82,14 +82,29 @@ def _make_runtime(store, router, **kwargs):
     return runtime, engine
 
 
+def _own_draft(db, store, channel, report_id, path):
+    """T019: matching drafts row owned by this channel's own
+    principal_thread_id so publish_result's report_ref-authorship binding
+    (see delegation.mcp_tools._worker_publish_result) accepts it."""
+    info = path.stat()
+    db.execute(
+        "INSERT INTO drafts(id,task_id,owner_thread_id,kind,template,path,created_at,device,inode,published_report_id,published_digest) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("d_" + uuid.uuid4().hex[:12], channel.task_id, channel.principal_thread_id, "report", "general",
+         str(path), store._now(), info.st_dev, info.st_ino, report_id, "test-digest"),
+    )
+
+
 def _publish(store, channel, label, call_index):
     report_id = "r_" + uuid.uuid4().hex[:12]
     filename = report_id + ".md"
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         task_dir = store._task_directory(db, channel.task_id)
-        (task_dir / filename).write_text(f"# {label}\n", encoding="utf-8")
+        path = task_dir / filename
+        path.write_text(f"# {label}\n", encoding="utf-8")
         db.execute("INSERT INTO reports VALUES (?,?,?,?,?)", (report_id, channel.task_id, "report", filename, store._now()))
+        _own_draft(db, store, channel, report_id, path)
         db.commit()
     mcp_tools.dispatch(store, channel, "publish_result", dict(report_ref=report_id, summary=f"{label} finished", request_key=f"pub-{label}-{call_index}"))
     return report_id
@@ -160,6 +175,17 @@ def test_task_level_accept_refused_when_report_file_is_missing(tmp_path):
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         db.execute("INSERT INTO reports VALUES (?,?,?,?,?)", (report_id, task_id, "report", f"{report_id}.md", store._now()))
+        # T019: matching drafts row (owner_thread_id == the synthetic
+        # worker's own principal_thread_id below) so publish_result's
+        # report_ref-authorship binding accepts it -- the file itself is
+        # deliberately never written, which is exactly what this test
+        # exercises (a claimed success with no stored evidence).
+        db.execute(
+            "INSERT INTO drafts(id,task_id,owner_thread_id,kind,template,path,created_at,device,inode,published_report_id,published_digest) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("d_" + uuid.uuid4().hex[:12], task_id, channel.principal_thread_id, "report", "general",
+             f"/nonexistent/{report_id}.md", store._now(), 0, 0, report_id, "test-digest"),
+        )
         db.commit()
     from cortex_runtime.trusted_channel import ChannelContext
 
@@ -366,8 +392,10 @@ def test_idle_wait_emits_no_updates_and_does_not_reprompt_a_running_worker(tmp_p
         with store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             task_dir = store._task_directory(db, channel.task_id)
-            (task_dir / f"{report_id}.md").write_text("# Y\n", encoding="utf-8")
+            path = task_dir / f"{report_id}.md"
+            path.write_text("# Y\n", encoding="utf-8")
             db.execute("INSERT INTO reports VALUES (?,?,?,?,?)", (report_id, channel.task_id, "report", f"{report_id}.md", store._now()))
+            _own_draft(db, store, channel, report_id, path)
             db.commit()
         mcp_tools.dispatch(store, channel, "publish_result", dict(report_ref=report_id, summary="Y finished", request_key="pubY"))
         return PromptOutcome(StopReason.END_TURN, "")

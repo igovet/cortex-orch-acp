@@ -29,6 +29,11 @@ check.
   ledger, crash recovery, attachment availability, trust labels, bounded
   reads, display-only session/load, and what's deferred to
   T020/T021/T022/T023](input-history-and-replay.md)
+- [Recoverable publications and storage consistency (T019): orphan
+  quarantine/reconcile, publish_result idempotency and report_ref binding,
+  fault-injection-tested crash recovery, observed artifact revision
+  binding, and entrypoint immutability/scope
+  audit](publications-and-consistency.md)
 
 ## Tools
 

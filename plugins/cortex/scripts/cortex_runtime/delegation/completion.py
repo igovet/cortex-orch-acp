@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 
 from . import events as delegation_events
+from . import revision as delegation_revision
 
 
 def _task_directory(store, db, task_id: str):
@@ -87,7 +88,18 @@ def gate(store, task_id: str) -> tuple[bool, list[str]]:
     ``progress`` event note.
     """
     reasons: list[str] = []
+    project_root = None
+    # T019: (assignment_ref, attempt_revisions row captured at worker_result
+    # time) for every accepted assignment whose worker_result included at
+    # least one 'observed' check -- verified only below, against a fresh
+    # capture of the *current* shared workspace root (see
+    # delegation.revision module docstring: any worker/coordinator/user
+    # change to the shared root invalidates every attempt's own already-
+    # captured observed checks, not only the attempt that made it).
+    observed_checks = []
     with store.connection() as db:
+        project_root_row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
+        project_root = project_root_row["project_root"] if project_root_row is not None else None
         requested = db.execute(
             "SELECT DISTINCT assignment_ref FROM task_events "
             "WHERE task_id=? AND event_type='delegation_requested' AND superseded=0",
@@ -127,12 +139,21 @@ def gate(store, task_id: str) -> tuple[bool, list[str]]:
                 )
                 continue
             if result_row is not None and not (failed or cancelled):
-                report_ref = json.loads(result_row["payload_json"]).get("report_ref")
+                payload = json.loads(result_row["payload_json"])
+                report_ref = payload.get("report_ref")
                 if not report_ref or not _report_file_exists(store, db, task_id, report_ref):
                     reasons.append(
                         f"assignment {assignment_ref}'s report_ref {report_ref!r} does not "
                         "resolve to a stored report file for this task."
                     )
+                elif any((check.get("evidence") == "observed") for check in (payload.get("checks") or [])):
+                    captured = db.execute(
+                        "SELECT kind, head, dirty_digest FROM attempt_revisions "
+                        "WHERE attempt_id=? AND phase LIKE 'worker_result:%' ORDER BY captured_at DESC LIMIT 1",
+                        (worker_key,),
+                    ).fetchone()
+                    if captured is not None and captured["kind"] == "observed":
+                        observed_checks.append((assignment_ref, dict(captured)))
 
         unconsumed_meaningful = db.execute(
             "SELECT event_type FROM task_events WHERE task_id=? AND consumed_by IS NULL AND superseded=0 "
@@ -144,5 +165,16 @@ def gate(store, task_id: str) -> tuple[bool, list[str]]:
     if unconsumed_meaningful:
         kinds = sorted({row["event_type"] for row in unconsumed_meaningful})
         reasons.append(f"unconsumed meaningful event(s) remain for this task: {', '.join(kinds)}.")
+
+    # T019: artifact revision binding, at coordinator-acceptance time. An
+    # unavailable *current* capture never refuses -- it only leaves the
+    # earlier captures' 'observed' checks unbound (unknown), it never
+    # assumes staleness from an inconclusive comparison.
+    if observed_checks and project_root is not None:
+        current = delegation_revision.record_attempt_revision(store, f"gate:{task_id}", "gate_acceptance", project_root)
+        if current["kind"] == "observed":
+            for assignment_ref, captured in observed_checks:
+                if (captured["head"], captured["dirty_digest"]) != (current["head"], current["dirty_digest"]):
+                    reasons.append(f"stale_verification:{assignment_ref}")
 
     return (not reasons, reasons)

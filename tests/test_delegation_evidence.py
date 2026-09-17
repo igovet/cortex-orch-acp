@@ -41,13 +41,24 @@ def _worker_channel(store, task_id, attempt_id):
     )
 
 
-def _report(store, task_id):
+def _report(store, task_id, channel):
+    """T019: also inserts a matching ``drafts`` row owned by this channel's
+    ``principal_thread_id`` so ``publish_result``'s report_ref-authorship
+    binding accepts it."""
     report_id = "r_" + uuid.uuid4().hex[:12]
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         task_dir = store._task_directory(db, task_id)
-        (task_dir / f"{report_id}.md").write_text("# done\n", encoding="utf-8")
+        path = task_dir / f"{report_id}.md"
+        path.write_text("# done\n", encoding="utf-8")
+        info = path.stat()
         db.execute("INSERT INTO reports VALUES (?,?,?,?,?)", (report_id, task_id, "report", f"{report_id}.md", store._now()))
+        db.execute(
+            "INSERT INTO drafts(id,task_id,owner_thread_id,kind,template,path,created_at,device,inode,published_report_id,published_digest) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("d_" + uuid.uuid4().hex[:12], task_id, channel.principal_thread_id, "report", "general",
+             str(path), store._now(), info.st_dev, info.st_ino, report_id, "test-digest"),
+        )
         db.commit()
     return report_id
 
@@ -56,7 +67,7 @@ def test_check_with_no_tool_call_ref_stays_claimed(tmp_path):
     store, task_id = _task(tmp_path)
     attempt_id = "xa_" + uuid.uuid4().hex[:12]
     channel = _worker_channel(store, task_id, attempt_id)
-    report_id = _report(store, task_id)
+    report_id = _report(store, task_id, channel)
     result = mcp_tools.dispatch(store, channel, "publish_result", dict(
         report_ref=report_id, summary="done", request_key="pub1",
         checks=[dict(name="unit tests", outcome="passed")],
@@ -76,7 +87,7 @@ def test_check_with_matching_completed_observation_is_observed(tmp_path):
     store, task_id = _task(tmp_path)
     attempt_id = "xa_" + uuid.uuid4().hex[:12]
     channel = _worker_channel(store, task_id, attempt_id)
-    report_id = _report(store, task_id)
+    report_id = _report(store, task_id, channel)
     delegation_evidence.record_tool_result_observed(
         store, task_id, attempt_id, "tc_abc123", "execute", "run pytest", "pending",
     )
@@ -101,7 +112,7 @@ def test_check_with_failed_observation_is_contradicted(tmp_path):
     store, task_id = _task(tmp_path)
     attempt_id = "xa_" + uuid.uuid4().hex[:12]
     channel = _worker_channel(store, task_id, attempt_id)
-    report_id = _report(store, task_id)
+    report_id = _report(store, task_id, channel)
     delegation_evidence.record_tool_result_observed(
         store, task_id, attempt_id, "tc_xyz789", "execute", "run pytest", "failed",
     )
@@ -127,7 +138,7 @@ def test_cross_attempt_tool_call_ref_is_never_trusted(tmp_path):
     )
     attempt_id = "xa_" + uuid.uuid4().hex[:12]
     channel = _worker_channel(store, task_id, attempt_id)
-    report_id = _report(store, task_id)
+    report_id = _report(store, task_id, channel)
     result = mcp_tools.dispatch(store, channel, "publish_result", dict(
         report_ref=report_id, summary="done", request_key="pub1",
         checks=[dict(name="unit tests", outcome="passed", tool_call_ref="tc_shared")],

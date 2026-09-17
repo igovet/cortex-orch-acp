@@ -20,6 +20,7 @@ which reacts to this event asynchronously.
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any, Mapping
 
 from ..acp import replay_store
@@ -176,8 +177,61 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
             "an existing published report id for this task",
             "Publish via write_report first and pass the exact receipt's report_ref.",
         )
+    # T019: report_ref must be a report this worker itself published from its
+    # own draft (drafts.owner_thread_id == channel.principal_thread_id) --
+    # never a coordinator's report or another worker's report. Otherwise a
+    # worker could claim any report visible in the task as its own result.
+    with store.connection() as db:
+        draft = db.execute(
+            "SELECT owner_thread_id FROM drafts WHERE published_report_id=?", (report_ref,),
+        ).fetchone()
+    if draft is None or draft["owner_thread_id"] != channel.principal_thread_id:
+        raise StoreError(
+            "report_not_own", "report_ref", report_ref,
+            "a report published from this worker's own draft in this attempt",
+            "Publish the result via write_report using this worker's own draft, "
+            "then pass that exact receipt's report_ref.",
+        )
     assignment_ref = channel.attempt_id
     dedup_key = f"publish_result:{report_ref}"
+    # T019: each report_ref carries exactly one canonical publication
+    # identity. A re-delivery from the *same* attempt with identical
+    # summary/checks reuses the existing event (below, via
+    # ``delegation_events.append_event``'s own dedup-by-key). A re-delivery
+    # from the same attempt with a *different* summary/checks is a
+    # delivery_conflict (never silently overwritten -- ``worker_result``
+    # events are append-only). A *different* attempt referencing the same
+    # report_ref is refused outright: report_ref binding already restricts
+    # it to this worker's own draft, so a second attempt can never
+    # legitimately own the first attempt's already-claimed report_ref.
+    checks = []
+    for item in args.get("checks") or []:
+        label = delegation_evidence.resolve_check(store, assignment_ref, item.get("tool_call_ref"))
+        checks.append(dict(
+            name=item["name"], outcome=item["outcome"],
+            tool_call_ref=item.get("tool_call_ref"), evidence=label,
+        ))
+    with store.connection() as db:
+        existing = db.execute(
+            "SELECT assignment_ref, payload_json FROM task_events WHERE task_id=? AND dedup_key=?",
+            (channel.task_id, dedup_key),
+        ).fetchone()
+    if existing is not None:
+        if existing["assignment_ref"] != assignment_ref:
+            raise StoreError(
+                "report_ref_already_published", "report_ref", report_ref,
+                "a report_ref not already published by a different attempt",
+                "This report_ref's result was already published by a different attempt; "
+                "publish a new report for this attempt's own result.",
+            )
+        prior = json.loads(existing["payload_json"])
+        if prior.get("summary") != args["summary"] or prior.get("checks") != checks:
+            raise StoreError(
+                "delivery_conflict", "report_ref", report_ref,
+                "identical summary and checks as this report_ref's first publish_result",
+                "Retry publish_result with the exact original summary/checks, or publish "
+                "a new report via write_report for a changed result.",
+            )
     with store.connection() as db:
         cancelled = db.execute(
             "SELECT 1 FROM task_events WHERE task_id=? AND assignment_ref=? "
@@ -188,13 +242,6 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
     # is resolved strictly against this exact attempt's own durable
     # tool_result_observations (delegation.evidence) -- a claim never
     # becomes confirmed without that link (see delegation.evidence docstring).
-    checks = []
-    for item in args.get("checks") or []:
-        label = delegation_evidence.resolve_check(store, assignment_ref, item.get("tool_call_ref"))
-        checks.append(dict(
-            name=item["name"], outcome=item["outcome"],
-            tool_call_ref=item.get("tool_call_ref"), evidence=label,
-        ))
     event = delegation_events.append_event(
         store, channel.task_id, "worker_result", dedup_key,
         dict(report_ref=report_ref, summary=args["summary"], checks=checks),

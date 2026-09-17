@@ -17,6 +17,7 @@ import stat
 import threading
 import uuid
 
+from . import _fault_injection
 from .contracts import StoreError, validate
 from .governance import governance_snapshot
 
@@ -104,6 +105,15 @@ CREATE TABLE IF NOT EXISTS task_changes (
  kind TEXT NOT NULL, reference TEXT, created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS changes_by_task ON task_changes(task_id,sequence);
+-- T019: additive optional group. Never claims what an attempt did; only
+-- what a read-only, isolated git inspection of the (shared) workspace root
+-- actually observed at one instant, bound to a worker_result event or a
+-- coordinator-acceptance gate check -- see delegation.revision.
+CREATE TABLE IF NOT EXISTS attempt_revisions (
+ attempt_id TEXT NOT NULL, captured_at TEXT NOT NULL, phase TEXT NOT NULL,
+ kind TEXT NOT NULL, head TEXT, dirty_digest TEXT, detail TEXT
+);
+CREATE INDEX IF NOT EXISTS attempt_revisions_by_attempt ON attempt_revisions(attempt_id,captured_at);
 PRAGMA user_version=11;
 '''
 
@@ -214,6 +224,18 @@ def draft_template(template, draft_id):
 
 def regular(path, private=True):
     info=Path(path).lstat()
+    # A concurrent unlink() of this exact path (for example SQLite deleting
+    # then recreating its -wal/-shm sidecar as the last/first connection
+    # closes/opens -- see Store.connection()) has a well-known benign race:
+    # another process's lstat() can observe the just-unlinked inode (still
+    # owned, still regular, still correct mode) with st_nlink==0 for a brief
+    # window before the directory entry is gone from this process's view.
+    # This can never be a symlink or a foreign/attacker hardlink -- both of
+    # those always show st_nlink>=1 (a hardlink attack increases nlink, it
+    # never produces zero) -- so treating it as "does not exist right now"
+    # preserves the safety property while tolerating the transient churn.
+    if info.st_nlink==0:
+        raise FileNotFoundError(2,"No such file or directory",str(path))
     if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_nlink!=1:
         raise StoreError("unsafe_storage","path",str(path),"owned regular file with one link")
     if private and stat.S_IMODE(info.st_mode)&0o077:
@@ -303,6 +325,15 @@ class Store:
                 from .trusted_channel import ensure_source_event_meta_column, ensure_source_event_ledger_column
                 ensure_source_event_meta_column(db)
                 ensure_source_event_ledger_column(db)
+                # T019: additive attempt_revisions table for a pre-T019 store
+                # (CREATE TABLE IF NOT EXISTS in SCHEMA only runs for a brand
+                # new database -- see the ``if initialize:`` branch above).
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS attempt_revisions ("
+                    " attempt_id TEXT NOT NULL, captured_at TEXT NOT NULL, phase TEXT NOT NULL,"
+                    " kind TEXT NOT NULL, head TEXT, dirty_digest TEXT, detail TEXT)"
+                )
+                db.execute("CREATE INDEX IF NOT EXISTS attempt_revisions_by_attempt ON attempt_revisions(attempt_id,captured_at)")
 
     def _check_project(self,db,task=None):
         if self.project_root is None:return
@@ -448,6 +479,7 @@ class Store:
                     db.rollback(); self._rollback_files(rollbacks)
                     for path in staged: path.unlink(missing_ok=True)
                     raise
+                _fault_injection.checkpoint("after_commit_before_cleanup")
                 self._finalize_files(rollbacks)
                 db.execute("BEGIN IMMEDIATE"); self._finish_source_deletions(db,task); db.commit()
             return result
@@ -621,7 +653,7 @@ class Store:
             )
         return draft,source
 
-    def _recover(self,db,task):
+    def _recover(self,db,task,outcome=None):
         from .cleanup import finish_deletions
         if db.execute("SELECT 1 FROM pending_deletions WHERE task_id=?",(task,)).fetchone():
             finish_deletions(self,db,task)
@@ -629,17 +661,61 @@ class Store:
             # rejected operation; do not roll its metadata deletion back.
             db.commit()
             raise StoreError("task_not_bound")
-        self._recover_task_files(db,task)
+        self._recover_task_files(db,task,outcome)
         self._finish_source_deletions(db,task)
 
-    def _recover_task_files(self,db,task):
+    def _quarantine_directory(self,task_dir):
+        """T019: a private per-task home for confirmed-orphan document
+        bodies (see ``_quarantine_orphan``). Never listed by any query
+        path; created the same owned/no-symlink way as every other
+        storage directory."""
+        current=task_dir/".orphaned"
+        try: current.mkdir(mode=0o700)
+        except FileExistsError: pass
+        info=current.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid!=os.getuid():
+            raise StoreError("unsafe_storage","storage_path",str(current),"owned directory without symlinks")
+        os.chmod(current,0o700,follow_symlinks=False)
+        return current
+
+    def _quarantine_orphan(self,db,task,task_dir,path,outcome=None):
+        """T019: move one confirmed-orphan ``.md`` body (file present, no
+        ``reports``/``editions`` row referencing it -- for example a report
+        or pipeline file whose commit crashed before its metadata row was
+        written) into the private quarantine directory instead of deleting
+        it, and record a ``task_changes`` row. Quarantine content is never
+        read by any query path and never auto-published; recovering it is
+        an out-of-band operator action, not a store operation. An
+        incomplete ``.pending_*.tmp`` write is unconfirmed content and is
+        still deleted, never quarantined (see ``_recover_task_files``)."""
+        content=file_digest(path,private=True)
+        quarantine=self._quarantine_directory(task_dir)
+        target=quarantine/f"{path.name}.{content[:12]}"
+        try:
+            target.lstat()
+        except FileNotFoundError:
+            os.rename(path,target); sync_directory(quarantine); sync_directory(task_dir)
+        else:
+            # Same name+digest already quarantined: this duplicate carries
+            # no new content and is discarded without ever overwriting the
+            # existing quarantine entry.
+            path.unlink(); sync_directory(task_dir)
+        reference=path.name+"."+content[:12]
+        self._change(db,task,"orphan_quarantined",reference)
+        if outcome is not None: outcome["quarantined"].append(dict(task_id=task,name=path.name,digest=content))
+
+    def _recover_task_files(self,db,task,outcome=None):
         for row in db.execute("SELECT id FROM tasks WHERE id=?",(task,)).fetchall():
             task=row["id"]; task_dir=self._task_directory(db,task)
             indexed={r["filename"] for r in db.execute("SELECT filename FROM reports WHERE task_id=? AND kind='report'",(task,))}
             for path in task_dir.iterdir():
-                if path.name.startswith(".pending_") or (path.suffix==".md" and path.name not in indexed):
-                    if path.name!="pipeline.md" and not path.name.startswith(".backup_pipeline_"):
-                        regular(path); path.unlink(); sync_directory(task_dir)
+                if path.name in (".orphaned",".access.lock"):continue
+                if path.name.startswith(".pending_"):
+                    regular(path); path.unlink(); sync_directory(task_dir)
+                    if outcome is not None: outcome["deleted_temps"].append(str(path))
+                    continue
+                if path.suffix==".md" and path.name not in indexed and path.name!="pipeline.md" and not path.name.startswith(".backup_pipeline_"):
+                    self._quarantine_orphan(db,task,task_dir,path,outcome)
             pipeline=db.execute("SELECT id,filename FROM reports WHERE task_id=? AND kind='pipeline'",(task,)).fetchone()
             backups=list(task_dir.glob(".backup_pipeline_*.md"))
             if pipeline:
@@ -653,12 +729,48 @@ class Store:
                     match=next((p for p in backups if file_digest(p)==latest),None)
                     if match is None: raise StoreError("file_conflict","pipeline",str(target),"bytes matching committed SHA-256")
                     os.replace(match,target); sync_directory(task_dir)
+                    if outcome is not None: outcome["confirmed_restored"].append(dict(task_id=task,report_id=pipeline["id"]))
                 for backup in backups: backup.unlink(missing_ok=True)
             else:
                 orphan=task_dir/"pipeline.md"
-                if orphan.exists():regular(orphan);orphan.unlink();sync_directory(task_dir)
+                if orphan.exists():self._quarantine_orphan(db,task,task_dir,orphan,outcome)
                 for backup in backups: regular(backup); backup.unlink()
-            for temp in task_dir.glob(".pending_*"): regular(temp); temp.unlink()
+            for temp in task_dir.glob(".pending_*"):
+                regular(temp); temp.unlink()
+                if outcome is not None: outcome["deleted_temps"].append(str(temp))
+
+    def reconcile(self,task_id=None):
+        """T019: run crash recovery for one task (or, with ``task_id=None``,
+        every task in this store) and return a structured report --
+        ``confirmed_restored`` (pipeline views repaired from a matching
+        backup), ``quarantined`` (orphan document bodies moved aside),
+        ``deleted_temps`` (unconfirmed ``.pending_*`` writes removed), and
+        ``indeterminate`` (a task left as a raised conflict rather than
+        silently resolved, for example a pipeline digest mismatch with no
+        matching backup). This is the same recovery every store call
+        already performs for its own task before acting (see ``_recover``
+        in ``_transaction``); callers such as
+        ``acp.production_runtime.ProductionOrchestratingRuntime`` invoke it
+        once, best-effort, at first use per project so crash leftovers are
+        surfaced/quarantined before any request needs them, not only lazily
+        on the next call touching that exact task."""
+        outcome=dict(confirmed_restored=[],quarantined=[],deleted_temps=[],indeterminate=[])
+        with self.connection() as db:
+            if task_id is not None:
+                tasks=[r["id"] for r in db.execute("SELECT id FROM tasks WHERE id=?",(task_id,)).fetchall()]
+            else:
+                tasks=[r["id"] for r in db.execute("SELECT id FROM tasks").fetchall()]
+        for tid in tasks:
+            with self.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                try:
+                    self._recover(db,tid,outcome)
+                    db.commit()
+                except StoreError as error:
+                    db.rollback()
+                    if str(error)!="task_not_bound":
+                        outcome["indeterminate"].append(dict(task_id=tid,reason=str(error)))
+        return outcome
 
     def _finish_source_deletions(self,db,task):
         for row in db.execute("SELECT * FROM pending_source_deletions WHERE task_id=?",(task,)).fetchall():
@@ -743,10 +855,12 @@ class Store:
             directory=project_draft_directory(db.execute("SELECT project_root FROM tasks WHERE id=?",(task,)).fetchone()[0],kind)
             path=directory/(draft_id+".md")
             body=draft_template(args["template"],draft_id)
+            _fault_injection.checkpoint("draft_before_write")
             fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
             staged.append(path)
             with os.fdopen(fd,"wb") as output:
                 output.write(body); output.flush(); os.fsync(output.fileno())
+            _fault_injection.checkpoint("draft_after_fsync")
             sync_directory(directory)
             identity=path.lstat()
             markdown=body.decode("utf-8")
@@ -804,6 +918,7 @@ class Store:
         placeholder_tail=b""
         placeholder_window=max(map(len,placeholders),default=1)-1
         decoder=codecs.getincrementaldecoder("utf-8")()
+        _fault_injection.checkpoint("before_temp_write")
         fd=os.open(temporary,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
         try:
             with os.fdopen(fd,"wb") as output:
@@ -832,6 +947,7 @@ class Store:
                     for block in file_blocks(target): old.update(block); output.write(block); stored.update(block); size+=len(block)
                     if old.hexdigest()!=previous: raise StoreError("file_conflict","pipeline",str(target),"committed SHA-256 "+previous)
                 output.flush(); os.fsync(output.fileno())
+            _fault_injection.checkpoint("after_temp_fsync")
             sync_directory(directory)
             backup=None
             if existing:
@@ -840,8 +956,10 @@ class Store:
                     for block in file_blocks(target): copy.write(block)
                     copy.flush(); os.fsync(copy.fileno())
                 os.chmod(backup,0o600); sync_directory(directory)
+            _fault_injection.checkpoint("after_backup_copy")
             os.replace(temporary,target); staged.remove(temporary)
             rollbacks.append((target,backup)); sync_directory(directory)
+            _fault_injection.checkpoint("after_replace_before_commit")
         except BaseException:
             temporary.unlink(missing_ok=True); raise
         if not existing: db.execute("INSERT INTO reports VALUES (?,?,?,?,?)",(rid,task,kind,target.name,now))
@@ -864,6 +982,7 @@ class Store:
             db.execute("INSERT INTO reports VALUES (?,?,?,?,?)",(rid,task,kind,filename,now))
         temporary=target.parent/(identifier(".pending_")+".tmp"); staged.append(temporary)
         hashed=hashlib.sha256(); size=0
+        _fault_injection.checkpoint("before_temp_write")
         fd=os.open(temporary,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
         try:
             with os.fdopen(fd,"wb") as output:
@@ -874,6 +993,7 @@ class Store:
                     for block in file_blocks(target): old.update(block); output.write(block); hashed.update(block); size+=len(block)
                     if old.hexdigest()!=previous: raise StoreError("file_conflict","pipeline",str(target),"committed SHA-256 "+previous)
                 output.flush(); os.fsync(output.fileno())
+            _fault_injection.checkpoint("after_temp_fsync")
             sync_directory(target.parent)
             backup=None
             if existing:
@@ -882,8 +1002,10 @@ class Store:
                     for block in file_blocks(target): copy.write(block)
                     copy.flush(); os.fsync(copy.fileno())
                 os.chmod(backup,0o600); sync_directory(target.parent)
+            _fault_injection.checkpoint("after_backup_copy")
             os.replace(temporary,target); staged.remove(temporary)
             rollbacks.append((target,backup)); sync_directory(target.parent)
+            _fault_injection.checkpoint("after_replace_before_commit")
         except BaseException:
             temporary.unlink(missing_ok=True); raise
         db.execute("INSERT INTO editions(report_id,title,summary,author,updated_at,digest,size_bytes) VALUES (?,?,?,?,?,?,?)",(rid,title,summary,author,now,hashed.hexdigest(),size))

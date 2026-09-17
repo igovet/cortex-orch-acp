@@ -148,8 +148,23 @@ def test_worker_publish_then_coordinator_decide_accept_over_the_wire(tmp_path):
     worker_channel_id, worker_secret, attempt_id = _worker_channel(store, task_id, coordinator_channel_id)
 
     with store.connection() as db:
+        principal_thread_id = db.execute(
+            "SELECT principal_thread_id FROM trusted_channels WHERE channel_id=?", (worker_channel_id,),
+        ).fetchone()["principal_thread_id"]
         db.execute("BEGIN IMMEDIATE")
-        db.execute("INSERT INTO reports VALUES (?,?,?,?,?)", ("r_" + "d" * 12, task_id, "report", "reports/w.md", store._now()))
+        task_dir = store._task_directory(db, task_id)
+        path = task_dir / "w.md"
+        path.write_text("# done\n", encoding="utf-8")
+        info = path.stat()
+        db.execute("INSERT INTO reports VALUES (?,?,?,?,?)", ("r_" + "d" * 12, task_id, "report", "w.md", store._now()))
+        # T019: matching drafts row owned by the worker's own principal
+        # thread so publish_result's report_ref-authorship binding accepts it.
+        db.execute(
+            "INSERT INTO drafts(id,task_id,owner_thread_id,kind,template,path,created_at,device,inode,published_report_id,published_digest) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("d_" + "e" * 12, task_id, principal_thread_id, "report", "general",
+             str(path), store._now(), info.st_dev, info.st_ino, "r_" + "d" * 12, "test-digest"),
+        )
         db.commit()
 
     publish_call = dict(name="publish_result", arguments=dict(report_ref="r_" + "d" * 12, summary="done", request_key="pub1"))

@@ -25,6 +25,7 @@ import time
 from typing import Any, Callable, Mapping, Protocol
 
 from ..delegation import events as delegation_events
+from ..delegation import revision as delegation_revision
 from ..delegation.provisioning import ProvisioningService
 from ..engine.instruction_delivery_registry import delivery_for
 from ..portable.engine_contract import StopReason
@@ -106,14 +107,22 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-def _coalesce(events: list[delegation_events.TaskEvent]) -> str:
+def _coalesce(events: list[delegation_events.TaskEvent], revisions: dict[int, dict] | None = None) -> str:
     """Coalesce a batch of claimed events into ONE continuation prompt.
 
     Every claimed event contributes a line (informative-only event types
     included) so nothing silently vanishes from the record even when it
     does not by itself gate continuation; see
     ``delegation.events.MEANINGFUL_EVENT_TYPES`` for what *does* gate it.
+
+    ``revisions`` (T019), keyed by event id, is this exact batch's own
+    freshly captured observed artifact revision for each ``worker_result``
+    event (see ``OrchestratingRuntime._process_new_events`` and
+    ``delegation.revision``) -- appended as a plain label so the
+    coordinator can see a check's evidence is bound to one specific
+    revision, never silently assumed still current.
     """
+    revisions = revisions or {}
     lines = []
     for event in events:
         payload = event.payload
@@ -130,6 +139,7 @@ def _coalesce(events: list[delegation_events.TaskEvent]) -> str:
                     f"{c.get('name')}={c.get('outcome')} ({c.get('evidence', 'claimed')})" for c in checks
                 )
                 line += f" Checks: {rendered}."
+                line += " " + delegation_revision.label(revisions.get(event.id))
             lines.append(line)
         elif event.event_type == "worker_question":
             lines.append(f"Assignment {ref} question: {payload.get('question', '')}")
@@ -413,6 +423,14 @@ class OrchestratingRuntime:
                 return StopReason.END_TURN
             continuation_id = new_id("cont_")
             claimed = delegation_events.claim_unconsumed(self._store, task_id, continuation_id)
+            # T019: capture this batch's worker_result events' observed
+            # artifact revision now, at the moment this runtime processes
+            # them (see delegation.revision module docstring on the shared-
+            # workspace-root limitation). Never blocks/fails the turn: an
+            # unavailable capture is recorded and labeled "unknown", not
+            # refused (refusal is the completion gate's job, at acceptance
+            # time -- see delegation.completion.gate).
+            revisions = self._capture_result_revisions(task_id, claimed)
             meaningful = [e for e in claimed if e.event_type in delegation_events.MEANINGFUL_EVENT_TYPES]
             if not meaningful and not first:
                 progressed = self._wait_for_progress(task_id, cancel_event)
@@ -430,7 +448,7 @@ class OrchestratingRuntime:
                 continue
             first = False
             no_progress = 0
-            prompt_text = _coalesce(claimed) if claimed else content
+            prompt_text = _coalesce(claimed, revisions) if claimed else content
             try:
                 outcome = self._engine.prompt(session_ref, prompt_text, cancel_event)
             except EngineTurnFailed as failure:
@@ -587,6 +605,28 @@ class OrchestratingRuntime:
         delegation_events.append_event(
             self._store, task_id, "progress", f"progress:{new_id('p_')}", dict(note=text), origin="runtime",
         )
+
+    def _capture_result_revisions(self, task_id: str, claimed) -> dict[int, dict]:
+        """T019: for every ``worker_result`` in ``claimed``, durably capture
+        (and return, keyed by event id) the observed artifact revision of
+        the task's (shared) project root at this exact instant, bound to
+        that assignment's attempt id (see ``delegation.revision``). A task
+        with no resolvable project root (should not happen for a bound
+        task) yields no captures rather than raising."""
+        worker_results = [event for event in claimed if event.event_type == "worker_result"]
+        if not worker_results:
+            return {}
+        with self._store.connection() as db:
+            row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            return {}
+        workspace_root = row["project_root"]
+        return {
+            event.id: delegation_revision.record_attempt_revision(
+                self._store, event.assignment_ref, f"worker_result:{event.id}", workspace_root,
+            )
+            for event in worker_results if event.assignment_ref is not None
+        }
 
     def _check_terminal_decision(self, task_id: str):
         with self._store.connection() as db:

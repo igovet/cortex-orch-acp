@@ -23,6 +23,7 @@ from ..configuration.service import ConfigurationService
 from ..delegation.live_adapters import (
     ConfigurationServiceSnapshotSource, EngineSessionManagerAdapter, SharedProjectRootWorkspaceProvisioner,
 )
+from ..contracts import StoreError
 from ..portable.errors import PortableError
 from ..project_storage import canonical_project, migrate_legacy_project_storage, project_store_directory
 from ..store import Store
@@ -57,6 +58,7 @@ class ProductionOrchestratingRuntime:
         self._environ = environ
         self._lock = threading.Lock()
         self._runtimes: dict[str, OrchestratingRuntime] = {}
+        self.last_reconcile = None
 
     def _connection_record_factory(self, configuration_service):
         def factory(task_id):
@@ -83,6 +85,15 @@ class ProductionOrchestratingRuntime:
         if not (directory / "cortex.sqlite3").exists():
             raise RouteUnresolved("task_not_bound")
         store = Store(directory, initialize=False, project_root=project)
+        # T019: best-effort, observed crash reconciliation once per project
+        # at first use, in addition to the recovery every store call already
+        # performs for its own task -- surfaces/quarantines leftovers from a
+        # crash between requests rather than waiting for the next call that
+        # happens to touch that exact task.
+        try:
+            self.last_reconcile = store.reconcile()
+        except StoreError as error:
+            self.last_reconcile = str(error)
         configuration_service = ConfigurationService(store)
         adapter = EngineSessionManagerAdapter(
             self._connection_record_factory(configuration_service), lambda task_id: str(project), environ=self._environ,
