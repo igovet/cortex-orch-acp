@@ -96,11 +96,14 @@ do not derive a route; include `Policy class: <value>`, review model/effort and
 `User-requested override: yes|no` labels. Include the complete command result for
 every code-mode call, including the initial skill read.
 
-Worker updates, questions and blockers stay on the native parent/subagent channel;
-do not route them through `codex_app.send_message_to_thread`, supply an app thread
-ID, or ask workers to discover an app messaging tool. Native final responses deliver
-the handoff automatically.
+Worker updates, questions and blockers stay on the native parent/subagent channel.
+<!-- cortex:native codex -->
+Do not route them through `codex_app.send_message_to_thread`, supply an app thread
+ID, or ask workers to discover an app messaging tool.
+<!-- /cortex:native -->
+Native final responses deliver the handoff automatically.
 
+<!-- cortex:native codex -->
 Native subagents spawned through `collaboration.spawn_agent` are tracked only with
 the native collaboration controls: `collaboration.wait_agent`,
 `collaboration.list_agents`, `collaboration.send_message` and
@@ -108,6 +111,7 @@ the native collaboration controls: `collaboration.wait_agent`,
 `create_thread`, `read_thread`, `wait_threads` or `send_message_to_thread` for
 orchestration workers. Codex app thread tools are reserved for explicit user-owned
 task management, not worker coordination.
+<!-- /cortex:native -->
 
 After each native spawn, the coordinator keeps the owner unresolved until it has
 performed bounded native waits and consumed that owner's terminal handoff/report.

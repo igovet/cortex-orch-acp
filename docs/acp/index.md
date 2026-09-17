@@ -15,6 +15,9 @@ check.
   evidence levels, opt-in probe](codex-acp-adapter.md)
 - [Permission/filesystem/terminal bridge (T014): binding, invalidation,
   containment, and UX-vs-actual-containment limitations](permissions-and-containment.md)
+- [Portable role instructions and delegation provisioning (T015): canonical
+  sources, native markers, instruction-delivery qualification, delegation
+  operations, and recoverable provisioning](roles-and-delegation.md)
 
 ## Tools
 

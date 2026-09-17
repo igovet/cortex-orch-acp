@@ -8,8 +8,10 @@ description: Explicit Cortex coordination for user outcomes, continuous incident
 Activate only on explicit selection. Persist explicit `normal`/`cortex` changes
 through `set_governance`, preserving the selected depth; normal returns to ordinary
 host work and does not erase the task or cancel active workers.
+<!--cortex:critical-->
 The model owns decisions and acceptance. Cortex stores tasks, advisory metadata
 and Markdown reports. It never grants authority or chooses a workflow.
+<!--/cortex:critical-->
 
 Prioritize user outcome, safety/reversibility, causal path, minimal handoffs,
 implementation, verification, then documentation.
@@ -90,7 +92,7 @@ artifact revision, safety or rollback changes. Worker completion, review deliver
 unchanged waits and small clarifications alone need no edition. Preserve older editions.
 
 Keep the incident brief inside the current pipeline. Preserve implementation_state,
-delivery_state and acceptance_state and the existing delivery_state,
+delivery_state, acceptance_state,
 acceptance_boundary, causal_model_delta, predecessor_rollout, retry_discriminator
 and receipt_references fields. Use incident_decision to organize one decision,
 referring to existing evidence instead of copying it across reports.

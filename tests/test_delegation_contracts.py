@@ -1,0 +1,109 @@
+"""T015: delegation.contracts -- internal operation schemas and validation."""
+from __future__ import annotations
+
+import pytest
+
+from cortex_runtime.contracts import StoreError
+from cortex_runtime.delegation import contracts as dc
+
+VALID_DELEGATE = dict(
+    title="Fix the thing", brief="Do the work.", role="backend-dev",
+    acceptance="Tests pass.", request_key="11111111-1111-1111-1111-111111111111",
+)
+
+
+def test_schemas_for_returns_fresh_copies_each_call():
+    first = dc.schemas_for("coordinator")
+    second = dc.schemas_for("coordinator")
+    assert first == second
+    assert first is not second
+    first["delegate"]["properties"]["title"]["maxLength"] = 1
+    # Mutating the first copy must never affect a freshly-requested schema
+    # (models "repeated session/generation starts get current schemas").
+    assert dc.schemas_for("coordinator")["delegate"]["properties"]["title"]["maxLength"] != 1
+
+
+def test_schemas_for_unknown_role_kind():
+    with pytest.raises(StoreError) as excinfo:
+        dc.schemas_for("shared")
+    assert excinfo.value.field == "role_kind"
+
+
+def test_coordinator_operations_closed_set():
+    assert set(dc.schemas_for("coordinator")) == {"delegate", "list_events", "clarify", "cancel"}
+
+
+def test_worker_operations_closed_set():
+    assert set(dc.schemas_for("worker")) == {"ask_question", "publish_result"}
+
+
+def test_no_operation_accepts_a_task_attempt_session_channel_workspace_epoch_id_field():
+    forbidden = {"task_id", "attempt_id", "session_id", "channel_id", "workspace_id",
+                 "workspace_binding_id", "epoch", "owner_epoch", "assignment_id"}
+    for role_kind in ("coordinator", "worker"):
+        for operation, schema in dc.schemas_for(role_kind).items():
+            overlap = forbidden & set(schema["properties"])
+            assert not overlap, f"{role_kind}.{operation} exposes id field(s) {overlap}"
+
+
+def test_delegate_valid():
+    assert dc.validate("coordinator", "delegate", VALID_DELEGATE) == VALID_DELEGATE
+
+
+def test_delegate_rejects_unadvertised_id_field():
+    args = dict(VALID_DELEGATE, task_id="t_deadbeefcafe")
+    with pytest.raises(StoreError) as excinfo:
+        dc.validate("coordinator", "delegate", args)
+    error = excinfo.value
+    assert error.field == "task_id"
+    assert "task/attempt/session/channel/workspace/epoch" in error.correction
+
+
+def test_delegate_rejects_missing_required_field():
+    args = {k: v for k, v in VALID_DELEGATE.items() if k != "role"}
+    with pytest.raises(StoreError) as excinfo:
+        dc.validate("coordinator", "delegate", args)
+    assert excinfo.value.field == "role"
+    assert excinfo.value.received == "missing"
+
+
+def test_delegate_rejects_wrong_type():
+    args = dict(VALID_DELEGATE, title=123)
+    with pytest.raises(StoreError) as excinfo:
+        dc.validate("coordinator", "delegate", args)
+    assert excinfo.value.field == "title"
+
+
+def test_delegate_rejects_out_of_bound_string():
+    args = dict(VALID_DELEGATE, title="x" * 500)
+    with pytest.raises(StoreError):
+        dc.validate("coordinator", "delegate", args)
+
+
+def test_unknown_operation_for_role_kind():
+    with pytest.raises(StoreError) as excinfo:
+        dc.validate("coordinator", "publish_result", dict(report_ref="r_" + "a" * 12, summary="x", request_key="k"))
+    assert excinfo.value.field == "operation"
+
+
+def test_clarify_requires_assignment_ref():
+    with pytest.raises(StoreError):
+        dc.validate("coordinator", "clarify", dict(message="hi", request_key="k" * 8))
+
+
+def test_publish_result_report_ref_pattern():
+    good = dict(report_ref="r_0123456789ab", summary="done", request_key="k" * 8)
+    assert dc.validate("worker", "publish_result", good) == good
+    bad = dict(good, report_ref="not-a-report-id")
+    with pytest.raises(StoreError):
+        dc.validate("worker", "publish_result", bad)
+
+
+def test_ask_question_valid():
+    args = dict(question="What should I do about X?", request_key="k" * 8)
+    assert dc.validate("worker", "ask_question", args) == args
+
+
+def test_validate_rejects_non_dict_arguments():
+    with pytest.raises(StoreError):
+        dc.validate("coordinator", "delegate", ["not", "a", "dict"])

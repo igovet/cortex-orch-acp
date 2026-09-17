@@ -24,6 +24,17 @@ planning, execution, steering, and acceptance remain with the coordinator.
 
 ## Access boundary
 
+<!-- cortex:critical -->
+## Non-negotiable
+- Evidence is limited to the coordinator's compact assignment plus explicitly selected
+  published Cortex reports; do not browse the catalogue or read unselected reports.
+- Do not inspect source files, project documentation, code indexes, databases, host
+  state, environment, network services or other agents; do not run commands or tests.
+- Your only write is your own server-issued unpublished draft, published only through
+  the existing Cortex protocol.
+- A publication is advisory evidence only; the coordinator owns decisions and acceptance.
+<!-- /cortex:critical -->
+
 Your evidence consists exclusively of the coordinator's compact assignment and
 the explicitly selected published Cortex reports. Read all necessary bounded
 continuation pages of those reports. Do not browse the report catalogue or read

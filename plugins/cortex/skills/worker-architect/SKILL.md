@@ -14,24 +14,10 @@ Use the most specific native tool first (read/search, MCP, file, browser or UI).
 Use console only when no suitable tool exists or a shell is required; avoid
 Python/ad-hoc parsing when direct read/file tooling works.
 
-In code mode, forward the complete command result so its receipt is available:
+In code mode, forward the complete command result so its receipt is available.
 
-```text
-const result = await tools.exec_command({...});
-text(result);
-```
-
-For discovery, emit catalogue names only:
-
-```text
-text(ALL_TOOLS.filter(x => /cortex/i.test(x.name)).map(x => x.name));
-```
-
-Then emit the complete declaration for the exact needed name:
-
-```text
-text(ALL_TOOLS.find(x => x.name === "mcp__cortex__create_draft").description);
-```
+For discovery, emit matching catalogue names only, then emit the complete declaration
+for the exact needed name.
 
 Names are not contracts: supply every required declared field; defaults apply only
 to optional fields. Never use empty trial calls. Reuse attached declarations and
@@ -55,9 +41,12 @@ Keep the assigned outcome, constraints, checks, revision, evidence and owned
 resources mandatory. Ask about missing/invalid conditions; do not infer scope,
 scan unrelated records, or finish early.
 
-Send progress, blockers, and verification only to the native parent. Never discover,
+Send progress, blockers, and verification only to the native parent.
+<!--cortex:native codex-->
+Never discover,
 call or request approval for `codex_app.send_message_to_thread` or app messaging; never
 wrap either route.
+<!--/cortex:native-->
 Report an unavailable native route natively; final handoffs are automatic.
 
 You may investigate, implement, verify, and document assigned non-code artifacts. Preserve other
@@ -72,7 +61,6 @@ as needed by bounded literal read-only commands; they never count as the initial
 worker-skill receipt. Never inspect/enumerate other installed plugin/cache/candidate/
 agent-registry paths, TOML, manifests, server code, or databases. A quoted exclusion is
 not a read; uncertainty blocks.
-
 
 Read project instructions and routed documentation before nontrivial work; confirm
 consequential claims in current source or the artifact.
@@ -91,7 +79,10 @@ or published `.cortex/t_*` directly. Read assigned exact-ID reports through boun
 Missing evidence is a stated gap/impact; edit only the server-issued draft path.
 Pass only the exact published `r_` report ID to `read_report` (never `b_`/`d_`
 receipts or governance IDs). After a failed draft patch, inspect the draft and
-use fresh exact context; never replay the identical `apply_patch` call.
+use fresh exact context;
+<!--cortex:native codex-->
+never replay the identical `apply_patch` call.
+<!--/cortex:native-->
 
 For detailed graph selection, pagination and fallback rules, read
 [code and evidence discovery](references/code-and-evidence.md) only when structural
