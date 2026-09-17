@@ -91,6 +91,11 @@ check.
   boundaries, real attacks attempted (stale-epoch delegation bypass and a
   principal-thread-id leak found and fixed), and accurately stated
   remaining containment limitations](security-boundaries.md)
+- [Packaging, onboarding, and diagnostics (T031): standalone entrypoint
+  and pinned-dependency manifest/verifier, non-destructive first-run
+  setup (storage, connection, route pinning, client recipes), no-paid
+  diagnostics, reversible uninstall, and what is Codex-plugin-harness-era
+  (removed at T033) vs. stays](packaging-and-onboarding.md)
 
 ## Tools
 

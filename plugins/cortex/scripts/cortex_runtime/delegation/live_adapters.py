@@ -156,7 +156,14 @@ class ConfigurationServiceSnapshotSource:
         self._service = configuration_service
 
     def snapshot(self, task_id: str) -> Mapping[str, object]:
-        current = self._service.current(task_id)
+        # T031: the active revision if one exists, else the latest
+        # proposed-but-not-yet-applied ('selected') one -- resolving which
+        # route to *open a session against* no longer requires that
+        # session to already exist (see ``EngineSessionManagerAdapter
+        # .open``'s own post-open ``ConfigurationService.apply()`` call,
+        # the only place that ever promotes a 'selected' revision to
+        # 'active', using the exact same route this snapshot named).
+        current = self._service.current_or_latest(task_id)
         if not current:
             from ..portable.errors import PortableError, PortableErrorCategory
 
@@ -198,6 +205,38 @@ def _requested_capabilities():
             EngineCapability.CANCELLATION,
         )
     return _ENGINE_CAPABILITIES
+
+
+class _PortableRevisionConfigureAdapter:
+    """T031: the ``adapter`` :meth:`~..configuration.service
+    .ConfigurationService.apply` calls -- translates the flat storage-row
+    ``revision`` dict ``apply()`` always passes into the portable
+    ``ConfigurationRevision``/``ExecutionRoute`` shape
+    ``engine.session_manager.EngineSessionManager.configure`` (and the
+    adapter-specific ``codex_option_mapping``/``claude_option_mapping``
+    callables it uses) actually expects, joining the route's model string
+    from ``configuration_route_extras`` (``routing.store.get_route_extras``)
+    since ``configuration_revisions`` itself never stores it in plain
+    text. Constructed fresh per apply attempt; never cached."""
+
+    def __init__(self, store, manager) -> None:
+        self._store = store
+        self._manager = manager
+
+    def configure(self, engine_session_id: str, revision: Mapping[str, object]) -> str:
+        from ..portable.identity import ConfigurationRevision, ExecutionRoute
+        from ..routing import store as routing_store
+
+        extras = routing_store.get_route_extras(self._store, revision["id"])
+        route_model = extras["route_model"] if extras is not None else revision["route_engine"]
+        route = ExecutionRoute(
+            engine=revision["route_engine"], connection_id=revision["route_connection_id"],
+            model=route_model, supported_parameters=tuple(sorted(revision["parameters"].items())),
+        )
+        portable_revision = ConfigurationRevision(
+            id=revision["id"], task_id=revision["task_id"], revision=revision["revision"], route=route,
+        )
+        return self._manager.configure(engine_session_id, portable_revision)
 
 
 class QueuedOpenCancelled(RuntimeError):
@@ -376,7 +415,59 @@ class EngineSessionManagerAdapter:
                 manager, record, session_id, task_id, attempt_id, launch,
                 cause="session_replacement" if replacement else "session_open",
             )
+            self._maybe_apply_configuration(manager, task_id, session_id, launch)
         return session_id
+
+    def _maybe_apply_configuration(self, manager, task_id, session_id, launch) -> None:
+        """T031: the real ``ConfigurationService.apply()`` wiring T008
+        always required but nothing ever called in production (T013's own
+        fresh-review report disclosed this as "no production glue yet
+        between ConfigurationService task revisions and EngineSessionManager
+        routes").
+
+        Only the *coordinator*'s own open() ever confirms/activates a
+        task's configuration (a worker inherits, never confirms, the
+        task's route); a no-op when this ``launch`` carries no
+        ``config_revision`` (a fake/test double with no real configuration
+        behind it -- unchanged pre-T031 behavior) or when that revision is
+        not (or no longer) in the ``'selected'`` state -- including the
+        ordinary case where a prior coordinator open already applied it,
+        so every later open (recovery, a worker, a second coordinator
+        turn) is a cheap, safe no-op, never a repeated wire call.
+
+        On success, the revision becomes ``'active'`` with its
+        confirmation evidence ref (T013/T026: the adapter's own
+        ``configure()`` evidence_ref, e.g. "engine_instance:session:pairs").
+        On an engine rejection or partial application,
+        ``ConfigurationService.apply`` itself already records
+        ``'failed'``/``'indeterminate'`` -- this method never re-raises
+        that into ``open()``'s own caller: an already-opened session is
+        not aborted over it (the T008 revision-state machine, not this
+        call's success/failure, is the source of truth for "active").
+        """
+        config_revision = launch.get("config_revision")
+        if not config_revision or launch.get("assignment_id"):
+            return
+        from ..configuration.service import ConfigurationService
+        from ..portable.errors import PortableError
+        from ..portable.identity import OwnershipEpoch
+
+        with self._store.connection() as db:
+            row = db.execute(
+                "SELECT state FROM configuration_revisions WHERE id=?", (config_revision,),
+            ).fetchone()
+            owner = db.execute("SELECT epoch FROM task_owners WHERE task_id=?", (task_id,)).fetchone()
+        if row is None or row["state"] != "selected" or owner is None:
+            return
+        current_epoch = OwnershipEpoch(epoch=owner["epoch"], owner=task_id)
+        adapter = _PortableRevisionConfigureAdapter(self._store, manager)
+        try:
+            ConfigurationService(self._store).apply(task_id, config_revision, adapter, session_id, current_epoch)
+        except PortableError:
+            # stale_pending_apply (a newer revision was proposed mid-flight)
+            # or a stale/mismatched epoch race -- never surfaced as an
+            # open() failure; see the docstring above.
+            pass
 
     def attempt_fallback(
         self, *, old_attempt_id: str, new_attempt_id: str, task_id: str, role: str, failure_class: str,

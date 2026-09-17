@@ -300,6 +300,20 @@ class ConfigurationService:
         return result
 
     def apply(self, task_id: str, revision_id: str, adapter, engine_session_id: str, current_epoch: OwnershipEpoch | None):
+        """``adapter.configure(engine_session_id, revision)`` -- ``revision``
+        is always the flat storage-row dict (see
+        ``configuration.store._row_dict``), exactly what every existing
+        ``adapter.configure()`` implementation here is tested against
+        (``tests/test_configuration_service.py``'s ``_FakeAdapter``, and
+        any other generic caller). A caller that needs the richer portable
+        ``ConfigurationRevision``/``ExecutionRoute`` shape
+        ``engine.session_manager.EngineSessionManager.configure`` (and the
+        adapter-specific option-mapping callables it uses) expects must
+        translate this dict itself before delegating -- see
+        ``delegation.live_adapters.EngineSessionManagerAdapter
+        ._maybe_apply_configuration``'s ``_PortableRevisionConfigureAdapter``,
+        the only production caller of this method.
+        """
         revision, recovery = self._start_pending_next_use(task_id, revision_id, engine_session_id, current_epoch)
         if recovery is not None:
             return recovery
@@ -399,6 +413,27 @@ class ConfigurationService:
     def current(self, task_id: str) -> dict[str, object] | None:
         with self.store.connection() as db:
             return configuration_store.current_active_tx(db, task_id)
+
+    def current_or_latest(self, task_id: str) -> dict[str, object] | None:
+        """T031: the active revision if one exists, else the single most
+        recent revision regardless of state.
+
+        Lets a caller resolve *which route to open a session against*
+        before that route's configuration has ever been confirmed/applied
+        -- the only legitimate use is
+        ``delegation.live_adapters.ConfigurationServiceSnapshotSource``,
+        immediately followed by :meth:`apply` once the session actually
+        opens (see that method's own docstring); nothing here ever claims
+        the returned revision is active. Never used by
+        :meth:`reconnect_restore` (which still requires a genuinely active
+        revision) or any other caller that must not silently reuse an
+        unconfirmed/rejected configuration.
+        """
+        current = self.current(task_id)
+        if current is not None:
+            return current
+        history = self.history(task_id)
+        return history[-1] if history else None
 
     def history(self, task_id: str) -> tuple[dict[str, object], ...]:
         with self.store.connection() as db:

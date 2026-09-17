@@ -13,8 +13,32 @@ a hidden provider/native fallback -- see
 ``cortex_runtime.acp.production_runtime`` and
 ``docs/acp/orchestration.md``.
 """
+import sys
+
 from cortex_runtime.acp.agent import main
 from cortex_runtime.acp.production_runtime import ProductionOrchestratingRuntime
+from cortex_runtime.packaging.pinned import PinnedManifestError, load_manifest, verify_launch_critical
+
+
+def _fail_closed_on_pinned_mismatch():
+    """T031: refuse to start (stderr only -- stdout stays protocol-only)
+    if this checkout does not satisfy its own pinned Python-floor/contract
+    manifest. Never downloads, installs, or upgrades anything; a mismatch
+    is always a concrete, named error, never a silent proceed."""
+    try:
+        manifest = load_manifest()
+        findings = verify_launch_critical(manifest)
+    except PinnedManifestError as error:
+        print(f"cortex_acp: pinned dependency manifest error: {error}", file=sys.stderr)
+        raise SystemExit(1) from None
+    failed = [finding for finding in findings if finding.status != "ok"]
+    if failed:
+        for finding in failed:
+            print(f"cortex_acp: pinned dependency {finding.component} {finding.status}: {finding.detail} "
+                  f"Repair: {finding.repair_action}", file=sys.stderr)
+        raise SystemExit(1)
+
 
 if __name__ == '__main__':
+    _fail_closed_on_pinned_mismatch()
     main(runtime=ProductionOrchestratingRuntime())

@@ -115,6 +115,8 @@
     "scripts/cortex_runtime/observability/store.py",
     "scripts/cortex_runtime/observability/usage.py",
     "scripts/cortex_runtime/ownership.py",
+    "scripts/cortex_runtime/packaging/__init__.py",
+    "scripts/cortex_runtime/packaging/pinned.py",
     "scripts/cortex_runtime/portable/__init__.py",
     "scripts/cortex_runtime/portable/engine_contract.py",
     "scripts/cortex_runtime/portable/errors.py",
