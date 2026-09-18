@@ -257,7 +257,7 @@ class FakeSessionRuntime:
                 delegation_capacity.mark_ambiguous(self._store, reservation_id, "timeout_alive")
             self._notify_activity()
 
-    def prompt(self, session_ref, message, cancel_event, *, on_delta=None):
+    def prompt(self, session_ref, message, cancel_event, *, on_delta=None, on_tool_call=None):
         info = self.sessions[session_ref]
         self.prompt_calls.append(session_ref)
         call_index = info["calls"]
@@ -272,12 +272,15 @@ class FakeSessionRuntime:
             # the original five-argument call exactly.
             import inspect
 
-            if "on_delta" in inspect.signature(behavior).parameters:
-                outcome = behavior(
-                    self._store, info["channel"], session_ref, message, call_index, on_delta=on_delta,
-                )
-            else:
-                outcome = behavior(self._store, info["channel"], session_ref, message, call_index)
+            declared = inspect.signature(behavior).parameters
+            extra = {}
+            if "on_delta" in declared:
+                extra["on_delta"] = on_delta
+            if "on_tool_call" in declared:
+                extra["on_tool_call"] = on_tool_call
+            outcome = behavior(
+                self._store, info["channel"], session_ref, message, call_index, **extra,
+            )
         # T035 visibility fix: this fake has no real per-chunk timeline, so
         # it simulates streaming with the one chunk it actually has (its
         # own whole outcome text) -- enough for a caller asserting

@@ -1817,6 +1817,7 @@ class EngineSessionManagerAdapter:
     def prompt(
         self, session_ref: str, message: str, cancel_event: threading.Event, *,
         on_delta: Callable[[str], bool] | None = None,
+        on_tool_call: Callable[[str, str | None, str | None, str | None], None] | None = None,
     ):
         """T035 visibility fix: ``on_delta``, when given, is called with each
         ``TURN_DELTA`` chunk's text the moment it is yielded by
@@ -1936,6 +1937,21 @@ class EngineSessionManagerAdapter:
                         except Exception:  # noqa: BLE001 - best-effort, never fails the turn
                             pass
                 elif event.kind == EngineEventKind.TOOL_CALL_OBSERVED:
+                    # The same observation the durable evidence below
+                    # records, also handed to the caller so a person can
+                    # watch what the model is doing while it does it --
+                    # ref/kind/title/status only, exactly the portable
+                    # fields EngineEvent carries (never raw arguments,
+                    # output or result; see its own docstring for why
+                    # those are deliberately not portable concepts).
+                    if on_tool_call is not None and event.tool_call_ref:
+                        try:
+                            on_tool_call(
+                                event.tool_call_ref, event.tool_call_kind,
+                                event.tool_call_title, event.tool_call_status,
+                            )
+                        except Exception:  # noqa: BLE001 - best-effort, never fails the turn
+                            pass
                     # T017: durable evidence, never raw tool output/args --
                     # see delegation.evidence module docstring.
                     if self._store is not None and task_id is not None:

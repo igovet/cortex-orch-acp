@@ -209,9 +209,123 @@ def test_a_running_workers_card_shows_what_it_is_doing(tmp_path):
     )
     releaser.join(timeout=10.0)
 
-    activity = [c for c in cards if "Reading calc.py" in str(c.get("text", ""))]
+    # What it is doing shows on the card's own title, next to whose card it
+    # is -- the collapsed card alone answers "what is the worker on".
+    activity = [c for c in cards if "Reading calc.py" in str(c.get("title", ""))]
     assert activity, f"the running worker's own turn never reached its card: {cards}"
     assert all(not c.get("new") for c in activity), "activity must update the existing card, never create a second one"
     assert all(c["status"] == "in_progress" for c in activity)
+    assert all("Worker: backend-dev" in c["title"] for c in activity), "the card stopped saying whose work it is"
+    # An unchanged card is never re-sent, however many wait ticks pass
+    # (the create and the ready update legitimately carry the same base
+    # title; it is the activity updates that used to repeat per tick).
+    activity_titles = [c["title"] for c in cards if " \u00b7 " in str(c.get("title", ""))]
+    assert len(activity_titles) == len(set(activity_titles)), (
+        f"the same activity card was sent more than once: {activity_titles}"
+    )
     # The worker's text is card content, never the coordinator's stream.
     assert "Reading calc.py" not in "".join(u for u in updates if isinstance(u, str))
+
+
+def test_a_workers_actions_are_collapsed_into_its_card_body(tmp_path):
+    """Requested while watching: the worker's actions should not all be in
+    the feed -- the card shows the one it is on, and the rest is there
+    when the card is opened."""
+    store, task_id = _task(tmp_path)
+    worker_may_finish = threading.Event()
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Assignment X", brief="do X", role="backend-dev",
+                acceptance="X done", request_key="reqX",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Delegated X.")
+        return PromptOutcome(StopReason.END_TURN, "Nothing new.")
+
+    def working_worker(store, channel, session_ref, message, call_index, on_tool_call=None):
+        if on_tool_call is not None:
+            on_tool_call("t1", "read", "Read calc.py", "completed")
+            on_tool_call("t2", "edit", "Edit calc.py", "in_progress")
+        worker_may_finish.wait(timeout=5.0)
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else working_worker
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, router), FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=3,
+    )
+    cards: list = []
+
+    def release_later():
+        for _ in range(100):
+            if any("Edit calc.py" in str(c.get("title", "")) for c in list(cards)):
+                break
+            threading.Event().wait(0.02)
+        worker_may_finish.set()
+
+    releaser = threading.Thread(target=release_later, daemon=True)
+    releaser.start()
+    runtime.start_prompt(task_id, "s1", "Do X.", [].append, threading.Event(), emit_tool_call=cards.append)
+    releaser.join(timeout=10.0)
+
+    latest = [c for c in cards if "Edit calc.py" in str(c.get("title", ""))]
+    assert latest, f"the action the worker is on never reached its card title: {cards}"
+    # The earlier action is not in the title any more, but it is still in
+    # the body -- that is the "open it to see the rest" half.
+    body = latest[-1].get("text") or ""
+    assert "Read calc.py" in body and "Edit calc.py" in body, body
+    assert "Read calc.py" not in latest[-1]["title"]
+    # One card for the assignment, not one per action.
+    assert len({c["tool_call_id"] for c in cards}) == 1, cards
+
+
+def test_an_explicit_language_choice_is_told_to_the_coordinator(tmp_path):
+    """Reported: the selector said Russian and the coordinator answered in
+    English. Nothing had ever told the model which language to answer in --
+    it followed the language of the prompt it was given."""
+    from cortex_runtime.acp import steering as acp_steering
+
+    store, task_id = _task(tmp_path)
+    seen: list[str] = []
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        seen.append(message)
+        return PromptOutcome(StopReason.END_TURN, "Готово.")
+
+    def router(store, channel, session_ref, launch, instructions):
+        return coordinator_behavior if channel is not None and channel.role == "coordinator" else None
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, router), FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=3,
+    )
+    acp_steering.set_language_override(store, task_id, "ru")
+    runtime.start_prompt(task_id, "s1", "Add a guard, in English words.", [].append, threading.Event())
+
+    assert seen, "the coordinator was never prompted"
+    assert "по-русски" in seen[0], seen[0]
+
+    # "auto" imposes nothing: the model keeps following the user.
+    second = tmp_path / "second"
+    second.mkdir()
+    store2, task2 = _task(second)
+    seen2: list[str] = []
+
+    def behavior2(store, channel, session_ref, message, call_index):
+        seen2.append(message)
+        return PromptOutcome(StopReason.END_TURN, "Done.")
+
+    runtime2 = OrchestratingRuntime(
+        store2, FakeSessionRuntime(store2, lambda s, c, sr, l, i: behavior2 if c is not None and c.role == "coordinator" else None),
+        FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=3,
+    )
+    acp_steering.set_language_override(store2, task2, "auto")
+    runtime2.start_prompt(task2, "s1", "Add a guard.", [].append, threading.Event())
+    assert seen2
+    assert "по-русски" not in seen2[0] and "in English" not in seen2[0], seen2[0]

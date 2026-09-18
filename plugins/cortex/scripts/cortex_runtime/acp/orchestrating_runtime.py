@@ -104,8 +104,43 @@ _WORKER_TOOL_CALL_KIND = "execute"
 _TOOL_CALL_STATUS_FOR_CANCELLED = "failed"
 
 
-# How much of a running worker's own turn a card ever carries (the tail).
-_WORKER_ACTIVITY_MAX_CHARS = 2000
+# The pinned ACP schema's ToolCallKind values. An engine is free to send
+# anything here (codex-acp and claude-agent-acp do not agree on the set),
+# and a value the schema does not define would make the card unrenderable,
+# so anything unrecognized becomes "other" rather than being dropped --
+# the call still shows, only its icon is generic.
+_ACP_TOOL_CALL_KINDS = frozenset({
+    "read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other",
+})
+
+
+def _acp_tool_call_kind(kind: str | None) -> str:
+    return kind if kind in _ACP_TOOL_CALL_KINDS else "other"
+
+
+# Likewise for status: the schema has exactly these four.
+_ACP_TOOL_CALL_STATUSES = frozenset({"pending", "in_progress", "completed", "failed"})
+
+
+def _acp_tool_call_status(status: str | None) -> str:
+    return status if status in _ACP_TOOL_CALL_STATUSES else "in_progress"
+
+
+# A worker's card carries the one thing it is doing right now, not its
+# whole feed -- so this bounds a single line, not a transcript.
+_WORKER_ACTIVITY_MAX_CHARS = 300
+
+# How many past actions a worker's expanded card keeps.
+_WORKER_ACTION_LOG_MAX_ENTRIES = 50
+
+# A tool call's title is one line on a card, never a place for a payload.
+_TOOL_CALL_TITLE_MAX_CHARS = 200
+
+# A worker card's title (role, work, and the action it is on right now).
+_WORKER_CARD_TITLE_MAX_CHARS = 300
+
+# Its expanded body.
+_WORKER_ACTION_LOG_MAX_CHARS = 4000
 
 
 def _display_role(role: str) -> str:
@@ -176,6 +211,7 @@ class SessionRuntime(Protocol):
     def prompt(
         self, session_ref: str, message: str, cancel_event: threading.Event, *,
         on_delta: Callable[[str], bool] | None = None,
+        on_tool_call: Callable[[str, str | None, str | None, str | None], None] | None = None,
     ) -> PromptOutcome: ...
 
 
@@ -438,6 +474,17 @@ class OrchestratingRuntime:
         # read by _continuation_loop's workers_running tick -- the tick
         # that already exists, never a second channel or a second card.
         self._worker_activity: dict[str, str] = {}
+        # Every action a worker has taken, in order -- the card's body,
+        # which a client shows only when the card is expanded. The title
+        # carries just the latest one, so the feed stays readable while
+        # the detail stays one click away.
+        self._worker_action_log: dict[str, list[str]] = {}
+        # Each worker card's own base title (role and work), so an
+        # activity update can extend it instead of replacing it.
+        self._worker_card_title: dict[str, str] = {}
+        # The last card payload actually sent per assignment, so an
+        # unchanged one is never sent twice.
+        self._worker_card_sent: dict[str, tuple] = {}
         # T020 (stop-race fix): the cancel_event of whichever start_prompt/
         # answer_question call currently owns this task's continuation loop
         # *in this process* -- lets stop_task() signal that loop to exit
@@ -1556,6 +1603,11 @@ class OrchestratingRuntime:
                 acp_steering.supersede_undelivered_steering(self._store, task_id)
                 return StopReason.CANCELLED
             prompt_text = _coalesce(claimed, revisions) if claimed else content
+            chosen_language = self._explicit_language(task_id)
+            if chosen_language is not None:
+                prompt_text = (
+                    f"{acp_messages.render('answer_in_language', chosen_language)}\n\n{prompt_text}"
+                )
             prompt_text, generation_delivery_id, delivery_blocked = self._begin_generation_delivery(
                 task_id, session_ref, COORDINATOR_ROLE_ID, prompt_text,
                 emit_update=emit_update, language=language,
@@ -1595,7 +1647,10 @@ class OrchestratingRuntime:
                 return emit_update(scrub_text(chunk_text, max_chars=_COORDINATOR_DELTA_MAX_CHARS), delta=True)
 
             try:
-                outcome = self._engine.prompt(session_ref, prompt_text, cancel_event, on_delta=_on_coordinator_delta)
+                outcome = self._engine.prompt(
+                    session_ref, prompt_text, cancel_event, on_delta=_on_coordinator_delta,
+                    on_tool_call=self._engine_tool_call_emitter(emit_tool_call),
+                )
                 from .. import _fault_injection
 
                 _fault_injection.checkpoint("t023_after_continuation_prompt")
@@ -1882,6 +1937,18 @@ class OrchestratingRuntime:
         )
         self._set_state(task_id, "running", wait_reason=None, wait_detail=None, no_progress_count=0)
 
+    def _explicit_language(self, task_id: str) -> str | None:
+        """The language the user actually chose, or ``None`` for "auto".
+
+        Distinct from :meth:`_resolve_language`, which always answers with
+        a concrete language (falling back to the script of what the user
+        last wrote). Only an explicit choice is ever imposed on the
+        coordinator itself -- on "auto" the model keeps following the user,
+        which is what "auto" means.
+        """
+        explicit = acp_steering.get_language_override(self._store, task_id)
+        return explicit if explicit in acp_messages.SUPPORTED_LANGUAGES else None
+
     def _resolve_language(self, task_id: str, *, content_hint: str | None = None) -> str:
         explicit = acp_steering.get_language_override(self._store, task_id)
         texts = acp_steering.recent_user_direct_texts(self._store, task_id)
@@ -2042,7 +2109,10 @@ class OrchestratingRuntime:
                         # Requirement: the title names the *resolved* role
                         # id, not the raw hint the coordinator typed --
                         # this is the first point a resolved id exists.
-                        fields["title"] = f"Worker: {_display_role(role_id)} — {requested.get('title', '')}"
+                        base_title = f"Worker: {_display_role(role_id)} — {requested.get('title', '')}"
+                        fields["title"] = base_title
+                        with self._lock:
+                            self._worker_card_title[assignment_ref] = base_title
                 emit_tool_call(fields)
             elif event.event_type == "worker_result" and event.assignment_ref:
                 assignment_ref = self._assignment_ref_for_attempt(task_id, event.assignment_ref)
@@ -2079,6 +2149,48 @@ class OrchestratingRuntime:
                     text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 ))
 
+    def _engine_tool_call_emitter(
+        self, emit_tool_call: Callable[[Mapping[str, Any]], bool] | None,
+        *, prefix: str = "", id_scope: str = "coordinator",
+    ):
+        """A callback for ``SessionRuntime.prompt``'s ``on_tool_call`` that
+        renders each of that session's own engine tool calls as an ACP
+        ToolCall card -- what is being read, edited, searched or run, while
+        it happens, which is otherwise visible only in durable evidence
+        nobody watching the session can see.
+
+        Carries exactly the portable fields ``EngineEvent`` has for a tool
+        call: ref, kind, title, status. Never arguments, output or result
+        -- those are deliberately not portable (see ``EngineEvent``), so a
+        card here is an accurate "it is reading calc.py", never a diff.
+
+        ``prefix`` labels whose call it is once more than one session is
+        working (a worker's role), and ``id_scope`` keeps two sessions'
+        cards from colliding when both engines happen to use the same
+        wire tool-call id. Returns ``None`` when no card channel is wired,
+        which every pre-existing caller relies on.
+        """
+        if emit_tool_call is None:
+            return None
+        seen: set[str] = set()
+
+        def on_tool_call(ref: str, kind: str | None, title: str | None, status: str | None) -> None:
+            card_id = f"call:{id_scope}:{ref}"
+            shown = scrub_text(title or "tool call", max_chars=_TOOL_CALL_TITLE_MAX_CHARS)
+            fields: dict[str, Any] = dict(
+                tool_call_id=card_id, status=_acp_tool_call_status(status),
+                title=f"{prefix}{shown}" if prefix else shown,
+            )
+            if ref in seen:
+                fields["new"] = False
+            else:
+                seen.add(ref)
+                fields["new"] = True
+                fields["kind"] = _acp_tool_call_kind(kind)
+            emit_tool_call(fields)
+
+        return on_tool_call
+
     def _emit_worker_activity_tool_calls(
         self, emit_tool_call: Callable[[Mapping[str, Any]], bool] | None,
     ) -> None:
@@ -2100,13 +2212,34 @@ class OrchestratingRuntime:
             return
         with self._lock:
             activity = dict(self._worker_activity)
-        for assignment_ref, text in activity.items():
-            if not text.strip():
+            logs = {ref: list(entries) for ref, entries in self._worker_action_log.items()}
+            titles = dict(self._worker_card_title)
+        for assignment_ref, latest in activity.items():
+            # The sentinel marks text the worker spoke (kept as a rolling
+            # tail) rather than a tool call's own one-line title; it never
+            # reaches the client.
+            latest = latest[1:] if latest.startswith("\u0000") else latest
+            latest = " ".join(latest.split())
+            if not latest:
                 continue
-            emit_tool_call(dict(
+            fields: dict[str, Any] = dict(
                 new=False, tool_call_id=_worker_tool_call_id(assignment_ref), status="in_progress",
-                text=scrub_text(text, max_chars=_WORKER_ACTIVITY_MAX_CHARS),
-            ))
+            )
+            base = titles.get(assignment_ref)
+            if base:
+                fields["title"] = scrub_text(f"{base} · {latest}", max_chars=_WORKER_CARD_TITLE_MAX_CHARS)
+            entries = logs.get(assignment_ref)
+            if entries:
+                fields["text"] = scrub_text("\n".join(entries), max_chars=_WORKER_ACTION_LOG_MAX_CHARS)
+            # This runs on every wait tick, but a worker is not doing
+            # something new on every tick: re-sending an identical card is
+            # pure wire noise (and a client redrawing it, flicker).
+            signature = (fields.get("title"), fields.get("text"))
+            with self._lock:
+                if self._worker_card_sent.get(assignment_ref) == signature:
+                    continue
+                self._worker_card_sent[assignment_ref] = signature
+            emit_tool_call(fields)
 
     def _emit_provisioning_tool_calls(
         self, emit_tool_call: Callable[[Mapping[str, Any]], bool] | None,
@@ -2834,25 +2967,40 @@ class OrchestratingRuntime:
                 with self._lock:
                     self._worker_turns_in_flight.add(assignment_ref)
 
+                # A worker's card shows the one thing it is working on now,
+                # never its whole feed: whichever of these two happened
+                # last wins, because that is what "what it is doing" means.
+                # Card content only -- never the client's message stream
+                # (PromptOutcome owns what a worker's text means to the
+                # coordinator; see SessionRuntime.prompt).
                 def _on_worker_delta(chunk_text: str, _ref: str = assignment_ref) -> bool:
-                    # Card content only -- never the client's message
-                    # stream (PromptOutcome owns what a worker's text
-                    # means for the coordinator; see SessionRuntime.prompt).
-                    # Through the same redaction choke point as every other
-                    # client-facing text this runtime emits.
                     with self._lock:
                         previous = self._worker_activity.get(_ref, "")
-                        self._worker_activity[_ref] = (previous + chunk_text)[-_WORKER_ACTIVITY_MAX_CHARS:]
+                        if not previous.startswith("\u0000"):
+                            previous = ""
+                        self._worker_activity[_ref] = "\u0000" + (previous[1:] + chunk_text)[-_WORKER_ACTIVITY_MAX_CHARS:]
                     return True
+
+                def _on_worker_tool_call(ref, kind, title, status, _ref=assignment_ref) -> None:
+                    action = (title or "tool call")[:_WORKER_ACTIVITY_MAX_CHARS]
+                    with self._lock:
+                        self._worker_activity[_ref] = action
+                        log = self._worker_action_log.setdefault(_ref, [])
+                        if not log or log[-1] != action:
+                            log.append(action)
+                            del log[:-_WORKER_ACTION_LOG_MAX_ENTRIES]
 
                 try:
                     outcome = self._engine.prompt(
-                        result.engine_session_ref, brief, cancel_event, on_delta=_on_worker_delta,
+                        result.engine_session_ref, brief, cancel_event,
+                        on_delta=_on_worker_delta, on_tool_call=_on_worker_tool_call,
                     )
                 finally:
                     with self._lock:
                         self._worker_turns_in_flight.discard(assignment_ref)
                         self._worker_activity.pop(assignment_ref, None)
+                        self._worker_action_log.pop(assignment_ref, None)
+                        self._worker_card_sent.pop(assignment_ref, None)
                 break
             except EngineTurnFailed as failure:
                 # T017: a worker's own engine turn failing (transport

@@ -26,6 +26,17 @@ DEFAULT_LANGUAGE = "en"
 SUPPORTED_LANGUAGES = ("en", "ru")
 
 _CATALOG: dict[str, dict[str, str]] = {
+    # The one entry here that is not shown to the user: it is prepended to
+    # the coordinator's own prompt when the user picked a language
+    # explicitly, because nothing else ever told the model which language
+    # to answer in -- it simply followed the language of whatever it was
+    # prompted with, so a Russian selection still produced English replies
+    # for an English-worded request. Rendered in the target language, which
+    # is itself the strongest instruction.
+    "answer_in_language": {
+        "en": "Always write your replies to the user in English, whatever language this prompt is in.",
+        "ru": "Всегда пиши свои ответы пользователю по-русски, независимо от того, на каком языке этот запрос.",
+    },
     "blocked_no_progress": {
         "en": "Blocked: no new worker result, question, or user input arrived after repeated waiting.",
         "ru": "Заблокировано: после многократного ожидания не появилось ни нового результата исполнителя, ни вопроса, ни ввода пользователя.",

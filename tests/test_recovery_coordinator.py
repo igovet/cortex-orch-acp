@@ -467,7 +467,7 @@ def test_steering_after_recovery_is_included_before_continuation(tmp_path):
     # the shared fake engine.
     original_prompt = engine.prompt
 
-    def _prompt(session_ref, message, cancel_event, *, on_delta=None):
+    def _prompt(session_ref, message, cancel_event, *, on_delta=None, on_tool_call=None):
         prompts_seen.append(message)
         from cortex_runtime.acp.orchestrating_runtime import PromptOutcome
 
