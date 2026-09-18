@@ -982,7 +982,29 @@ class OrchestratingRuntime:
             # regardless of whether this process itself ever opened this
             # (freshly allocated) attempt id before.
             launch["recovery"] = True
-        session_id = self._engine.open("shared_project_root", launch, composed_instructions(role_set))
+        instructions = composed_instructions(role_set)
+        # D-T035-04: hand the coordinator the same allowed-routes table its
+        # own ``delegate`` calls are checked against, so it can choose a
+        # role's engine/model/effort without a round trip -- absent
+        # entirely (never a placeholder) when no route policy file exists
+        # anywhere, or the one that does exists is malformed (surfaced
+        # separately by ``_authorize_dispatch``'s own malformed-policy
+        # event, never duplicated here).
+        try:
+            from ..configuration import route_policy as route_policy_module
+
+            policy, malformed = route_policy_module.load_route_policy(self._task_project_root(task_id))
+            if policy is not None and malformed is None:
+                table = route_policy_module.render_table(policy)
+                if table:
+                    instructions += (
+                        "\n\nAllowed worker routes per role (role: engine/model {efforts} default=effort; "
+                        "pass delegate's own engine/model/effort to choose one; omit to use the first "
+                        "listed route for that role):\n" + table + "\n"
+                    )
+        except Exception:  # noqa: BLE001 - never block coordinator startup over this
+            pass
+        session_id = self._engine.open("shared_project_root", launch, instructions)
         # T035 FINDING-02 fix (superseded, EXT-01 #2): ``self._engine.open``
         # (see ``delegation.live_adapters.EngineSessionManagerAdapter
         # .reconcile_configuration``) runs the coordinator's own first-turn
@@ -3400,6 +3422,12 @@ class OrchestratingRuntime:
             result = self._provisioning.delegate(
                 coordinator_channel, payload["title"], payload["brief"], payload["role"],
                 payload["acceptance"], payload["request_key"],
+                # D-T035-04: the coordinator's own optional route choice,
+                # carried verbatim from the ``delegation_requested`` event
+                # payload (``delegation.mcp_tools._coordinator_delegate``);
+                # every event predating this field is a plain dict without
+                # these keys, so ``.get`` keeps them replaying as omitted.
+                engine=payload.get("engine"), model=payload.get("model"), effort=payload.get("effort"),
             )
         except PortableError as error:
             result = None

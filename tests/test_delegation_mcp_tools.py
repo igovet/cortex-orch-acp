@@ -84,6 +84,32 @@ def test_delegate_returns_deterministic_assignment_ref_and_is_idempotent(tmp_pat
     assert len([e for e in events if e.event_type == "delegation_requested"]) == 1
 
 
+def test_delegate_carries_optional_engine_model_effort_into_the_event_payload(tmp_path):
+    # D-T035-04: the coordinator's own explicit route choice for this
+    # delegation must reach the durable event unchanged -- resolved later
+    # by delegation.provisioning/live_adapters, never defaulted here.
+    store, task_id, coordinator = _task(tmp_path)
+    args = dict(title="T", brief="B", role="backend-dev", acceptance="A", request_key="k1",
+                engine="codex-acp", model="gpt-5.6-terra", effort="medium")
+    mcp_tools.dispatch(store, coordinator, "delegate", args)
+    events = delegation_events.list_since(store, task_id)
+    requested = next(e for e in events if e.event_type == "delegation_requested")
+    assert requested.payload["engine"] == "codex-acp"
+    assert requested.payload["model"] == "gpt-5.6-terra"
+    assert requested.payload["effort"] == "medium"
+
+
+def test_delegate_without_engine_carries_none_into_the_event_payload(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    args = dict(title="T", brief="B", role="backend-dev", acceptance="A", request_key="k2")
+    mcp_tools.dispatch(store, coordinator, "delegate", args)
+    events = delegation_events.list_since(store, task_id)
+    requested = next(e for e in events if e.event_type == "delegation_requested")
+    assert requested.payload["engine"] is None
+    assert requested.payload["model"] is None
+    assert requested.payload["effort"] is None
+
+
 def test_worker_channel_cannot_call_coordinator_operations(tmp_path):
     store, task_id, coordinator = _task(tmp_path)
     worker = _worker_channel(store, task_id, coordinator)

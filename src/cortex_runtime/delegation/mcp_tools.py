@@ -63,6 +63,11 @@ def _coordinator_delegate(store, channel: ChannelContext, args: Mapping[str, Any
         store, channel.task_id, "delegation_requested", dedup_key,
         dict(request_key=request_key, title=args["title"], brief=args["brief"],
              role=args["role"], acceptance=args["acceptance"],
+             # D-T035-04: the coordinator's own optional route choice for
+             # this delegation, carried verbatim (never defaulted here --
+             # ``delegation.provisioning``/``live_adapters`` resolve an
+             # omitted value against the route policy).
+             engine=args.get("engine"), model=args.get("model"), effort=args.get("effort"),
              assignment_ref=assignment_ref, coordinator_channel_id=channel.channel_id),
         origin=channel.channel_id, assignment_ref=assignment_ref,
     )

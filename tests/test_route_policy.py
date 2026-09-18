@@ -204,6 +204,36 @@ def test_default_effort_applied_when_nothing_selected():
     assert policy.resolve_effort("implementation", "codex-acp", "terra", None) == "medium"
 
 
+# --- D-T035-04: coordinator-facing allowed-routes table -----------------
+
+def test_render_table_uses_the_short_role_alias_and_lists_every_entry():
+    entries = route_policy_module._parse_entries("worker-backend-dev", [
+        {"engine": "codex-acp", "model": "gpt-5.6-terra", "efforts": ["medium", "high"], "default_effort": "medium"},
+        {"engine": "claude-agent-acp", "model": "sonnet", "efforts": ["medium"], "default_effort": "medium"},
+    ])
+    policy = _policy(roles={"worker-backend-dev": entries}, default=None)
+    table = route_policy_module.render_table(policy)
+    assert table == (
+        "backend-dev: codex-acp/gpt-5.6-terra {high,medium} default=medium | "
+        "claude-agent-acp/sonnet {medium} default=medium"
+    )
+
+
+def test_render_table_includes_the_default_bucket_and_skips_empty_roles():
+    default_entries = route_policy_module._parse_entries("default", [
+        {"engine": "codex-acp", "model": "*", "efforts": ["*"]},
+    ])
+    policy = _policy(roles={"worker-explorer": ()}, default=default_entries)
+    table = route_policy_module.render_table(policy)
+    assert "worker-explorer" not in table
+    assert table == "default: codex-acp/* {*}"
+
+
+def test_render_table_of_no_policy_roles_and_no_default_is_empty():
+    policy = _policy(roles={}, default=None)
+    assert route_policy_module.render_table(policy) == ""
+
+
 # --- ceiling still wins over a permissive policy ------------------------
 
 def test_ceiling_still_wins_over_permissive_policy(tmp_path):

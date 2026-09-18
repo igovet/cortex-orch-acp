@@ -111,6 +111,38 @@ class RoutePolicy:
         raise _refuse(role, engine, model, requested_effort, candidates)
 
 
+def render_table(policy: RoutePolicy) -> str:
+    """D-T035-04: a compact role -> allowed-routes table, one line per role
+    actually named in ``policy`` (its own entries, or the ``default``
+    bucket when the file names one) -- delivered with the coordinator's
+    own instructions (``acp.orchestrating_runtime.OrchestratingRuntime
+    ._open_coordinator_session``) so it can choose a ``delegate`` call's
+    optional ``engine``/``model``/``effort`` without a round trip to
+    discover what is even allowed. Uses each role's own short alias
+    (``portable.roles.WORKER_ALIASES``) when one exists, since that is the
+    same short name the coordinator already uses in ``delegate``'s own
+    ``role`` argument."""
+    from ..portable.roles import WORKER_ALIASES
+
+    reverse_alias = {full: short for short, full in WORKER_ALIASES.items()}
+    names = sorted(policy.roles)
+    if policy.default is not None:
+        names.append("default")
+    lines = []
+    for name in names:
+        entries = policy.default if name == "default" else policy.roles.get(name)
+        if not entries:
+            continue
+        label = reverse_alias.get(name, name)
+        routes = " | ".join(
+            f"{entry.engine}/{entry.model} {{{','.join(sorted(entry.efforts))}}}"
+            + (f" default={entry.default_effort}" if entry.default_effort else "")
+            for entry in entries
+        )
+        lines.append(f"{label}: {routes}")
+    return "\n".join(lines)
+
+
 def _refuse(role: str, engine: str, model: str | None, requested_effort: str | None, entries) -> PortableError:
     allowed = sorted(
         f"{entry.engine}/{entry.model}:{{{','.join(sorted(entry.efforts))}}}" for entry in entries

@@ -104,6 +104,17 @@ def test_delegate_rejects_out_of_bound_string():
         dc.validate("coordinator", "delegate", args)
 
 
+def test_delegate_accepts_optional_engine_model_effort():
+    # D-T035-04: the coordinator's own route choice for this delegation --
+    # all three optional, never required (VALID_DELEGATE carries none of
+    # them and still validates, see test_delegate_valid).
+    args = dict(VALID_DELEGATE, engine="codex-acp", model="gpt-5.6-terra", effort="medium")
+    assert dc.validate("coordinator", "delegate", args) == args
+    assert "engine" not in dc.schemas_for("coordinator")["delegate"]["required"]
+    assert "model" not in dc.schemas_for("coordinator")["delegate"]["required"]
+    assert "effort" not in dc.schemas_for("coordinator")["delegate"]["required"]
+
+
 def test_unknown_operation_for_role_kind():
     with pytest.raises(StoreError) as excinfo:
         dc.validate("coordinator", "publish_result", dict(report_ref="r_" + "a" * 12, summary="x", request_key="k"))

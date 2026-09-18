@@ -388,7 +388,7 @@ def test_new_process_retry_with_no_held_secret_fails_explicitly_never_opens_uncr
     original_step_engine_session = provisioning_module.ProvisioningService._step_engine_session
     calls = {"n": 0}
 
-    def stop_before_engine_session(self, idempotency_key, row, coordinator_channel, role_set):
+    def stop_before_engine_session(self, idempotency_key, row, coordinator_channel, role_set, **kwargs):
         calls["n"] += 1
         raise RuntimeError("simulated process crash before the engine_session step")
 

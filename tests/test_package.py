@@ -221,8 +221,11 @@ def test_orchestrator_routes_conditional_procedures_with_valid_links():
     # worker, publish the assignment and check the result" -- machinery the
     # user is already inside and never asked about. Saying that plainly
     # costs a few hundred characters and is worth them; this guard exists
-    # to stop drift, not to price out a rule the product needs.
-    assert len(body) < 7990
+    # to stop drift, not to price out a rule the product needs. D-T035-04
+    # adds the one rule that makes the delivered per-role route table
+    # usable: that choosing the worker's provider/model/effort is the
+    # coordinator's own job.
+    assert len(body) < 8300
     links = re.findall(r'\]\((references/[^)]+)\)', body)
     assert len(set(links)) >= 7
     for link in links:

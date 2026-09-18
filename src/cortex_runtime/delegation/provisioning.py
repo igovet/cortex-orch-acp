@@ -338,6 +338,10 @@ class ProvisioningService:
         role: str,
         acceptance: str,
         request_key: str,
+        *,
+        engine: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
     ) -> ProvisioningResult:
         if not isinstance(channel, ChannelContext):
             raise PortableError(
@@ -422,7 +426,7 @@ class ProvisioningService:
             allow_unqualified_delivery=self._allow_unqualified_delivery,
         )
 
-        return self._run_steps(idempotency_key, channel, role_set)
+        return self._run_steps(idempotency_key, channel, role_set, engine=engine, model=model, effort=effort)
 
     def _result_from_row(self, row) -> ProvisioningResult:
         return ProvisioningResult(
@@ -466,7 +470,10 @@ class ProvisioningService:
             # secret past this call.
             self._pending_channel_secrets.pop(idempotency_key, None)
 
-    def _run_steps(self, idempotency_key: str, channel: ChannelContext, role_set) -> ProvisioningResult:
+    def _run_steps(
+        self, idempotency_key: str, channel: ChannelContext, role_set,
+        *, engine: str | None = None, model: str | None = None, effort: str | None = None,
+    ) -> ProvisioningResult:
         while True:
             with self._store.connection() as db:
                 row = _row(db, idempotency_key)
@@ -496,7 +503,7 @@ class ProvisioningService:
             elif step == "context_snapshot":
                 self._step_context_snapshot(idempotency_key, row, role_set)
             elif step == "engine_session":
-                self._step_engine_session(idempotency_key, row, channel, role_set)
+                self._step_engine_session(idempotency_key, row, channel, role_set, engine=engine, model=model, effort=effort)
             else:  # pragma: no cover - defensive; STEP_ORDER is closed
                 raise PortableError(
                     category=PortableErrorCategory.INDETERMINATE_WRITE,
@@ -625,7 +632,10 @@ class ProvisioningService:
                 db.rollback()
                 raise
 
-    def _step_engine_session(self, idempotency_key: str, row, coordinator_channel: ChannelContext, role_set) -> None:
+    def _step_engine_session(
+        self, idempotency_key: str, row, coordinator_channel: ChannelContext, role_set,
+        *, engine: str | None = None, model: str | None = None, effort: str | None = None,
+    ) -> None:
         with self._store.connection() as db:
             current_epoch = db.execute(
                 "SELECT epoch FROM task_owners WHERE task_id=?", (row["task_id"],)
@@ -721,6 +731,14 @@ class ProvisioningService:
                 resolved_route_id=resolved_route.get("route_id"),
                 resolved_connection_id=resolved_route.get("connection_id"),
                 resolved_model=resolved_route.get("model"),
+                # D-T035-04: the coordinator's own explicit (or omitted)
+                # route choice for this delegation, carried unresolved --
+                # ``EngineSessionManagerAdapter.open`` is where the route
+                # policy and connections registry are actually resolved/
+                # validated (it already loads both for ``_authorize_
+                # dispatch``), never here (this module has no project_root/
+                # environ of its own to resolve them with).
+                requested_engine=engine, requested_model=model, requested_effort=effort,
             )
             try:
                 session_ref = self._engine.open(row["workspace_binding_id"], launch, composed_instructions(role_set))

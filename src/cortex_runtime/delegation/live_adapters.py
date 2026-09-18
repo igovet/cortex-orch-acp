@@ -537,6 +537,20 @@ class EngineSessionManagerAdapter:
             (channel_id, channel_secret, project_root)
             if channel_id and channel_secret else None
         )
+        # D-T035-04: the coordinator's own explicit (or omitted, meaning
+        # "pick the role's first allowed policy entry") route choice for
+        # this one delegation, resolved here -- into ``launch["resolved_
+        # connection_id"]``/``["resolved_model"]``/``["parameters"]
+        # ["effort"]`` -- against the route policy and connections
+        # registry this method already loads (see ``_authorize_dispatch``)
+        # before the override-connection-id selection just below ever
+        # runs, so a coordinator-chosen route reaches ``record`` exactly
+        # like a T027 mixed-team one. A no-op for the coordinator's own
+        # session (``launch`` carries no ``assignment_id``) and whenever a
+        # fallback ``route_override`` is already present (fallback always
+        # wins, unchanged).
+        if self._store is not None:
+            self._resolve_requested_route(launch, project_root)
         # EXT-01 carried item: exactly one resolved connection id for this
         # attempt, from exactly one of two sources, both already-authorized
         # or already-role-resolved *before* open() ever runs -- never both,
@@ -1190,6 +1204,121 @@ class EngineSessionManagerAdapter:
             route_engine=record.engine, route_connection_id=record.id, resource_policy=policy,
         )
 
+    def _resolve_requested_route(self, launch, project_root) -> None:
+        """D-T035-04: the coordinator, not the user's own form selection,
+        decides which allowed engine/model/effort a delegated role gets --
+        resolved here from ``delegate``'s own optional ``engine``/
+        ``model``/``effort`` arguments (threaded through unresolved as
+        ``launch["requested_engine"/"requested_model"/"requested_effort"]``
+        by ``delegation.provisioning``), the one place a route policy and
+        the connections registry are both already available (see
+        :meth:`_authorize_dispatch`, called a few lines below this
+        method's own caller).
+
+        A no-op for the coordinator's own session (no ``assignment_id``),
+        a fallback attempt (``route_override`` already present -- fallback
+        always wins, unchanged), and an ordinary T027 mixed-team delegation
+        that already resolved its own override (``resolved_connection_id``
+        already set) with no explicit ``requested_engine`` of its own to
+        take precedence over it.
+
+        When ``requested_engine`` names an engine: validates it (and
+        ``requested_model``/``requested_effort``) against the route policy
+        exactly like :meth:`_authorize_dispatch` does for an already-
+        resolved route -- ``RoutePolicy.resolve_effort`` raises the same
+        ``route_policy_not_authorized`` (naming what IS allowed) on refusal,
+        never silently substituting a different engine/model. When no
+        policy file exists at all, an explicit request is honored
+        unvalidated (nothing to narrow it against yet).
+
+        When ``requested_engine`` is absent and a policy exists for this
+        role (its own entries, or the ``default`` bucket): falls back to
+        that role's *first* allowed entry's engine/model/default_effort --
+        the coordinator's own instructions carry this exact table (see
+        ``acp.orchestrating_runtime.OrchestratingRuntime
+        ._open_coordinator_session``), so an omitted choice still dispatches
+        on an allowed route rather than silently inheriting whatever engine
+        the coordinator itself happens to be running on.
+
+        Either way, resolves the chosen engine to a real connection via
+        ``connections.registry`` -- raises ``PortableError(code=
+        "engine_not_connected")`` (never substitutes a different engine)
+        when the user has no connection for it.
+        """
+        if launch.get("route_override") is not None or not launch.get("assignment_id"):
+            return
+        if launch.get("resolved_connection_id") is not None:
+            # This task carries an explicit T027 mixed-team profile that
+            # already resolved this role's route. That profile is a
+            # deliberate per-task statement and outranks a deployment-wide
+            # policy file, so the coordinator's choice never overrides it
+            # -- the policy narrows what a role may use, it does not
+            # reopen a route decision the task itself already made.
+            return
+        requested_engine = launch.get("requested_engine")
+        role = launch.get("role_id") or "worker"
+        from ..configuration import route_policy as route_policy_module
+
+        policy, malformed = route_policy_module.load_route_policy(project_root, self._environ)
+        requested_model = launch.get("requested_model")
+        requested_effort = launch.get("requested_effort")
+        if policy is None or malformed is not None:
+            if requested_engine is None:
+                return
+            engine, model, effort = requested_engine, requested_model, requested_effort
+        elif requested_engine is not None:
+            effort = policy.resolve_effort(role, requested_engine, requested_model, requested_effort)
+            engine, model = requested_engine, requested_model
+        else:
+            entries = policy.roles.get(role) or policy.default
+            if not entries:
+                return
+            first = entries[0]
+            engine = first.engine
+            model = None if first.model == route_policy_module.WILDCARD else first.model
+            effort = first.default_effort
+        from ..connections import registry as connection_registry
+        from ..portable.errors import PortableError, PortableErrorCategory
+
+        # A raw registry lookup, never ``connections.onboarding
+        # .resolve_connection_for_route``'s stricter live login/credential
+        # re-verification -- that check runs, exactly once, a few lines
+        # below this method's own caller (the pre-existing "record =
+        # state.connections.get(override_connection_id)" branch this
+        # method feeds ``launch["resolved_connection_id"]`` into), the
+        # same as every other route-override source (T027 mixed-team,
+        # fallback). This only ever needs to know whether the requested
+        # engine has *a* connection at all.
+        state = connection_registry.read_registry(self._environ)
+        connection_id = next(
+            (candidate_id for candidate_id, candidate in state.connections.items() if candidate.engine == engine),
+            None,
+        )
+        if connection_id is None:
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION,
+                code="engine_not_connected",
+                remediation=(
+                    f"role {role!r} requires engine {engine!r} for this delegation, but this user has "
+                    "no connection for it; connect that engine (see cortex_acp_setup.py) before "
+                    "delegating this role with it."
+                ),
+                retry_eligible=False,
+                field="engine",
+            )
+        launch["resolved_connection_id"] = connection_id
+        launch["resolved_model"] = model
+        # What authorized this route, recorded with the attempt. The
+        # task's own route profile did not: absent an explicit mixed-team
+        # profile it authorizes only the coordinator's route, and this
+        # route has no id under it to check (route ids exist only inside
+        # such a profile's own ``route_details``). Saying so in the audit
+        # is the difference between a permission granted by the user's
+        # route policy and a check that quietly passed.
+        launch["route_basis"] = "route_policy"
+        if effort:
+            launch["parameters"] = dict(launch.get("parameters") or {}, effort=effort)
+
     def _authorize_dispatch(self, record, task_id, launch, project_root=None) -> None:
         """T027: refuse *before* any capacity reservation/process launch
         when this attempt's role is not authorized for the route it is
@@ -1317,6 +1446,9 @@ class EngineSessionManagerAdapter:
         fingerprint = routing_authorization.fingerprint_params(launch.get("parameters") or {})
         is_fallback = launch.get("route_override") is not None
         detail = dict(role=role, route_connection_id=record.id)
+        route_basis = launch.get("route_basis")
+        if route_basis:
+            detail["route_basis"] = route_basis
         if is_fallback:
             detail["failure_class"] = launch.get("fallback_failure_class")
         routing_store.record_attempt_audit(

@@ -100,6 +100,27 @@ COORDINATOR_OPERATIONS = {
                 "Concrete, evidence-checkable acceptance criteria for this delegation.",
                 4_000,
             ),
+            "engine": string(
+                "Optional: the engine to dispatch this role's worker on (for example "
+                "'codex-acp' or 'claude-agent-acp'), chosen from this role's own line in the "
+                "allowed-routes table delivered with these instructions. Omit to let the "
+                "runtime pick that role's first allowed route from the route policy.",
+                64,
+                minimum=0,
+            ),
+            "model": string(
+                "Optional: model name for 'engine', from the same allowed-routes line. Only "
+                "meaningful together with 'engine'; ignored if 'engine' is omitted.",
+                80,
+                minimum=0,
+            ),
+            "effort": string(
+                "Optional: effort/reasoning level for 'engine'+'model' (for example 'medium' "
+                "or 'high'), from the same allowed-routes line's '{...}' set. Omit to use that "
+                "route's own default effort.",
+                32,
+                minimum=0,
+            ),
         },
         ["title", "brief", "role", "acceptance"],
     ),
