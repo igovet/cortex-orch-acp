@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-ENGINE_DIR = Path(__file__).resolve().parents[1] / "plugins/cortex/scripts/cortex_runtime/engine"
+ENGINE_DIR = Path(__file__).resolve().parents[1] / "src/cortex_runtime/engine"
 FORBIDDEN_MODULE_SUBSTRINGS = (
     "codex_adapter",  # the *legacy* module name (this task's own module is codex_adapter_acp / codex_install)
     "server",

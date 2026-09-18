@@ -1,11 +1,11 @@
 # Cortex repository development
 
-Use `python3`. Runtime behavior belongs entirely below `plugins/cortex/`.
+Use `python3`. Runtime behavior belongs entirely below `./`.
 Do not activate orchestration merely because this repository is named Cortex;
 only an explicit user selection activates the bundled orchestrator skill.
 
-Cortex is an incoming ACP v1 stdio agent (`plugins/cortex/scripts/cortex_acp.py`,
-`plugins/cortex/scripts/cortex_runtime/acp/`), not a plugin hosted inside another
+Cortex is an incoming ACP v1 stdio agent (`src/cortex_acp.py`,
+`src/cortex_runtime/acp/`), not a plugin hosted inside another
 agent's process. See `docs/acp/index.md` for the full section map. T033 removed
 the entire Codex-plugin/gateway harness (the MITM gateway, the pinned-dependency
 installer, native Codex profile registration, the lifecycle hook dispatcher, the

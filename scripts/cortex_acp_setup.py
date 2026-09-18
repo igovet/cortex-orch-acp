@@ -77,7 +77,7 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
-sys.path.insert(0, str(SCRIPTS.parent / "plugins" / "cortex" / "scripts"))
+sys.path.insert(0, str(SCRIPTS.parent / "src"))
 
 from cortex_runtime.catalog import discovery, refresh as catalog_refresh, store as catalog_store  # noqa: E402
 from cortex_runtime.configuration import store as configuration_store  # noqa: E402

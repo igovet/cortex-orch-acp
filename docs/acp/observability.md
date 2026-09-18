@@ -9,7 +9,7 @@ replaces an existing durable evidence path (the T016 `task_events` log,
 T027's `attempt_route_audit`, T022's `context_generations`/
 `capsule_deliveries`, ...); it reads and joins those, plus two new tables,
 to build the metrics/attribution this task's own acceptance bullets
-require (`plugins/cortex/scripts/cortex_runtime/observability/`).
+require (`src/cortex_runtime/observability/`).
 
 ## 1. Structured events (`observability.events`)
 

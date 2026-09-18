@@ -261,7 +261,7 @@ results and rejected attempts.
 
 This section described the Codex plugin/gateway harness's `codex_app`
 Desktop provider and its static send-message observer. T033 (ACP migration)
-deleted that harness entirely (`plugins/cortex/hooks/`, `cortex_hook.py`,
+deleted that harness entirely (`./hooks/`, `cortex_hook.py`,
 `cortex_runtime/hooks.py`, `cortex_runtime/gateway/`,
 `cortex_runtime/codex_adapter.py`); there is no `codex_app` MCP server, no
 static send-message-to-thread observer, and no per-tool disable filter in
@@ -274,7 +274,7 @@ section used to describe.
 ## Lifecycle hooks (removed, T033)
 
 The Codex-plugin-harness-era hooks manifest and local Python handler
-(`plugins/cortex/hooks/hooks.json`, `cortex_runtime/hooks.py`) described in
+(`./hooks/hooks.json`, `cortex_runtime/hooks.py`) described in
 this section no longer exist. There is no `PreToolUse`, `UserPromptSubmit`,
 `SessionStart(compact)`, or `Stop` hook handler packaged with the ACP-only
 product, and no host trust prompt for one. See "Source capture" in

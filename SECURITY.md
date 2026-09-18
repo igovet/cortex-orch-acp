@@ -83,7 +83,7 @@ before nested operation parsing or executor dispatch and retains no operand.
 
 ## P1 semantic capability and evidence contract
 
-`plugins/cortex/policy/capability-manifest-v1.json` is a closed versioned policy
+`./policy/capability-manifest-v1.json` is a closed versioned policy
 declaration, consumed by the repository runtime for bounded decisions and
 evidence-admissibility checks. It does not mint a bearer token or claim installed
 host enforcement. Canonical operations use a versioned semantic tuple; aliases,
@@ -631,7 +631,7 @@ verified. Source and report provenance (`cortex_runtime/acp/replay_store.py`)
 help the coordinator decide whether earlier evidence is still usable.
 
 T033 (ACP migration) removed the Codex-plugin-harness-era lifecycle hook
-dispatcher (`plugins/cortex/hooks/`, `cortex_hook.py`,
+dispatcher (`./hooks/`, `cortex_hook.py`,
 `cortex_runtime/hooks.py`) entirely; there is no packaged `PreToolUse`,
 `UserPromptSubmit`, or `Stop` hook handler, and no host trust prompt for one.
 Every mutation reaches the store only through a dispatched, channel-verified

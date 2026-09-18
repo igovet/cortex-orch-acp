@@ -3,7 +3,7 @@ exposure of the delegation operations (delegate/list_events/clarify/cancel/
 decide for a coordinator channel; ask_question/publish_result for a worker
 channel), role-filtered in both tools/list and tools/call.
 
-Spawns the real ``plugins/cortex/scripts/cortex.py`` entry point as a
+Spawns the real ``src/cortex.py`` entry point as a
 subprocess (never a real engine) against a tmp project store, exactly the
 process boundary described in docs/acp/orchestration.md: this test's
 subprocess plays the role of "an engine's own Cortex MCP child process".
@@ -24,7 +24,7 @@ from cortex_runtime.store import Store
 from cortex_runtime.trusted_channel import issue_channel_tx
 
 ROOT = Path(__file__).resolve().parents[1]
-CORTEX_PY = ROOT / "plugins/cortex/scripts/cortex.py"
+CORTEX_PY = ROOT / "src/cortex.py"
 
 
 def _storage_only_home(home: Path) -> Path:

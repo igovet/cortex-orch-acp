@@ -20,9 +20,9 @@ def test_stamped_package_and_profiles():
     assert all((PLUGIN/path).is_file() for path in payload)
     expected_runtime={
         Path(path).name for path in payload
-        if Path(path).parent==Path('scripts/cortex_runtime') and path.endswith('.py')
+        if Path(path).parent==Path('src/cortex_runtime') and path.endswith('.py')
     }
-    assert {p.name for p in (PLUGIN/'scripts/cortex_runtime').glob('*.py')}==expected_runtime
+    assert {p.name for p in (PLUGIN/'src/cortex_runtime').glob('*.py')}==expected_runtime
 
 
 
@@ -172,7 +172,7 @@ def test_coordinator_native_worker_tracking_is_distinct_from_app_task_management
     assert rule in orchestrator
     assert '`create_thread`, `read_thread`, `wait_threads` or `send_message_to_thread`' in orchestrator
     assert 'reserved for explicit user-owned\ntask management, not worker coordination.' in orchestrator
-    assert 'scripts/cortex_runtime/store.py' in payload
+    assert 'src/cortex_runtime/store.py' in payload
     assert (PLUGIN/'skills/orchestrator/SKILL.md').is_file()
     package_version = json.loads((PLUGIN/'package-identity.json').read_text())['version']
     assert package_version.startswith('1.0.0+sha256.')
@@ -391,7 +391,7 @@ def test_prompt_and_skill_editing_subagents_use_the_explicit_sol_medium_override
 
 
 def test_write_report_description_matches_artifact_schema():
-    source=(ROOT/'plugins/cortex/scripts/cortex_runtime/contracts.py').read_text()
+    source=(ROOT/'src/cortex_runtime/contracts.py').read_text()
     assert 'Metadata arrays use the advertised item schemas' in source
     assert 'Never put Markdown bodies or shell interpolation' in source
     assert 'writer metadata, arrays, chunks' not in source

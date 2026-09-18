@@ -25,7 +25,7 @@ from pathlib import Path
 from cortex_runtime.portable.engine_contract import StopReason
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = ROOT / "plugins" / "cortex" / "scripts"
+SCRIPTS = ROOT / "src"
 TESTS_DIR = ROOT / "tests"
 
 # T010 (ACP configuration UI) added connection/catalog/user-default reads to

@@ -18,7 +18,7 @@ branch, the native-index host-source reader, and the `phase2_cli_*`
 external-evaluator preparation scripts and tests. `server.py` now requires
 a trusted channel for every `tools/call`. Relocate the package
 identity/stamp out of the deleted `.codex-plugin/plugin.json` into
-`plugins/cortex/package-identity.json` (same `1.0.0+sha256.<16 hex>`
+`./package-identity.json` (same `1.0.0+sha256.<16 hex>`
 scheme and stamp/validate semantics), and relocate the still-needed
 payload-digest and dev-candidate dependency-identity helpers out of the
 deleted `cortex_runtime.runtime.state` into `scripts/cortex_package.py`.

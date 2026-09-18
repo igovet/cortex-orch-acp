@@ -1,7 +1,7 @@
 # ACP client integration (T011)
 
-Cortex is an incoming ACP v1 stdio agent (`plugins/cortex/scripts/cortex_acp.py`,
-implemented in `plugins/cortex/scripts/cortex_runtime/acp/`). This section
+Cortex is an incoming ACP v1 stdio agent (`src/cortex_acp.py`,
+implemented in `src/cortex_runtime/acp/`). This section
 covers registering Cortex as a selectable Custom Agent in a real ACP client,
 without any Registry submission dependency, and the no-paid startup smoke
 harness that validates the launch/protocol surface before any live client

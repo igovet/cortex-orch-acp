@@ -11,11 +11,11 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import cortex_acp  # noqa: E402
 from cortex_runtime.packaging import pinned  # noqa: E402
 
-SCRIPTS = Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"
+SCRIPTS = Path(__file__).resolve().parents[1] / "src"
 
 
 def test_fail_closed_on_manifest_error(monkeypatch, capsys):

@@ -13,8 +13,35 @@ import stat
 from generate_agent_profiles import check as check_agent_profiles
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN = ROOT/'plugins/cortex'
+PLUGIN = ROOT
 BASE = '1.0.0'
+
+# What actually ships. Named explicitly because the repository root is no
+# longer a container for the payload -- it *is* the project (the plugin
+# layout was removed with the plugin, T033/T035), so walking it would fold
+# tests, docs and development scripts into the package identity and make
+# it change for reasons that have nothing to do with what runs.
+PAYLOAD_ENTRIES = (
+    'src', 'skills', 'agents', 'agent-sources', 'assets', 'policy', 'report-templates',
+    'package-identity.json', 'pinned-dependencies.json', 'profiles.json',
+    'requirements.lock', 'requirements.txt', 'runtime-payload.json', '.mcp.json',
+)
+
+
+def payload_paths(root):
+    """Every file of the payload, in a stable order, as (relative, path)."""
+    entries = []
+    for name in PAYLOAD_ENTRIES:
+        entry = root/name
+        if not entry.exists():
+            continue
+        if entry.is_file():
+            entries.append((name, entry))
+            continue
+        for path in sorted(entry.rglob('*')):
+            if path.is_file() or path.is_symlink():
+                entries.append((path.relative_to(root).as_posix(), path))
+    return sorted(entries)
 
 
 def _tree_digest(root):
@@ -89,15 +116,15 @@ def _assert_no_symlink_tree(path, *, label='candidate'):
 
 def payload_digest(plugin):
     digest=hashlib.sha256()
-    _assert_no_symlink_tree(plugin, label='payload')
-    for path in sorted(plugin.rglob('*')):
+    for name in PAYLOAD_ENTRIES:
+        entry=plugin/name
+        if entry.is_dir():
+            _assert_no_symlink_tree(entry, label='payload')
+    for relative,path in payload_paths(plugin):
         if path.is_symlink():
             raise ValueError('symlink in payload')
-        if not path.is_file():
-            continue
         if '__pycache__' in path.parts or path.suffix in {'.pyc','.pyo'}:
             raise ValueError('bytecode in payload')
-        relative=path.relative_to(plugin).as_posix()
         body=path.read_bytes()
         if relative=='package-identity.json':
             value=json.loads(body); value['version']=BASE
@@ -140,7 +167,7 @@ def validate(plugin=PLUGIN):
                 '## Report class selection')):
             raise ValueError('incomplete specialist structure')
     declared=json.loads((plugin/'runtime-payload.json').read_text())['files']
-    actual=sorted(p.relative_to(plugin).as_posix() for p in (plugin/'scripts').rglob('*.py'))
+    actual=sorted(p.relative_to(plugin).as_posix() for p in (plugin/'src').rglob('*.py'))
     if declared!=actual:
         raise ValueError('runtime payload differs from manifest')
     capability_manifest=json.loads((plugin/'policy/capability-manifest-v1.json').read_text())
@@ -195,20 +222,20 @@ def prepare():
     target=candidates/version
     if target.exists():
         _assert_no_symlink_tree(target, label='candidate')
-        validate(target/'plugins/cortex')
-        if payload_digest(target/'plugins/cortex')!=payload_digest(PLUGIN):
+        validate(target/'.')
+        if payload_digest(target/'.')!=payload_digest(PLUGIN):
             raise ValueError('candidate content mismatch')
     else:
         temp=Path(tempfile.mkdtemp(prefix='.staging-',dir=candidates))
         try:
-            shutil.copytree(PLUGIN,temp/'plugins/cortex')
+            shutil.copytree(PLUGIN,temp/'.')
             (temp/'.agents/plugins').mkdir(parents=True)
             shutil.copyfile(ROOT/'.agents/plugins/marketplace.json',temp/'.agents/plugins/marketplace.json')
-            validate(temp/'plugins/cortex')
+            validate(temp/'.')
             os.replace(temp,target)
         finally:
             if temp.exists(): shutil.rmtree(temp)
-    receipt=dict(version=version,digest=payload_digest(PLUGIN),candidate=str(target),plugin=str(target/'plugins/cortex'),dependency_manifest_digest=manifest_digest,dependency_bytes_digest=dependency_bytes_digest,dependency_digest=dependency_digest)
+    receipt=dict(version=version,digest=payload_digest(PLUGIN),candidate=str(target),plugin=str(target/'.'),dependency_manifest_digest=manifest_digest,dependency_bytes_digest=dependency_bytes_digest,dependency_digest=dependency_digest)
     file=dev/'.codex/cortex-candidate.json'
     fd,temp=tempfile.mkstemp(dir=file.parent)
     with os.fdopen(fd,'w') as stream:

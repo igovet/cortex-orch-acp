@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """No-paid startup smoke harness for the production incoming ACP agent.
 
-Spawns the real ``plugins/cortex/scripts/cortex_acp.py`` entry point (never
+Spawns the real ``src/cortex_acp.py`` entry point (never
 a test-only fake runtime -- see ``tests/acp_fakes.py`` for the fake used by
 pytest) against a fresh temporary project directory and a fresh temporary
 ``HOME``/``XDG_CONFIG_HOME``/``XDG_STATE_HOME``, using a minimal, explicitly
@@ -47,7 +47,7 @@ frame -- is not something this harness can distinguish from a client
 itself misbehaving, because by the time this harness's own reader thread
 starts consuming stdout, the write already happened. A real client's own
 stdout parsing during T035 GUI qualification, or a manual
-``python3 -B plugins/cortex/scripts/cortex_acp.py < /dev/null | head -c 200
+``python3 -B src/cortex_acp.py < /dev/null | head -c 200
 | xxd`` byte-level check, remains the authoritative check for this
 specific failure mode; see ``docs/acp/real-client-runbook.md``'s
 stdout-clean-verification row.
@@ -69,10 +69,10 @@ import uuid
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = REPO_ROOT / "plugins" / "cortex" / "scripts"
+SCRIPTS_DIR = REPO_ROOT / "src"
 AGENT_ENTRY = SCRIPTS_DIR / "cortex_acp.py"
 SCHEMA_PATH = REPO_ROOT / "tests" / "fixtures" / "acp" / "schema-1.4.0.json"
-PLUGIN_JSON = REPO_ROOT / "plugins" / "cortex" / "package-identity.json"
+PLUGIN_JSON = REPO_ROOT / "package-identity.json"
 
 READ_TIMEOUT_SECONDS = 10.0
 PROC_EXIT_TIMEOUT_SECONDS = 15.0

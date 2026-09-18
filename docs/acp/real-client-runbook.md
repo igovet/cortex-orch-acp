@@ -18,7 +18,7 @@ by the time the harness's reader thread starts consuming stdout, any such
 write already landed ahead of the first protocol frame, and the harness has
 no way to distinguish that from the client itself misbehaving. The
 "stdout-clean verification via logs" row below (and, independently, a
-manual `python3 -B plugins/cortex/scripts/cortex_acp.py < /dev/null | head
+manual `python3 -B src/cortex_acp.py < /dev/null | head
 -c 200 | xxd` byte-level check) is the authoritative check for this
 specific failure mode, not the automated harness.
 

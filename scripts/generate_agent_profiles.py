@@ -10,7 +10,7 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN = ROOT / "plugins/cortex"
+PLUGIN = ROOT / "."
 SOURCES = PLUGIN / "agent-sources"
 AGENTS = PLUGIN / "agents"
 WORKER_REFERENCES = (

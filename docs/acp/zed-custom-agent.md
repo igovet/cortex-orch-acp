@@ -36,7 +36,7 @@ Add this inside the top-level `"agent_servers"` object in Zed's
     "Cortex": {
       "type": "custom",
       "command": "<ABSOLUTE_PATH_TO_python3>",
-      "args": ["-B", "<ABSOLUTE_PATH_TO_REPO>/plugins/cortex/scripts/cortex_acp.py"],
+      "args": ["-B", "<ABSOLUTE_PATH_TO_REPO>/src/cortex_acp.py"],
       "env": {}
     }
   }

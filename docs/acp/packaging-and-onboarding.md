@@ -8,14 +8,14 @@ details this page's setup step delegates to (T011).
 
 ## Install
 
-There is no separate "install" step: `plugins/cortex/scripts/cortex_acp.py`
+There is no separate "install" step: `src/cortex_acp.py`
 runs directly, as plain `python3`, from this checkout:
 
 ```
-python3 -B /absolute/path/to/plugins/cortex/scripts/cortex_acp.py
+python3 -B /absolute/path/to/src/cortex_acp.py
 ```
 
-`cortex_runtime` (everything under `plugins/cortex/scripts/cortex_runtime/`)
+`cortex_runtime` (everything under `src/cortex_runtime/`)
 is standard-library only — nothing to `pip install` for the agent itself.
 `cortex_acp.py` never spawns a plugin host, never downloads or upgrades
 anything at launch, and writes only JSON-RPC lines to stdout (every log
@@ -30,11 +30,11 @@ MITM/gateway supervisor (`cortex_gateway.py`, `cortex_runtime/gateway/`,
 `cortex_runtime/runtime/`), the pinned-dependency pip installer
 (`marketplace_bootstrap.py`), native Codex profile registration into
 `~/.codex/agents` (`cortex_setup.py`), the local lifecycle hook dispatcher
-(`plugins/cortex/hooks/`, `cortex_hook.py`, `cortex_runtime/hooks.py`), the
+(`./hooks/`, `cortex_hook.py`, `cortex_runtime/hooks.py`), the
 Codex-native unchanneled MCP `_meta` identity adapter (`codex_adapter.py`),
 the native-index host-source reader (`host_source.py`), the
 `.codex-plugin/` Marketplace manifest (the package identity/stamp now
-lives in `plugins/cortex/package-identity.json` instead), and the
+lives in `./package-identity.json` instead), and the
 `phase2_cli_*`/`phase2` external-evaluator preparation scripts and tests.
 This page never built on any of them, and `cortex_acp.py` never did
 either — see `tests/test_engine_codex_no_native_fallback.py` for the
@@ -74,7 +74,7 @@ instructions that used to name them.
 
 ## Pinned dependencies
 
-`plugins/cortex/pinned-dependencies.json` is the single manifest for:
+`./pinned-dependencies.json` is the single manifest for:
 
 - the Python version floor (currently 3.11+, matching
   `docs/project/conventions.md`);

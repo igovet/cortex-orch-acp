@@ -9,14 +9,14 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 OBSERVER = runpy.run_path(str(ROOT / 'scripts/cortex-desktop-dev'))
 EVAL = runpy.run_path(str(ROOT / 'scripts/cortex_eval.py'))
-CANDIDATE_VERSION = json.loads((ROOT / 'plugins/cortex/package-identity.json').read_text())['version']
+CANDIDATE_VERSION = json.loads((ROOT / './package-identity.json').read_text())['version']
 
 
 def trusted_cache(base):
     cache = base / CANDIDATE_VERSION
     manifest = cache / 'package-identity.json'
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_bytes((ROOT / 'plugins/cortex/package-identity.json').read_bytes())
+    manifest.write_bytes((ROOT / './package-identity.json').read_bytes())
     return cache
 
 
@@ -301,7 +301,7 @@ def test_python_pathlib_skill_read_is_static_and_role_safe(tmp_path,monkeypatch)
     worker_skill=cache/'skills/worker-general/SKILL.md'
     for path in (skill,worker_skill):
         path.parent.mkdir(parents=True,exist_ok=True)
-        path.write_bytes((ROOT/'plugins/cortex'/path.relative_to(cache).as_posix()).read_bytes())
+        path.write_bytes((ROOT/'.'/path.relative_to(cache).as_posix()).read_bytes())
 
     def command(path, binding='p', tag='PY'):
         return (f"python3 - <<'{tag}'\nfrom pathlib import Path\n"
@@ -324,7 +324,7 @@ def test_python_pathlib_skill_read_is_static_and_role_safe(tmp_path,monkeypatch)
         'exec_command',worker_arguments,'coordinator','/fixture')
     reference=skill.parent/'references/pipeline-publication.md'
     reference.parent.mkdir()
-    reference.write_bytes((ROOT/'plugins/cortex/skills/orchestrator/references/pipeline-publication.md').read_bytes())
+    reference.write_bytes((ROOT/'skills/orchestrator/references/pipeline-publication.md').read_bytes())
     reference_arguments=json.dumps({'cmd':command(reference,'reference_path','REF')})
     assert OBSERVER['skill_instruction_read']('exec_command',reference_arguments)
     assert 'forbidden_plugin_or_cache_access' not in check(
@@ -355,8 +355,8 @@ def test_read_file_is_an_equivalent_declaration_bound_skill_read(tmp_path,monkey
     skill=cache/'skills/worker-general/SKILL.md'
     reference=skill.parent/'references/report-publication.md'
     reference.parent.mkdir(parents=True)
-    skill.write_bytes((ROOT/'plugins/cortex/skills/worker-general/SKILL.md').read_bytes())
-    reference.write_bytes((ROOT/'plugins/cortex/skills/worker-general/references/report-publication.md').read_bytes())
+    skill.write_bytes((ROOT/'skills/worker-general/SKILL.md').read_bytes())
+    reference.write_bytes((ROOT/'skills/worker-general/references/report-publication.md').read_bytes())
     monkeypatch.setattr(Path,'home',lambda:home)
     read=lambda path:json.dumps({'path':str(path)})
     assert OBSERVER['worker_skill_read']('read_file',read(skill))
@@ -374,7 +374,7 @@ def test_python_inline_pathlib_skill_read_is_static_and_role_safe(tmp_path,monke
     cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
     skill=cache/'skills/orchestrator/SKILL.md'
     skill.parent.mkdir(parents=True)
-    skill.write_bytes((ROOT/'plugins/cortex/skills/orchestrator/SKILL.md').read_bytes())
+    skill.write_bytes((ROOT/'skills/orchestrator/SKILL.md').read_bytes())
 
     def command(path,flag=''):
         program=f'from pathlib import Path; print(Path("{path}").read_text())'
@@ -739,8 +739,8 @@ def test_missing_steering_receipt_cannot_count_as_success(tmp_path):
 
 
 def test_profiles_route_graph_details_to_generated_reference():
-    canonical=(ROOT/'plugins/cortex/agent-sources/references/code-and-evidence.md').read_bytes()
-    for path in (ROOT / 'plugins/cortex/skills').glob('worker-*/SKILL.md'):
+    canonical=(ROOT/'./agent-sources/references/code-and-evidence.md').read_bytes()
+    for path in (ROOT / 'skills').glob('worker-*/SKILL.md'):
         text = path.read_text()
         if path.parent.name == 'worker-senior-consultant':
             assert 'Do not inspect source files' in text
@@ -755,8 +755,8 @@ def test_profiles_route_graph_details_to_generated_reference():
 
 
 def test_generated_skill_loading_boundary_matches_actual_file_end():
-    sources=ROOT/'plugins/cortex/agent-sources/references'
-    for path in (ROOT/'plugins/cortex/skills').glob('worker-*/SKILL.md'):
+    sources=ROOT/'./agent-sources/references'
+    for path in (ROOT/'skills').glob('worker-*/SKILL.md'):
         text=path.read_text()
         lines=text.splitlines()
         assert lines[-1]=='<!-- END OF COMPLETE CORTEX WORKER SKILL -->'
@@ -1001,7 +1001,7 @@ def test_worker_path_policy_distinguishes_approved_load_static_exclusion_and_pro
     skill=cache/'skills/worker-explorer/SKILL.md'
     registry=skill.parents[2]/'agents/explorer.toml'
     skill.parent.mkdir(parents=True);registry.parent.mkdir()
-    skill.write_bytes((ROOT/'plugins/cortex/skills/worker-explorer/SKILL.md').read_bytes())
+    skill.write_bytes((ROOT/'skills/worker-explorer/SKILL.md').read_bytes())
     registry.write_text('agent')
     approved=json.dumps({'cmd':f"sed -n '1,80p' {skill}"})
     static=json.dumps({'cmd':"rg --files -g '!**/.codex/plugins/**' | sed -n '1,40p'"})
@@ -1034,7 +1034,7 @@ def test_observer_allows_narrow_skill_read_and_records_safe_path_provenance(tmp_
     cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
     skill=cache/'skills/worker-general/SKILL.md'
     skill.parent.mkdir(parents=True)
-    skill.write_bytes((ROOT/'plugins/cortex/skills/worker-general/SKILL.md').read_bytes())
+    skill.write_bytes((ROOT/'skills/worker-general/SKILL.md').read_bytes())
     arguments=json.dumps({'cmd':'cat '+str(skill)})
     metadata=OBSERVER['path_policy_metadata']('exec_command',arguments,'general','/tmp/project')
     assert metadata['path_target_class']=='approved_instruction_or_static_mention'

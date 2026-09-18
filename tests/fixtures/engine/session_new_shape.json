@@ -7,7 +7,7 @@
       {
         "name": "cortex",
         "command": "/usr/bin/python3",
-        "args": ["-B", "/abs/path/to/plugins/cortex/scripts/cortex.py"],
+        "args": ["-B", "/abs/path/to/src/cortex.py"],
         "env": [
           {"name": "CORTEX_CHANNEL_ID", "value": "ch_000000000000"},
           {"name": "CORTEX_CHANNEL_SECRET", "value": "PLACEHOLDER_TOKEN_VALUE_ONLY"},

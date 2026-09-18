@@ -14,7 +14,7 @@ def test_the_bound_task_is_confirmed_before_governance():
     calling `create_task` itself is refused every time, and every live run
     spent its opening words explaining that refusal to the user.
     """
-    text = (ROOT / "plugins/cortex/skills/orchestrator/SKILL.md").read_text()
+    text = (ROOT / "skills/orchestrator/SKILL.md").read_text()
 
     start = text.index("## Apply governance to decisions")
     end = text.index("\n## Durable decisions", start)
@@ -29,12 +29,12 @@ def test_the_bound_task_is_confirmed_before_governance():
 
 
 def test_harvest_remains_explicit_only_in_orchestrator_contract():
-    text = (ROOT / "plugins/cortex/skills/orchestrator/SKILL.md").read_text()
+    text = (ROOT / "skills/orchestrator/SKILL.md").read_text()
     assert "Keep `cortex:knowledge-harvest` explicit-only" in text
 
 
 def test_pending_workers_require_silent_bounded_waits():
-    text = (ROOT / "plugins/cortex/skills/orchestrator/SKILL.md").read_text()
+    text = (ROOT / "skills/orchestrator/SKILL.md").read_text()
 
     start = text.index("## Honest communication")
     end = text.index("\n## Load only relevant details", start)

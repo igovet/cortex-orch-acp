@@ -18,7 +18,7 @@ SKILL.md`, `skills/orchestrator/SKILL.md`, and 7 shared/coordinator skills
 `tool-discipline`, `knowledge-harvest`, `documentation-sync`,
 `context-compaction`). The 22 non-consultant worker skills and their Codex
 `agents/*.toml` renderings are both generated, byte-identically, from one
-shared template (`plugins/cortex/agent-sources/worker-protocol.md` +
+shared template (`./agent-sources/worker-protocol.md` +
 `consultant-protocol.md` + a per-role `agent-sources/<role>.md`) by
 `scripts/generate_agent_profiles.py` (`check`/`write`); the coordinator and
 shared skills are hand-maintained directly under `skills/`. `portable.roles`

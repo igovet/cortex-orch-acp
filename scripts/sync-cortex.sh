@@ -3,7 +3,7 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 case "${1:-}" in
   --check|--dry-run)
-    python3 -B "${script_dir}/validate-cortex-marketplace.py"
+    python3 -B "${script_dir}/cortex_package.py" validate
     ;;
   '')
     # Only cortex-dev establishes this exact isolated boundary.

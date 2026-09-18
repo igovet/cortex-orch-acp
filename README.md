@@ -8,7 +8,7 @@ Cortex lifecycle policy findings are advisory: hooks do not veto host tool calls
 <table>
   <tr>
     <td width="190" align="center" valign="middle">
-      <img src="plugins/cortex/assets/logo.png" alt="Cortex logo" width="156" />
+      <img src="./assets/logo.png" alt="Cortex logo" width="156" />
     </td>
     <td valign="middle">
       <h1>Cortex</h1>
@@ -822,7 +822,7 @@ leave a partial state that subsequent attempts reject.
 Storage format 11 requires the separate offline 10→11 migration and a backup with
 access stopped. Migration changes metadata only and leaves Markdown bytes intact.
 A legacy shared v11 store can be split into a fresh project-local store with
-`plugins/cortex/scripts/cortex_split.py`; the split also requires stopped access,
+`src/cortex_split.py`; the split also requires stopped access,
 a new backup, and leaves the source and Markdown unchanged. See
 [storage and migration](docs/project/storage.md).
 
@@ -831,7 +831,7 @@ a new backup, and leaves the source and Markdown unchanged. See
 This subsection historically described the Codex-plugin-harness bundled
 hooks (`python3` `PreToolUse`/`UserPromptSubmit`/`Stop`/`SessionStart`
 handler). T033 removed the Codex-plugin-harness-era lifecycle hook
-dispatcher entirely (`plugins/cortex/hooks/`, `cortex_hook.py`,
+dispatcher entirely (`./hooks/`, `cortex_hook.py`,
 `cortex_runtime/hooks.py`) along with `execution_boundary.py`, the module
 that implemented the app-thread-message denial and private-root deny
 boundary those hooks enforced. There is no packaged hook handler, no
@@ -890,14 +890,14 @@ profile drift. Each profile also fixes its default draft class:
 | `general` | `senior_consultant` |
 
 Choose the report class that fits the assignment’s result. A profile default does
-not require another worker for a suitable different class. Optional [report examples](plugins/cortex/skills/cortex-control/references/index.md)
+not require another worker for a suitable different class. Optional [report examples](skills/cortex-control/references/index.md)
 for planning, investigation, implementation, verification, documentation and final
 synthesis. Examples guide content without imposing exact report headings.
 
 Codex supplies the selected orchestrator skill and the worker skill catalogue.
 The host supplies required skills through Codex's normal procedure only when relevant.
 Workers use exact advertised skill paths and declared references; they do not enumerate the installation.
-[Tool discipline](plugins/cortex/skills/tool-discipline/SKILL.md) requires checking
+[Tool discipline](skills/tool-discipline/SKILL.md) requires checking
 live tool declarations, complete arguments and actual results; it forbids guessed
 calls and unexplained mutation replays. Profiles do not authorize tools or select models.
 Discovery first lists tool names, then opens one selected complete declaration;
@@ -1036,23 +1036,23 @@ prepares only the isolated candidate; it never updates the stable user plugin.
 
 ### Runtime boundary
 
-The complete installable product lives under `plugins/cortex/`. Root-level
+The complete installable product lives under `./`. Root-level
 `scripts/`, `tests/`, `docs/` and `AGENTS.md` are development support.
 
 | Path | Purpose |
 | --- | --- |
-| `plugins/cortex/scripts/cortex.py` | Seven-operation MCP entry point |
-| `plugins/cortex/.mcp.json` | Direct Python server startup |
-| `plugins/cortex/scripts/cortex_runtime/contracts.py` | Advertised schemas and limits |
-| `plugins/cortex/scripts/cortex_runtime/acp/agent.py` | ACP agent entry point; reads the current session's typed user input within its project boundary |
-| `plugins/cortex/scripts/cortex_runtime/store.py` | SQLite metadata and real Markdown storage |
-| `plugins/cortex/scripts/cortex_runtime/project_storage.py` | Native project binding and project-local store routing |
-| `plugins/cortex/scripts/cortex_runtime/server.py` | Bounded stdio transport and private errors |
-| `plugins/cortex/scripts/cortex_clear.py` | Explicit host-side retention command |
-| `plugins/cortex/scripts/cortex_split.py` | Stopped-access split from a legacy shared store |
-| `plugins/cortex/profiles.json` | 23 advisory specialist descriptions |
-| `plugins/cortex/skills/orchestrator/SKILL.md` | Coordination and model selection |
-| `plugins/cortex/skills/cortex-control/SKILL.md` | Shared worker reporting protocol |
+| `src/cortex.py` | Seven-operation MCP entry point |
+| `./.mcp.json` | Direct Python server startup |
+| `src/cortex_runtime/contracts.py` | Advertised schemas and limits |
+| `src/cortex_runtime/acp/agent.py` | ACP agent entry point; reads the current session's typed user input within its project boundary |
+| `src/cortex_runtime/store.py` | SQLite metadata and real Markdown storage |
+| `src/cortex_runtime/project_storage.py` | Native project binding and project-local store routing |
+| `src/cortex_runtime/server.py` | Bounded stdio transport and private errors |
+| `src/cortex_clear.py` | Explicit host-side retention command |
+| `src/cortex_split.py` | Stopped-access split from a legacy shared store |
+| `./profiles.json` | 23 advisory specialist descriptions |
+| `skills/orchestrator/SKILL.md` | Coordination and model selection |
+| `skills/cortex-control/SKILL.md` | Shared worker reporting protocol |
 | `.agents/plugins/marketplace.json` | Repository Marketplace |
 | `scripts/cortex_package.py` | Complete payload hashing and candidate validation |
 | `scripts/sync-cortex.sh` | Read-only source validation (`--check`) |

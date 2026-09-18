@@ -42,7 +42,7 @@ def exchange(tmp_path, messages, channel=None):
     if channel is not None:
         env.update(CORTEX_CHANNEL_ID=channel.channel_id, CORTEX_CHANNEL_SECRET=channel.secret,
                     CORTEX_CHANNEL_PROJECT_ROOT=str(tmp_path))
-    result=subprocess.run([sys.executable,'-B',str(ROOT/'plugins/cortex/scripts/cortex.py')],input='\n'.join(json.dumps(m) for m in messages)+'\n',text=True,capture_output=True,env=env,timeout=30)
+    result=subprocess.run([sys.executable,'-B',str(ROOT/'src/cortex.py')],input='\n'.join(json.dumps(m) for m in messages)+'\n',text=True,capture_output=True,env=env,timeout=30)
     assert result.returncode==0 and result.stderr==''
     return [json.loads(line) for line in result.stdout.splitlines()]
 
@@ -87,7 +87,7 @@ def test_markdown_code_and_quotes_survive_wire_storage_and_restart(tmp_path):
 def test_raw_invalid_and_oversize_frames(tmp_path):
     raw='{"jsonrpc":"2.0","id":1,"method":"ping","method":"PRIVATE"}\n'+'x'*2_000_001+'\n'+json.dumps(dict(jsonrpc='2.0',id=3,method='ping'))+'\n'
     home=storage_only_home(tmp_path/'host')
-    result=subprocess.run([sys.executable,'-B',str(ROOT/'plugins/cortex/scripts/cortex.py')],input=raw,text=True,capture_output=True,env=os.environ|{'CODEX_HOME':str(home)},timeout=30)
+    result=subprocess.run([sys.executable,'-B',str(ROOT/'src/cortex.py')],input=raw,text=True,capture_output=True,env=os.environ|{'CODEX_HOME':str(home)},timeout=30)
     rows=[json.loads(line) for line in result.stdout.splitlines()]
     assert len(rows)==3 and rows[-1]['result']=={}
     assert 'PRIVATE' not in result.stdout and result.stderr==''

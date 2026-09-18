@@ -17,7 +17,7 @@ import pytest
 
 from cortex_runtime.portable import roles
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[1] / "plugins" / "cortex"
+PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
 DENYLIST = (
     "codex_app", "mcp__codex", "apply_patch", "spawn_agent",

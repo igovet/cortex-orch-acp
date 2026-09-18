@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
-sys.path.insert(0, str(SCRIPTS.parent / "plugins" / "cortex" / "scripts"))
+sys.path.insert(0, str(SCRIPTS.parent / "src"))
 
 from cortex_runtime.acp import config_options as acp_config_options  # noqa: E402
 from cortex_runtime.configuration import store as configuration_store  # noqa: E402
@@ -56,7 +56,7 @@ def _pinned_checks():
         manifest = pinned.load_manifest()
     except pinned.PinnedManifestError as error:
         return [_check("pinned_dependency_manifest", "fail", str(error),
-                        "Restore plugins/cortex/pinned-dependencies.json from version control.")]
+                        "Restore ./pinned-dependencies.json from version control.")]
     status_map = {"ok": "ok", "mismatch": "fail", "missing": "warn"}
     for finding in pinned.verify_all(manifest):
         checks.append(_check(f"pinned:{finding.component}", status_map[finding.status],

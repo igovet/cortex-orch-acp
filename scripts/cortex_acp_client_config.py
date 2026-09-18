@@ -35,7 +35,7 @@ import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-AGENT_ENTRY = REPO_ROOT / "plugins" / "cortex" / "scripts" / "cortex_acp.py"
+AGENT_ENTRY = REPO_ROOT / "src" / "cortex_acp.py"
 
 AGENT_NAME = "Cortex"
 

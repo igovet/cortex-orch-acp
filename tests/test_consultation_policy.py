@@ -4,7 +4,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_consultation_is_conditionally_loaded_and_preserves_report_only_scope():
-    root = ROOT / "plugins/cortex/skills/orchestrator"
+    root = ROOT / "skills/orchestrator"
     entry = (root / "SKILL.md").read_text()
     policy = (root / "references/senior-consultation.md").read_text()
     assert '(references/senior-consultation.md)' in entry
@@ -24,7 +24,7 @@ def test_documented_overlay_has_negative_controls_and_no_runtime_gate():
 
 
 def test_advisory_lane_is_catalogue_optional_and_silent_when_unavailable():
-    root = ROOT / "plugins/cortex/skills/orchestrator"
+    root = ROOT / "skills/orchestrator"
     entry = (root / "SKILL.md").read_text()
     policy = (root / "references/consultation-routing.md").read_text()
     assert '(references/consultation-routing.md)' in entry
@@ -40,7 +40,7 @@ def test_advisory_lane_is_catalogue_optional_and_silent_when_unavailable():
 
 
 def test_advisory_lane_contract_is_non_owning_and_bounded():
-    policy = (ROOT / "plugins/cortex/skills/orchestrator/references/consultation-routing.md").read_text()
+    policy = (ROOT / "skills/orchestrator/references/consultation-routing.md").read_text()
     assert "not a pipeline stage, worker profile,\nruntime dependency" in policy
     assert "one bounded call with one compact decision packet" in policy
     assert "no councils, debates, multi-model\ncomparison, voting" in policy

@@ -2,7 +2,7 @@
 
 Cortex stores tasks, advisory governance and Markdown documents. The model owns
 execution and semantic judgment. The complete runtime is packaged below
-`plugins/cortex`; repository tooling is development support only.
+`.`; repository tooling is development support only.
 
 - [Report storage and reliability](storage.md)
 - [Development conventions](conventions.md)
@@ -17,12 +17,12 @@ execution and semantic judgment. The complete runtime is packaged below
 - [ACP client integration](../acp/index.md)
 - [Release evidence](../release-readiness.md)
 
-The implementation consists of the advertised [contracts](../../plugins/cortex/scripts/cortex_runtime/contracts.py),
-[store](../../plugins/cortex/scripts/cortex_runtime/store.py),
-[MCP server](../../plugins/cortex/scripts/cortex_runtime/server.py),
-[coordinator skill](../../plugins/cortex/skills/orchestrator/SKILL.md) and
-[shared worker protocol](../../plugins/cortex/agent-sources/worker-protocol.md).
-The separate [control skill](../../plugins/cortex/skills/cortex-control/SKILL.md)
+The implementation consists of the advertised [contracts](../../src/cortex_runtime/contracts.py),
+[store](../../src/cortex_runtime/store.py),
+[MCP server](../../src/cortex_runtime/server.py),
+[coordinator skill](../../skills/orchestrator/SKILL.md) and
+[shared worker protocol](../.././agent-sources/worker-protocol.md).
+The separate [control skill](../../skills/cortex-control/SKILL.md)
 is limited to retention maintenance and optional report examples.
 
 Knowledge maintenance retains `harvest` and `harvest-refresh`, index-driven

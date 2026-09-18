@@ -93,7 +93,7 @@ class PortableError(Exception):
 
 
 # A few representative cortex_runtime.contracts.StoreError codes, mapped by
-# hand into the portable taxonomy.  Source: plugins/cortex/scripts/
+# hand into the portable taxonomy.  Source: src/
 # cortex_runtime/contracts.py ERROR_HELP.  This dict is documentation plus a
 # convenience lookup; it does not import contracts.py and is not exhaustive.
 STORE_ERROR_CODE_MAPPING: dict[str, tuple[PortableErrorCategory, str, bool]] = {

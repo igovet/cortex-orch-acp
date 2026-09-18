@@ -10,7 +10,7 @@ real ``engine.session_manager.EngineSessionManager``) against the standalone
 test-double engine (``tests/fake_engine_process.py`` -- never a real engine)
 to capture *exactly* the ``mcpServers`` entry production code computed for
 this worker's session, then launches that entry's own ``command``/``args``
-as a real ``plugins/cortex/scripts/cortex.py`` subprocess -- the actual
+as a real ``src/cortex.py`` subprocess -- the actual
 Cortex MCP server, not a hand-assembled stand-in -- with its ``cwd`` set to
 the isolated workspace copy (exactly where a real engine would run it from),
 and drives it over real JSON-RPC to read the task's sources and publish its
@@ -36,7 +36,7 @@ from cortex_runtime.trusted_channel import issue_channel_tx
 from engine_fakes import default_scenario, fake_launch_command, isolated_environ, make_connection_record, new_connection_id, write_scenario
 
 ROOT = Path(__file__).resolve().parents[1]
-CORTEX_PY = ROOT / "plugins/cortex/scripts/cortex.py"
+CORTEX_PY = ROOT / "src/cortex.py"
 
 
 def _bootstrap(tmp_path):
@@ -138,7 +138,7 @@ def test_isolated_worker_real_mcp_subprocess_uses_project_root_not_workspace(tmp
     assert server_env["CORTEX_CHANNEL_PROJECT_ROOT"] != workspace_root
 
     # Now launch exactly that computed command/args as a real subprocess --
-    # the real plugins/cortex/scripts/cortex.py MCP server, not a hand-
+    # the real src/cortex.py MCP server, not a hand-
     # assembled stand-in -- with its cwd set to the isolated workspace, the
     # same place a real engine would actually run it from.
     assert server_entry["args"][-1] == str(CORTEX_PY)

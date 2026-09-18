@@ -40,7 +40,7 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from cortex_runtime.acp.agent import Agent  # noqa: E402
 from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime  # noqa: E402

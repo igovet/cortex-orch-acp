@@ -145,7 +145,7 @@ For a legacy shared v11 database, the offline split remains a separate operation
 With all CLI, Desktop, MCP and hook access stopped, split one canonical project at a time:
 
 ```bash
-python3 -B plugins/cortex/scripts/cortex_split.py \
+python3 -B src/cortex_split.py \
   --source-storage-dir /absolute/private/legacy-store \
   --project-root /absolute/existing/project \
   --backup /absolute/private/cortex-global-v11-backup.sqlite3 \
@@ -172,7 +172,7 @@ reader. Stop all CLI, Desktop, MCP and hook access, and back up every affected
 project's task/draft directories. Then run the explicit metadata conversion:
 
 ```bash
-python3 -B plugins/cortex/scripts/cortex_migrate.py --storage-dir /absolute/private/store --backup /absolute/private/cortex-v10.sqlite3 --access-stopped
+python3 -B src/cortex_migrate.py --storage-dir /absolute/private/store --backup /absolute/private/cortex-v10.sqlite3 --access-stopped
 ```
 
 The backup path must be new. The migrator takes an exclusive cooperative access lock

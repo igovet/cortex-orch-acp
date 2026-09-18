@@ -9,7 +9,7 @@ import pytest
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins" / "cortex" / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import cortex_acp_setup as setup  # noqa: E402
 from cortex_runtime.connections.model import AuthMode  # noqa: E402

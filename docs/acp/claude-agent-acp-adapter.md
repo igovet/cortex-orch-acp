@@ -6,9 +6,9 @@ the Claude Agent SDK) — the second, non-Codex engine proving the portable
 runtime is genuinely engine-independent (see T002's ADR-001/ADR-001a/
 ADR-001c selection record). This page covers the claude-agent-acp-specific
 pieces added in T026:
-`plugins/cortex/scripts/cortex_runtime/engine/claude_install.py` (pinned
+`src/cortex_runtime/engine/claude_install.py` (pinned
 install identity/integrity) and
-`plugins/cortex/scripts/cortex_runtime/engine/claude_adapter_acp.py`
+`src/cortex_runtime/engine/claude_adapter_acp.py`
 (launch mapping, configuration-option mapping, evidence).
 
 Pinned release basis: `@agentclientprotocol/claude-agent-acp` **0.78.0**

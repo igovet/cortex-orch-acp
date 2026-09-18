@@ -3,7 +3,7 @@ import subprocess
 import runpy
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parents[1] / "plugins/cortex/scripts"))
+sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from cortex_runtime.advisory_lane import (QUALIFIED_TOOL, consider_advisory_lane,
                                            consult, discover, packet_identity)
 

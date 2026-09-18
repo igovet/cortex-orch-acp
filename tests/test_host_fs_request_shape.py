@@ -31,7 +31,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = REPO_ROOT / "tests" / "fixtures" / "acp" / "schema-1.4.0.json"
-sys.path.insert(0, str(REPO_ROOT / "plugins" / "cortex" / "scripts"))
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from cortex_runtime.acp.agent import Agent  # noqa: E402
 

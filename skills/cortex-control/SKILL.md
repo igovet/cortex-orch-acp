@@ -16,7 +16,7 @@ read agent TOML, manifests, databases or server internals, or enumerate the inst
 ## Explicit retention maintenance
 
 When the coordinator assigns the user's taskless `clear N days` command, run only
-the bundled [retention command](../../scripts/cortex_clear.py). Obtain its current
+the bundled [retention command](../../src/cortex_clear.py). Obtain its current
 CLI syntax with `--help`; do not read the script implementation. Supply the canonical
 project, exact retention and protected native thread IDs established by the
 coordinator. This route creates no task, governance choice, pipeline, or report.

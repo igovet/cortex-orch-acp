@@ -17,7 +17,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-RUNTIME_ROOT = str(Path(__file__).resolve().parents[1] / "plugins/cortex/scripts")
+RUNTIME_ROOT = str(Path(__file__).resolve().parents[1] / "src")
 
 CHILD_TEMPLATE = textwrap.dedent(
     """

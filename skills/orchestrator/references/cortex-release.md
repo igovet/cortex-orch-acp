@@ -2,7 +2,7 @@
 
 Read repository AGENTS.md and affected project/feature docs. Preserve seven public
 MCP tools, 23 profiles and the worker report protocol. Runtime belongs below
-plugins/cortex. Quality metadata stays advisory, not routing or acceptance authority.
+.. Quality metadata stays advisory, not routing or acceptance authority.
 
 Use an isolated checkout preserving user changes. Run focused tests and the incident
 regression evaluation. Regenerate the complete payload hash after final payload edits

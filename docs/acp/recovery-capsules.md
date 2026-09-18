@@ -1,6 +1,6 @@
 # Deterministic recovery capsules (T021)
 
-This page documents `plugins/cortex/scripts/cortex_runtime/recovery/capsule.py`
+This page documents `src/cortex_runtime/recovery/capsule.py`
 and the `read_capsule` MCP tool (`delegation/mcp_tools.py`,
 `delegation/contracts.py`). A capsule is a **derived, rebuildable view**
 over already-durable state — never a second authoritative pipeline, and

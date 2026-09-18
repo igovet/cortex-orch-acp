@@ -1,7 +1,7 @@
 # Conventions
 
 Use Python 3.11+ and `python3`, with no runtime third-party dependencies. Keep
-installable behavior under `plugins/cortex/`. All tool arguments, retry contracts
+installable behavior under `./`. All tool arguments, retry contracts
 and size limits belong in advertised schemas and descriptions, not prompt prose.
 
 Use one project-local SQLite store at `<project>/.cortex/cortex.sqlite3`.

@@ -29,7 +29,7 @@ WHAT IS REAL, UNCHANGED, in this file:
     ``delegation.live_adapters.EngineSessionManagerAdapter`` +
     ``delegation.workspace_isolation.IsolatedSnapshotWorkspaceProvisioner``
     per project, exactly as production does.
-  - The Cortex MCP server (``plugins/cortex/scripts/cortex.py``) is
+  - The Cortex MCP server (``src/cortex.py``) is
     launched as a literal subprocess for the worker, with the exact
     ``mcpServers`` entry the real adapter computed for it.
   - Only the ACP engine at the far end of each launch_command is a
@@ -90,7 +90,7 @@ import cortex_acp_setup as setup
 from engine_fakes import default_scenario, fake_launch_command, write_scenario
 
 ROOT = Path(__file__).resolve().parents[1]
-CORTEX_PY = ROOT / "plugins/cortex/scripts/cortex.py"
+CORTEX_PY = ROOT / "src/cortex.py"
 _MODEL = "claude-opus-placeholder"
 
 _EDIT_REQUEST = dict(

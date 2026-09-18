@@ -5,9 +5,9 @@ Cortex is an outgoing ACP v1 client of a pinned, operator-verified
 App Server) — the exact same outgoing-client role documented for
 `engine.session_manager.EngineSessionManager` (see T012). This page covers
 the codex-acp-specific pieces added in T013:
-`plugins/cortex/scripts/cortex_runtime/engine/codex_install.py` (pinned
+`src/cortex_runtime/engine/codex_install.py` (pinned
 install identity/integrity) and
-`plugins/cortex/scripts/cortex_runtime/engine/codex_adapter_acp.py`
+`src/cortex_runtime/engine/codex_adapter_acp.py`
 (launch/env mapping, configuration-option mapping, evidence, instruction
 delivery).
 

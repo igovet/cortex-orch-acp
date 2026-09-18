@@ -1,7 +1,7 @@
 # Recoverable publications and storage consistency (T019)
 
 This page documents the durable-publication and storage-recovery protocol
-in `plugins/cortex/scripts/cortex_runtime/store.py` and
+in `src/cortex_runtime/store.py` and
 `delegation/mcp_tools.py`, and records exactly which T019 scope items are
 covered here versus still open. It does not replace or duplicate the
 existing storage model; it closes two concrete gaps in the

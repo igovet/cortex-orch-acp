@@ -17,7 +17,7 @@ import pytest
 from cortex_runtime.connections import environment, onboarding, registry
 from cortex_runtime.connections.model import AuthMode
 
-CONNECTIONS_DIR = Path(__file__).resolve().parents[1] / "plugins/cortex/scripts/cortex_runtime/connections"
+CONNECTIONS_DIR = Path(__file__).resolve().parents[1] / "src/cortex_runtime/connections"
 
 FAKE_SECRET = "fake-super-secret-value-QWERTY123456"
 

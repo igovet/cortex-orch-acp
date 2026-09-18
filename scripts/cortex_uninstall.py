@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
-sys.path.insert(0, str(SCRIPTS.parent / "plugins" / "cortex" / "scripts"))
+sys.path.insert(0, str(SCRIPTS.parent / "src"))
 
 from cortex_runtime.connections import registry  # noqa: E402
 from cortex_runtime.portable.errors import PortableError  # noqa: E402

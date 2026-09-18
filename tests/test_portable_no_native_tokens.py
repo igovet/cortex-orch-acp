@@ -1,6 +1,6 @@
 """Guard against native/host/vendor tokens leaking into the portable package.
 
-The portable package (plugins/cortex/scripts/cortex_runtime/portable/) must
+The portable package (src/cortex_runtime/portable/) must
 stay engine-agnostic: it must never reference a specific native engine
 protocol detail, host environment variable, or vendor name.  This scans the
 actual source text of every portable/*.py file for a documented denylist of
@@ -15,7 +15,7 @@ import re
 
 import pytest
 
-PORTABLE_DIR = Path(__file__).resolve().parents[1] / "plugins/cortex/scripts/cortex_runtime/portable"
+PORTABLE_DIR = Path(__file__).resolve().parents[1] / "src/cortex_runtime/portable"
 
 # Documented forbidden-token list (word-boundary, case-insensitive for
 # vendor/product names as noted):

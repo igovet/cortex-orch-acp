@@ -11,14 +11,14 @@ import pytest
 ROOT=Path(__file__).resolve().parents[1]
 OBSERVER=runpy.run_path(str(ROOT/'scripts/cortex-desktop-dev'))
 EVAL=runpy.run_path(str(ROOT/'scripts/cortex_eval.py'))
-CANDIDATE_VERSION = json.loads((ROOT / 'plugins/cortex/package-identity.json').read_text())['version']
+CANDIDATE_VERSION = json.loads((ROOT / './package-identity.json').read_text())['version']
 
 
 def trusted_cache(base):
     cache = base / CANDIDATE_VERSION
     manifest = cache / 'package-identity.json'
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_bytes((ROOT / 'plugins/cortex/package-identity.json').read_bytes())
+    manifest.write_bytes((ROOT / './package-identity.json').read_bytes())
     return cache
 
 
@@ -679,10 +679,10 @@ def test_skill_read_accepts_bounded_readonly_batches_and_rejects_shell_escape(tm
     cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
     skill=cache/'skills/worker-general/SKILL.md'
     skill.parent.mkdir(parents=True)
-    skill.write_bytes((ROOT/'plugins/cortex/skills/worker-general/SKILL.md').read_bytes())
+    skill.write_bytes((ROOT/'skills/worker-general/SKILL.md').read_bytes())
     reference=cache/'skills/worker-backend-dev/references/report-publication.md'
     reference.parent.mkdir(parents=True)
-    reference.write_bytes((ROOT/'plugins/cortex/skills/worker-backend-dev/references/report-publication.md').read_bytes())
+    reference.write_bytes((ROOT/'skills/worker-backend-dev/references/report-publication.md').read_bytes())
     check=OBSERVER['skill_instruction_read']
     positive=("pwd && printf '%s\\n' '--- skill ---' && echo 'reading exact skill' && sed -n '1,240p' "
               +str(skill))
@@ -706,10 +706,10 @@ def test_skill_read_accepts_newline_reference_batches_but_rejects_mixed_or_quote
     cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
     skill=cache/'skills/worker-general/SKILL.md'
     skill.parent.mkdir(parents=True)
-    skill.write_bytes((ROOT/'plugins/cortex/skills/worker-general/SKILL.md').read_bytes())
+    skill.write_bytes((ROOT/'skills/worker-general/SKILL.md').read_bytes())
     reference=cache/'skills/worker-backend-dev/references/report-publication.md'
     reference.parent.mkdir(parents=True)
-    reference.write_bytes((ROOT/'plugins/cortex/skills/worker-backend-dev/references/report-publication.md').read_bytes())
+    reference.write_bytes((ROOT/'skills/worker-backend-dev/references/report-publication.md').read_bytes())
     check=OBSERVER['skill_instruction_read']
     newline_batch=(f"sed -n '1,240p' {skill}\n"
                    f"sed -n '1,260p' {reference}")
@@ -736,7 +736,7 @@ def test_mixed_skill_read_and_project_discovery_has_scoped_cache_policy(tmp_path
     cache=trusted_cache(tmp_path/'.cortex-dev/.codex/plugins/cache/cortex/cortex')
     skill=cache/'skills/worker-general/SKILL.md'
     skill.parent.mkdir(parents=True)
-    skill.write_bytes((ROOT/'plugins/cortex/skills/worker-general/SKILL.md').read_bytes())
+    skill.write_bytes((ROOT/'skills/worker-general/SKILL.md').read_bytes())
     mixed=(f"sed -n '1,240p' {skill} && printf '%s\\n' '--- files ---' && "
            "rg --files -g '!*.pyc' . | sort")
     arguments=json.dumps({'cmd':mixed})

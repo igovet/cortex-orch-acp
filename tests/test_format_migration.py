@@ -31,7 +31,7 @@ from cortex_runtime.store import Store
 from storage_fixture import call_store
 from test_markdown_store import create, write
 
-RUNTIME_ROOT = str(Path(__file__).resolve().parents[1] / "plugins/cortex/scripts")
+RUNTIME_ROOT = str(Path(__file__).resolve().parents[1] / "src")
 
 # Same enumerated drop list the pre-existing offline-migration test in
 # test_storage_v11.py uses to build an authentic pre-T005 format-10
