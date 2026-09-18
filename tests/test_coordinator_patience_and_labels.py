@@ -451,3 +451,73 @@ def test_the_identical_integration_conflict_is_not_an_endless_retry(tmp_path):
     rendered = _coalesce(delegation_events.claim_unconsumed(store, task_id, "c2"), {})
     assert "has now happened 3 times" in rendered
     assert "Stop retrying" in rendered
+
+
+def test_a_worker_card_is_never_updated_before_it_is_created(tmp_path):
+    """Zed answers an update for a card it never saw with "Tool call not
+    found", and the card -- the delegation itself -- never appears.
+
+    It happened because a card's create came from the event-claim path
+    (which runs between coordinator turns) while its updates came from the
+    wait/provisioning path: once a delegation started while the turn that
+    asked for it was still running, the update overtook the create. The
+    fix is not to repair it at the connection -- it is that one place owns
+    the card's lifecycle and decides create-vs-update from what has
+    actually been emitted."""
+    store, task_id = _task(tmp_path)
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda *a, **k: None), FakeWorkspace(), FakeConfigSnapshotSource(),
+    )
+    cards: list = []
+
+    # The provisioning/activity paths reach the card first, update-shaped.
+    runtime._emit_worker_card(cards.append, "a_ref", status="in_progress", text="Provisioning: channel")
+    assert cards[0]["new"] is True, cards[0]
+    assert cards[0]["title"], "a card must be named when it is created"
+    assert cards[0]["kind"], "a card must have a kind when it is created"
+
+    # The claim path's own create later is just an update: one card, one id.
+    runtime._emit_worker_card(
+        cards.append, "a_ref", title="Worker: backend-dev — Add a guard", status="pending",
+    )
+    assert cards[1]["new"] is False
+    assert cards[1]["title"] == "Worker: backend-dev — Add a guard"
+    assert len({c["tool_call_id"] for c in cards}) == 1
+
+
+def test_the_coordinator_can_write_the_project_store_but_not_its_source(tmp_path):
+    """`create_draft` returns "an absolute server-created project path to
+    edit with native file tools". The read-only snapshot excluded
+    `.cortex` entirely, so the coordinator could not reach the file it had
+    just been told to fill -- observed live, repeatedly. The store is
+    Cortex's own and must be writable; the project's source must not be."""
+    from cortex_runtime.delegation.workspace_isolation import IsolatedSnapshotWorkspaceProvisioner
+    import os
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "calc.py").write_text("def divide(a, b):\n    return a / b\n")
+    store = Store(project / ".cortex", project_root=project)
+    result = bootstrap_task(store, SourceEvent(origin="cli", event_id=str(uuid.uuid4())), "Guard divide.", "owner-1")
+    drafts = project / ".cortex" / "pipeline-drafts"
+    drafts.mkdir(parents=True, exist_ok=True)
+
+    provisioner = IsolatedSnapshotWorkspaceProvisioner(store, str(project))
+    root, mode = provisioner.coordinator_root_for(result.task_id)
+    assert mode == "read_only_snapshot"
+
+    # The store is the real one, and writable through it.
+    linked = os.path.join(root, ".cortex")
+    assert os.path.realpath(linked) == os.path.realpath(str(project / ".cortex"))
+    draft = os.path.join(linked, "pipeline-drafts", "d1.md")
+    with open(draft, "w") as handle:
+        handle.write("# plan\n")
+    assert (drafts / "d1.md").read_text() == "# plan\n"
+
+    # The project's own source is still not writable from here.
+    import pytest as _pytest
+
+    with _pytest.raises(PermissionError):
+        with open(os.path.join(root, "calc.py"), "w") as handle:
+            handle.write("broken")
+    assert (project / "calc.py").read_text().startswith("def divide")

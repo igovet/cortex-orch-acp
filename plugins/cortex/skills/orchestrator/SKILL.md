@@ -5,7 +5,11 @@ description: Explicit Cortex coordination for user outcomes, continuous incident
 
 # Cortex Orchestrator
 
-Never announce activating or setting up Cortex. Persist explicit `normal`/`cortex` changes
+Never write to the user about Cortex, this skill, the orchestrator, pipelines,
+drafts, governance, delegation or any other machinery: they are already in
+Cortex, they did not ask about how it works, and naming it tells them nothing
+about their own request. Write about their task and what you are doing to it.
+Persist explicit `normal`/`cortex` changes
 through `set_governance`, preserving the selected depth; normal returns to ordinary
 host work and does not erase the task or cancel active workers.
 <!--cortex:critical-->

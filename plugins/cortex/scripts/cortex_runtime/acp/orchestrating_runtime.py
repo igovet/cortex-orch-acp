@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+import re
 import json
 import os
 import threading
@@ -38,7 +39,7 @@ from ..delegation.provisioning import ProvisioningService
 from ..engine import failure_classification
 from ..engine import reaper as engine_reaper
 from ..engine.instruction_delivery_registry import delivery_for
-from ..observability.redact import scrub_text
+from ..observability.redact import scrub_display_text, scrub_text
 from ..portable.engine_contract import StopReason
 from ..portable.errors import PortableError, PortableErrorCategory
 from ..portable.identity import new_id
@@ -145,6 +146,14 @@ _EARLY_DISPATCH_POLL_SECONDS = 0.25
 # How many times the identical integration conflict may repeat for one
 # assignment before the coordinator is told that retrying is not a strategy.
 _IDENTICAL_INTEGRATION_CONFLICT_LIMIT = 3
+
+# This runtime's own MCP tools, as an engine names them in a tool call.
+# Their individual cards are noise in a session feed: a reader wants the
+# work, not the bookkeeping that supports it.
+_INTERNAL_TOOL_CALL = re.compile(r"^(?:mcp\.)?cortex[._]")
+
+# How many distinct bookkeeping operations the collapsed card lists.
+_INTERNAL_OPERATIONS_MAX_ENTRIES = 40
 
 # A worker card's title (role, work, and the action it is on right now).
 _WORKER_CARD_TITLE_MAX_CHARS = 300
@@ -507,6 +516,10 @@ class OrchestratingRuntime:
         # Each worker card's route line (engine, model, effort), kept so
         # every later body update still says what it is running on.
         self._worker_card_route: dict[str, str] = {}
+        # Worker cards this runtime has actually emitted a create for.
+        # See _emit_worker_card: the one place that decides create vs
+        # update, so the two can never arrive out of order again.
+        self._emitted_worker_cards: set[str] = set()
         # T020 (stop-race fix): the cancel_event of whichever start_prompt/
         # answer_question call currently owns this task's continuation loop
         # *in this process* -- lets stop_task() signal that loop to exit
@@ -1707,7 +1720,7 @@ class OrchestratingRuntime:
             try:
                 outcome = self._engine.prompt(
                     session_ref, prompt_text, cancel_event, on_delta=_on_coordinator_delta,
-                    on_tool_call=self._engine_tool_call_emitter(emit_tool_call),
+                    on_tool_call=self._engine_tool_call_emitter(emit_tool_call, language=language),
                     on_display_update=emit_display_update,
                 )
                 from .. import _fault_injection
@@ -2198,17 +2211,15 @@ class OrchestratingRuntime:
                     continue
                 role_hint = event.payload.get("role", "?")
                 work_title = event.payload.get("title", "")
-                emit_tool_call(dict(
-                    new=True, tool_call_id=_worker_tool_call_id(assignment_ref),
+                self._emit_worker_card(
+                    emit_tool_call, assignment_ref,
                     title=f"Worker: {_display_role(role_hint)} — {work_title}",
                     kind=_WORKER_TOOL_CALL_KIND, status="pending",
                     text=scrub_text(f"Queued: {event.payload.get('brief', '')}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
-                ))
+                )
             elif event.event_type == "assignment_ready" and event.assignment_ref:
                 assignment_ref = event.assignment_ref
-                fields: dict[str, Any] = dict(
-                    new=False, tool_call_id=_worker_tool_call_id(assignment_ref), status="in_progress",
-                )
+                fields: dict[str, Any] = dict(status="in_progress")
                 role_id = self._delegation_provisioning_role(task_id, assignment_ref)
                 if role_id:
                     requested = self._delegation_requested_payload(task_id, assignment_ref)
@@ -2225,7 +2236,7 @@ class OrchestratingRuntime:
                     fields["text"] = route
                     with self._lock:
                         self._worker_card_route[assignment_ref] = route
-                emit_tool_call(fields)
+                self._emit_worker_card(emit_tool_call, assignment_ref, **fields)
             elif event.event_type == "worker_result" and event.assignment_ref:
                 assignment_ref = self._assignment_ref_for_attempt(task_id, event.assignment_ref)
                 if assignment_ref is None:
@@ -2240,30 +2251,63 @@ class OrchestratingRuntime:
                 report_ref = event.payload.get("report_ref")
                 if report_ref:
                     lines.append(f"Report: {report_ref}")
-                emit_tool_call(dict(
-                    new=False, tool_call_id=_worker_tool_call_id(assignment_ref), status="completed",
+                self._emit_worker_card(
+                    emit_tool_call, assignment_ref, status="completed",
                     text=scrub_text("\n".join(lines), max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
-                ))
+                )
             elif event.event_type == "assignment_failed" and event.assignment_ref:
                 text = f"Not delegated/failed: {event.payload.get('error', 'unknown error')}"
                 detail = event.payload.get("detail")
                 if detail:
                     text += f" {detail}"
-                emit_tool_call(dict(
-                    new=False, tool_call_id=_worker_tool_call_id(event.assignment_ref), status="failed",
+                self._emit_worker_card(
+                    emit_tool_call, event.assignment_ref, status="failed",
                     text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
-                ))
+                )
             elif event.event_type == "assignment_cancelled" and event.assignment_ref:
                 text = f"Cancelled: {event.payload.get('reason', '')}"
-                emit_tool_call(dict(
-                    new=False, tool_call_id=_worker_tool_call_id(event.assignment_ref),
+                self._emit_worker_card(
+                    emit_tool_call, event.assignment_ref,
                     status=_TOOL_CALL_STATUS_FOR_CANCELLED,
                     text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
-                ))
+                )
+
+    def _emit_worker_card(self, emit_tool_call, assignment_ref: str, **fields) -> None:
+        """Every update to a worker's assignment card goes through here.
+
+        A card's create used to be emitted by the event-claim path (which
+        only runs between coordinator turns) while its updates came from
+        the wait/provisioning path -- so once a delegation started while
+        the turn that asked for it was still running, an update could
+        reach the client before the create. A client answers an update for
+        a card it never saw with "Tool call not found", and the card -- the
+        delegation itself -- never appears at all.
+
+        So no caller decides ``new`` any more: this does, from whether this
+        card has actually been emitted for this task yet. The default title
+        is filled in for a create that arrives update-shaped, because a
+        card must be named when it is created.
+        """
+        if emit_tool_call is None:
+            return
+        card_id = _worker_tool_call_id(assignment_ref)
+        with self._lock:
+            first = card_id not in self._emitted_worker_cards
+            if first:
+                self._emitted_worker_cards.add(card_id)
+        payload = dict(fields)
+        payload["tool_call_id"] = card_id
+        payload["new"] = first
+        if first:
+            payload.setdefault("kind", _WORKER_TOOL_CALL_KIND)
+            payload.setdefault("status", "pending")
+            if not payload.get("title"):
+                payload["title"] = "Worker assignment"
+        emit_tool_call(payload)
 
     def _engine_tool_call_emitter(
         self, emit_tool_call: Callable[[Mapping[str, Any]], bool] | None,
-        *, prefix: str = "", id_scope: str = "coordinator",
+        *, prefix: str = "", id_scope: str = "coordinator", language: str = "en",
     ):
         """A callback for ``SessionRuntime.prompt``'s ``on_tool_call`` that
         renders each of that session's own engine tool calls as an ACP
@@ -2298,7 +2342,7 @@ class OrchestratingRuntime:
             card_id = f"call:{id_scope}:{ref}"
             known = titles.get(ref)
             if isinstance(title, str) and title.strip():
-                known = scrub_text(title.strip(), max_chars=_TOOL_CALL_TITLE_MAX_CHARS)
+                known = scrub_display_text(title.strip(), max_chars=_TOOL_CALL_TITLE_MAX_CHARS)
                 titles[ref] = known
             if status is None:
                 status = pending_status.pop(ref, None)
@@ -2307,6 +2351,26 @@ class OrchestratingRuntime:
             fields: dict[str, Any] = dict(
                 tool_call_id=card_id, status=_acp_tool_call_status(status),
             )
+            if _INTERNAL_TOOL_CALL.match(known or title or ""):
+                # This runtime's own bookkeeping -- create_task,
+                # set_governance, list_events and the rest. A reader asked
+                # for their session, not for its plumbing, and one card per
+                # call buried the actual work. They collapse into a single
+                # card whose body says what was done.
+                name = _INTERNAL_TOOL_CALL.sub("", known or title or "")
+                if name and name not in internal_done:
+                    internal_done.append(name)
+                    del internal_done[:-_INTERNAL_OPERATIONS_MAX_ENTRIES]
+                card_id = f"call:{id_scope}:internal"
+                first = card_id not in seen
+                seen.add(card_id)
+                emit_tool_call(dict(
+                    new=first, tool_call_id=card_id, status="completed",
+                    title=acp_messages.render("internal_operations_card", language),
+                    **(dict(kind="other") if first else {}),
+                    text="\n".join(internal_done),
+                ))
+                return
             if known is None:
                 # Nothing to show yet. A card reading "tool call" tells a
                 # reader nothing at all, which is the complaint this whole
@@ -2343,6 +2407,7 @@ class OrchestratingRuntime:
         # Status/kind seen for a call the engine has not named yet.
         pending_status: dict[str, str | None] = {}
         pending_kind: dict[str, str | None] = {}
+        internal_done: list[str] = []
         pending_locations: dict[str, object] = {}
         pending_content: dict[str, object] = {}
         return on_tool_call
@@ -2379,9 +2444,7 @@ class OrchestratingRuntime:
             latest = " ".join(latest.split())
             if not latest:
                 continue
-            fields: dict[str, Any] = dict(
-                new=False, tool_call_id=_worker_tool_call_id(assignment_ref), status="in_progress",
-            )
+            fields: dict[str, Any] = dict(status="in_progress")
             base = titles.get(assignment_ref)
             if base:
                 fields["title"] = scrub_text(f"{base} · {latest}", max_chars=_WORKER_CARD_TITLE_MAX_CHARS)
@@ -2402,7 +2465,7 @@ class OrchestratingRuntime:
                 if self._worker_card_sent.get(assignment_ref) == signature:
                     continue
                 self._worker_card_sent[assignment_ref] = signature
-            emit_tool_call(fields)
+            self._emit_worker_card(emit_tool_call, assignment_ref, **fields)
 
     def _emit_provisioning_tool_calls(
         self, emit_tool_call: Callable[[Mapping[str, Any]], bool] | None,
@@ -2421,10 +2484,10 @@ class OrchestratingRuntime:
         if emit_tool_call is None:
             return
         for assignment_ref, step, _updated_at in provisioning_sig:
-            emit_tool_call(dict(
-                new=False, tool_call_id=_worker_tool_call_id(assignment_ref), status="in_progress",
+            self._emit_worker_card(
+                emit_tool_call, assignment_ref, status="in_progress",
                 text=scrub_text(f"Provisioning: {step}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
-            ))
+            )
 
     def _handle_ask_user(
         self, task_id: str, session_id: str, emit_update: Callable[[str], bool], language: str, decision: dict,

@@ -102,3 +102,19 @@ def test_no_relay_at_all_when_the_client_never_advertised_the_capability():
 
     agent.client_capabilities = {}
     assert agent._make_fs_requester("acps_abc123") is None
+
+
+def test_a_tool_call_titles_path_survives_redaction():
+    """The display path is the point of the card. A workspace directory is
+    exactly the shape the credential scrubber matches, and scrubbing it
+    left the title unreadable and the path unusable as a link."""
+    from cortex_runtime.observability.redact import scrub_display_text, scrub_text
+
+    title = "Read file '/p/.cortex/workspaces/coordinator_7093afe9d3ff3a61/work/calc.py'"
+    assert "REDACTED" in scrub_text(title), "the durable scrubber is unchanged"
+    assert scrub_display_text(title) == title
+
+    # Everything else it catches, it still catches -- inside a path or not.
+    assert "[REDACTED]" in scrub_display_text("api_key=sk-abcdefghijklmnopqrst /tmp/f.py")
+    assert "[REDACTED_TOKEN]" in scrub_display_text("bearer abcdefghijklmnop /tmp/f.py")
+    assert "[REDACTED]@" in scrub_display_text("https://user:pw@example.com/x")

@@ -66,6 +66,47 @@ def scrub_text(value: Any, *, max_chars: int = MAX_TEXT_CHARS) -> str:
     return text
 
 
+_PATHISH = re.compile(r"(?:[A-Za-z]:)?(?:/[^\s'\"]+)+")
+
+
+def scrub_display_text(value: Any, *, max_chars: int = MAX_TEXT_CHARS) -> str:
+    """:func:`scrub_text` for a string whose whole purpose is to be shown
+    to the user who owns the project -- a tool call's title, for instance.
+
+    Identical in every respect but one: an absolute filesystem path is
+    left intact. ``_LONG_OPAQUE_TOKEN`` cannot tell a credential from a
+    directory name, and a workspace directory is exactly the shape it
+    matches, so a title reading "Read file '/project/.cortex/workspaces/
+    coordinator_7093afe9d3ff3a61/work/calc.py'" came out with the path
+    destroyed -- unreadable, and unusable as the link it exists to be.
+
+    The narrowing is deliberate and bounded: a path in the user's own
+    project, shown back to that same user, is not a credential, and the
+    other three rules (URL userinfo, bearer tokens, key=value secrets)
+    still apply to the path and to everything around it. Never use this
+    for anything durable, exported, or sent anywhere but this user's own
+    client -- that is what :func:`scrub_text` is for.
+    """
+    text = value if isinstance(value, str) else str(value)
+    original_len = len(text)
+    text = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
+    text = _BEARER.sub("[REDACTED_TOKEN]", text)
+    text = _KEY_VALUE_SECRET.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
+
+    pieces: list[str] = []
+    last = 0
+    for match in _PATHISH.finditer(text):
+        pieces.append(_LONG_OPAQUE_TOKEN.sub(lambda m: f"[REDACTED:{_digest(m.group(0))}]", text[last:match.start()]))
+        pieces.append(match.group(0))
+        last = match.end()
+    pieces.append(_LONG_OPAQUE_TOKEN.sub(lambda m: f"[REDACTED:{_digest(m.group(0))}]", text[last:]))
+    text = "".join(pieces)
+
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"...[truncated_from:{original_len}_chars]"
+    return text
+
+
 def scrub_command(command: Any) -> dict:
     """Reduce a full ``argv`` list to a non-sensitive shape: the fixed
     launch binary path (``argv[0]``, never secret -- see

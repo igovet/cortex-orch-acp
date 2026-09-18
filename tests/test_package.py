@@ -214,8 +214,15 @@ def test_orchestrator_routes_conditional_procedures_with_valid_links():
     import re
     root = PLUGIN/'skills/orchestrator'
     body = (root/'SKILL.md').read_text()
-    # Keep the source compact while allowing the explicit owner/reconciliation branch.
-    assert len(body) < 7700
+    # Keep the source compact while allowing the explicit owner/
+    # reconciliation branch, and (T035) the rule about what never reaches
+    # the user: watching a live session, every coordinator reply opened
+    # with "Using the Cortex Orchestrator to hand the implementation to a
+    # worker, publish the assignment and check the result" -- machinery the
+    # user is already inside and never asked about. Saying that plainly
+    # costs a few hundred characters and is worth them; this guard exists
+    # to stop drift, not to price out a rule the product needs.
+    assert len(body) < 7990
     links = re.findall(r'\]\((references/[^)]+)\)', body)
     assert len(set(links)) >= 7
     for link in links:

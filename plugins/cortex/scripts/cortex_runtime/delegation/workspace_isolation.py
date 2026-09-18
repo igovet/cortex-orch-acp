@@ -212,6 +212,43 @@ def capture_and_copy_workspace(project_root: str, dest_root: str) -> dict:
     return manifest
 
 
+def _link_project_store(work_root: str, project_root: str) -> None:
+    """Make the project's own ``.cortex`` reachable, and writable, from
+    inside the coordinator's read-only snapshot.
+
+    ``create_draft`` hands back "an absolute server-created project path to
+    edit with native file tools" under ``<project_root>/.cortex/
+    pipeline-drafts``: editing drafts and reports with ordinary file
+    operations is the designed contract, not a workaround. The snapshot
+    excludes ``.cortex`` (it is storage, never project source), which left
+    the coordinator unable to reach the very file it had just been told to
+    fill -- observed live, repeatedly, as "the draft is outside the area I
+    may write to".
+
+    A symlink, so there is exactly one ``.cortex``: the real one. Nothing
+    is copied, nothing is synchronised, and a draft written here is
+    written where every other reader of this project already looks.
+
+    This does not re-open the project to the coordinator. What it may
+    write is the store, which is Cortex's own; the project's *source*
+    stays the read-only copy around it, and the engine-independent
+    pre/post digest of the real project root
+    (``acp.orchestrating_runtime``) still refuses a turn that changed it.
+    """
+    link = os.path.join(work_root, ".cortex")
+    store_path = os.path.join(project_root, ".cortex")
+    if not os.path.isdir(store_path) or os.path.lexists(link):
+        return
+    parent_mode = os.stat(work_root).st_mode
+    os.chmod(work_root, parent_mode | stat.S_IWUSR)
+    try:
+        os.symlink(store_path, link)
+    except OSError:
+        return
+    finally:
+        os.chmod(work_root, parent_mode)
+
+
 def _set_tree_write_bit(root: str, *, writable: bool) -> None:
     """Add (``writable=True``) or strip (``writable=False``) the owner
     write bit, recursively, on every path under ``root`` including
@@ -444,6 +481,7 @@ class IsolatedSnapshotWorkspaceProvisioner:
             return self._project_root, "unavailable_writable_fallback"
         root = row["root_path"]
         _set_tree_write_bit(root, writable=False)
+        _link_project_store(root, self._project_root)
         return root, "read_only_snapshot"
 
     def row_for_binding(self, binding_id: str):

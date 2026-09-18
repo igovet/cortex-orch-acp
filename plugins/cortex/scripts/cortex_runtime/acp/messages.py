@@ -33,6 +33,10 @@ _CATALOG: dict[str, dict[str, str]] = {
     # prompted with, so a Russian selection still produced English replies
     # for an English-worded request. Rendered in the target language, which
     # is itself the strongest instruction.
+    "internal_operations_card": {
+        "en": "Task bookkeeping",
+        "ru": "Служебные операции",
+    },
     "answer_in_language": {
         "en": "Always write your replies to the user in English, whatever language this prompt is in.",
         "ru": "Всегда пиши свои ответы пользователю по-русски, независимо от того, на каком языке этот запрос.",
