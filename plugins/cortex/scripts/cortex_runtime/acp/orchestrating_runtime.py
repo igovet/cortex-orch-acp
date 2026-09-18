@@ -104,6 +104,10 @@ _WORKER_TOOL_CALL_KIND = "execute"
 _TOOL_CALL_STATUS_FOR_CANCELLED = "failed"
 
 
+# How much of a running worker's own turn a card ever carries (the tail).
+_WORKER_ACTIVITY_MAX_CHARS = 2000
+
+
 def _display_role(role: str) -> str:
     """The role as a reader sees it on a worker's card.
 
@@ -428,6 +432,12 @@ class OrchestratingRuntime:
         # FINDING-06 already accepted for the coordinator's own turn; both
         # end on host cancel/stop, which this loop re-checks every tick.
         self._worker_turns_in_flight: set[str] = set()
+        # The most recent scrubbed excerpt of each in-flight worker's own
+        # engine turn, so its card can show what it is doing rather than
+        # only that it is running. Written by the worker's own on_delta,
+        # read by _continuation_loop's workers_running tick -- the tick
+        # that already exists, never a second channel or a second card.
+        self._worker_activity: dict[str, str] = {}
         # T020 (stop-race fix): the cancel_event of whichever start_prompt/
         # answer_question call currently owns this task's continuation loop
         # *in this process* -- lets stop_task() signal that loop to exit
@@ -1514,6 +1524,7 @@ class OrchestratingRuntime:
                         # which is the genuine stall this budget exists for.
                         no_progress = 0
                         self._set_state(task_id, "blocked", wait_reason="workers_running", no_progress_count=0)
+                        self._emit_worker_activity_tool_calls(emit_tool_call)
                         continue
                     no_progress += 1
                     self._set_state(task_id, "blocked", wait_reason="workers_running", no_progress_count=no_progress)
@@ -2067,6 +2078,35 @@ class OrchestratingRuntime:
                     status=_TOOL_CALL_STATUS_FOR_CANCELLED,
                     text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 ))
+
+    def _emit_worker_activity_tool_calls(
+        self, emit_tool_call: Callable[[Mapping[str, Any]], bool] | None,
+    ) -> None:
+        """Show what a running worker is actually doing.
+
+        Between ``assignment_ready`` and its result, a worker's card said
+        only "in_progress" -- the reported complaint was "I can see the
+        worker started, but not what it is doing". This updates the SAME
+        per-assignment card (never a second one, exactly like
+        :meth:`_emit_provisioning_tool_calls`) with the tail of that
+        worker's own turn, scrubbed through the one redaction choke point.
+
+        Card text only: a worker's text never enters the client's message
+        stream, which stays the coordinator's own (see ``PromptOutcome``).
+        A no-op when no card channel is wired, and when the worker has not
+        produced anything yet (nothing to say is not worth an update).
+        """
+        if emit_tool_call is None:
+            return
+        with self._lock:
+            activity = dict(self._worker_activity)
+        for assignment_ref, text in activity.items():
+            if not text.strip():
+                continue
+            emit_tool_call(dict(
+                new=False, tool_call_id=_worker_tool_call_id(assignment_ref), status="in_progress",
+                text=scrub_text(text, max_chars=_WORKER_ACTIVITY_MAX_CHARS),
+            ))
 
     def _emit_provisioning_tool_calls(
         self, emit_tool_call: Callable[[Mapping[str, Any]], bool] | None,
@@ -2793,11 +2833,26 @@ class OrchestratingRuntime:
                     return
                 with self._lock:
                     self._worker_turns_in_flight.add(assignment_ref)
+
+                def _on_worker_delta(chunk_text: str, _ref: str = assignment_ref) -> bool:
+                    # Card content only -- never the client's message
+                    # stream (PromptOutcome owns what a worker's text
+                    # means for the coordinator; see SessionRuntime.prompt).
+                    # Through the same redaction choke point as every other
+                    # client-facing text this runtime emits.
+                    with self._lock:
+                        previous = self._worker_activity.get(_ref, "")
+                        self._worker_activity[_ref] = (previous + chunk_text)[-_WORKER_ACTIVITY_MAX_CHARS:]
+                    return True
+
                 try:
-                    outcome = self._engine.prompt(result.engine_session_ref, brief, cancel_event)
+                    outcome = self._engine.prompt(
+                        result.engine_session_ref, brief, cancel_event, on_delta=_on_worker_delta,
+                    )
                 finally:
                     with self._lock:
                         self._worker_turns_in_flight.discard(assignment_ref)
+                        self._worker_activity.pop(assignment_ref, None)
                 break
             except EngineTurnFailed as failure:
                 # T017: a worker's own engine turn failing (transport

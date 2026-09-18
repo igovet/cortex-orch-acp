@@ -266,7 +266,18 @@ class FakeSessionRuntime:
         if behavior is None:
             outcome = PromptOutcome(StopReason.END_TURN, "")
         else:
-            outcome = behavior(self._store, info["channel"], session_ref, message, call_index)
+            # A behavior that declares ``on_delta`` wants to emit chunks
+            # *during* its turn (the only way to exercise anything that
+            # reacts to a turn still in flight); every other behavior keeps
+            # the original five-argument call exactly.
+            import inspect
+
+            if "on_delta" in inspect.signature(behavior).parameters:
+                outcome = behavior(
+                    self._store, info["channel"], session_ref, message, call_index, on_delta=on_delta,
+                )
+            else:
+                outcome = behavior(self._store, info["channel"], session_ref, message, call_index)
         # T035 visibility fix: this fake has no real per-chunk timeline, so
         # it simulates streaming with the one chunk it actually has (its
         # own whole outcome text) -- enough for a caller asserting

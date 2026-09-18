@@ -157,3 +157,61 @@ def test_consecutive_coordinator_turns_are_separated_in_the_client_stream(tmp_pa
         "a notice ran together with the preceding turn's text, with no separator"
     )
     assert "First turn text.\n\n" in streamed
+
+
+def test_a_running_workers_card_shows_what_it_is_doing(tmp_path):
+    """The reported gap: between ``assignment_ready`` and its result a
+    worker's card said only "in_progress". Its own turn must reach the
+    card -- and never the client's message stream, which is the
+    coordinator's."""
+    store, task_id = _task(tmp_path)
+    worker_may_finish = threading.Event()
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Assignment X", brief="do X", role="backend-dev",
+                acceptance="X done", request_key="reqX",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Delegated X.")
+        return PromptOutcome(StopReason.END_TURN, "Nothing new.")
+
+    def talking_worker(store, channel, session_ref, message, call_index, on_delta=None):
+        if on_delta is not None:
+            on_delta("Reading calc.py")
+            on_delta(" and adding the guard.")
+        worker_may_finish.wait(timeout=5.0)
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else talking_worker
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, router), FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=3,
+    )
+    cards: list = []
+    updates: list = []
+
+    def release_later():
+        for _ in range(100):
+            if any("Reading calc.py" in str(c.get("text", "")) for c in list(cards)):
+                break
+            threading.Event().wait(0.02)
+        worker_may_finish.set()
+
+    releaser = threading.Thread(target=release_later, daemon=True)
+    releaser.start()
+    runtime.start_prompt(
+        task_id, "s1", "Do X.", updates.append, threading.Event(), emit_tool_call=cards.append,
+    )
+    releaser.join(timeout=10.0)
+
+    activity = [c for c in cards if "Reading calc.py" in str(c.get("text", ""))]
+    assert activity, f"the running worker's own turn never reached its card: {cards}"
+    assert all(not c.get("new") for c in activity), "activity must update the existing card, never create a second one"
+    assert all(c["status"] == "in_progress" for c in activity)
+    # The worker's text is card content, never the coordinator's stream.
+    assert "Reading calc.py" not in "".join(u for u in updates if isinstance(u, str))
