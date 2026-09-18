@@ -226,3 +226,50 @@ def test_streamed_coordinator_chunk_is_redacted(tmp_path):
     assert updates, "expected the coordinator's own turn text to have been streamed"
     assert not any("sk-liveFAKESECRETVALUE1234567890abcdef" in u for u in updates)
     assert any("[REDACTED_TOKEN]" in u for u in updates)
+
+
+def test_a_tool_call_between_two_spoken_messages_separates_them(tmp_path):
+    """The reported rendering: "...verify the change.The Cortex draft was
+    created...". A model that speaks, calls a tool, then speaks again has
+    produced two messages, but ``agent_message_chunk`` carries no message
+    identity, so the chunks arrive as one unbroken run. The tool call
+    between them is the observable boundary."""
+    project = tmp_path / "project"
+    project.mkdir()
+    store, task_id = _task(project, "Check in.")
+    engine_dir = tmp_path / "engine"
+    engine_dir.mkdir()
+    environ = isolated_environ(engine_dir)
+    scenario_path = write_scenario(engine_dir, default_scenario(
+        prompt_updates=[
+            dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text="Publishing the draft.")),
+            dict(sessionUpdate="tool_call", toolCallId="tc1", title="write", status="completed"),
+            dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text="The draft was created.")),
+        ],
+        prompt_stop_reason="end_turn",
+    ))
+    record = make_connection_record(
+        new_connection_id(), launch_command=fake_launch_command(scenario_path), environ=environ,
+    )
+    adapter = EngineSessionManagerAdapter(
+        lambda task_id: record, lambda task_id: str(project), environ=environ, call_timeout=10.0,
+    )
+    runtime = OrchestratingRuntime(
+        store, adapter, FakeWorkspace(), FakeConfigSnapshotSource(),
+        allow_unqualified_delivery=True, wait_timeout_seconds=10.0,
+    )
+    try:
+        channel, _session_ref = runtime._ensure_coordinator(task_id)
+        mcp_tools.dispatch(store, channel, "decide", dict(
+            assignment_ref="task", decision="accept", rationale="Trivial check-in.", request_key="acc1",
+        ))
+        chunks: list[str] = []
+        runtime.start_prompt(task_id, "s1", "Just check in.", chunks.append, threading.Event())
+        streamed = "".join(chunks)
+        assert "Publishing the draft.The draft was created." not in streamed, (
+            f"two messages ran together with no separator: {streamed!r}"
+        )
+        assert "Publishing the draft.\n\nThe draft was created." in streamed, streamed
+    finally:
+        for manager in list(adapter._managers.values()):
+            manager.shutdown(grace=1.0)
