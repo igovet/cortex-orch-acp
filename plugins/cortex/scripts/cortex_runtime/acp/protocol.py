@@ -240,6 +240,40 @@ def user_message_chunk(session_id, text):
     ))
 
 
+def _tool_call_text_content(text):
+    return [dict(type="content", content=dict(type="text", text=text))]
+
+
+def tool_call(session_id, tool_call_id, title, kind, status, *, text=None):
+    """A brand-new ``ToolCall`` (T035 worker-assignment cards): one per
+    delegated assignment, keyed by a caller-chosen stable ``tool_call_id``
+    (see ``acp.orchestrating_runtime``'s per-assignment id derivation) so
+    every subsequent :func:`tool_call_update` for the same assignment
+    targets this same card instead of creating a new one. ``status`` is one
+    of the pinned schema's four ``ToolCallStatus`` values (``pending``,
+    ``in_progress``, ``completed``, ``failed`` -- there is no ``cancelled``;
+    see the caller for how a cancelled assignment maps onto ``failed``).
+    ``text``, when given, becomes this card's initial bounded content."""
+    update = dict(sessionUpdate="tool_call", toolCallId=tool_call_id, title=title, kind=kind, status=status)
+    if text:
+        update["content"] = _tool_call_text_content(text)
+    return notification("session/update", dict(sessionId=session_id, update=update))
+
+
+def tool_call_update(session_id, tool_call_id, *, status=None, title=None, text=None):
+    """A ``ToolCallUpdate`` for an already-created card (see :func:`tool_call`
+    above) -- only the fields actually changing are included, per the pinned
+    schema's own "all fields except the tool call ID are optional" contract."""
+    update = dict(sessionUpdate="tool_call_update", toolCallId=tool_call_id)
+    if status is not None:
+        update["status"] = status
+    if title is not None:
+        update["title"] = title
+    if text is not None:
+        update["content"] = _tool_call_text_content(text)
+    return notification("session/update", dict(sessionId=session_id, update=update))
+
+
 def validate_load_session_params(params):
     """(T018) Validate a ``LoadSessionRequest`` per the pinned schema:
     ``sessionId``, ``cwd`` (absolute existing canonical directory -- checked

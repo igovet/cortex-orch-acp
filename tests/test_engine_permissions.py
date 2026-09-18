@@ -8,7 +8,11 @@ import threading
 import pytest
 
 from cortex_runtime.engine.correlation import CorrelationTables
-from cortex_runtime.engine.permissions import DuplicateEnginePermissionRequestId, PermissionBridge
+from cortex_runtime.engine.permissions import (
+    DuplicateEnginePermissionRequestId,
+    PermissionBridge,
+    requires_confirmation,
+)
 from cortex_runtime.engine.resource_binding import BindingRegistry, ResourceBinding, ResourceBindingError
 
 
@@ -224,3 +228,133 @@ def test_allow_always_never_persists_a_standing_rule(tmp_path):
     # The host requester was consulted for *both* -- nothing was decided
     # locally from a remembered "always" choice.
     assert len(calls) == 2
+
+
+# -- T035: worker full-access-except-deletion auto-approval -----------------
+
+
+def _params(tool_call, options=None):
+    return dict(
+        toolCall=tool_call,
+        options=options or [dict(optionId="allow", kind="allow_once"), dict(optionId="deny", kind="reject_once")],
+    )
+
+
+def test_worker_ordinary_operation_is_auto_approved_without_host(tmp_path):
+    """A read/edit/search/etc. tool call for a worker binding is answered
+    locally -- the host requester is never called at all."""
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="worker"))
+    calls = []
+
+    def requester(engine_session_id, params, timeout):
+        calls.append(params)
+        return {"outcome": {"outcome": "selected", "optionId": "allow"}}
+
+    bridge = _bridge(bindings=bindings, host_permission_requester=requester)
+    params = _params(dict(toolCallId="tc-1", kind="edit", rawInput=dict(command="apply_patch")))
+    result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=params)
+    assert result == {"outcome": {"outcome": "selected", "optionId": "allow"}}
+    assert calls == []
+
+
+def test_worker_deletion_tool_kind_is_not_auto_approved(tmp_path):
+    """toolCall.kind == 'delete' always reaches the host, never auto-approved."""
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="worker"))
+    calls = []
+
+    def requester(engine_session_id, params, timeout):
+        calls.append(params)
+        return {"outcome": {"outcome": "selected", "optionId": "allow"}}
+
+    bridge = _bridge(bindings=bindings, host_permission_requester=requester)
+    params = _params(dict(toolCallId="tc-1", kind="delete", title="Delete scratch.txt"))
+    result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=params)
+    assert result == {"outcome": {"outcome": "selected", "optionId": "allow"}}
+    assert len(calls) == 1
+
+
+def test_worker_rm_shell_command_is_not_auto_approved(tmp_path):
+    """A shell 'execute' tool call whose command is 'rm ...' is recognized
+    as a deletion even though toolCall.kind itself is only 'execute'."""
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="worker"))
+    calls = []
+
+    def requester(engine_session_id, params, timeout):
+        calls.append(params)
+        return {"outcome": {"outcome": "cancelled"}}
+
+    bridge = _bridge(bindings=bindings, host_permission_requester=requester)
+    params = _params(dict(toolCallId="tc-1", kind="execute", rawInput=dict(command="rm -rf build/")))
+    result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=params)
+    assert result == {"outcome": {"outcome": "cancelled"}}
+    assert len(calls) == 1
+
+
+def test_worker_unclassifiable_tool_call_asks_rather_than_allows(tmp_path):
+    """No toolCall.kind at all -- the classifier refuses to guess and this
+    still reaches the host instead of being silently auto-approved."""
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="worker"))
+    calls = []
+
+    def requester(engine_session_id, params, timeout):
+        calls.append(params)
+        return {"outcome": {"outcome": "selected", "optionId": "allow"}}
+
+    bridge = _bridge(bindings=bindings, host_permission_requester=requester)
+    params = _params(dict(toolCallId="tc-1"))  # kind omitted entirely
+    result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=params)
+    assert result == {"outcome": {"outcome": "selected", "optionId": "allow"}}
+    assert len(calls) == 1
+
+
+def test_coordinator_binding_is_never_auto_approved(tmp_path):
+    """A coordinator binding always reaches the host, even for a tool call
+    that would be auto-approved for a worker -- the T035 mode-floor rule
+    ('the coordinator must not work on the project') is unaffected by the
+    worker auto-approval feature."""
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="coordinator"))
+    calls = []
+
+    def requester(engine_session_id, params, timeout):
+        calls.append(params)
+        return {"outcome": {"outcome": "selected", "optionId": "allow"}}
+
+    bridge = _bridge(bindings=bindings, host_permission_requester=requester)
+    params = _params(dict(toolCallId="tc-1", kind="read"))
+    result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=params)
+    assert result == {"outcome": {"outcome": "selected", "optionId": "allow"}}
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "tool_call,expected",
+    [
+        (dict(kind="delete"), True),
+        (dict(kind="move"), True),
+        (dict(kind="read"), False),
+        (dict(kind="edit"), False),
+        (dict(kind="search"), False),
+        (dict(kind="fetch"), False),
+        (dict(kind="think"), False),
+        (dict(kind="switch_mode"), False),
+        (dict(kind="other"), True),
+        (dict(), True),
+        (dict(kind="execute", rawInput=dict(command="pytest -q")), False),
+        (dict(kind="execute", rawInput=dict(command="rm -rf /tmp/x")), True),
+        (dict(kind="execute", rawInput=dict(command="rmdir empty/")), True),
+        (dict(kind="execute", rawInput=dict(command="git clean -fd")), True),
+        (dict(kind="execute", rawInput=dict(command="find . -name '*.tmp' -delete")), True),
+        (dict(kind="execute", rawInput=dict(command="mv a.txt b.txt")), True),
+        (dict(kind="execute", rawInput=dict(command="echo hi > out.txt")), True),
+        (dict(kind="execute", rawInput=dict(command="echo hi >> out.txt")), False),
+        (dict(kind="execute", title="Delete the scratch file"), True),
+    ],
+)
+def test_requires_confirmation_classification(tool_call, expected):
+    params = _params(dict(toolCallId="tc-1", **tool_call))
+    assert requires_confirmation(params) is expected

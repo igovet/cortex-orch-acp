@@ -78,6 +78,33 @@ def test_every_emitted_message_matches_the_pinned_schema(tmp_path):
     assert proc.returncode == 0
 
 
+def test_tool_call_cards_match_schema():
+    """T035: the worker-assignment tool-call/tool-call-update notifications
+    (``acp.protocol.tool_call``/``tool_call_update``) validate against the
+    pinned schema's ``AgentNotification`` -- covering every status this
+    runtime actually emits, including the cancelled-as-failed mapping."""
+    from cortex_runtime.acp import protocol
+
+    notification_validator = _validator("AgentNotification")
+    create = protocol.tool_call(
+        "s1", "worker:abc123", "Worker: worker-backend-dev — Add a cache", "execute", "pending",
+        text="Queued: add a cache to the repository",
+    )
+    notification_validator.validate(create)
+    assert create["params"]["update"]["sessionUpdate"] == "tool_call"
+
+    for status in ("in_progress", "completed", "failed"):
+        update = protocol.tool_call_update("s1", "worker:abc123", status=status, text="some bounded account text")
+        notification_validator.validate(update)
+        assert update["params"]["update"]["sessionUpdate"] == "tool_call_update"
+
+    # The cancelled-assignment mapping this runtime uses: no 'cancelled'
+    # ToolCallStatus exists in the pinned schema, so it renders as 'failed'
+    # -- assert that mapped value itself still validates.
+    cancelled_as_failed = protocol.tool_call_update("s1", "worker:abc123", status="failed", text="Cancelled: no longer needed")
+    notification_validator.validate(cancelled_as_failed)
+
+
 def test_error_response_matches_schema():
     response_validator = _validator("AgentResponse")
     proc = spawn_production_agent()

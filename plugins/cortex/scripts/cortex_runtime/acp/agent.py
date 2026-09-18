@@ -246,6 +246,14 @@ class Agent:
             self._runtime_accepts_host_elicitor = 'host_elicitor' in inspect.signature(runtime.start_prompt).parameters
         except (TypeError, ValueError):
             self._runtime_accepts_host_elicitor = False
+        # T035: detected the same way -- a runtime not updated for T035
+        # (every pre-T035 FakeRuntime/test) simply never receives
+        # emit_tool_call and stays on the plain-text-only narration it
+        # already had.
+        try:
+            self._runtime_accepts_emit_tool_call = 'emit_tool_call' in inspect.signature(runtime.start_prompt).parameters
+        except (TypeError, ValueError):
+            self._runtime_accepts_emit_tool_call = False
         self.environ = environ if environ is not None else os.environ
         self.version = _agent_version()
         self.stores = {}
@@ -532,6 +540,38 @@ class Agent:
             return None
         return _RealHostElicitor(self.host_requester, timeout=self._elicitation_timeout_seconds)
 
+    def _make_emit_tool_call(self, session_id, cancel_event):
+        """T035: the runtime-facing ``emit_tool_call`` callable -- accepts
+        one already-shaped update dict (``tool_call_id``, ``new`` [bool],
+        ``title``/``kind``/``status``/``text`` -- fields the runtime omits
+        are left unchanged on an existing card, per
+        ``acp.protocol.tool_call_update``'s own "only changed fields"
+        contract) and sends the matching ``session/update`` notification:
+        ``tool_call`` the first time a given ``tool_call_id`` is seen
+        (``new=True``, set by ``acp.orchestrating_runtime`` itself, which
+        already knows -- from the durable event log -- exactly once per
+        assignment when that is), ``tool_call_update`` every time after.
+        Never raises (same convention as ``emit_update`` below); ``None``
+        transport or an already-cancelled turn is a silent no-op, exactly
+        like a dropped text chunk."""
+        def emit_tool_call(update):
+            if cancel_event.is_set() or self.transport is None:
+                return False
+            tool_call_id = update["tool_call_id"]
+            if update.get("new"):
+                notif = protocol.tool_call(
+                    session_id, tool_call_id, update.get("title") or "Worker assignment",
+                    update.get("kind") or "other", update.get("status") or "pending",
+                    text=update.get("text"),
+                )
+            else:
+                notif = protocol.tool_call_update(
+                    session_id, tool_call_id, status=update.get("status"), title=update.get("title"),
+                    text=update.get("text"),
+                )
+            return self.transport.send_notification(notif)
+        return emit_tool_call
+
     def _current_language_for_session(self, store, session):
         """T020: the ``language`` SessionConfigOption's current value for
         this session -- the task's own durable per-task override once a
@@ -686,6 +726,8 @@ class Agent:
             # to the runtime's own constructor default (also None), which
             # is the unconditional plain-text ask_user fallback.
             start_prompt_kwargs["host_elicitor"] = self._make_elicitor(session_id)
+        if self._runtime_accepts_emit_tool_call:
+            start_prompt_kwargs["emit_tool_call"] = self._make_emit_tool_call(session_id, cancel_event)
         try:
             reason = self.runtime.start_prompt(task_id, session_id, text, emit_update, cancel_event, **start_prompt_kwargs)
         except OrchestrationUnavailable as exc:
@@ -968,7 +1010,10 @@ class Agent:
             return
         index, text = parsed
         list_method, list_kwargs = self._runtime_call_kwargs("list_open_questions", project_root=session["project"])
-        answer_method, answer_kwargs = self._runtime_call_kwargs("answer_question", project_root=session["project"])
+        answer_method, answer_kwargs = self._runtime_call_kwargs(
+            "answer_question", project_root=session["project"],
+            emit_tool_call=self._make_emit_tool_call(session_id, cancel_event),
+        )
         if list_method is None or answer_method is None:
             reply("This runtime does not support /cortex-answer.")
             return

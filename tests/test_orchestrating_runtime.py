@@ -528,3 +528,215 @@ def test_claimed_events_survive_a_prompt_exception_and_are_delivered_once(tmp_pa
             (task_id, "user_message:s1:0"),
         ).fetchone()
     assert first_message["consumed_by"] is not None  # eventually claimed and delivered exactly once
+
+
+# -- T035: worker-assignment ACP tool-call cards --------------------------
+
+
+def test_delegation_produces_stable_card_updated_through_running_and_completed(tmp_path):
+    """One ACP tool-call card per delegated assignment: created once with a
+    stable id (derived from the assignment's own durable ref), and every
+    later lifecycle event (running, then finished) updates that SAME card
+    -- never creates a second one."""
+    store, task_id = _task(tmp_path)
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Add a cache", brief="add a cache to the repository", role="backend-dev",
+                acceptance="cache added", request_key="reqA",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Delegated.")
+        if "finished" in message:
+            mcp_tools.dispatch(store, channel, "decide", dict(
+                assignment_ref="task", decision="accept", rationale="Done.", request_key="acc1",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Accepted.")
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        title = _assignment_title(store, channel)
+        _publish(store, channel, title, call_index)
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime, engine = _make_runtime(store, router)
+    cards = []
+    result = runtime.start_prompt(
+        task_id, "s1", "Add a cache.", lambda t: True, threading.Event(), emit_tool_call=cards.append,
+    )
+    assert result == StopReason.END_TURN
+
+    ids = {c["tool_call_id"] for c in cards}
+    assert len(ids) == 1  # exactly one card, one stable id, for the one assignment
+    creates = [c for c in cards if c.get("new")]
+    assert len(creates) == 1  # the card is created exactly once
+    assert creates[0]["status"] == "pending"
+    assert creates[0]["kind"] == "execute"
+    updates = [c for c in cards if not c.get("new")]
+    assert [c.get("status") for c in updates] == ["in_progress", "completed"]
+    # T035 requirement 3: the running/finished title update names the
+    # RESOLVED role id ("worker-backend-dev"), not the raw hint the
+    # coordinator typed ("backend-dev").
+    running = updates[0]
+    assert running.get("title") is not None
+    assert "worker-backend-dev" in running["title"]
+    assert "Add a cache" in running["title"]
+    completed = updates[1]
+    assert "Report:" in completed["text"]
+
+
+def test_cancelled_assignment_renders_as_failed_card_with_reason(tmp_path):
+    """T035: the pinned ACP schema's ToolCallStatus has no 'cancelled'
+    value -- a cancelled assignment must render as a 'failed' card, with
+    the cancellation reason carried in its content so it stays
+    distinguishable from an ordinary engine/refusal failure by its text.
+    Mirrors ``test_two_workers_steering_cancels_one_other_finishes``
+    (steering cancels X via a second /prompt turn; Y finishes normally)."""
+    store, task_id = _task(tmp_path)
+    phase = {"delegated": False, "cancelled_x": False, "accepted": False}
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if not phase["delegated"]:
+            phase["delegated"] = True
+            mcp_tools.dispatch(store, channel, "delegate", dict(title="X", brief="do X", role="backend-dev", acceptance="X done", request_key="reqX"))
+            mcp_tools.dispatch(store, channel, "delegate", dict(title="Y", brief="do Y", role="backend-dev", acceptance="Y done", request_key="reqY"))
+            return PromptOutcome(StopReason.END_TURN, "delegated X and Y")
+        if "no longer needed" in message and not phase["cancelled_x"]:
+            phase["cancelled_x"] = True
+            with store.connection() as db:
+                row = db.execute(
+                    "SELECT assignment_ref FROM task_events WHERE task_id=? AND event_type='delegation_requested' "
+                    "AND payload_json LIKE '%\"title\": \"X\"%'", (task_id,),
+                ).fetchone()
+            mcp_tools.dispatch(store, channel, "cancel", dict(
+                assignment_ref=row["assignment_ref"], reason="no longer needed", request_key="cancelX",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "cancelled X")
+        if phase["cancelled_x"] and not phase["accepted"]:
+            from cortex_runtime.delegation import completion as delegation_completion
+
+            ok, _reasons = delegation_completion.gate(store, task_id)
+            if ok:
+                phase["accepted"] = True
+                mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="Y delivered; X cancelled.", request_key="acc1"))
+                return PromptOutcome(StopReason.END_TURN, "accepted")
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        title = _assignment_title(store, channel)
+        if title == "X":
+            # Never publishes -- represents a worker cancelled before finishing.
+            return PromptOutcome(StopReason.END_TURN, "")
+        _publish(store, channel, title, call_index)
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime, engine = _make_runtime(store, router)
+    cards = []
+    result1 = runtime.start_prompt(task_id, "s1", "Do X and Y.", lambda t: True, threading.Event(), emit_tool_call=cards.append)
+    assert result1 == StopReason.END_TURN
+    result2 = runtime.start_prompt(task_id, "s1", "X is no longer needed.", lambda t: True, threading.Event(), emit_tool_call=cards.append)
+    assert result2 == StopReason.END_TURN
+    with store.connection() as db:
+        state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
+    assert state == "accepted"
+
+    cancelled_updates = [c for c in cards if c.get("status") == "failed" and "Cancelled" in (c.get("text") or "")]
+    assert len(cancelled_updates) == 1
+    assert "no longer needed" in cancelled_updates[0]["text"]
+    # It updated the SAME card the delegation created, never a new one.
+    created_ids = {c["tool_call_id"] for c in cards if c.get("new")}
+    assert cancelled_updates[0]["tool_call_id"] in created_ids
+    assert len(created_ids) == 2  # one card each for X and Y
+
+
+def test_refusal_before_execution_still_produces_a_failed_card(tmp_path):
+    """T035 requirement 6: an assignment refused before it ever ran (here,
+    an unknown role) must still be visible as a card, in 'failed', with the
+    actionable reason -- exactly as visible as the plain-text line commit
+    cf6e491 introduced, now carried by the card instead of duplicated as
+    text (see OrchestratingRuntime._continuation_loop)."""
+    store, task_id = _task(tmp_path)
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Assignment X", brief="do X", role="totally_bogus_role",
+                acceptance="X done", request_key="reqX",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Delegated X.")
+        mcp_tools.dispatch(store, channel, "decide", dict(
+            assignment_ref="task", decision="accept",
+            rationale="Delegation was refused; did the work myself.", request_key="acceptX",
+        ))
+        return PromptOutcome(StopReason.END_TURN, "Did the work myself.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        raise AssertionError("a refused delegation must never launch a worker")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime, engine = _make_runtime(store, router)
+    updates, cards = [], []
+    result = runtime.start_prompt(
+        task_id, "s1", "Do X.", updates.append, threading.Event(), emit_tool_call=cards.append,
+    )
+    assert result == StopReason.END_TURN
+
+    # The crude text line (cf6e491) is NOT duplicated once a card channel
+    # is wired -- the card is the one, non-duplicated, client-visible
+    # record of the refusal.
+    assert not any("was NOT delegated" in u for u in updates)
+    created = [c for c in cards if c.get("new")]
+    assert len(created) == 1
+    assert "totally_bogus_role" in created[0]["title"]  # raw hint: never resolved
+    failed = [c for c in cards if c.get("status") == "failed"]
+    assert len(failed) == 1
+    assert failed[0]["tool_call_id"] == created[0]["tool_call_id"]
+    assert "unknown_role" in failed[0]["text"]
+    assert "worker-backend-dev" in failed[0]["text"]  # the actionable remediation detail
+
+
+def test_emit_tool_call_none_falls_back_to_plain_text_refusal(tmp_path):
+    """A caller that never wires emit_tool_call (every pre-T035 test/
+    caller) must keep seeing the pre-T035 plain-text refusal line -- the
+    card path never silently drops the one thing cf6e491 made visible."""
+    store, task_id = _task(tmp_path)
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Assignment X", brief="do X", role="totally_bogus_role",
+                acceptance="X done", request_key="reqX",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Delegated X.")
+        mcp_tools.dispatch(store, channel, "decide", dict(
+            assignment_ref="task", decision="accept",
+            rationale="Delegation was refused; did the work myself.", request_key="acceptX",
+        ))
+        return PromptOutcome(StopReason.END_TURN, "Did the work myself.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        raise AssertionError("a refused delegation must never launch a worker")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime, engine = _make_runtime(store, router)
+    updates = []
+    runtime.start_prompt(task_id, "s1", "Do X.", updates.append, threading.Event())
+    assert any("was NOT delegated" in u for u in updates)

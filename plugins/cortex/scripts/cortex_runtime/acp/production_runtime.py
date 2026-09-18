@@ -179,6 +179,7 @@ class ProductionOrchestratingRuntime:
     def start_prompt(
         self, task_id, session_id, content, emit_update, cancel_event, *,
         project_root=None, source_origin=None, source_event_id=None, host_elicitor=None,
+        emit_tool_call=None,
     ):
         if not project_root:
             raise RouteUnresolved("project_root_unresolved")
@@ -187,6 +188,7 @@ class ProductionOrchestratingRuntime:
             return runtime.start_prompt(
                 task_id, session_id, content, emit_update, cancel_event,
                 source_origin=source_origin, source_event_id=source_event_id, host_elicitor=host_elicitor,
+                emit_tool_call=emit_tool_call,
             )
         except PortableError as error:
             # Every qualification/configuration/ownership refusal this
@@ -213,9 +215,9 @@ class ProductionOrchestratingRuntime:
         runtime = self._runtime_for_project(project_root)
         return runtime.stop_task(task_id, session_id, emit_update)
 
-    def answer_question(self, task_id, session_id, question, text, emit_update, cancel_event, *, project_root):
+    def answer_question(self, task_id, session_id, question, text, emit_update, cancel_event, *, project_root, emit_tool_call=None):
         runtime = self._runtime_for_project(project_root)
-        return runtime.answer_question(task_id, session_id, question, text, emit_update, cancel_event)
+        return runtime.answer_question(task_id, session_id, question, text, emit_update, cancel_event, emit_tool_call=emit_tool_call)
 
     def list_open_questions(self, task_id, *, project_root):
         runtime = self._runtime_for_project(project_root)

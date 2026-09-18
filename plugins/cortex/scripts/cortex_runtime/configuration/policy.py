@@ -31,6 +31,29 @@ class FailureClass(str):
     pass
 
 
+# T035 ("the coordinator must not be able to work on the project" -- user
+# requirement, verbatim: "Важно что бы наш рантайм/движок не давал
+# возможности координатору работать с проектом, потому что координатор это
+# route"): the engine's own non-editing mode, one entry per pinned live
+# engine (see ``engine.codex_adapter_acp``/``engine.claude_adapter_acp``
+# module docstrings for the full pinned "mode" vocabulary each engine
+# actually offers).
+#
+# - codex-acp: "read-only" is the one mode with no edit capability at all.
+# - claude-agent-acp: "plan", not "default" -- "default" still permits
+#   edits (it only asks first); only "plan" is genuinely non-editing, the
+#   same guarantee as codex's "read-only" rather than merely "asks first".
+#
+# ``configuration.service.ConfigurationService.propose`` applies this as a
+# floor on the coordinator's own configuration revision (the only "mode"
+# propose ever sets -- see that method's own docstring for the exact
+# precedence and its one disclosed gap: a connection's very first proposal,
+# before any live session has ever reported its own "mode" options).
+COORDINATOR_MODE_FLOOR: Mapping[str, str] = {
+    "codex-acp": "read-only",
+    "claude-agent-acp": "plan",
+}
+
 CANCELLATION = "cancellation"
 REFUSAL = "refusal"
 AUTHORIZATION_LOSS = "authorization_loss"

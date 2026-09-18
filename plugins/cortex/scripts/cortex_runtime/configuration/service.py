@@ -18,7 +18,7 @@ from ..connections.model import ConnectionState
 from ..portable.errors import PortableError, PortableErrorCategory
 from ..portable.identity import ExecutionRoute, OwnershipEpoch
 from . import store as configuration_store
-from .policy import PolicyCeiling, RouteProfile, require_narrowing
+from .policy import COORDINATOR_MODE_FLOOR, PolicyCeiling, RouteProfile, require_narrowing
 from .resolution import ConfigurationInputs, merge_layers, rederive_on_route_change, validate_dependent_settings
 from ..routing import store as routing_store
 
@@ -172,6 +172,32 @@ class ConfigurationService:
                     inputs.parameters,
                 )
                 parameters = rederive_on_route_change(previous_route_id, inputs.route, parameters)
+                # T035 coordinator mode floor (see configuration.policy
+                # .COORDINATOR_MODE_FLOOR's own docstring for the exact
+                # values/rationale and the one disclosed gap): this is the
+                # *only* place "mode" is ever set for the coordinator's own
+                # revision (propose() has no other caller -- see
+                # ConfigurationService's module docstring), so overriding it
+                # here -- unconditionally replacing whatever "mode" value
+                # (if any) the caller/user requested -- is a floor, never a
+                # preference: a user-chosen mode never survives this for a
+                # known live engine. Only applied when this route's own
+                # catalog-observed supported_parameters already lists the
+                # floor value as a supported "mode" option; when it does
+                # not (never yet discovered from a live session -- always
+                # true for a connection's very first proposal, since
+                # catalog.model_seed seeds "model" only, never "mode"), this
+                # is silently skipped rather than injecting a value nothing
+                # has ever confirmed the engine actually supports -- see
+                # EngineSessionManager.configure's own wire-level
+                # confirm-or-fail gate (T035 FINDING-02) for the backstop
+                # once "mode" *is* known.
+                mode_floor = COORDINATOR_MODE_FLOOR.get(inputs.route.engine)
+                if mode_floor is not None:
+                    catalog_modes = {value for name, value in catalog_entry.route.supported_parameters if name == "mode"}
+                    if mode_floor in catalog_modes:
+                        parameters = dict(parameters)
+                        parameters["mode"] = mode_floor
                 candidate_ceiling = inputs.ceiling_override if inputs.ceiling_override is not None else effective_ceiling
                 require_narrowing(candidate_ceiling, effective_ceiling)
                 validate_dependent_settings(catalog_entry, parameters)

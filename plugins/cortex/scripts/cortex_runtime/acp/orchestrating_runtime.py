@@ -36,6 +36,7 @@ from ..delegation.provisioning import ProvisioningService
 from ..engine import failure_classification
 from ..engine import reaper as engine_reaper
 from ..engine.instruction_delivery_registry import delivery_for
+from ..observability.redact import scrub_text
 from ..portable.engine_contract import StopReason
 from ..portable.errors import PortableError, PortableErrorCategory
 from ..portable.identity import new_id
@@ -67,6 +68,29 @@ def _bounded_detail(text: str) -> str:
     if len(text) <= _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS:
         return text
     return text[: _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS - 3] + "..."
+
+
+# T035: one ACP ToolCall card per delegated assignment (see
+# ``_emit_assignment_tool_call``/``_continuation_loop``). ``ToolCallStatus``
+# (tests/fixtures/acp/schema-1.4.0.json) is exactly pending/in_progress/
+# completed/failed -- there is no "cancelled" value, so a cancelled
+# assignment is rendered as a failed card carrying the cancellation reason
+# in its content (see _TOOL_CALL_STATUS_FOR_CANCELLED below). ``kind`` is a
+# deliberate "execute" for every worker card: a delegated assignment runs
+# arbitrary worker actions (edits, commands, searches, ...), never just one
+# of the more specific kinds (read/edit/search/...), and "execute" reads
+# truer than the catch-all "other".
+_WORKER_TOOL_CALL_KIND = "execute"
+_TOOL_CALL_STATUS_FOR_CANCELLED = "failed"
+
+
+def _worker_tool_call_id(assignment_ref: str) -> str:
+    """Stable id for one delegated assignment's card, derived from its own
+    durable ``assignment_ref`` (the coordinator-facing delegation
+    idempotency key -- see ``delegation.mcp_tools._coordinator_delegate``)
+    so every event this assignment ever produces (queued/running/finished/
+    failed/cancelled) updates the exact same card, never a new one."""
+    return f"worker:{assignment_ref}"
 
 
 @dataclass(frozen=True)
@@ -367,6 +391,7 @@ class OrchestratingRuntime:
         self, task_id, session_id, content, emit_update, cancel_event, *,
         source_origin: str | None = None, source_event_id: str | None = None,
         host_elicitor: HostElicitor | None = None,
+        emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
     ) -> StopReason:
         """T018: ``source_origin``/``source_event_id`` (when supplied by the
         caller -- see ``acp.agent.Agent``'s signature detection, mirroring
@@ -387,7 +412,16 @@ class OrchestratingRuntime:
         ``HostElicitor`` is scoped to exactly one connection's own
         ``HostRequester`` -- see ``acp.agent``) overrides the constructor's
         own ``host_elicitor`` default for this call only; ``None`` (the
-        default -- every pre-T020 caller) falls back to that default."""
+        default -- every pre-T020 caller) falls back to that default.
+
+        ``emit_tool_call`` (T035, per-call the same way): when given, one
+        ACP ToolCall card (``session/update`` ``tool_call``/``tool_call_update``
+        -- see ``acp.protocol.tool_call``) is emitted per delegated
+        assignment, in addition to (T035, replacing the plain-text
+        ``assignment_delegation_failed`` line for the one case a card fully
+        covers -- see ``_emit_assignment_tool_call``) ``emit_update``'s own
+        narration. ``None`` (every pre-T035 caller/test) falls back to the
+        plain-text-only behavior unchanged."""
         elicitor = host_elicitor if host_elicitor is not None else self._elicitor
         with self._lock:
             if task_id in self._active_tasks:
@@ -397,7 +431,8 @@ class OrchestratingRuntime:
             self._session_task[session_id] = task_id
         try:
             return self._run(task_id, session_id, content, emit_update, cancel_event,
-                              source_origin=source_origin, source_event_id=source_event_id, host_elicitor=elicitor)
+                              source_origin=source_origin, source_event_id=source_event_id, host_elicitor=elicitor,
+                              emit_tool_call=emit_tool_call)
         finally:
             with self._lock:
                 self._active_tasks.discard(task_id)
@@ -1026,6 +1061,7 @@ class OrchestratingRuntime:
         self, task_id, session_id, content, emit_update, cancel_event, *,
         source_origin: str | None = None, source_event_id: str | None = None,
         host_elicitor: HostElicitor | None = None,
+        emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
     ) -> StopReason:
         # T020: an urgent /cortex-stop takes precedence over everything --
         # a stopped task never resumes through an ordinary prompt/steering/
@@ -1121,11 +1157,15 @@ class OrchestratingRuntime:
             acp_steering.record_steering(
                 self._store, task_id, source_origin or session_id, source_event_id or dedup_key, content,
             )
-        return self._continuation_loop(task_id, session_id, channel, session_ref, content, emit_update, cancel_event, language, host_elicitor)
+        return self._continuation_loop(
+            task_id, session_id, channel, session_ref, content, emit_update, cancel_event, language, host_elicitor,
+            emit_tool_call=emit_tool_call,
+        )
 
     def _continuation_loop(
         self, task_id, session_id, channel, session_ref, content, emit_update, cancel_event, language,
-        host_elicitor: HostElicitor | None = None,
+        host_elicitor: HostElicitor | None = None, *,
+        emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
     ) -> StopReason:
         """The coordinator continuation loop proper: claim/coalesce/prompt/
         process, repeated until a terminal outcome. Factored out of
@@ -1190,22 +1230,31 @@ class OrchestratingRuntime:
             # refused (refusal is the completion gate's job, at acceptance
             # time -- see delegation.completion.gate).
             revisions = self._capture_result_revisions(task_id, claimed)
+            # T035: one ACP tool-call card per delegated assignment,
+            # queued/running/finished/failed/cancelled -- see
+            # _emit_assignment_tool_calls. Runs over the FULL claimed batch
+            # (delegation_requested/assignment_ready are informative-only
+            # for the coordinator's own continuation prompt below -- see
+            # MEANINGFUL_EVENT_TYPES -- but are exactly the "queued"/
+            # "running" transitions this card lifecycle needs).
+            self._emit_assignment_tool_calls(task_id, emit_tool_call, claimed)
             meaningful = [e for e in claimed if e.event_type in delegation_events.MEANINGFUL_EVENT_TYPES]
             # FINDING 11: a refused delegation must never be silently
-            # absorbed into "the coordinator did it all itself" -- surface
-            # it the same way an engine_failure/recovery loss already is:
-            # a client-visible localized line plus its own durable
-            # "progress" record (see _emit_localized), distinct from the
-            # assignment_failed event itself, so a turn where every
-            # delegation was refused is never indistinguishable from one
-            # where work was actually delegated.
-            for event in meaningful:
-                if event.event_type == "assignment_failed":
-                    self._emit_localized(
-                        task_id, emit_update, language, "assignment_delegation_failed",
-                        assignment_ref=event.assignment_ref or "?",
-                        error=event.payload.get("error", "unknown"),
-                    )
+            # absorbed into "the coordinator did it all itself" -- surfaced
+            # above as a failed tool-call card (T035) whenever a card
+            # channel is wired; the plain-text line below is kept ONLY as
+            # the fallback for a caller that never wired emit_tool_call at
+            # all (no pre-T035 caller/test does) -- a card and this same
+            # text line together would just duplicate the refusal, so the
+            # text only fires when there is no card to carry it.
+            if emit_tool_call is None:
+                for event in meaningful:
+                    if event.event_type == "assignment_failed":
+                        self._emit_localized(
+                            task_id, emit_update, language, "assignment_delegation_failed",
+                            assignment_ref=event.assignment_ref or "?",
+                            error=event.payload.get("error", "unknown"),
+                        )
             if not meaningful and not first:
                 # T020 (stop-race fix): if a /cortex-stop landed in this
                 # exact window (this batch was claimed but was never going
@@ -1362,7 +1411,8 @@ class OrchestratingRuntime:
 
     def answer_question(
         self, task_id: str, session_id: str, question: questions_store.PendingQuestion, text: str,
-        emit_update: Callable[[str], bool], cancel_event: threading.Event,
+        emit_update: Callable[[str], bool], cancel_event: threading.Event, *,
+        emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
     ) -> StopReason:
         """Deliver an explicit ``/cortex-answer`` (see ``acp.commands``) for
         one specific, already-disambiguated open ``question`` -- used when
@@ -1416,7 +1466,10 @@ class OrchestratingRuntime:
         with self._lock:
             self._active_cancel_events[task_id] = cancel_event
         try:
-            return self._continuation_loop(task_id, session_id, channel, session_ref, text, emit_update, cancel_event, language)
+            return self._continuation_loop(
+                task_id, session_id, channel, session_ref, text, emit_update, cancel_event, language,
+                emit_tool_call=emit_tool_call,
+            )
         finally:
             with self._lock:
                 if self._active_cancel_events.get(task_id) is cancel_event:
@@ -1601,6 +1654,136 @@ class OrchestratingRuntime:
             dict(note=acp_messages.render(key, language, **params), message_key=key, message_params=params),
             origin="runtime",
         )
+
+    # -- T035: worker-assignment ACP tool-call cards ----------------------
+
+    def _delegation_requested_payload(self, task_id: str, assignment_ref: str) -> Mapping[str, Any] | None:
+        import json as _json
+
+        with self._store.connection() as db:
+            row = db.execute(
+                "SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref=? "
+                "AND event_type='delegation_requested' ORDER BY id LIMIT 1",
+                (task_id, assignment_ref),
+            ).fetchone()
+        return _json.loads(row["payload_json"]) if row is not None else None
+
+    def _delegation_provisioning_role(self, task_id: str, assignment_ref: str) -> str | None:
+        """Best-effort resolved role id for a delegation, once
+        ``ProvisioningService.delegate`` has actually resolved and recorded
+        one (``delegation_provisioning.role_id`` -- see that module).
+        ``None`` before provisioning has run that far (e.g. an unknown-role
+        delegation refused before ``resolve_role`` ever succeeded, so no
+        row was ever inserted) -- the caller then keeps the raw role hint
+        it already has instead of guessing a resolved id."""
+        with self._store.connection() as db:
+            row = db.execute(
+                "SELECT role_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?",
+                (task_id, assignment_ref),
+            ).fetchone()
+        return row["role_id"] if row is not None else None
+
+    def _assignment_ref_for_attempt(self, task_id: str, attempt_id: str) -> str | None:
+        """``worker_result`` events are keyed by the worker's own attempt id
+        (``channel.attempt_id`` -- see
+        ``delegation.mcp_tools._worker_publish_result``), a different id
+        space from the coordinator-facing delegation ``assignment_ref``
+        (the idempotency key) every other assignment lifecycle event uses;
+        resolves attempt id back to that same delegation ref so a
+        ``worker_result`` updates the exact same card its
+        ``delegation_requested`` created, never a second, unrelated one."""
+        with self._store.connection() as db:
+            row = db.execute(
+                "SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?",
+                (task_id, attempt_id),
+            ).fetchone()
+        return row["idempotency_key"] if row is not None else None
+
+    def _emit_assignment_tool_calls(
+        self, task_id: str, emit_tool_call: Callable[[Mapping[str, Any]], bool] | None, claimed,
+    ) -> None:
+        """T035: render each delegated assignment's lifecycle as one ACP
+        ToolCall card (``acp.protocol.tool_call``/``tool_call_update``),
+        created once and updated in place -- from the SAME claimed batch
+        :meth:`_continuation_loop` already reads for the coordinator's own
+        continuation prompt (``claim_unconsumed`` claims every event type,
+        not only ``delegation_events.MEANINGFUL_EVENT_TYPES`` -- see that
+        function's docstring), so this observes ``delegation_requested``/
+        ``assignment_ready`` exactly once each, the same instant the
+        coordinator continuation loop itself does.
+
+        A cancelled assignment is rendered ``failed`` (the pinned
+        ``ToolCallStatus`` schema has no ``cancelled`` value -- see the
+        module-level docstring near ``_TOOL_CALL_STATUS_FOR_CANCELLED``)
+        with the cancellation reason carried in its content, so it stays
+        distinguishable from an ordinary failure by its text, never by a
+        status a client cannot render.
+
+        A no-op entirely when ``emit_tool_call`` is ``None`` (see
+        :meth:`start_prompt`'s docstring) -- every pre-T035 caller/test."""
+        if emit_tool_call is None:
+            return
+        for event in claimed:
+            if event.event_type == "delegation_requested":
+                assignment_ref = event.assignment_ref
+                if not assignment_ref:
+                    continue
+                role_hint = event.payload.get("role", "?")
+                work_title = event.payload.get("title", "")
+                emit_tool_call(dict(
+                    new=True, tool_call_id=_worker_tool_call_id(assignment_ref),
+                    title=f"Worker: {role_hint} — {work_title}",
+                    kind=_WORKER_TOOL_CALL_KIND, status="pending",
+                    text=scrub_text(f"Queued: {event.payload.get('brief', '')}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                ))
+            elif event.event_type == "assignment_ready" and event.assignment_ref:
+                assignment_ref = event.assignment_ref
+                fields: dict[str, Any] = dict(
+                    new=False, tool_call_id=_worker_tool_call_id(assignment_ref), status="in_progress",
+                )
+                role_id = self._delegation_provisioning_role(task_id, assignment_ref)
+                if role_id:
+                    requested = self._delegation_requested_payload(task_id, assignment_ref)
+                    if requested is not None:
+                        # Requirement: the title names the *resolved* role
+                        # id, not the raw hint the coordinator typed --
+                        # this is the first point a resolved id exists.
+                        fields["title"] = f"Worker: {role_id} — {requested.get('title', '')}"
+                emit_tool_call(fields)
+            elif event.event_type == "worker_result" and event.assignment_ref:
+                assignment_ref = self._assignment_ref_for_attempt(task_id, event.assignment_ref)
+                if assignment_ref is None:
+                    continue
+                checks = event.payload.get("checks") or []
+                lines = [event.payload.get("summary", "")]
+                if checks:
+                    rendered = ", ".join(
+                        f"{c.get('name')}={c.get('outcome')} ({c.get('evidence', 'claimed')})" for c in checks
+                    )
+                    lines.append(f"Checks: {rendered}.")
+                report_ref = event.payload.get("report_ref")
+                if report_ref:
+                    lines.append(f"Report: {report_ref}")
+                emit_tool_call(dict(
+                    new=False, tool_call_id=_worker_tool_call_id(assignment_ref), status="completed",
+                    text=scrub_text("\n".join(lines), max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                ))
+            elif event.event_type == "assignment_failed" and event.assignment_ref:
+                text = f"Not delegated/failed: {event.payload.get('error', 'unknown error')}"
+                detail = event.payload.get("detail")
+                if detail:
+                    text += f" {detail}"
+                emit_tool_call(dict(
+                    new=False, tool_call_id=_worker_tool_call_id(event.assignment_ref), status="failed",
+                    text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                ))
+            elif event.event_type == "assignment_cancelled" and event.assignment_ref:
+                text = f"Cancelled: {event.payload.get('reason', '')}"
+                emit_tool_call(dict(
+                    new=False, tool_call_id=_worker_tool_call_id(event.assignment_ref),
+                    status=_TOOL_CALL_STATUS_FOR_CANCELLED,
+                    text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                ))
 
     def _handle_ask_user(
         self, task_id: str, session_id: str, emit_update: Callable[[str], bool], language: str, decision: dict,
