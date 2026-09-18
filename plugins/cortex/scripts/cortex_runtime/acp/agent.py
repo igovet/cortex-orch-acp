@@ -1295,7 +1295,22 @@ class Agent:
                 project=project, task_id=durable["task_id"], channel=None, active=None, lock=threading.Lock(),
                 owner_epoch=None, pending_selection=None, default_selection=None,
                 pending_language=None, client_capabilities=dict(self.client_capabilities))
-        self.transport.send_response(protocol.result_response(request_id, protocol.load_session_response()))
+        session = self.sessions[session_id]
+        # T035 FINDING-08 fix: report the same selection surface as
+        # session/new, not a bare null. ``_config_options_for_session`` ->
+        # ``_current_selection_context`` already does the right thing here
+        # for free: with ``session["task_id"]`` set (from durable storage
+        # above), it reads the task's own configuration_revisions history
+        # (state "active"/etc, never "default") -- exactly the task-owned
+        # configuration this reconnect must show, distinguishable from a
+        # fresh session merely inheriting the current global default (state
+        # "default", the ``task_id is None`` branch). A task that never got
+        # an active configuration falls through to ``None`` there, which
+        # ``build_config_options`` reports with nothing marked as current --
+        # itself distinguishable from a task with a real selection.
+        options = self._config_options_for_session(session, store)
+        response = protocol.load_session_response(config_options=options)
+        self.transport.send_response(protocol.result_response(request_id, response))
 
     def _session_cancel(self, params):
         session_id = protocol.validate_session_cancel_params(params)

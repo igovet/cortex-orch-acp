@@ -822,6 +822,106 @@ def test_new_session_shows_persisted_default_as_default_not_pending(tmp_path, mo
     assert session2["default_selection"]["route_id"] == route_id
 
 
+# --- T035 FINDING-08: session/load must report the reloaded task's own
+#     selection surface, not a bare null, and never the current global
+#     default in its place ---------------------------------------------------
+
+def test_session_load_reports_tasks_own_active_configuration(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    _build_and_save_snapshot(record, environ=environ, model_id="model-a", thought_level="high")
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, _transport = _new_agent(tmp_path, environ)
+    result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    session_id = result["sessionId"]
+    _store, task_id = _bootstrap_task_for_session(agent, session_id, tmp_path)
+    agent._session_set_config_option(1, dict(sessionId=session_id, configId="model", value="model-a"))
+    agent._session_set_config_option(2, dict(sessionId=session_id, configId="thought_level", value="high"))
+
+    # A brand-new Agent (simulating a reconnect) reloads the same durable
+    # session/task.
+    loader, loader_transport = _new_agent(tmp_path, environ)
+    loader._session_load(42, dict(sessionId=session_id, cwd=str(project), mcpServers=[]))
+    reply = next(m for m in loader_transport.responses if m.get("id") == 42)
+    assert "error" not in reply, reply
+    assert reply["result"]["modes"] is None  # T035: never reported by session/new either
+    options_by_id = {opt["id"]: opt for opt in reply["result"]["configOptions"]}
+    assert options_by_id["model"]["currentValue"] == "model-a"
+    assert options_by_id["thought_level"]["currentValue"] == "high"
+    # Reused vocabulary: a task's own live selection is "selected"/"active",
+    # never "default" -- the mislabelling this fix must avoid.
+    assert options_by_id["model"]["_meta"]["_cortex"]["state"] == "selected"
+    validator = _schema_validator("LoadSessionResponse")
+    validator.validate(reply["result"])
+
+
+def test_session_load_reports_task_own_configuration_not_changed_global_default(tmp_path, monkeypatch):
+    """The regression this finding is about: reconnect to a task after the
+    *global* default changed to a different engine/model -- the reload must
+    still show the task's own values, never the new default."""
+    environ = _isolate(tmp_path, monkeypatch)
+    record_a = _configured_connection(name="A", environ=environ)
+    record_b = _configured_connection(name="B", environ=environ)
+    _build_and_save_snapshot(record_a, environ=environ, model_id="model-a", thought_level="high")
+    _build_and_save_snapshot(record_b, environ=environ, model_id="model-b", thought_level=None)
+    project = tmp_path / "project"
+    project.mkdir()
+
+    agent, _transport = _new_agent(tmp_path, environ)
+    result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    session_id = result["sessionId"]
+    _store, task_id = _bootstrap_task_for_session(agent, session_id, tmp_path)
+    agent._session_set_config_option(1, dict(sessionId=session_id, configId="provider", value=record_a.id))
+    agent._session_set_config_option(2, dict(sessionId=session_id, configId="model", value="model-a"))
+    agent._session_set_config_option(3, dict(sessionId=session_id, configId="thought_level", value="high"))
+
+    # The global default changes afterward, in a different pre-task session
+    # (mirrors T035's "changed global defaults" scenario).
+    other_project = tmp_path / "other-project"
+    other_project.mkdir()
+    other_agent, _other_transport = _new_agent(tmp_path, environ)
+    other_result = other_agent._session_new(dict(cwd=str(other_project), mcpServers=[]))
+    other_agent._session_set_config_option(
+        9, dict(sessionId=other_result["sessionId"], configId="provider", value=record_b.id))
+    other_agent._session_set_config_option(
+        10, dict(sessionId=other_result["sessionId"], configId="model", value="model-b"))
+    defaults = configuration_store.read_user_defaults(environ)["defaults"]
+    assert defaults["route_connection_id"] == record_b.id  # global default really did change
+
+    loader, loader_transport = _new_agent(tmp_path, environ)
+    loader._session_load(43, dict(sessionId=session_id, cwd=str(project), mcpServers=[]))
+    reply = next(m for m in loader_transport.responses if m.get("id") == 43)
+    options_by_id = {opt["id"]: opt for opt in reply["result"]["configOptions"]}
+    assert options_by_id["provider"]["currentValue"] == record_a.id
+    assert options_by_id["model"]["currentValue"] == "model-a"
+    assert options_by_id["thought_level"]["currentValue"] == "high"
+    assert options_by_id["model"]["_meta"]["_cortex"]["state"] == "selected"
+
+
+def test_session_load_of_never_configured_task_is_distinguishable(tmp_path, monkeypatch):
+    """A task that never got an active configuration still gets a sensible
+    (auto-selected) options list, but with no ``_meta._cortex.state`` --
+    distinguishable both from a real task selection ("selected"/"active")
+    and from a fresh session's inherited "default"."""
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    _build_and_save_snapshot(record, environ=environ, model_id="model-a", thought_level="high")
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, _transport = _new_agent(tmp_path, environ)
+    result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    session_id = result["sessionId"]
+    _bootstrap_task_for_session(agent, session_id, tmp_path)  # task exists, never configured
+
+    loader, loader_transport = _new_agent(tmp_path, environ)
+    loader._session_load(44, dict(sessionId=session_id, cwd=str(project), mcpServers=[]))
+    reply = next(m for m in loader_transport.responses if m.get("id") == 44)
+    options_by_id = {opt["id"]: opt for opt in reply["result"]["configOptions"]}
+    assert options_by_id["model"]["currentValue"] == "model-a"  # sole selectable, auto-shown
+    assert "_meta" not in options_by_id["model"]  # never "selected"/"active", never "default" either
+
+
 def test_pending_pre_task_selection_is_proposed_on_first_prompt(tmp_path, monkeypatch):
     environ = _isolate(tmp_path, monkeypatch)
     record = _configured_connection(environ=environ)

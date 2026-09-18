@@ -258,8 +258,14 @@ def validate_load_session_params(params):
     return params["sessionId"], params["cwd"], mcp_servers
 
 
-def load_session_response():
-    return dict(modes=None, configOptions=None)
+def load_session_response(config_options=None):
+    """T035 FINDING-08 fix: ``configOptions`` mirrors ``session/new``'s
+    -- the reloaded session's own selection surface (see
+    ``agent.Agent._session_load``/``_config_options_for_session``), not
+    always ``None``. ``modes`` stays ``None``: ``session/new`` never
+    reports it either (Cortex has no ACP "modes" concept, only
+    ``configOptions``), so there is nothing session/load should add."""
+    return dict(modes=None, configOptions=config_options if config_options else None)
 
 
 def prompt_result(stop_reason):
