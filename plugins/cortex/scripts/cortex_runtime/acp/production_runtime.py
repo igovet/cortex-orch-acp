@@ -155,6 +155,14 @@ class ProductionOrchestratingRuntime:
             workspace_resolver=lambda binding_id, launch: (
                 workspace_provisioner.root_for(binding_id) or str(project)
             ),
+            # EXT-01 finding #1 fix: an isolated worker's ``workspace_root``
+            # above is a throwaway copy that excludes both ``.git`` and
+            # ``.cortex`` -- it must never be handed to the engine's Cortex
+            # MCP server as the project root (that store does not exist
+            # there). This project's one real store always lives at
+            # ``project`` itself, regardless of which workspace a given
+            # attempt executes in.
+            project_root_factory=lambda task_id: str(project),
         )
         # T028: bounded owned-resource reaper sweep, once per project at
         # first use in this process (see engine.reaper's module docstring)
@@ -172,6 +180,17 @@ class ProductionOrchestratingRuntime:
             store, adapter, workspace_provisioner,
             ConfigurationServiceSnapshotSource(configuration_service),
         )
+        # EXT-01 #5 fix: previously never wired at all in production, so
+        # ``host_permission_requester``/``host_fs_requester`` existed only on
+        # paper here -- a worker's deletion confirmation could never reach a
+        # host, and an unsaved-editor-buffer check was always skipped (see
+        # EXT-01's own finding #5). ``adapter`` must exist before ``runtime``
+        # (the runtime's own constructor requires an already-built
+        # ``SessionRuntime``), so this back-reference is set only now, right
+        # after both exist -- see ``EngineSessionManagerAdapter.set_runtime``
+        # for exactly how it is used (never anything more than a read-only
+        # lookup: this adapter never mutates the runtime).
+        adapter.set_runtime(runtime)
         with self._lock:
             self._runtimes.setdefault(project_root, runtime)
             return self._runtimes[project_root]
@@ -179,7 +198,7 @@ class ProductionOrchestratingRuntime:
     def start_prompt(
         self, task_id, session_id, content, emit_update, cancel_event, *,
         project_root=None, source_origin=None, source_event_id=None, host_elicitor=None,
-        emit_tool_call=None,
+        emit_tool_call=None, host_permission_requester=None, host_fs_requester=None,
     ):
         if not project_root:
             raise RouteUnresolved("project_root_unresolved")
@@ -188,6 +207,7 @@ class ProductionOrchestratingRuntime:
             return runtime.start_prompt(
                 task_id, session_id, content, emit_update, cancel_event,
                 source_origin=source_origin, source_event_id=source_event_id, host_elicitor=host_elicitor,
+                host_permission_requester=host_permission_requester, host_fs_requester=host_fs_requester,
                 emit_tool_call=emit_tool_call,
             )
         except PortableError as error:

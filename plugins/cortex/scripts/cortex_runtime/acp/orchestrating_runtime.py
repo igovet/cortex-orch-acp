@@ -323,6 +323,26 @@ class OrchestratingRuntime:
         # every integration instead of silently treating "no host fs" the
         # same as "checked, no conflict".
         self._host_fs_requester = host_fs_requester
+        # EXT-01 #5 fix: ``OrchestratingRuntime`` is one long-lived instance
+        # per project, shared across every ACP connection for that project
+        # (see this class's own docstring above and ``start_prompt``'s own
+        # ``host_elicitor`` precedent) -- so a *connection-scoped* requester
+        # can never be a frozen constructor default alone (a later
+        # connection's own requester would never replace it). Each
+        # ``start_prompt`` call registers this call's own real,
+        # connection-bound ``host_permission_requester``/``host_fs_requester``
+        # (built by ``acp.agent.Agent`` from that connection's own
+        # ``HostRequester``/``client_capabilities``) here, keyed by
+        # ``task_id`` -- exactly the same per-task registration pattern
+        # ``_active_cancel_events`` already uses -- and de-registers it when
+        # that call returns (``SecondCoordinatorRefused`` already guarantees
+        # only one ``start_prompt`` is ever active for a given ``task_id`` at
+        # a time, so there is never a second call to clobber). A permission
+        # request that arrives for a task with no currently-registered
+        # requester (no ``start_prompt`` call for it in flight right now)
+        # fails closed exactly like "no host requester at all" always has.
+        self._task_permission_requesters: dict[str, Callable] = {}
+        self._task_fs_requesters: dict[str, Callable] = {}
         # T020: per-task de-duplication of identical consecutive runtime
         # status lines (never persisted -- see acp.messages.Dedup).
         self._status_dedup = acp_messages.Dedup()
@@ -392,6 +412,8 @@ class OrchestratingRuntime:
         source_origin: str | None = None, source_event_id: str | None = None,
         host_elicitor: HostElicitor | None = None,
         emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
+        host_permission_requester: Callable | None = None,
+        host_fs_requester: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> StopReason:
         """T018: ``source_origin``/``source_event_id`` (when supplied by the
         caller -- see ``acp.agent.Agent``'s signature detection, mirroring
@@ -414,6 +436,22 @@ class OrchestratingRuntime:
         own ``host_elicitor`` default for this call only; ``None`` (the
         default -- every pre-T020 caller) falls back to that default.
 
+        ``host_permission_requester``/``host_fs_requester`` (EXT-01 #5,
+        per-call -- registered under ``self._lock`` into
+        ``self._task_permission_requesters``/``self._task_fs_requesters``
+        keyed by ``task_id`` for the duration of this call, exactly the same
+        "never frozen at construction, always this connection's own" reason
+        as ``host_elicitor`` above): ``None`` (every pre-EXT-01 caller)
+        leaves this task with no live requester for this call, the same
+        fail-closed behavior as before this fix existed.
+        ``host_permission_requester`` reaches a worker/coordinator engine
+        session's own ``session/request_permission`` relay via
+        ``delegation.live_adapters.EngineSessionManagerAdapter``'s own
+        engine_session_id -> task_id lookup (see
+        ``EngineSessionManagerAdapter.set_runtime``); ``host_fs_requester``
+        is consulted by :meth:`_make_host_fs_checker` for the unsaved-editor-
+        buffer check ``delegation.integration.integrate`` performs.
+
         ``emit_tool_call`` (T035, per-call the same way): when given, one
         ACP ToolCall card (``session/update`` ``tool_call``/``tool_call_update``
         -- see ``acp.protocol.tool_call``) is emitted per delegated
@@ -429,6 +467,10 @@ class OrchestratingRuntime:
             self._active_tasks.add(task_id)
             self._active_cancel_events[task_id] = cancel_event
             self._session_task[session_id] = task_id
+            if host_permission_requester is not None:
+                self._task_permission_requesters[task_id] = host_permission_requester
+            if host_fs_requester is not None:
+                self._task_fs_requesters[task_id] = host_fs_requester
         try:
             return self._run(task_id, session_id, content, emit_update, cancel_event,
                               source_origin=source_origin, source_event_id=source_event_id, host_elicitor=elicitor,
@@ -438,6 +480,10 @@ class OrchestratingRuntime:
                 self._active_tasks.discard(task_id)
                 if self._active_cancel_events.get(task_id) is cancel_event:
                     del self._active_cancel_events[task_id]
+                if host_permission_requester is not None:
+                    self._task_permission_requesters.pop(task_id, None)
+                if host_fs_requester is not None:
+                    self._task_fs_requesters.pop(task_id, None)
 
     def cancel(self, session_id: str) -> None:
         """T028 (session/cancel, distinct from the task-wide ``/cortex-stop``
@@ -2047,25 +2093,46 @@ class OrchestratingRuntime:
             ).fetchall()
         import json
 
+        # P1 #7 fix: the dedup bookkeeping below (which needs the shared
+        # lock, to stay race-free against a concurrent _process_new_events
+        # call for the same task) is now the *only* thing done under
+        # self._lock. Every external/blocking effect -- executor.submit's
+        # own dispatch, _cancel_assignment, _integrate_assignment -- runs
+        # after the lock is released (P1 #7's second point: no blocking
+        # external operation under the shared runtime lock).
+        #
+        # For a submitted future specifically: this also closes the
+        # deadlock itself. future.add_done_callback() invokes the callback
+        # *immediately, on the calling thread* when the future is already
+        # done (documented concurrent.futures behavior) -- so registering
+        # it while still holding self._lock let an already-finished future
+        # re-enter _on_worker_done's self._cond (built on that same
+        # non-reentrant lock) on the same thread and deadlock. Ordering is
+        # preserved without that risk: the future is added to self._running
+        # (under a short, separate lock acquisition) strictly *before*
+        # add_done_callback is ever called, so a callback -- whether fired
+        # synchronously right here or later from a worker thread -- always
+        # finds the future already present to discard; it can never be
+        # missed, and it is never observable as still "running" once its
+        # own callback has had a chance to run.
+        to_delegate = []
+        to_cancel = []
+        to_clarify = []
+        to_integrate = []
         with self._lock:
             for row in requests:
                 assignment_ref = row["assignment_ref"]
                 if assignment_ref in self._dispatched_delegations:
                     continue
                 self._dispatched_delegations.add(assignment_ref)
-                payload = json.loads(row["payload_json"])
-                future = self._executor.submit(
-                    self._provision_and_prompt, task_id, coordinator_channel, payload, cancel_event,
-                )
-                self._running.setdefault(task_id, set()).add(future)
-                future.add_done_callback(lambda f, t=task_id: self._on_worker_done(t, f))
+                to_delegate.append(json.loads(row["payload_json"]))
 
             for row in cancels:
                 assignment_ref = row["assignment_ref"]
                 if assignment_ref in self._dispatched_cancels:
                     continue
                 self._dispatched_cancels.add(assignment_ref)
-                self._cancel_assignment(task_id, assignment_ref, json.loads(row["payload_json"]).get("reason", ""))
+                to_cancel.append((assignment_ref, json.loads(row["payload_json"]).get("reason", "")))
 
             for row in clarifications:
                 assignment_ref = row["assignment_ref"]
@@ -2075,16 +2142,34 @@ class OrchestratingRuntime:
                     continue
                 self._delivered_clarification_ids.add(row["id"])
                 message = json.loads(row["payload_json"]).get("message", "")
-                future = self._executor.submit(self._deliver_clarification, task_id, key, session_ref, message, cancel_event, row["id"])
-                self._running.setdefault(task_id, set()).add(future)
-                future.add_done_callback(lambda f, t=task_id: self._on_worker_done(t, f))
+                to_clarify.append((key, session_ref, message, row["id"]))
 
             for row in integrations:
                 if row["id"] in self._dispatched_integrations:
                     continue
                 self._dispatched_integrations.add(row["id"])
                 payload = json.loads(row["payload_json"])
-                self._integrate_assignment(task_id, payload["assignment_ref"], payload["request_key"])
+                to_integrate.append((payload["assignment_ref"], payload["request_key"]))
+
+        for payload in to_delegate:
+            future = self._executor.submit(
+                self._provision_and_prompt, task_id, coordinator_channel, payload, cancel_event,
+            )
+            with self._lock:
+                self._running.setdefault(task_id, set()).add(future)
+            future.add_done_callback(lambda f, t=task_id: self._on_worker_done(t, f))
+
+        for assignment_ref, reason in to_cancel:
+            self._cancel_assignment(task_id, assignment_ref, reason)
+
+        for key, session_ref, message, row_id in to_clarify:
+            future = self._executor.submit(self._deliver_clarification, task_id, key, session_ref, message, cancel_event, row_id)
+            with self._lock:
+                self._running.setdefault(task_id, set()).add(future)
+            future.add_done_callback(lambda f, t=task_id: self._on_worker_done(t, f))
+
+        for assignment_ref, request_key in to_integrate:
+            self._integrate_assignment(task_id, assignment_ref, request_key)
 
         self._terminate_completed_workers(task_id)
 
@@ -2597,45 +2682,71 @@ class OrchestratingRuntime:
             self._store, task_id, "assignment_cancelled", f"assignment_cancelled:{assignment_ref}",
             dict(reason=reason), origin="runtime", assignment_ref=assignment_ref,
         )
-        # Not self._notify() here: this runs while _process_new_events holds
-        # self._lock (a plain, non-reentrant Lock shared with self._cond);
-        # a waiting coordinator observes the new event via its own bounded
-        # DB poll instead (see _wait_for_progress).
+        # Not self._notify() here: a waiting coordinator observes the new
+        # event via its own bounded DB poll instead (see
+        # _wait_for_progress) -- no _running entry is added/removed by this
+        # call, so there is nothing for _cond to usefully notify here.
 
     def _make_host_fs_checker(self, project_root: str, task_id: str):
-        """T025 (lead follow-up): builds the per-path unsaved-host-buffer
-        check ``delegation.integration.integrate`` consults, reusing the
-        existing T014 ``engine.fs_bridge.HostFsForwarder``/``RevisionLog``
-        abstraction (never a bespoke second wire protocol) rather than
-        calling ``self._host_fs_requester`` directly. Returns ``None`` when
-        no host fs requester was ever supplied to this runtime (host never
-        negotiated fs, or no live connection is wired yet -- see this
-        class's own constructor docstring); the caller then durably
-        records ``host_buffer_state: 'unknown'`` instead of silently
-        treating "unknown" the same as "checked, no conflict"."""
-        if self._host_fs_requester is None:
+        """T025 (lead follow-up) / EXT-01 #5: builds the per-path unsaved-
+        host-buffer check ``delegation.integration.integrate`` consults,
+        reusing the existing T014 ``engine.fs_bridge.HostFsForwarder``/
+        ``RevisionLog`` abstraction (never a bespoke second wire protocol)
+        rather than calling a host fs requester directly.
+
+        The requester consulted is this exact call's own registered
+        ``self._task_fs_requesters[task_id]`` (set by ``start_prompt`` for
+        the duration of the call that is running this integration -- see
+        that method's own docstring) if one was registered, else this
+        runtime's constructor-time ``self._host_fs_requester`` default (kept
+        only for callers/tests that never opt into the per-task mechanism).
+
+        Returns ``None`` -- capability genuinely absent -- when neither is
+        set (host never negotiated fs, or no live connection is wired for
+        this task right now); the caller then durably records
+        ``host_buffer_state: 'unknown'`` instead of silently treating
+        "unknown" the same as "checked, no conflict".
+
+        The returned ``checker`` *raises* (never silently returns ``None``)
+        when the host round-trip for one specific path could not be trusted
+        (timeout/closed transport/malformed reply) -- ``integrate()`` itself
+        is responsible for turning that into a per-path conflict and an
+        overall ``host_buffer_state: 'check_failed'`` (see its own
+        docstring); a clean "the host has no buffer for this exact path"
+        answer stays a plain ``None`` return, never a conflict by itself."""
+        requester = self._task_fs_requesters.get(task_id)
+        if requester is None:
+            requester = self._host_fs_requester
+        if requester is None:
             return None
         from ..engine.fs_bridge import HostFsForwarder
 
-        forwarder = HostFsForwarder(host_fs_requester=self._host_fs_requester)
+        forwarder = HostFsForwarder(host_fs_requester=requester)
         binding_stub = _IntegrationHostBinding(f"integration:{task_id}")
 
         def checker(relpath: str):
             absolute_path = os.path.join(project_root, relpath)
-            try:
-                result = forwarder.read_text_file(binding_stub, dict(path=absolute_path))
-            except Exception:
-                # The host has no buffer for this exact path (or an
-                # unrelated transport hiccup) -- never treated as a
-                # positive "matches disk" signal; simply not consulted for
-                # this one path (see integrate()'s own None handling).
-                return None
+            result = forwarder.read_text_file(binding_stub, dict(path=absolute_path))
             content = result.get("content") if isinstance(result, dict) else None
-            if content is None:
-                return None
+            if not isinstance(content, str):
+                raise ValueError(f"host fs checker: malformed/missing content for {relpath!r}.")
             return content.encode("utf-8", "surrogateescape")
 
         return checker
+
+    def permission_requester_for_task(self, task_id: str):
+        """EXT-01 #5: the exact connection-bound
+        ``(engine_session_id, params, timeout) -> dict`` callable currently
+        registered for ``task_id`` (see ``start_prompt``'s own docstring),
+        or ``None`` if no ``start_prompt`` call for this task is in flight
+        right now. Called by
+        ``delegation.live_adapters.EngineSessionManagerAdapter`` (see
+        ``set_runtime``) after it has already resolved
+        ``engine_session_id -> task_id`` itself -- this method never sees
+        or needs an ``engine_session_id``, only the ``task_id`` that lookup
+        already produced."""
+        with self._lock:
+            return self._task_permission_requesters.get(task_id)
 
     def _integrate_assignment(self, task_id: str, assignment_ref: str, request_key: str) -> None:
         """T025 (lead follow-up): performs the actual technical application
@@ -2688,4 +2799,4 @@ class OrchestratingRuntime:
                 origin="runtime", assignment_ref=assignment_ref,
             )
         # Not self._notify() here -- same reasoning as _cancel_assignment
-        # above (called while _process_new_events holds self._lock).
+        # above.

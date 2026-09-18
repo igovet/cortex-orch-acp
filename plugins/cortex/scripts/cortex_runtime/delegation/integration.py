@@ -305,24 +305,40 @@ def integrate(
     """Apply attempt ``attempt_id``'s isolated workspace changes onto
     ``project_root``. Idempotent per ``(assignment_ref, request_key)``.
 
-    ``host_fs_checker`` (optional) -- ``(relpath) -> bytes | None`` -- a
-    caller-supplied read of the *host's* own negotiated buffer for a
-    project-relative path (see ``engine.fs_bridge.HostFsForwarder``), or
-    ``None`` when the host has no such buffer/capability. Only ever
-    consulted for a path this integration is about to modify; a path the
-    worker never touched is never blocked on a host buffer it does not
-    change.
+    ``host_fs_checker`` (optional) -- ``(relpath) -> bytes | None``, may
+    raise -- a caller-supplied read of the *host's* own negotiated buffer
+    for a project-relative path (see ``engine.fs_bridge.HostFsForwarder``),
+    or the whole parameter is ``None`` when the host has no such
+    buffer/capability at all (recorded ``host_buffer_state: "unknown"``).
+    Only ever consulted for a path this integration is about to modify; a
+    path the worker never touched is never blocked on a host buffer it does
+    not change. Per path: a clean ``None`` return means "host confirms no
+    buffer content here" (not a conflict by itself); *raising* means the
+    round-trip itself could not be trusted (timeout, closed transport,
+    malformed reply) and is always treated as a conflict for that path
+    (recorded ``host_buffer_state: "check_failed"``) -- uncertainty is never
+    silently treated the same as "checked, no conflict".
     """
     existing = _existing_row(store, assignment_ref, request_key)
     if existing is not None:
         return _result_from_row(existing)
 
-    # T025 (lead follow-up): a host that never negotiated fs (or whose
-    # capability the caller does not have a live requester for) means this
+    # T025 (lead follow-up) / EXT-01 #5 (three-state fix): a host that never
+    # negotiated fs (or whose capability the caller does not have a live
+    # requester for -- ``host_fs_checker`` is ``None``) means this
     # integration cannot know whether an unsaved buffer exists for any
-    # touched path -- recorded as a visible, durable limitation rather than
-    # silently treated the same as "checked, no conflict".
+    # touched path -- recorded as ``unknown`` (capability absent), a visible,
+    # durable limitation, rather than silently treated the same as "checked,
+    # no conflict". A *third* state, ``check_failed``, is recorded below when
+    # a requester *was* supplied but at least one touched path's own
+    # round-trip failed (timeout/closed transport/malformed reply, see
+    # ``acp.orchestrating_runtime._make_host_fs_checker``) -- that failure
+    # itself is never conflated with "no buffer" (which stays a clean,
+    # non-exception ``None`` return): each such path is refused as a
+    # conflict below, exactly like a positively-observed unsaved buffer,
+    # because uncertainty must never become permission to overwrite.
     host_buffer_state = "checked" if host_fs_checker is not None else "unknown"
+    buffer_check_failed = False
 
     provisioner = workspace_isolation.IsolatedSnapshotWorkspaceProvisioner(store, project_root, task_id)
     binding_row = provisioner.row_for_binding(workspace_binding_id)
@@ -367,7 +383,14 @@ def integrate(
             continue
         main_entry = _read_current_entry(project_root, relpath)
         if host_fs_checker is not None:
-            host_content = host_fs_checker(relpath)
+            try:
+                host_content = host_fs_checker(relpath)
+            except Exception:
+                # The round-trip itself failed (or returned something the
+                # checker could not trust) -- uncertain, never "no buffer".
+                buffer_check_failed = True
+                conflicts[relpath] = dict(reason="host_buffer_check_failed")
+                continue
             if host_content is not None:
                 main_bytes = main_entry.get("bytes") if main_entry and main_entry.get("kind") == "f" else None
                 if main_bytes is None or host_content != main_bytes:
@@ -413,6 +436,13 @@ def integrate(
             reason="delete_modify_conflict" if (base_entry is None) != (worker_entry is None)
             else "kind_or_binary_conflict",
         )
+
+    if buffer_check_failed:
+        # A failed host round-trip always produced its own conflict entry
+        # above, so ``conflicts`` is guaranteed non-empty here -- this only
+        # ever affects which branch below records; it can never itself let
+        # an apply proceed uncertain.
+        host_buffer_state = "check_failed"
 
     if conflicts:
         return _record(

@@ -288,10 +288,26 @@ class EngineSessionManagerAdapter:
         capacity_limit: int | None = None,
         capacity_queue_timeout_seconds: float = 600.0,
         workspace_resolver: Callable[[str, Mapping[str, object]], str] | None = None,
+        project_root_factory: Callable[[str], str] | None = None,
         **manager_kwargs,
     ) -> None:
         self._connection_record_factory = connection_record_factory
         self._workspace_root_factory = workspace_root_factory
+        # EXT-01 finding #1 fix: the *execution* workspace root (this
+        # attempt's cwd -- a throwaway isolated copy under
+        # ``workspace_resolver``, excluding both ``.git`` and ``.cortex``)
+        # and the *logical* project root (where the one real
+        # ``.cortex/cortex.sqlite3`` store actually lives, which
+        # ``engine.mcp_bridge.build_mcp_servers``/``server.py`` need in
+        # ``channel_credentials``/``CORTEX_CHANNEL_PROJECT_ROOT``) are not
+        # the same path once isolation is in play. ``project_root_factory``
+        # -- ``task_id -> project_root`` -- is the explicit, opt-in seam for
+        # the caller's already-known real project root; when ``None`` (every
+        # pre-existing caller/test, all of which only ever use the shared,
+        # non-isolated ``workspace_root_factory`` where the two paths are
+        # identical), behaviour is unchanged: the resolved workspace root is
+        # reused as the project root, exactly as before.
+        self._project_root_factory = project_root_factory
         # T025 (optional, opt-in -- every existing caller keeps its
         # single-argument ``workspace_root_factory(task_id)`` behaviour
         # unchanged): when supplied, resolves the *actual* per-attempt
@@ -334,6 +350,58 @@ class EngineSessionManagerAdapter:
         # promptly instead of relying purely on its own backoff poll
         # interval (up to 1s) under real scheduling contention.
         self._activity_cond = threading.Condition()
+        # EXT-01 #5: optional back-reference to the owning
+        # ``acp.orchestrating_runtime.OrchestratingRuntime`` (set once, after
+        # both are constructed -- see ``set_runtime``'s own docstring for why
+        # the two cannot be constructed in the other order). ``None`` means
+        # "no runtime wired" (every pre-EXT-01 caller/test): every engine
+        # session this adapter opens then gets no ``host_permission_requester``
+        # at all, the exact same fail-closed-to-cancelled behaviour as before
+        # this fix existed.
+        self._runtime = None
+
+    def set_runtime(self, runtime) -> None:
+        """EXT-01 #5: wires this adapter to the
+        ``acp.orchestrating_runtime.OrchestratingRuntime`` it is the
+        ``SessionRuntime`` for -- called once by the caller
+        (``acp.production_runtime.ProductionOrchestratingRuntime``) right
+        after constructing that runtime with this adapter, which is itself
+        constructed first (the runtime's own constructor requires an
+        already-built ``SessionRuntime``); this setter is the seam that
+        closes that ordering gap. Every ``EngineSessionManager`` this
+        adapter opens *after* this call gets a real
+        ``host_permission_requester`` (see :meth:`_host_permission_requester`)
+        that maps its own ``engine_session_id`` back to this adapter's own
+        already-tracked owning ``task_id`` (``_session_to_attempt`` +
+        ``_attempt_task``, both populated by :meth:`open` itself -- never a
+        second, independent identity scheme) and then asks the runtime for
+        *that task's* currently-registered, connection-bound requester (see
+        ``OrchestratingRuntime.permission_requester_for_task``)."""
+        self._runtime = runtime
+
+    def _host_permission_requester(self, engine_session_id, params, timeout):
+        """EXT-01 #5: the actual ``host_permission_requester`` passed to
+        every ``EngineSessionManager`` this adapter opens (see :meth:`open`)
+        -- resolves ``engine_session_id`` to the one task it belongs to
+        using this adapter's own bookkeeping, then delegates to that task's
+        currently-registered requester. Returns ``None`` (mapped by
+        ``engine.permissions.PermissionBridge`` to the same ``cancelled``
+        outcome as "no host requester at all") whenever no runtime is wired,
+        the session is unknown to this adapter, or no requester is
+        currently registered for its task (no ``start_prompt`` call for that
+        task is in flight on any connection right now) -- never guesses,
+        never reuses a different task's requester."""
+        if self._runtime is None:
+            return None
+        with self._lock:
+            attempt_id = self._session_to_attempt.get(engine_session_id)
+            task_id = self._attempt_task.get(attempt_id) if attempt_id is not None else None
+        if task_id is None:
+            return None
+        requester = self._runtime.permission_requester_for_task(task_id)
+        if requester is None:
+            return None
+        return requester(engine_session_id, params, timeout)
 
     def _resolve_launch_install(self, record):
         """T035 follow-up ("a connection's launch command is trusted
@@ -390,8 +458,17 @@ class EngineSessionManagerAdapter:
             workspace_root = self._workspace_resolver(workspace_binding_id, launch)
         else:
             workspace_root = self._workspace_root_factory(task_id)
+        # EXT-01 finding #1: the MCP server's ``project_root`` must be this
+        # task's one real logical project root, never the (possibly
+        # isolated, throwaway) execution ``workspace_root`` above -- see
+        # ``_project_root_factory``'s own docstring in ``__init__``.
+        project_root = (
+            self._project_root_factory(task_id)
+            if self._project_root_factory is not None
+            else workspace_root
+        )
         channel_credentials = (
-            (channel_id, channel_secret, workspace_root)
+            (channel_id, channel_secret, project_root)
             if channel_id and channel_secret else None
         )
         route_override = launch.get("route_override")
@@ -432,6 +509,14 @@ class EngineSessionManagerAdapter:
             manager_kwargs["coordinator_refusal_notifier"] = (
                 self._notify_coordinator_refusal if self._store is not None else None
             )
+        # EXT-01 #5: a caller-supplied ``host_permission_requester`` (every
+        # existing direct test -- see e.g.
+        # ``test_delegation_worker_mode_floor.py``) always wins unchanged;
+        # only when none was given does this adapter wire its own
+        # runtime-backed lookup (a no-op -- returns ``None``, same as before
+        # this fix -- until :meth:`set_runtime` has actually been called).
+        if "host_permission_requester" not in manager_kwargs:
+            manager_kwargs["host_permission_requester"] = self._host_permission_requester
         manager = EngineSessionManager(
             record, workspace_root, environ=self._environ,
             channel_credentials=channel_credentials,
@@ -1355,6 +1440,16 @@ class EngineSessionManagerAdapter:
             with self._lock:
                 self._pending_generation.pop(session_ref, None)
 
+    # EXT-01 #4 fix: how often the independent cancel-watcher below re-checks
+    # ``cancel_event`` while ``manager.prompt_turn()`` is blocked with
+    # nothing to yield (silent engine, transport still open). This is
+    # deliberately *not* a wall-clock bound on the turn itself (the turn's
+    # own iteration below is never given a timeout -- see
+    # ``engine.session_manager``'s own T035 FINDING-06 comment); it only
+    # bounds how quickly a cancel gets *sent*, independent of whether the
+    # engine ever emits another event.
+    _CANCEL_WATCH_POLL_SECONDS = 0.05
+
     def prompt(self, session_ref: str, message: str, cancel_event: threading.Event):
         from ..acp.orchestrating_runtime import EngineTurnFailed, PromptOutcome
         from ..portable.engine_contract import EngineEventKind, StopReason
@@ -1381,9 +1476,40 @@ class EngineSessionManagerAdapter:
         usage_basis = None
         usage_values: dict = {}
         call_failed = True
+        # EXT-01 #4 fix (independent-review P1 #4): the per-event
+        # ``cancel_event.is_set()`` check below only ever runs when this
+        # loop's own ``for`` statement advances -- i.e. only once
+        # ``manager.prompt_turn()`` actually yields another event. A silent
+        # engine (accepted the prompt, transport still open, never emits
+        # another event) parks that generator on its own internal
+        # ``update_queue.get()`` indefinitely (by design -- T035 FINDING-06
+        # removed the wall-clock bound on the turn itself), so a cancel
+        # requested while parked there was never sent downstream at all
+        # until *something else* drove another iteration. This watcher
+        # thread sends ``manager.cancel(session_ref)`` the moment
+        # ``cancel_event`` is set, entirely independent of the event
+        # stream -- it never waits for, and is never driven by, the next
+        # event. The per-event check right below is kept as a fast path
+        # (an event that happens to arrive at the same moment as the cancel
+        # need not wait even one poll interval) and to preserve its
+        # existing fault-injection checkpoint; ``_cancel_sent`` makes the
+        # two paths race-safe without ever sending the notification twice.
+        _cancel_sent = threading.Event()
+        _stop_watch = threading.Event()
+
+        def _watch_for_cancel() -> None:
+            while not _stop_watch.is_set():
+                if cancel_event.wait(timeout=self._CANCEL_WATCH_POLL_SECONDS):
+                    if not _cancel_sent.is_set():
+                        _cancel_sent.set()
+                        manager.cancel(session_ref)
+                    return
+
+        watcher = threading.Thread(target=_watch_for_cancel, name="engine-cancel-watch", daemon=True)
+        watcher.start()
         try:
             for event in manager.prompt_turn(session_ref, message):
-                if cancel_event.is_set():
+                if cancel_event.is_set() and not _cancel_sent.is_set():
                     from .. import _fault_injection
 
                     # T028: any event still arriving on this iteration
@@ -1396,6 +1522,7 @@ class EngineSessionManagerAdapter:
                     # deliveries still land normally) but never reported as
                     # having completed the turn or used to revive it.
                     _fault_injection.checkpoint("t028_late_event_after_cancel")
+                    _cancel_sent.set()
                     manager.cancel(session_ref)
                 if event.kind == EngineEventKind.TURN_DELTA and event.delta_text:
                     text_parts.append(event.delta_text)
@@ -1437,6 +1564,14 @@ class EngineSessionManagerAdapter:
                 raise EngineTurnFailed("poisoned") from error
             raise
         finally:
+            # EXT-01 #4 fix: stop the watcher promptly once this call is
+            # done for any reason (normal end, failure, or already handled
+            # its own cancel) -- it is a bounded, short poll (never longer
+            # than ``_CANCEL_WATCH_POLL_SECONDS``), so this join never waits
+            # on anything unbounded, and it never leaves a stray thread
+            # polling a ``cancel_event`` no one will ever set again.
+            _stop_watch.set()
+            watcher.join(timeout=self._CANCEL_WATCH_POLL_SECONDS * 4)
             # T029: exactly one usage_records row per prompt() call --
             # retry/fallback hops and recovery/clarification deliveries
             # each call prompt() again and therefore each get their own

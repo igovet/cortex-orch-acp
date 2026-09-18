@@ -308,3 +308,123 @@ def test_host_buffer_checked_and_blocks_via_fake_host_forwarder(tmp_path):
     assert payload["host_buffer_state"] == "checked"
     # Never overwritten by the worker's stale-relative-to-host result.
     assert (tmp_path / "shared.txt").read_text() == "line1\nline2\nline3\n"
+
+
+def test_host_buffer_check_failed_blocks_overwrite_never_silently_applies(tmp_path):
+    """EXT-01 #5 (three-state fix): a requester *was* supplied (fs is
+    negotiated) but the one round-trip for the worker's own touched path
+    fails (here: the host's transport is simply gone -- a
+    ``HostRequestClosed``-shaped failure in production) -- this must never
+    be treated the same as "host confirms no buffer here" (which stays a
+    clean pass). Recorded as its own third state, ``check_failed``, and the
+    path is refused exactly like a positively-observed conflict: the
+    worker's result is never applied uncertain."""
+    store, task_id = _task(tmp_path)
+    assignment_ref_holder = {}
+
+    def fake_host_fs_requester(method, params):
+        assert method == "fs/read_text_file"
+        if params["path"].endswith("shared.txt"):
+            raise RuntimeError("transport closed mid-request")
+        raise AssertionError("only the worker's own touched path is ever consulted")
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            result = mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Worker A", brief="edit", role="backend-dev", acceptance="done", request_key="reqA",
+            ))
+            assignment_ref_holder["ref"] = result["assignment_ref"]
+            return PromptOutcome(StopReason.END_TURN, "Delegated.")
+        if "Worker A finished" in message and "done" not in assignment_ref_holder:
+            assignment_ref_holder["done"] = True
+            mcp_tools.dispatch(store, channel, "integrate", dict(
+                assignment_ref=assignment_ref_holder["ref"], request_key="int1",
+            ))
+        return PromptOutcome(StopReason.END_TURN, "Waiting.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        title = _assignment_title(store, channel)
+        root = workspace.root_for(channel.workspace_binding_id)
+        with open(os.path.join(root, "shared.txt"), "w") as f:
+            f.write("line1\nline2\nWORKER-EDIT\n")
+        _publish(store, channel, title, call_index)
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime, engine, workspace = _runtime(store, router, tmp_path, host_fs_requester=fake_host_fs_requester)
+    cancel_event = threading.Event()
+    runtime.start_prompt(task_id, "s1", "Go.", lambda t: True, cancel_event)
+
+    events = _integration_events(store, task_id)
+    assert len(events) == 1
+    etype, payload = events[0]
+    assert etype == "integration_conflict"
+    assert payload["conflict_paths"]["shared.txt"]["reason"] == "host_buffer_check_failed"
+    assert payload["host_buffer_state"] == "check_failed"
+    # Never overwritten by the worker's own result while the check was
+    # uncertain -- exactly the same protection a positively-observed
+    # unsaved buffer gets, never weaker.
+    assert (tmp_path / "shared.txt").read_text() == "line1\nline2\nline3\n"
+
+
+def test_per_call_host_fs_requester_overrides_constructor_default_and_is_scoped_to_the_call(tmp_path):
+    """EXT-01 #5: ``OrchestratingRuntime`` is one long-lived instance per
+    project, shared across every ACP connection -- so a real caller
+    (``acp.agent.Agent``) registers this exact call's own connection-bound
+    requester via ``start_prompt(host_fs_requester=...)``, never only the
+    constructor-time default. Proven here: the constructor default is never
+    consulted at all when a per-call one is given, and
+    ``self._task_fs_requesters`` (this runtime's own per-task registry) is
+    empty again once the call returns -- never leaked across tasks/calls."""
+    store, task_id = _task(tmp_path)
+    assignment_ref_holder = {}
+
+    def constructor_default_requester(method, params):
+        raise AssertionError("the per-call requester must win; the constructor default must never be consulted")
+
+    def per_call_requester(method, params):
+        assert method == "fs/read_text_file"
+        return {"content": "line1\nline2\nHOST-HAS-UNSAVED-EDIT\n"}
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            result = mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Worker A", brief="edit", role="backend-dev", acceptance="done", request_key="reqA",
+            ))
+            assignment_ref_holder["ref"] = result["assignment_ref"]
+            return PromptOutcome(StopReason.END_TURN, "Delegated.")
+        if "Worker A finished" in message and "done" not in assignment_ref_holder:
+            assignment_ref_holder["done"] = True
+            mcp_tools.dispatch(store, channel, "integrate", dict(
+                assignment_ref=assignment_ref_holder["ref"], request_key="int1",
+            ))
+        return PromptOutcome(StopReason.END_TURN, "Waiting.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        title = _assignment_title(store, channel)
+        root = workspace.root_for(channel.workspace_binding_id)
+        with open(os.path.join(root, "shared.txt"), "w") as f:
+            f.write("line1\nline2\nWORKER-EDIT\n")
+        _publish(store, channel, title, call_index)
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime, engine, workspace = _runtime(store, router, tmp_path, host_fs_requester=constructor_default_requester)
+    cancel_event = threading.Event()
+    runtime.start_prompt(task_id, "s1", "Go.", lambda t: True, cancel_event, host_fs_requester=per_call_requester)
+
+    assert runtime._task_fs_requesters == {}  # deregistered once the call returned
+    events = _integration_events(store, task_id)
+    assert len(events) == 1
+    etype, payload = events[0]
+    assert etype == "integration_conflict"
+    assert payload["conflict_paths"]["shared.txt"]["reason"] == "unsaved_host_buffer"
+    assert payload["host_buffer_state"] == "checked"

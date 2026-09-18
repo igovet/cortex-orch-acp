@@ -254,6 +254,22 @@ class Agent:
             self._runtime_accepts_emit_tool_call = 'emit_tool_call' in inspect.signature(runtime.start_prompt).parameters
         except (TypeError, ValueError):
             self._runtime_accepts_emit_tool_call = False
+        # EXT-01 #5: detected the same way -- a runtime not updated for this
+        # fix (every pre-existing FakeRuntime/test) simply never receives
+        # host_permission_requester/host_fs_requester and keeps its own
+        # pre-existing (unwired) behavior unchanged.
+        try:
+            self._runtime_accepts_host_permission_requester = (
+                'host_permission_requester' in inspect.signature(runtime.start_prompt).parameters
+            )
+        except (TypeError, ValueError):
+            self._runtime_accepts_host_permission_requester = False
+        try:
+            self._runtime_accepts_host_fs_requester = (
+                'host_fs_requester' in inspect.signature(runtime.start_prompt).parameters
+            )
+        except (TypeError, ValueError):
+            self._runtime_accepts_host_fs_requester = False
         self.environ = environ if environ is not None else os.environ
         self.version = _agent_version()
         self.stores = {}
@@ -540,6 +556,78 @@ class Agent:
             return None
         return _RealHostElicitor(self.host_requester, timeout=self._elicitation_timeout_seconds)
 
+    def _make_permission_requester(self, session_id):
+        """EXT-01 #5: a real, connection-bound
+        ``(engine_session_id, params, timeout) -> dict`` relay for a
+        downstream engine's ``session/request_permission`` (see
+        ``engine.permissions.PermissionBridge``), or ``None`` when this
+        connection has no transport yet. Unlike ``_make_elicitor``, ACP
+        defines no client capability flag for permission requests at all
+        (``session/request_permission`` is a core, not-optional host
+        feature -- verified against this repository's own vendored
+        ``ClientCapabilities`` schema, which has no such property): the only
+        gate is whether a live ``HostRequester`` exists, exactly matching
+        ``engine.permissions.PermissionBridge``'s own pre-existing
+        "``None`` means never reaches a host" contract.
+
+        ``engine_session_id`` is accepted and discarded here -- this
+        connection has exactly one ``session_id`` per ``start_prompt`` call
+        (the caller's own), and the *engine*-session-to-*task* identity
+        mapping this relay is answering for is already resolved one layer
+        below, by ``delegation.live_adapters.EngineSessionManagerAdapter``,
+        before this callable is ever invoked (see
+        ``EngineSessionManagerAdapter._host_permission_requester``); this
+        closure only ever needs to know which ACP ``sessionId`` (this
+        connection's own) to put on the outbound wire request."""
+        if self.host_requester is None:
+            return None
+        host_requester = self.host_requester
+
+        def request_permission(engine_session_id, params, timeout=30.0):
+            del engine_session_id  # see docstring: resolved one layer below
+            body = dict(params or {})
+            body["sessionId"] = session_id
+            try:
+                return host_requester.request("session/request_permission", body, timeout=timeout or 30.0)
+            except (HostRequestTimeout, HostRequestClosed, HostRequestError):
+                return None
+
+        return request_permission
+
+    def _make_fs_requester(self, session_id):
+        """EXT-01 #5: a real, connection-bound ``(method, params) -> dict``
+        relay for the host's own negotiated ``fs/*`` capability (see
+        ``engine.fs_bridge.HostFsForwarder``), built -- like
+        ``_make_elicitor`` -- iff the host actually advertised
+        ``clientCapabilities.fs.readTextFile`` at ``initialize`` (schema-
+        1.4.0's own ``FileSystemCapabilities``; ``fs`` omitted, or with
+        ``readTextFile`` false/missing, both mean "cannot read a host
+        buffer" -- never guessed at). ``None`` otherwise -- the caller
+        (``acp.orchestrating_runtime._make_host_fs_checker``) then records
+        the integration's own ``host_buffer_state: 'unknown'`` rather than
+        ever treating "capability not negotiated" as "checked, no
+        conflict".
+
+        Deliberately never catches an exception from the underlying
+        ``HostRequester.request`` call: the caller distinguishes a clean "no
+        buffer for this path" (``None``/empty content) from a failed
+        round-trip (timeout/closed transport/error) by whether *this*
+        callable raises -- see ``delegation.integration.integrate``'s own
+        ``host_fs_checker`` contract docstring for exactly why swallowing an
+        exception here would be the one thing this fix must not do."""
+        capabilities = self.client_capabilities if isinstance(self.client_capabilities, dict) else {}
+        fs = capabilities.get("fs")
+        if not isinstance(fs, dict) or not fs.get("readTextFile"):
+            return None
+        if self.host_requester is None:
+            return None
+        host_requester = self.host_requester
+
+        def request_fs(method, params):
+            return host_requester.request(method, params)
+
+        return request_fs
+
     def _make_emit_tool_call(self, session_id, cancel_event):
         """T035: the runtime-facing ``emit_tool_call`` callable -- accepts
         one already-shaped update dict (``tool_call_id``, ``new`` [bool],
@@ -726,6 +814,12 @@ class Agent:
             # to the runtime's own constructor default (also None), which
             # is the unconditional plain-text ask_user fallback.
             start_prompt_kwargs["host_elicitor"] = self._make_elicitor(session_id)
+        if self._runtime_accepts_host_permission_requester:
+            # EXT-01 #5: same "never guessed, None is the honest default"
+            # convention as host_elicitor above.
+            start_prompt_kwargs["host_permission_requester"] = self._make_permission_requester(session_id)
+        if self._runtime_accepts_host_fs_requester:
+            start_prompt_kwargs["host_fs_requester"] = self._make_fs_requester(session_id)
         if self._runtime_accepts_emit_tool_call:
             start_prompt_kwargs["emit_tool_call"] = self._make_emit_tool_call(session_id, cancel_event)
         try:
