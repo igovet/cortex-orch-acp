@@ -162,6 +162,45 @@ _WORKER_CARD_TITLE_MAX_CHARS = 300
 _WORKER_ACTION_LOG_MAX_CHARS = 4000
 
 
+def _project_relative(text: str | None, project_root: str | None) -> str | None:
+    """Rewrite absolute paths inside ``project_root`` as paths relative to
+    it, and leave everything else exactly as it is.
+
+    A card reading "Read file '/var/tmp/cortex-zed-demo/calc.py'" spends
+    most of its width on the one part the reader already knows -- which
+    project they are in. ``calc.py`` says the same thing. A path *outside*
+    the project is the opposite: that it is elsewhere is the important
+    part, so it keeps its full spelling.
+    """
+    if not text or not project_root:
+        return text
+    root = project_root.rstrip(os.sep)
+    if not root:
+        return text
+    return text.replace(root + os.sep, "")
+
+
+def _touches_store(title: str | None, locations) -> bool:
+    """Whether a tool call is working on this project's own store rather
+    than on the project.
+
+    Writing a report or filling a draft is done with ordinary file
+    operations against ``<project>/.cortex`` -- by design. To a reader
+    those are not edits to their code: they are the bookkeeping that
+    surrounds it, and one "Editing files" card per report buried the work
+    the report is about. They fold into the same collapsed block as this
+    runtime's own tool calls.
+
+    Judged by where the call actually points -- its ``locations`` first,
+    and its title only as the fallback for an engine that sends none.
+    """
+    for location in locations or ():
+        path = location.get("path") if isinstance(location, Mapping) else None
+        if isinstance(path, str) and f"{os.sep}.cortex{os.sep}" in path:
+            return True
+    return bool(title) and f"{os.sep}.cortex{os.sep}" in title
+
+
 def _display_role(role: str) -> str:
     """The role as a reader sees it on a worker's card.
 
@@ -1709,7 +1748,11 @@ class OrchestratingRuntime:
                     if cancel_event.is_set():
                         return
                     try:
-                        self._process_new_events(task_id, channel, cancel_event)
+                        self._process_new_events(task_id, channel, cancel_event, emit_tool_call)
+                        # A worker that starts during this turn also works
+                        # during it: its card must follow along now, not
+                        # once the coordinator finally stops talking.
+                        self._emit_worker_activity_tool_calls(emit_tool_call)
                     except Exception:  # noqa: BLE001 - never fail the turn over an early start
                         return
 
@@ -1720,7 +1763,9 @@ class OrchestratingRuntime:
             try:
                 outcome = self._engine.prompt(
                     session_ref, prompt_text, cancel_event, on_delta=_on_coordinator_delta,
-                    on_tool_call=self._engine_tool_call_emitter(emit_tool_call, language=language),
+                    on_tool_call=self._engine_tool_call_emitter(
+                        emit_tool_call, language=language, project_root=self._task_project_root(task_id),
+                    ),
                     on_display_update=emit_display_update,
                 )
                 from .. import _fault_injection
@@ -1786,7 +1831,7 @@ class OrchestratingRuntime:
                     wait_reason="refused", wait_detail=dict(explanation=outcome.text or "Coordinator refused this turn."),
                 )
                 return StopReason.REFUSAL
-            self._process_new_events(task_id, channel, cancel_event)
+            self._process_new_events(task_id, channel, cancel_event, emit_tool_call)
             terminal = self._check_terminal_decision(task_id)
             if terminal == "accepted":
                 self._set_state(task_id, "accepted")
@@ -2212,7 +2257,7 @@ class OrchestratingRuntime:
                 role_hint = event.payload.get("role", "?")
                 work_title = event.payload.get("title", "")
                 self._emit_worker_card(
-                    emit_tool_call, assignment_ref,
+                    emit_tool_call, assignment_ref, only_if_new=True,
                     title=f"Worker: {_display_role(role_hint)} — {work_title}",
                     kind=_WORKER_TOOL_CALL_KIND, status="pending",
                     text=scrub_text(f"Queued: {event.payload.get('brief', '')}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
@@ -2272,7 +2317,7 @@ class OrchestratingRuntime:
                     text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 )
 
-    def _emit_worker_card(self, emit_tool_call, assignment_ref: str, **fields) -> None:
+    def _emit_worker_card(self, emit_tool_call, assignment_ref: str, *, only_if_new: bool = False, **fields) -> None:
         """Every update to a worker's assignment card goes through here.
 
         A card's create used to be emitted by the event-claim path (which
@@ -2288,13 +2333,18 @@ class OrchestratingRuntime:
         is filled in for a create that arrives update-shaped, because a
         card must be named when it is created.
         """
-        if emit_tool_call is None:
+        if emit_tool_call is None or not assignment_ref:
             return
         card_id = _worker_tool_call_id(assignment_ref)
         with self._lock:
             first = card_id not in self._emitted_worker_cards
             if first:
                 self._emitted_worker_cards.add(card_id)
+        if not first and only_if_new:
+            # The create already happened -- at dispatch, which is where a
+            # delegation's card is owned. Re-sending the queued state from
+            # the event-claim path would be the same card twice.
+            return
         payload = dict(fields)
         payload["tool_call_id"] = card_id
         payload["new"] = first
@@ -2308,6 +2358,7 @@ class OrchestratingRuntime:
     def _engine_tool_call_emitter(
         self, emit_tool_call: Callable[[Mapping[str, Any]], bool] | None,
         *, prefix: str = "", id_scope: str = "coordinator", language: str = "en",
+        project_root: str | None = None,
     ):
         """A callback for ``SessionRuntime.prompt``'s ``on_tool_call`` that
         renders each of that session's own engine tool calls as an ACP
@@ -2342,7 +2393,9 @@ class OrchestratingRuntime:
             card_id = f"call:{id_scope}:{ref}"
             known = titles.get(ref)
             if isinstance(title, str) and title.strip():
-                known = scrub_display_text(title.strip(), max_chars=_TOOL_CALL_TITLE_MAX_CHARS)
+                known = scrub_display_text(
+                    _project_relative(title.strip(), project_root), max_chars=_TOOL_CALL_TITLE_MAX_CHARS,
+                )
                 titles[ref] = known
             if status is None:
                 status = pending_status.pop(ref, None)
@@ -2351,26 +2404,34 @@ class OrchestratingRuntime:
             fields: dict[str, Any] = dict(
                 tool_call_id=card_id, status=_acp_tool_call_status(status),
             )
-            if _INTERNAL_TOOL_CALL.match(known or title or ""):
+            if _INTERNAL_TOOL_CALL.match(known or title or "") or _touches_store(known or title, locations):
                 # This runtime's own bookkeeping -- create_task,
                 # set_governance, list_events and the rest. A reader asked
                 # for their session, not for its plumbing, and one card per
                 # call buried the actual work. They collapse into a single
                 # card whose body says what was done.
-                name = _INTERNAL_TOOL_CALL.sub("", known or title or "")
-                if name and name not in internal_done:
-                    internal_done.append(name)
-                    del internal_done[:-_INTERNAL_OPERATIONS_MAX_ENTRIES]
-                card_id = f"call:{id_scope}:internal"
+                name = _INTERNAL_TOOL_CALL.sub("", known or title or "") or "tool call"
+                if internal_group[1] is None:
+                    # A run that was interrupted by real work is finished;
+                    # this call opens a new group rather than reopening a
+                    # block the reader has already scrolled past.
+                    internal_group[0] += 1
+                    internal_group[1] = []
+                entries = internal_group[1]
+                if name and name not in entries:
+                    entries.append(name)
+                    del entries[:-_INTERNAL_OPERATIONS_MAX_ENTRIES]
+                card_id = f"call:{id_scope}:internal:{internal_group[0]}"
                 first = card_id not in seen
                 seen.add(card_id)
                 emit_tool_call(dict(
                     new=first, tool_call_id=card_id, status="completed",
                     title=acp_messages.render("internal_operations_card", language),
                     **(dict(kind="other") if first else {}),
-                    text="\n".join(internal_done),
+                    text="\n".join(entries),
                 ))
                 return
+            internal_group[1] = None
             if known is None:
                 # Nothing to show yet. A card reading "tool call" tells a
                 # reader nothing at all, which is the complaint this whole
@@ -2407,7 +2468,10 @@ class OrchestratingRuntime:
         # Status/kind seen for a call the engine has not named yet.
         pending_status: dict[str, str | None] = {}
         pending_kind: dict[str, str | None] = {}
-        internal_done: list[str] = []
+        # [sequence number, entries of the run in progress or None]. Only
+        # consecutive internal calls share a card: one block per run, not
+        # one block for the whole session.
+        internal_group: list = [0, None]
         pending_locations: dict[str, object] = {}
         pending_content: dict[str, object] = {}
         return on_tool_call
@@ -2695,7 +2759,10 @@ class OrchestratingRuntime:
 
     # -- delegation_requested / assignment_cancel_requested processing --
 
-    def _process_new_events(self, task_id: str, coordinator_channel: ChannelContext, cancel_event: threading.Event) -> None:
+    def _process_new_events(
+        self, task_id: str, coordinator_channel: ChannelContext, cancel_event: threading.Event,
+        emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
+    ) -> None:
         with self._store.connection() as db:
             requests = db.execute(
                 "SELECT * FROM task_events WHERE task_id=? AND event_type='delegation_requested' ORDER BY id",
@@ -2754,7 +2821,10 @@ class OrchestratingRuntime:
                 if assignment_ref in self._dispatched_delegations:
                     continue
                 self._dispatched_delegations.add(assignment_ref)
-                to_delegate.append(json.loads(row["payload_json"]))
+                # The ref is the event's own column, carried alongside the
+                # payload rather than merged into it: the payload is what
+                # the delegate tool wrote, and it stays that.
+                to_delegate.append((assignment_ref, json.loads(row["payload_json"])))
 
             for row in cancels:
                 assignment_ref = row["assignment_ref"]
@@ -2780,7 +2850,19 @@ class OrchestratingRuntime:
                 payload = json.loads(row["payload_json"])
                 to_integrate.append((payload["assignment_ref"], payload["request_key"]))
 
-        for payload in to_delegate:
+        for assignment_ref, payload in to_delegate:
+            # The card appears when the worker is dispatched, not when the
+            # coordinator's turn later ends. Delegation now starts while
+            # that turn is still running, and until this ran here the
+            # coordinator could truthfully say "I delegated it" with
+            # nothing to show for minutes -- reported as "the worker is
+            # nowhere to be seen".
+            self._emit_worker_card(
+                emit_tool_call, assignment_ref,
+                title=f"Worker: {_display_role(payload.get('role') or '?')} — {payload.get('title', '')}",
+                kind=_WORKER_TOOL_CALL_KIND, status="pending",
+                text=scrub_text(f"Queued: {payload.get('brief', '')}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+            )
             future = self._executor.submit(
                 self._provision_and_prompt, task_id, coordinator_channel, payload, cancel_event,
             )

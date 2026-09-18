@@ -521,3 +521,134 @@ def test_the_coordinator_can_write_the_project_store_but_not_its_source(tmp_path
         with open(os.path.join(root, "calc.py"), "w") as handle:
             handle.write("broken")
     assert (project / "calc.py").read_text().startswith("def divide")
+
+
+def test_only_consecutive_internal_calls_share_one_block():
+    """This runtime's own bookkeeping calls collapse so they do not bury
+    the work -- but a run that real work interrupted is finished. Folding
+    the whole session into one block puts later operations into a card the
+    reader scrolled past long ago."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
+
+    cards: list = []
+    on_tool_call = _R._engine_tool_call_emitter(_R.__new__(_R), cards.append)
+
+    on_tool_call("i1", "other", "mcp.cortex.create_task", "completed")
+    on_tool_call("i2", "other", "mcp.cortex.set_governance", "completed")
+    internal = [c for c in cards if c["tool_call_id"].startswith("call:coordinator:internal")]
+    assert len({c["tool_call_id"] for c in internal}) == 1, "a consecutive run is one block"
+    assert internal[-1]["text"].splitlines() == ["create_task", "set_governance"]
+
+    # Real work in between ends that run.
+    on_tool_call("r1", "read", "Read calc.py", "completed")
+    on_tool_call("i3", "other", "mcp.cortex.list_events", "completed")
+
+    blocks = {c["tool_call_id"] for c in cards if ":internal" in c["tool_call_id"]}
+    assert len(blocks) == 2, f"a new run must open a new block: {blocks}"
+    last = [c for c in cards if c["tool_call_id"] == "call:coordinator:internal:2"]
+    assert last[-1]["text"].splitlines() == ["list_events"], last[-1]
+    # The real work kept its own card, with its own name.
+    assert any(c.get("title") == "Read calc.py" for c in cards)
+
+
+def test_the_worker_card_appears_while_the_coordinator_is_still_talking(tmp_path):
+    """Reported: "I delegated it" with no worker anywhere in the feed. The
+    card was emitted from the event-claim path, which only runs between
+    coordinator turns -- but a delegation now starts during the turn that
+    asked for it, so for the whole length of that turn there was nothing
+    to see."""
+    store, task_id = _task(tmp_path)
+    worker_may_finish = threading.Event()
+    cards: list = []
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Add a guard", brief="do X", role="backend-dev",
+                acceptance="X done", request_key="reqX",
+            ))
+            # Still talking. The card must already be there.
+            for _ in range(200):
+                if any("Add a guard" in str(c.get("title", "")) for c in list(cards)):
+                    break
+                threading.Event().wait(0.02)
+            worker_may_finish.set()
+            return PromptOutcome(StopReason.END_TURN, "Delegated.")
+        return PromptOutcome(StopReason.END_TURN, "Nothing new.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        worker_may_finish.wait(timeout=5.0)
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, router), FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=3,
+    )
+    runtime.start_prompt(task_id, "s1", "Do X.", [].append, threading.Event(), emit_tool_call=cards.append)
+
+    assert worker_may_finish.is_set()
+    named = [c for c in cards if "Add a guard" in str(c.get("title", ""))]
+    assert named, f"the worker never appeared while the turn ran: {cards}"
+    assert named[0]["new"] is True and "Worker: backend-dev" in named[0]["title"]
+
+
+def test_edits_to_the_store_are_bookkeeping_not_edits_to_the_project():
+    """Filling a draft or writing a report is done with ordinary file
+    operations against `<project>/.cortex` -- by design. To a reader those
+    are not edits to their code, and one "Editing files" card per report
+    buried the work the report was about."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
+
+    cards: list = []
+    on_tool_call = _R._engine_tool_call_emitter(_R.__new__(_R), cards.append)
+
+    on_tool_call(
+        "e1", "edit", "Edit file", "completed",
+        [{"path": "/p/.cortex/draft-reports/r1.md"}], None,
+    )
+    assert cards, "the call vanished entirely"
+    assert ":internal" in cards[-1]["tool_call_id"], cards[-1]
+    assert cards[-1]["title"] == "Task bookkeeping"
+
+    # A real edit to the project keeps its own card, its diff and its path.
+    on_tool_call(
+        "e2", "edit", "Edit calc.py", "completed",
+        [{"path": "/p/calc.py"}], [{"type": "diff", "path": "/p/calc.py", "oldText": "a", "newText": "b"}],
+    )
+    project_card = [c for c in cards if c.get("title") == "Edit calc.py"]
+    assert project_card, cards
+    assert project_card[0]["kind"] == "edit"
+    assert project_card[0]["locations"] == [{"path": "/p/calc.py"}]
+    assert project_card[0]["content"][0]["type"] == "diff"
+
+
+def test_a_path_inside_the_project_is_shown_relative_to_it():
+    """A card reading "Read file '/var/tmp/demo-project/calc.py'" spends
+    its width on the one thing the reader already knows. A path outside
+    the project is the opposite case: being elsewhere is the point."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
+
+    cards: list = []
+    on_tool_call = _R._engine_tool_call_emitter(
+        _R.__new__(_R), cards.append, project_root="/p/demo",
+    )
+    on_tool_call("r1", "read", "Read file '/p/demo/src/calc.py'", "completed")
+    assert cards[-1]["title"] == "Read file 'src/calc.py'"
+
+    on_tool_call("r2", "read", "Read file '/etc/hosts'", "completed")
+    assert cards[-1]["title"] == "Read file '/etc/hosts'"
+
+    # The locations a client turns into links stay absolute -- a relative
+    # path is for reading, not for opening.
+    on_tool_call("r3", "read", "Read calc.py", "completed", [{"path": "/p/demo/src/calc.py"}])
+    assert cards[-1]["locations"] == [{"path": "/p/demo/src/calc.py"}]
+
+    # With no project known, nothing is rewritten.
+    plain: list = []
+    _R._engine_tool_call_emitter(_R.__new__(_R), plain.append)("r4", "read", "Read '/p/demo/x.py'", "completed")
+    assert plain[-1]["title"] == "Read '/p/demo/x.py'"

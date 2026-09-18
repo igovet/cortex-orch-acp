@@ -268,9 +268,10 @@ class Server:
                 current=current_owner_epoch(db,context.task_id)
             if current!=context.owner_epoch:
                 raise StoreError('stale_ownership_epoch')
-        return store.call(name, params.get('arguments',{}),
+        result=store.call(name, params.get('arguments',{}),
                            context.principal_thread_id, context.parent_principal_thread_id,
                            original_request=None, steering_source=None, trusted=True)
+        return _reachable_draft_path(result, project)
 
     @staticmethod
     def error(failure):
@@ -285,6 +286,39 @@ class Server:
         if failure.expected is not None:data['expected']=public(failure.expected)
         data['write_state']='uncertain' if code in ('storage_error','file_conflict','unsafe_storage') else 'rejected'
         return dict(content=[dict(type='text',text=json.dumps(data))],isError=True)
+
+
+def _reachable_draft_path(result, project_root):
+    """Express a returned ``draft_path`` through the caller's own working
+    directory when that is the same file.
+
+    A draft is "an absolute server-created project path to edit with
+    native file tools", and it lives under ``<project>/.cortex``. A
+    session whose engine runs in an isolated workspace cannot write an
+    absolute path outside that workspace -- its sandbox refuses it, and
+    the observed result was the coordinator explaining, turn after turn,
+    that the file it had just been handed was out of reach.
+
+    The workspace carries the project's real ``.cortex`` (see
+    ``delegation.workspace_isolation._link_project_store``), so the same
+    file has a second, reachable name. Rewriting to it is safe precisely
+    because it is checked, not assumed: both are resolved, and the path is
+    only rewritten when they are the same directory. ``store``'s own
+    validation resolves either spelling back to the one real draft
+    directory, so nothing downstream can tell the difference.
+    """
+    if not isinstance(result, dict) or not isinstance(result.get('draft_path'), str):
+        return result
+    try:
+        cwd_store=Path(os.getcwd())/'.cortex'
+        project_store=Path(project_root)/'.cortex'
+        if cwd_store.resolve()!=project_store.resolve() or cwd_store==project_store:
+            return result
+        draft=Path(result['draft_path']).resolve()
+        relative=draft.relative_to(project_store.resolve())
+    except (OSError, ValueError):
+        return result
+    return dict(result, draft_path=str(cwd_store/relative))
 
 
 def reject_duplicates(pairs):
