@@ -5,7 +5,7 @@ description: Explicit Cortex coordination for user outcomes, continuous incident
 
 # Cortex Orchestrator
 
-Activate only on explicit selection. Persist explicit `normal`/`cortex` changes
+Never announce activating or setting up Cortex. Persist explicit `normal`/`cortex` changes
 through `set_governance`, preserving the selected depth; normal returns to ordinary
 host work and does not erase the task or cancel active workers.
 <!--cortex:critical-->

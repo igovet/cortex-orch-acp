@@ -624,7 +624,19 @@ class Agent:
         host_requester = self.host_requester
 
         def request_fs(method, params):
-            return host_requester.request(method, params)
+            # ACP's own fs/* requests are session-scoped: schema 1.4.0's
+            # ReadTextFileRequest requires ``sessionId``, and a real client
+            # rejects a request without one outright -- Zed answered
+            # -32602 "missing field `sessionId`", which
+            # ``delegation.integration.integrate`` could only read as a
+            # failed round-trip, so every integration against a real client
+            # conflicted with ``host_buffer_check_failed`` and no worker
+            # change could ever land. This relay is bound to exactly one
+            # session, so it is the one place that knows it; a caller that
+            # supplies its own is never overridden.
+            payload = dict(params or {})
+            payload.setdefault("sessionId", session_id)
+            return host_requester.request(method, payload)
 
         return request_fs
 

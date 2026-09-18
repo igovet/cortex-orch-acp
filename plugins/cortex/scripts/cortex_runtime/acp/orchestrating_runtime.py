@@ -2263,23 +2263,48 @@ class OrchestratingRuntime:
         """
         if emit_tool_call is None:
             return None
-        seen: set[str] = set()
+        # Per call ref, the last title the engine actually gave for it.
+        # Both engines name a call when they create it and then send
+        # status-only updates with no title at all, so an update must
+        # never overwrite the name with a placeholder -- that is exactly
+        # how a feed of real actions turned into a column of "tool call".
+        titles: dict[str, str] = {}
 
         def on_tool_call(ref: str, kind: str | None, title: str | None, status: str | None) -> None:
             card_id = f"call:{id_scope}:{ref}"
-            shown = scrub_text(title or "tool call", max_chars=_TOOL_CALL_TITLE_MAX_CHARS)
+            known = titles.get(ref)
+            if isinstance(title, str) and title.strip():
+                known = scrub_text(title.strip(), max_chars=_TOOL_CALL_TITLE_MAX_CHARS)
+                titles[ref] = known
+            if status is None:
+                status = pending_status.pop(ref, None)
+            else:
+                pending_status.pop(ref, None)
             fields: dict[str, Any] = dict(
                 tool_call_id=card_id, status=_acp_tool_call_status(status),
-                title=f"{prefix}{shown}" if prefix else shown,
             )
-            if ref in seen:
-                fields["new"] = False
-            else:
+            if known is None:
+                # Nothing to show yet. A card reading "tool call" tells a
+                # reader nothing at all, which is the complaint this whole
+                # emitter exists to answer -- so hold it until the engine
+                # names the call, and remember the status it had meanwhile
+                # so nothing is lost when it does.
+                pending_status[ref] = status
+                pending_kind.setdefault(ref, kind)
+                return
+            if ref not in seen:
                 seen.add(ref)
                 fields["new"] = True
-                fields["kind"] = _acp_tool_call_kind(kind)
+                fields["kind"] = _acp_tool_call_kind(kind if kind is not None else pending_kind.get(ref))
+            else:
+                fields["new"] = False
+            fields["title"] = f"{prefix}{known}" if prefix else known
             emit_tool_call(fields)
 
+        seen: set[str] = set()
+        # Status/kind seen for a call the engine has not named yet.
+        pending_status: dict[str, str | None] = {}
+        pending_kind: dict[str, str | None] = {}
         return on_tool_call
 
     def _emit_worker_activity_tool_calls(

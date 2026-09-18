@@ -373,3 +373,36 @@ def test_a_delegation_starts_while_the_coordinator_is_still_talking(tmp_path):
     assert worker_started.is_set()
     # No early-dispatch thread outlives the turn it belongs to.
     assert not [th for th in threading.enumerate() if th.name == "cortex-early-dispatch" and th.is_alive()]
+
+
+def test_a_tool_call_card_waits_for_a_name_instead_of_saying_tool_call():
+    """Reported looking at a live feed full of cards reading "tool call":
+    that tells a reader nothing. Both engines name a call when they create
+    it and then send status-only updates, so a card must never be created
+    unnamed, and an update must never overwrite the name it has."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
+
+    cards: list = []
+    runtime = _R.__new__(_R)  # only the emitter factory is exercised
+    on_tool_call = _R._engine_tool_call_emitter(runtime, cards.append)
+
+    # An unnamed call produces nothing at all -- not a placeholder card.
+    on_tool_call("c1", "execute", None, "pending")
+    assert cards == [], cards
+
+    # Once named, the card appears, keeping the status seen while unnamed.
+    on_tool_call("c1", None, "Run `pytest -q`", None)
+    assert len(cards) == 1
+    assert cards[0]["new"] is True
+    assert cards[0]["title"] == "Run `pytest -q`"
+    assert cards[0]["kind"] == "execute"
+    assert cards[0]["status"] == "pending"
+
+    # A status-only update keeps the name instead of clobbering it.
+    on_tool_call("c1", None, None, "completed")
+    assert cards[1] == dict(tool_call_id=cards[0]["tool_call_id"], status="completed",
+                            new=False, title="Run `pytest -q`")
+
+    # An unknown kind still renders, as the schema's catch-all.
+    on_tool_call("c2", "sorcery", "Consult the oracle", "in_progress")
+    assert cards[2]["kind"] == "other"
