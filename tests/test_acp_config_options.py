@@ -1342,3 +1342,115 @@ def test_saved_default_route_removed_with_saved_thought_level_status_reflects_it
                  if n["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
     text = chunk["params"]["update"]["content"]["text"]
     assert text.lower().count("unavailable") >= 1
+
+
+# --- T035 FINDING-10: selector reflects LIVE connection state, never a ------
+#     cached/stored verdict (see config_options.selectable_entries_from_
+#     snapshots's own docstring for the fix) -----------------------------
+
+def _force_stored_state(connection_id, state, environ):
+    """Directly overwrite the registry's *stored* state for one connection,
+    bypassing ``onboarding.validate`` entirely -- simulates a record that
+    fell out of sync with its own live credential (e.g. last validated
+    while the credential was absent, or never revalidated after it came
+    back), the exact scenario FINDING-10 reports."""
+    with registry.transaction(environ) as reg_state:
+        record = reg_state.connections[connection_id]
+        stale = ConnectionRecord(
+            id=record.id, name=record.name, engine=record.engine, provider=record.provider,
+            auth_mode=record.auth_mode, key_kind=record.key_kind, endpoint=record.endpoint,
+            launch_command=record.launch_command, credential_ref=record.credential_ref,
+            approved_fingerprint=record.approved_fingerprint, state=state,
+            qualified=record.qualified, created_at=record.created_at, updated_at=record.updated_at,
+        )
+        reg_state.connections[connection_id] = stale
+
+
+def test_restored_credential_is_selectable_with_no_explicit_revalidation_call(tmp_path, monkeypatch):
+    """FINDING-10 case 1: registry still reads AUTHORIZATION_REQUIRED (as it
+    would right after a credential was removed) but the credential is back
+    in place -- the selector must self-heal without any separate ``validate``
+    call, exactly like the launch path already does."""
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    _build_and_save_snapshot(record, environ=environ, model_id="model-a")
+
+    # Stored state falls out of sync with the (still valid) credential --
+    # never call onboarding.validate() ourselves here.
+    _force_stored_state(record.id, ConnectionState.AUTHORIZATION_REQUIRED, environ)
+    stale = registry.read_registry(environ).connections[record.id]
+    assert stale.state == ConnectionState.AUTHORIZATION_REQUIRED
+
+    entries = config_options.selectable_entries_from_snapshots({record.id: stale}, environ)
+    assert entries  # selectable again, live state re-derived, not the stale stored one
+    assert {entry.route.model for entry in entries} == {"model-a"}
+
+    # The saved default for this exact route resolves too, not reported as
+    # withdrawn.
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, transport = _new_agent(tmp_path, environ)
+    result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    session_id = result["sessionId"]
+    agent._session_set_config_option(1, dict(sessionId=session_id, configId="provider", value=record.id))
+
+    _force_stored_state(record.id, ConnectionState.AUTHORIZATION_REQUIRED, environ)
+    agent2, transport2 = _new_agent(tmp_path, environ)
+    result2 = agent2._session_new(dict(cwd=str(project), mcpServers=[]))
+    ids = {opt["id"]: opt for opt in result2["configOptions"]}
+    assert ids["provider"]["currentValue"] == record.id
+    assert "_meta" not in ids["provider"] or ids["provider"]["_meta"]["_cortex"]["state"] != "default_unavailable"
+
+
+def test_disappeared_credential_stops_being_selectable_despite_stored_configured(tmp_path, monkeypatch):
+    """FINDING-10 case 2 (the other direction): the registry's stored state
+    still reads CONFIGURED but the credential itself is gone -- the selector
+    must not keep offering it just because nothing has explicitly
+    invalidated the stored record yet."""
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    _build_and_save_snapshot(record, environ=environ, model_id="model-a")
+
+    stored = registry.read_registry(environ).connections[record.id]
+    assert stored.state == ConnectionState.CONFIGURED
+
+    # The credential disappears on disk without any registry mutation --
+    # stored state is untouched (still CONFIGURED).
+    secret_path = registry.secret_path(record.id, environ)
+    secret_path.unlink()
+    stored_after = registry.read_registry(environ).connections[record.id]
+    assert stored_after.state == ConnectionState.CONFIGURED  # still stale/optimistic
+
+    entries = config_options.selectable_entries_from_snapshots({record.id: stored_after}, environ)
+    assert entries == ()  # live state (AUTHORIZATION_REQUIRED) wins, never the stale CONFIGURED
+
+
+def test_default_pointing_at_model_genuinely_absent_from_catalog_still_withdrawn(tmp_path, monkeypatch):
+    """The two cases must not collapse: a saved default naming a model the
+    current catalog genuinely no longer offers is still reported
+    unavailable -- this must stay distinct from FINDING-10's stale-state
+    case, which is now self-healed instead."""
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    _build_and_save_snapshot(record, environ=environ, model_id="model-a")
+    project = tmp_path / "project"
+    project.mkdir()
+
+    agent, transport = _new_agent(tmp_path, environ)
+    result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    session_id = result["sessionId"]
+    agent._session_set_config_option(1, dict(sessionId=session_id, configId="provider", value=record.id))
+    agent._session_set_config_option(2, dict(sessionId=session_id, configId="model", value="model-a"))
+
+    # The catalog is genuinely refreshed to no longer include "model-a" --
+    # a real withdrawal, not a stale-state artifact; the connection's own
+    # live state remains healthy (CONFIGURED) throughout.
+    _build_and_save_snapshot(record, environ=environ, model_id="model-b")
+    stored = registry.read_registry(environ).connections[record.id]
+    assert stored.state == ConnectionState.CONFIGURED  # never touched -- this is a catalog change, not a state one
+
+    agent2, transport2 = _new_agent(tmp_path, environ)
+    result2 = agent2._session_new(dict(cwd=str(project), mcpServers=[]))
+    ids = {opt["id"]: opt for opt in result2["configOptions"]}
+    assert ids["model"]["_meta"]["_cortex"]["state"] == "default_unavailable"
+    assert ids["model"]["description"] == "Saved route is unavailable — choose a route"

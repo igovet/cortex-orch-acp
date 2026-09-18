@@ -52,8 +52,10 @@ from ..catalog.evidence import Fact, ProvenanceSource
 from ..catalog.labels import build_model_label, build_provider_label, disambiguate_labels, engine_short_name
 from ..catalog.model import CatalogEntry
 from ..connections import account_identity as connection_account_identity
+from ..connections import onboarding as connection_onboarding
 from ..connections import registry as connection_registry
 from ..connections.model import ConnectionRecord
+from ..portable.errors import PortableError
 
 # T035: three independent axes -- provider (which configured connection),
 # model (within that provider), and thought_level (reasoning effort) --
@@ -149,6 +151,25 @@ def selectable_entries_from_snapshots(
     A connection with no cached snapshot (never discovered/refreshed) never
     contributes any entry -- it is simply absent, not a fabricated one.
 
+    Each connection's selectability is decided from its **live** state (T035
+    FINDING-10), never the stored/cached ``ConnectionRecord.state`` a caller
+    happened to pass in: this function re-derives it here via
+    ``connections.onboarding.validate`` -- the identical call the launch
+    path (``onboarding.resolve_connection_for_route``) already makes -- so a
+    connection whose credential was just restored becomes selectable again
+    without any separate revalidation step, and one whose credential just
+    disappeared stops being offered even though the registry's stored
+    record still says ``configured``. ``validate`` only does bounded local
+    filesystem stats (never a network call) and only writes back when the
+    derived state actually changed, so this costs one cheap local
+    read-modify-maybe-write per connection -- run at most once per
+    connection per ``session/new``/``session/load``/config rebuild, the same
+    frequency the pre-fix, non-self-healing stored-state read already ran
+    at. A connection absent from the registry entirely (e.g. a
+    caller-constructed ``ConnectionRecord`` never persisted, as in a few
+    direct-call unit tests) falls back to the record's own given state
+    rather than failing the whole selection surface.
+
     Picks each connection's newest file that actually describes that
     connection (see ``_is_cross_connection_placeholder``), not merely its
     newest file by mtime: a placeholder written into this connection's
@@ -162,6 +183,14 @@ def selectable_entries_from_snapshots(
     selectable: list[CatalogEntry] = []
     catalog_dir = connection_registry.state_root(environ) / "catalog"
     for connection_id, record in connections.items():
+        try:
+            record = connection_onboarding.validate(connection_id, environ=environ)
+        except PortableError:
+            # Not (or no longer) in the registry -- use the given record's
+            # own state rather than failing the whole selection surface
+            # (covers direct-call sites that pass an ad-hoc, unpersisted
+            # ConnectionRecord).
+            pass
         directory = catalog_dir / connection_id
         files = []
         if directory.is_dir():
