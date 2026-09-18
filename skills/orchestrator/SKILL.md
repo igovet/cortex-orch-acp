@@ -72,26 +72,26 @@ not a server gate or approval machine.
 
 ## Durable decisions
 
-Immediately before the first call, get schemas with
-`text(ALL_TOOLS.filter(x=>x.name.startsWith("mcp__cortex__")))`; then `create_task`
-before project work. Reuse the binding on
-follow-ups. Publish the initial
-pipeline through `create_draft` and `write_report` before assigning its owner.
-Pass returned task identity to owner. Read owner's published report
-through `read_report`. Reconcile actual outcomes only via Cortex report/public-evidence
-reads comparing owner-cited artifact hashes/check results; publish final pipeline
-edition before completion. A native final message is not a published Cortex
-report. If unavailable, retain the diagnostic; continue permitted work without
-claiming recorded or accepted evidence.
+The record keeps itself: the task is bound and its initial pipeline is published
+before your first turn. Do not create or edit a draft, and do not publish a
+pipeline edition, to say that work started, that a worker was assigned, or that
+you are waiting -- none of that is yours to record, and a draft you edit is a
+diff the user has to scroll past. Publish a pipeline edition only when a
+decision of yours changes the outcome, scope, causal model, safety or rollback.
+
+Read an owner's published report through `read_report` when its summary is not
+enough to decide. Reconcile actual outcomes only against published reports and
+public evidence, comparing owner-cited artifact hashes and check results; your
+own final message is not a report. If a read is unavailable, keep the
+diagnostic and continue permitted work without claiming recorded evidence.
 
 Use advertised schemas; never guess IDs or private storage, and never reach for
 `resources/list`/`read_mcp_resource` -- this server exposes tools only.
 Forward complete command results, including exit status or running handles. Read
 bounded evidence pages only as far as a decision requires.
 
-Keep one newest-first `pipeline.md`; update it for outcome, scope, causal model,
-artifact revision, safety or rollback changes. Worker completion, review delivery,
-unchanged waits and small clarifications alone need no edition. Preserve older editions.
+Keep one newest-first `pipeline.md`; preserve older editions. Worker completion,
+review delivery, unchanged waits and small clarifications need no edition.
 
 Keep the incident brief inside the current pipeline. Preserve implementation_state,
 delivery_state, acceptance_state,
@@ -127,5 +127,4 @@ replan after a new failure class.
 - Release: [Cortex release](references/cortex-release.md).
 - Actual context loss: [recovery](references/recovery.md).
 - Consequential decision: [senior consultation](references/senior-consultation.md).
-- Advisory pre-check: [routing](references/consultation-routing.md).
 - Publication recovery: [guide](references/pipeline-publication.md).

@@ -23,32 +23,18 @@ def test_documented_overlay_has_negative_controls_and_no_runtime_gate():
     assert "never a runtime gate, server decision or acceptance rule" in section
 
 
-def test_advisory_lane_is_catalogue_optional_and_silent_when_unavailable():
+def test_the_advisory_lane_is_no_longer_instructed():
+    """Removed on the user's decision: "мы его больше не будем использовать".
+
+    The Advisory Lane told the coordinator to consult an `mcp-rubber-duck`
+    server before an expensive assignment. Its instruction file and the
+    role's link to it are gone, so the coordinator is never told to reach
+    for that tool. The runtime module and its documentation still exist and
+    are untouched -- removing a feature is a separate decision from
+    removing an instruction.
+    """
     root = ROOT / "skills/orchestrator"
+    assert not (root / "references/consultation-routing.md").exists()
     entry = (root / "SKILL.md").read_text()
-    policy = (root / "references/consultation-routing.md").read_text()
-    assert '(references/consultation-routing.md)' in entry
-    assert "only from the tools exposed in the current live host\ncatalogue" in policy
-    assert "explicit\nmcp-rubber-duck provider/server identity" in policy
-    assert "the tool name is exactly `ask_duck`" in policy
-    assert "An unrelated\n`ask_duck`-like tool" in policy
-    assert "does\nnot qualify" in policy
-    assert "do not execute Advisory Lane logic at all" in policy
-    assert "not a warning, blocker, degraded" in policy
-    assert "pipeline mutation" in policy
-    assert "Cortex behavior and" in policy
-
-
-def test_advisory_lane_contract_is_non_owning_and_bounded():
-    policy = (ROOT / "skills/orchestrator/references/consultation-routing.md").read_text()
-    assert "not a pipeline stage, worker profile,\nruntime dependency" in policy
-    assert "one bounded call with one compact decision packet" in policy
-    assert "no councils, debates, multi-model\ncomparison, voting" in policy
-    assert "inspect the live server/tool declaration" in policy
-    assert "configured provider/model appropriate" in policy
-    assert "Missing, malformed, or ambiguous provider/model metadata" in policy
-    assert "package names, static configuration, cached assumptions" in policy
-    assert "recursive worker route" in policy
-    assert "never owns the incident or task" in policy
-    assert "Escalate to a real bounded worker" in policy
-    assert "generic host-equivalent name" in policy
+    assert "consultation-routing" not in entry
+    assert "ask_duck" not in entry and "rubber" not in entry.lower()
