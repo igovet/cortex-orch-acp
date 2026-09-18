@@ -7,7 +7,7 @@ description: Cortex retention command and optional report-writing examples. Load
 
 ## Loading boundary
 
-Load this skill through the standard Codex skill mechanism only for one of the
+Read this skill with `read_skill` only for one of the
 declared purposes. Ordinary workers load their complete worker skill and its needed
 declared references; they do not load this skill. Use an attached body or read this
 exact advertised SKILL.md path. Needed declared Markdown references may be read on demand. Do not

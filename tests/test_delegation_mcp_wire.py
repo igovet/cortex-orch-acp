@@ -103,8 +103,9 @@ def test_coordinator_tools_list_includes_role_filtered_delegation_tools(tmp_path
     # T029: read_diagnostics is a coordinator-only read-only observability/
     # usage summary operation.
     assert "read_diagnostics" in names
+    assert "read_skill" in names, "the situational shared skills must be reachable"
     assert "ask_question" not in names and "publish_result" not in names
-    assert len(names) == 18
+    assert len(names) == 19
 
 
 def test_worker_tools_list_is_worker_only(tmp_path):

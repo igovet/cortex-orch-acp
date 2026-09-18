@@ -289,6 +289,30 @@ def _shared_list_sources(store, channel: ChannelContext, args: Mapping[str, Any]
     return replay_store.list_sources(store, channel.task_id, after, limit)
 
 
+def _shared_read_skill(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
+    """Read one of this runtime's own shared skills by name.
+
+    The situational half of skill delivery (see ``portable.roles
+    .ALWAYS_ON_SKILLS`` for the half that arrives with the role). Only a
+    shared skill is readable: a role's own instructions are handed to the
+    engine that runs it, never fetched, and no channel can read another
+    role's body through here.
+    """
+    from ..portable.roles import SHARED_ROLE_IDS, load_role
+
+    requested = args.get("skill")
+    skill_id = requested if isinstance(requested, str) else ""
+    skill_id = skill_id.strip().removeprefix("cortex:")
+    if skill_id not in SHARED_ROLE_IDS:
+        raise StoreError(
+            "unknown_skill", "skill", str(requested),
+            ", ".join(sorted(SHARED_ROLE_IDS)),
+            "Read one of this runtime's own shared skills.",
+        )
+    role_set = load_role(skill_id)
+    return dict(skill=skill_id, title=role_set.title, body=role_set.body_portable)
+
+
 def _shared_read_capsule(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
     """T021: this channel's own deterministic recovery capsule.
 
@@ -386,12 +410,14 @@ _COORDINATOR_HANDLERS = dict(
     integrate=_coordinator_integrate,
     list_sources=_shared_list_sources, read_source=_shared_read_source,
     read_capsule=_shared_read_capsule, read_large_output=_shared_read_large_output,
+    read_skill=_shared_read_skill,
     read_diagnostics=_coordinator_read_diagnostics,
 )
 _WORKER_HANDLERS = dict(
     ask_question=_worker_ask_question, publish_result=_worker_publish_result,
     list_sources=_shared_list_sources, read_source=_shared_read_source,
     read_capsule=_shared_read_capsule, read_large_output=_shared_read_large_output,
+    read_skill=_shared_read_skill,
 )
 _ROLE_HANDLERS = dict(coordinator=_COORDINATOR_HANDLERS, worker=_WORKER_HANDLERS)
 
@@ -408,6 +434,7 @@ _OPERATION_DESCRIPTIONS = dict(
               "last-write-wins -- the outcome (applied/conflict/noop) appears as a later durable event.",
     ask_question="Ask the delegating coordinator one bounded question; never ask the user directly.",
     publish_result="Publish this assignment's result via an already-acknowledged report reference.",
+    read_skill="Read one of this runtime's own shared skills by name (for example 'documentation-sync').",
     list_sources="List durable source references (user text and resolved attachments) for this task, cursor-paginated.",
     read_source="Bounded, addressable read of one source_ref (text or attachment) with provenance and trust label.",
     read_capsule="Read this channel's own deterministic recovery capsule: identity, applied config, exact "
@@ -438,7 +465,7 @@ def tool_definitions(role_kind: str) -> list[dict]:
             description=_OPERATION_DESCRIPTIONS.get(name, f"Delegation operation '{name}'."),
             inputSchema=dict(type="object", properties=schema["properties"],
                               required=schema["required"], additionalProperties=False),
-            annotations=dict(readOnlyHint=name in ("list_events", "list_sources", "read_source", "read_capsule", "read_diagnostics"), destructiveHint=False,
+            annotations=dict(readOnlyHint=name in ("list_events", "list_sources", "read_source", "read_capsule", "read_diagnostics", "read_skill"), destructiveHint=False,
                               idempotentHint=name != "ask_question", openWorldHint=False),
         ))
     return tools

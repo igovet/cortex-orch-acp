@@ -267,7 +267,7 @@ default_tools_approval_mode = "approve"
 
 The MCP setting affects Cortex storage tools only. It does not authorize shell
 commands, patches, external messages, destructive actions, scope expansion, or
-tools from other plugins. Keep those decisions routed through Codex or the
+tools from other plugins. Keep those decisions routed with `read_skill` or the
 user's configured approval policy.
 
 > [!WARNING]
@@ -482,7 +482,7 @@ Missing indexes do not force harvest during an ordinary task.
 Before accepting an ordinary completed task, the coordinator reviews verified changes
 for durable project-knowledge or public-documentation impact. Missing inspection is
 not evidence of no impact. When impact is supported, the coordinator assigns the
-appropriate documentation owner to load/apply the bundled documentation-sync skill,
+appropriate documentation owner to apply the bundled documentation-sync skill,
 gives that owner exact documentation ownership, and requires affected knowledge
 updates plus proportionate verification before completion. The coordinator does not
 read another role's `SKILL.md`; after the owner's published documentation report, it
@@ -895,7 +895,7 @@ for planning, investigation, implementation, verification, documentation and fin
 synthesis. Examples guide content without imposing exact report headings.
 
 Codex supplies the selected orchestrator skill and the worker skill catalogue.
-The host supplies required skills through Codex's normal procedure only when relevant.
+The host supplies required skills with `read_skill`'s normal procedure only when relevant.
 Workers use exact advertised skill paths and declared references; they do not enumerate the installation.
 [Tool discipline](skills/tool-discipline/SKILL.md) requires checking
 live tool declarations, complete arguments and actual results; it forbids guessed

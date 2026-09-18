@@ -14,7 +14,7 @@ commit summary. Documentation should let a new engineer discover each in-scope
 capability, its owning code, runtime behavior, and verification or operating
 path.
 
-Harvest workers load this complete skill through standard Codex skill loading,
+Harvest workers read this complete skill with `read_skill`,
 including its feature-census guidance below. Its inventory, coverage, page-content
 and validation rules apply before census/planning work. Exact advertised SKILL.md
 and needed declared Markdown reference reads are allowed; plugin implementation
@@ -49,7 +49,7 @@ harvest scope.
 
 Apply skill `cortex:tool-discipline` to calls. Draft creator guidance and the worker
 profile supply the report requirements. Load a declared example only for an assigned
-content question; do not load `cortex:cortex-control` merely for ordinary reporting.
+content question; do not read `cortex-control` with `read_skill` merely for ordinary reporting.
 After context loss, load skill `cortex:context-compaction` and follow its rereading procedure.
 
 ## Evidence topology

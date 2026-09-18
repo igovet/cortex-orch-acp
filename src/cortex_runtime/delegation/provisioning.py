@@ -54,7 +54,7 @@ from ..contracts import StoreError
 from ..portable.errors import PortableError, PortableErrorCategory
 from ..engine.instruction_delivery_registry import delivery_for
 from ..portable.instruction_delivery import DeliveryQualification, qualify_delivery
-from ..portable.roles import load_role, resolve_role
+from ..portable.roles import composed_instructions, load_role, resolve_role
 from ..store import identifier
 from ..trusted_channel import ChannelContext
 from . import contracts as delegation_contracts
@@ -723,7 +723,7 @@ class ProvisioningService:
                 resolved_model=resolved_route.get("model"),
             )
             try:
-                session_ref = self._engine.open(row["workspace_binding_id"], launch, role_set.body_portable)
+                session_ref = self._engine.open(row["workspace_binding_id"], launch, composed_instructions(role_set))
             except Exception as error:
                 # T017 (fresh review, MEDIUM/starvation): a queued open
                 # that never reserves (cancelled, or provably

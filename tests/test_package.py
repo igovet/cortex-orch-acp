@@ -243,8 +243,8 @@ def test_ordinary_completion_documentation_branches_are_semantic_and_conditional
 
     def assert_contract(completion):
         positive = re.search(
-            r'If impact is supported.*?assign the appropriate documentation owner to load/apply '
-            r'`cortex:documentation-sync`; give that owner exact affected documentation '
+            r'If impact is supported.*?assign the appropriate documentation owner to apply '
+            r'`documentation-sync` \(readable with `read_skill`\); give that owner exact affected documentation '
             r'ownership and require its updates plus proportionate verification before acceptance',
             completion)
         insufficient = re.search(
@@ -256,8 +256,8 @@ def test_ordinary_completion_documentation_branches_are_semantic_and_conditional
             r'If sufficient evidence supports no impact, record a concise no-impact '
             r'conclusion without token edits or an unnecessary worker', completion)
         owner = re.search(
-            r'assign the appropriate documentation owner to load/apply '
-            r'`cortex:documentation-sync`', completion)
+            r'assign the appropriate documentation owner to apply '
+            r'`documentation-sync`', completion)
         reconcile = re.search(
             r'After the owner.s published documentation report, only Cortex '
             r'report/public-evidence reads may compare its cited documentation hashes'
@@ -277,7 +277,7 @@ def test_ordinary_completion_documentation_branches_are_semantic_and_conditional
         assert 'model-owned/advisory decisions are not runtime gates' in completion
         assert not re.search(
             r'\b(?:for every ordinary task|regardless of impact|without regard to impact|always)\b'
-            r'.*?`cortex:documentation-sync`',
+            r'.*?`documentation-sync`',
             completion,
             re.IGNORECASE)
 
@@ -287,9 +287,9 @@ def test_ordinary_completion_documentation_branches_are_semantic_and_conditional
 
     # Branch polarity fixtures: these mutations must be rejected by the contract.
     unconditional = completion.replace(
-        'If impact is supported, assign the appropriate documentation owner to load/apply',
-        'For every ordinary task, load/apply `cortex:documentation-sync`. '
-        'If impact is supported, assign the appropriate documentation owner to load/apply',
+        'If impact is supported, assign the appropriate documentation owner to apply',
+        'For every ordinary task, apply `documentation-sync`. '
+        'If impact is supported, assign the appropriate documentation owner to apply',
         1)
     with pytest.raises(AssertionError):
         assert_contract(unconditional)

@@ -38,17 +38,26 @@ def test_coordinator_operations_closed_set():
     # T024 adds the shared read-only 'read_large_output' operation.
     # T025 adds 'integrate' (technical application of an isolated worker
     # workspace onto the main project root). T029 adds the coordinator-only
-    # read-only 'read_diagnostics' observability/usage summary.
+    # read-only 'read_diagnostics' observability/usage summary. T035 adds
+    # the shared read-only 'read_skill': a role's instructions are handed to
+    # the engine that runs it, but the situational shared skills the role
+    # text names ("documentation-sync", "knowledge-harvest") had no way to
+    # be reached at all -- the plugin host that once loaded a skill by name
+    # is gone.
     assert set(dc.schemas_for("coordinator")) == {
         "delegate", "list_events", "clarify", "cancel", "decide", "integrate",
         "list_sources", "read_source", "read_capsule", "read_large_output",
-        "read_diagnostics",
+        "read_diagnostics", "read_skill",
     }
 
 
 def test_worker_operations_closed_set():
+    # 'read_skill' (T035) is shared: a worker's own role text tells it to
+    # apply `context-compaction` after a context loss, which nothing could
+    # deliver once the plugin host that loaded skills by name was gone.
     assert set(dc.schemas_for("worker")) == {
-        "ask_question", "publish_result", "list_sources", "read_source", "read_capsule", "read_large_output",
+        "ask_question", "publish_result", "list_sources", "read_source", "read_capsule",
+        "read_large_output", "read_skill",
     }
 
 

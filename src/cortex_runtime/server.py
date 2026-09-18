@@ -95,7 +95,7 @@ def _write_observation(operation, outcome, replayed=False, meta=None, arguments=
                outcome=outcome, replayed=replayed, version=VERSION,
                catalogue_digest=CATALOGUE_DIGEST)
     if operation == 'initialize':
-        row['plugin_path'] = str(PLUGIN)
+        row['package_path'] = str(PLUGIN)
     elif operation in BY_NAME:
         row.update(safe_observation_fields(operation,arguments,result))
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)

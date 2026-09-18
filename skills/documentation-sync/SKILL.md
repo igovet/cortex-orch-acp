@@ -10,7 +10,7 @@ description: Update affected project knowledge after verified changes while pres
 | Role | Work |
 | --- | --- |
 | Coordinator | Select scope and specialists from documentation-impact previews and the current pipeline |
-| Technical writer / assigned documentation owner | Load/apply this skill, confirm source-backed facts and update only affected documentation |
+| Technical writer / assigned documentation owner | Apply this skill, confirm source-backed facts and update only affected documentation |
 | Independent reviewer when warranted | Check material documentation changes against source, commands and links |
 
 The coordinator may read the bounded report evidence needed for a decision, while
@@ -21,7 +21,7 @@ inspection, file read/hash or command verification is delegated to an appropriat
 worker and returned in a task-bound report; the coordinator must not rerun project
 checks itself. A stale or absent index does not automatically require harvest.
 
-The assigned documentation owner loads/applies this skill; the coordinator assigns
+The assigned documentation owner applies this skill; the coordinator assigns
 that owner and does not read another role's `SKILL.md`.
 
 For ordinary completion, apply this skill only after the coordinator's evidence-backed

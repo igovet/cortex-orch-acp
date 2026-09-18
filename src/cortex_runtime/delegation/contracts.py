@@ -204,6 +204,26 @@ COORDINATOR_OPERATIONS.update(SOURCE_OPERATIONS)
 # own channel -- see delegation.mcp_tools._shared_read_capsule; a channel
 # can never request another task's or another role's capsule, since no
 # task/recipient id beyond the channel's own binding is ever accepted).
+# T035: the situational shared skills, readable by name. The role text
+# has always said things like "load/apply `cortex:documentation-sync`",
+# from when a plugin host could load a skill by name; in an ACP session
+# nothing could, so that instruction was unsatisfiable. The always-on
+# shared skills are delivered with the role itself (portable.roles
+# .ALWAYS_ON_SKILLS); this is how a model reaches the rest.
+SKILL_OPERATIONS = {
+    "read_skill": _operation(
+        {
+            "skill": string(
+                "Shared skill id to read, for example 'documentation-sync' or "
+                "'knowledge-harvest'. Only this runtime's own shared skills are "
+                "readable; a role's own instructions are delivered, never fetched.",
+                80,
+            ),
+        },
+        ["skill"],
+    ),
+}
+
 CAPSULE_OPERATIONS = {
     "read_capsule": _operation(
         {
@@ -217,6 +237,7 @@ CAPSULE_OPERATIONS = {
     ),
 }
 COORDINATOR_OPERATIONS.update(CAPSULE_OPERATIONS)
+COORDINATOR_OPERATIONS.update(SKILL_OPERATIONS)
 
 # T024: shared read-only large-output operation, available on *both*
 # coordinator and worker channels (owner-scoped by the caller's own channel
@@ -276,6 +297,7 @@ WORKER_OPERATIONS = {
 WORKER_OPERATIONS.update(SOURCE_OPERATIONS)
 WORKER_OPERATIONS.update(CAPSULE_OPERATIONS)
 WORKER_OPERATIONS.update(LARGE_OUTPUT_OPERATIONS)
+WORKER_OPERATIONS.update(SKILL_OPERATIONS)
 
 ROLE_KIND_OPERATIONS = {
     "coordinator": COORDINATOR_OPERATIONS,

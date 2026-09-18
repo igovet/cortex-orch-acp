@@ -30,7 +30,7 @@ Ask the user only when their decision, input or authority materially blocks the
 outcome. State the observed facts, viable options and consequences. Continue
 independent in-scope work while waiting.
 
-After compaction, load `cortex:context-compaction`, recover the user's language,
+After compaction, read `context-compaction` with `read_skill`, recover the user's language,
 current requirements, pipeline, steering and active worker state before replying.
 Do not rely on a summary where exact wording or evidence matters.
 

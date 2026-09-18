@@ -30,9 +30,9 @@ from ..portable import version as portable_version
 # The payload root and the repository root are the same directory now:
 # the plugin layout (and the `plugins/cortex` container it lived in) went
 # with the plugin itself -- this repository *is* the agent.
-_PLUGIN_ROOT = Path(__file__).resolve().parents[3]
-_REPO_ROOT = _PLUGIN_ROOT
-MANIFEST_PATH = _PLUGIN_ROOT / "pinned-dependencies.json"
+_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
+_REPO_ROOT = _PACKAGE_ROOT
+MANIFEST_PATH = _PACKAGE_ROOT / "pinned-dependencies.json"
 
 
 class PinnedManifestError(Exception):

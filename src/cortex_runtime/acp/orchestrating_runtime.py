@@ -44,7 +44,7 @@ from ..portable.engine_contract import StopReason
 from ..portable.errors import PortableError, PortableErrorCategory
 from ..portable.identity import new_id
 from ..portable.instruction_delivery import DeliveryQualification, qualify_delivery
-from ..portable.roles import load_role
+from ..portable.roles import composed_instructions, load_role
 from ..recovery.capsule import build_capsule, render_capsule
 from ..trusted_channel import ChannelContext, issue_channel_tx
 from . import messages as acp_messages
@@ -971,7 +971,7 @@ class OrchestratingRuntime:
             # regardless of whether this process itself ever opened this
             # (freshly allocated) attempt id before.
             launch["recovery"] = True
-        session_id = self._engine.open("shared_project_root", launch, role_set.body_portable)
+        session_id = self._engine.open("shared_project_root", launch, composed_instructions(role_set))
         # T035 FINDING-02 fix (superseded, EXT-01 #2): ``self._engine.open``
         # (see ``delegation.live_adapters.EngineSessionManagerAdapter
         # .reconcile_configuration``) runs the coordinator's own first-turn
@@ -3362,7 +3362,7 @@ class OrchestratingRuntime:
                     new_session_ref, fallback_refused, new_attempt_id = self._attempt_worker_route_fallback(
                         task_id, assignment_ref, provisioning_row["assignment_id"], provisioning_row["role_id"],
                         provisioning_row["attempt_id"], provisioning_row["workspace_binding_id"],
-                        provisioning_row["config_revision"], "capacity_unavailable", role_set.body_portable,
+                        provisioning_row["config_revision"], "capacity_unavailable", composed_instructions(role_set),
                     )
                     if new_session_ref is not None:
                         from types import SimpleNamespace
@@ -3528,7 +3528,7 @@ class OrchestratingRuntime:
                     role_set = load_role(role_id)
                     new_session_ref, fallback_refused, new_attempt_id = self._attempt_worker_route_fallback(
                         task_id, assignment_ref, assignment_id, role_id, old_attempt_id,
-                        workspace_binding_id, config_revision, failure_class, role_set.body_portable,
+                        workspace_binding_id, config_revision, failure_class, composed_instructions(role_set),
                     )
                 if new_session_ref is None:
                     if not fallback_refused:

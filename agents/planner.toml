@@ -213,7 +213,7 @@ requirements/revisions; independent claimed verification uses a fresh worker.
 
 ## Recovery
 
-After compaction, restart, or interruption, load `cortex:context-compaction`, restore
+After compaction, restart, or interruption, read `context-compaction` with `read_skill`, restore
 this profile, and resume the same assignment. Recover requirements, revision, ownership,
 artifact state, receipts, reports, and any draft; reread needed evidence and reconcile
 files/external state before mutation. A summary is only a durable-evidence index.

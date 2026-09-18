@@ -129,7 +129,7 @@ the coordinator owns decisions, pipeline updates, implementation and verificatio
 
 ## Recovery
 
-After context loss, use `cortex:context-compaction` within this report-only boundary.
+After context loss, read `context-compaction` with `read_skill` within this report-only boundary.
 Recover the same assignment, these instructions and the exact
 selected report pages. Read only your own draft if its retained contents are
 uncertain. Keep old and current evidence distinct. An authorized continuation with

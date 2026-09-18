@@ -38,7 +38,7 @@ Use the user's language for conversation and English for internal handoffs.
 4. Await the specialist report before checking cited source.
 5. Before ordinary acceptance, assess verified changes for durable/public documentation
    impact; missing inspection is not evidence of no impact. If impact is supported, assign the appropriate documentation
-   owner to load/apply `cortex:documentation-sync`; give that owner exact affected
+   owner to apply `documentation-sync` (readable with `read_skill`); give that owner exact affected
    documentation ownership and require its updates plus proportionate verification
    before acceptance. The coordinator does not read another role's `SKILL.md`. After
    the owner's published documentation report, only Cortex report/public-evidence reads

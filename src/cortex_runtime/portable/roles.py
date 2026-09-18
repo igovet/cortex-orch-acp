@@ -31,8 +31,10 @@ import re
 
 from .errors import PortableError, PortableErrorCategory
 
-PLUGIN_ROOT = Path(__file__).resolve().parents[3]
-SKILLS_ROOT = PLUGIN_ROOT / "skills"
+# The repository root: this project *is* the agent, so there is no
+# plugin container above it any more (the name was the old one).
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+SKILLS_ROOT = REPOSITORY_ROOT / "skills"
 
 _NATIVE_BLOCK = re.compile(
     r"<!--\s*cortex:native\s+[a-z0-9_-]+\s*-->.*?<!--\s*/cortex:native\s*-->",
@@ -257,7 +259,7 @@ def load_role(role_hint: object) -> RoleInstructionSet:
             code="role_source_unavailable",
             remediation=(
                 f"Canonical source for role '{role_id}' could not be read at "
-                f"{source_path}: {error}. Verify the plugin payload is complete."
+                f"{source_path}: {error}. Verify the Cortex package is complete."
             ),
             retry_eligible=False,
             field="role",
@@ -276,6 +278,48 @@ def load_role(role_hint: object) -> RoleInstructionSet:
         source_path=str(source_path),
         sha256=hashlib.sha256(raw).hexdigest(),
     )
+
+
+# Shared skills that are not situational: they describe how to behave at
+# all times, so waiting for a model to decide to load them means they do
+# not apply until it does. Delivered with the role itself.
+#
+# The rest of SHARED_ROLE_IDS is situational (documentation-sync when
+# documentation is actually affected, knowledge-harvest when a harvest is
+# explicitly asked for, context-compaction on a compaction, cortex-control
+# for retention) and is read on demand instead -- knowledge-harvest alone
+# is 18KB, which no turn should pay for unconditionally.
+ALWAYS_ON_SKILLS: dict[str, tuple[str, ...]] = {
+    "coordinator": ("tool-discipline", "coordinator-communication", "content-safety"),
+    "worker": ("tool-discipline", "content-safety"),
+    "shared": (),
+}
+
+
+def composed_instructions(role_set: RoleInstructionSet) -> str:
+    """One role's instructions as an engine should receive them: its own
+    body, then the always-on shared skills for its kind.
+
+    Until this existed nothing delivered a shared skill at all. The role
+    text says things like "load/apply `cortex:documentation-sync`" -- an
+    instruction from when a plugin host could load a skill by name. In an
+    ACP session there is no such host: this runtime *is* the agent, and an
+    engine only ever receives the text handed to it. So the rules that
+    always apply are handed over with the role, and the situational ones
+    are readable by name through this runtime's own tools.
+
+    A shared skill that cannot be read is skipped rather than failing the
+    session: a worker without ``content-safety`` is worse off, but a
+    worker that cannot start at all is worse still, and the omission is
+    visible in what was delivered.
+    """
+    parts = [role_set.body_portable]
+    for skill_id in ALWAYS_ON_SKILLS.get(role_set.kind, ()):
+        try:
+            parts.append(load_role(skill_id).body_portable)
+        except PortableError:
+            continue
+    return "\n\n".join(part.strip() for part in parts if part and part.strip()) + "\n"
 
 
 def load_all_roles() -> dict[str, RoleInstructionSet]:
