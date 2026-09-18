@@ -26,6 +26,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping, Protocol
 
+from ..configuration.policy import BENIGN_CONFIGURATION_ERROR_CODES
 from ..contracts import StoreError
 from ..delegation import events as delegation_events
 from ..delegation import integration as delegation_integration
@@ -609,7 +610,20 @@ class OrchestratingRuntime:
     def _ensure_coordinator(self, task_id: str) -> tuple[ChannelContext, str]:
         cached = self._coordinator_channels.get(task_id)
         if cached is not None:
-            return cached, self._coordinator_sessions[task_id]
+            session_ref = self._coordinator_sessions[task_id]
+            # EXT-01 #2a: a cached, still-open coordinator session is
+            # exactly the case the old (session-open-only) configuration
+            # glue never revisited -- a mid-task model/provider change
+            # (``acp.agent._apply_mid_task_selection``) only ever proposes
+            # a fresh ``'selected'`` revision, it never itself re-opens this
+            # session. Reconciling here, on every call (cached or not),
+            # right after resolving *which* session this turn will use and
+            # strictly before any prompt content for it is composed/sent
+            # below (see ``_run``/``answer_question``'s own call sites),
+            # is the one safe boundary: never mid-turn, which would leave
+            # that turn's own effective model ambiguous.
+            self._reconcile_configuration(task_id, session_ref)
+            return cached, session_ref
         # T017: this runtime instance's first use of this task -- reconcile
         # any claim (consumed_by set) whose delivery was never confirmed by
         # a matching mark_delivered (a crash between claim_unconsumed and
@@ -684,6 +698,7 @@ class OrchestratingRuntime:
             self._coordinator_channels[task_id] = channel
             self._coordinator_sessions[task_id] = session_ref
             self._pending_recovery_notice[task_id] = outcome
+            self._reconcile_configuration(task_id, session_ref)
             return channel, session_ref
         from ..trusted_channel import resolve_channel
 
@@ -707,6 +722,7 @@ class OrchestratingRuntime:
                 raise
         self._coordinator_channels[task_id] = channel
         self._coordinator_sessions[task_id] = session_ref
+        self._reconcile_configuration(task_id, session_ref)
         return channel, session_ref
 
     def _open_coordinator_session(
@@ -726,42 +742,23 @@ class OrchestratingRuntime:
             # (freshly allocated) attempt id before.
             launch["recovery"] = True
         session_id = self._engine.open("shared_project_root", launch, role_set.body_portable)
-        # T035 FINDING-02 fix: ``self._engine.open`` (see
-        # ``delegation.live_adapters.EngineSessionManagerAdapter
-        # ._maybe_apply_configuration``) runs ``ConfigurationService.apply()``
-        # synchronously *inside* this call for a coordinator's own
-        # 'selected' revision, and deliberately never re-raises a
-        # 'failed'/'rejected' outcome into open()'s caller -- an
-        # already-opened engine *session* is not itself aborted over a
-        # configuration refusal (see that method's own docstring). That
-        # left the other half missing: nothing ever stopped the *prompt*
-        # that triggered the refused apply from running anyway on whatever
-        # the engine defaulted to. Re-reading this exact revision's
-        # settled state right here closes that gap without touching the
-        # detection logic (already correct) or the session-open behavior
-        # (unchanged): 'selected'/'pending_next_use'/'active'/'indeterminate'
-        # all pass through untouched (including the ordinary case of a
-        # fresh task's still-unapplied 'selected' revision), only a
-        # terminal 'failed'/'rejected' outcome for *this* revision blocks
-        # the turn.
+        # T035 FINDING-02 fix (superseded, EXT-01 #2): ``self._engine.open``
+        # (see ``delegation.live_adapters.EngineSessionManagerAdapter
+        # .reconcile_configuration``) runs the coordinator's own first-turn
+        # configuration confirmation synchronously *inside* this call, and
+        # deliberately never re-raises an unconfirmed outcome into open()'s
+        # own caller -- an already-opened engine *session* is not itself
+        # aborted over a configuration refusal (see that method's own
+        # docstring). This cheap, preview-time check catches the common
+        # case (a fresh session's own open() just settled 'failed'/
+        # 'rejected') immediately; ``_ensure_coordinator``'s own
+        # ``_reconcile_configuration`` call right after this method returns
+        # is the authoritative, always-run gate (it also covers
+        # 'indeterminate', and re-reads the *current* revision rather than
+        # this snapshot, which can be stale for a cached-session turn --
+        # see that method's own docstring).
         self._reject_if_configuration_failed(task_id, preview.get("config_revision"))
         return session_id
-
-    # T035 FINDING-02: the one error_code that means "this engine has no
-    # configuration surface at all" (engine.session_manager
-    # .EngineSessionManager.configure: ``options`` -- this session's own
-    # observed configOptions -- was empty, so nothing was ever sent to the
-    # wire). Pre-existing, documented, intentional behavior (see
-    # tests/test_acp_setup_fresh_session.py::
-    # test_rejected_configuration_never_becomes_active): there is no
-    # specific requested value to have silently substituted here -- the
-    # coordinator simply runs the engine's one and only mode, exactly as
-    # it always would have. Every *other* 'failed'/'rejected' error_code
-    # (an engine that DOES have configurable options but refused/did not
-    # confirm a specific requested one -- e.g. the live
-    # claude_acp_option_value_unsupported:model this fix targets) is a real
-    # requested-and-refused value and must still gate the turn.
-    _BENIGN_CONFIGURATION_ERROR_CODES = frozenset({"engine_does_not_support_configuration_options"})
 
     def _reject_if_configuration_failed(self, task_id: str, revision_id: str | None) -> None:
         """Raise a :class:`~..portable.errors.PortableError` carrying the
@@ -775,7 +772,13 @@ class OrchestratingRuntime:
         ``data.reason`` channel ``acp.production_runtime.RouteUnresolved``
         already uses for ``no_configuration_revision``/
         ``instruction_delivery_unqualified`` -- never a silent
-        substitution."""
+        substitution.
+
+        Superseded (but not removed -- still a cheap, harmless early check
+        right after a fresh/recovered open) as the authoritative gate by
+        :meth:`_reconcile_configuration`/``EngineSessionManagerAdapter
+        .reconcile_configuration``, EXT-01 #2c, which additionally blocks
+        'indeterminate' and runs on every turn, not only session-open."""
         if not revision_id:
             return
         with self._store.connection() as db:
@@ -784,7 +787,7 @@ class OrchestratingRuntime:
             ).fetchone()
         if row is None or row["state"] not in ("failed", "rejected"):
             return
-        if row["error_code"] in self._BENIGN_CONFIGURATION_ERROR_CODES:
+        if row["error_code"] in BENIGN_CONFIGURATION_ERROR_CODES:
             return
         raise PortableError(
             category=PortableErrorCategory.VALIDATION,
@@ -793,6 +796,43 @@ class OrchestratingRuntime:
                         "working configuration before starting a new turn.",
             retry_eligible=False,
         )
+
+    def _reconcile_configuration(self, task_id: str, session_ref: str) -> None:
+        """EXT-01 finding #2: the authoritative, always-run configuration
+        gate for a coordinator turn -- called by :meth:`_ensure_coordinator`
+        every time it resolves a session (a reused cached one, a freshly
+        opened one, or a recovered one alike), strictly before returning to
+        its own caller (``_run``/``answer_question``), both of which then
+        go on to compose and send this turn's own prompt content -- i.e.
+        exactly the one safe per-turn boundary: never mid-turn, which would
+        leave that turn's own effective model ambiguous.
+
+        Delegates the actual per-session wire (re)confirmation to the
+        session runtime's own ``reconcile_configuration(task_id,
+        session_ref)`` (real production case:
+        ``delegation.live_adapters.EngineSessionManagerAdapter
+        .reconcile_configuration`` -- see its own docstring for exactly how
+        it closes all three EXT-01 #2 cases (a mid-task selection on an
+        already-cached session, a fresh session after restart/recovery
+        whose task-level revision was already 'active', and a partial/
+        indeterminate application) -- looked up via ``getattr`` exactly
+        like ``shutdown`` above, so every existing ``SessionRuntime`` test
+        double that does not implement it (i.e. carries no real
+        configuration behind it at all) is an unchanged no-op, never a
+        ``AttributeError``.
+
+        That call returns a :class:`~..portable.errors.PortableError`
+        (never raises itself) when this session's own confirmation for the
+        task's current revision is refused or unconfirmed; this method
+        raises it, blocking the turn -- reusing the existing
+        'failed'/'rejected'/'indeterminate' vocabulary, never a fourth
+        state."""
+        reconcile = getattr(self._engine, "reconcile_configuration", None)
+        if reconcile is None:
+            return
+        error = reconcile(task_id, session_ref)
+        if error is not None:
+            raise error
 
     # -- T022: fresh-generation capsule/role/tool-schema delivery --------
 

@@ -345,6 +345,23 @@ class EngineSessionManagerAdapter:
         self._ever_opened_attempts: set[str] = set()
         self._pending_generation: dict[str, dict] = {}
         self._session_meta: dict[str, dict] = {}
+        # EXT-01 finding #2: per-*session* configuration confirmation record
+        # -- keyed by this adapter's own portable session_ref, populated and
+        # consulted only by :meth:`reconcile_configuration`. Deliberately
+        # in-memory, never a durable store row: no session_ref this adapter
+        # ever hands out survives this process's own lifetime (a restart or
+        # a coordinator recovery always opens a genuinely new session -- see
+        # :meth:`open`'s ``launch['recovery']`` path), so this record always
+        # starts empty for a new session and is therefore always
+        # reconfirmed, regardless of what ``configuration_revisions`` (a
+        # *task*-level, cross-session row) already says. See
+        # :meth:`reconcile_configuration`'s own docstring for the full
+        # rationale -- this is deliberately never merged into
+        # ``configuration_revisions`` itself, whose ``active`` state is
+        # immutable by DB trigger (``configuration_revisions_guard``) once
+        # reached, precisely because it is cross-session task history, not
+        # one session's own confirmation.
+        self._session_configured_revision: dict[str, str] = {}
         # T017 (load-test fix): notified on every confirmed/ambiguous
         # release and every cancel/shutdown signal, so a queued open wakes
         # promptly instead of relying purely on its own backoff poll
@@ -575,10 +592,22 @@ class EngineSessionManagerAdapter:
                 cause="session_replacement" if replacement else "session_open",
             )
             self._bind_resource(manager, session_id, task_id, attempt_id, workspace_binding_id, workspace_root, launch)
-            self._maybe_apply_configuration(manager, task_id, session_id, launch)
+            if not launch.get("assignment_id"):
+                # EXT-01 #2: only the coordinator's own session ever
+                # confirms/activates a task's configuration revision as a
+                # whole (a worker inherits the task's route but never
+                # re-confirms that same revision row here -- see
+                # ``_apply_worker_mode_floor`` for the distinct, narrower
+                # thing a worker's own open() *does* confirm: just its own
+                # engine mode, T035). See ``reconcile_configuration``'s own
+                # docstring: this is also the session's *first* turn boundary
+                # (``acp.orchestrating_runtime.OrchestratingRuntime
+                # ._ensure_coordinator`` calls the same method again on every
+                # later turn, cached session or not).
+                self.reconcile_configuration(task_id, session_id)
             if launch.get("assignment_id"):
                 # T035 gap closure: a worker's own engine mode, unlike the
-                # coordinator's, is never part of ``_maybe_apply_configuration``
+                # coordinator's, is never part of ``reconcile_configuration``
                 # (see that method's own docstring -- it skips every worker
                 # launch outright). Unconfirmed, "full working capability
                 # except deletion, which must be confirmed" silently does not
@@ -664,59 +693,160 @@ class EngineSessionManagerAdapter:
         except Exception:
             pass
 
-    def _maybe_apply_configuration(self, manager, task_id, session_id, launch) -> None:
-        """T031: the real ``ConfigurationService.apply()`` wiring T008
-        always required but nothing ever called in production (T013's own
-        fresh-review report disclosed this as "no production glue yet
-        between ConfigurationService task revisions and EngineSessionManager
-        routes").
+    def reconcile_configuration(self, task_id: str, session_ref: str):
+        """EXT-01 finding #2 (per-session configuration confirmation).
 
-        Only the *coordinator*'s own open() ever confirms/activates a
-        task's configuration revision as a whole (a worker inherits the
-        task's route from it, but never re-confirms/re-activates that same
-        revision row here -- see ``_apply_worker_mode_floor`` for the
-        distinct, narrower thing a worker's own open() *does* confirm: just
-        its own engine mode, T035); a no-op when this ``launch`` carries no
-        ``config_revision`` (a fake/test double with no real configuration
-        behind it -- unchanged pre-T031 behavior) or when that revision is
-        not (or no longer) in the ``'selected'`` state -- including the
-        ordinary case where a prior coordinator open already applied it,
-        so every later open (recovery, a worker, a second coordinator
-        turn) is a cheap, safe no-op, never a repeated wire call.
+        Replaces the pre-EXT-01 ``_maybe_apply_configuration`` (T031),
+        which read *only* ``configuration_revisions.state`` and skipped
+        entirely once it was already ``'active'`` -- correct for "has this
+        task's configuration been decided and confirmed by *some* session
+        ever", wrong for "is *this* concrete engine session, right now,
+        actually running under it". A task-level ``'active'`` row is real,
+        durable evidence that some session once confirmed it -- never
+        evidence that this ``session_ref`` did. Three concrete gaps that
+        follows from conflating the two (see the EXT-01 review):
 
-        On success, the revision becomes ``'active'`` with its
-        confirmation evidence ref (T013/T026: the adapter's own
-        ``configure()`` evidence_ref, e.g. "engine_instance:session:pairs").
-        On an engine rejection or partial application,
-        ``ConfigurationService.apply`` itself already records
-        ``'failed'``/``'indeterminate'`` -- this method never re-raises
-        that into ``open()``'s own caller: an already-opened session is
-        not aborted over it (the T008 revision-state machine, not this
-        call's success/failure, is the source of truth for "active").
+        (a) a mid-task model change (``acp.agent._apply_mid_task_selection``)
+            only ever proposes a fresh ``'selected'`` revision; nothing
+            re-opens the coordinator's already-cached session, so the old
+            state-only check never fired again for it. Closed by having
+            this method run on *every* turn (see
+            ``acp.orchestrating_runtime.OrchestratingRuntime
+            ._ensure_coordinator``, which calls this every time it resolves
+            a session -- cached, freshly opened, or recovered alike -- at
+            that method's own safe per-turn boundary, never mid-turn), not
+            only once at session-open time.
+        (b) a new session after a restart/recovery: the *task's* revision
+            may already be ``'active'`` (a prior, now-dead session
+            confirmed it) while this brand-new session has never itself
+            received a single ``session/set_config_option`` call and is
+            silently running the engine's own defaults. Closed by
+            ``self._session_configured_revision`` below: a per-*session*
+            record, never read from or written into
+            ``configuration_revisions`` (whose ``'active'`` state is
+            immutable once reached -- see ``configuration_revisions_guard``
+            -- precisely because it is cross-session task history, not any
+            one session's own confirmation). It lives in memory on this
+            adapter, not the durable store, because no ``session_ref`` this
+            adapter ever hands out outlives this process: a restart or
+            recovery always opens a genuinely new one (``open()``'s own
+            ``launch['recovery']`` path), so the record for it always
+            starts empty and this method always reconfirms, regardless of
+            the task-level row's state.
+        (c) a partial/indeterminate application: this method never marks a
+            session confirmed except on a real ``'active'`` outcome: a
+            benign "engine has no configuration surface" is recorded as
+            confirmed (there is nothing to have configured), but a
+            failed/rejected/partially-applied/unknown outcome returns a
+            :class:`~..portable.errors.PortableError` instead -- the
+            caller (``_ensure_coordinator``) raises it, blocking the turn,
+            never proceeding on an unconfirmed combination. Reuses the
+            existing ``failed``/``rejected``/``indeterminate`` vocabulary;
+            no fourth state is added anywhere.
+
+        Returns ``None`` when this session is (now) confirmed for the
+        task's current revision, when that revision is still mid-flight
+        (``'selected'``/``'pending_next_use'`` -- another call already has
+        it in hand, or the very next reconciliation will), or when there is
+        no store/session/current revision to reconcile at all (a fake/test
+        double with no real configuration behind it, or no session live for
+        ``session_ref`` -- unchanged pre-EXT-01 no-op behavior). Never
+        raises itself -- ``open()`` calls this and discards the result (an
+        already-opened session is not itself torn down over a refused
+        configuration; see ``_open_coordinator_session``'s own comment for
+        why *that* is ``_ensure_coordinator``'s job, using this same
+        return value).
         """
-        config_revision = launch.get("config_revision")
-        if not config_revision or launch.get("assignment_id"):
-            return
-        from ..configuration.service import ConfigurationService
-        from ..portable.errors import PortableError
+        if self._store is None:
+            return None
+        with self._lock:
+            attempt_id = self._session_to_attempt.get(session_ref)
+            manager = self._managers.get(attempt_id) if attempt_id is not None else None
+        if manager is None:
+            return None
+        from ..configuration import store as configuration_store
+        from ..configuration.policy import BENIGN_CONFIGURATION_ERROR_CODES
+        from ..configuration.service import ConfigurationRejected, ConfigurationService
+        from ..portable.errors import PortableError, PortableErrorCategory
         from ..portable.identity import OwnershipEpoch
 
-        with self._store.connection() as db:
-            row = db.execute(
-                "SELECT state FROM configuration_revisions WHERE id=?", (config_revision,),
-            ).fetchone()
-            owner = db.execute("SELECT epoch FROM task_owners WHERE task_id=?", (task_id,)).fetchone()
-        if row is None or row["state"] != "selected" or owner is None:
-            return
-        current_epoch = OwnershipEpoch(epoch=owner["epoch"], owner=task_id)
-        adapter = _PortableRevisionConfigureAdapter(self._store, manager)
-        try:
-            ConfigurationService(self._store).apply(task_id, config_revision, adapter, session_id, current_epoch)
-        except PortableError:
-            # stale_pending_apply (a newer revision was proposed mid-flight)
-            # or a stale/mismatched epoch race -- never surfaced as an
-            # open() failure; see the docstring above.
-            pass
+        service = ConfigurationService(self._store)
+        # EXT-01 #2a: ``latest_live`` (never ``current_or_latest``, which
+        # prefers an already-'active' revision even when a newer one has
+        # since been proposed -- see that method's own docstring for why
+        # that is correct for *its* one caller and wrong here) so a
+        # mid-task selection change is actually the target this
+        # reconciles a live session toward, not whatever was active before
+        # it was ever proposed.
+        current = service.latest_live(task_id)
+        if current is None:
+            return None
+        revision_id = current["id"]
+        with self._lock:
+            already_confirmed = self._session_configured_revision.get(session_ref) == revision_id
+        if already_confirmed and current["state"] == "active":
+            return None
+        state, error_code = current["state"], current.get("error_code")
+        if state == "selected":
+            with self._store.connection() as db:
+                owner = db.execute("SELECT epoch FROM task_owners WHERE task_id=?", (task_id,)).fetchone()
+            if owner is None:
+                return None
+            current_epoch = OwnershipEpoch(epoch=owner["epoch"], owner=task_id)
+            adapter = _PortableRevisionConfigureAdapter(self._store, manager)
+            try:
+                service.apply(task_id, revision_id, adapter, session_ref, current_epoch)
+            except PortableError:
+                # stale_pending_apply (a newer revision was proposed
+                # mid-flight) or a stale/mismatched owner epoch race -- the
+                # next reconciliation (this same method, next turn) will
+                # simply re-read whatever is current then; never treated as
+                # a confirmed failure of *this* attempt.
+                return None
+            with self._store.connection() as db:
+                row = db.execute(
+                    "SELECT state, error_code FROM configuration_revisions WHERE id=?", (revision_id,),
+                ).fetchone()
+            state, error_code = (row["state"], row["error_code"]) if row is not None else ("indeterminate", None)
+        elif state == "active":
+            # EXT-01 #2b: already active at the task level, but never
+            # confirmed by *this* session -- confirm it directly over the
+            # wire (never a second ``ConfigurationService.apply`` on an
+            # already-'active' row: that requires 'selected' and would
+            # simply reject it) using the identical confirm-or-fail
+            # ``_PortableRevisionConfigureAdapter``/``EngineSessionManager
+            # .configure`` gate ``_apply_worker_mode_floor`` already relies
+            # on for the analogous worker-mode case. Only this in-memory
+            # per-session record changes; the store's own 'active' row and
+            # its original confirmation evidence are untouched.
+            with self._store.connection() as db:
+                stored = configuration_store.revision_row_tx(db, task_id, revision_id)
+            revision = configuration_store._row_dict(stored)
+            adapter = _PortableRevisionConfigureAdapter(self._store, manager)
+            try:
+                adapter.configure(session_ref, revision)
+            except ConfigurationRejected as rejected:
+                state, error_code = "failed", rejected.reason
+            except Exception:
+                state, error_code = "indeterminate", "apply_exception"
+            else:
+                state, error_code = "active", None
+        if state == "active" or (state in ("failed", "rejected") and error_code in BENIGN_CONFIGURATION_ERROR_CODES):
+            with self._lock:
+                self._session_configured_revision[session_ref] = revision_id
+            return None
+        if state in ("selected", "pending_next_use"):
+            # Another in-flight apply (a concurrent reconciliation, or this
+            # one's own stale_pending_apply race above) already owns
+            # settling this revision; the next reconciliation re-reads it.
+            return None
+        return PortableError(
+            category=PortableErrorCategory.VALIDATION,
+            code=error_code or "configuration_apply_failed",
+            remediation="This task's configuration revision was refused by, or never confirmed by, the engine "
+                        "for this session; select and apply a working configuration before starting a new turn.",
+            retry_eligible=False,
+        )
 
     def _apply_worker_mode_floor(self, manager, task_id, session_id, launch) -> None:
         """T035 gap closure: confirm -- not merely request -- this worker's
@@ -1297,6 +1427,7 @@ class EngineSessionManagerAdapter:
                 self._session_to_attempt.pop(session_id, None)
             self._session_meta.pop(session_id, None) if session_id is not None else None
             self._pending_generation.pop(session_id, None) if session_id is not None else None
+            self._session_configured_revision.pop(session_id, None) if session_id is not None else None
         if manager is not None:
             manager.shutdown(grace=2.0)
             exited = None

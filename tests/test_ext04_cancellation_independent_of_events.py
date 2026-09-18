@@ -151,6 +151,7 @@ def test_capacity_is_not_released_on_an_unconfirmed_stop_only_on_a_confirmed_one
         adapter._session_to_attempt = {f"sess-{attempt_id}": attempt_id}
         adapter._session_meta = {}
         adapter._pending_generation = {}
+        adapter._session_configured_revision = {}
         adapter._activity_cond = threading.Condition()
 
         adapter.terminate_owned(attempt_id)

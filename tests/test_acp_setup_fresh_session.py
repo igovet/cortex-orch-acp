@@ -28,7 +28,7 @@ production glue yet between ConfigurationService task revisions and
 EngineSessionManager routes"): ``ConfigurationService.apply()`` is now
 actually called, from ``EngineSessionManagerAdapter.open()`` itself, right
 after a coordinator's session opens -- see that method's own
-``_maybe_apply_configuration`` docstring for exactly when it runs and why
+``reconcile_configuration`` docstring for exactly when it runs and why
 a rejection/partial application never gets promoted to ``'active'``
 (covered by ``test_rejected_configuration_never_becomes_active`` below).
 """

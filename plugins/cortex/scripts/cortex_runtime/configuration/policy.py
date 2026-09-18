@@ -138,6 +138,23 @@ WORKER_MODE_FLOOR: Mapping[str, str] = {
     "claude-agent-acp": "default",
 }
 
+# T035 FINDING-02 / EXT-01 #2: the one error_code that means "this engine
+# has no configuration surface at all" (engine.session_manager
+# .EngineSessionManager.configure: ``options`` -- this session's own
+# observed configOptions -- was empty, so nothing was ever sent to the
+# wire). There is no specific requested value to have silently substituted
+# for it -- the session simply runs the engine's one and only mode, exactly
+# as it always would have. Every *other* 'failed'/'rejected'/'indeterminate'
+# error_code (an engine that DOES have configurable options but refused/
+# only partially confirmed a specific requested one) is a real requested-
+# and-refused-or-unconfirmed value and must still gate the turn. Shared by
+# ``acp.orchestrating_runtime.OrchestratingRuntime._reject_if_configuration_failed``
+# (task-level, pre-EXT-01-#2 gate) and
+# ``delegation.live_adapters.EngineSessionManagerAdapter
+# .reconcile_configuration`` (per-session, EXT-01 #2 gate) -- one shared
+# vocabulary, never two independently-maintained copies.
+BENIGN_CONFIGURATION_ERROR_CODES = frozenset({"engine_does_not_support_configuration_options"})
+
 CANCELLATION = "cancellation"
 REFUSAL = "refusal"
 AUTHORIZATION_LOSS = "authorization_loss"

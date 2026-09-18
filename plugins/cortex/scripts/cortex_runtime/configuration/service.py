@@ -477,6 +477,34 @@ class ConfigurationService:
             return None
         return latest
 
+    def latest_live(self, task_id: str) -> dict[str, object] | None:
+        """EXT-01 finding #2: the task's own current *target* configuration
+        -- the highest-numbered revision that has not settled into a
+        terminal negative outcome (``'rejected'``/``'failed'``) -- walking
+        backward through history for the rare case where the very latest
+        one has (in which case the next-highest still-live revision, almost
+        always the previously-'active' one, is the honest answer). Returns
+        ``None`` only when every revision this task has ever had is
+        ``'rejected'``/``'failed'`` (including "no revision at all").
+
+        Deliberately distinct from :meth:`current_or_latest`, which prefers
+        an already-``'active'`` revision even when a strictly newer one has
+        since been proposed -- correct for *that* method's own one
+        legitimate use (resolving a route to open a brand-new session
+        against, see its own docstring), wrong for reconciling an
+        *existing* session's own confirmation: a mid-task selection change
+        (``acp.agent._apply_mid_task_selection``) always creates a newer
+        revision than whatever is currently ``'active'``, and it is that
+        newer one -- not the stale ``'active'`` one -- a live session must
+        be reconciled toward (see
+        ``delegation.live_adapters.EngineSessionManagerAdapter
+        .reconcile_configuration``, this method's only caller).
+        """
+        for revision in reversed(self.history(task_id)):
+            if revision["state"] not in ("rejected", "failed"):
+                return revision
+        return None
+
     def history(self, task_id: str) -> tuple[dict[str, object], ...]:
         with self.store.connection() as db:
             return configuration_store.history_tx(db, task_id)
