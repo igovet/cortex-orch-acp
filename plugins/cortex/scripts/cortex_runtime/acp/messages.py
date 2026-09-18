@@ -98,6 +98,10 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Reconnected this task on a newly authorized engine/route ({engine}), with a new session rebuilt from recorded task state (this is a new session, never a native resume of the prior engine).",
         "ru": "Задача переподключена на новом разрешённом движке/маршруте ({engine}) с новой сессией, восстановленной из сохранённого состояния задачи (это новая сессия, а не нативное возобновление прежнего движка).",
     },
+    "assignment_delegation_failed": {
+        "en": "Assignment {assignment_ref} was NOT delegated ({error}); this work was refused before reaching a worker. If the coordinator proceeds itself, that is a fallback, not a delegation.",
+        "ru": "Назначение {assignment_ref} НЕ было делегировано ({error}); эта работа была отклонена ещё до передачи исполнителю. Если координатор выполнит её сам, это резервный вариант, а не делегирование.",
+    },
     "coordinator_recovery_worker_lost": {
         "en": "Assignment {assignment_ref} could not be safely resumed after recovery and was marked failed ({reason}); the coordinator may re-delegate it.",
         "ru": "Назначение {assignment_ref} не удалось безопасно возобновить после восстановления и оно помечено как неудачное ({reason}); координатор может делегировать его заново.",

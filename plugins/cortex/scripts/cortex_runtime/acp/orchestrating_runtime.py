@@ -55,6 +55,18 @@ DEFAULT_WAIT_TIMEOUT_SECONDS = 5.0
 _WAIT_BACKOFF_START = 0.05
 _WAIT_BACKOFF_MAX = 1.0
 _UNSET = object()
+# Bound on the actionable-error text (e.g. resolve_role's own remediation,
+# which lists every valid role id) carried in an assignment_failed event
+# payload -- large enough to hold the full ~30-role-id catalog uncut today,
+# small enough to never make one event payload unbounded as that catalog
+# grows. Truncated with a marker, never silently dropped.
+_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS = 1200
+
+
+def _bounded_detail(text: str) -> str:
+    if len(text) <= _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS:
+        return text
+    return text[: _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS - 3] + "..."
 
 
 @dataclass(frozen=True)
@@ -1179,6 +1191,21 @@ class OrchestratingRuntime:
             # time -- see delegation.completion.gate).
             revisions = self._capture_result_revisions(task_id, claimed)
             meaningful = [e for e in claimed if e.event_type in delegation_events.MEANINGFUL_EVENT_TYPES]
+            # FINDING 11: a refused delegation must never be silently
+            # absorbed into "the coordinator did it all itself" -- surface
+            # it the same way an engine_failure/recovery loss already is:
+            # a client-visible localized line plus its own durable
+            # "progress" record (see _emit_localized), distinct from the
+            # assignment_failed event itself, so a turn where every
+            # delegation was refused is never indistinguishable from one
+            # where work was actually delegated.
+            for event in meaningful:
+                if event.event_type == "assignment_failed":
+                    self._emit_localized(
+                        task_id, emit_update, language, "assignment_delegation_failed",
+                        assignment_ref=event.assignment_ref or "?",
+                        error=event.payload.get("error", "unknown"),
+                    )
             if not meaningful and not first:
                 # T020 (stop-race fix): if a /cortex-stop landed in this
                 # exact window (this batch was claimed but was never going
@@ -2204,7 +2231,8 @@ class OrchestratingRuntime:
             if result is None:
                 delegation_events.append_event(
                     self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
-                    dict(error=error.code), origin="runtime", assignment_ref=assignment_ref,
+                    dict(error=error.code, role=payload["role"], detail=_bounded_detail(error.remediation)),
+                    origin="runtime", assignment_ref=assignment_ref,
                 )
                 return
         delegation_events.append_event(

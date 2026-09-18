@@ -146,11 +146,23 @@ def known_role_ids() -> tuple[str, ...]:
     return tuple(sorted(worker_ids + tuple(COORDINATOR_ROLE_IDS) + tuple(SHARED_ROLE_IDS)))
 
 
-def resolve_role(hint: object) -> str:
-    """Resolve a role hint to an exact known role id.
+def _normalize_role_hint(hint: str) -> str:
+    """Separator/case normalization only -- ``backend_dev``, ``Backend-Dev``
+    and ``backend-dev`` all fold to the same lookup key. Never fuzzy/prefix
+    matching: a hint that still does not name a known id or alias after this
+    fold is genuinely unknown, not guessed at."""
+    return hint.strip().lower().replace("_", "-")
 
-    Only an exact role id or an exact entry of :data:`WORKER_ALIASES` is
-    accepted -- no prefix/fuzzy matching. An unknown hint raises
+
+def resolve_role(hint: object) -> str:
+    """Resolve a role hint to a known role id.
+
+    An exact role id or an exact entry of :data:`WORKER_ALIASES` is
+    accepted first (no lookup performed); otherwise the hint is folded via
+    :func:`_normalize_role_hint` (separators/case only) and looked up
+    again -- so ``backend_dev``, ``Backend_Dev`` and ``worker-backend-dev``
+    all resolve to the same role, matching what the tool schema itself
+    advertises. No prefix/fuzzy matching. An unknown hint raises
     ``PortableError(code="unknown_role")`` naming every valid id so the
     caller can pick a concrete correction instead of guessing.
     """
@@ -170,6 +182,12 @@ def resolve_role(hint: object) -> str:
         return hint
     if hint in WORKER_ALIASES and WORKER_ALIASES[hint] in ids:
         return WORKER_ALIASES[hint]
+    normalized = _normalize_role_hint(hint)
+    if normalized != hint:
+        if normalized in ids:
+            return normalized
+        if normalized in WORKER_ALIASES and WORKER_ALIASES[normalized] in ids:
+            return WORKER_ALIASES[normalized]
     raise PortableError(
         category=PortableErrorCategory.VALIDATION,
         code="unknown_role",

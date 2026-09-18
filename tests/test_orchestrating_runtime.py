@@ -425,6 +425,69 @@ def test_worker_question_reaches_coordinator_only_then_clarify_then_publish(tmp_
     assert not any("Which config should I use" in u for u in updates)
 
 
+def test_unknown_role_delegation_is_visible_and_recorded_not_silently_absorbed(tmp_path):
+    """FINDING 11: a refused delegation (unknown role) must never silently
+    degrade into "the coordinator quietly did it all itself" -- the client
+    must see the refusal, and the durable record must distinguish it from a
+    real delegation."""
+    store, task_id = _task(tmp_path)
+    state = {"seen_failure": False}
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Assignment X", brief="do X", role="totally_bogus_role",
+                acceptance="X done", request_key="reqX",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Delegated X.")
+        if "was NOT delegated" in message:
+            state["seen_failure"] = True
+        if state["seen_failure"]:
+            mcp_tools.dispatch(store, channel, "decide", dict(
+                assignment_ref="task", decision="accept",
+                rationale="Delegation was refused; did the work myself.", request_key="acceptX",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Did the work myself.")
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        raise AssertionError("a refused delegation must never launch a worker")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime, engine = _make_runtime(store, router)
+    updates = []
+    result = runtime.start_prompt(task_id, "s1", "Do X.", updates.append, threading.Event())
+    assert result == StopReason.END_TURN
+
+    # 1) Visible to the client: a session update names the refusal itself,
+    # distinct from the coordinator's own free-form text.
+    assert any("was NOT delegated" in u for u in updates)
+
+    # 2) Durably recorded, and actionable (not a bare code): the requested
+    # role and the valid ids are both carried, and there is no worker_result
+    # for this task -- a real delegation and a refused one are
+    # programmatically distinguishable, never collapsed together.
+    with store.connection() as db:
+        failed_rows = db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='assignment_failed'",
+            (task_id,),
+        ).fetchall()
+        worker_result_rows = db.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND event_type='worker_result'", (task_id,),
+        ).fetchall()
+    assert len(failed_rows) == 1
+    payload = json.loads(failed_rows[0]["payload_json"])
+    assert payload["error"] == "unknown_role"
+    assert payload["role"] == "totally_bogus_role"
+    assert "worker-backend-dev" in payload["detail"]
+    assert "orchestrator" in payload["detail"]
+    assert worker_result_rows == []
+
+
 def test_claimed_events_survive_a_prompt_exception_and_are_delivered_once(tmp_path):
     """T016 review (MEDIUM): if engine.prompt() raises, the events claimed
     for that turn must not be lost -- they must be released back to

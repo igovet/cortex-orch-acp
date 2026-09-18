@@ -35,6 +35,23 @@ def test_resolve_role_unknown_lists_valid_ids():
     assert "orchestrator" in error.remediation
 
 
+def test_resolve_role_normalizes_separators_and_case():
+    """FINDING 11: backend_dev / backend-dev / Backend_Dev / worker-backend-dev
+    all resolve to the same role -- the tool schema advertises the hyphenated
+    spelling, but an underscore is the spelling any model reaches for."""
+    for hint in ("backend_dev", "backend-dev", "Backend_Dev", "worker-backend-dev", "WORKER_BACKEND_DEV"):
+        assert roles.resolve_role(hint) == "worker-backend-dev"
+
+
+def test_resolve_role_normalization_does_not_invent_matches():
+    """Normalization is separator/case folding only, never fuzzy matching --
+    a name that is genuinely not a known id or alias still raises."""
+    with pytest.raises(PortableError):
+        roles.resolve_role("backend_developer")
+    with pytest.raises(PortableError):
+        roles.resolve_role("totally_unknown_role")
+
+
 def test_resolve_role_no_fuzzy_matching():
     """A near-miss (prefix/substring) never silently resolves."""
     with pytest.raises(PortableError):
