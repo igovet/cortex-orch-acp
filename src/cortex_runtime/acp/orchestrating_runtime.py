@@ -168,6 +168,28 @@ _WORKER_CARD_TITLE_MAX_CHARS = 300
 _WORKER_ACTION_LOG_MAX_CHARS = 4000
 
 
+def _client_safe_content(content):
+    """Drop tool-call content a client cannot possibly resolve.
+
+    ACP lets a tool call carry a `terminal` content block referring to a
+    terminal by id -- but that terminal belongs to *this* agent's session
+    with the engine, not to the client's session with us. Forwarded
+    verbatim, Zed answered the whole notification with
+    `-32603 ... Terminal with id ... not found`, which loses the entire
+    card, not just the block. Seen live in Zed's own log.
+
+    Everything else passes through untouched: text and diffs mean the same
+    thing in either session.
+    """
+    if not content:
+        return content
+    kept = [
+        part for part in content
+        if not (isinstance(part, Mapping) and part.get("type") == "terminal")
+    ]
+    return kept or None
+
+
 def _project_relative(text: str | None, project_root: str | None) -> str | None:
     """Rewrite absolute paths inside ``project_root`` as paths relative to
     it, and leave everything else exactly as it is.
@@ -569,6 +591,13 @@ class OrchestratingRuntime:
         # worker's integration. See _integrate_assignment and the
         # coordinator-turn digest check.
         self._authorized_project_revisions: dict[str, list] = {}
+        # The card channel of whichever start_prompt call currently owns
+        # this task, so a worker running on the executor can put its own
+        # actions in the same feed the coordinator is writing to.
+        self._task_tool_call_emitters: dict[str, object] = {}
+        # Assignments dispatched and not yet terminal. A live worker is
+        # work in progress, not an absence of progress.
+        self._open_assignments: dict[str, set] = {}
         # T020 (stop-race fix): the cancel_event of whichever start_prompt/
         # answer_question call currently owns this task's continuation loop
         # *in this process* -- lets stop_task() signal that loop to exit
@@ -661,6 +690,8 @@ class OrchestratingRuntime:
                 self._task_permission_requesters[task_id] = host_permission_requester
             if host_fs_requester is not None:
                 self._task_fs_requesters[task_id] = host_fs_requester
+            if emit_tool_call is not None:
+                self._task_tool_call_emitters[task_id] = emit_tool_call
         try:
             return self._run(task_id, session_id, content, emit_update, cancel_event,
                               source_origin=source_origin, source_event_id=source_event_id, host_elicitor=elicitor,
@@ -671,6 +702,7 @@ class OrchestratingRuntime:
                 self._active_tasks.discard(task_id)
                 if self._active_cancel_events.get(task_id) is cancel_event:
                     del self._active_cancel_events[task_id]
+                self._task_tool_call_emitters.pop(task_id, None)
                 if host_permission_requester is not None:
                     self._task_permission_requesters.pop(task_id, None)
                 if host_fs_requester is not None:
@@ -1686,6 +1718,16 @@ class OrchestratingRuntime:
                         continue
                     last_provisioning_sig = provisioning_sig
                     with self._lock:
+                        # Only a worker whose engine turn is actually in
+                        # flight holds this open. Treating "an assignment
+                        # exists" as progress was tried and reverted: an
+                        # assignment that never reaches a terminal event
+                        # would then hold the turn open forever, which is
+                        # the same defect mirrored -- a task nobody is
+                        # working on that never ends. The reported symptom
+                        # (blocked while the worker was working) is a
+                        # worker turn that produced nothing, and that is
+                        # where it has to be fixed.
                         worker_running = bool(self._worker_turns_in_flight)
                     if worker_running:
                         # See self._worker_turns_in_flight: a worker's own
@@ -2334,7 +2376,9 @@ class OrchestratingRuntime:
                         # Requirement: the title names the *resolved* role
                         # id, not the raw hint the coordinator typed --
                         # this is the first point a resolved id exists.
-                        base_title = f"Worker: {_display_role(role_id)} — {requested.get('title', '')}"
+                        route = self._delegation_route_label(task_id, assignment_ref)
+                        who = _display_role(role_id) + (f" · {route}" if route else "")
+                        base_title = f"Worker: {who} — {requested.get('title', '')}"
                         fields["title"] = base_title
                         with self._lock:
                             self._worker_card_title[assignment_ref] = base_title
@@ -2348,6 +2392,7 @@ class OrchestratingRuntime:
                 assignment_ref = self._assignment_ref_for_attempt(task_id, event.assignment_ref)
                 if assignment_ref is None:
                     continue
+                self._close_assignment(task_id, assignment_ref)
                 checks = event.payload.get("checks") or []
                 lines = [event.payload.get("summary", "")]
                 if checks:
@@ -2363,6 +2408,7 @@ class OrchestratingRuntime:
                     text=self._worker_card_body(assignment_ref, lines),
                 )
             elif event.event_type == "assignment_failed" and event.assignment_ref:
+                self._close_assignment(task_id, event.assignment_ref)
                 text = f"Not delegated/failed: {event.payload.get('error', 'unknown error')}"
                 detail = event.payload.get("detail")
                 if detail:
@@ -2372,12 +2418,23 @@ class OrchestratingRuntime:
                     text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 )
             elif event.event_type == "assignment_cancelled" and event.assignment_ref:
+                self._close_assignment(task_id, event.assignment_ref)
                 text = f"Cancelled: {event.payload.get('reason', '')}"
                 self._emit_worker_card(
                     emit_tool_call, event.assignment_ref,
                     status=_TOOL_CALL_STATUS_FOR_CANCELLED,
                     text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 )
+
+    def _close_assignment(self, task_id: str, assignment_ref: str) -> None:
+        """This assignment has reached a terminal event: it is no longer a
+        reason to keep waiting. See the no-progress branch."""
+        with self._lock:
+            open_refs = self._open_assignments.get(task_id)
+            if open_refs is not None:
+                open_refs.discard(assignment_ref)
+                if not open_refs:
+                    self._open_assignments.pop(task_id, None)
 
     def _worker_card_body(self, assignment_ref: str, lines) -> str:
         """A finished worker's card body: what it reports, and under it
@@ -2535,7 +2592,7 @@ class OrchestratingRuntime:
             # a reader actually wants. Anything the engine did not send
             # stays absent rather than being invented.
             locations = locations if locations else pending_locations.pop(ref, None)
-            content = content if content else pending_content.pop(ref, None)
+            content = _client_safe_content(content if content else pending_content.pop(ref, None))
             if locations:
                 fields["locations"] = list(locations)
             if content:
@@ -2579,10 +2636,6 @@ class OrchestratingRuntime:
             titles = dict(self._worker_card_title)
             routes = dict(self._worker_card_route)
         for assignment_ref, latest in activity.items():
-            # The sentinel marks text the worker spoke (kept as a rolling
-            # tail) rather than a tool call's own one-line title; it never
-            # reaches the client.
-            latest = latest[1:] if latest.startswith("\u0000") else latest
             latest = " ".join(latest.split())
             if not latest:
                 continue
@@ -2941,6 +2994,8 @@ class OrchestratingRuntime:
                 kind=_WORKER_TOOL_CALL_KIND, status="pending",
                 text=scrub_text(f"Queued: {payload.get('brief', '')}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
             )
+            with self._lock:
+                self._open_assignments.setdefault(task_id, set()).add(assignment_ref)
             future = self._executor.submit(
                 self._provision_and_prompt, task_id, coordinator_channel, payload, cancel_event,
             )
@@ -3360,11 +3415,12 @@ class OrchestratingRuntime:
                 # (PromptOutcome owns what a worker's text means to the
                 # coordinator; see SessionRuntime.prompt).
                 def _on_worker_delta(chunk_text: str, _ref: str = assignment_ref) -> bool:
-                    with self._lock:
-                        previous = self._worker_activity.get(_ref, "")
-                        if not previous.startswith("\u0000"):
-                            previous = ""
-                        self._worker_activity[_ref] = "\u0000" + (previous[1:] + chunk_text)[-_WORKER_ACTIVITY_MAX_CHARS:]
+                    # Deliberately not shown. A card's title said, live,
+                    # "Worker: backend-dev - Add a guard · plete, begins
+                    # with the required decision brief" -- the tail of the
+                    # worker's prose, cut mid-word. A fragment of a
+                    # sentence is worse than no suffix at all; only a named
+                    # action ever goes in a title (see _on_worker_tool_call).
                     return True
 
                 def _on_worker_tool_call(ref, kind, title, status, *rest, _ref=assignment_ref) -> None:
@@ -3386,10 +3442,32 @@ class OrchestratingRuntime:
                             log.append(action)
                             del log[:-_WORKER_ACTION_LOG_MAX_ENTRIES]
 
+                # Every action this worker takes is its own card in the
+                # shared feed, prefixed with whose action it is: a session
+                # has one message stream and no sub-feeds, so attribution
+                # is what keeps two workers apart. `id_scope` keeps their
+                # cards from colliding when both engines happen to use the
+                # same wire tool-call id.
+                with self._lock:
+                    feed = self._task_tool_call_emitters.get(task_id)
+                route_label = self._delegation_route_label(task_id, assignment_ref)
+                who = _display_role(result.role_id)
+                if route_label:
+                    who = f"{who} · {route_label}"
+                worker_cards = self._engine_tool_call_emitter(
+                    feed, prefix=f"{who} · ", id_scope=assignment_ref,
+                    project_root=self._task_project_root(task_id),
+                ) if feed is not None else None
+
+                def _worker_tool_call(*args, _card=worker_cards, _log=_on_worker_tool_call) -> None:
+                    _log(*args)
+                    if _card is not None:
+                        _card(*args)
+
                 try:
                     outcome = self._engine.prompt(
                         result.engine_session_ref, brief, cancel_event,
-                        on_delta=_on_worker_delta, on_tool_call=_on_worker_tool_call,
+                        on_delta=_on_worker_delta, on_tool_call=_worker_tool_call,
                     )
                 finally:
                     with self._lock:

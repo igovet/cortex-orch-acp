@@ -177,10 +177,11 @@ def test_a_running_workers_card_shows_what_it_is_doing(tmp_path):
             return PromptOutcome(StopReason.END_TURN, "Delegated X.")
         return PromptOutcome(StopReason.END_TURN, "Nothing new.")
 
-    def talking_worker(store, channel, session_ref, message, call_index, on_delta=None):
-        if on_delta is not None:
-            on_delta("Reading calc.py")
-            on_delta(" and adding the guard.")
+    def talking_worker(store, channel, session_ref, message, call_index, on_tool_call=None):
+        # What a worker *does* is what its card says; a fragment of what it
+        # *says* used to land in the title, cut mid-word.
+        if on_tool_call is not None:
+            on_tool_call("t1", "read", "Reading calc.py", "in_progress", None, None)
         worker_may_finish.wait(timeout=5.0)
         return PromptOutcome(StopReason.END_TURN, "")
 
@@ -198,7 +199,7 @@ def test_a_running_workers_card_shows_what_it_is_doing(tmp_path):
 
     def release_later():
         for _ in range(100):
-            if any("Reading calc.py" in str(c.get("text", "")) for c in list(cards)):
+            if any("Reading calc.py" in str(c.get("title", "")) for c in list(cards)):
                 break
             threading.Event().wait(0.02)
         worker_may_finish.set()
@@ -210,28 +211,28 @@ def test_a_running_workers_card_shows_what_it_is_doing(tmp_path):
     )
     releaser.join(timeout=10.0)
 
-    # What it is doing shows on the card's own title, next to whose card it
-    # is -- the collapsed card alone answers "what is the worker on".
+    # What the worker is doing reaches the feed while it is doing it, as
+    # its own card, saying whose action it is.
     activity = [c for c in cards if "Reading calc.py" in str(c.get("title", ""))]
-    assert activity, f"the running worker's own turn never reached its card: {cards}"
-    assert all(not c.get("new") for c in activity), "activity must update the existing card, never create a second one"
+    assert activity, f"the running worker's own turn never reached the feed: {cards}"
+    assert all("backend-dev" in c["title"] for c in activity), activity
     assert all(c["status"] == "in_progress" for c in activity)
-    assert all("Worker: backend-dev" in c["title"] for c in activity), "the card stopped saying whose work it is"
-    # An unchanged card is never re-sent, however many wait ticks pass
-    # (the create and the ready update legitimately carry the same base
-    # title; it is the activity updates that used to repeat per tick).
-    activity_titles = [c["title"] for c in cards if " \u00b7 " in str(c.get("title", ""))]
-    assert len(activity_titles) == len(set(activity_titles)), (
-        f"the same activity card was sent more than once: {activity_titles}"
-    )
+    # The assignment keeps exactly one card of its own, never one per action.
+    assignment_cards = {c["tool_call_id"] for c in cards if c["tool_call_id"].startswith("worker:")}
+    assert len(assignment_cards) == 1, cards
+    # No card is re-sent unchanged, however many wait ticks pass.
+    sent = [(c["tool_call_id"], c.get("title"), c.get("text")) for c in cards]
+    assert len(sent) == len(set(sent)), f"the same card was sent twice: {sent}"
     # The worker's text is card content, never the coordinator's stream.
     assert "Reading calc.py" not in "".join(u for u in updates if isinstance(u, str))
 
 
-def test_a_workers_actions_are_collapsed_into_its_card_body(tmp_path):
-    """Requested while watching: the worker's actions should not all be in
-    the feed -- the card shows the one it is on, and the rest is there
-    when the card is opened."""
+def test_every_worker_action_is_its_own_card_saying_whose_it_is(tmp_path):
+    """Chosen with the user after watching a run where a worker's work was
+    invisible: a session has one message stream and no sub-feeds, so each
+    action becomes its own card, attributed -- role, and the engine/model/
+    effort it is running on -- which is also what keeps two parallel
+    workers apart."""
     store, task_id = _task(tmp_path)
     worker_may_finish = threading.Event()
 
@@ -246,8 +247,8 @@ def test_a_workers_actions_are_collapsed_into_its_card_body(tmp_path):
 
     def working_worker(store, channel, session_ref, message, call_index, on_tool_call=None):
         if on_tool_call is not None:
-            on_tool_call("t1", "read", "Read calc.py", "completed")
-            on_tool_call("t2", "edit", "Edit calc.py", "in_progress")
+            on_tool_call("t1", "read", "Read calc.py", "completed", None, None)
+            on_tool_call("t2", "edit", "Edit calc.py", "in_progress", None, None)
         worker_may_finish.wait(timeout=5.0)
         return PromptOutcome(StopReason.END_TURN, "")
 
@@ -263,7 +264,7 @@ def test_a_workers_actions_are_collapsed_into_its_card_body(tmp_path):
     cards: list = []
 
     def release_later():
-        for _ in range(100):
+        for _ in range(200):
             if any("Edit calc.py" in str(c.get("title", "")) for c in list(cards)):
                 break
             threading.Event().wait(0.02)
@@ -274,15 +275,18 @@ def test_a_workers_actions_are_collapsed_into_its_card_body(tmp_path):
     runtime.start_prompt(task_id, "s1", "Do X.", [].append, threading.Event(), emit_tool_call=cards.append)
     releaser.join(timeout=10.0)
 
-    latest = [c for c in cards if "Edit calc.py" in str(c.get("title", ""))]
-    assert latest, f"the action the worker is on never reached its card title: {cards}"
-    # The earlier action is not in the title any more, but it is still in
-    # the body -- that is the "open it to see the rest" half.
-    body = latest[-1].get("text") or ""
-    assert "Read calc.py" in body and "Edit calc.py" in body, body
-    assert "Read calc.py" not in latest[-1]["title"]
-    # One card for the assignment, not one per action.
-    assert len({c["tool_call_id"] for c in cards}) == 1, cards
+    actions = [c for c in cards if "Read calc.py" in str(c.get("title", ""))
+               or "Edit calc.py" in str(c.get("title", ""))]
+    assert len(actions) >= 2, f"the worker's actions never reached the feed: {cards}"
+    assert all("backend-dev" in c["title"] for c in actions), actions
+    # Each action is its own card, never folded into the assignment's.
+    assignment_card = _worker_card_ids(cards)
+    assert all(c["tool_call_id"] not in assignment_card for c in actions), actions
+    assert len({c["tool_call_id"] for c in actions}) == len(actions)
+
+
+def _worker_card_ids(cards):
+    return {c["tool_call_id"] for c in cards if c["tool_call_id"].startswith("worker:")}
 
 
 def test_an_explicit_language_choice_is_told_to_the_coordinator(tmp_path):
@@ -705,3 +709,28 @@ def test_a_worker_tool_call_actually_reaches_its_card(tmp_path):
     # A worker assignment is not a command being run.
     created = [c for c in cards if c.get("new")]
     assert created and created[0]["kind"] != "execute", created[0]
+
+
+def test_a_terminal_content_block_is_never_forwarded_to_the_client():
+    """Seen in Zed's own log: `-32603 ... Terminal with id ... not found`,
+    and the whole card lost with it. A tool call's `terminal` content
+    refers to a terminal in this agent's session with the engine; the
+    client has no such id. Text and diffs mean the same thing in either
+    session and still pass through."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
+
+    cards: list = []
+    on_tool_call = _R._engine_tool_call_emitter(_R.__new__(_R), cards.append)
+    on_tool_call(
+        "t1", "execute", "Run pytest", "completed", None,
+        [{"type": "terminal", "terminalId": "exec-fa8ac10d"},
+         {"type": "diff", "path": "/p/calc.py", "oldText": "a", "newText": "b"}],
+    )
+    content = cards[-1]["content"]
+    assert all(part.get("type") != "terminal" for part in content), content
+    assert any(part.get("type") == "diff" for part in content), content
+
+    # A call whose only content was a terminal carries none, not an empty list.
+    on_tool_call("t2", "execute", "Run again", "completed", None,
+                 [{"type": "terminal", "terminalId": "exec-b"}])
+    assert "content" not in cards[-1], cards[-1]
