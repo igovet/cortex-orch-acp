@@ -283,9 +283,30 @@ def reconcile_undelivered_claims(store, task_id: str | None = None) -> int:
 
 
 def has_unconsumed(store, task_id: str) -> bool:
+    """Whether at least one unconsumed, not-superseded event exists that
+    represents *outstanding work* the coordinator must still be woken for
+    -- i.e. its ``event_type`` is in :data:`MEANINGFUL_EVENT_TYPES` (see
+    that constant's own docstring for the exact list and why).
+
+    A purely informational row (a coordinator's own self-generated
+    ``progress`` notice, for example ``coordinator_mutation_refused``, or
+    any other non-meaningful event type) is never by itself reported as
+    "unconsumed" here, even though it is still unconsumed in the database
+    and :func:`claim_unconsumed` still claims and delivers it -- coalesced
+    into whatever the next real continuation's prompt turns out to be --
+    exactly once, whenever that next continuation happens for a meaningful
+    reason. Counting it here as well would make the coordinator's own
+    informative-only notice look like outstanding work owed *to* it,
+    stalling the turn through the full no-progress wait budget for
+    something nobody is ever going to deliver (see
+    ``acp.orchestrating_runtime._continuation_loop``/``_wait_for_progress``,
+    the only callers of this function).
+    """
+    placeholders = ",".join("?" for _ in MEANINGFUL_EVENT_TYPES)
     with store.connection() as db:
         row = db.execute(
-            "SELECT 1 FROM task_events WHERE task_id=? AND consumed_by IS NULL AND superseded=0 LIMIT 1",
-            (task_id,),
+            "SELECT 1 FROM task_events WHERE task_id=? AND consumed_by IS NULL AND superseded=0 "
+            f"AND event_type IN ({placeholders}) LIMIT 1",
+            (task_id, *MEANINGFUL_EVENT_TYPES),
         ).fetchone()
     return row is not None
