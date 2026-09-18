@@ -467,6 +467,7 @@ class EngineSessionManagerAdapter:
                 manager, record, session_id, task_id, attempt_id, launch,
                 cause="session_replacement" if replacement else "session_open",
             )
+            self._bind_resource(manager, session_id, task_id, attempt_id, workspace_binding_id, workspace_root, launch)
             self._maybe_apply_configuration(manager, task_id, session_id, launch)
             if launch.get("assignment_id"):
                 # T035 gap closure: a worker's own engine mode, unlike the
@@ -898,6 +899,63 @@ class EngineSessionManagerAdapter:
             )
             self._pending_generation[session_id] = generation
 
+    def _bind_resource(
+        self, manager, session_id, task_id, attempt_id, workspace_binding_id, workspace_root, launch,
+    ) -> None:
+        """T035 gap closure: register this session's own
+        ``engine.resource_binding.ResourceBinding`` so
+        ``engine.permissions.PermissionBridge`` can classify anything at
+        all -- previously nothing in production ever called
+        ``EngineSessionManager.bind_resource`` (see
+        ``resource_binding``'s own module docstring), so every permission
+        request failed closed to ``cancelled`` regardless of role or
+        classification, silently disabling the "workers keep full
+        capability except deletion" rule's auto-approval half in
+        production.
+
+        Store-gated (same convention every other T022/T023/T027 feature in
+        this method already follows): a caller with no ``store`` -- a
+        bespoke test double with no durable state to read
+        ``context_generation_id``/``ownership_epoch`` from -- gets no
+        binding here and keeps failing closed exactly as before this fix;
+        this never weakens the fail-closed default, it only activates the
+        auto-approval half for real production sessions, which always
+        supply a store (see ``acp.production_runtime``).
+
+        ``role`` is never defaulted or inferred from a shape: it is the
+        same ``"worker" if launch.get("assignment_id") else "coordinator"``
+        rule every other role computation in this file already uses (see
+        ``_record_process_identity``/``_record_effective_context``/
+        ``_open_generation``), so a coordinator can never be misclassified
+        as a worker and auto-approved.
+        """
+        import os
+
+        from .. import ownership
+        from ..engine.resource_binding import ResourceBinding
+
+        with self._lock:
+            generation = self._pending_generation.get(session_id)
+        if generation is None:
+            return
+        with self._store.connection() as db:
+            epoch = ownership.current_owner_epoch(db, task_id)
+        if epoch is None:
+            return
+        role = "worker" if launch.get("assignment_id") else "coordinator"
+        binding = ResourceBinding(
+            engine_instance_id=manager._process.engine_instance_id,
+            engine_session_id=session_id,
+            context_generation_id=generation["id"],
+            assignment_id=launch.get("assignment_id") or attempt_id,
+            attempt_id=attempt_id,
+            workspace_binding_id=workspace_binding_id,
+            workspace_root=os.path.realpath(workspace_root),
+            ownership_epoch=str(epoch),
+            role=role,
+        )
+        manager.bind_resource(binding)
+
     def _persist_terminal_output(
         self, engine_session_id: str, terminal_id: str, data: bytes, *,
         truncated: bool, exit_code: int | None, signal: str | None, failure: str | None,
@@ -1162,14 +1220,25 @@ class EngineSessionManagerAdapter:
             time.sleep(0.05)
         return False
 
-    def _observe_compaction_signal(self, session_ref: str, event) -> None:
+    def _observe_compaction_signal(self, manager, session_ref: str, event) -> None:
         """T022: an observed compaction reaching its terminal phase opens
         (at most once per evidence id -- see
         ``delegation.generations.record_compaction_event``) a fresh
         generation, queued the same way ``open()`` queues its own initial
         one -- picked up by :meth:`pending_delivery` on the *next*
         continuation, never mid-turn (Cortex cannot rewrite a turn already
-        in flight)."""
+        in flight).
+
+        T035 gap closure: also invalidates this session's own
+        ``ResourceBinding`` context generation (see
+        ``engine.session_manager.EngineSessionManager.invalidate_generation``
+        / ``engine.resource_binding.ResourceBinding.is_current``) the same
+        instant the fresh generation is opened -- previously nothing in
+        production ever called this either, so a permission request whose
+        host round-trip straddled a mid-session compaction would still be
+        relayed as if nothing had changed underneath it, exactly the
+        staleness ``is_current`` exists to catch.
+        """
         from . import generations as delegation_generations
 
         with self._lock:
@@ -1188,6 +1257,7 @@ class EngineSessionManagerAdapter:
         if generation is not None:
             with self._lock:
                 self._pending_generation[session_ref] = generation
+            manager.invalidate_generation(session_ref, generation["id"])
 
     def pending_delivery(self, session_ref: str) -> Mapping[str, object] | None:
         """T022 (optional ``SessionRuntime`` extension, checked via
@@ -1305,7 +1375,7 @@ class EngineSessionManagerAdapter:
                         )
                 elif event.kind == EngineEventKind.COMPACTION_SIGNAL:
                     if self._store is not None:
-                        self._observe_compaction_signal(session_ref, event)
+                        self._observe_compaction_signal(manager, session_ref, event)
                 elif event.kind == EngineEventKind.USAGE_UPDATE:
                     # T029: the engine's own most-recent usage_update for
                     # this call (cumulative counters, per

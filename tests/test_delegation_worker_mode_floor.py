@@ -23,7 +23,6 @@ from cortex_runtime.configuration.service import ConfigurationService
 from cortex_runtime.connections import registry as connection_registry
 from cortex_runtime.delegation import capacity
 from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter, WorkerModeNotConfirmed
-from cortex_runtime.engine.resource_binding import ResourceBinding
 from cortex_runtime.ownership import current_owner_epoch
 from cortex_runtime.portable.identity import OwnershipEpoch, SourceEvent
 from cortex_runtime.store import Store
@@ -186,17 +185,6 @@ def test_coordinator_open_never_touches_the_worker_mode_floor(tmp_path):
     adapter.terminate_owned("xa_c1")
 
 
-def _binding_for(manager, engine_session_id, workspace_root, **overrides):
-    fields = dict(
-        engine_instance_id=manager._process.engine_instance_id, engine_session_id=engine_session_id,
-        context_generation_id="gen_1", assignment_id="asg_1", attempt_id="xa_w1",
-        workspace_binding_id="wb_" + engine_session_id, workspace_root=str(workspace_root), ownership_epoch="epoch_1",
-        role="worker",
-    )
-    fields.update(overrides)
-    return ResourceBinding(**fields)
-
-
 def test_confirmed_worker_mode_and_permission_classifier_work_together(tmp_path):
     """End to end with fakes (no paid call, no real engine launch): once
     this worker's own mode is confirmed via ``_apply_worker_mode_floor``,
@@ -256,14 +244,12 @@ def test_confirmed_worker_mode_and_permission_classifier_work_together(tmp_path)
         "instructions",
     )
     manager = adapter._managers["xa_w1"]
-    # This is the disclosed, separate, pre-existing gap
-    # (``engine.session_manager.EngineSessionManager.bind_resource`` is
-    # never called by any production caller yet -- see
-    # ``engine.resource_binding``'s own module docstring): out of scope for
-    # this task, which is only about the mode floor, so this test binds the
-    # resource directly exactly as ``test_engine_resource_dispatch.py``'s
-    # own end-to-end coverage already does.
-    manager.bind_resource(_binding_for(manager, session_ref, tmp_path))
+    # T035 gap closure: ``EngineSessionManagerAdapter.open`` now calls
+    # ``bind_resource`` itself (see ``_bind_resource``) for every session
+    # opened with a real store, so no manual binding is set up here -- this
+    # exercises the actual production wiring, not a hand-made binding.
+    assert manager.bindings.get(session_ref) is not None
+    assert manager.bindings.get(session_ref).role == "worker"
     try:
         list(manager.prompt_turn(session_ref, "do it"))
         import json
@@ -278,5 +264,65 @@ def test_confirmed_worker_mode_and_permission_classifier_work_together(tmp_path)
         assert replies[1]["result"] == {"outcome": {"outcome": "selected", "optionId": "deny"}}
         assert len(host_calls) == 1
         assert host_calls[0]["toolCall"]["toolCallId"] == "tc-delete"
+    finally:
+        adapter.terminate_owned("xa_w1")
+
+
+def test_unbound_session_fails_closed_even_for_an_ordinary_operation(tmp_path):
+    """T035 gap closure, the property protecting everything else: an
+    engine session opened with no ``store`` (so ``_bind_resource`` never
+    runs -- see its own docstring) must still refuse every permission
+    request, never fall back to permissive/auto-approved behaviour, even
+    for an ordinary (non-deletion) tool call that a *bound* worker session
+    would auto-approve, and even though a host requester is wired and
+    ready to answer. ``PermissionBridge`` must never be reached at all --
+    it must short-circuit on the missing binding before ever consulting
+    role/classification or a host."""
+    environ = isolated_environ(tmp_path)
+
+    host_calls = []
+
+    def host_permission_requester(engine_session_id, params, timeout):
+        host_calls.append(params)
+        return {"outcome": {"outcome": "selected", "optionId": "allow"}}
+
+    reply_log = tmp_path / "replies.jsonl"
+    edit_request = dict(
+        method="session/request_permission",
+        params=dict(
+            sessionId="sess-1",
+            toolCall=dict(toolCallId="tc-edit", kind="edit"),
+            options=[dict(optionId="allow", kind="allow_once"), dict(optionId="deny", kind="reject_once")],
+        ),
+    )
+    scenario = default_scenario(
+        prompt_behavior="client_requests_sequence",
+        client_requests=[edit_request],
+        client_reply_log_path=str(reply_log),
+    )
+    scenario_path = write_scenario(tmp_path, scenario)
+    connection = make_connection_record(new_connection_id(), fake_launch_command(scenario_path), environ=environ)
+    with connection_registry.transaction(environ) as state:
+        state.connections[connection.id] = connection
+
+    # No ``store=`` supplied -- the same "fake/test double with no durable
+    # state" case ``_bind_resource``'s own docstring names.
+    adapter = EngineSessionManagerAdapter(
+        lambda t: connection, lambda t: str(tmp_path), environ=environ, call_timeout=10.0,
+        host_permission_requester=host_permission_requester,
+    )
+    session_ref = adapter.open(
+        "shared_project_root", dict(task_id="task-1", attempt_id="xa_w1", assignment_id="asg1"), "instructions",
+    )
+    manager = adapter._managers["xa_w1"]
+    assert manager.bindings.get(session_ref) is None
+    try:
+        import json
+
+        list(manager.prompt_turn(session_ref, "do it"))
+        replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
+        assert len(replies) == 1
+        assert replies[0]["result"] == {"outcome": {"outcome": "cancelled"}}
+        assert host_calls == []
     finally:
         adapter.terminate_owned("xa_w1")
