@@ -406,3 +406,48 @@ def test_a_tool_call_card_waits_for_a_name_instead_of_saying_tool_call():
     # An unknown kind still renders, as the schema's catch-all.
     on_tool_call("c2", "sorcery", "Consult the oracle", "in_progress")
     assert cards[2]["kind"] == "other"
+
+
+def test_the_identical_integration_conflict_is_not_an_endless_retry(tmp_path):
+    """Watched live: the worker finished, integration conflicted, the
+    coordinator sent it back to redo work that was already done, and that
+    ran in a circle. A conflict that never changes is not a retry."""
+    from cortex_runtime.acp.orchestrating_runtime import _coalesce
+    from cortex_runtime.delegation import events as delegation_events
+
+    store, task_id = _task(tmp_path)
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda *a, **k: None), FakeWorkspace(), FakeConfigSnapshotSource(),
+    )
+    conflict = {"calc.py": {"reason": "host_buffer_check_failed"}}
+    assignment = "a_ref"
+
+    assert runtime._identical_integration_conflicts(task_id, assignment, conflict) == 0
+    for index in range(2):
+        delegation_events.append_event(
+            store, task_id, "progress", f"integration_conflict:r{index}",
+            dict(kind="integration_conflict", assignment_ref=assignment, request_key=f"r{index}",
+                 conflict_paths=conflict, host_buffer_state="check_failed"),
+            origin="runtime", assignment_ref=assignment,
+        )
+    assert runtime._identical_integration_conflicts(task_id, assignment, conflict) == 2
+
+    # A conflict that moved is progress, and is never counted against it.
+    moved = {"other.py": {"reason": "unsaved_host_buffer"}}
+    assert runtime._identical_integration_conflicts(task_id, assignment, moved) == 0
+
+    # The coordinator is told plainly, once the repeat limit is reached.
+    events = delegation_events.claim_unconsumed(store, task_id, "c1")
+    rendered = _coalesce(events, {})
+    assert "CONFLICTED" in rendered
+    assert "will not change this" not in rendered, "a plain conflict must stay a plain conflict"
+
+    delegation_events.append_event(
+        store, task_id, "progress", "integration_conflict:r2",
+        dict(kind="integration_conflict", assignment_ref=assignment, request_key="r2",
+             conflict_paths=conflict, host_buffer_state="check_failed", repeated=3),
+        origin="runtime", assignment_ref=assignment,
+    )
+    rendered = _coalesce(delegation_events.claim_unconsumed(store, task_id, "c2"), {})
+    assert "has now happened 3 times" in rendered
+    assert "Stop retrying" in rendered

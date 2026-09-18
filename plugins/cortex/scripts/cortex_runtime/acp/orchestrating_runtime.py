@@ -142,6 +142,10 @@ _TOOL_CALL_TITLE_MAX_CHARS = 200
 # an idle turn is not a busy loop against the store.
 _EARLY_DISPATCH_POLL_SECONDS = 0.25
 
+# How many times the identical integration conflict may repeat for one
+# assignment before the coordinator is told that retrying is not a strategy.
+_IDENTICAL_INTEGRATION_CONFLICT_LIMIT = 3
+
 # A worker card's title (role, work, and the action it is on right now).
 _WORKER_CARD_TITLE_MAX_CHARS = 300
 
@@ -333,10 +337,18 @@ def _coalesce(events: list[delegation_events.TaskEvent], revisions: dict[int, di
         elif event.event_type == "progress" and payload.get("kind") == "integration_conflict":
             conflicts = payload.get("conflict_paths") or {}
             rendered = "; ".join(f"{path}: {detail.get('reason')}" for path, detail in conflicts.items())
-            lines.append(
+            line = (
                 f"Integration of assignment {ref} ({payload.get('request_key')}) CONFLICTED, "
                 f"nothing was written: {rendered}. host_buffer_state={payload.get('host_buffer_state')}."
             )
+            repeated = payload.get("repeated")
+            if repeated:
+                line += (
+                    f" This identical conflict has now happened {repeated} times: the worker's"
+                    " work is not the problem and redoing it will not change this. Stop retrying,"
+                    " and tell the user what is blocking the integration."
+                )
+            lines.append(line)
         elif event.event_type == "progress":
             lines.append(f"Progress: {payload.get('note', '')}")
         # delegation_requested / coordinator_decision are the coordinator's
@@ -3311,6 +3323,32 @@ class OrchestratingRuntime:
         with self._lock:
             return self._task_permission_requesters.get(task_id)
 
+    def _identical_integration_conflicts(self, task_id: str, assignment_ref: str, conflict_paths) -> int:
+        """How many integration conflicts this assignment has already had
+        with this exact path/reason signature. Signature, not count: a
+        conflict that moved to a different path or a different reason is
+        progress, and must not be counted against a retry."""
+        import json
+
+        signature = sorted(
+            (path, (detail or {}).get("reason")) for path, detail in (conflict_paths or {}).items()
+        )
+        seen = 0
+        with self._store.connection() as db:
+            rows = db.execute(
+                "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='progress' "
+                "AND assignment_ref=? AND dedup_key LIKE 'integration_conflict:%'",
+                (task_id, assignment_ref),
+            ).fetchall()
+        for row in rows:
+            try:
+                previous = json.loads(row["payload_json"] or "{}").get("conflict_paths") or {}
+            except (TypeError, ValueError):
+                continue
+            if sorted((path, (detail or {}).get("reason")) for path, detail in previous.items()) == signature:
+                seen += 1
+        return seen
+
     def _integrate_assignment(self, task_id: str, assignment_ref: str, request_key: str) -> None:
         """T025 (lead follow-up): performs the actual technical application
         (``delegation.integration.integrate``) for an ``integrate``
@@ -3345,11 +3383,25 @@ class OrchestratingRuntime:
             workspace_binding_id=provisioning_row["workspace_binding_id"], host_fs_checker=host_fs_checker,
         )
         if result["status"] == "conflict":
+            payload = dict(
+                kind="integration_conflict", assignment_ref=assignment_ref, request_key=request_key,
+                conflict_paths=result["conflict_paths"], host_buffer_state=result["host_buffer_state"],
+            )
+            # A conflict is a legitimate "try again": the host had an
+            # unsaved buffer, main moved. The identical conflict over and
+            # over is not -- watched live, a worker finished, integration
+            # conflicted, the coordinator sent it back to redo work that
+            # was already done, and that ran in a circle. Count how many
+            # times this exact signature has already happened for this
+            # assignment, so the coordinator is told when retrying has
+            # stopped being a strategy. Advisory, never a runtime gate: the
+            # coordinator still owns what to do about it.
+            repeats = self._identical_integration_conflicts(task_id, assignment_ref, result["conflict_paths"])
+            if repeats + 1 >= _IDENTICAL_INTEGRATION_CONFLICT_LIMIT:
+                payload["repeated"] = repeats + 1
             delegation_events.append_event(
                 self._store, task_id, "progress", f"integration_conflict:{request_key}",
-                dict(kind="integration_conflict", assignment_ref=assignment_ref, request_key=request_key,
-                     conflict_paths=result["conflict_paths"], host_buffer_state=result["host_buffer_state"]),
-                origin="runtime", assignment_ref=assignment_ref,
+                payload, origin="runtime", assignment_ref=assignment_ref,
             )
         else:
             delegation_events.append_event(
