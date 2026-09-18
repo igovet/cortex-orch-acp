@@ -494,51 +494,69 @@ class EngineSessionManagerAdapter:
         reservation_id = None
         if self._store is not None:
             reservation_id = self._reserve_capacity_blocking(record.id, task_id, attempt_id, launch)
-        manager_kwargs = dict(self._manager_kwargs)
-        # T026: route each connection's own pinned adapter option_mapping
-        # (never a caller-supplied one, which always wins) -- see
-        # _option_mapping_for's own docstring for why this was previously
-        # always the generic default for every engine including codex-acp.
-        if "option_mapping" not in manager_kwargs:
-            mapping = _option_mapping_for(record.engine)
-            if mapping is not None:
-                manager_kwargs["option_mapping"] = mapping
-        if "install" not in manager_kwargs:
-            manager_kwargs["install"] = self._resolve_launch_install(record)
-        if "coordinator_refusal_notifier" not in manager_kwargs:
-            manager_kwargs["coordinator_refusal_notifier"] = (
-                self._notify_coordinator_refusal if self._store is not None else None
+        # EXT-01 #8 ("startup cleanup"): from here on a real process may
+        # exist (``EngineSessionManager._ensure_started`` spawns it lazily,
+        # inside ``negotiate()``) before this method ever reaches its own
+        # atomic bookkeeping below -- a failure in install verification,
+        # negotiate (``initialize``), or ``session/new`` must never leak
+        # the capacity slot just reserved above, nor leave that process
+        # running with nothing in this adapter (or the durable registry)
+        # able to find and stop it later. ``manager`` is the one local
+        # reference to it for exactly that reason: this same stack frame
+        # both spawned it and is the first to know it failed, so recovery
+        # never has to guess. See ``_cleanup_failed_open`` for the
+        # confirmed-vs-ambiguous distinction this reuses verbatim from
+        # ``terminate_owned``.
+        manager = None
+        try:
+            manager_kwargs = dict(self._manager_kwargs)
+            # T026: route each connection's own pinned adapter option_mapping
+            # (never a caller-supplied one, which always wins) -- see
+            # _option_mapping_for's own docstring for why this was previously
+            # always the generic default for every engine including codex-acp.
+            if "option_mapping" not in manager_kwargs:
+                mapping = _option_mapping_for(record.engine)
+                if mapping is not None:
+                    manager_kwargs["option_mapping"] = mapping
+            if "install" not in manager_kwargs:
+                manager_kwargs["install"] = self._resolve_launch_install(record)
+            if "coordinator_refusal_notifier" not in manager_kwargs:
+                manager_kwargs["coordinator_refusal_notifier"] = (
+                    self._notify_coordinator_refusal if self._store is not None else None
+                )
+            # EXT-01 #5: a caller-supplied ``host_permission_requester`` (every
+            # existing direct test -- see e.g.
+            # ``test_delegation_worker_mode_floor.py``) always wins unchanged;
+            # only when none was given does this adapter wire its own
+            # runtime-backed lookup (a no-op -- returns ``None``, same as before
+            # this fix -- until :meth:`set_runtime` has actually been called).
+            if "host_permission_requester" not in manager_kwargs:
+                manager_kwargs["host_permission_requester"] = self._host_permission_requester
+            manager = EngineSessionManager(
+                record, workspace_root, environ=self._environ,
+                channel_credentials=channel_credentials,
+                terminal_output_persist=self._persist_terminal_output,
+                **manager_kwargs,
             )
-        # EXT-01 #5: a caller-supplied ``host_permission_requester`` (every
-        # existing direct test -- see e.g.
-        # ``test_delegation_worker_mode_floor.py``) always wins unchanged;
-        # only when none was given does this adapter wire its own
-        # runtime-backed lookup (a no-op -- returns ``None``, same as before
-        # this fix -- until :meth:`set_runtime` has actually been called).
-        if "host_permission_requester" not in manager_kwargs:
-            manager_kwargs["host_permission_requester"] = self._host_permission_requester
-        manager = EngineSessionManager(
-            record, workspace_root, environ=self._environ,
-            channel_credentials=channel_credentials,
-            terminal_output_persist=self._persist_terminal_output,
-            **manager_kwargs,
-        )
-        manager.negotiate(_requested_capabilities())
-        # T026: this engine's own qualified session/new _meta delivery
-        # channel (today: claude-agent-acp only -- see
-        # _session_new_meta_for's own docstring). codex-acp's own leading-
-        # block channel is applied at prompt time, not session/new, so this
-        # is always None for it.
-        session_new_meta = _session_new_meta_for(record.engine, _pinned_version_for(record.engine), instructions)
-        session_id = manager.create_session(
-            task_id, launch.get("assignment_id") or attempt_id, session_new_meta=session_new_meta,
-        )
-        # T035 (additive, best-effort): feed this real session's own
-        # actually-observed configOptions into catalog.discovery, so the
-        # provider/model/thought_level selects reflect the engine's real
-        # advertised set from here on -- never blocking/failing the engine
-        # session itself on a capture problem.
-        self._capture_catalog_observation(manager, record, session_id)
+            manager.negotiate(_requested_capabilities())
+            # T026: this engine's own qualified session/new _meta delivery
+            # channel (today: claude-agent-acp only -- see
+            # _session_new_meta_for's own docstring). codex-acp's own leading-
+            # block channel is applied at prompt time, not session/new, so this
+            # is always None for it.
+            session_new_meta = _session_new_meta_for(record.engine, _pinned_version_for(record.engine), instructions)
+            session_id = manager.create_session(
+                task_id, launch.get("assignment_id") or attempt_id, session_new_meta=session_new_meta,
+            )
+            # T035 (additive, best-effort): feed this real session's own
+            # actually-observed configOptions into catalog.discovery, so the
+            # provider/model/thought_level selects reflect the engine's real
+            # advertised set from here on -- never blocking/failing the engine
+            # session itself on a capture problem.
+            self._capture_catalog_observation(manager, record, session_id)
+        except BaseException:
+            self._cleanup_failed_open(manager, reservation_id)
+            raise
         with self._lock:
             self._managers[attempt_id] = manager
             self._sessions[attempt_id] = session_id
@@ -576,6 +594,48 @@ class EngineSessionManagerAdapter:
                     self.terminate_owned(attempt_id)
                     raise
         return session_id
+
+    def _cleanup_failed_open(self, manager, reservation_id) -> None:
+        """EXT-01 #8: undo a partially-completed :meth:`open` -- capacity
+        already reserved, and possibly a real ``EngineProcess`` already
+        spawned by ``manager.negotiate``/``manager.create_session`` -- that
+        failed before reaching :meth:`open`'s own atomic registration into
+        ``self._managers``/``self._sessions``/``self._reservations``.
+        Called from :meth:`open`'s own exception handler with the same
+        local ``manager`` reference that call was about to register, so
+        this never depends on that registration having happened (the exact
+        gap the finding this fixes describes) -- this process is the only
+        one that ever knew about the attempt, and it is still on the
+        stack.
+
+        Mirrors ``terminate_owned``'s own confirmed-vs-ambiguous split
+        (see ``delegation.capacity``'s module docstring) rather than
+        inventing a third state: a process that never actually spawned
+        (``manager is None``, or ``manager._process is None`` because the
+        failure happened before/during ``EngineSessionManager
+        ._ensure_started``) provably never started, so its reservation is
+        released outright the same as a confirmed exit. A process that did
+        spawn is shut down (``EngineProcess.release``, the same call
+        ``terminate_owned`` makes -- never a cross-process signal, since
+        this process is the one that just launched it) and only released
+        if that shutdown positively observes the exit; otherwise marked
+        ``ambiguous`` -- still counted against the connection's limit,
+        never silently dropped -- for the same reconciliation path an
+        ordinary unconfirmed ``terminate_owned`` uses."""
+        if manager is not None:
+            manager.shutdown(grace=2.0)
+        if reservation_id is None or self._store is None:
+            return
+        from . import capacity as delegation_capacity
+
+        process = getattr(manager, "_process", None) if manager is not None else None
+        if process is None:
+            delegation_capacity.release_confirmed(self._store, reservation_id, "never_started")
+        elif bool(process.wait_exited(0)):
+            delegation_capacity.release_confirmed(self._store, reservation_id, "process_exited")
+        else:
+            delegation_capacity.mark_ambiguous(self._store, reservation_id, "timeout_alive")
+        self._notify_activity()
 
     def _capture_catalog_observation(self, manager, record, session_id) -> None:
         """T035: parse this real session's own observed ``configOptions``
