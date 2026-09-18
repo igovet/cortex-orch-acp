@@ -152,8 +152,22 @@ class ProductionOrchestratingRuntime:
             # store is supplied (see ``EngineSessionManagerAdapter``'s own
             # docstring); this project's real store is exactly that.
             store=store,
+            # T035 (FINDING-12/-13 closure): "shared_project_root" is the
+            # literal sentinel ``acp.orchestrating_runtime`` passes as
+            # ``workspace_binding_id`` only for a *coordinator* open (see
+            # that module's ``_open_coordinator_session`` call site) -- no
+            # real ``workspace_snapshots`` row is ever keyed by that exact
+            # string, so ``root_for`` on it always returned ``None`` and
+            # this used to fall straight through to the real, writable
+            # ``project`` -- the coordinator's whole prior workspace. Route
+            # it instead to ``coordinator_root_for``'s read-only snapshot;
+            # every other (worker) binding id is unaffected. See that
+            # method's own docstring for exactly what this does and does
+            # not prevent.
             workspace_resolver=lambda binding_id, launch: (
-                workspace_provisioner.root_for(binding_id) or str(project)
+                workspace_provisioner.coordinator_root_for(launch["task_id"])[0]
+                if binding_id == "shared_project_root"
+                else workspace_provisioner.root_for(binding_id) or str(project)
             ),
             # EXT-01 finding #1 fix: an isolated worker's ``workspace_root``
             # above is a throwaway copy that excludes both ``.git`` and

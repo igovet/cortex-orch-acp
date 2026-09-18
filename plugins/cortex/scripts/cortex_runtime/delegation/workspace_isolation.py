@@ -212,6 +212,35 @@ def capture_and_copy_workspace(project_root: str, dest_root: str) -> dict:
     return manifest
 
 
+def _set_tree_write_bit(root: str, *, writable: bool) -> None:
+    """Add (``writable=True``) or strip (``writable=False``) the owner
+    write bit, recursively, on every path under ``root`` including
+    ``root`` itself -- read/execute bits untouched either way. Used by
+    :meth:`IsolatedSnapshotWorkspaceProvisioner.coordinator_root_for` (see
+    its own docstring for exactly what stripping the bit does and does not
+    prevent) and, before removal, to restore it so :func:`_remove_owned_tree`
+    /``shutil.rmtree`` -- which needs the owner write bit on a *directory*
+    to unlink its entries, a kernel-enforced check independent of file
+    ownership -- can actually delete a tree this function previously made
+    read-only."""
+    paths = [root]
+    for current, dirs, files in os.walk(root):
+        paths.extend(os.path.join(current, name) for name in dirs)
+        paths.extend(os.path.join(current, name) for name in files)
+    for path in paths:
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError:
+            continue
+        if stat.S_ISLNK(mode):
+            continue
+        new_mode = (stat.S_IMODE(mode) | 0o200) if writable else (stat.S_IMODE(mode) & ~0o222)
+        try:
+            os.chmod(path, new_mode)
+        except OSError:
+            continue
+
+
 def _remove_owned_tree(root) -> None:
     path = Path(root)
     try:
@@ -262,11 +291,17 @@ class IsolatedSnapshotWorkspaceProvisioner:
             raise StoreError("workspace_task_unresolved")
         return row["task_id"]
 
-    def create(self, attempt_id: str) -> str:
+    def create(self, attempt_id: str, *, task_id: str | None = None) -> str:
+        """``task_id``: normally resolved from the already-inserted
+        ``delegation_provisioning`` row for ``attempt_id`` (a worker's
+        path). :meth:`coordinator_root_for` is the one caller that has no
+        such row -- a coordinator "attempt" is never provisioned through
+        ``delegation.provisioning`` -- so it passes its own already-known
+        task id directly instead."""
         from ..portable.identity import new_id
         from . import revision as delegation_revision
 
-        task_id = self._resolve_task_id(attempt_id)
+        task_id = task_id if task_id is not None else self._resolve_task_id(attempt_id)
         binding_id = new_id("wb_")
         state_root = self._state_root()
         base_dest = state_root / attempt_id / "base"
@@ -332,6 +367,72 @@ class IsolatedSnapshotWorkspaceProvisioner:
         if row is None:
             return
         self.cleanup_binding(row["workspace_binding_id"], reason="removed")
+
+    def coordinator_root_for(self, task_id: str) -> tuple[str, str]:
+        """T035 (FINDING-12/-13 closure): get-or-refresh a *read-only*
+        snapshot workspace for ``task_id``'s coordinator, reusing exactly
+        the copy machinery a worker gets (see class docstring) and then
+        stripping the owner write bit from the whole copy.
+
+        PREVENTS: the coordinator's own engine process (an unprivileged
+        session running as this same OS user) opening a path under the
+        returned root for write, create, rename, or delete -- the kernel
+        checks the permission bits on every one of those syscalls
+        regardless of what the engine's own "mode" claims, which is exactly
+        the hook FINDING-12/-13 showed neither codex mode actually gives
+        Cortex (``read-only`` silently allowed the edit; ``agent`` never
+        even asked). Read/list/execute stay permitted throughout -- the
+        coordinator can still see the whole project, which is how it
+        decides what to delegate.
+
+        DOES NOT PREVENT: this copy's owning uid re-granting itself the
+        write bit. ``chmod`` is an ownership check, not a permission check
+        -- the uid that owns these files can always run ``os.chmod``/
+        ``chmod`` on them and then write, so a coordinator process that
+        explicitly decides to re-permission the tree before writing is not
+        physically stopped by this alone. What that determined write would
+        still land in is a throwaway copy, never the real project -- and
+        the engine-independent backstop
+        (``acp.orchestrating_runtime``'s pre/post ``capture_revision``
+        compare of the *real* project root) and the mode floor/permission-
+        refusal path (``configuration.policy``/``engine.permissions``) stay
+        in place unchanged specifically because of this gap. Of the three
+        layers, only this one *prevents*; the mode floor and permission
+        refusal only ever *ask* (and only when the engine chooses to ask at
+        all); the backstop only ever *detects, after the fact*.
+
+        Re-created (any previous copy for this task removed first) on every
+        call -- called once per fresh coordinator engine session (first
+        turn, or a ``recovery.coordinator_recovery`` replacement; never
+        mid-session, the same as a real process's cwd) -- so each new
+        session sees the project's current on-disk state rather than an
+        arbitrarily stale one, while never leaving more than one live copy
+        per task on disk.
+
+        Falls back to the real, writable ``project_root`` -- the pre-
+        existing, pre-T035-physical-prevention behaviour -- only when a
+        snapshot genuinely cannot be taken (the same
+        ``WorkspaceSnapshotUnavailable`` cases :meth:`create` already
+        handles for a worker: size/entry caps, an unreadable entry). That
+        case is recorded in the ``mode`` column exactly like a worker's own
+        ``serialized_shared_root`` fallback -- visible in durable state --
+        and returned as this method's own second value so the caller can
+        treat it as the honest exception it is, never assume prevention
+        silently held.
+        """
+        attempt_id = f"coordinator__{task_id}"
+        previous = self._row_for_attempt(attempt_id)
+        if previous is not None:
+            if previous["mode"] == "isolated_snapshot" and previous["root_path"]:
+                _set_tree_write_bit(previous["root_path"], writable=True)
+            self.cleanup_binding(previous["workspace_binding_id"], reason="coordinator_workspace_refresh")
+        binding_id = self.create(attempt_id, task_id=task_id)
+        row = self.row_for_binding(binding_id)
+        if row["mode"] != "isolated_snapshot":
+            return self._project_root, "unavailable_writable_fallback"
+        root = row["root_path"]
+        _set_tree_write_bit(root, writable=False)
+        return root, "read_only_snapshot"
 
     def row_for_binding(self, binding_id: str):
         with self._store.connection() as db:
