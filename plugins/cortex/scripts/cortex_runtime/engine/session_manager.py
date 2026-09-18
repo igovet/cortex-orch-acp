@@ -176,6 +176,7 @@ class EngineSessionManager:
         host_permission_requester=None,
         max_concurrent_client_requests: int = DEFAULT_MAX_CONCURRENT_CLIENT_REQUESTS,
         terminal_output_persist=None,
+        coordinator_refusal_notifier=None,
     ):
         """``install`` -- a
         :class:`~.codex_install.CodexAcpInstall`, or ``None`` -- is passed
@@ -193,7 +194,12 @@ class EngineSessionManager:
         engine session (see :class:`~.permissions.PermissionBridge`); when
         ``None`` every ``session/request_permission`` is answered
         ``cancelled`` without ever reaching a host.
-        """
+
+        ``coordinator_refusal_notifier`` is passed straight through to
+        :class:`~.permissions.PermissionBridge` (see its own docstring) --
+        ``None`` by default, so a caller that never opts in keeps this
+        bridge's pre-existing behaviour exactly (the refusal itself is
+        unaffected either way; only the model-visible "why" delivery is)."""
         self._record = record
         self._workspace_root = workspace_root
         self._environ = environ
@@ -206,6 +212,7 @@ class EngineSessionManager:
         self._abandon_wait_seconds = abandon_wait_seconds
         self._policy = policy if policy is not None else ResourcePolicy()
         self._host_permission_requester = host_permission_requester
+        self._coordinator_refusal_notifier = coordinator_refusal_notifier
         # T024: optional sink -- see ``engine.terminal_bridge.TerminalBridge``
         # and ``delegation.live_adapters``'s real binding of this to
         # ``recovery.large_output_store``; ``None`` (default) never persists.
@@ -253,6 +260,7 @@ class EngineSessionManager:
             self._permission_bridge = PermissionBridge(
                 correlation=self.correlation, bindings=self.bindings, logs=self._process.logs,
                 host_permission_requester=self._host_permission_requester, call_timeout=self._call_timeout,
+                coordinator_refusal_notifier=self._coordinator_refusal_notifier,
             )
             self._fs_bridge = FsBridge()
             self._terminal_bridge = TerminalBridge(persist_sink=self._terminal_output_persist)

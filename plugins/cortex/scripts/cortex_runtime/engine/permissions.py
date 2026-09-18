@@ -17,11 +17,25 @@ a **worker** binding (``ResourceBinding.role == "worker"``) whose request
 :func:`requires_confirmation` classifies as *not* a deletion is answered
 locally with that request's own offered ``allow_once`` option, without
 ever reaching the host -- so a worker's ordinary operations are never
-slowed down by a confirmation prompt. A coordinator binding is never
-auto-approved here regardless of classification: coordinators run in a
-non-editing engine mode already (see ``configuration.service``/the T035
-mode-floor work) and any permission request they somehow still trigger
-must keep reaching the host exactly as before, unchanged by this feature.
+slowed down by a confirmation prompt.
+
+T035 FINDING-12 closure ("the coordinator must not be able to work on the
+project" -- see ``.cortex/acp-migration/evidence/T035/FINDING-12-read-only-
+mode-does-not-prevent-edits.md`` and ``configuration.policy
+.COORDINATOR_MODE_FLOOR``'s own docstring): a **coordinator** binding
+(``ResourceBinding.role == "coordinator"``) never reaches the host either,
+in either direction. Live evidence proved the previously-chosen mechanism
+(the engine's own non-editing mode) does not stop a coordinator from
+editing the project, and additionally hides the attempt from this bridge
+entirely (that mode never issues ``session/request_permission`` for the
+edits it silently performs). With the coordinator floor now on the same
+mode the worker floor already uses, edit attempts DO reach this bridge --
+and every one :func:`is_coordinator_mutating` classifies as mutating is
+refused right here, offline, deterministically, every time; every
+non-mutating (read/search/fetch/...) request is auto-approved right here
+instead, so a coordinator can still inspect the repository to decide what
+to delegate. A coordinator's permission decision is simply never a host's
+to make, in either direction.
 
 HONEST BOUNDARY: this only ever inspects the ACP ``toolCall`` payload the
 engine itself chose to declare (``kind``/``rawInput``/``title``) on a
@@ -29,7 +43,12 @@ engine itself chose to declare (``kind``/``rawInput``/``title``) on a
 tool that deletes a file without ever issuing that request (see
 ``engine/fs_bridge.py``, ``terminal_bridge.py``, ``resource_policy.py``'s
 own docstrings on the same limit) is invisible here and is not, and
-cannot be, caught by this bridge.
+cannot be, caught by this bridge. See
+``delegation.revision``/``acp.orchestrating_runtime``'s coordinator-turn
+workspace-digest comparison for the engine-independent backstop this gap
+is exactly why that backstop exists: detection after the fact, not
+prevention, for whatever a coordinator's engine executes without ever
+asking this bridge at all.
 """
 from __future__ import annotations
 
@@ -114,6 +133,74 @@ def requires_confirmation(params) -> bool:
     return True
 
 
+# T035 FINDING-12 closure ("the coordinator must not be able to work on the
+# project" -- see this module's own module docstring and
+# configuration.policy.COORDINATOR_MODE_FLOOR's docstring for the live
+# evidence that an engine-native non-editing mode does not enforce this):
+# reuses requires_confirmation's own toolCall.kind buckets and its
+# command-text inspection for "execute" rather than inventing a second
+# classification scheme. Every request requires_confirmation already
+# treats as ask-worthy for a worker (a deletion, an unrecognized/missing
+# kind, or a destructive shell idiom under "execute") is refused outright
+# here for a coordinator -- never merely asked about, since a coordinator
+# has no legitimate need to mutate anything and the whole point is to
+# refuse the intent instead of relaying it to a host. The one addition:
+# toolCall.kind == "edit" is never a deletion (requires_confirmation
+# returns False for it -- a worker may edit freely) but is always a
+# mutation, so it is refused here too.
+def is_coordinator_mutating(params) -> bool:
+    """True when this ``session/request_permission`` call must be refused
+    for a coordinator binding rather than answered or relayed to a host.
+
+    Explicit about what counts as mutating: ``toolCall.kind`` of
+    ``"edit"``/``"delete"``/``"move"`` always is; a missing/unrecognized
+    kind (including ACP's own ``"other"``) always is (an unclassifiable
+    request is refused, never guessed at -- see module docstring);
+    ``"execute"`` is only when its command text matches
+    :data:`_DELETION_COMMAND_PATTERN`. Every other recognized kind
+    (``read``/``search``/``fetch``/``think``/``switch_mode``) -- and an
+    ``"execute"`` call whose command text matches none of that pattern --
+    is *not* refused, so a coordinator can still inspect the repository
+    (list/read/search/fetch/run an ordinary non-destructive shell command)
+    to decide what to delegate.
+
+    HONEST BOUNDARY (the same one :func:`requires_confirmation` already
+    discloses, reused as-is here): the ``"execute"`` command-text scan only
+    ever recognizes a known *destructive* idiom; a non-destructive *write*
+    under ``"execute"`` (an append, ``touch``, ``mkdir``, a package
+    install, ...) is not caught by this reused pattern and is not refused.
+    This is the same documented incompleteness as the deletion
+    classifier's own, not a new gap this function introduces.
+    """
+    tool_call = _tool_call(params)
+    if tool_call.get("kind") == "edit":
+        return True
+    return requires_confirmation(params)
+
+
+# T035 FINDING-12 closure: the observability-log reason recorded alongside
+# every coordinator mutation refusal (see PermissionBridge._handle_one).
+# ACP's RequestPermissionResponse has no text field at all (verified against
+# the vendored tests/fixtures/acp/schema-1.4.0.json -- RequestPermissionOutcome
+# is only ever {"outcome":"cancelled"} or {"outcome":"selected","optionId":
+# ...}; its "_meta" property is explicitly documented as something "clients
+# MUST NOT make assumptions about"), so this text cannot be attached to the
+# wire reply itself -- see module docstring's own HONEST BOUNDARY. It is
+# delivered to the coordinator model instead through the same continuation-
+# text channel every other runtime-authored explanation already uses (see
+# ``delegation.live_adapters.EngineSessionManagerAdapter``'s
+# ``coordinator_refusal_notifier`` wiring and ``acp.orchestrating_runtime
+# ._render_continuation_text``'s "progress" handling): the coordinator reads
+# it, as ordinary continuation text, the next time its own engine session is
+# prompted -- never synchronously inside the same already-in-flight turn,
+# since ACP has no channel for that either.
+COORDINATOR_MUTATION_REFUSAL_REASON = (
+    "This mutating action was refused: the coordinator is a route, not a worker, and this "
+    "runtime never lets it edit, delete, move, or run a destructive command against the "
+    "project (see T035). Delegate this work to a worker instead of attempting it yourself."
+)
+
+
 def _auto_allow_option_id(params):
     """The offered ``optionId`` whose own ``kind`` is ``"allow_once"``, or
     ``None`` if the engine did not offer one -- never invents an id the
@@ -130,6 +217,26 @@ def _auto_allow_option_id(params):
     return None
 
 
+def _auto_reject_option_id(params):
+    """The offered ``optionId`` whose own ``kind`` is ``"reject_once"``
+    (preferred) or, failing that, ``"reject_always"`` -- or ``None`` if the
+    engine offered neither, in which case the caller falls back to
+    ``CANCELLED_OUTCOME``. Never invents an id the engine did not itself
+    offer (same invariant as :func:`_auto_allow_option_id` /
+    :meth:`PermissionBridge._validate_host_response`). ``"reject_once"`` is
+    preferred over ``"reject_always"`` for the same reason
+    ``_auto_allow_option_id`` never picks ``"allow_always"``: this is a
+    fresh per-request decision, not a persisted standing rule."""
+    options = (params or {}).get("options") if isinstance(params, dict) else None
+    if not isinstance(options, list):
+        return None
+    by_kind = {
+        option.get("kind"): option.get("optionId")
+        for option in options if isinstance(option, dict)
+    }
+    return by_kind.get("reject_once") or by_kind.get("reject_always")
+
+
 class DuplicateEnginePermissionRequestId(Exception):
     """The engine reused a still-outstanding (or never-cleaned-up) wire
     request id for ``session/request_permission``; refused as a protocol
@@ -137,23 +244,45 @@ class DuplicateEnginePermissionRequestId(Exception):
 
 
 class PermissionBridge:
-    def __init__(self, *, correlation, bindings, logs=None, host_permission_requester=None, call_timeout=30.0):
+    def __init__(
+        self, *, correlation, bindings, logs=None, host_permission_requester=None, call_timeout=30.0,
+        coordinator_refusal_notifier=None,
+    ):
         """``host_permission_requester`` -- ``(engine_session_id, params,
         timeout) -> dict`` or ``None`` -- is the caller-injected seam to the
         actual incoming ACP session/host that owns this engine session (see
         ``acp.host_requests.HostRequester``); when ``None`` every permission
-        request is answered ``cancelled`` without ever reaching a host."""
+        request is answered ``cancelled`` without ever reaching a host.
+
+        ``coordinator_refusal_notifier`` -- ``(engine_session_id, reason) ->
+        None`` or ``None`` (default) -- is called, synchronously and never
+        allowed to raise into the caller (see :meth:`_notify_refusal`),
+        every time this bridge refuses a coordinator binding's mutating
+        request (see :func:`is_coordinator_mutating`). This is the only
+        way ``COORDINATOR_MUTATION_REFUSAL_REASON`` ever reaches anything
+        beyond this process's own observability log -- see that constant's
+        own module-level docstring for exactly how (and when) it reaches
+        the coordinator model."""
         self._correlation = correlation
         self._bindings = bindings
         self._logs = logs
         self._host_permission_requester = host_permission_requester
         self._call_timeout = call_timeout
+        self._coordinator_refusal_notifier = coordinator_refusal_notifier
         self._lock = threading.Lock()
         self._in_flight: set[tuple[str, object]] = set()
 
     def _observe(self, event, **fields) -> None:
         if self._logs is not None:
             self._logs.observe(event, **fields)
+
+    def _notify_refusal(self, engine_session_id: str) -> None:
+        if self._coordinator_refusal_notifier is None:
+            return
+        try:
+            self._coordinator_refusal_notifier(engine_session_id, COORDINATOR_MUTATION_REFUSAL_REASON)
+        except Exception:  # noqa: BLE001 - a notifier failure must never affect the refusal itself
+            self._observe("coordinator_refusal_notifier_failed", engine_session_id=engine_session_id)
 
     def handle(self, *, engine_session_id, wire_session_id, wire_request_id, params) -> dict:
         """Returns the JSON-RPC *result* payload to send back to the
@@ -195,6 +324,33 @@ class PermissionBridge:
             if option_id is not None:
                 self._observe("permission_auto_approved", engine_session_id=engine_session_id)
                 return {"outcome": {"outcome": "selected", "optionId": option_id}}
+        if binding.role == "coordinator":
+            # T035 FINDING-12 closure: a coordinator never reaches the host
+            # at all -- its intent is decided right here, offline, every
+            # time, regardless of whether a host_permission_requester is
+            # even configured (see is_coordinator_mutating's own docstring
+            # for exactly what counts as mutating).
+            if is_coordinator_mutating(params):
+                self._observe(
+                    "coordinator_mutation_refused", engine_session_id=engine_session_id,
+                    reason=COORDINATOR_MUTATION_REFUSAL_REASON,
+                )
+                self._notify_refusal(engine_session_id)
+                reject_option_id = _auto_reject_option_id(params)
+                if reject_option_id is not None:
+                    return {"outcome": {"outcome": "selected", "optionId": reject_option_id}}
+                return dict(CANCELLED_OUTCOME)
+            option_id = _auto_allow_option_id(params)
+            if option_id is not None:
+                self._observe("coordinator_read_auto_approved", engine_session_id=engine_session_id)
+                return {"outcome": {"outcome": "selected", "optionId": option_id}}
+            # No allow_once option offered for a request already classified
+            # as non-mutating -- fail closed to cancelled rather than ever
+            # relaying a coordinator's request to a host (a coordinator's
+            # permission decisions are never a host's to make -- see
+            # module docstring).
+            self._observe("coordinator_read_no_allow_option", engine_session_id=engine_session_id)
+            return dict(CANCELLED_OUTCOME)
         if self._host_permission_requester is None:
             self._observe("permission_no_host_requester", engine_session_id=engine_session_id)
             return dict(CANCELLED_OUTCOME)

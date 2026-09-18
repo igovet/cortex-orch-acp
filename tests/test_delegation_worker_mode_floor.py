@@ -93,8 +93,15 @@ def test_worker_mode_floor_matches_pinned_engine_values():
     assert WORKER_MODE_FLOOR == {"codex-acp": "agent", "claude-agent-acp": "default"}
 
 
-def test_coordinator_floor_is_unaffected_by_the_new_worker_floor():
-    assert COORDINATOR_MODE_FLOOR == {"codex-acp": "read-only", "claude-agent-acp": "plan"}
+def test_coordinator_floor_matches_the_worker_floor_after_finding_12():
+    """FINDING-12 (see ``configuration.policy.COORDINATOR_MODE_FLOOR``'s own
+    docstring): the coordinator's engine mode used to be a genuinely
+    non-editing mode (codex read-only / claude plan), but that mode never
+    issues ``session/request_permission`` for the edits it silently allows,
+    so it removed Cortex's only interception point. The floor now matches
+    ``WORKER_MODE_FLOOR`` -- the narrowest mode still known to always ask --
+    and enforcement moved to ``engine.permissions.PermissionBridge``."""
+    assert COORDINATOR_MODE_FLOOR == {"codex-acp": "agent", "claude-agent-acp": "default"}
 
 
 def test_worker_session_confirms_its_own_mode_over_the_wire(tmp_path):

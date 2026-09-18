@@ -428,6 +428,10 @@ class EngineSessionManagerAdapter:
                 manager_kwargs["option_mapping"] = mapping
         if "install" not in manager_kwargs:
             manager_kwargs["install"] = self._resolve_launch_install(record)
+        if "coordinator_refusal_notifier" not in manager_kwargs:
+            manager_kwargs["coordinator_refusal_notifier"] = (
+                self._notify_coordinator_refusal if self._store is not None else None
+            )
         manager = EngineSessionManager(
             record, workspace_root, environ=self._environ,
             channel_credentials=channel_credentials,
@@ -987,6 +991,38 @@ class EngineSessionManagerAdapter:
             failure=failure, truncated=truncated,
         )
         return record["id"]
+
+    def _notify_coordinator_refusal(self, engine_session_id: str, reason: str) -> None:
+        """T035 FINDING-12 closure: ``engine.permissions.PermissionBridge``'s
+        ``coordinator_refusal_notifier`` seam. ACP's ``RequestPermissionResponse``
+        has no text field (see that module's own docstring), so this is the
+        only way the refusal reason ever reaches the coordinator model at
+        all: appended as an ordinary ``"progress"`` task event (the exact
+        same idempotent, informative-only shape ``acp.orchestrating_runtime
+        ._emit_localized`` already uses for every other runtime-authored
+        status line), which ``_render_continuation_text`` renders as
+        ``"Progress: <note>"`` the next time this task's coordinator session
+        is prompted. Never delivered synchronously inside the
+        already-in-flight turn the refusal happened on -- ACP has no
+        channel for that either. Best-effort, same as
+        :meth:`_persist_terminal_output`: a session with no recorded meta
+        (or no store at all) is silently a no-op rather than raising into
+        the permission bridge, which must never let a notifier failure
+        change the refusal it already decided."""
+        if self._store is None:
+            return
+        with self._lock:
+            meta = self._session_meta.get(engine_session_id)
+        if meta is None:
+            return
+        from . import events as delegation_events
+        from ..portable.identity import new_id
+
+        delegation_events.append_event(
+            self._store, meta["task_id"], "progress", f"progress:{new_id('p_')}",
+            dict(note=reason, message_key="coordinator_mutation_refused", message_params={}),
+            origin="runtime",
+        )
 
     def _reserve_capacity_blocking(self, connection_id: str, task_id: str, attempt_id: str, launch: Mapping[str, object]) -> str:
         """Block (bounded backoff poll, never a model prompt) until a

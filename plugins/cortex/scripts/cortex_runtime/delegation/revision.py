@@ -406,6 +406,45 @@ def latest_revision(store, attempt_id: str, phase_prefix: str) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def workspace_changed(before: dict, after: dict) -> bool:
+    """T035 FINDING-12 closure, engine-independent backstop: True unless
+    ``before``/``after`` (two :func:`capture_revision` results, taken
+    immediately before and immediately after one coordinator engine turn)
+    can positively prove the workspace's tree digest did not move.
+
+    What this compares: only ``dirty_digest`` -- the sha256 tree-manifest
+    digest capture_revision computes over every file/dir/symlink/other
+    entry under the workspace root (excluding ``.git``/``.cortex``; see
+    that function's own docstring). ``head`` is never part of this
+    comparison (a HEAD move with an identical tree, e.g. an empty commit or
+    a branch switch onto identical content, is not itself a workspace
+    mutation this backstop cares about).
+
+    Fail-closed, not fail-open: either capture being ``"unavailable"``
+    (the tree could not be safely/completely digested -- see
+    ``capture_revision``'s own docstring for when that happens) means this
+    returns ``True`` -- "cannot prove unchanged" is treated the same as
+    "changed", never silently treated as "probably fine". This mirrors
+    ``capture_revision`` itself, which already refuses a partial/best-effort
+    digest rather than risk hiding a change.
+
+    Cost: this is exactly one extra full :func:`capture_revision` walk of
+    the shared project workspace on *every* coordinator turn (before *and*
+    after -- two walks per turn), the same bounded, pure-Python,
+    no-subprocess walk ``record_attempt_revision`` already performs for
+    every ``worker_result`` -- capped by the same ``_MAX_FILES``/
+    ``_MAX_TOTAL_HASH_BYTES``/``_TIME_BUDGET_SECONDS`` constants (so, worst
+    case, up to ~20 extra wall-clock seconds and a full re-read of every
+    tracked file's bytes, per coordinator turn) -- see module docstring for
+    why this is pure Python rather than a faster ``git status`` shortcut.
+    """
+    return (
+        before.get("kind") != "observed"
+        or after.get("kind") != "observed"
+        or before.get("dirty_digest") != after.get("dirty_digest")
+    )
+
+
 def label(captured: dict | None) -> str:
     """A short, human-readable continuation-text label for one capture (or
     ``None``, meaning nothing was ever captured)."""

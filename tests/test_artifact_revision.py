@@ -435,3 +435,48 @@ def test_label_formats_observed_and_unavailable():
     assert delegation_revision.label(
         dict(kind="unavailable", head=None, dirty_digest=None, detail="x")
     ) == "revision: unknown (unavailable)"
+
+
+# -- T035 FINDING-12 closure: the coordinator-turn backstop --------------
+
+
+def _observed(digest="a" * 64, head=None):
+    return dict(kind="observed", head=head, dirty_digest=digest, detail=None)
+
+
+def _unavailable():
+    return dict(kind="unavailable", head=None, dirty_digest=None, detail="x")
+
+
+def test_workspace_changed_false_for_identical_digests():
+    assert delegation_revision.workspace_changed(_observed(), _observed()) is False
+
+
+def test_workspace_changed_true_for_different_digests():
+    assert delegation_revision.workspace_changed(_observed("a" * 64), _observed("b" * 64)) is True
+
+
+def test_workspace_changed_ignores_head_only_movement():
+    """A HEAD move with an identical tree (e.g. an empty commit) is not
+    itself a workspace mutation this backstop cares about."""
+    before = _observed(digest="a" * 64, head="1" * 40)
+    after = _observed(digest="a" * 64, head="2" * 40)
+    assert delegation_revision.workspace_changed(before, after) is False
+
+
+def test_workspace_changed_fails_closed_when_either_capture_is_unavailable():
+    assert delegation_revision.workspace_changed(_unavailable(), _observed()) is True
+    assert delegation_revision.workspace_changed(_observed(), _unavailable()) is True
+    assert delegation_revision.workspace_changed(_unavailable(), _unavailable()) is True
+
+
+def test_workspace_changed_real_capture_before_and_after_a_write(tmp_path):
+    """Exercises the real, pure-Python capture_revision walk (not a stub),
+    against a real temporary directory -- proves the wiring end to end,
+    not just the comparison function in isolation."""
+    (tmp_path / "a.txt").write_text("one\n")
+    before = delegation_revision.capture_revision(tmp_path)
+    assert delegation_revision.workspace_changed(before, delegation_revision.capture_revision(tmp_path)) is False
+    (tmp_path / "a.txt").write_text("two\n")
+    after = delegation_revision.capture_revision(tmp_path)
+    assert delegation_revision.workspace_changed(before, after) is True

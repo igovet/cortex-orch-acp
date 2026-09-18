@@ -165,7 +165,7 @@ def test_propose_rederives_dependent_settings_on_route_change(tmp_path):
 # work on the project") --------------------------------------------------
 
 
-def _entry_with_mode(connection=None, model="model-a", modes=("read-only", "agent")):
+def _entry_with_mode(connection=None, model="model-a", modes=("agent-full-access", "agent")):
     connection = connection or _connection()
     options = [
         {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
@@ -178,16 +178,19 @@ def _entry_with_mode(connection=None, model="model-a", modes=("read-only", "agen
 
 
 def test_propose_forces_coordinator_mode_floor_over_a_user_chosen_mode(tmp_path):
-    """The catalog already knows this connection supports 'read-only';
-    propose() must override whatever mode was requested, never leave the
-    user's own choice of a working mode in place -- a floor, not a
-    preference (requirement #4)."""
+    """The catalog already knows this connection supports 'agent-full-access'
+    (a mode that would never ask, see COORDINATOR_MODE_FLOOR's own
+    docstring); propose() must override whatever mode was requested, never
+    leave the user's own choice of a working mode in place -- a floor, not a
+    preference (requirement #4). The floor itself is 'agent' (post-FINDING-12
+    -- see COORDINATOR_MODE_FLOOR's own docstring), not the engine's
+    non-editing mode."""
     store, task, epoch = _bootstrap(tmp_path)
     service = ConfigurationService(store)
     entry = _entry_with_mode()
-    inputs = ConfigurationInputs(route=entry.route, parameters={"mode": "agent"})
+    inputs = ConfigurationInputs(route=entry.route, parameters={"mode": "agent-full-access"})
     row = service.propose(task, entry, inputs, expected_revision=0, current_epoch=epoch)
-    assert row["parameters"]["mode"] == "read-only"
+    assert row["parameters"]["mode"] == "agent"
 
 
 def test_propose_leaves_mode_untouched_for_a_non_coordinator_engine(tmp_path):
@@ -218,16 +221,19 @@ def test_propose_leaves_mode_unset_when_catalog_never_discovered_it(tmp_path):
     assert "mode" not in row["parameters"]
 
 
-def test_propose_claude_coordinator_floor_is_plan_not_default(tmp_path):
+def test_propose_claude_coordinator_floor_is_default_not_bypass(tmp_path):
+    """Post-FINDING-12 the claude coordinator floor is 'default' (the same
+    value WORKER_MODE_FLOOR already uses), not the engine's non-editing
+    'plan' mode -- see COORDINATOR_MODE_FLOOR's own docstring."""
     from dataclasses import replace
 
     store, task, epoch = _bootstrap(tmp_path)
     service = ConfigurationService(store)
     connection = replace(_connection(), engine="claude-agent-acp")
-    entry = _entry_with_mode(connection=connection, modes=("default", "plan", "acceptEdits"))
-    inputs = ConfigurationInputs(route=entry.route, parameters={"mode": "default"})
+    entry = _entry_with_mode(connection=connection, modes=("bypassPermissions", "default", "plan", "acceptEdits"))
+    inputs = ConfigurationInputs(route=entry.route, parameters={"mode": "bypassPermissions"})
     row = service.propose(task, entry, inputs, expected_revision=0, current_epoch=epoch)
-    assert row["parameters"]["mode"] == "plan"
+    assert row["parameters"]["mode"] == "default"
 
 
 def test_apply_lifecycle_happy_path_with_fake_adapter(tmp_path):

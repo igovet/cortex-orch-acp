@@ -311,11 +311,10 @@ def test_worker_unclassifiable_tool_call_asks_rather_than_allows(tmp_path):
     assert len(calls) == 1
 
 
-def test_coordinator_binding_is_never_auto_approved(tmp_path):
-    """A coordinator binding always reaches the host, even for a tool call
-    that would be auto-approved for a worker -- the T035 mode-floor rule
-    ('the coordinator must not work on the project') is unaffected by the
-    worker auto-approval feature."""
+def test_coordinator_binding_never_reaches_the_host(tmp_path):
+    """T035 FINDING-12 closure: a coordinator binding's permission decision
+    is always made locally, in either direction -- never relayed to a host,
+    unlike the pre-FINDING-12 behaviour this test used to assert."""
     bindings = BindingRegistry()
     bindings.bind(_binding(tmp_path, role="coordinator"))
     calls = []
@@ -328,7 +327,113 @@ def test_coordinator_binding_is_never_auto_approved(tmp_path):
     params = _params(dict(toolCallId="tc-1", kind="read"))
     result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=params)
     assert result == {"outcome": {"outcome": "selected", "optionId": "allow"}}
-    assert len(calls) == 1
+    assert calls == []
+
+
+def test_coordinator_read_request_is_auto_approved_without_host(tmp_path):
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="coordinator"))
+    bridge = _bridge(bindings=bindings, host_permission_requester=None)
+    for kind in ("read", "search", "fetch", "think", "switch_mode"):
+        params = _params(dict(toolCallId=f"tc-{kind}", kind=kind))
+        result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=hash(kind) % 1000, params=params)
+        assert result == {"outcome": {"outcome": "selected", "optionId": "allow"}}
+
+
+def test_coordinator_non_destructive_execute_is_auto_approved_without_host(tmp_path):
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="coordinator"))
+    bridge = _bridge(bindings=bindings, host_permission_requester=None)
+    params = _params(dict(toolCallId="tc-1", kind="execute", rawInput=dict(command="git log -n 5")))
+    result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=params)
+    assert result == {"outcome": {"outcome": "selected", "optionId": "allow"}}
+
+
+def test_coordinator_edit_request_is_refused_without_host(tmp_path):
+    """A coordinator's mutating request (edit/delete/move/destructive
+    execute) is refused right here -- the host is never even consulted,
+    and never relays a host-side 'allow' back either."""
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="coordinator"))
+    calls = []
+
+    def requester(engine_session_id, params, timeout):
+        calls.append(params)
+        return {"outcome": {"outcome": "selected", "optionId": "allow"}}
+
+    bridge = _bridge(bindings=bindings, host_permission_requester=requester)
+    params = _params(dict(toolCallId="tc-1", kind="edit", rawInput=dict(command="apply_patch")))
+    result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=params)
+    assert result == {"outcome": {"outcome": "selected", "optionId": "deny"}}
+    assert calls == []
+
+
+def test_coordinator_delete_and_destructive_execute_are_refused(tmp_path):
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="coordinator"))
+    bridge = _bridge(bindings=bindings, host_permission_requester=None)
+    for tool_call in (
+        dict(toolCallId="tc-1", kind="delete"),
+        dict(toolCallId="tc-2", kind="move"),
+        dict(toolCallId="tc-3", kind="execute", rawInput=dict(command="rm -rf build/")),
+    ):
+        params = _params(tool_call)
+        result = bridge.handle(
+            engine_session_id="es_a", wire_session_id="w1", wire_request_id=hash(tool_call["toolCallId"]), params=params,
+        )
+        assert result == {"outcome": {"outcome": "selected", "optionId": "deny"}}
+
+
+def test_coordinator_unclassifiable_request_is_refused_not_allowed(tmp_path):
+    """The worker/coordinator asymmetry: an unrecognized kind asks the user
+    for a worker (see test_worker_unclassifiable_tool_call_asks_rather_than_allows)
+    but is refused outright for a coordinator, never allowed."""
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="coordinator"))
+    bridge = _bridge(bindings=bindings, host_permission_requester=None)
+    params = _params(dict(toolCallId="tc-1"))  # kind omitted entirely
+    result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=params)
+    assert result == {"outcome": {"outcome": "selected", "optionId": "deny"}}
+
+
+def test_coordinator_refusal_falls_back_to_cancelled_without_reject_option(tmp_path):
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="coordinator"))
+    bridge = _bridge(bindings=bindings, host_permission_requester=None)
+    params = dict(toolCall=dict(toolCallId="tc-1", kind="edit"), options=[dict(optionId="allow", kind="allow_once")])
+    result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=params)
+    assert result == {"outcome": {"outcome": "cancelled"}}
+
+
+def test_coordinator_refusal_notifier_is_called_with_the_reason(tmp_path):
+    from cortex_runtime.engine.permissions import COORDINATOR_MUTATION_REFUSAL_REASON
+
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="coordinator"))
+    notified = []
+    bridge = PermissionBridge(
+        correlation=CorrelationTables(), bindings=bindings, host_permission_requester=None,
+        coordinator_refusal_notifier=lambda session_id, reason: notified.append((session_id, reason)),
+    )
+    params = _params(dict(toolCallId="tc-1", kind="edit"))
+    bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=params)
+    assert notified == [("es_a", COORDINATOR_MUTATION_REFUSAL_REASON)]
+
+
+def test_coordinator_refusal_notifier_failure_never_breaks_the_refusal(tmp_path):
+    bindings = BindingRegistry()
+    bindings.bind(_binding(tmp_path, role="coordinator"))
+
+    def raising_notifier(session_id, reason):
+        raise RuntimeError("boom")
+
+    bridge = PermissionBridge(
+        correlation=CorrelationTables(), bindings=bindings, host_permission_requester=None,
+        coordinator_refusal_notifier=raising_notifier,
+    )
+    params = _params(dict(toolCallId="tc-1", kind="edit"))
+    result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=params)
+    assert result == {"outcome": {"outcome": "selected", "optionId": "deny"}}
 
 
 @pytest.mark.parametrize(

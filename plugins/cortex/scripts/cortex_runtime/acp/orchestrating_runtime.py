@@ -1316,6 +1316,21 @@ class OrchestratingRuntime:
                 if claimed:
                     delegation_events.release_claim(self._store, task_id, continuation_id)
                 return StopReason.END_TURN
+            # T035 FINDING-12 closure: the engine-independent backstop.
+            # ``engine.permissions.PermissionBridge`` refuses a coordinator's
+            # mutating *intent* whenever the engine actually asks -- but
+            # that still depends on the engine choosing to ask at all (see
+            # that module's own HONEST BOUNDARY). This is the part that
+            # does not depend on the engine's goodwill: capture the shared
+            # project workspace's observed tree digest immediately before
+            # and immediately after this one coordinator turn and fail the
+            # turn, visibly, if it moved -- detection, never prevention (the
+            # write already happened by the time this runs), but it turns a
+            # silent violation into a recorded, blocked task state instead
+            # of nothing at all. See ``delegation.revision.workspace_changed``'s
+            # own docstring for exactly what is compared and what it costs
+            # (two full capture_revision walks of the workspace per turn).
+            pre_turn_revision = delegation_revision.capture_revision(self._task_project_root(task_id))
             try:
                 outcome = self._engine.prompt(session_ref, prompt_text, cancel_event)
                 from .. import _fault_injection
@@ -1350,6 +1365,20 @@ class OrchestratingRuntime:
             self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind=None, stop_reason=outcome.stop_reason)
             if claimed:
                 delegation_events.mark_delivered(self._store, task_id, continuation_id)
+            post_turn_revision = delegation_revision.capture_revision(self._task_project_root(task_id))
+            if delegation_revision.workspace_changed(pre_turn_revision, post_turn_revision):
+                # T035 FINDING-12 closure: the coordinator's own turn just
+                # changed (or could not prove it did not change) the shared
+                # project workspace -- refused as a blocking failure of this
+                # turn, never silently accepted and never treated as if the
+                # turn had ended normally (see this loop's own comment above
+                # the capture that made ``pre_turn_revision``).
+                self._emit_localized(task_id, emit_update, language, "coordinator_turn_mutated_workspace")
+                self._set_state(
+                    task_id, "blocked", wait_reason="coordinator_turn_mutated_workspace",
+                    wait_detail=dict(explanation=acp_messages.render("coordinator_turn_mutated_workspace", language)),
+                )
+                return StopReason.END_TURN
             if outcome.text:
                 emit_update(outcome.text)
             if outcome.stop_reason == StopReason.REFUSAL:

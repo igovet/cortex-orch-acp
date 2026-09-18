@@ -740,3 +740,70 @@ def test_emit_tool_call_none_falls_back_to_plain_text_refusal(tmp_path):
     updates = []
     runtime.start_prompt(task_id, "s1", "Do X.", updates.append, threading.Event())
     assert any("was NOT delegated" in u for u in updates)
+
+
+# -- T035 FINDING-12 closure: the coordinator-turn workspace backstop -----
+
+
+def test_coordinator_turn_that_writes_to_the_project_is_blocked(tmp_path):
+    """Engine-independent backstop: even though this fake engine never goes
+    through engine.permissions.PermissionBridge at all (it calls
+    delegation.mcp_tools.dispatch directly, simulating whatever an engine's
+    own native tool did), a coordinator turn that wrote into the shared
+    project workspace is still detected and the turn is failed -- never
+    silently accepted as an ordinary END_TURN."""
+    store, task_id = _task(tmp_path)
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        (tmp_path / "hack.txt").write_text("the coordinator edited this\n")
+        return PromptOutcome(StopReason.END_TURN, "Done.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        raise AssertionError("no delegation happens in this test")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime, engine = _make_runtime(store, router)
+    updates = []
+    result = runtime.start_prompt(task_id, "s1", "Do X.", updates.append, threading.Event())
+    assert result == StopReason.END_TURN
+    assert any("changed the project workspace" in u for u in updates)
+    with store.connection() as db:
+        state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
+    assert state == "blocked"
+
+
+def test_coordinator_turn_that_only_reads_is_not_blocked(tmp_path):
+    """The positive control: a coordinator turn that never mutates the
+    workspace proceeds exactly as before -- the backstop never false-
+    positives on an ordinary turn."""
+    store, task_id = _task(tmp_path)
+    (tmp_path / "existing.txt").write_text("unchanged\n")
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        (tmp_path / "existing.txt").read_text()  # ordinary inspection, no write
+        mcp_tools.dispatch(store, channel, "decide", dict(
+            assignment_ref="task", decision="accept",
+            rationale="Nothing to do; accepted directly.", request_key="acceptdirect",
+        ))
+        return PromptOutcome(StopReason.END_TURN, "Accepted.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        raise AssertionError("no delegation happens in this test")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime, engine = _make_runtime(store, router)
+    updates = []
+    result = runtime.start_prompt(task_id, "s1", "Do X.", updates.append, threading.Event())
+    assert result == StopReason.END_TURN
+    assert not any("changed the project workspace" in u for u in updates)
+    with store.connection() as db:
+        state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
+    assert state == "accepted"

@@ -42,6 +42,24 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Coordinator engine turn failed ({kind}).",
         "ru": "Ход координатора завершился ошибкой движка ({kind}).",
     },
+    "coordinator_turn_mutated_workspace": {
+        "en": "Blocked: the coordinator's own turn changed the project workspace (or its "
+              "change could not be ruled out). The coordinator is a route, not a worker -- "
+              "delegate this work to a worker instead of doing it directly.",
+        "ru": "Заблокировано: собственный ход координатора изменил рабочую область проекта "
+              "(или изменение не удалось исключить). Координатор — это маршрут, а не "
+              "исполнитель; делегируйте эту работу исполнителю, а не выполняйте её напрямую.",
+    },
+    "coordinator_mutation_refused": {
+        "en": "This mutating action was refused: the coordinator is a route, not a worker, and "
+              "this runtime never lets it edit, delete, move, or run a destructive command "
+              "against the project. Delegate this work to a worker instead of attempting it "
+              "yourself.",
+        "ru": "Это изменяющее действие отклонено: координатор — это маршрут, а не исполнитель, "
+              "и этот рантайм никогда не позволяет ему редактировать, удалять, перемещать "
+              "файлы или выполнять деструктивные команды в проекте. Делегируйте эту работу "
+              "исполнителю, а не пытайтесь выполнить её сами.",
+    },
     "max_total_continuations": {
         "en": "Stopping: exceeded the maximum number of coordination continuations for one prompt.",
         "ru": "Остановка: превышено максимальное число продолжений координации для одного запроса.",

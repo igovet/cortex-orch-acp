@@ -34,15 +34,37 @@ class FailureClass(str):
 # T035 ("the coordinator must not be able to work on the project" -- user
 # requirement, verbatim: "Важно что бы наш рантайм/движок не давал
 # возможности координатору работать с проектом, потому что координатор это
-# route"): the engine's own non-editing mode, one entry per pinned live
-# engine (see ``engine.codex_adapter_acp``/``engine.claude_adapter_acp``
-# module docstrings for the full pinned "mode" vocabulary each engine
-# actually offers).
+# route"): one entry per pinned live engine (see
+# ``engine.codex_adapter_acp``/``engine.claude_adapter_acp`` module
+# docstrings for the full pinned "mode" vocabulary each engine actually
+# offers).
 #
-# - codex-acp: "read-only" is the one mode with no edit capability at all.
-# - claude-agent-acp: "plan", not "default" -- "default" still permits
-#   edits (it only asks first); only "plan" is genuinely non-editing, the
-#   same guarantee as codex's "read-only" rather than merely "asks first".
+# FINDING-12 (live evidence, see
+# ``.cortex/acp-migration/evidence/T035/FINDING-12-read-only-mode-does-not-
+# prevent-edits.md``): this floor previously picked codex "read-only" /
+# claude "plan" -- each engine's own non-editing mode -- on the theory that
+# a mode the engine itself will not edit under is sufficient enforcement.
+# Live evidence proved that wrong on both counts. The mode was requested
+# AND confirmed by codex-acp (the task's own ``configuration_revisions``
+# row recorded ``parameters={"mode":"read-only"}`` with a real
+# ``confirmation_evidence_ref``), and the coordinator still edited
+# ``calc.py`` and created ``test_calc.py`` directly -- it never delegated.
+# Worse, "read-only" turned out to *remove* Cortex's only interception
+# point: in that mode the engine never issues ``session/request_permission``
+# for its edits at all, so ``engine.permissions.PermissionBridge`` never
+# even sees the attempt to refuse it. A mode chosen specifically to stop
+# edits made every edit invisible instead.
+#
+# This floor now picks the SAME mode as ``WORKER_MODE_FLOOR`` below --
+# codex "agent", claude "default" -- the narrowest mode a previous builder
+# already verified, against the pinned installed builds cited in that
+# floor's own docstring, still issues ``session/request_permission`` for a
+# mutating tool call. The point is not to make the engine self-censor (that
+# was the failed theory); it is to regain the interception point so
+# ``PermissionBridge`` can actually classify and refuse a coordinator
+# binding's mutating request itself (see that module's own T035 coordinator-
+# refusal docstring) -- enforcement now lives in Cortex, not in a mode
+# string the engine is free to ignore.
 #
 # ``configuration.service.ConfigurationService.propose`` applies this as a
 # floor on the coordinator's own configuration revision (the only "mode"
@@ -50,8 +72,8 @@ class FailureClass(str):
 # precedence and its one disclosed gap: a connection's very first proposal,
 # before any live session has ever reported its own "mode" options).
 COORDINATOR_MODE_FLOOR: Mapping[str, str] = {
-    "codex-acp": "read-only",
-    "claude-agent-acp": "plan",
+    "codex-acp": "agent",
+    "claude-agent-acp": "default",
 }
 
 # T035 gap closure ("a worker's engine mode is never chosen or confirmed by
@@ -74,8 +96,12 @@ COORDINATOR_MODE_FLOOR: Mapping[str, str] = {
 #   detected as potentially unsafe" (which is where a delete/destructive
 #   shell command lands); only "agent-full-access" sets
 #   ``approvalPolicy: "never"`` (never asks, ever -- the mode this floor
-#   must never pick), and "read-only" cannot edit at all (that is
-#   ``COORDINATOR_MODE_FLOOR``'s own job, not a worker's).
+#   must never pick); "read-only" cannot edit at all, but never issues
+#   ``session/request_permission`` for the edits it silently allows either
+#   (see FINDING-12 above), so it is never picked here or by
+#   ``COORDINATOR_MODE_FLOOR`` -- enforcement for a worker's deletion rule,
+#   and for a coordinator's own no-mutation rule, is Cortex-side
+#   classification in ``engine.permissions``, never an engine mode string.
 # - claude-agent-acp 0.78.0 (``dist/permissions/modes.js``,
 #   ``dist/session-mode.js``, ``dist/acp-agent.js`` ``canUseTool``): "default"
 #   ("Manual" -- "Always ask before making changes") is the one mode with no
