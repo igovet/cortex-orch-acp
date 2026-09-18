@@ -63,6 +63,7 @@ class ProductionOrchestratingRuntime:
 
     def _connection_record_factory(self, configuration_service):
         def factory(task_id):
+            from ..connections import onboarding as connection_onboarding
             from ..connections import registry as connection_registry
 
             # T035 fix: a fresh task's first coordinator open must resolve
@@ -80,11 +81,31 @@ class ProductionOrchestratingRuntime:
             current = configuration_service.current_or_latest(task_id)
             if current is None:
                 raise RouteUnresolved("no_configuration_revision")
+            connection_id = current["route_connection_id"]
             state = connection_registry.read_registry(self._environ)
-            record = state.connections.get(current["route_connection_id"])
-            if record is None:
+            if connection_id not in state.connections:
                 raise RouteUnresolved("connection_not_found")
-            return record
+            # FINDING 09 fix: a route naming a *known* connection that is
+            # not actually usable (login expired, credential file missing/
+            # invalid, keyring unreachable, ...) must never be collapsed
+            # into the same "no_configuration_revision" refusal a genuinely
+            # unconfigured task gets -- that sends the user hunting through
+            # routes/defaults instead of at their expired login. Re-derive
+            # this connection's live state the same way the non-
+            # orchestration engine-session path already does
+            # (``connections.onboarding.resolve_connection_for_route``,
+            # itself reusing ``_STATE_ERROR_CODE``'s existing
+            # ``connection_requires_reauthorization``/``connection_unavailable``/
+            # ``connection_invalid`` vocabulary -- never a new code) and
+            # fail closed, naming both the reason and the connection,
+            # instead of silently returning an unusable record for
+            # ``EngineSessionManagerAdapter.open`` to fail on some other,
+            # opaquer way. Never substitutes a different connection: this is
+            # a refusal, not a fallback.
+            try:
+                return connection_onboarding.resolve_connection_for_route(connection_id, environ=self._environ)
+            except PortableError as error:
+                raise RouteUnresolved(f"{error.code}:{connection_id}") from error
         return factory
 
     def _runtime_for_project(self, project_root: str) -> OrchestratingRuntime:

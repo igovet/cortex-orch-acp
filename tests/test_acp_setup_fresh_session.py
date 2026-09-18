@@ -92,6 +92,32 @@ def _isolate(tmp_path, monkeypatch):
 _MODEL = "claude-opus-placeholder"
 
 
+def _register_connection(tmp_path, engine_dir, *, name, model, config_options=None,
+                          configure_behavior="accept", env_dump_path=None):
+    """Registers one claude-agent-acp connection and pins ``model`` as its
+    route, purely through ``scripts/cortex_acp_setup.py`` -- the same
+    building block ``_one_time_setup`` uses for its single "work"
+    connection, generalized so a test can register a *second*, independent
+    connection (see the FINDING-09 no-fallback test below) without
+    duplicating this scaffolding."""
+    scenario_path = write_scenario(engine_dir, default_scenario(
+        prompt_updates=[dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text="Ready."))],
+        prompt_stop_reason="end_turn",
+        config_options=config_options,
+        configure_behavior=configure_behavior,
+        env_dump_path=env_dump_path,
+    ))
+    secret_file = tmp_path / f"secret-{name}.txt"
+    secret_file.write_bytes(b"fake-api-key")
+    conn = setup.add_connection(
+        name=name, engine="claude-agent-acp", provider="anthropic", auth_mode=AuthMode.API_KEY,
+        key_kind="anthropic_api_key", api_key_reader=lambda: secret_file.read_bytes(),
+        launch_command=fake_launch_command(scenario_path),
+    )
+    pinned = setup.pin_route(connection_id=conn["connection_id"], model=model)
+    return conn, pinned
+
+
 def _one_time_setup(tmp_path, engine_dir, *, config_options=None, configure_behavior="accept"):
     """Registers one claude-agent-acp connection (QUALIFIED instruction
     delivery -- see ``engine.instruction_delivery_registry`` -- so the
@@ -100,21 +126,10 @@ def _one_time_setup(tmp_path, engine_dir, *, config_options=None, configure_beha
     real-adapter coordinator test in this suite) and pins its model as the
     default route, purely through ``scripts/cortex_acp_setup.py``."""
     setup.init_storage()
-    scenario_path = write_scenario(engine_dir, default_scenario(
-        prompt_updates=[dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text="Ready."))],
-        prompt_stop_reason="end_turn",
-        config_options=config_options,
-        configure_behavior=configure_behavior,
-    ))
-    secret_file = tmp_path / "secret.txt"
-    secret_file.write_bytes(b"fake-api-key")
-    conn = setup.add_connection(
-        name="work", engine="claude-agent-acp", provider="anthropic", auth_mode=AuthMode.API_KEY,
-        key_kind="anthropic_api_key", api_key_reader=lambda: secret_file.read_bytes(),
-        launch_command=fake_launch_command(scenario_path),
+    return _register_connection(
+        tmp_path, engine_dir, name="work", model=_MODEL,
+        config_options=config_options, configure_behavior=configure_behavior,
     )
-    pinned = setup.pin_route(connection_id=conn["connection_id"], model=_MODEL)
-    return conn, pinned
 
 
 def test_fresh_task_configuration_is_auto_proposed_from_stored_setup_state_alone(tmp_path, monkeypatch):
@@ -671,4 +686,224 @@ def test_legacy_defaults_json_with_no_saved_identity_self_heals_after_a_refresh(
     migrated = configuration_store.read_user_defaults(environ)
     assert migrated["defaults"]["route_connection_id"] == conn["connection_id"]
     assert migrated["defaults"]["route_model"] == _MODEL
+
+
+# ---------------------------------------------------------------------------
+# T035 FINDING-09: an expired/unusable connection must be refused *as such*,
+# distinct from a genuine "no configuration revision" -- never collapsed
+# into the same opaque code, and never silently used anyway.
+#
+# Live defect this reproduces (see
+# .cortex/acp-migration/evidence/T035/FINDING-09-auth-required-reported-as-no-configuration.md):
+# a task's route named a connection whose login had expired
+# (``ConnectionState.AUTHORIZATION_REQUIRED``); ``start_prompt`` refused
+# correctly (fail closed, no fallback) but with reason
+# ``no_configuration_revision`` -- the wrong diagnosis, sending a user
+# hunting through routes/defaults instead of at their expired login.
+# ---------------------------------------------------------------------------
+
+def test_route_to_an_authorization_required_connection_is_refused_naming_it(tmp_path, monkeypatch):
+    """A route that names a *known* connection whose login has expired is
+    refused with ``connection_requires_reauthorization:<connection_id>`` --
+    the exact vocabulary ``connections.onboarding``'s own
+    ``_STATE_ERROR_CODE``/``resolve_connection_for_route`` already use for
+    the non-orchestration engine-session path -- never the generic
+    ``no_configuration_revision``."""
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    engine_dir = tmp_path / "engine"
+    engine_dir.mkdir()
+    conn, pinned = _one_time_setup(tmp_path, engine_dir, config_options=[
+        dict(id="model", type="select", options=[dict(value=_MODEL, name="Placeholder")]),
+    ])
+
+    from cortex_runtime.store import Store
+
+    store = Store(project / ".cortex", project_root=project)
+    registry_state = connection_registry.read_registry(environ)
+    task_id, service = _bootstrap_configured_task(store, registry_state, pinned)
+    # Exactly what the live finding observed: the pinned route's own
+    # 'selected' revision already exists, but the login backing its
+    # connection has since expired -- simulated here by emptying the
+    # connection's own canonical secret file, which
+    # ``connections.onboarding._derive_state`` treats as
+    # ``AUTHORIZATION_REQUIRED`` (a zero-byte secret file), the same as a
+    # real API key expiring/being revoked.
+    secret_path = connection_registry.secret_path(conn["connection_id"], environ)
+    secret_path.write_bytes(b"")
+
+    runtime = ProductionOrchestratingRuntime(environ=environ)
+    cancel_event = threading.Event()
+    try:
+        runtime.start_prompt(
+            task_id, "s1", "Ship the report.", lambda _c: True, cancel_event,
+            project_root=str(project),
+        )
+        assert False, "an authorization_required connection must never be silently used"
+    except Exception as error:
+        assert str(error) == f"connection_requires_reauthorization:{conn['connection_id']}"
+        assert str(error) != "no_configuration_revision"
+    finally:
+        for orch_runtime in list(runtime._runtimes.values()):
+            for manager in list(orch_runtime._engine._managers.values()):
+                manager.shutdown(grace=2.0)
+
+
+def test_route_to_an_invalid_connection_is_refused_naming_it(tmp_path, monkeypatch):
+    """Same path, ``ConnectionState.INVALID`` this time (a secret file with
+    unsafe group/other-readable permissions) -- refused as
+    ``connection_invalid:<connection_id>``, still never
+    ``no_configuration_revision``."""
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    engine_dir = tmp_path / "engine"
+    engine_dir.mkdir()
+    conn, pinned = _one_time_setup(tmp_path, engine_dir, config_options=[
+        dict(id="model", type="select", options=[dict(value=_MODEL, name="Placeholder")]),
+    ])
+
+    from cortex_runtime.store import Store
+
+    store = Store(project / ".cortex", project_root=project)
+    registry_state = connection_registry.read_registry(environ)
+    task_id, service = _bootstrap_configured_task(store, registry_state, pinned)
+    secret_path = connection_registry.secret_path(conn["connection_id"], environ)
+    secret_path.chmod(0o644)  # group/other-readable -- unsafe, per _derive_state
+
+    runtime = ProductionOrchestratingRuntime(environ=environ)
+    cancel_event = threading.Event()
+    try:
+        runtime.start_prompt(
+            task_id, "s1", "Ship the report.", lambda _c: True, cancel_event,
+            project_root=str(project),
+        )
+        assert False, "an invalid connection must never be silently used"
+    except Exception as error:
+        assert str(error) == f"connection_invalid:{conn['connection_id']}"
+    finally:
+        secret_path.chmod(0o600)  # restore before the fixture's own teardown
+        for orch_runtime in list(runtime._runtimes.values()):
+            for manager in list(orch_runtime._engine._managers.values()):
+                manager.shutdown(grace=2.0)
+
+
+# ``ConnectionState.UNAVAILABLE`` is not exercised here: for the
+# ``api_key``/``SecretFile`` connections this suite's fake engine uses, an
+# absent/empty/malformed secret file always resolves to
+# ``AUTHORIZATION_REQUIRED``/``INVALID`` (see ``_derive_state``'s
+# ``SecretFile`` branch just above) -- ``UNAVAILABLE`` is only ever reached
+# for an ``os_keyring`` credential whose ``keyring`` module import/lookup
+# itself fails, or an ``EngineNativeDir`` connection whose engine has no
+# native-login-marker mapping. Neither shape exists anywhere else in this
+# test module (every connection here is ``api_key``/``SecretFile``, by the
+# same convention every other real-adapter test in this file already
+# follows), and standing one up would duplicate ``test_connections.py``'s
+# own ``os_keyring``/native-account coverage rather than add anything new
+# to this file's route-refusal path -- ``resolve_connection_for_route``
+# maps ``UNAVAILABLE`` through the identical ``_STATE_ERROR_CODE`` table as
+# ``AUTHORIZATION_REQUIRED``/``INVALID`` above, so the two cases already
+# covered are sufficient evidence that the dispatch itself is state-generic,
+# not special-cased per state.
+
+
+def test_a_task_with_no_configuration_revision_at_all_is_still_refused_as_such(tmp_path, monkeypatch):
+    """The other half of the FINDING-09 requirement: a task that genuinely
+    has never had any configuration revision must still be refused
+    ``no_configuration_revision`` -- the two reasons must never collapse
+    into one code in either direction."""
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    engine_dir = tmp_path / "engine"
+    engine_dir.mkdir()
+    _one_time_setup(tmp_path, engine_dir)
+
+    from cortex_runtime.bootstrap import bootstrap_task
+    from cortex_runtime.portable.identity import SourceEvent
+    from cortex_runtime.store import Store
+
+    store = Store(project / ".cortex", project_root=project)
+    result = bootstrap_task(store, SourceEvent(origin="cli", event_id=str(uuid.uuid4())), "Ship the report.",
+                             owner_ref="owner-1")
+    task_id = result.task_id
+    assert not ConfigurationService(store).history(task_id)
+
+    runtime = ProductionOrchestratingRuntime(environ=environ)
+    cancel_event = threading.Event()
+    try:
+        runtime.start_prompt(
+            task_id, "s1", "Ship the report.", lambda _c: True, cancel_event,
+            project_root=str(project),
+        )
+        assert False, "a task with no configuration revision at all must be refused as such"
+    except Exception as error:
+        assert str(error) == "no_configuration_revision"
+    finally:
+        for orch_runtime in list(runtime._runtimes.values()):
+            for manager in list(orch_runtime._engine._managers.values()):
+                manager.shutdown(grace=2.0)
+
+
+def test_an_unusable_route_never_falls_back_to_a_different_working_connection(tmp_path, monkeypatch):
+    """The security property the live run confirmed, asserted explicitly:
+    with the task's own route pointing at an ``authorization_required``
+    connection and a second, perfectly usable connection also configured,
+    the refusal stands -- ``start_prompt`` never silently opens the working
+    connection instead."""
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    work_engine_dir = tmp_path / "work_engine"
+    work_engine_dir.mkdir()
+    spare_engine_dir = tmp_path / "spare_engine"
+    spare_engine_dir.mkdir()
+    spare_model = "sibling-placeholder"
+    spare_launch_marker = tmp_path / "spare_launched.json"
+
+    setup.init_storage()
+    conn, pinned = _register_connection(
+        tmp_path, work_engine_dir, name="work", model=_MODEL,
+        config_options=[dict(id="model", type="select", options=[dict(value=_MODEL, name="Placeholder")])],
+    )
+    _register_connection(
+        tmp_path, spare_engine_dir, name="spare", model=spare_model,
+        config_options=[dict(id="model", type="select", options=[dict(value=spare_model, name="Spare")])],
+        env_dump_path=str(spare_launch_marker),
+    )
+
+    from cortex_runtime.store import Store
+
+    store = Store(project / ".cortex", project_root=project)
+    registry_state = connection_registry.read_registry(environ)
+    task_id, service = _bootstrap_configured_task(store, registry_state, pinned)
+    # Only the task's own connection ("work") is deauthorized -- "spare"
+    # stays fully configured and working throughout.
+    secret_path = connection_registry.secret_path(conn["connection_id"], environ)
+    secret_path.write_bytes(b"")
+
+    runtime = ProductionOrchestratingRuntime(environ=environ)
+    cancel_event = threading.Event()
+    try:
+        runtime.start_prompt(
+            task_id, "s1", "Ship the report.", lambda _c: True, cancel_event,
+            project_root=str(project),
+        )
+        assert False, "an unusable route must be refused, never silently rerouted"
+    except Exception as error:
+        assert str(error) == f"connection_requires_reauthorization:{conn['connection_id']}"
+    # The decisive assertion: "spare"'s own fake-engine process was never
+    # even launched (it would have dumped its process env to this path on
+    # startup -- see fake_engine_process.py) -- no hidden provider switch,
+    # no silent substitution of a different, working connection.
+    assert not spare_launch_marker.exists(), (
+        "the refusal must never fall back to a different, working connection"
+    )
+    # Nor did the task's own configuration/route change underneath it.
+    assert service.current(task_id) is None
+    assert service.history(task_id)[-1]["route_connection_id"] == conn["connection_id"]
+    for orch_runtime in list(runtime._runtimes.values()):
+        for manager in list(orch_runtime._engine._managers.values()):
+            manager.shutdown(grace=2.0)
 
