@@ -10,9 +10,10 @@ borrows or fabricates routes for it, and never affects any other connection.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
+from types import MappingProxyType
 from typing import Iterable, Mapping, Sequence
 
 from ..connections.model import AuthMode, ConnectionRecord, ConnectionState, SUPPORT_MATRIX
@@ -21,6 +22,7 @@ from ..portable.identity import ExecutionRoute, new_id
 from .evidence import EvidenceState, Fact, Provenance, ProvenanceSource
 from .labels import build_label, disambiguate_labels
 from .model import CatalogEntry, CatalogSnapshot
+from . import model_seed
 
 _PARAMETER_CATEGORIES = frozenset({"mode", "model_config", "thought_level"})
 _KNOWN_CATEGORIES = _PARAMETER_CATEGORIES | {"model"}
@@ -86,9 +88,32 @@ class _ParsedOption:
 
 @dataclass(frozen=True)
 class Observation:
-    """A validated ``configOptions`` payload for one connection."""
+    """A validated ``configOptions`` payload for one connection.
+
+    ``model_thought_levels`` (T035 follow-up "per-model efforts"; user
+    decision 2026-09-18, verbatim: "store it keyed by model right away,
+    even if the efforts are identical"): every model's ``thought_level``
+    (effort) set is stored ``{model_slug: (effort, ...)}``, always keyed by
+    model -- there is no separate "flat, engine-wide" shape and no fallback
+    between the two. :func:`parse_observation` itself populates this for
+    *every* model it lists, copying one shared flat set to each model when
+    that is all a live ACP session actually advertised (e.g.
+    claude-agent-acp's one flat ``default,low,medium,high,xhigh,max`` today
+    -- the duplication across models is intentional, not something to
+    optimize back into a shared value); :meth:`with_model_thought_levels`
+    lets a caller holding a genuinely *per-model* source -- today only
+    ``catalog.codex_debug_models.fetch_effort_ceiling``'s parse of codex's
+    own offline ``codex debug models`` output, e.g. ``gpt-5.5`` lacking
+    ``max``/``ultra`` that its sibling models have -- overlay real per-model
+    values on top (only ``catalog.refresh.perform_refresh`` does this in
+    production; the live session's own parsed default is never mutated in
+    place, only merged into a new ``Observation``, keeping the two
+    provenances distinct: a copied-flat entry still carries the live
+    session's own provenance, never claimed as codex's per-model one).
+    """
 
     options: tuple[_ParsedOption, ...]
+    model_thought_levels: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def model_options(self) -> tuple[tuple[str, str], ...]:
         for option in self.options:
@@ -96,11 +121,49 @@ class Observation:
                 return option.select_options
         return ()
 
+    def with_model_thought_levels(self, overrides: Mapping[str, tuple[str, ...]]) -> "Observation":
+        """A new :class:`Observation` with ``overrides`` merged over the
+        existing ``model_thought_levels`` (a model absent from ``overrides``
+        keeps whatever it already had -- never dropped); never mutates
+        ``self`` (frozen dataclass). Every value is still keyed by model,
+        never a fallback shape."""
+        merged = dict(self.model_thought_levels)
+        merged.update({model: tuple(levels) for model, levels in overrides.items() if levels})
+        return Observation(options=self.options, model_thought_levels=MappingProxyType(merged))
+
+    def parameter_pairs_for(self, model: str) -> tuple[tuple[str, str], ...]:
+        """The ``(name, value)`` pairs to fold into ``model``'s own
+        ``ExecutionRoute.supported_parameters``: every ``mode``/
+        ``model_config`` select pair and boolean pair (identical for every
+        model of this observation -- see :meth:`parameter_pairs`), plus
+        ``model``'s own ``thought_level`` values looked up from
+        ``model_thought_levels`` -- always keyed by model, never a
+        shared/flat value read directly off ``self.options``. A model with
+        no entry in ``model_thought_levels`` simply gets no
+        ``thought_level`` pairs, exactly like an observation whose
+        ``thought_level`` select was absent entirely.
+        """
+        pairs = self.parameter_pairs()
+        levels = self.model_thought_levels.get(model, ())
+        return pairs + tuple(("thought_level", value) for value in levels)
+
     def parameter_pairs(self) -> tuple[tuple[str, str], ...]:
+        """The model-independent ``(name, value)`` pairs to fold into a
+        route's ``ExecutionRoute.supported_parameters``: every ``mode``/
+        ``model_config`` select option's own advertised values (one pair
+        per value, all sharing that category name -- never only the
+        ``currentValue``, since a route's ``supported_parameters`` is the
+        *allowed set* a later selection is validated against; see
+        ``configuration.resolution.validate_dependent_settings``) plus
+        every boolean option's own single current value keyed by its own
+        ``id``. ``thought_level`` is deliberately never emitted here --
+        see :attr:`model_thought_levels`/:meth:`parameter_pairs_for`, which
+        is always model-keyed instead."""
         pairs: list[tuple[str, str]] = []
         for option in self.options:
-            if option.type == "select" and option.category in _PARAMETER_CATEGORIES:
-                pairs.append((option.id, str(option.current_value)))
+            if option.type == "select" and option.category in _PARAMETER_CATEGORIES and option.category != "thought_level":
+                for value, _name in option.select_options:
+                    pairs.append((option.category, value))
             elif option.type == "boolean":
                 pairs.append((option.id, "true" if option.current_value else "false"))
         return tuple(pairs)
@@ -137,7 +200,24 @@ def parse_observation(raw: object) -> Observation:
             parsed.append(_ParsedOption(option_id, category, "boolean", current_value, ()))
         else:
             raise _invalid_observation(f"'type' must be 'select' or 'boolean', got {option_type!r}")
-    return Observation(options=tuple(parsed))
+    observation = Observation(options=tuple(parsed))
+    # T035 follow-up (user decision 2026-09-18): a live session's own
+    # thought_level select is always copied into every model's own entry
+    # in model_thought_levels at parse time -- never left as one implicit
+    # shared value read off self.options -- even though every model gets
+    # the identical set here (a genuinely per-model source, if any, is
+    # overlaid later via with_model_thought_levels; see that method and
+    # catalog.refresh.perform_refresh).
+    thought_values = tuple(
+        value
+        for option in observation.options
+        if option.type == "select" and option.category == "thought_level"
+        for value, _name in option.select_options
+    )
+    if thought_values:
+        models = [model for model, _name in observation.model_options()]
+        observation = observation.with_model_thought_levels({model: thought_values for model in models})
+    return observation
 
 
 @dataclass(frozen=True)
@@ -174,13 +254,43 @@ def _connection_facts(record: ConnectionRecord, adapter_version: str) -> Evidenc
     return state
 
 
+def seed_observation(engine: str) -> "Observation | None":
+    """A synthetic ``Observation`` built from :data:`model_seed.SEED_MODELS`
+    for ``engine`` (T035), or ``None`` when this engine has no seed -- see
+    ``model_seed``'s module docstring for sourcing. Carries only a
+    ``model`` select, never a fabricated ``thought_level`` (see
+    ``model_seed``'s "known ceiling" note). A caller must pass this
+    connection's id in ``build_catalog``'s ``seeded_connection_ids`` so the
+    resulting routes are promoted with ``ProvenanceSource.SEED``, never
+    ``DISCOVERY``."""
+    pairs = model_seed.SEED_MODELS.get(engine)
+    if not pairs:
+        return None
+    raw = [dict(
+        id="model", name="Model", type="select", category="model",
+        currentValue=pairs[0][0],
+        options=[dict(value=value, name=name) for value, name in pairs],
+    )]
+    return parse_observation(raw)
+
+
 def build_catalog(
     connections: Mapping[str, ConnectionRecord],
     observations: Mapping[str, Observation | None],
     manual_declarations: Sequence[ManualDeclaration] = (),
     adapter_versions: Mapping[str, str] | None = None,
+    seeded_connection_ids: frozenset[str] = frozenset(),
 ) -> CatalogSnapshot:
-    """Assemble one :class:`CatalogSnapshot`; never crosses connections."""
+    """Assemble one :class:`CatalogSnapshot`; never crosses connections.
+
+    ``seeded_connection_ids`` (T035): connection ids whose ``observations``
+    entry is a synthetic :func:`seed_observation`, not a real captured
+    engine payload -- their routes' ``catalog_obtained`` fact is promoted
+    with :class:`~.evidence.ProvenanceSource.SEED` instead of ``DISCOVERY``,
+    so ``acp.config_options`` can honestly label them "seeded" rather than
+    engine-confirmed. Every other connection is unaffected (unchanged
+    pre-T035 ``DISCOVERY`` provenance).
+    """
     adapter_versions = adapter_versions or {}
     now = _now()
     snapshot_id = new_id("cs_")
@@ -198,16 +308,22 @@ def build_catalog(
             unavailable[connection_id] = reason
             continue
         for model, _model_name in observation.model_options():
-            supported_parameters = observation.parameter_pairs()
+            # T035 follow-up: per-model override when the caller attached
+            # one (see Observation.with_model_thought_levels); an unchanged
+            # flat parameter_pairs() for every model with none (the
+            # overwhelming default, identical to every pre-existing
+            # observation/test).
+            supported_parameters = observation.parameter_pairs_for(model)
             route = ExecutionRoute(
                 engine=record.engine,
                 connection_id=connection_id,
                 model=model,
                 supported_parameters=supported_parameters,
             )
+            source = ProvenanceSource.SEED if connection_id in seeded_connection_ids else ProvenanceSource.DISCOVERY
             evidence = base_facts.promote(
                 Fact.CATALOG_OBTAINED,
-                Provenance(source=ProvenanceSource.DISCOVERY, adapter_version=adapter_version, observed_at=now),
+                Provenance(source=source, adapter_version=adapter_version, observed_at=now),
             )
             label = build_label(record.engine, record.name, model)
             raw_labels[route.id] = label

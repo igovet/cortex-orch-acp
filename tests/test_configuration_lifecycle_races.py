@@ -70,11 +70,11 @@ def test_failed_apply_never_yields_mixed_route_or_effort_via_current(tmp_path):
     service = ConfigurationService(store)
     entry_a = _entry(effort="high", model="model-a")
     entry_b = _entry(effort="high", model="model-b")
-    row1 = service.propose(task, entry_a, ConfigurationInputs(route=entry_a.route, parameters={"effort": "high"}), expected_revision=0, current_epoch=epoch)
+    row1 = service.propose(task, entry_a, ConfigurationInputs(route=entry_a.route, parameters={"thought_level": "high"}), expected_revision=0, current_epoch=epoch)
     service.apply(task, row1["id"], _FakeAdapter("confirm"), "es_" + "a" * 12, epoch)
     active_before = service.current(task)
 
-    row2 = service.propose(task, entry_b, ConfigurationInputs(route=entry_b.route, parameters={"effort": "high"}), expected_revision=1, current_epoch=epoch)
+    row2 = service.propose(task, entry_b, ConfigurationInputs(route=entry_b.route, parameters={"thought_level": "high"}), expected_revision=1, current_epoch=epoch)
     service.apply(task, row2["id"], _FakeAdapter("reject"), "es_" + "a" * 12, epoch)
     active_after = service.current(task)
 
@@ -82,7 +82,7 @@ def test_failed_apply_never_yields_mixed_route_or_effort_via_current(tmp_path):
     # never a blend of row1's route with row2's parameters or vice versa.
     assert active_after == active_before
     assert active_after["route_id"] == entry_a.route.id
-    assert active_after["parameters"] == {"effort": "high"}
+    assert active_after["parameters"] == {"thought_level": "high"}
 
 
 def test_indeterminate_apply_never_yields_mixed_state_via_current(tmp_path):
@@ -90,11 +90,11 @@ def test_indeterminate_apply_never_yields_mixed_state_via_current(tmp_path):
     service = ConfigurationService(store)
     entry_a = _entry(model="model-a")
     entry_b = _entry(model="model-b")
-    row1 = service.propose(task, entry_a, ConfigurationInputs(route=entry_a.route, parameters={"effort": "high"}), expected_revision=0, current_epoch=epoch)
+    row1 = service.propose(task, entry_a, ConfigurationInputs(route=entry_a.route, parameters={"thought_level": "high"}), expected_revision=0, current_epoch=epoch)
     service.apply(task, row1["id"], _FakeAdapter("confirm"), "es_" + "a" * 12, epoch)
     snapshot = service.current(task)
 
-    row2 = service.propose(task, entry_b, ConfigurationInputs(route=entry_b.route, parameters={"effort": "high"}), expected_revision=1, current_epoch=epoch)
+    row2 = service.propose(task, entry_b, ConfigurationInputs(route=entry_b.route, parameters={"thought_level": "high"}), expected_revision=1, current_epoch=epoch)
     service.apply(task, row2["id"], _FakeAdapter("raise"), "es_" + "a" * 12, epoch)
     assert service.current(task) == snapshot  # still exactly the first active row
 
@@ -105,7 +105,7 @@ def test_concurrent_propose_and_apply_interleaving_produces_no_lost_update_or_tw
     entry = _entry()
     barrier = threading.Barrier(2)
 
-    row_a = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"effort": "high"}), expected_revision=0, current_epoch=epoch)
+    row_a = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "high"}), expected_revision=0, current_epoch=epoch)
 
     def apply_worker():
         try:
@@ -116,7 +116,7 @@ def test_concurrent_propose_and_apply_interleaving_produces_no_lost_update_or_tw
     def propose_worker():
         barrier.wait(timeout=5)
         try:
-            return service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"effort": "high"}), expected_revision=row_a["revision"], current_epoch=epoch)
+            return service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "high"}), expected_revision=row_a["revision"], current_epoch=epoch)
         except PortableError as error:
             return error.code
 
@@ -145,8 +145,8 @@ def test_apply_rejects_stale_revision_at_start_when_newer_one_already_proposed(t
     store, task, epoch = _bootstrap(tmp_path)
     service = ConfigurationService(store)
     entry = _entry()
-    row1 = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"effort": "high"}), expected_revision=0, current_epoch=epoch)
-    row2 = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"effort": "high"}), expected_revision=row1["revision"], current_epoch=epoch)
+    row1 = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "high"}), expected_revision=0, current_epoch=epoch)
+    row2 = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "high"}), expected_revision=row1["revision"], current_epoch=epoch)
     with pytest.raises(PortableError) as excinfo:
         service.apply(task, row1["id"], _FakeAdapter("confirm"), "es_" + "a" * 12, epoch)
     assert excinfo.value.code == "stale_configuration_revision"
@@ -159,14 +159,14 @@ def test_apply_rejects_stale_pending_apply_that_completes_after_a_newer_revision
     store, task, epoch = _bootstrap(tmp_path)
     service = ConfigurationService(store)
     entry = _entry()
-    row1 = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"effort": "high"}), expected_revision=0, current_epoch=epoch)
+    row1 = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "high"}), expected_revision=0, current_epoch=epoch)
 
     class _AdapterThatProposesANewerRevisionMidFlight:
         def configure(self, engine_session_id, revision):
             # A newer revision gets proposed *while* this adapter call is
             # still outstanding -- simulating a slow/late engine response
             # racing a fresh propose() from elsewhere.
-            service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"effort": "high"}), expected_revision=row1["revision"], current_epoch=epoch)
+            service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "high"}), expected_revision=row1["revision"], current_epoch=epoch)
             return "evref_late"
 
     with pytest.raises(PortableError) as excinfo:

@@ -165,9 +165,11 @@ own `_meta` field on the wire.
 
 **Practical consequence**: a claude-agent-acp coordinator/worker role with
 non-negotiable `critical_rules` is admitted at the pinned 0.78.0 version
-with no `allow_unqualified_delivery` escape hatch needed at all — unlike
-codex-acp's own UNQUALIFIED channel, which still needs that escape hatch.
-Any *other*/unrecognized claude-agent-acp version remains UNSUPPORTED
+with no `allow_unqualified_delivery` escape hatch needed at all. codex-acp
+1.12.0's own tagged channel is QUALIFIED too as of T035 live evidence (see
+`docs/acp/codex-acp-adapter.md`), so it no longer needs that escape hatch
+either; the flag remains available for any future engine whose channel is
+still UNQUALIFIED. Any *other*/unrecognized claude-agent-acp version remains UNSUPPORTED
 (`ClaudeAgentAcpUnrecognizedVersionDelivery`) and is still refused exactly
 as before — the evidence chain above was only confirmed against 0.78.0's
 own dist. `tests/test_engine_claude_coordinator_live_session.py` and

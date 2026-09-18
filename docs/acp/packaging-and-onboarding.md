@@ -92,6 +92,9 @@ python3 -B scripts/cortex_acp_setup.py add-connection \
     --api-key-file /path/to/key.txt      # never inline on argv
 python3 -B scripts/cortex_acp_setup.py pin-route \
     --connection cn_xxxxxxxxxxxx --model gpt-5-codex
+python3 -B scripts/cortex_acp_setup.py record-observation \
+    --connection cn_xxxxxxxxxxxx --model gpt-5-codex \
+    --config-options-file /path/to/observed-config-options.json
 python3 -B scripts/cortex_acp_setup.py print-client-recipes
 ```
 
@@ -119,6 +122,25 @@ python3 -B scripts/cortex_acp_setup.py print-client-recipes
   further per-task action. `tests/test_acp_setup_fresh_session.py` proves
   this end to end (fake downstream engine subprocess, real production
   `Agent`/`OrchestratingRuntime` code).
+- **`record-observation`** replaces a `pin-route`'d route with one built
+  from a *real* engine-observed `configOptions` payload (the same
+  `session/new`-shaped JSON array a live engine actually returned — a
+  Zed devtools capture, or the result of an explicitly authorized
+  `scripts/cortex_codex_probe.py` qualification run; this step itself
+  never contacts an engine). Unlike `pin-route`'s `ManualDeclaration`
+  (only ever accepted with **no** parameters, since nothing confirmed
+  what it actually supports), this goes through
+  `catalog.discovery.parse_observation`/`build_catalog` — the same
+  DISCOVERY-provenance path automatic discovery would use — so the saved
+  route's `ExecutionRoute.supported_parameters` are the engine's real
+  advertised values (every value in each `mode`/`thought_level`
+  select's own `options`, not only whichever was current when observed),
+  and re-pins it as the user default exactly like `pin-route` does. This
+  is what lets a real reasoning-effort choice (e.g. "high") actually
+  appear as a selectable `thought_level` config option in a client's
+  message panel — see `acp.config_options.build_thought_level_option`
+  and `tests/test_cortex_acp_setup.py`'s `test_record_observation_*`
+  tests.
 - **`print-client-recipes`** delegates entirely to the existing T011
   `scripts/cortex_acp_client_config.py` (dry-run by default; a real write
   needs `--settings PATH --apply --i-consent-to-write`) plus the codeg

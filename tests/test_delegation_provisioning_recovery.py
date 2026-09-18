@@ -116,7 +116,9 @@ def test_delegate_produces_one_ready_assignment_with_no_model_ids(tmp_path):
     assert outcome.assignment_ref
     assert outcome.workspace_binding_id and outcome.channel_id
     assert outcome.engine_session_ref and outcome.config_revision and outcome.context_snapshot_ref
-    assert outcome.instruction_delivery == "unqualified"
+    # codex-acp 1.12.0 is QUALIFIED as of T035 live evidence (see
+    # engine.instruction_delivery_registry.CodexAcp1_12Delivery).
+    assert outcome.instruction_delivery == "qualified"
     assert ws.create_calls == 1
     assert eng.open_calls == 1
 
@@ -284,8 +286,14 @@ def test_delegate_refuses_worker_channel(tmp_path):
 
 
 def test_critical_role_refused_without_qualified_or_allowed_delivery(tmp_path):
+    """Exercises the refusal for a critical-rules role delivered through a
+    non-QUALIFIED channel. Uses an unrecognized claude-agent-acp version
+    (UNSUPPORTED) as the stand-in engine/version -- codex-acp 1.12.0, this
+    file's usual default, is QUALIFIED as of T035 live evidence and can no
+    longer stand in for a refused/non-QUALIFIED channel here."""
     store, result, channel = _channel(tmp_path)
-    ws, eng, cfg = FakeWorkspace(), FakeEngineSessionOpener(), FakeConfigSnapshotSource()
+    ws, eng = FakeWorkspace(), FakeEngineSessionOpener()
+    cfg = FakeConfigSnapshotSource(engine="claude-agent-acp", version="0.11.0")
     svc = ProvisioningService(store, ws, eng, cfg, allow_unqualified_delivery=False)
     with pytest.raises(PortableError) as excinfo:
         svc.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", new_key())

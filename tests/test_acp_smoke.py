@@ -51,7 +51,7 @@ def test_smoke_with_fixture_connection_shows_model_option(tmp_path):
     checks_by_name = {check["name"]: check for check in report["checks"]}
     assert checks_by_name["session/new:configOptions_with_fixture"]["status"] == "pass"
     option_ids = {opt["id"] for opt in checks_by_name["session/new:configOptions_with_fixture"]["detail"]}
-    assert option_ids == {"model", "thought_level", "language"}
+    assert option_ids == {"provider", "model", "thought_level", "language"}
 
 
 def test_smoke_never_creates_a_task_for_cortex_status(tmp_path):

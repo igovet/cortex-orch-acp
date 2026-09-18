@@ -8,7 +8,7 @@ import time
 import pytest
 
 from cortex_runtime.engine.session_manager import EngineSessionManager
-from cortex_runtime.portable.engine_contract import EngineCapability, EngineEventKind, StopReason
+from cortex_runtime.portable.engine_contract import EngineCapability, EngineEventKind, StopReason, UsageBasis
 
 from engine_fakes import default_scenario, fake_launch_command, isolated_environ, make_connection_record, new_connection_id, write_scenario
 
@@ -42,6 +42,50 @@ def test_negotiate_create_session_and_prompt(tmp_path):
         assert deltas == ["hello ", "world"]
         assert events[-1].kind == EngineEventKind.TURN_END
         assert events[-1].stop_reason == StopReason.END_TURN
+    finally:
+        manager.shutdown(grace=2.0)
+
+
+def test_usage_update_with_real_token_counts_is_engine_reported(tmp_path):
+    """T035 FINDING-03: a `usage_update` notification carrying actual
+    integer token fields is honestly attributed to the engine."""
+    scenario = default_scenario(prompt_updates=[
+        dict(delay=0.0, sessionUpdate="usage_update", usage=dict(inputTokens=12, outputTokens=3)),
+        dict(delay=0.0, sessionUpdate="agent_message_chunk", content=dict(type="text", text="ok")),
+    ])
+    manager = _make_manager(tmp_path, scenario)
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        events = list(manager.prompt_turn(session_id, "hello"))
+        usage_events = [event for event in events if event.kind == EngineEventKind.USAGE_UPDATE]
+        assert len(usage_events) == 1
+        assert usage_events[0].usage_basis == UsageBasis.ENGINE_REPORTED
+        assert usage_events[0].usage_values == dict(inputTokens=12, outputTokens=3)
+    finally:
+        manager.shutdown(grace=2.0)
+
+
+def test_usage_update_with_no_recognized_token_fields_is_unknown_not_engine_reported(tmp_path):
+    """T035 FINDING-03: a `usage_update` notification whose `usage` payload
+    yields no recognized integer token field (here: empty) must never be
+    recorded as ENGINE_REPORTED -- that would defeat observability.usage's
+    "unknown is never zero" protection for exactly the calls it exists to
+    protect. See also test_observability_usage.py for the storage-layer
+    half of this same protection."""
+    scenario = default_scenario(prompt_updates=[
+        dict(delay=0.0, sessionUpdate="usage_update", usage={}),
+        dict(delay=0.0, sessionUpdate="agent_message_chunk", content=dict(type="text", text="ok")),
+    ])
+    manager = _make_manager(tmp_path, scenario)
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        events = list(manager.prompt_turn(session_id, "hello"))
+        usage_events = [event for event in events if event.kind == EngineEventKind.USAGE_UPDATE]
+        assert len(usage_events) == 1
+        assert usage_events[0].usage_basis == UsageBasis.UNKNOWN
+        assert usage_events[0].usage_values == {}
     finally:
         manager.shutdown(grace=2.0)
 
@@ -111,16 +155,98 @@ def test_cancel_outcome_is_distinct_from_normal_completion(tmp_path):
         manager.shutdown(grace=2.0)
 
 
-def test_timeout_alive_is_distinct_from_process_exit(tmp_path):
+def test_prompt_turn_is_never_bound_by_call_timeout_while_streaming(tmp_path):
+    """T035 FINDING-06: ``session/prompt`` carries no wall-clock timeout at
+    all -- a turn whose own total duration comfortably exceeds the old
+    (and here, deliberately tiny) ``call_timeout`` must still complete
+    normally, proving the prompt path is fully decoupled from the short
+    RPC budget used by initialize/session/new/configure."""
+    scenario = default_scenario(
+        prompt_updates=[
+            dict(delay=0.1, sessionUpdate="agent_message_chunk", content=dict(type="text", text="a")),
+            dict(delay=0.1, sessionUpdate="agent_message_chunk", content=dict(type="text", text="b")),
+            dict(delay=0.1, sessionUpdate="agent_message_chunk", content=dict(type="text", text="c")),
+        ],
+        prompt_stop_reason="end_turn",
+    )
+    # call_timeout=0.05 is far shorter than this turn's ~0.3s total
+    # duration; under the old flat-timeout design this would have failed
+    # with timeout_alive well before the engine ever replied.
+    manager = _make_manager(tmp_path, scenario, call_timeout=0.05)
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        events = list(manager.prompt_turn(session_id, "hi"))
+        deltas = [event.delta_text for event in events if event.kind == EngineEventKind.TURN_DELTA]
+        assert deltas == ["a", "b", "c"]
+        assert events[-1].kind == EngineEventKind.TURN_END
+        assert events[-1].stop_reason == StopReason.END_TURN
+    finally:
+        manager.shutdown(grace=2.0)
+
+
+def test_timeout_alive_no_longer_produced_for_a_silent_prompt_turn(tmp_path):
+    """T035 FINDING-06 (stronger requirement): a genuinely silent engine
+    (no updates, no reply) is never itself classified timeout_alive by
+    prompt_turn any more -- there is no clock left to produce that
+    classification from this call. The turn simply blocks (proven here by
+    a bounded wait that observes nothing happening) until cancelled (see
+    test_cancel_is_the_only_way_out_of_a_silent_prompt_turn) or the
+    process/transport actually ends (see
+    test_process_exit_is_distinct_from_timeout)."""
     hang_scenario = default_scenario(prompt_behavior="hang")
     manager = _make_manager(tmp_path, hang_scenario, call_timeout=0.3)
     try:
         manager.negotiate(REQUESTED_CAPABILITIES)
         session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
-        events = list(manager.prompt_turn(session_id, "hi"))
-        assert events[0].kind == EngineEventKind.ERROR
-        assert events[0].error_message == "timeout_alive"
-        assert manager._process.alive()  # timeout alone never proves death
+        results = []
+
+        def run():
+            for event in manager.prompt_turn(session_id, "hi"):
+                results.append(event)
+
+        import threading
+        # daemon=True: this call.timeout=0.3 governed *only* the old (now
+        # removed) flat prompt timeout; the worker is left genuinely stuck
+        # until manager.shutdown() below resolves it via transport EOF, not
+        # any clock -- never joined synchronously here for that reason.
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        time.sleep(1.0)  # far past the old call_timeout=0.3
+        assert worker.is_alive()  # still stuck: no timeout ever fired
+        assert results == []  # no ERROR/TURN_END event was ever produced
+        assert manager._process.alive()  # never proved dead by a timeout
+    finally:
+        manager.shutdown(grace=2.0)  # resolves the still-blocked call via EOF
+
+
+def test_cancel_is_the_only_way_out_of_a_silent_prompt_turn(tmp_path):
+    """T035 FINDING-06: with no timeout on session/prompt at all, an engine
+    that streams nothing and replies to nothing except session/cancel can
+    only ever be unstuck by cancellation -- prove that path works, and
+    works promptly (bounded join well under the old 30s cap), on a turn
+    that would otherwise hang indefinitely."""
+    scenario = default_scenario(prompt_behavior="silent_until_cancel")
+    manager = _make_manager(tmp_path, scenario)
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        results = []
+
+        def run():
+            for event in manager.prompt_turn(session_id, "hi"):
+                results.append(event)
+
+        import threading
+        worker = threading.Thread(target=run)
+        worker.start()
+        time.sleep(0.2)  # long enough to prove the turn is genuinely stuck
+        assert worker.is_alive()
+        manager.cancel(session_id)
+        worker.join(timeout=5.0)
+        assert not worker.is_alive()  # cancellation is prompt, not sluggish
+        assert results[-1].kind == EngineEventKind.TURN_END
+        assert results[-1].stop_reason == StopReason.CANCELLED
     finally:
         manager.shutdown(grace=2.0)
 

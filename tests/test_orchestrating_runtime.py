@@ -22,6 +22,7 @@ from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation import events as delegation_events
 from cortex_runtime.delegation import mcp_tools
 from cortex_runtime.portable.engine_contract import StopReason
+from cortex_runtime.portable.errors import PortableError
 from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.store import Store
 
@@ -172,6 +173,92 @@ def test_second_coordinator_is_refused_while_one_is_active(tmp_path):
     finally:
         release.set()
         thread.join(timeout=5)
+
+
+def _insert_configuration_revision(store, task_id, revision_id, state, *, error_code=None):
+    """Test-only: seed one ``configuration_revisions`` row directly (never
+    through ``ConfigurationService`` -- these tests exercise
+    ``OrchestratingRuntime``'s own post-open gate against whatever state a
+    revision has settled into, independent of how it got there)."""
+    from cortex_runtime.configuration.policy import PolicyCeiling
+    from cortex_runtime.configuration.store import serialize_ceiling
+
+    now = "2020-01-01T00:00:00+00:00"
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute(
+                "INSERT INTO configuration_revisions "
+                "(id, task_id, revision, route_id, route_engine, route_connection_id, parameters, "
+                "ceiling_snapshot, state, confirmation_evidence_ref, error_code, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (revision_id, task_id, 1, "xr_test", "codex-acp", "cn_test", "{}",
+                 serialize_ceiling(PolicyCeiling()), state, None, error_code, now, now),
+            )
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+
+
+def test_turn_refused_when_configuration_revision_settled_failed(tmp_path):
+    """T035 FINDING-02: a turn must not proceed on a configuration
+    revision that has already settled 'failed' -- the client must see the
+    engine's own refusal reason, never a silent substitution."""
+    store, task_id = _task(tmp_path)
+    revision_id = "cr_" + task_id[2:]  # matches FakeConfigSnapshotSource's config_revision
+    _insert_configuration_revision(
+        store, task_id, revision_id, "failed", error_code="claude_acp_option_value_unsupported:model",
+    )
+
+    def router(store, channel, session_ref, launch, instructions):
+        return lambda store, channel, session_ref, message, call_index: PromptOutcome(StopReason.END_TURN, "READY")
+
+    runtime, engine = _make_runtime(store, router)
+    with pytest.raises(PortableError) as excinfo:
+        runtime.start_prompt(task_id, "s1", "Go.", lambda text: True, threading.Event())
+    assert excinfo.value.code == "claude_acp_option_value_unsupported:model"
+    # Never opened a prompt turn on the refused configuration.
+    assert engine.prompt_calls == []
+
+
+def test_turn_proceeds_when_engine_has_no_configuration_surface_at_all(tmp_path):
+    """T035 FINDING-02 scope guard: 'engine_does_not_support_configuration_options'
+    is the pre-existing, documented, intentional case (see
+    tests/test_acp_setup_fresh_session.py::
+    test_rejected_configuration_never_becomes_active) -- there was never a
+    specific requested value to have silently substituted, so this must
+    never be gated, unlike every other failed/rejected error_code."""
+    store, task_id = _task(tmp_path)
+    revision_id = "cr_" + task_id[2:]
+    _insert_configuration_revision(
+        store, task_id, revision_id, "failed", error_code="engine_does_not_support_configuration_options",
+    )
+
+    def router(store, channel, session_ref, launch, instructions):
+        return lambda store, channel, session_ref, message, call_index: PromptOutcome(StopReason.END_TURN, "READY")
+
+    runtime, engine = _make_runtime(store, router)
+    result = runtime.start_prompt(task_id, "s1", "Go.", lambda text: True, threading.Event())
+    assert result == StopReason.END_TURN
+
+
+def test_turn_proceeds_on_a_fresh_unapplied_selected_revision(tmp_path):
+    """T035 FINDING-02 regression guard: a fresh task's first coordinator
+    open must still resolve its not-yet-applied 'selected' revision --
+    the T035 fix that made ``current_or_latest``/the snapshot source
+    tolerate 'selected' must keep working; only a settled 'failed'/
+    'rejected' revision is ever gated."""
+    store, task_id = _task(tmp_path)
+    revision_id = "cr_" + task_id[2:]
+    _insert_configuration_revision(store, task_id, revision_id, "selected")
+
+    def router(store, channel, session_ref, launch, instructions):
+        return lambda store, channel, session_ref, message, call_index: PromptOutcome(StopReason.END_TURN, "READY")
+
+    runtime, engine = _make_runtime(store, router)
+    result = runtime.start_prompt(task_id, "s1", "Go.", lambda text: True, threading.Event())
+    assert result == StopReason.END_TURN
 
 
 def test_ask_user_ends_turn_and_next_prompt_resumes_the_same_task(tmp_path):

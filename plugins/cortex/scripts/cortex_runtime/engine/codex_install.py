@@ -251,6 +251,27 @@ def verify_install(install: CodexAcpInstall, environ: dict[str, str] | None = No
             field="package_version",
         )
 
+    # Mirrors claude_install.verify_install's identical check (T035
+    # follow-up "a connection's launch command is trusted verbatim, never
+    # re-verified"): `adapter_entry` must be the exact file package.json's
+    # own "bin" field names, never merely some other file under the
+    # package, even one whose own pinned hash matches -- only enforced when
+    # package.json actually declares a "bin" field (a fixture/install
+    # record built before this check existed, with no "bin" field at all,
+    # is left unaffected).
+    bin_field = package_data.get("bin") if isinstance(package_data, dict) else None
+    bin_targets = bin_field.values() if isinstance(bin_field, dict) else ()
+    package_dir = package_json.parent
+    resolved_bin_paths = {package_dir.joinpath(target).resolve() for target in bin_targets if isinstance(target, str)}
+    if resolved_bin_paths and adapter_entry not in resolved_bin_paths:
+        raise _validation_error(
+            "engine_install_drifted",
+            f"adapter_entry {adapter_entry} is not the launchable entry point package.json's own "
+            f"\"bin\" field names ({sorted(str(p) for p in resolved_bin_paths)}); launching any other "
+            "file under this package is never trusted even if its own pinned hash matches.",
+            field="adapter_entry",
+        )
+
     return install
 
 

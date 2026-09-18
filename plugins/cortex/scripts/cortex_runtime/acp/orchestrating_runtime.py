@@ -632,7 +632,74 @@ class OrchestratingRuntime:
             # regardless of whether this process itself ever opened this
             # (freshly allocated) attempt id before.
             launch["recovery"] = True
-        return self._engine.open("shared_project_root", launch, role_set.body_portable)
+        session_id = self._engine.open("shared_project_root", launch, role_set.body_portable)
+        # T035 FINDING-02 fix: ``self._engine.open`` (see
+        # ``delegation.live_adapters.EngineSessionManagerAdapter
+        # ._maybe_apply_configuration``) runs ``ConfigurationService.apply()``
+        # synchronously *inside* this call for a coordinator's own
+        # 'selected' revision, and deliberately never re-raises a
+        # 'failed'/'rejected' outcome into open()'s caller -- an
+        # already-opened engine *session* is not itself aborted over a
+        # configuration refusal (see that method's own docstring). That
+        # left the other half missing: nothing ever stopped the *prompt*
+        # that triggered the refused apply from running anyway on whatever
+        # the engine defaulted to. Re-reading this exact revision's
+        # settled state right here closes that gap without touching the
+        # detection logic (already correct) or the session-open behavior
+        # (unchanged): 'selected'/'pending_next_use'/'active'/'indeterminate'
+        # all pass through untouched (including the ordinary case of a
+        # fresh task's still-unapplied 'selected' revision), only a
+        # terminal 'failed'/'rejected' outcome for *this* revision blocks
+        # the turn.
+        self._reject_if_configuration_failed(task_id, preview.get("config_revision"))
+        return session_id
+
+    # T035 FINDING-02: the one error_code that means "this engine has no
+    # configuration surface at all" (engine.session_manager
+    # .EngineSessionManager.configure: ``options`` -- this session's own
+    # observed configOptions -- was empty, so nothing was ever sent to the
+    # wire). Pre-existing, documented, intentional behavior (see
+    # tests/test_acp_setup_fresh_session.py::
+    # test_rejected_configuration_never_becomes_active): there is no
+    # specific requested value to have silently substituted here -- the
+    # coordinator simply runs the engine's one and only mode, exactly as
+    # it always would have. Every *other* 'failed'/'rejected' error_code
+    # (an engine that DOES have configurable options but refused/did not
+    # confirm a specific requested one -- e.g. the live
+    # claude_acp_option_value_unsupported:model this fix targets) is a real
+    # requested-and-refused value and must still gate the turn.
+    _BENIGN_CONFIGURATION_ERROR_CODES = frozenset({"engine_does_not_support_configuration_options"})
+
+    def _reject_if_configuration_failed(self, task_id: str, revision_id: str | None) -> None:
+        """Raise a :class:`~..portable.errors.PortableError` carrying the
+        engine's own refusal reason when ``revision_id`` has settled into
+        'failed' or 'rejected' with a real (non-benign) error_code --
+        never for any other state (see :meth:`_open_coordinator_session`'s
+        call site for why 'selected' must never be gated here). The raised
+        error's ``code`` is that revision's own recorded ``error_code``
+        verbatim (falling back to a generic code only if none was
+        recorded), so it reaches the client through the exact same
+        ``data.reason`` channel ``acp.production_runtime.RouteUnresolved``
+        already uses for ``no_configuration_revision``/
+        ``instruction_delivery_unqualified`` -- never a silent
+        substitution."""
+        if not revision_id:
+            return
+        with self._store.connection() as db:
+            row = db.execute(
+                "SELECT state, error_code FROM configuration_revisions WHERE id=?", (revision_id,),
+            ).fetchone()
+        if row is None or row["state"] not in ("failed", "rejected"):
+            return
+        if row["error_code"] in self._BENIGN_CONFIGURATION_ERROR_CODES:
+            return
+        raise PortableError(
+            category=PortableErrorCategory.VALIDATION,
+            code=row["error_code"] or "configuration_apply_failed",
+            remediation="This task's configuration revision was refused by the engine; select and apply a "
+                        "working configuration before starting a new turn.",
+            retry_eligible=False,
+        )
 
     # -- T022: fresh-generation capsule/role/tool-schema delivery --------
 

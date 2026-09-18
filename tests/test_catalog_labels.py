@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import pytest
 
-from cortex_runtime.catalog.labels import build_label, disambiguate_labels
+from cortex_runtime.catalog.labels import (
+    ENGINE_SHORT_NAMES, build_connection_label, build_label, disambiguate_labels, engine_short_name,
+)
 from cortex_runtime.portable.errors import PortableError
 
 
@@ -217,6 +219,21 @@ def test_label_model_component_keeps_dots_and_url_like_text_but_strips_invisible
 def test_label_model_component_strips_combining_mark_after_ascii_base():
     label = build_label("codex-acp", "Work", "módel-a")
     assert "́" not in label
+
+
+def test_engine_short_name_maps_known_adapter_ids_to_their_short_name():
+    assert engine_short_name("claude-agent-acp") == "claude"
+    assert engine_short_name("codex-acp") == "codex"
+    # An unmapped engine id falls back to itself, never a fabricated guess.
+    assert engine_short_name("future-engine-acp") == "future-engine-acp"
+    # SUPPORTED_ENGINES connections.model has exactly these two engines --
+    # a new engine must only need one entry here (T035 review requirement).
+    assert set(ENGINE_SHORT_NAMES) == {"claude-agent-acp", "codex-acp"}
+
+
+def test_build_connection_label_uses_the_short_engine_name_not_the_adapter_package_id():
+    assert build_connection_label("claude-agent-acp", "claude-sonnet-live") == "claude · claude-sonnet-live"
+    assert build_connection_label("codex-acp", "codex-luna") == "codex · codex-luna"
 
 
 def test_disambiguate_labels_appends_route_suffix_only_on_collision():

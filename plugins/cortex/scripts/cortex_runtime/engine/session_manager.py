@@ -18,7 +18,7 @@ from ..portable.engine_contract import EngineCapability, EngineEvent, EngineEven
 from ..portable.errors import PortableError, PortableErrorCategory
 from ..portable.identity import new_id
 from . import stub_handlers
-from .client import EngineClient, EngineProtocolError, EngineTimeout, EngineTransportClosed
+from .client import EngineClient, EngineProtocolError, EngineTransportClosed
 from .correlation import CorrelationTables
 from .fs_bridge import FsBridge, FsBridgeError
 from .mcp_bridge import build_mcp_servers
@@ -30,6 +30,22 @@ from .terminal_bridge import TerminalBridge, TerminalBridgeError
 
 DEFAULT_INITIALIZE_TIMEOUT = 15.0
 DEFAULT_CALL_TIMEOUT = 30.0
+# T035 FINDING-06: ``session/prompt`` (the actual model turn) is issued with
+# NO wall-clock timeout at all -- explicit product decision, not an
+# oversight: at the `high`/`xhigh`/`max`/`ultra` reasoning efforts this
+# product targets there is no duration that is safely "too long" for a
+# turn that is genuinely still running, so no clock ever ends one. Only
+# three things end a prompt turn: the engine actually returns a result,
+# the transport reaches EOF / the process exits (both real, already-
+# detected events -- see ``EngineTransportClosed`` and
+# ``process.EngineProcess``), or the user cancels (``cancel_wire``). A
+# consequence accepted deliberately: an engine that stays alive with an
+# open transport but never responds and never streams anything will hang
+# this call until cancelled -- there is no other way out of that state.
+# ``DEFAULT_CALL_TIMEOUT`` remains the short RPC bound for every call that
+# is NOT a model turn (``initialize``, ``session/new``,
+# ``session/set_config_option``, ``session/request_permission``), each of
+# which has a real bounded server-side response and stays timeout-bound.
 DEFAULT_UPDATE_QUEUE_MAXSIZE = 2048
 DEFAULT_ABANDON_WAIT_SECONDS = 5.0
 # T014 review (LOW): a bound on concurrent agent-to-client request handler
@@ -472,6 +488,18 @@ class EngineSessionManager:
         self._process.logs.observe("session_created", portable_session_id=portable_session_id)
         return portable_session_id
 
+    def observed_config_options(self, engine_session_id: str) -> list | None:
+        """T035: the raw ``configOptions`` array this engine session's own
+        ``session/new`` response actually returned (``[]`` if it returned
+        none at all), or ``None`` if ``engine_session_id`` is not a known
+        session. Purely additive read accessor -- lets a caller (see
+        ``delegation.live_adapters``) feed a real, live-observed
+        ``configOptions`` payload into ``catalog.discovery`` automatically
+        after a real session opens, instead of only ever through the
+        ``cortex_acp_setup.py record-observation`` manual fallback. Never
+        itself sends anything to the engine."""
+        return self._session_config_options.get(engine_session_id)
+
     def configure(self, engine_session_id: str, revision) -> str:
         wire_session_id = self.correlation.wire_session_id(engine_session_id)
         if wire_session_id is None:
@@ -630,10 +658,19 @@ class EngineSessionManager:
 
             def run_call():
                 try:
+                    # T035 FINDING-06: no timeout -- see the module-level
+                    # comment above ``DEFAULT_UPDATE_QUEUE_MAXSIZE`` for why
+                    # a model turn is never clock-bound. ``timeout=None``
+                    # makes ``EngineClient.call`` wait on its response event
+                    # indefinitely (``threading.Event.wait(None)``); the only
+                    # ways this resolves are a real result, transport EOF/
+                    # process exit (``EngineTransportClosed``), or
+                    # ``cancel_wire`` eliciting a ``cancelled`` result from
+                    # the engine.
                     outcome["result"] = self._client.call(
                         "session/prompt",
                         dict(sessionId=wire_session_id, prompt=[dict(type="text", text=prompt)]),
-                        timeout=self._call_timeout,
+                        timeout=None,
                     )
                 except Exception as exc:  # noqa: BLE001 - surfaced to the generator's caller below
                     outcome["error"] = exc
@@ -659,9 +696,15 @@ class EngineSessionManager:
                 if isinstance(error, EngineTransportClosed):
                     yield EngineEvent(kind=EngineEventKind.ERROR, error_message="transport_eof")
                     return
-                if isinstance(error, EngineTimeout):
-                    yield EngineEvent(kind=EngineEventKind.ERROR, error_message="timeout_alive")
-                    return
+                # T035 FINDING-06: no ``EngineTimeout`` branch here -- the
+                # call above is issued with ``timeout=None`` and can never
+                # time out, so classifying a prompt turn as ``timeout_alive``
+                # would be a lie. ``timeout_alive`` still legitimately
+                # applies elsewhere (``negotiate``/``create_session``/
+                # ``configure``/permission requests, all still bound by
+                # ``self._call_timeout``, and the engine-liveness observation
+                # in ``client.EngineClient.call`` / ``process.EngineProcess``
+                # that those calls feed) -- just never for this one.
                 raise error
             result = outcome.get("result") or {}
             stop_reason = _STOP_REASON_FROM_WIRE.get(result.get("stopReason"))
@@ -828,7 +871,20 @@ class EngineSessionManager:
         if kind == "usage_update":
             usage = update.get("usage") or {}
             values = {key: value for key, value in usage.items() if isinstance(value, int)}
-            return EngineEvent(kind=EngineEventKind.USAGE_UPDATE, usage_basis=UsageBasis.ENGINE_REPORTED, usage_values=values)
+            # T035 FINDING-03 fix: a `usage_update` notification whose
+            # `usage` payload yields no recognized integer token field
+            # (empty dict, or only non-integer/unrecognized keys) is not
+            # actually reporting anything -- claiming ENGINE_REPORTED here
+            # regardless previously let a call with zero extracted tokens
+            # through as if the engine had honestly reported usage,
+            # defeating observability.usage's own "unknown is never zero"
+            # protection (see that module's docstring) for exactly the
+            # calls it exists to protect. Only a non-empty `values` is ever
+            # ENGINE_REPORTED; otherwise this is UNKNOWN, identical to the
+            # "no usage_update event at all" case (delegation.live_adapters
+            # .EngineSessionManagerAdapter.prompt's own basis=None default).
+            basis = UsageBasis.ENGINE_REPORTED if values else UsageBasis.UNKNOWN
+            return EngineEvent(kind=EngineEventKind.USAGE_UPDATE, usage_basis=basis, usage_values=values)
         if kind == "user_message_chunk":
             # History replay (session/load): never translated into an
             # EngineEvent, never queued, never re-delivered as a user

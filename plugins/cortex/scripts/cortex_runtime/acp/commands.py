@@ -6,10 +6,17 @@ Four commands, never a separate configuration implementation of their own:
 
 - ``/cortex-status`` -- report the current/pending model + thought_level and
   connection setup state; no input, never mutates anything.
-- ``/cortex-model <route label or route id>`` -- select a model; routed
-  through the identical ``ConfigurationService.ui_select``/``command_set``
-  call a ``session/set_config_option`` for ``configId="model"`` would make
-  (see ``acp.agent``'s shared selection helper).
+- ``/cortex-model <route label or route id>`` -- select a whole route
+  (provider+model together) by its disambiguated label or route id, across
+  every configured provider; routed through
+  ``acp.agent.Agent._apply_route_selection``, which reaches the identical
+  ``ConfigurationService.ui_select``/``command_set`` call a
+  ``session/set_config_option`` request would make. T035: this is *not*
+  the same as the protocol-level ``configId="model"`` axis (see
+  ``config_options.py``), which is always scoped to whichever ``provider``
+  is currently selected -- a client that wants provider+model as two
+  separate choices uses ``session/set_config_option`` with
+  ``configId="provider"`` then ``configId="model"`` instead.
 - ``/cortex-effort <value>`` -- select a ``thought_level`` value; same
   sharing for ``configId="thought_level"``.
 - ``/cortex-setup`` -- static onboarding guidance naming connection setup

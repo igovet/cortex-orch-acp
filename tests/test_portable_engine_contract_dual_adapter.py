@@ -62,7 +62,7 @@ ADAPTERS = (
         config_options_path=FIXTURES / "codex_acp_config_options.json",
         own_effort_param="thought_level", own_effort_value="medium", own_effort_evidence_key="reasoning_effort",
         foreign_mode_value="acceptEdits",  # a claude-agent-acp-only mode value
-        expected_delivery_qualification=DeliveryQualification.UNQUALIFIED,
+        expected_delivery_qualification=DeliveryQualification.QUALIFIED,
         expected_tier="automatic",
     ),
     AdapterFixture(
@@ -151,10 +151,14 @@ def test_session_lifecycle_through_real_production_adapter(tmp_path, fixture):
 @pytest.mark.parametrize("fixture", ADAPTERS, ids=_ids)
 def test_generations_tier_and_instruction_delivery_qualification_are_this_engines_own(fixture):
     """Generations/deliveries: each engine's own recovery tier and
-    instruction-delivery qualification -- never forced to match the other
-    engine's (they are legitimately different by design: codex-acp's own
-    leading-block channel is UNQUALIFIED, claude-agent-acp's own
-    session/new channel is QUALIFIED, per T026's fresh dist evidence)."""
+    instruction-delivery qualification -- computed independently per
+    engine, not forced to match. Both happen to be QUALIFIED today, but
+    via distinct evidence: claude-agent-acp's own session/new channel is
+    QUALIFIED via T026's static dist evidence (a confirmed system-role
+    channel), while codex-acp's own leading-block channel is QUALIFIED via
+    T035's live-run evidence (see ``CodexAcp1_12Delivery``'s own
+    docstring) -- neither one's qualification is inferred from the
+    other's."""
     tier = delegation_generations.tier_for(fixture.engine, fixture.version)
     assert tier.tier == fixture.expected_tier
 

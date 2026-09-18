@@ -38,6 +38,14 @@ class ProvenanceSource(str, Enum):
     MANUAL = "manual"
     ENGINE_REPORT = "engine_report"
     OBSERVATION = "observation"
+    # T035: a static, in-repo seed value (see catalog.model_seed) -- never
+    # an engine's own advertisement. Distinct from DISCOVERY (a real,
+    # parsed session/new configOptions payload) so acp.config_options can
+    # label a seeded model "seeded", never "confirmed"/"observed"; a real
+    # DISCOVERY-sourced snapshot for the same connection always supersedes
+    # it (catalog.discovery.selectable_entries_from_snapshots only ever
+    # falls back to a seed when no real snapshot file exists yet).
+    SEED = "seed"
 
 
 _CONFIRMATION_SOURCES = (ProvenanceSource.ENGINE_REPORT, ProvenanceSource.OBSERVATION)

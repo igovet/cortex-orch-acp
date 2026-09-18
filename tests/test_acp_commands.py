@@ -172,7 +172,7 @@ def test_cortex_model_command_reaches_same_configuration_service_outcome(tmp_pat
     result2 = agent2._session_new(dict(cwd=str(project), mcpServers=[]))
     session_id2 = result2["sessionId"]
     store2, task_id2 = _bootstrap(agent2, session_id2)
-    agent2._session_set_config_option(43, dict(sessionId=session_id2, configId="model", value=route_id))
+    agent2._session_set_config_option(43, dict(sessionId=session_id2, configId="model", value=entries[0].route.model))
     service2 = ConfigurationService(store2)
     history2 = service2.history(task_id2)
     assert history2[0]["route_id"] == history[0]["route_id"]

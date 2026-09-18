@@ -120,14 +120,37 @@ def test_collaboration_mode_category_is_never_folded_into_route_parameters():
     assert "mode" in params  # the real "mode" category is still captured
 
 
+def _values_for(supported_parameters, name):
+    return {value for pname, value in supported_parameters if pname == name}
+
+
 def test_boolean_parameters_included_only_when_present():
     claude = _connection("cn_" + "a" * 12, "claude-agent-acp", "Work")
     observation = parse_observation(_load_options("claude_agent_acp_config_options.json"))
     snapshot = build_catalog({claude.id: claude}, {claude.id: observation})
     entry = snapshot.entries[0]
-    params = dict(entry.route.supported_parameters)
-    assert params["fast"] == "false"
-    assert "effort" in params and "mode" in params
+    names = {name for name, _value in entry.route.supported_parameters}
+    assert _values_for(entry.route.supported_parameters, "fast") == {"false"}
+    assert "mode" in names
+    # Keyed by the shared ACP category ("thought_level"), never
+    # claude-agent-acp's own adapter-specific option id ("effort") --
+    # codex-acp's own "reasoning_effort" id shares this same category, and
+    # only the shared name lets acp.config_options.build_thought_level_option
+    # find either engine's effort choice by one name.
+    assert "effort" not in names
+    assert _values_for(entry.route.supported_parameters, "thought_level") == {"default", "medium"}
+
+
+def test_thought_level_parameter_is_keyed_by_category_not_adapter_id():
+    codex = _connection("cn_" + "a" * 12, "codex-acp", "Work")
+    observation = parse_observation(_load_options("codex_acp_config_options.json"))
+    snapshot = build_catalog({codex.id: codex}, {codex.id: observation})
+    entry = snapshot.entries[0]
+    names = {name for name, _value in entry.route.supported_parameters}
+    assert "reasoning_effort" not in names
+    # Every advertised effort value is captured, not only the momentarily
+    # current one -- otherwise "high"/"low" could never be selected.
+    assert _values_for(entry.route.supported_parameters, "thought_level") == {"none", "medium"}
 
 
 def test_manual_declaration_is_unverified_and_requires_no_parameters():
@@ -170,3 +193,37 @@ def test_build_catalog_never_crosses_connections_for_labels():
     snapshot = build_catalog({first.id: first, second.id: second}, observations)
     for entry in snapshot.entries:
         assert entry.connection_id == entry.route.connection_id
+
+
+# --- T035: static seed provenance is distinct from a real observation ------
+
+def test_seeded_connection_promotes_seed_provenance_not_discovery():
+    from cortex_runtime.catalog import discovery
+    from cortex_runtime.catalog.evidence import ProvenanceSource
+
+    record = _connection("cn_" + "a" * 12, "codex-acp", "Work")
+    observation = discovery.seed_observation("codex-acp")
+    assert observation is not None
+    snapshot = build_catalog(
+        {record.id: record}, {record.id: observation}, seeded_connection_ids=frozenset({record.id}))
+    assert snapshot.entries
+    for entry in snapshot.entries:
+        provenance = entry.evidence.get(Fact.CATALOG_OBTAINED)
+        assert provenance.source == ProvenanceSource.SEED
+        assert provenance.source != ProvenanceSource.DISCOVERY
+
+
+def test_unlisted_engine_has_no_seed():
+    from cortex_runtime.catalog import discovery
+    assert discovery.seed_observation("no-such-engine") is None
+
+
+def test_real_observation_still_uses_discovery_not_seed_provenance():
+    from cortex_runtime.catalog.evidence import ProvenanceSource
+
+    record = _connection("cn_" + "b" * 12, "codex-acp", "Work")
+    observation = parse_observation(_load_options("codex_acp_config_options.json"))
+    snapshot = build_catalog({record.id: record}, {record.id: observation})
+    for entry in snapshot.entries:
+        provenance = entry.evidence.get(Fact.CATALOG_OBTAINED)
+        assert provenance.source == ProvenanceSource.DISCOVERY

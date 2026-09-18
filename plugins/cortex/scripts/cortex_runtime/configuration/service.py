@@ -433,7 +433,23 @@ class ConfigurationService:
         if current is not None:
             return current
         history = self.history(task_id)
-        return history[-1] if history else None
+        latest = history[-1] if history else None
+        # A 'rejected' latest revision is never returned here: per the
+        # ``configuration_revisions_guard`` trigger, 'rejected' is only ever
+        # reached directly from 'selected' (a ceiling-narrowing violation
+        # caught in ``_start_pending_next_use``, *before* this revision was
+        # ever actually used to open a session) -- it is never a legitimate
+        # "route to open a session against". 'failed', by contrast, is only
+        # ever reached from 'pending_next_use'/'indeterminate', i.e. this
+        # revision's route *was* already used for a real, already-open
+        # session -- the engine just rejected/never confirmed the
+        # configuration change itself (see
+        # ``ConfigurationServiceSnapshotSource.snapshot``'s repeated calls
+        # across a coordinator's later continuations, which must keep
+        # resolving that same still-in-use route).
+        if latest is not None and latest["state"] == "rejected":
+            return None
+        return latest
 
     def history(self, task_id: str) -> tuple[dict[str, object], ...]:
         with self.store.connection() as db:

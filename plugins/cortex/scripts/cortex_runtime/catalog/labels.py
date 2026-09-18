@@ -65,6 +65,27 @@ _PUNYCODE_LABEL = re.compile(r"(^|\.)xn--", re.IGNORECASE)
 # --- allowlist (the real gate) ----------------------------------------------
 _ALLOWED_PUNCTUATION = frozenset("-_()#+&,'")
 
+# T035 (F4 review round): the ``provider`` control's own label is
+# ``<short engine name> · <connection name>`` -- never the raw adapter
+# package id (``claude-agent-acp``/``codex-acp``), which is an
+# implementation detail the user never typed and should not have to read;
+# the *connection name* is what actually tells them which account is in
+# use, so it is never abbreviated. This is the one place a new engine's
+# short name is added; ``build_connection_label`` is the only caller. An
+# engine id with no entry here falls back to itself unchanged -- never a
+# fabricated guess -- so nothing breaks before this map is updated.
+ENGINE_SHORT_NAMES: dict[str, str] = {
+    "claude-agent-acp": "claude",
+    "codex-acp": "codex",
+}
+
+
+def engine_short_name(engine: str) -> str:
+    """The short, user-facing engine name (e.g. ``claude``, ``codex``) for
+    display -- never used for engine identity/storage/routing, which always
+    keeps the full adapter package id (see :data:`ENGINE_SHORT_NAMES`)."""
+    return ENGINE_SHORT_NAMES.get(engine, engine)
+
 
 def _unsafe_label(field_name: str, value: str) -> PortableError:
     return PortableError(
@@ -186,6 +207,31 @@ def _sanitize_component(value: str, field_name: str) -> str:
     if len(cleaned) > _MAX_COMPONENT:
         cleaned = cleaned[: _MAX_COMPONENT - 1].rstrip() + _ELLIPSIS
     return cleaned
+
+
+def build_connection_label(engine: str, connection_name: str) -> str:
+    """``<short engine name> · Connection name`` -- the ``provider``
+    control's own label (T035; F4): the short, user-facing engine name
+    (:func:`engine_short_name`, e.g. ``claude``/``codex``), never the raw
+    adapter package id -- same sanitization/safety rules as
+    :func:`build_label`, just without a model component."""
+    assert_safe_connection_name(connection_name)
+    engine_component = _sanitize_component(engine_short_name(engine), "engine")
+    name_component = _sanitize_component(connection_name, "connection_name")
+    label = _SEPARATOR.join((engine_component, name_component))
+    if len(label) > _MAX_TOTAL:
+        label = label[: _MAX_TOTAL - 1].rstrip() + _ELLIPSIS
+    return label
+
+
+def build_model_label(model: str) -> str:
+    """Just ``Model`` -- the ``model`` control's own label (T035): the
+    ``provider`` control already shows ``Engine · Connection name``, so the
+    ``model`` control must not repeat that prefix (repeating it made every
+    entry render identically once the host truncated the shared prefix --
+    see FINDING-04). Sanitized/length-capped the same as ``build_label``'s
+    model component."""
+    return _sanitize_component(model, "model")
 
 
 def build_label(engine: str, connection_name: str, model: str) -> str:

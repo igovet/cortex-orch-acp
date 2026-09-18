@@ -1,6 +1,7 @@
 """Tests for scripts/cortex_acp_setup.py (T031 first-run setup)."""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -122,6 +123,119 @@ def test_pin_route_rejects_unqualified_gateway_connection(tmp_path, monkeypatch)
                                  auth_mode=AuthMode.GATEWAY)
     with pytest.raises(SystemExit):
         setup.pin_route(connection_id=conn["connection_id"], model="gpt-5-codex")
+
+
+_OBSERVED_CONFIG_OPTIONS = [
+    dict(id="model", name="Model", category="model", type="select", currentValue="gpt-5-codex",
+         options=[dict(value="gpt-5-codex", name="GPT-5 Codex")]),
+    dict(id="reasoning_effort", name="Reasoning effort", category="thought_level", type="select",
+         currentValue="medium",
+         options=[dict(value="low", name="Low"), dict(value="medium", name="Medium"), dict(value="high", name="High")]),
+]
+
+
+def _write_observed_config_options(tmp_path, options=None):
+    path = tmp_path / "observed-config-options.json"
+    path.write_text(json.dumps(options if options is not None else _OBSERVED_CONFIG_OPTIONS), encoding="utf-8")
+    return path
+
+
+def test_record_observation_persists_real_supported_parameters(tmp_path, monkeypatch):
+    """The core gap this closes: ``pin-route`` alone can never persist a
+    real ``thought_level``/``reasoning_effort`` choice (its
+    ``ManualDeclaration`` is only ever accepted with no parameters -- see
+    ``catalog.discovery.build_catalog``'s "unsupported_manual_parameters"
+    guard). ``record-observation`` goes through a real ``Observation``
+    instead, so the saved route's ``supported_parameters`` are the
+    engine's actual advertised effort values."""
+    _isolate(tmp_path, monkeypatch)
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_bytes(b"fake-key")
+    conn = setup.add_connection(
+        name="work", engine="codex-acp", provider="openai", auth_mode=AuthMode.API_KEY,
+        key_kind="openai_api_key", api_key_reader=lambda: secret_file.read_bytes(),
+    )
+    pinned = setup.pin_route(connection_id=conn["connection_id"], model="gpt-5-codex")
+    assert pinned["route_id"]
+
+    options_file = _write_observed_config_options(tmp_path)
+    result = setup.record_observation(
+        connection_id=conn["connection_id"], model="gpt-5-codex", config_options_file=options_file,
+    )
+    assert ["thought_level", "low"] in result["supported_parameters"]
+    assert ["thought_level", "medium"] in result["supported_parameters"]
+    assert ["thought_level", "high"] in result["supported_parameters"]
+    # A real observation produces a different (richer) route id than the
+    # empty-parameters ManualDeclaration pin-route left behind, and it is
+    # now the pinned default.
+    assert result["route_id"] != pinned["route_id"]
+    report = setup.status()
+    assert report["pinned_route"] == result["route_id"]
+
+
+def test_record_observation_rerun_same_inputs_is_idempotent(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_bytes(b"fake-key")
+    conn = setup.add_connection(
+        name="work", engine="codex-acp", provider="openai", auth_mode=AuthMode.API_KEY,
+        key_kind="openai_api_key", api_key_reader=lambda: secret_file.read_bytes(),
+    )
+    options_file = _write_observed_config_options(tmp_path)
+    first = setup.record_observation(connection_id=conn["connection_id"], model="gpt-5-codex", config_options_file=options_file)
+    second = setup.record_observation(connection_id=conn["connection_id"], model="gpt-5-codex", config_options_file=options_file)
+    assert first["route_id"] == second["route_id"]
+
+
+def test_record_observation_unknown_connection_fails_closed(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    options_file = _write_observed_config_options(tmp_path)
+    with pytest.raises(SystemExit):
+        setup.record_observation(connection_id="cn_doesnotexist", model="gpt-5-codex", config_options_file=options_file)
+
+
+def test_record_observation_rejects_model_the_engine_never_advertised(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_bytes(b"fake-key")
+    conn = setup.add_connection(
+        name="work", engine="codex-acp", provider="openai", auth_mode=AuthMode.API_KEY,
+        key_kind="openai_api_key", api_key_reader=lambda: secret_file.read_bytes(),
+    )
+    options_file = _write_observed_config_options(tmp_path)
+    with pytest.raises(SystemExit):
+        setup.record_observation(connection_id=conn["connection_id"], model="a-model-never-advertised", config_options_file=options_file)
+
+
+def test_record_observation_rejects_malformed_config_options(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_bytes(b"fake-key")
+    conn = setup.add_connection(
+        name="work", engine="codex-acp", provider="openai", auth_mode=AuthMode.API_KEY,
+        key_kind="openai_api_key", api_key_reader=lambda: secret_file.read_bytes(),
+    )
+    options_file = _write_observed_config_options(tmp_path, options=[dict(id="model")])  # missing required fields
+    with pytest.raises(SystemExit):
+        setup.record_observation(connection_id=conn["connection_id"], model="gpt-5-codex", config_options_file=options_file)
+
+
+def test_record_observation_cli_round_trip(tmp_path, monkeypatch, capsys):
+    _isolate(tmp_path, monkeypatch)
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_bytes(b"fake-key")
+    conn = setup.add_connection(
+        name="work", engine="codex-acp", provider="openai", auth_mode=AuthMode.API_KEY,
+        key_kind="openai_api_key", api_key_reader=lambda: secret_file.read_bytes(),
+    )
+    options_file = _write_observed_config_options(tmp_path)
+    exit_code = setup.main([
+        "record-observation", "--connection", conn["connection_id"], "--model", "gpt-5-codex",
+        "--config-options-file", str(options_file),
+    ])
+    assert exit_code == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert ["thought_level", "high"] in printed["supported_parameters"]
 
 
 def test_status_on_untouched_environment_reports_no_connections(tmp_path, monkeypatch):

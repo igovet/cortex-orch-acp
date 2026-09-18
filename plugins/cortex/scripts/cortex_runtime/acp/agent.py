@@ -43,7 +43,7 @@ from .transport import StdioTransport, EOF
 from . import replay_store as acp_replay_store
 from ..bootstrap import append_source_event, bootstrap_task
 from ..catalog.model import CatalogEntry
-from ..configuration.resolution import ConfigurationInputs
+from ..configuration.resolution import ConfigurationInputs, resolve_saved_route
 from ..configuration.service import ConfigurationService
 from ..configuration import store as configuration_store
 from ..connections import registry as connection_registry
@@ -459,13 +459,26 @@ class Agent:
         """The last explicit ``/cortex-model``/``set_config_option`` choice
         persisted as the *normal* T008 user-default route/parameters (see
         ``_apply_pre_task_selection``) -- plain ``route_id``/``parameters``
-        fields, never a Cortex-specific "pending" marker -- or ``None``."""
+        fields, never a Cortex-specific "pending" marker -- or ``None``.
+
+        ``connection_id``/``model`` (T035 FINDING-05 fix): the saved
+        choice's stable identity, persisted alongside ``route_id`` by every
+        write site since this fix -- ``None``/``None`` for a defaults.json
+        written before this fix existed, which
+        ``_propose_pending_selection_for_new_task`` recovers one-time via
+        ``catalog.store.find_route_identity`` and then persists forward."""
         defaults = configuration_store.read_user_defaults(self.environ)["defaults"]
         route_id = defaults.get("route_id") if isinstance(defaults, dict) else None
         if not isinstance(route_id, str) or not route_id:
             return None
         parameters = defaults.get("parameters") if isinstance(defaults, dict) else None
-        return dict(route_id=route_id, parameters=parameters if isinstance(parameters, dict) else {})
+        connection_id = defaults.get("route_connection_id") if isinstance(defaults, dict) else None
+        model = defaults.get("route_model") if isinstance(defaults, dict) else None
+        return dict(
+            route_id=route_id, parameters=parameters if isinstance(parameters, dict) else {},
+            connection_id=connection_id if isinstance(connection_id, str) and connection_id else None,
+            model=model if isinstance(model, str) and model else None,
+        )
 
     def _current_selection_context(self, store, session):
         task_id = session["task_id"]
@@ -534,11 +547,11 @@ class Agent:
         return self._default_language_from_user_defaults()
 
     def _config_options_for_session(self, session, store):
-        entries, _connections = self._selectable_entries_and_connections()
+        entries, connections = self._selectable_entries_and_connections()
         current = self._current_selection_context(store, session)
         language_current = self._current_language_for_session(store, session)
         return acp_config_options.build_config_options(
-            entries, current, include_language=True, language_current=language_current)
+            entries, connections, current, include_language=True, language_current=language_current)
 
     def _connection_setup_summary(self, connections):
         if not connections:
@@ -721,23 +734,100 @@ class Agent:
         Cortex-proposed revision at all, and the skip is reported via
         ``observe`` (never silent) -- see the F-minor "unavailable route"
         review finding.
+
+        T035 FINDING-05 fix: a catalog refresh mints a new route id for an
+        unchanged (connection, model) pair whenever the observed
+        ``supported_parameters`` differ (e.g. per-model thought levels were
+        recorded) -- see ``catalog.discovery.route_fingerprint``. The saved
+        route is therefore resolved by its stable ``(connection_id, model)``
+        identity (``configuration.resolution.resolve_saved_route``) against
+        *this call's own freshly-read* ``entries``, never by a remembered
+        id alone; a legacy ``defaults.json`` with no saved identity (written
+        before this fix) is recovered once via
+        ``catalog.store.find_route_identity`` scanning still-cached older
+        snapshots. Either way, once resolved, the fresh ``route_id`` (and
+        identity, for the legacy-recovery case) is written back to
+        ``defaults.json`` so this never has to re-resolve on the next task.
+        A connection+model match failure (the model was genuinely
+        withdrawn) still fails closed, but now names the model instead of
+        the opaque ``pending_selection_route_unavailable``.
         """
         pending = session.get("pending_selection") or session.get("default_selection")
         session["pending_selection"] = None
         session["default_selection"] = None
         if pending is None:
             return
-        entries, _connections = self._selectable_entries_and_connections()
-        catalog_entry = next((entry for entry in entries if entry.route.id == pending["route_id"]), None)
+        entries, connections = self._selectable_entries_and_connections()
+        catalog_entry, withdrawn_model = self._resolve_pending_route(entries, connections, pending)
         if catalog_entry is None:
-            observe(self.environ, "session/prompt", "pending_selection_route_unavailable")
+            if withdrawn_model is not None:
+                observe(self.environ, "session/prompt", f"pending_selection_model_withdrawn:{withdrawn_model}")
+            else:
+                observe(self.environ, "session/prompt", "pending_selection_route_unavailable")
             return
+        if catalog_entry.route.id != pending.get("route_id"):
+            self._persist_migrated_default(catalog_entry, pending.get("parameters") or {})
+            observe(self.environ, "session/prompt", "pending_selection_route_migrated")
         service = ConfigurationService(store)
         inputs = ConfigurationInputs(route=catalog_entry.route, parameters=pending.get("parameters") or {})
         try:
             service.ui_select(task_id, catalog_entry, inputs, 0, session["owner_epoch"])
         except PortableError:
             observe(self.environ, "session/prompt", "pending_selection_apply_failed")
+
+    def _resolve_pending_route(self, entries, connections, pending):
+        """T035 FINDING-05: resolve a saved pre-task selection (``pending``,
+        the ``route_id``/``connection_id``/``model``/``parameters`` shape
+        ``_default_selection_from_user_defaults``/``_apply_pre_task_selection``
+        both produce) against ``entries`` -- this call's own freshly-read
+        selectable catalog entries.
+
+        Returns ``(catalog_entry, withdrawn_model)``: on success
+        ``withdrawn_model`` is ``None`` (whether or not the id actually
+        changed -- the caller compares ``catalog_entry.route.id`` against
+        ``pending["route_id"]`` itself to decide whether a migration write
+        is needed); on failure ``catalog_entry`` is ``None`` and
+        ``withdrawn_model`` names the model that disappeared, or is itself
+        ``None`` when there was not even a recoverable identity to check
+        (an unknown connection/route with nothing to name).
+
+        See ``configuration.resolution.resolve_saved_route`` for the actual
+        identity match (connection_id + model, never model alone) --
+        exactly what makes a different model or a different connection
+        impossible to land on here by construction.
+        """
+        connection_id, model = pending.get("connection_id"), pending.get("model")
+        if not connection_id or not model:
+            # Legacy defaults.json (written before this fix): try the
+            # direct id match first (still the common case -- most saved
+            # defaults are not yet stale), then a one-time reverse lookup
+            # of this route id's own identity from older cached snapshots.
+            route_id = pending.get("route_id")
+            direct = next((entry for entry in entries if entry.route.id == route_id), None)
+            if direct is not None:
+                return direct, None
+            from ..catalog import store as catalog_store
+
+            identity = catalog_store.find_route_identity(connections.keys(), route_id, self.environ)
+            if identity is None:
+                return None, None
+            connection_id, model = identity
+        resolution = resolve_saved_route(entries, connection_id, model)
+        return resolution.entry, resolution.withdrawn_model
+
+    def _persist_migrated_default(self, catalog_entry, parameters) -> None:
+        """T035 FINDING-05: record a saved default's migration to its
+        current route id (a refresh minted a new one for the same
+        connection+model) -- self-healing ``defaults.json`` so the next
+        task resolves directly by id again, without needing
+        :meth:`_resolve_pending_route`'s fallback path at all."""
+        current = configuration_store.read_user_defaults(self.environ)
+        defaults = dict(current["defaults"])
+        defaults["route_id"] = catalog_entry.route.id
+        defaults["route_connection_id"] = catalog_entry.connection_id
+        defaults["route_model"] = catalog_entry.route.model
+        defaults["parameters"] = dict(parameters)
+        configuration_store.write_user_defaults(defaults, current["ceiling"], self.environ)
 
     def _run_command_body(self, request_id, session_id, session, recognized, cancel_event):
         command_id, argument = recognized
@@ -778,7 +868,13 @@ class Agent:
 
         # cortex-model / cortex-effort / cortex-language: share the exact
         # selection code path with session/set_config_option (see
-        # _apply_config_selection).
+        # _apply_config_selection) -- except cortex-model, which (T035)
+        # still resolves a *whole* route (any provider, by route id or
+        # disambiguated label; see resolve_model_argument) rather than a
+        # provider-scoped model name, and so goes through
+        # _apply_route_selection (provider+model bundled) instead of the
+        # single-axis config_id='model' path session/set_config_option uses.
+        route_selection_entry = None
         if command_id == acp_commands.CORTEX_LANGUAGE:
             config_id = acp_config_options.LANGUAGE_OPTION_ID
             resolved = acp_commands.resolve_language_argument(argument)
@@ -793,6 +889,7 @@ class Agent:
                 if resolved is None:
                     _reply(f"No matching model for {argument!r}. Use /cortex-status to see the current options.")
                     return
+                route_selection_entry = next(entry for entry in entries if entry.route.id == resolved)
             else:
                 config_id = acp_config_options.THOUGHT_LEVEL_OPTION_ID
                 resolved = argument.strip() or None
@@ -815,7 +912,10 @@ class Agent:
                 return
 
         with session["lock"]:
-            accepted, options, error = self._apply_config_selection(store, session, config_id, "value_id", resolved)
+            if route_selection_entry is not None:
+                accepted, options, error = self._apply_route_selection(store, session, route_selection_entry)
+            else:
+                accepted, options, error = self._apply_config_selection(store, session, config_id, "value_id", resolved)
         if not accepted:
             self.transport.send_notification(protocol.config_option_update(session_id, options))
             message = error.message if error is not None else "The selection could not be applied."
@@ -966,8 +1066,23 @@ class Agent:
         return RpcError(-32001, error.remediation, data=data)
 
     def _apply_config_selection(self, store, session, config_id, kind, value):
-        """Shared by ``session/set_config_option`` and the ``/cortex-model``/
-        ``/cortex-effort`` commands (see module + ``commands.py`` docstrings).
+        """Shared by ``session/set_config_option`` and the ``/cortex-effort``/
+        ``/cortex-language`` commands (see module + ``commands.py``
+        docstrings; ``/cortex-model`` instead goes through
+        ``_apply_route_selection`` -- see ``_run_command_body``).
+
+        T035: ``provider``, ``model``, and ``thought_level`` are three
+        independent configIds (see ``acp.config_options`` module
+        docstring) -- never one fused route select. Changing ``provider``
+        necessarily changes engine and so may change the valid model/effort
+        sets: the same model *name* is kept if the new provider happens to
+        offer it too, otherwise the new provider's own first model is used
+        explicitly (never a silently-kept invalid model, never a silently
+        dropped selection) and ``thought_level`` is always reset (a
+        different route's supported values may differ entirely). Changing
+        ``model`` (within the current provider) also resets
+        ``thought_level`` for the same reason; only changing
+        ``thought_level`` itself preserves the current provider+model.
 
         Returns ``(accepted: bool, options: list[dict], error: RpcError | None)``.
         ``options`` is the *new* full configOptions list on success, or the
@@ -989,28 +1104,59 @@ class Agent:
         if config_id == acp_config_options.LANGUAGE_OPTION_ID:
             # T020: an independent settings axis -- never a route/parameter
             # override, never gated on model selectability, and (unlike
-            # model/thought_level) never revision-gated against
+            # provider/model/thought_level) never revision-gated against
             # ConfigurationService history: this value lives on a single
             # durable task_orchestration column (or, pre-task, the same
-            # plain T008 user-default row model/thought_level use), so
-            # there is no concurrent-revision race to detect/reject here.
+            # plain T008 user-default row provider/model/thought_level use),
+            # so there is no concurrent-revision race to detect/reject here.
             return self._apply_language_selection(store, session, value)
 
-        if config_id == acp_config_options.MODEL_OPTION_ID:
-            target_route_id = value
-            parameters_override: dict = {}
-        else:
-            model_option = next((item for item in previous_options if item["id"] == acp_config_options.MODEL_OPTION_ID), None)
-            target_route_id = model_option["currentValue"] if model_option is not None else None
-            parameters_override = {config_id: value}
+        provider_option = next(
+            (item for item in previous_options if item["id"] == acp_config_options.PROVIDER_OPTION_ID), None)
+        current_connection_id = provider_option["currentValue"] if provider_option is not None else None
+        model_option = next(
+            (item for item in previous_options if item["id"] == acp_config_options.MODEL_OPTION_ID), None)
+        current_model = model_option["currentValue"] if model_option is not None else None
+
         entries, _connections = self._selectable_entries_and_connections()
-        catalog_entry = next((entry for entry in entries if entry.route.id == target_route_id), None)
-        if catalog_entry is None:
+
+        if config_id == acp_config_options.PROVIDER_OPTION_ID:
+            provider_entries = [entry for entry in entries if entry.connection_id == value]
+            target_entry = next((entry for entry in provider_entries if entry.route.model == current_model), None)
+            if target_entry is None and provider_entries:
+                target_entry = provider_entries[0]
+            parameters_override: dict = {}
+        elif config_id == acp_config_options.MODEL_OPTION_ID:
+            target_entry = next(
+                (entry for entry in entries
+                 if entry.connection_id == current_connection_id and entry.route.model == value), None)
+            parameters_override = {}
+        else:
+            target_entry = next(
+                (entry for entry in entries
+                 if entry.connection_id == current_connection_id and entry.route.model == current_model), None)
+            parameters_override = {config_id: value}
+
+        if target_entry is None:
             return False, previous_options, RpcError(-32602, "The selected route is no longer selectable.")
 
         if session["task_id"] is None:
-            return self._apply_pre_task_selection(store, session, catalog_entry, parameters_override, config_id)
-        return self._apply_mid_task_selection(store, session, catalog_entry, parameters_override)
+            return self._apply_pre_task_selection(store, session, target_entry, parameters_override, config_id)
+        return self._apply_mid_task_selection(store, session, target_entry, parameters_override)
+
+    def _apply_route_selection(self, store, session, catalog_entry):
+        """Select a whole route (provider+model together) in one step --
+        used only by the ``/cortex-model`` command's free-text resolution
+        (which matches by full route id/label across *every* provider, see
+        ``resolve_model_argument``/``_run_command_body``), unlike the
+        protocol-level ``configId='model'`` axis, which is always scoped to
+        the currently selected provider (see ``_apply_config_selection``).
+        Always resets ``thought_level``, exactly like a protocol-level
+        provider/model change."""
+        if session["task_id"] is None:
+            return self._apply_pre_task_selection(
+                store, session, catalog_entry, {}, acp_config_options.MODEL_OPTION_ID)
+        return self._apply_mid_task_selection(store, session, catalog_entry, {})
 
     def _apply_pre_task_selection(self, store, session, catalog_entry, parameters_override, config_id):
         """Persist the choice as the *normal* T008 user-default route/parameters
@@ -1021,16 +1167,23 @@ class Agent:
         ``_propose_pending_selection_for_new_task``)."""
         current = configuration_store.read_user_defaults(self.environ)
         defaults = dict(current["defaults"])
-        if config_id == acp_config_options.MODEL_OPTION_ID:
+        if config_id in (acp_config_options.PROVIDER_OPTION_ID, acp_config_options.MODEL_OPTION_ID):
             merged_parameters: dict = {}
         else:
             previous = session.get("pending_selection") or session.get("default_selection") or {}
             merged_parameters = dict(previous.get("parameters") or {})
             merged_parameters.update(parameters_override)
         defaults["route_id"] = catalog_entry.route.id
+        # T035 FINDING-05: the stable identity alongside the fingerprint id
+        # -- see resolve_saved_route/_resolve_pending_route.
+        defaults["route_connection_id"] = catalog_entry.connection_id
+        defaults["route_model"] = catalog_entry.route.model
         defaults["parameters"] = merged_parameters
         configuration_store.write_user_defaults(defaults, current["ceiling"], self.environ)
-        session["pending_selection"] = dict(route_id=catalog_entry.route.id, parameters=merged_parameters)
+        session["pending_selection"] = dict(
+            route_id=catalog_entry.route.id, parameters=merged_parameters,
+            connection_id=catalog_entry.connection_id, model=catalog_entry.route.model,
+        )
         session["default_selection"] = None
         return True, self._config_options_for_session(session, store), None
 

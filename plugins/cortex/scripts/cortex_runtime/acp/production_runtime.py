@@ -65,7 +65,19 @@ class ProductionOrchestratingRuntime:
         def factory(task_id):
             from ..connections import registry as connection_registry
 
-            current = configuration_service.current(task_id)
+            # T035 fix: a fresh task's first coordinator open must resolve
+            # the same not-yet-active revision
+            # ``ConfigurationServiceSnapshotSource.snapshot`` (T031) already
+            # tolerates -- ``EngineSessionManagerAdapter.open`` calls this
+            # factory *before* its own post-open ``ConfigurationService
+            # .apply()`` call, which is the only thing that ever promotes a
+            # 'selected' revision to 'active'. Requiring an already-active
+            # revision here made that promotion unreachable: open() needed
+            # an active revision, and a revision only becomes active after
+            # open() succeeds. ``current_or_latest`` grants the same
+            # tolerance as the snapshot source (and, like it, never returns
+            # a 'rejected'/'failed' revision -- see its own docstring).
+            current = configuration_service.current_or_latest(task_id)
             if current is None:
                 raise RouteUnresolved("no_configuration_revision")
             state = connection_registry.read_registry(self._environ)
@@ -106,6 +118,19 @@ class ProductionOrchestratingRuntime:
         adapter = EngineSessionManagerAdapter(
             self._connection_record_factory(configuration_service), lambda task_id: str(project),
             environ=self._environ,
+            # T035 fix: production was never passing ``store=`` here, so
+            # every ``self._store is not None``-gated feature in
+            # ``EngineSessionManagerAdapter.open`` (T017 capacity tracking,
+            # T022 context-generation/delivery tracking, T023 effective-
+            # context recording, T027 dispatch authorization/route audit,
+            # and -- the specific cause a fresh task could never actually
+            # confirm its configuration even once the connection-record
+            # factory above stopped deadlocking -- T031's own
+            # ``_maybe_apply_configuration``) was silently inert in
+            # production. Every one of those already only activates when a
+            # store is supplied (see ``EngineSessionManagerAdapter``'s own
+            # docstring); this project's real store is exactly that.
+            store=store,
             workspace_resolver=lambda binding_id, launch: (
                 workspace_provisioner.root_for(binding_id) or str(project)
             ),

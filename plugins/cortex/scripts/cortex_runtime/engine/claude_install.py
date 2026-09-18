@@ -236,6 +236,29 @@ def verify_install(install: ClaudeAcpInstall, environ: dict[str, str] | None = N
             field="package_version",
         )
 
+    # `adapter_entry` must be the exact file package.json's own "bin" field
+    # names as the launchable entry point (`dist/index.js`, per this
+    # module's docstring) -- never merely *some* file under the package
+    # (e.g. `dist/acp-agent.js`, a library module `dist/index.js` imports
+    # that never calls its own `runAcp()` and so, launched directly, exits
+    # immediately without ever reading stdin: node prints nothing, binds no
+    # ACP handlers, and the very first `initialize` call sees its transport
+    # closed). Checked against every declared bin entry (not just one key)
+    # since a caller is never required to know the package's exact bin
+    # key up front.
+    bin_field = package_data.get("bin") if isinstance(package_data, dict) else None
+    bin_targets = bin_field.values() if isinstance(bin_field, dict) else ()
+    package_dir = package_json.parent
+    resolved_bin_paths = {package_dir.joinpath(target).resolve() for target in bin_targets if isinstance(target, str)}
+    if resolved_bin_paths and adapter_entry not in resolved_bin_paths:
+        raise _validation_error(
+            "engine_install_drifted",
+            f"adapter_entry {adapter_entry} is not the launchable entry point package.json's own "
+            f"\"bin\" field names ({sorted(str(p) for p in resolved_bin_paths)}); launching any other "
+            "file under this package is never trusted even if its own pinned hash matches.",
+            field="adapter_entry",
+        )
+
     return install
 
 

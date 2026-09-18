@@ -295,6 +295,16 @@ class FakeEngine:
 
         if behavior == "hang":
             return  # never reply, never emit -- caller times out
+        if behavior == "silent_until_cancel":
+            # T035 FINDING-06: models an engine that is genuinely silent --
+            # no session/update notifications at all -- for as long as the
+            # caller lets it run, and is unstuck *only* by session/cancel
+            # (never by any clock). Used to prove cancellation is a real,
+            # prompt way out of an otherwise-unbounded prompt turn now that
+            # session/prompt itself carries no timeout.
+            cancel_event.wait()
+            _result(request_id, dict(stopReason="cancelled"))
+            return
         if behavior == "one_update_then_hang":
             # Emit exactly the first scripted update, then behave exactly
             # like "hang": never reply, never emit again -- lets a test

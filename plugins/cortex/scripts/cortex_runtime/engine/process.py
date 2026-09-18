@@ -19,8 +19,17 @@ import uuid
 
 from ..connections.environment import build_process_env
 from ..portable.errors import PortableError, PortableErrorCategory
-from . import codex_install
+from . import claude_install, codex_install
 from .logs import EngineLogs
+
+# Per-engine (verify_install, launch_command_for) pair -- codex-acp's own
+# verified install additionally pins CODEX_PATH/NO_BROWSER below; a
+# claude-agent-acp install carries no equivalent second binary to pin (see
+# claude_install's own module docstring).
+_INSTALL_MODULE_BY_ENGINE = {
+    "codex-acp": codex_install,
+    "claude-agent-acp": claude_install,
+}
 
 TERMINATE_GRACE_SECONDS = 5.0
 
@@ -48,19 +57,22 @@ class EngineProcess:
     """
 
     def __init__(self, record, cwd, *, environ=None, install=None):
-        """``install`` -- a :class:`~.codex_install.CodexAcpInstall`, or
-        ``None`` -- is only ever meaningful for ``record.engine ==
-        "codex-acp"``. When supplied it is re-verified fresh (see
-        ``codex_install.verify_install``) before anything is launched:
-        ``record.launch_command`` must already equal
-        ``codex_install.launch_command_for`` of the *verified* install (a
-        mismatch is refused, never silently overridden), and the verified
-        install's ``bundled_codex_binary`` is pinned into this process's own
-        environment as ``CODEX_PATH`` (with ``NO_BROWSER=1``) via
-        ``build_process_env``'s ``pinned_engine_vars``. Omitting ``install``
-        for a codex-acp connection launches exactly as any other engine
-        (no pinned vars, no install verification) -- callers that need the
-        pinned-install guarantee must pass it explicitly.
+        """``install`` -- a :class:`~.codex_install.CodexAcpInstall` for a
+        ``codex-acp`` record, a :class:`~.claude_install.ClaudeAcpInstall`
+        for a ``claude-agent-acp`` record, or ``None`` -- is re-verified
+        fresh (see that module's own ``verify_install``) before anything is
+        launched when supplied: ``record.launch_command`` must already
+        equal that engine's own ``launch_command_for`` of the *verified*
+        install (a mismatch is refused, never silently overridden). A
+        codex-acp install's verified ``bundled_codex_binary`` is
+        additionally pinned into this process's own environment as
+        ``CODEX_PATH`` (with ``NO_BROWSER=1``) via ``build_process_env``'s
+        ``pinned_engine_vars``; claude-agent-acp pins no equivalent second
+        binary. Omitting ``install`` launches exactly as before this
+        integrity check existed (no verification) -- callers that need the
+        pinned-install guarantee must pass it explicitly (see
+        ``engine.install_resolution.resolve_verified_install``, the
+        production entry point for both engines).
         """
         if record.launch_command is None:
             raise _validation_error(
@@ -84,25 +96,27 @@ class EngineProcess:
             )
         pinned_engine_vars = None
         if install is not None:
-            if record.engine != "codex-acp":
+            install_module = _INSTALL_MODULE_BY_ENGINE.get(record.engine)
+            if install_module is None:
                 raise _validation_error(
                     "engine_install_not_applicable",
-                    "An install record is only meaningful for engine 'codex-acp'.",
+                    f"An install record is not meaningful for engine {record.engine!r}.",
                     field="install",
                 )
-            verified_install = codex_install.verify_install(install, environ)
-            expected_command = codex_install.launch_command_for(verified_install)
+            verified_install = install_module.verify_install(install, environ)
+            expected_command = install_module.launch_command_for(verified_install)
             if tuple(command) != tuple(expected_command):
                 raise _validation_error(
                     "engine_launch_command_mismatch",
-                    "record.launch_command does not match codex_install.launch_command_for() of the "
+                    "record.launch_command does not match this engine's own launch_command_for() of the "
                     "verified install; a launch command is never silently substituted.",
                     field="launch_command",
                 )
-            pinned_engine_vars = {
-                "CODEX_PATH": verified_install.bundled_codex_binary,
-                "NO_BROWSER": "1",
-            }
+            if record.engine == "codex-acp":
+                pinned_engine_vars = {
+                    "CODEX_PATH": verified_install.bundled_codex_binary,
+                    "NO_BROWSER": "1",
+                }
 
         base_env = dict(os.environ if environ is None else environ)
         # Pass this connection's own resolution ``environ`` through

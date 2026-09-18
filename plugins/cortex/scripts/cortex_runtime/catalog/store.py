@@ -306,6 +306,46 @@ def task_route_history(store, task_id: str) -> tuple[dict[str, object], ...]:
     )
 
 
+def find_route_identity(
+    connection_ids, route_id: str, environ: dict[str, str] | None = None
+) -> tuple[str, str] | None:
+    """Best-effort reverse lookup of a stale route id's ``(connection_id,
+    model)`` identity by scanning every still-cached snapshot file for each
+    of ``connection_ids`` (never the live/current snapshot only -- a
+    snapshot file is never rewritten or deleted, see :func:`save_snapshot`,
+    so a route id that ever existed is still found here even after a later
+    refresh minted a new id for the same model).
+
+    Used only as a one-time migration path for a ``defaults.json`` written
+    before this identity (``route_connection_id``/``route_model``) was
+    stored alongside ``route_id`` -- a fresh write always carries both, and
+    a caller with them never needs this scan (see
+    ``configuration.resolution.resolve_saved_route``). Returns ``None`` if
+    no cached snapshot for any of ``connection_ids`` ever contained this
+    route id.
+    """
+    for connection_id in connection_ids:
+        try:
+            paths = sorted(_snapshot_dir(connection_id, environ).glob("cs_*.json"))
+        except OSError:
+            continue
+        for path in paths:
+            data = registry.read_owner_file(path)
+            if data is None:
+                continue
+            try:
+                raw = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                continue
+            for item in raw.get("entries", []) if isinstance(raw, dict) else []:
+                route = item.get("route") if isinstance(item, dict) else None
+                if isinstance(route, dict) and route.get("id") == route_id:
+                    model = route.get("model")
+                    if isinstance(model, str) and model:
+                        return connection_id, model
+    return None
+
+
 def is_stale(route_id: str, snapshot: CatalogSnapshot) -> bool:
     """True when ``route_id`` no longer appears anywhere in ``snapshot``.
 

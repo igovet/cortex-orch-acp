@@ -88,7 +88,7 @@ def test_propose_creates_first_selected_revision(tmp_path):
     store, task, epoch = _bootstrap(tmp_path)
     service = ConfigurationService(store)
     entry = _entry()
-    inputs = ConfigurationInputs(route=entry.route, parameters={"effort": "high"})
+    inputs = ConfigurationInputs(route=entry.route, parameters={"thought_level": "high"})
     row = service.propose(task, entry, inputs, expected_revision=0, current_epoch=epoch)
     assert row["state"] == "selected" and row["revision"] == 1
     assert service.history(task)[0]["id"] == row["id"]
@@ -137,7 +137,7 @@ def test_propose_rejects_unsupported_dependent_setting_bundle_atomically(tmp_pat
     store, task, epoch = _bootstrap(tmp_path)
     service = ConfigurationService(store)
     entry = _entry(effort="high")
-    inputs = ConfigurationInputs(route=entry.route, parameters={"effort": "extreme"})
+    inputs = ConfigurationInputs(route=entry.route, parameters={"thought_level": "extreme"})
     with pytest.raises(PortableError) as excinfo:
         service.propose(task, entry, inputs, expected_revision=0, current_epoch=epoch)
     assert excinfo.value.code == "unsupported_dependent_setting"
@@ -150,12 +150,12 @@ def test_propose_rederives_dependent_settings_on_route_change(tmp_path):
     connection = _connection()
     first = _entry(connection=connection, effort="high", model="model-a")
     second = _entry(connection=connection, effort="high", model="model-b")
-    inputs_1 = ConfigurationInputs(route=first.route, parameters={"effort": "high", "custom": "kept"})
+    inputs_1 = ConfigurationInputs(route=first.route, parameters={"thought_level": "high", "custom": "kept"})
     row1 = service.propose(task, first, inputs_1, expected_revision=0, current_epoch=epoch)
     # The new route only supports effort=high too, so proposing with no
     # explicit effort must not silently inherit anything incompatible; and
     # switching routes still re-derives rather than blindly carrying settings.
-    inputs_2 = ConfigurationInputs(route=second.route, parameters={"effort": "high"})
+    inputs_2 = ConfigurationInputs(route=second.route, parameters={"thought_level": "high"})
     row2 = service.propose(task, second, inputs_2, expected_revision=row1["revision"], current_epoch=epoch)
     assert row2["parameters"]["custom"] == "kept"  # engine-agnostic field still merged from task layer
     assert row2["route_id"] == second.route.id
@@ -179,7 +179,7 @@ def test_apply_failed_keeps_prior_active_with_no_mixed_state_via_current(tmp_pat
     entry = _entry()
     first_row = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={}), expected_revision=0, current_epoch=epoch)
     service.apply(task, first_row["id"], _FakeAdapter("confirm"), "es_" + "a" * 12, epoch)
-    second_row = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"effort": "high"}), expected_revision=1, current_epoch=epoch)
+    second_row = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "high"}), expected_revision=1, current_epoch=epoch)
     result = service.apply(task, second_row["id"], _FakeAdapter("reject"), "es_" + "a" * 12, epoch)
     assert result["state"] == "failed"
     current = service.current(task)
@@ -199,7 +199,7 @@ def test_apply_exception_marks_indeterminate_and_reconcile_both_ways(tmp_path):
     assert reconciled["state"] == "active"
     assert service.current(task)["id"] == row["id"]
 
-    row2 = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"effort": "high"}), expected_revision=1, current_epoch=epoch)
+    row2 = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "high"}), expected_revision=1, current_epoch=epoch)
     service.apply(task, row2["id"], _FakeAdapter("raise"), "es_" + "a" * 12, epoch)
     reconciled_failed = service.reconcile(task, row2["id"], epoch, failed=True, error_code="engine_timeout")
     assert reconciled_failed["state"] == "failed"
@@ -219,13 +219,13 @@ def test_mid_run_revision_snapshot_is_retained_after_a_later_revision_becomes_ac
     store, task, epoch = _bootstrap(tmp_path)
     service = ConfigurationService(store)
     entry = _entry()
-    row1 = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"effort": "high"}), expected_revision=0, current_epoch=epoch)
+    row1 = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "high"}), expected_revision=0, current_epoch=epoch)
     service.apply(task, row1["id"], _FakeAdapter("confirm"), "es_" + "a" * 12, epoch)
-    row2 = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"effort": "high"}), expected_revision=1, current_epoch=epoch)
+    row2 = service.propose(task, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "high"}), expected_revision=1, current_epoch=epoch)
     service.apply(task, row2["id"], _FakeAdapter("confirm"), "es_" + "a" * 12, epoch)
     history = {row["id"]: row for row in service.history(task)}
     assert history[row1["id"]]["revision"] == 1  # snapshot never changes retroactively
-    assert history[row1["id"]]["parameters"] == {"effort": "high"}
+    assert history[row1["id"]]["parameters"] == {"thought_level": "high"}
     assert service.current(task)["id"] == row2["id"]
 
 
@@ -358,12 +358,12 @@ def test_ui_select_and_command_set_parity(tmp_path):
     inputs = ConfigurationInputs(route=entry.route, parameters={})
     ui_error = None
     try:
-        service.ui_select(task, entry, ConfigurationInputs(route=entry.route, parameters={"effort": "bogus"}), expected_revision=0, current_epoch=epoch)
+        service.ui_select(task, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "bogus"}), expected_revision=0, current_epoch=epoch)
     except PortableError as error:
         ui_error = error.code
     command_error = None
     try:
-        service.command_set(task, entry, ConfigurationInputs(route=entry.route, parameters={"effort": "bogus"}), expected_revision=0, current_epoch=epoch)
+        service.command_set(task, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "bogus"}), expected_revision=0, current_epoch=epoch)
     except PortableError as error:
         command_error = error.code
     assert ui_error == command_error == "unsupported_dependent_setting"

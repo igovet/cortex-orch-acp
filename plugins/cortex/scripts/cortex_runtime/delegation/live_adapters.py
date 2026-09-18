@@ -323,6 +323,38 @@ class EngineSessionManagerAdapter:
         # interval (up to 1s) under real scheduling contention.
         self._activity_cond = threading.Condition()
 
+    def _resolve_launch_install(self, record):
+        """T035 follow-up ("a connection's launch command is trusted
+        verbatim, never re-verified"): before a real engine is spawned,
+        re-derive and re-verify this connection's own install straight from
+        its recorded ``launch_command`` (see
+        ``engine.install_resolution.resolve_verified_install``) -- for
+        *both* engines, not just codex-acp (previously this constructor
+        never passed ``install`` at all, for either engine, so
+        ``EngineProcess`` never cross-checked ``launch_command`` against
+        anything; that gap is exactly how a wrong entry point -- a library
+        module with no stdin listener instead of the package's own declared
+        ``bin`` -- reached live testing).
+
+        A ``launch_command`` that is not install-shaped at all (this
+        repository's own fake-engine test doubles, whose launch_command is
+        never the exact ``(node_binary, adapter_entry)`` a real pinned
+        install produces) is reported as
+        ``install_resolution.InstallUnresolvable`` and launches unchanged
+        (``None``, the same as every caller before this check existed).
+        Anything install-shaped that then fails verification (hash drift,
+        wrong declared entry point, untrusted location) is **not** caught
+        here -- it propagates out of :meth:`open` and refuses the launch,
+        unlike ``catalog.refresh``'s own non-fatal use of the same
+        resolver, which only ever supplements an already-successful
+        refresh."""
+        from ..engine import install_resolution
+
+        try:
+            return install_resolution.resolve_verified_install(record, self._environ)
+        except install_resolution.InstallUnresolvable:
+            return None
+
     def open(self, workspace_binding_id: str, launch: Mapping[str, object], instructions: str) -> str:
         from ..engine.session_manager import EngineSessionManager
 
@@ -382,6 +414,8 @@ class EngineSessionManagerAdapter:
             mapping = _option_mapping_for(record.engine)
             if mapping is not None:
                 manager_kwargs["option_mapping"] = mapping
+        if "install" not in manager_kwargs:
+            manager_kwargs["install"] = self._resolve_launch_install(record)
         manager = EngineSessionManager(
             record, workspace_root, environ=self._environ,
             channel_credentials=channel_credentials,
@@ -398,6 +432,12 @@ class EngineSessionManagerAdapter:
         session_id = manager.create_session(
             task_id, launch.get("assignment_id") or attempt_id, session_new_meta=session_new_meta,
         )
+        # T035 (additive, best-effort): feed this real session's own
+        # actually-observed configOptions into catalog.discovery, so the
+        # provider/model/thought_level selects reflect the engine's real
+        # advertised set from here on -- never blocking/failing the engine
+        # session itself on a capture problem.
+        self._capture_catalog_observation(manager, record, session_id)
         with self._lock:
             self._managers[attempt_id] = manager
             self._sessions[attempt_id] = session_id
@@ -417,6 +457,33 @@ class EngineSessionManagerAdapter:
             )
             self._maybe_apply_configuration(manager, task_id, session_id, launch)
         return session_id
+
+    def _capture_catalog_observation(self, manager, record, session_id) -> None:
+        """T035: parse this real session's own observed ``configOptions``
+        (see ``EngineSessionManager.observed_config_options``) and persist
+        it as a real, ``DISCOVERY``-provenance catalog snapshot for
+        ``record`` -- exactly the same ``parse_observation``/
+        ``build_catalog``/``catalog_store.save_snapshot`` path
+        ``cortex_acp_setup.py record_observation`` already uses by hand,
+        just triggered automatically by a real session opening. Best
+        effort only: a missing/empty/malformed payload, or any failure
+        here, is silently ignored -- the catalog simply keeps its previous
+        (possibly seeded, see ``catalog.model_seed``) state until a valid
+        observation is captured, and engine session creation itself must
+        never fail because of this.
+        """
+        try:
+            raw = manager.observed_config_options(session_id)
+            if not raw:
+                return
+            from ..catalog import discovery as catalog_discovery
+            from ..catalog import store as catalog_store
+
+            observation = catalog_discovery.parse_observation(raw)
+            snapshot = catalog_discovery.build_catalog({record.id: record}, {record.id: observation})
+            catalog_store.save_snapshot(snapshot, self._environ)
+        except Exception:
+            pass
 
     def _maybe_apply_configuration(self, manager, task_id, session_id, launch) -> None:
         """T031: the real ``ConfigurationService.apply()`` wiring T008

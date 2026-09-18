@@ -78,7 +78,7 @@ qualified without live proof (T035+).
 
 | Engine | Version | Channel | Qualification |
 |---|---|---|---|
-| codex-acp | 1.12.0 (pinned) | leading `session/prompt` text block (`engine.codex_adapter_acp.build_first_prompt_blocks`) | `unqualified` -- a mechanism exists and is exercised, but nothing on the wire distinguishes it from ordinary user text |
+| codex-acp | 1.12.0 (pinned) | nonce-tagged leading `session/prompt` text block (`engine.codex_adapter_acp.build_first_prompt_blocks`) | `qualified` -- T035 live evidence (real run, `gpt-5.6-luna`: instructions followed, a guessed closing tag rejected); see `docs/acp/codex-acp-adapter.md`'s "Instruction delivery" section |
 | claude-agent-acp | any | none | `unsupported` -- no static evidence of any delivery mechanism yet |
 | anything else | any | none | `unsupported` (unknown engine/version never guesses a qualification) |
 

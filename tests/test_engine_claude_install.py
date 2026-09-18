@@ -83,6 +83,67 @@ def test_verify_install_rejects_package_json_hash_drift(tmp_path):
     assert excinfo.value.code == "engine_install_drifted"
 
 
+def test_verify_install_rejects_adapter_entry_not_named_by_package_bin(tmp_path):
+    """Regression (T035 live handshake): a real claude-agent-acp package.json
+    declares ``"bin": {"claude-agent-acp": "dist/index.js"}`` -- the only
+    file that ever calls the SDK's own ``runAcp()`` and attaches ACP
+    handlers to stdin/stdout. A sibling library module under the same
+    package (e.g. ``dist/acp-agent.js``, which ``dist/index.js`` imports
+    ``runAcp`` from but never itself invokes at module scope) is a plain
+    ES module: launched directly with node it does nothing and exits
+    immediately -- the transport closes before the very first
+    ``initialize`` call ever gets a reply. ``verify_install`` must reject
+    an ``adapter_entry`` that is not the file package.json's own ``bin``
+    field names, even though such a file can otherwise pass every other
+    check here (absolute, non-symlinked, trusted location, matching its
+    own pinned hash)."""
+    root = tmp_path / "install"
+    root.mkdir()
+    node_binary = root / "node"
+    _write_executable(node_binary)
+    dist = root / "dist"
+    dist.mkdir()
+    real_entry = dist / "index.js"
+    real_entry.write_text("#!/usr/bin/env node\n// fixture entry that calls runAcp()\n", encoding="utf-8")
+    library_module = dist / "acp-agent.js"
+    library_module.write_text("// fixture library module: only exports runAcp, never calls it\n", encoding="utf-8")
+    package_json = root / "package.json"
+    package_json.write_text(
+        json.dumps({
+            "name": "@agentclientprotocol/claude-agent-acp",
+            "version": "0.78.0",
+            "bin": {"claude-agent-acp": "dist/index.js"},
+        }),
+        encoding="utf-8",
+    )
+    install = ClaudeAcpInstall(
+        node_binary=str(node_binary),
+        adapter_entry=str(library_module),
+        package_json=str(package_json),
+        package_version="0.78.0",
+        package_json_sha256=_sha256(package_json),
+        adapter_entry_sha256=_sha256(library_module),
+    )
+    environ = _environ(tmp_path)
+    with pytest.raises(PortableError) as excinfo:
+        verify_install(install, environ)
+    assert excinfo.value.code == "engine_install_drifted"
+    assert excinfo.value.field == "adapter_entry"
+
+    # The correct entry point (matching package.json's own "bin" field)
+    # is accepted.
+    correct_install = ClaudeAcpInstall(
+        node_binary=str(node_binary),
+        adapter_entry=str(real_entry),
+        package_json=str(package_json),
+        package_version="0.78.0",
+        package_json_sha256=_sha256(package_json),
+        adapter_entry_sha256=_sha256(real_entry),
+    )
+    verified = verify_install(correct_install, environ)
+    assert verified is correct_install
+
+
 def test_verify_install_rejects_package_version_mismatch(tmp_path):
     root, node_binary, adapter_entry, package_json = _make_install_dir(tmp_path, version="0.78.0")
     install = ClaudeAcpInstall(

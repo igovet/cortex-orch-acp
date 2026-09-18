@@ -10,7 +10,7 @@ route's parameters are never inherited from a previous route's revision.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..catalog.model import CatalogEntry
 from ..portable.errors import PortableError, PortableErrorCategory
@@ -78,6 +78,54 @@ def rederive_on_route_change(
     if previous_route_id is None or previous_route_id == new_route.id:
         return dict(parameters)
     return {key: value for key, value in parameters.items() if key not in _DEPENDENT_SETTING_NAMES}
+
+
+@dataclass(frozen=True)
+class SavedRouteResolution:
+    """The outcome of :func:`resolve_saved_route`.
+
+    Exactly one of ``entry``/``withdrawn_model``/``unresolved`` is
+    meaningful: ``entry`` on success, ``withdrawn_model`` when the saved
+    (connection, model) identity was recovered but that model is no longer
+    offered on that connection (fail closed, naming it), ``unresolved``
+    (always ``True`` then) when there was not even enough saved identity to
+    look anything up.
+    """
+
+    entry: CatalogEntry | None
+    withdrawn_model: str | None = None
+    unresolved: bool = False
+
+
+def resolve_saved_route(
+    entries: Sequence[CatalogEntry], connection_id: str | None, model: str | None,
+) -> SavedRouteResolution:
+    """Resolve a saved default by its stable ``(connection_id, model)``
+    identity against ``entries`` -- the *current* catalog's selectable
+    entries -- instead of by its old fingerprint ``route_id``.
+
+    This is what makes a saved default survive a catalog refresh that
+    mints new route ids for an unchanged (connection, model) pair (see
+    ``catalog.discovery.route_fingerprint`` -- a route id also folds in
+    ``supported_parameters``, so a refresh that only changes *those* for
+    the same model still changes the id every time): the caller always
+    re-derives ``entries`` from the live catalog first, then this function
+    matches on identity alone and returns whatever id that entry's route
+    presently has.
+
+    By construction this can never resolve to a different model or a
+    different connection than ``connection_id``/``model`` name: every
+    candidate is filtered on both fields *before* any entry is returned
+    (see ``tests/test_catalog_refresh.py``'s near-miss assertions).
+    """
+    if not connection_id or not model:
+        return SavedRouteResolution(entry=None, unresolved=True)
+    entry = next(
+        (e for e in entries if e.connection_id == connection_id and e.route.model == model), None
+    )
+    if entry is not None:
+        return SavedRouteResolution(entry=entry)
+    return SavedRouteResolution(entry=None, withdrawn_model=model)
 
 
 def validate_dependent_settings(entry: CatalogEntry, parameters: Mapping[str, Any]) -> None:

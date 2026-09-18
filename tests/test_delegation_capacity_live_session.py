@@ -80,7 +80,7 @@ def test_unconfirmed_termination_stays_ambiguous_and_holds_capacity(tmp_path):
     (``EngineProcess.wait_exited(0)``) to report "not yet confirmed exited",
     the same signal a real expired grace window with a still-alive process
     would produce (see ``test_engine_session_manager.py``'s
-    ``test_timeout_alive_is_distinct_from_process_exit`` for the underlying
+    ``test_process_exit_is_distinct_from_timeout`` for the underlying
     real-process semantics this reuses)."""
     store, task_id = _task(tmp_path)
     engine_dir = tmp_path / "engine"
