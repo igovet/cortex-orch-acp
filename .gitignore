@@ -1,6 +1,7 @@
 # Local Codex configuration and runtime state must never be released.
 .codex/
 .cortex/
+.claude/
 
 # Local Python bytecode from the bundled plugin.
 __pycache__/

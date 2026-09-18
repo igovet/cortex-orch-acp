@@ -108,9 +108,10 @@ A single scrubbing path, reused by every free-text sink in this runtime:
   new `EngineLogs.stderr_line()` (replacing the old direct
   `stderr.append_line` call in `engine.process.EngineProcess._drain_stderr`
   — a launched engine's own stderr is untrusted text).
-- `gateway.diagnostics.safe_value()` — previously only stripped
-  *characters* (`_SAFE`), which does not redact a credential-shaped value
-  using only allowed characters; it now scrubs *patterns* first.
+- `observability.redact.scrub_text()`/`scrub_mapping()` — the T033
+  Codex-plugin-harness-era `gateway.diagnostics.safe_value()` it replaced only
+  stripped *characters* (`_SAFE`), which does not redact a credential-shaped
+  value using only allowed characters; this scrubs *patterns* first.
 
 `scrub_text`: URL userinfo (`scheme://user:pass@host` →
 `scheme://[REDACTED]@host`), `Bearer`/`token`-prefixed credentials,
@@ -139,7 +140,7 @@ instead (see `delegation.evidence`), never a content body.
 Fixture-based tests (`tests/test_observability_redaction.py`) plant a
 secret in an engine's environment, a launch argv, report/source text, and
 simulated engine stderr, and assert nothing leaks through `EngineLogs`,
-`gateway.diagnostics.safe_value`, or `store.py`'s `create_task` redaction
+`observability.redact`, or `store.py`'s `create_task` redaction
 path, while ids/status/error-category fields survive unredacted.
 
 ## 5. Missing telemetry never gates execution

@@ -51,7 +51,7 @@ ORCHESTRATION_COST_SIGNALS = (
 )
 AVAILABILITY_KINDS = (
     "codebase_memory",
-    "gateway_provider",
+    "engine_provider",
     "dependencies",
     "git",
     "host_capabilities",

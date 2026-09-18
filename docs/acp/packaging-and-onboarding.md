@@ -22,29 +22,25 @@ anything at launch, and writes only JSON-RPC lines to stdout (every log
 goes to stderr) — see `tests/test_acp_entrypoint_packaging.py` and
 `tests/test_acp_stdout_purity.py`.
 
-### What is Codex-plugin-harness-era and is being removed (T033)
+### What was Codex-plugin-harness-era and was removed (T033)
 
-A few *other* files in this repository still belong to the older Codex
-plugin/gateway harness, not the ACP path above, and are scheduled for
-removal at T033 — this page never builds on them:
-
-- `plugins/cortex/scripts/cortex_gateway.py`, `cortex_runtime/gateway/`,
-  `cortex_runtime/runtime/` (the owned MITM/gateway supervisor).
-- `cortex_runtime/marketplace_bootstrap.py` — pip-installs
-  `requirements.lock` into `~/.codex/cortex/deps/<digest>` unless
-  `CORTEX_DEPENDENCY_DIR` is already set. This is **only** reached by the
-  gateway/MCP launch path, never by `cortex_acp.py`; it is the one place
-  in this repository that does install third-party packages at (gateway)
-  launch time, and it is exactly the behavior this task's entrypoint
-  fail-closed check (below) was designed to *not* need or extend.
-- `plugins/cortex/scripts/cortex_setup.py` — registers the 23 packaged
-  agent profiles into Codex's own native `~/.codex/agents` registry
-  (`CODEX_HOME`); this is Codex-CLI-native onboarding, unrelated to ACP
-  client registration. `scripts/cortex_acp_setup.py` (this task) is a
-  distinct, ACP-only script and does not call it.
-- `plugins/cortex/hooks/`, `host_source.py`, `.codex-plugin/` marketplace
-  wiring, legacy `.codex` paths, and the `phase2_cli_*`/`phase2` scripts
-  and tests.
+The Codex plugin/gateway harness was a separate, older way to run Cortex —
+not the ACP path above — and was deleted entirely at T033: the owned
+MITM/gateway supervisor (`cortex_gateway.py`, `cortex_runtime/gateway/`,
+`cortex_runtime/runtime/`), the pinned-dependency pip installer
+(`marketplace_bootstrap.py`), native Codex profile registration into
+`~/.codex/agents` (`cortex_setup.py`), the local lifecycle hook dispatcher
+(`plugins/cortex/hooks/`, `cortex_hook.py`, `cortex_runtime/hooks.py`), the
+Codex-native unchanneled MCP `_meta` identity adapter (`codex_adapter.py`),
+the native-index host-source reader (`host_source.py`), the
+`.codex-plugin/` Marketplace manifest (the package identity/stamp now
+lives in `plugins/cortex/package-identity.json` instead), and the
+`phase2_cli_*`/`phase2` external-evaluator preparation scripts and tests.
+This page never built on any of them, and `cortex_acp.py` never did
+either — see `tests/test_engine_codex_no_native_fallback.py` for the
+still-enforced boundary that no `cortex_runtime/engine/*.py` module may
+import any of these names. Real Codex CLI/Desktop live-product claims for
+the remaining native surface stay pending T035–T037.
 
 ### Launch-time environment variables
 
@@ -52,8 +48,8 @@ removal at T033 — this page never builds on them:
 |---|---|---|
 | `HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | `cortex_runtime.connections.registry` and everything built on it (connections, catalog, user defaults) | ACP path, stays |
 | `CORTEX_OBSERVATION_DIR` | `cortex_runtime.observability`/diagnostics logging sink | ACP path, stays |
-| `CODEX_HOME` | Native codex-acp/codex CLI isolation directory *and* `cortex_setup.py`'s native-profile registration | ACP path (isolation) stays; the profile-registration use is Codex-harness-era, removed at T033 |
-| `CORTEX_DEPENDENCY_DIR` | `marketplace_bootstrap.py`'s pinned pip-install target | Codex-harness-era (gateway only), removed at T033 |
+| `CODEX_HOME` | Native codex-acp/codex CLI isolation directory | ACP path (isolation) stays; the native-profile-registration use (`cortex_setup.py`) was Codex-harness-era and was removed at T033 |
+| `CORTEX_DEPENDENCY_DIR` | Was `marketplace_bootstrap.py`'s pinned pip-install target | Codex-harness-era (gateway only); removed at T033, including from `.mcp.json`'s `env_vars` |
 
 ## Pinned dependencies
 

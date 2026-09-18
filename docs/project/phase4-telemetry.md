@@ -30,7 +30,7 @@ responses produce `null` token totals and response counts rather than invented
 zeros.
 
 `availability` always has separate status/reason entries for Codebase Memory,
-gateway/provider, dependencies, Git, and host capabilities. Unavailable,
+engine provider, dependencies, Git, and host capabilities. Unavailable,
 unknown, and not-checked statuses are exclusions only: they cannot populate the
 `quality` field or become a Phase 5 strategy input. Quality is optional and is
 accepted only when explicitly sourced from an independent oracle or review.

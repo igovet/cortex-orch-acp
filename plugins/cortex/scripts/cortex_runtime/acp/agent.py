@@ -85,7 +85,7 @@ def _request_id_identity(value):
 
 def _agent_version():
     try:
-        return json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text())["version"]
+        return json.loads((PLUGIN / "package-identity.json").read_text())["version"]
     except (OSError, ValueError, KeyError):
         return "0.0.0"
 

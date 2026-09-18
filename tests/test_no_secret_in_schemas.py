@@ -5,7 +5,6 @@ import uuid
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.contracts import TOOLS
 from cortex_runtime.portable.identity import SourceEvent
-from cortex_runtime.project_storage import ProjectResolver
 from cortex_runtime.server import Server
 from cortex_runtime.store import Store
 
@@ -24,8 +23,7 @@ def test_generated_secret_never_appears_in_responses_observation_or_db_bytes(tmp
     secret = result.secret
     assert secret
 
-    server = Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)),
-                     channel_credentials=(result.channel_id, secret, str(tmp_path)))
+    server = Server(channel_credentials=(result.channel_id, secret, str(tmp_path)))
     draft = server.dispatch('tools/call', dict(
         name='create_draft', arguments=dict(template='general', request_key='k1')))
     from pathlib import Path
@@ -43,8 +41,7 @@ def test_generated_secret_never_appears_in_responses_observation_or_db_bytes(tmp
         assert secret not in json.dumps(reply)
 
     # Wrong-secret rejection must also never echo the real secret.
-    bad_server = Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)),
-                         channel_credentials=(result.channel_id, 'wrong-secret', str(tmp_path)))
+    bad_server = Server(channel_credentials=(result.channel_id, 'wrong-secret', str(tmp_path)))
     rejected = bad_server.dispatch('tools/call', dict(name='list_reports', arguments={}))
     assert rejected['isError']
     assert secret not in json.dumps(rejected)

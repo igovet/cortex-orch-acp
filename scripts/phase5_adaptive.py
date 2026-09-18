@@ -37,7 +37,7 @@ EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 QUALITY_SOURCES = {"independent_oracle", "independent_review"}
 AVAILABILITY_KINDS = (
     "codebase_memory",
-    "gateway_provider",
+    "engine_provider",
     "dependencies",
     "git",
     "host_capabilities",

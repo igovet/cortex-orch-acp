@@ -13,8 +13,7 @@ from cortex_runtime.diagnostic_boundary import (
     emit_bounded_diagnostic,
     run_passive_diagnostic,
 )
-from cortex_runtime import hooks, server
-from cortex_runtime.execution_boundary import authorize_pre_dispatch
+from cortex_runtime import server
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,46 +119,6 @@ def test_server_observation_failure_does_not_change_request_continuation(monkeyp
     assert "private" not in stderr.getvalue()
 
 
-def test_hook_observation_failure_does_not_change_existing_hook_exit(monkeypatch):
-    monkeypatch.setattr(hooks, "_write_observation", lambda *_args: (_ for _ in ()).throw(OSError("private")))
-    stderr = StringIO()
-    result = hooks.observe({"outcome": "failed"}, diagnostic_stream=stderr)
-
-    assert result["execution_continued"] is True
-    assert result["diagnostic"]["error_type"] == "OSError"
-    assert "private" not in stderr.getvalue()
-
-
-def test_hook_failure_logging_failure_does_not_raise_or_change_failure_status():
-    class BrokenStream:
-        def write(self, _value):
-            raise RuntimeError("private logger failure")
-
-        def flush(self):
-            raise RuntimeError("private logger failure")
-
-    assert hooks.main(StringIO("not json"), StringIO(), BrokenStream()) == 1
-
-
-@pytest.mark.parametrize("emitter_error", [StoreError("file_conflict"), PermissionError("private")])
-def test_hooks_main_broken_stderr_telemetry_keeps_legacy_failure_return(monkeypatch, emitter_error):
-    class BrokenStream:
-        def write(self, _value):
-            raise emitter_error
-
-        def flush(self):
-            raise emitter_error
-
-    # Force both passive lanes after malformed input: logging itself fails,
-    # then telemetry's bounded emission fails with a protected-looking error.
-    monkeypatch.setattr(
-        hooks, "_write_observation",
-        lambda _row: (_ for _ in ()).throw(RuntimeError("telemetry unavailable")),
-    )
-
-    assert hooks.main(StringIO("not json"), StringIO(), BrokenStream()) == 1
-
-
 def test_diagnostic_failure_record_is_value_free_for_unusual_exception_type():
     class PrivateException(Exception):
         pass
@@ -167,18 +126,6 @@ def test_diagnostic_failure_record_is_value_free_for_unusual_exception_type():
     finding = diagnostic_failure("logging", PrivateException("secret value"))
     assert finding["error_type"] == "PrivateException"
     assert "secret value" not in repr(finding)
-
-
-def test_class_b_private_pre_dispatch_remains_denied():
-    decision = authorize_pre_dispatch(
-        "Bash", {"command": "cat .cortex/private-report.md"},
-        actor_kind="native_worker", role="worker", task_id="task-1",
-        assignment_id="assignment-1", route="native_hook",
-        capabilities=frozenset({"cortex.runtime.execute"}), cwd=str(ROOT),
-        project_root=str(ROOT),
-    )
-    assert decision["allowed"] is False
-    assert decision["code"] == "PERMISSION_DENIED"
 
 
 def test_class_b_integrity_finding_keeps_current_host_audit_exit_one():

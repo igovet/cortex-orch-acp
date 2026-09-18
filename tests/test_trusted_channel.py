@@ -7,7 +7,6 @@ import pytest
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.contracts import StoreError
 from cortex_runtime.portable.identity import SourceEvent
-from cortex_runtime.project_storage import ProjectResolver
 from cortex_runtime.server import Server
 from cortex_runtime.store import Store
 from cortex_runtime.trusted_channel import issue_channel, resolve_channel, revoke_channel
@@ -20,8 +19,7 @@ def bootstrap(tmp_path, owner='owner-1', text='Build a page.'):
 
 
 def server_for(tmp_path, channel_id, secret):
-    return Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)),
-                  channel_credentials=(channel_id, secret, str(tmp_path)))
+    return Server(channel_credentials=(channel_id, secret, str(tmp_path)))
 
 
 def call(server, name, arguments=None, meta=None):
@@ -100,12 +98,18 @@ def test_revoked_channel_is_rejected(tmp_path):
     error(call(server, 'list_reports'), 'channel_revoked')
 
 
-def test_both_identity_kinds_present_is_ambiguous(tmp_path):
+def test_unchanneled_server_rejects_every_call(tmp_path):
+    """T033: the Codex-plugin-harness-era unchanneled ``_meta`` identity path
+    was removed. A server started without channel credentials must reject
+    every tool call, regardless of any ``_meta`` supplied."""
     store, result = bootstrap(tmp_path)
-    server = server_for(tmp_path, result.channel_id, result.secret)
+    unchanneled = Server()
+    error(call(unchanneled, 'list_reports'), 'channel_required')
     thread = str(uuid.uuid4())
     meta = {'threadId': thread, 'x-codex-turn-metadata': {}}
-    error(call(server, 'list_reports', meta=meta), 'ambiguous_identity')
+    error(call(unchanneled, 'list_reports', meta=meta), 'channel_required')
+    error(call(unchanneled, 'create_task', dict(project_root=str(tmp_path), request_key='k'), meta=meta),
+          'channel_required')
 
 
 def test_channel_path_rejects_task_creation(tmp_path):
@@ -131,55 +135,6 @@ def _principal(store, channel_id):
         ).fetchone()[0]
 
 
-def test_leaked_principal_thread_id_cannot_be_used_on_the_legacy_path(tmp_path):
-    """Security regression (independent review blocker B1).
-
-    A channel's internal principal thread id must never be usable through
-    the unfenced legacy Codex ``_meta`` adapter: not for reads, not for
-    mutations, and this must hold both before and after an explicit
-    ownership transfer (a delayed/duplicated legacy attempt with a
-    once-current owner must not succeed just because the channel epoch
-    check does not apply to it).
-    """
-    from cortex_runtime.ownership import acquire_task_owner
-
-    store, result = bootstrap(tmp_path)
-    principal = _principal(store, result.channel_id)
-    legacy_meta = {'threadId': principal, 'x-codex-turn-metadata': {}}
-    legacy = Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
-
-    with store.connection() as db:
-        before = db.execute('SELECT COUNT(*) FROM drafts').fetchone()[0]
-    error(call(legacy, 'list_reports', meta=legacy_meta), 'channel_managed_task')
-    error(call(legacy, 'create_draft', dict(template='general', request_key='k-before'), meta=legacy_meta),
-          'channel_managed_task')
-    with store.connection() as db:
-        assert db.execute('SELECT COUNT(*) FROM drafts').fetchone()[0] == before
-
-    acquire_task_owner(store, result.task_id, 'owner-2', 1)
-
-    error(call(legacy, 'list_reports', meta=legacy_meta), 'channel_managed_task')
-    error(call(legacy, 'create_draft', dict(template='general', request_key='k-after'), meta=legacy_meta),
-          'channel_managed_task')
-    with store.connection() as db:
-        assert db.execute('SELECT COUNT(*) FROM drafts').fetchone()[0] == before
-
-    # The legitimate channel path is unaffected.
-    server = server_for(tmp_path, result.channel_id, result.secret)
-    ok(call(server, 'list_reports'))
-
-
-def test_legacy_child_thread_cannot_register_under_a_leaked_channel_principal(tmp_path):
-    store, result = bootstrap(tmp_path)
-    principal = _principal(store, result.channel_id)
-    legacy = Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
-    child = str(uuid.uuid4())
-    meta = {'threadId': child, 'x-codex-turn-metadata': {'parent_thread_id': principal}}
-    error(call(legacy, 'list_reports', meta=meta), 'channel_managed_task')
-    with store.connection() as db:
-        assert db.execute('SELECT 1 FROM thread_bindings WHERE thread_id=?', (child,)).fetchone() is None
-
-
 def test_channel_responses_never_disclose_principal_thread_ids(tmp_path):
     store, result = bootstrap(tmp_path)
     coordinator_principal = _principal(store, result.channel_id)
@@ -192,23 +147,3 @@ def test_channel_responses_never_disclose_principal_thread_ids(tmp_path):
     # binding.thread_id/parent_thread_id/receipt are masked, not merely absent.
     assert published['binding']['thread_id'] != coordinator_principal
     assert published['binding']['parent_thread_id'] is None
-
-
-def test_legacy_created_task_is_unaffected_by_the_channel_fence(tmp_path):
-    """A task created through the ordinary legacy path (no task_owners row)
-    keeps its existing unrestricted legacy behavior."""
-    legacy = Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)))
-    thread = str(uuid.uuid4())
-    meta = {'threadId': thread, 'x-codex-turn-metadata': {}}
-
-    def legacy_call(name, arguments):
-        return legacy.dispatch('tools/call', dict(name=name, arguments=arguments, _meta=meta))
-
-    original_source = legacy.request_source
-    legacy.request_source = lambda *_: 'Legacy text.'
-    try:
-        created = ok(legacy_call('create_task', dict(project_root=str(tmp_path), request_key='legacy-k')))
-    finally:
-        legacy.request_source = original_source
-    assert created['original_report_id']
-    ok(legacy_call('list_reports', {}))

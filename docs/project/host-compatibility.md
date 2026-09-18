@@ -9,10 +9,16 @@ was their intent. Do not carry that superseded requirement into runtime assignme
 
 The [official skill guide](https://learn.chatgpt.com/docs/build-skills) describes
 metadata-first discovery followed by loading the selected complete SKILL.md, with
-supporting references loaded as needed. The [plugin packaging guide](https://developers.openai.com/plugins/build/plugins)
-uses `.codex-plugin/plugin.json` with `"skills": "./skills/"`. Cortex retains that
-layout, all 23 complete worker skills, including the report-only senior consultant,
-companion skills and seven MCP operations.
+supporting references loaded as needed. Cortex retains the `skills/` directory
+layout the [plugin packaging guide](https://developers.openai.com/plugins/build/plugins)
+describes, all 23 complete worker skills, including the report-only senior
+consultant, companion skills and seven MCP operations. The Codex-plugin-harness-era
+`.codex-plugin/plugin.json` manifest that once declared `"skills": "./skills/"`
+for native marketplace plugin loading was removed at T033 along with the rest of
+that harness; ACP engine adapters read `skills/*/SKILL.md` directly through
+Cortex's own portable role-instruction delivery (see
+[roles-and-delegation.md](../acp/roles-and-delegation.md)), not through that
+native convention.
 
 A worker uses a complete body already injected by Codex or reads its exact advertised
 SKILL.md path from the available-skills catalogue. Documented path aliases are expanded
@@ -84,7 +90,7 @@ receipt bindings, and records `host_enforcement_state=unverified`. Pre-binding
 shell, terminal, file, patch, nested wrapper, or private-path activity invalidates
 the evidence. The sole observed-current-host static discovery exception is a complete
 bounded literal read of an advertised coordinator `SKILL.md` or public `.mcp.json`/
-`.codex-plugin/plugin.json` declaration in the isolated bundled release; directories,
+`package-identity.json` declaration in the isolated bundled release; directories,
 globs, arbitrary cache content, runtime/state/registry paths, and mutation remain
 invalid. No shell fallback or Desktop diagnostic substitute is permitted.
 The exact value-free `text(ALL_TOOLS)` envelope is a distinct bounded public-catalogue
@@ -247,33 +253,26 @@ follow the writer's own declaration, independently of optional draft-retry keys.
 See [focused verification](verification.md) for the consecutive real-host audit
 results and rejected attempts.
 
-## Worker app-message boundary
+## Worker app-message boundary (historical, Codex-plugin-harness era)
 
-The worker protocol forbids app task messaging and requires progress, questions,
-blockers and final delivery to remain on the native parent/subagent route. The
-isolated observer classifies direct, quoted-bracket and simple static-alias worker
-`send_message_to_thread` calls, including known `functions.exec` wrappers, as
-forbidden orchestration outcomes, so CLI/Desktop qualification fails closed after
-observing the actual route. This is bounded static inspection, not exhaustive
-JavaScript evaluation. The installed Desktop provider is injected dynamically as the `codex_app` MCP
-server. The candidate `[mcp_servers.codex_app] disabled_tools=["send_message_to_thread"]`
-override fails bootstrap with `invalid transport`; the launcher therefore does
-not claim a per-tool filter or shadow the provider. This remains an audit boundary
-rather than host authorization: the plugin cannot hide or revoke an app connector
-supplied globally by Codex.
+This section described the Codex plugin/gateway harness's `codex_app`
+Desktop provider and its static send-message observer. T033 (ACP migration)
+deleted that harness entirely (`plugins/cortex/hooks/`, `cortex_hook.py`,
+`cortex_runtime/hooks.py`, `cortex_runtime/gateway/`,
+`cortex_runtime/codex_adapter.py`); there is no `codex_app` MCP server, no
+static send-message-to-thread observer, and no per-tool disable filter in
+the ACP-only product. The underlying rule -- workers report progress and
+results only through the native parent/subagent route, never app/connector
+task messaging -- remains model guidance (see [SECURITY](../../SECURITY.md)),
+but it is no longer paired with the Codex-specific audit mechanics this
+section used to describe.
 
-## Lifecycle hooks in the format 11 candidate
+## Lifecycle hooks (removed, T033)
 
-The new payload includes a default hooks manifest and one local Python handler.
-Use the installed host's documented event schemas and ordinary trust flow. The
-[official hook reference](https://learn.chatgpt.com/docs/hooks) says subagent hooks
-carry a parent session ID; only explicit agent/parent receipts establish actor
-identity. Tool-event actor identity can remain unknown. `SessionStart(compact)` is
-the recovery context channel, not PreCompact/PostCompact stdout.
-
-Documented UserPromptSubmit has no unique typed-message identity; it records a
-pending native capture signal instead of inventing a duplicate-free source ID.
-A fresh active task is still created and initially sourced by MCP. Real CLI/Desktop
-event coverage and timing are separate qualification evidence, reported in
-[release readiness](../release-readiness.md). Historical no-hooks observations do
-not establish support for this payload.
+The Codex-plugin-harness-era hooks manifest and local Python handler
+(`plugins/cortex/hooks/hooks.json`, `cortex_runtime/hooks.py`) described in
+this section no longer exist. There is no `PreToolUse`, `UserPromptSubmit`,
+`SessionStart(compact)`, or `Stop` hook handler packaged with the ACP-only
+product, and no host trust prompt for one. See "Source capture" in
+[SECURITY](../../SECURITY.md) for what replaces hook-mediated dispatch in
+the ACP path.

@@ -41,9 +41,13 @@ them (linked inline); this page does not restate their design docs.
   unfenced legacy Codex `_meta` path. Fixed: for a channel-managed
   (`trusted`) caller, `actor_thread_id` is now always `null`; a new boolean
   `actor_is_self` tells the caller only whether an observation was its own
-  action. Untrusted/legacy callers are unaffected (their own thread id was
+  action. Untrusted/legacy callers were unaffected (their own thread id was
   already directly visible on that path). Regression:
   `tests/test_security_boundaries.py::test_hook_actor_thread_id_never_leaks_a_principal_to_a_channel_peer`.
+  T033 removed the unfenced legacy Codex `_meta` path itself (`server.py`
+  now requires a trusted channel for every call), so this specific
+  impersonation route is gone outright; the fix and its regression test
+  above are kept as the historical audit record.
 
 ### 2. Runtime binding
 - **Finding (fixed): stale owner epoch bypassed delegation MCP

@@ -72,7 +72,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "plugins" / "cortex" / "scripts"
 AGENT_ENTRY = SCRIPTS_DIR / "cortex_acp.py"
 SCHEMA_PATH = REPO_ROOT / "tests" / "fixtures" / "acp" / "schema-1.4.0.json"
-PLUGIN_JSON = REPO_ROOT / "plugins" / "cortex" / ".codex-plugin" / "plugin.json"
+PLUGIN_JSON = REPO_ROOT / "plugins" / "cortex" / "package-identity.json"
 
 READ_TIMEOUT_SECONDS = 10.0
 PROC_EXIT_TIMEOUT_SECONDS = 15.0

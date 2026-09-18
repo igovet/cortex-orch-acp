@@ -1,12 +1,10 @@
 """Small newline-delimited JSON-RPC MCP server with value-free diagnostics.
 
-Two independent identity paths reach ``Store.call``: the legacy Codex
-``_meta`` adapter (``codex_adapter.thread_context``, unfenced by itself —
-see that module's security note) and the trusted-channel path
-(``_dispatch_channeled``, which verifies a channel secret and always passes
-``trusted=True``). Only ``Store`` itself, not this dispatch code, is the
-authority that keeps a channel-managed task off the legacy path; see
-``store.Store._resolve_thread``/``Store._channel_managed``.
+Every ``tools/call`` reaches ``Store.call`` through exactly one identity
+path: the trusted channel (``_dispatch_channeled``, which verifies a channel
+secret and always passes ``trusted=True``). The Codex-plugin-harness-era
+unchanneled ``_meta`` identity path (native Codex CLI turn metadata) was
+removed at T033; every server process now requires channel credentials.
 """
 from __future__ import annotations
 
@@ -20,18 +18,16 @@ import time
 from collections import OrderedDict
 
 from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, ERROR_HELP, validate
-from .codex_adapter import thread_context, is_legacy_meta
 from .delegation import contracts as delegation_contracts
 from .delegation import mcp_tools as delegation_mcp_tools
-from .host_source import original_request, pending_requests
 from .store import Store, private_directory
-from .project_storage import ProjectResolver, migrate_legacy_project_storage, project_store_directory, canonical_project
+from .project_storage import migrate_legacy_project_storage, project_store_directory, canonical_project
 from .trusted_channel import resolve_channel
 from .ownership import current_owner_epoch
 from .diagnostic_boundary import emit_bounded_diagnostic, run_passive_diagnostic
 
 PLUGIN = Path(__file__).resolve().parents[2]
-VERSION = json.loads((PLUGIN / '.codex-plugin/plugin.json').read_text())['version']
+VERSION = json.loads((PLUGIN / 'package-identity.json').read_text())['version']
 CATALOGUE_DIGEST = hashlib.sha256(json.dumps(TOOLS, sort_keys=True).encode()).hexdigest()
 
 # Tools that mutate task-owned state and therefore require the caller's
@@ -101,12 +97,6 @@ def _write_observation(operation, outcome, replayed=False, meta=None, arguments=
     if operation == 'initialize':
         row['plugin_path'] = str(PLUGIN)
     elif operation in BY_NAME:
-        try:
-            thread,parent=thread_context(meta)
-            row.update(thread_id=thread,parent_thread_id=parent,
-                       context_source='MCP _meta',turn_metadata_type='object')
-        except StoreError as exc:
-            row['context_error']=str(exc)
         row.update(safe_observation_fields(operation,arguments,result))
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
@@ -125,20 +115,6 @@ def observe(operation, outcome, replayed=False, meta=None, arguments=None, resul
     )
 
 
-def recover_gateway_if_explicitly_enabled() -> None:
-    """Recover an explicitly configured gateway, failing closed on errors."""
-    from .runtime.supervisor import GatewaySupervisor
-
-    supervisor = GatewaySupervisor()
-    # Treat only a genuinely absent path as unconfigured.  Directories,
-    # symlinks, permissive files, and other existing states must fail closed
-    # through the loader rather than silently skipping recovery.
-    if supervisor.loader.is_configured():
-        snapshot = supervisor.manager.snapshot()
-        if snapshot.gateway_enabled:
-            supervisor.ensure()
-
-
 def _delegation_operation_names(role_kind):
     try:
         return set(delegation_contracts.schemas_for(role_kind))
@@ -152,12 +128,9 @@ class ProtocolError(Exception):
 
 
 class Server:
-    def __init__(self, *, project_resolver=None, channel_credentials=None):
-        self.projects = project_resolver or ProjectResolver()
+    def __init__(self, *, channel_credentials=None):
         self.stores = OrderedDict()
         self.store = None
-        self.request_source = original_request
-        self.steering_source = pending_requests
         # (channel_id, secret, project_root), read once at construction from
         # CORTEX_CHANNEL_ID / CORTEX_CHANNEL_SECRET / CORTEX_CHANNEL_PROJECT_ROOT
         # by main(); never re-read per request, never taken from tool
@@ -175,9 +148,12 @@ class Server:
         """Resolve (and cache) this process's own trusted channel, if any.
 
         Returns ``None`` when this server was not launched with channel
-        credentials (the legacy/native ``_meta`` path); raises ``StoreError``
-        (mapped to a JSON-RPC error by callers) if channel credentials are
-        present but do not resolve to a live channel.
+        credentials; ``tools/call`` itself already refuses every call in
+        that case (see ``dispatch``'s ``channel_required`` check), so
+        callers of this method only ever see ``None`` from ``tools/list``.
+        Raises ``StoreError`` (mapped to a JSON-RPC error by callers) if
+        channel credentials are present but do not resolve to a live
+        channel.
         """
         if self._resolved_channel is not None:
             return self._resolved_channel
@@ -221,67 +197,38 @@ class Server:
             observe('tools/call','invalid_arguments')
             raise ProtocolError(-32602,'Malformed tools/call parameters. Supply name as a string and arguments as an object; only name, arguments and _meta are allowed.')
         name = params['name']
-        if self.channel_credentials is not None:
+        if self.channel_credentials is None:
+            observe('tools/call','channel_required')
+            return self.error(StoreError('channel_required'))
+        try:
+            channel = self._channel_context()
+        except StoreError as exc:
+            observe('tools/call', str(exc))
+            return self.error(exc)
+        role_operations = _delegation_operation_names(channel.role)
+        if name in role_operations:
             try:
-                channel = self._channel_context()
+                if name not in DELEGATION_READ_OPERATIONS:
+                    with self.store.connection() as db:
+                        current = current_owner_epoch(db, channel.task_id)
+                    if current != channel.owner_epoch:
+                        raise StoreError('stale_ownership_epoch')
+                arguments = params.get('arguments', {})
+                if not isinstance(arguments, dict):
+                    raise StoreError('invalid_arguments','arguments',str(type(arguments).__name__),'JSON object','Send one object matching the advertised inputSchema.')
+                data = delegation_mcp_tools.dispatch(self.store, channel, name, arguments)
+                observe(name,'success',False,None,arguments,data)
+                return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
             except StoreError as exc:
-                observe('tools/call', str(exc))
+                observe(name, str(exc), meta=params.get('_meta'), arguments=params.get('arguments'))
                 return self.error(exc)
-            role_operations = _delegation_operation_names(channel.role)
-            if name in role_operations:
-                try:
-                    if name not in DELEGATION_READ_OPERATIONS:
-                        with self.store.connection() as db:
-                            current = current_owner_epoch(db, channel.task_id)
-                        if current != channel.owner_epoch:
-                            raise StoreError('stale_ownership_epoch')
-                    arguments = params.get('arguments', {})
-                    if not isinstance(arguments, dict):
-                        raise StoreError('invalid_arguments','arguments',str(type(arguments).__name__),'JSON object','Send one object matching the advertised inputSchema.')
-                    data = delegation_mcp_tools.dispatch(self.store, channel, name, arguments)
-                    observe(name,'success',False,None,arguments,data)
-                    return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
-                except StoreError as exc:
-                    observe(name, str(exc), meta=params.get('_meta'), arguments=params.get('arguments'))
-                    return self.error(exc)
         if name not in BY_NAME:
             observe('tools/call','unknown_tool')
             raise ProtocolError(-32602,'Unknown tool. Call tools/list and use an advertised name; do not reconstruct retired names.')
         try:
             validate(name,params.get('arguments',{}))
-            meta=params.get('_meta')
-            legacy=is_legacy_meta(meta)
-            channeled=self.channel_credentials is not None
-            if legacy and channeled:
-                raise StoreError('ambiguous_identity')
-            if channeled:
-                data=self._dispatch_channeled(name,params)
-                observe(name,'success',data.get('replayed',False),None,params.get('arguments'),data)
-                return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
-            thread,parent=thread_context(meta)
-            if name=='create_task' and parent is not None:raise StoreError('child_creation')
-            project=self.projects.resolve(thread,parent)
-            if name=='create_task' and params['arguments']['project_root']!=project:
-                raise StoreError('project_context_conflict')
-            migrate_legacy_project_storage(project)
-            store=self.stores.get(project)
-            if store is None:
-                directory=project_store_directory(project)
-                if name!='create_task' and not (directory/'cortex.sqlite3').exists():
-                    raise StoreError('parent_not_bound' if parent else 'task_not_bound')
-                store=Store(directory,initialize=name=='create_task',project_root=project)
-                self.stores[project]=store
-            self.stores.move_to_end(project)
-            while len(self.stores)>16:self.stores.popitem(last=False)
-            self.store=store
-            source=None
-            if name=='create_task':
-                source=lambda:self.request_source(thread,params['arguments']['project_root'])
-            steering=lambda project,cursor:self.steering_source(thread,project,cursor)
-            data = store.call(name, params.get('arguments',{}),thread,parent,
-                                   original_request=source,steering_source=steering if parent is None else None)
-            self.projects.remember(thread,parent,project)
-            observe(name,'success',data.get('replayed',False),params.get('_meta'),params.get('arguments'),data)
+            data=self._dispatch_channeled(name,params)
+            observe(name,'success',data.get('replayed',False),None,params.get('arguments'),data)
             return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
         except StoreError as exc:
             code = str(exc)
@@ -293,7 +240,7 @@ class Server:
         return self.error(failure)
 
     def _dispatch_channeled(self, name, params):
-        """Resolve identity from a trusted channel instead of Codex ``_meta``.
+        """Resolve identity from this process's one trusted channel.
 
         The channel's project root is fixed for this whole server process
         (see ``__init__``); the channel itself supplies the task and
@@ -351,9 +298,6 @@ def reject_duplicates(pairs):
 
 def main():
     os.umask(0o077)
-    from .marketplace_bootstrap import bootstrap
-    bootstrap()
-    recover_gateway_if_explicitly_enabled()
     channel_id=os.environ.get('CORTEX_CHANNEL_ID')
     channel_secret=os.environ.get('CORTEX_CHANNEL_SECRET')
     channel_project_root=os.environ.get('CORTEX_CHANNEL_PROJECT_ROOT')

@@ -7,7 +7,7 @@ import sqlite3
 import pytest
 
 from cortex_runtime.contracts import StoreError
-from cortex_runtime.host_source import NativeSource
+from cortex_runtime.store import NativeSource
 from cortex_runtime.store import Store
 from cortex_runtime.migrate import migrate
 from test_markdown_store import create, write, key

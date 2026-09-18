@@ -12,26 +12,9 @@ import pytest
 
 from cortex_runtime.contracts import StoreError
 from cortex_runtime.project_storage import StorageAccess
-from cortex_runtime.server import Server
 import sys
 sys.path.insert(0, os.path.dirname(__file__))
 from storage_fixture import call_store
-
-
-@pytest.fixture(autouse=True)
-def _restore_process_umask():
-    """Undo the process-wide ``os.umask(0o077)`` set by ``Server.__init__``.
-
-    ``server.py`` sets this and never restores it (pre-existing,
-    out-of-scope behavior). This file constructs a ``Server`` for the
-    cross-thread draft-ownership case, so it restores the umask this
-    process had on entry after every test to avoid leaking that mutation
-    forward into unrelated files collected later in the same pytest run.
-    """
-    original = os.umask(0o022)
-    os.umask(original)
-    yield
-    os.umask(original)
 
 
 def _project(tmp_path):
@@ -129,34 +112,30 @@ def error_code(result):
     return json.loads(result["content"][0]["text"])["error"]
 
 
-def test_second_thread_cannot_write_or_read_another_threads_draft(tmp_path, monkeypatch):
-    """Reuses the real MCP path: classification alone never grants draft access.
+def test_second_thread_cannot_write_or_read_another_threads_draft(tmp_path):
+    """Reuses the real storage path: classification alone never grants draft access.
 
     ``StorageAccess`` would classify both drafts' paths as ``own_draft_area``
     (same shape), but the actual store enforces per-draft
-    ``owner_thread_id`` ownership; a second, unrelated thread must still be
-    rejected when it tries to act on the first thread's draft id.
+    ``owner_thread_id`` ownership; a second, unrelated thread (here, a
+    second task's thread in the same project store) must still be rejected
+    when it tries to act on the first thread's draft id.
     """
-    import json
-    import sqlite3
+    from cortex_runtime.store import Store
+    from storage_fixture import call_store
 
-    sys.path.insert(0, os.path.dirname(__file__))
-    from test_project_storage import NativeIndex, configured_server, create_task
-
-    index = NativeIndex(tmp_path, monkeypatch)
     project = tmp_path / "project"; project.mkdir()
-    owner, stranger = identifier(), identifier()
-    index.add(owner, project)
-    index.add(stranger, project)
-    server = configured_server()
-    create_task(server, project, owner)
-    create_task(server, project, stranger, key="stranger-task")
+    store = Store(project / ".cortex", project_root=project)
+    owner_task = call_store(store, "create_task", dict(
+        project_root=str(project), request="Owner request.", request_key="owner-task"))["task_id"]
+    stranger_task = call_store(store, "create_task", dict(
+        project_root=str(project), request="Stranger request.", request_key="stranger-task"))["task_id"]
 
-    draft = successful(dispatch(server, "create_draft", {
-        "template": "general", "request_key": "owner-draft"}, owner))
+    draft = call_store(store, "create_draft", dict(
+        task_id=owner_task, template="general", request_key="owner-draft"))
 
-    # A different, unrelated thread cannot publish against the owner's draft id.
-    result = dispatch(server, "write_report", {
-        "title": "Hijack", "summary": "Should not be permitted.", "author": "stranger",
-        "draft_id": draft["draft_id"], "request_key": "stranger-write"}, stranger)
-    assert result["isError"], result
+    # A different, unrelated task's thread cannot publish against the owner's draft id.
+    with pytest.raises(StoreError):
+        call_store(store, "write_report", dict(
+            task_id=stranger_task, title="Hijack", summary="Should not be permitted.",
+            author="stranger", draft_id=draft["draft_id"], request_key="stranger-write"))

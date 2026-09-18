@@ -11,12 +11,57 @@ import tomllib
 import re
 import stat
 from generate_agent_profiles import check as check_agent_profiles
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from plugins.cortex.scripts.cortex_runtime.runtime.state import dependency_identity
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT/'plugins/cortex'
 BASE = '1.0.0'
+
+
+def _tree_digest(root):
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob('*')):
+        if path.is_symlink():
+            raise ValueError('dependency target contains a symlink')
+        if not path.is_file():
+            continue
+        if path.suffix in {'.pyc', '.pyo'} or '__pycache__' in path.parts:
+            raise ValueError('dependency target contains bytecode')
+        relative = path.relative_to(root).as_posix()
+        data = path.read_bytes()
+        digest.update(relative.encode() + b'\0' + str(len(data)).encode() + b'\0')
+        digest.update(data)
+    return digest.hexdigest()
+
+
+def dependency_identity(plugin_root, target=None, *, required=False):
+    """Return lock-manifest, installed-byte, and combined dependency identity.
+
+    Relocated verbatim from the deleted (T033) ``cortex_runtime.runtime.state``
+    gateway-supervisor module; only the dev candidate preparation flow
+    (``prepare`` below) still needs this, so it now lives here.
+    """
+    manifest = plugin_root/'requirements.lock'
+    manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    raw_target = target or (Path(os.environ['CORTEX_DEPENDENCY_DIR']) if os.environ.get('CORTEX_DEPENDENCY_DIR') else None)
+    if raw_target is None:
+        if required:
+            raise ValueError('CORTEX_DEPENDENCY_DIR is required for isolated candidate preparation')
+        bytes_digest = 'unbound'
+    else:
+        target_path = Path(raw_target).expanduser()
+        if not target_path.is_absolute() or target_path.is_symlink():
+            raise ValueError('dependency target must be an absolute non-symlink directory')
+        current = Path(target_path.anchor)
+        for part in target_path.parts[1:]:
+            current /= part
+            if current.is_symlink():
+                raise ValueError('dependency target contains an unsafe symlink path')
+        info = target_path.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError('dependency target must be owner-only and owned by the current user')
+        bytes_digest = _tree_digest(target_path)
+    combined = hashlib.sha256(f'{manifest_digest}\0{bytes_digest}'.encode('ascii')).hexdigest()
+    return manifest_digest, bytes_digest, combined
 
 
 def _assert_no_symlink_tree(path, *, label='candidate'):
@@ -54,41 +99,15 @@ def payload_digest(plugin):
             raise ValueError('bytecode in payload')
         relative=path.relative_to(plugin).as_posix()
         body=path.read_bytes()
-        if relative=='.codex-plugin/plugin.json':
+        if relative=='package-identity.json':
             value=json.loads(body); value['version']=BASE
             body=json.dumps(value,sort_keys=True,separators=(',',':')).encode()
         digest.update(relative.encode()+b'\0'+str(len(body)).encode()+b'\0'+body)
     return digest.hexdigest()
 
 
-def dependency_lock_entries(plugin=PLUGIN):
-    lock = plugin/'requirements.lock'
-    if not lock.is_file():
-        raise ValueError('missing hash-locked gateway dependency manifest')
-    entries=[]
-    for raw in lock.read_text().splitlines():
-        line=raw.strip()
-        if not line or line.startswith('#') or line.startswith('--'):
-            continue
-        fields=line.split()
-        if not fields or '==' not in fields[0]:
-            raise ValueError('invalid hash-locked dependency entry')
-        if len(fields)<2:
-            raise ValueError('dependency entry must contain valid SHA-256 hashes')
-        hashes=[field.split(':',1)[1] for field in fields[1:] if field.startswith('--hash=sha256:')]
-        if len(hashes)<1 or any(len(value)!=64 or any(ch not in '0123456789abcdef' for ch in value) for value in hashes):
-            raise ValueError('dependency entry must contain valid SHA-256 hashes')
-        if any(not field.startswith('--hash=sha256:') for field in fields[1:]):
-            raise ValueError('dependency entry contains an unsupported option')
-        name, version=fields[0].split('==',1)
-        entries.append((name, version, tuple(hashes)))
-    if len({name for name, _, _ in entries}) != len(entries):
-        raise ValueError('hash-locked dependency manifest contains duplicate names')
-    return entries
-
-
 def stamp():
-    path=PLUGIN/'.codex-plugin/plugin.json'
+    path=PLUGIN/'package-identity.json'
     value=json.loads(path.read_text())
     value['version']=BASE+'+sha256.'+payload_digest(PLUGIN)[:16]
     path.write_text(json.dumps(value,indent=2)+'\n')
@@ -97,46 +116,9 @@ def stamp():
 
 def validate(plugin=PLUGIN):
     check_agent_profiles(plugin)
-    value=json.loads((plugin/'.codex-plugin/plugin.json').read_text())
+    value=json.loads((plugin/'package-identity.json').read_text())
     if value['name']!='cortex' or value['version']!=BASE+'+sha256.'+payload_digest(plugin)[:16]:
         raise ValueError('invalid package identity or stale cache stamp')
-    requirements = plugin/'requirements.txt'
-    if not requirements.is_file():
-        raise ValueError('missing gateway dependency manifest')
-    dependency_lines = [line.strip() for line in requirements.read_text().splitlines()
-                        if line.strip() and not line.lstrip().startswith('#')]
-    if not dependency_lines or any('==' not in line for line in dependency_lines):
-        raise ValueError('gateway dependencies must be exactly pinned')
-    dependencies = dict(line.split('==', 1) for line in dependency_lines)
-    if dependencies.get('aiohttp') != '3.14.3' or dependencies.get('zstandard') != '0.25.0':
-        raise ValueError('gateway direct dependencies changed without a package review')
-    if len(dependencies) != len(dependency_lines):
-        raise ValueError('gateway dependency manifest contains duplicate names')
-    locked = dependency_lock_entries(plugin)
-    if {name: version for name, version, _ in locked} != dependencies:
-        raise ValueError('hash-locked dependencies differ from the pinned manifest')
-    hook_file=plugin/'hooks/hooks.json'
-    if hook_file.exists():
-        hook_config=json.loads(hook_file.read_text())
-        events=hook_config.get('hooks',{})
-        allowed={'UserPromptSubmit','SessionStart','SubagentStart','PreCompact',
-                 'PostCompact','PostToolUse','PreToolUse','SubagentStop','Stop',
-                 'Interrupt','SessionEnd'}
-        if set(events)!=allowed:
-            raise ValueError('unexpected lifecycle hook catalogue')
-        for groups in events.values():
-            if not isinstance(groups,list) or not groups:
-                raise ValueError('invalid lifecycle hook groups')
-            for group in groups:
-                handlers=group.get('hooks',[])
-                if not handlers:
-                    raise ValueError('empty lifecycle hook group')
-                for handler in handlers:
-                    if (handler.get('type')!='command' or
-                            handler.get('command')!='python3 -B "${PLUGIN_ROOT}/scripts/cortex_hook.py"' or
-                            not 0<handler.get('timeout',0)<=3 or
-                            handler.get('async',False)):
-                        raise ValueError('hooks must use the packaged Python handler')
     profiles=json.loads((plugin/'profiles.json').read_text())['profiles']
     agents=list((plugin/'agents').glob('*.toml'))
     expected_profile_count=23
@@ -174,7 +156,7 @@ def validate(plugin=PLUGIN):
     mcp=json.loads((plugin/'.mcp.json').read_text())['mcpServers']['cortex']
     if mcp['command']!='python3' or mcp['args']!=['-B','./scripts/cortex.py']:
         raise ValueError('MCP entry point')
-    if set(mcp.get('env_vars', [])) != {'CORTEX_OBSERVATION_DIR', 'CORTEX_DEPENDENCY_DIR'}:
+    if set(mcp.get('env_vars', [])) != {'CORTEX_OBSERVATION_DIR'}:
         raise ValueError('MCP environment contract')
     return value['version']
 

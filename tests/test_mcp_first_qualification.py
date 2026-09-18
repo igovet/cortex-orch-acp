@@ -14,13 +14,13 @@ ROOT = Path(__file__).resolve().parents[1]
 OBSERVER = runpy.run_path(str(ROOT / "scripts/cortex-desktop-dev"), run_name="mcp_first_test")
 LIVE = runpy.run_path(str(ROOT / "scripts/cortex-live-smoke"), run_name="mcp_first_test")
 ACTIVE_VERSION = json.loads(
-    (ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text())["version"]
+    (ROOT / "plugins/cortex/package-identity.json").read_text())["version"]
 
 
 def _trusted_cache_manifest(release):
-    manifest = release / ".codex-plugin/plugin.json"
+    manifest = release / "package-identity.json"
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_bytes((ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_bytes())
+    manifest.write_bytes((ROOT / "plugins/cortex/package-identity.json").read_bytes())
 
 
 def state(tmp_path):
@@ -1578,10 +1578,10 @@ def test_stable_worker_skill_requires_active_manifest_and_trusted_bytes(tmp_path
     # A stale version directory cannot become trusted merely by containing a
     # correctly named worker skill; its manifest identity is not active.
     stale = stable_root / "1.15.9-stale"
-    stale_manifest = stale / ".codex-plugin/plugin.json"
+    stale_manifest = stale / "package-identity.json"
     stale_manifest.parent.mkdir(parents=True)
     stale_value = json.loads(
-        (ROOT / "plugins/cortex/.codex-plugin/plugin.json").read_text())
+        (ROOT / "plugins/cortex/package-identity.json").read_text())
     stale_value["version"] = stale.name
     stale_manifest.write_text(json.dumps(stale_value))
     stale_skill = stale / "skills/worker-general/SKILL.md"

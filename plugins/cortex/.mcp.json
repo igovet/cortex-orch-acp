@@ -9,8 +9,7 @@
       "cwd": ".",
       "required": true,
       "env_vars": [
-        "CORTEX_OBSERVATION_DIR",
-        "CORTEX_DEPENDENCY_DIR"
+        "CORTEX_OBSERVATION_DIR"
       ]
     }
   }

@@ -18,6 +18,34 @@ import threading
 import uuid
 
 from . import _fault_injection
+
+
+class NativeSource(str):
+    """Text plus private provenance, never serialized into a tool response.
+
+    Relocated verbatim from the deleted (T033) Codex-plugin-harness-era
+    ``cortex_runtime.host_source``. ``Store.call``'s ``original_request``
+    parameter (see below) expects exactly this shape -- ``.cursor``,
+    ``.messages``, ``.completeness`` and ``.reason`` -- from any caller
+    that supplies real captured source text, native or ACP.
+
+    T033 follow-up (recorded, not fixed here): ``server.py``'s only live
+    ``Store.call`` site passes ``original_request=None`` (bootstrap_task
+    captures the ACP source text up front instead, before any task-scoped
+    call). So on the current ACP path nothing ever constructs a
+    ``NativeSource`` in production, and the ``original_request`` capture
+    branch in ``Store._call``/``_capture_status`` (``original_request_sha256``)
+    is reachable only from tests. Left in place deliberately -- removing a
+    still-plumbed-through Store parameter is a larger, riskier change than
+    this task's scope.
+    """
+    def __new__(cls, text, cursor, messages, completeness='complete', reason=None):
+        value = super().__new__(cls, text)
+        value.cursor = cursor
+        value.messages = messages
+        value.completeness = completeness
+        value.reason = reason
+        return value
 from .contracts import StoreError, validate
 from .governance import governance_snapshot
 

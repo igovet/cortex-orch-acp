@@ -7,7 +7,6 @@ from jsonschema import validate
 from cortex_runtime.contracts import BY_NAME
 from cortex_runtime.governance import governance_snapshot
 from cortex_runtime.hook_storage import HookStorage
-from cortex_runtime.hooks import restoration
 from cortex_runtime.store import Store
 
 
@@ -58,10 +57,9 @@ def test_recovery_changes_with_depth_and_contains_no_rationale_body(bound):
                                                request_key='full'), 'parent')
     after = hooks.snapshot(context)
     assert after['state_key'] != before['state_key']
-    text = restoration(after)
-    assert 'Current advisory governance: full' in text
-    assert selected['report_id'] in text
-    assert 'DO_NOT_INJECT_PRIVATE_RATIONALE' not in text
+    assert after['governance']['mode'] == 'full'
+    assert after['governance']['report_id'] == selected['report_id']
+    assert 'DO_NOT_INJECT_PRIVATE_RATIONALE' not in json.dumps(after)
     choose(store, 'light')
     assert hooks.snapshot(context)['governance']['mode'] == 'light'
 

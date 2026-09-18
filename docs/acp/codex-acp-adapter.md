@@ -215,17 +215,19 @@ enforced at review time only).
 
 `engine.codex_install`/`engine.codex_adapter_acp` never import the legacy
 native Codex `_meta` adapter (`cortex_runtime.codex_adapter` — an unrelated
-module, deliberately named differently to avoid confusion), `server.py`,
-`hooks.py`, `host_source.py`, `marketplace_bootstrap.py`, or anything under
-a `.codex-plugin` path (see `tests/test_engine_codex_no_native_fallback.py`,
-an AST-level import/string-literal boundary check that scans every
+module name, deliberately different to avoid confusion, and deleted
+outright at T033 along with `server.py`'s unchanneled dispatch branch that
+used it), `hooks.py`, `host_source.py`, `marketplace_bootstrap.py` (also
+all deleted at T033), or anything under a `.codex-plugin` path (see
+`tests/test_engine_codex_no_native_fallback.py`, an AST-level
+import/string-literal boundary check that scans every
 `cortex_runtime/engine/*.py` module, not only this task's own two). A
 `ConfigurationRejected` or engine `PortableError` raised anywhere in this
-adapter never triggers the legacy native path, silently or otherwise:
-there is no code path from this module back into it. Comparing behavior
-against the legacy native route remains a manual-only exercise (run both
-side by side and diff by hand) — this task adds no automated
-legacy-comparison/rollback switch.
+adapter never triggered the legacy native path, silently or otherwise:
+there was no code path from this module back into it, and now there is no
+such path at all in the repository — the whole Codex plugin harness was
+removed at T033 by explicit product decision. There is no legacy
+comparison/rollback operation.
 
 ## Probe usage (requires explicit approval)
 

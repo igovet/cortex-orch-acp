@@ -11,7 +11,7 @@ import pytest
 
 from cortex_runtime.contracts import StoreError
 from cortex_runtime.hook_storage import HookStorage
-from cortex_runtime.host_source import NativeSource
+from cortex_runtime.store import NativeSource
 from cortex_runtime.split import APPLICATION_ID, split_project
 from cortex_runtime.store import Store
 

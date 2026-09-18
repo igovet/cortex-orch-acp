@@ -80,7 +80,7 @@ def _insert_provisioning_row(store, task_id, key="k_" + "a" * 30):
 
 
 def test_split_project_carries_delegation_rows_for_the_selected_project(tmp_path):
-    from cortex_runtime.host_source import NativeSource
+    from cortex_runtime.store import NativeSource
 
     source_dir = tmp_path / "legacy"
     source_dir.mkdir(mode=0o700)
@@ -116,7 +116,7 @@ def test_clear_tasks_removes_delegation_rows_with_the_task(tmp_path):
     # pre-existing gap unrelated to this task's delegation schema (not
     # fixed here; see report). This test isolates the new delegation-row
     # deletion behavior from that unrelated gap.
-    from cortex_runtime.host_source import NativeSource
+    from cortex_runtime.store import NativeSource
 
     store = Store(tmp_path / "private")
     project = tmp_path / "project"
@@ -205,7 +205,7 @@ def _insert_generation_and_delivery(store, task_id, *, gen_id="cg_" + "a" * 12, 
 
 
 def test_split_project_carries_context_generation_rows_for_the_selected_project(tmp_path):
-    from cortex_runtime.host_source import NativeSource
+    from cortex_runtime.store import NativeSource
 
     source_dir = tmp_path / "legacy"
     source_dir.mkdir(mode=0o700)
@@ -238,7 +238,7 @@ def test_split_project_carries_context_generation_rows_for_the_selected_project(
 
 
 def test_clear_tasks_removes_t022_generation_rows_with_the_task(tmp_path):
-    from cortex_runtime.host_source import NativeSource
+    from cortex_runtime.store import NativeSource
 
     store = Store(tmp_path / "private")
     project = tmp_path / "project"

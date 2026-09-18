@@ -9,6 +9,36 @@ characters remain the first 16 characters of the unchanged payload-digest
 computation. The manifest, MCP server, package validator/candidate preparation
 and the worker-skill live execution gate now accept only the new format.
 
+Remove the Codex plugin harness entirely (T033): the owned MITM/gateway
+supervisor and its aiohttp/zstandard dependency, the pinned-dependency pip
+installer, native `~/.codex/agents` profile registration, the local
+lifecycle hook dispatcher (`hooks.json`/`hooks.py`), the Codex-native
+unchanneled MCP `_meta` identity adapter and its `server.py` dispatch
+branch, the native-index host-source reader, and the `phase2_cli_*`
+external-evaluator preparation scripts and tests. `server.py` now requires
+a trusted channel for every `tools/call`. Relocate the package
+identity/stamp out of the deleted `.codex-plugin/plugin.json` into
+`plugins/cortex/package-identity.json` (same `1.0.0+sha256.<16 hex>`
+scheme and stamp/validate semantics), and relocate the still-needed
+payload-digest and dev-candidate dependency-identity helpers out of the
+deleted `cortex_runtime.runtime.state` into `scripts/cortex_package.py`.
+There is no legacy-comparison/rollback operation to the removed harness,
+by explicit product decision. Live product claims for the remaining
+native/ACP client surface stay pending T035–T037.
+Delete the now-dead `execution_boundary.py` (its only caller, `hooks.py`,
+was already removed above) and its dedicated
+`tests/test_host_dispatch_contract.py`; keep `tests/test_diagnostic_boundary.py`'s
+still-live `diagnostic_boundary.py` coverage and drop only its
+`execution_boundary`-dependent case. Correct `SECURITY.md`, `README.md`,
+and `docs/project/host-compatibility.md`, which still described
+`PreToolUse`-hook enforcement (app-thread-message denial, private-root
+deny, host-dispatch-envelope authorization, bundled-skill-read allowance,
+role capability sets) as live; they now state plainly that no such hook
+exists and describe the actual ACP-path containment
+(`engine/fs_bridge.py`, `engine/terminal_bridge.py`,
+`engine/resource_policy.py`, `engine/resource_binding.py`) and its
+narrower scope and gap.
+
 ## 1.15.9
 
 Stable release candidate `1.15.9+codex.sha256.e4f332d43bf38024` is release-ready

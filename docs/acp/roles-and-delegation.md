@@ -9,8 +9,10 @@ task's code is only exercised here against fakes/stubs.
 
 ## Canonical role sources
 
-The actually-loaded specialization mechanism, per the T001 baseline, is
-`skills/` (declared by `.codex-plugin/plugin.json`): 23 `skills/worker-*/
+The actually-loaded specialization mechanism, per the T001 baseline, is the
+packaged `skills/` directory (the native-plugin `.codex-plugin/plugin.json`
+manifest that once declared it was removed at T033; ACP engine adapters
+read these files directly): 23 `skills/worker-*/
 SKILL.md`, `skills/orchestrator/SKILL.md`, and 7 shared/coordinator skills
 (`cortex-control`, `coordinator-communication`, `content-safety`,
 `tool-discipline`, `knowledge-harvest`, `documentation-sync`,

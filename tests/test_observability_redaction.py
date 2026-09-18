@@ -1,6 +1,7 @@
 """T029: the single redaction choke point (observability.redact), and the
-two real sinks that route through it (engine.logs.EngineLogs,
-gateway.diagnostics.safe_value).
+real sink that routes through it (engine.logs.EngineLogs). The other former
+sink, the Codex-plugin-harness-era gateway.diagnostics.safe_value, was
+removed with the rest of the gateway at T033.
 
 Mirrors tests/test_connections_no_secrets.py's style: plant a fake secret
 in every place this task's own risk list names (an engine's own
@@ -12,7 +13,6 @@ from __future__ import annotations
 
 import json
 
-from cortex_runtime.gateway import diagnostics as gateway_diagnostics
 from cortex_runtime.engine.logs import EngineLogs
 from cortex_runtime.observability import redact
 
@@ -108,11 +108,3 @@ def test_engine_logs_stderr_line_never_writes_planted_secrets_or_report_text(tmp
     assert FAKE_SECRET.encode() not in raw
     assert b"fakeSecretPass99" not in raw
     assert b"fakeSecretToken987654321zzzz" not in raw
-
-
-def test_gateway_safe_value_redacts_credential_shaped_field_but_keeps_error_code():
-    assert gateway_diagnostics.safe_value(FAKE_SECRET) != FAKE_SECRET
-    assert FAKE_SECRET not in gateway_diagnostics.safe_value(f"key={FAKE_SECRET}")
-    # A plain error code (task acceptance: "retain correct error provenance").
-    assert gateway_diagnostics.safe_value("invalid_compaction_reasoning") == "invalid_compaction_reasoning"
-    assert gateway_diagnostics.safe_value(200) == "200"

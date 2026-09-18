@@ -72,7 +72,7 @@ def source_record(**updates):
         "counts": {"dispatch_count": 1, "read_count": 2, "write_count": 1, "report_count": 1},
         "availability": {
             "codebase_memory": {"status": "unavailable", "reason": "service-unavailable"},
-            "gateway_provider": {"status": "available", "reason": None},
+            "engine_provider": {"status": "available", "reason": None},
             "dependencies": {"status": "available", "reason": None},
             "git": {"status": "available", "reason": None},
             "host_capabilities": {"status": "available", "reason": None},
@@ -142,7 +142,7 @@ def test_unknown_and_private_fields_fail_closed():
     with pytest.raises(TELEMETRY.TelemetryError):
         TELEMETRY.aggregate_run(value)
     value = source_record()
-    value["availability"]["gateway_provider"]["raw_output"] = "private"
+    value["availability"]["engine_provider"]["raw_output"] = "private"
     with pytest.raises(TELEMETRY.TelemetryError):
         TELEMETRY.aggregate_run(value)
 

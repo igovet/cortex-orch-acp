@@ -29,6 +29,20 @@ Cortex lifecycle policy findings are advisory: hooks do not veto host tool calls
   </tr>
 </table>
 
+> **T033 notice:** the Codex-native plugin/gateway harness this README was
+> originally written for — the `codex plugin marketplace add`/`codex plugin
+> add cortex@cortex` install flow below, its lifecycle hooks, and its
+> automatic `config.toml` provider/compaction patching — was **removed
+> entirely** at T033. Cortex is now an ACP-only agent (both ACP directions,
+> a portable engine adapter for codex-acp/claude-agent-acp, and no native
+> plugin runtime). See [docs/acp/index.md](docs/acp/index.md) for the
+> current ACP integration hub and
+> [docs/acp/packaging-and-onboarding.md](docs/acp/packaging-and-onboarding.md)
+> for install/setup/diagnostics/uninstall. The install/installation sections
+> immediately below describe the removed native-plugin flow and are kept
+> only as a historical record pending a full rewrite in T038; do not follow
+> them. Real ACP client (Zed, codeg) product claims stay pending T035–T037.
+
 ## Install with Codex — recommended
 
 > [!IMPORTANT]
@@ -158,10 +172,10 @@ project boundary; do not use a broad system or home directory as the project.
 
 Task documents and the private SQLite metadata index are both project-local below
 `.cortex`: `.cortex/<task>/` and `.cortex/cortex.sqlite3`. This same root also
-contains `draft-reports` and `pipeline-drafts`. The active Codex
-home's `state_5.sqlite` locates native source records and validates the thread's
-canonical project; it is not the Cortex store. Task/report association is checked on every
-read. Keep the project's SQLite file and task directories together for offline
+contains `draft-reports` and `pipeline-drafts`. T033 removed the Codex-native
+thread-index reader that once resolved a task's project from the active Codex
+home's `state_5.sqlite`; the ACP orchestrator supplies the project boundary
+directly. Task/report association is checked on every read. Keep the project's SQLite file and task directories together for offline
 backups. The installed MCP configuration invokes `python3` directly, so its launch
 environment must resolve Python 3.11 or newer.
 
@@ -507,22 +521,12 @@ tools such as `create_thread`, `read_thread`, `wait_threads` and
 `send_message_to_thread` are reserved for explicit user-owned task management,
 never for orchestration-worker tracking.
 
-For an active Cortex task, the bundled `PreToolUse` hook denies both the canonical
-`mcp__codex_app__send_message_to_thread` call and its direct alias before dispatch.
-Tool-event payloads may not establish whether the caller is a worker, so this is a
-task-wide denial that also applies to a coordinator. The native parent/subagent route
-remains available for worker communication.
-
-The isolated CLI/Desktop observer also recognizes direct, quoted-bracket and
-simple static-alias worker calls to `send_message_to_thread`, including those in
-known `functions.exec` wrappers, as forbidden orchestration outcomes and fails
-its audit. This is bounded static inspection, not exhaustive JavaScript
-evaluation. A qualification guard based on the host's observed call boundary
-cannot remove an app connector that the host exposes. The installed Desktop
-provider is injected dynamically as the `codex_app` MCP server; the candidate
-`[mcp_servers.codex_app] disabled_tools=["send_message_to_thread"]` override
-fails bootstrap with `invalid transport`, so the launcher does not claim a
-per-tool filter or shadow the provider.
+T033 removed the Codex-plugin-harness lifecycle hook dispatcher and its
+`codex_app`/Desktop-provider integration entirely (see [security](SECURITY.md)
+"Source capture"); there is no packaged `PreToolUse` denial of
+`send_message_to_thread` and no static CLI/Desktop observer classifying that
+call. The rule above is model guidance carried by worker instructions and
+report review, not enforced by any runtime hook or host configuration filter.
 
 ## Preferred worker route: Codebase Memory MCP
 
@@ -623,26 +627,18 @@ an explicitly classified unauthorized target,
 Cortex/transport contract breach, or task-impacting failure can enter the
 orchestration acceptance gate.
 
-The trusted `PreToolUse` hook provides a deny-only execution guard for this
-boundary. It rejects worker shell, file, and patch operands that resolve inside
-the confirmed task-private root before dispatch, including relative paths,
-`cd`/variable-expansion forms, and existing symlink routes. The guard emits only
-a sanitized denial and does not open or log the target. It intentionally leaves
-bounded `mcp__cortex__read_report` reads and ordinary workspace, Git, Codebase
-Memory, and external MCP diagnostics available. This preflight is defense in
-depth; the observer's fail-closed hard stop remains authoritative for any
-observed unauthorized event.
-Only an observed complete attributable `PreToolUse` `PERMISSION_DENIED` with the
-explicit `denied_before_dispatch` status is a prevented-attempt diagnostic: it
-neither proves host execution nor becomes accepted evidence. Missing or unknown
-semantic status fails the audit closed. A dispatched unauthorized target remains
-acceptance-critical.
-When a tool event omits `agent_id`, worker scope is established only from a
-matching child-thread/parent-session provenance receipt validated against the
-durable binding. Running worker command receipts retain their effective working
-directory and command-session ID, allowing a later `write_stdin` to apply the
-same guard. Unproven session-scoped events remain compatible with coordinator and
-system tooling rather than being globally denied.
+There is no `PreToolUse` hook, and no equivalent general-purpose shell/file/
+patch pre-dispatch denial, in the ACP-only product: T033 removed the Codex
+lifecycle hook dispatcher and its supporting `execution_boundary.py` module
+entirely. A worker's engine process can otherwise run shell commands and
+touch `.cortex/` files on local disk like any other local process running
+as the same OS user. The containment that does exist is narrower and
+opt-in: when an ACP engine session negotiates the local filesystem/terminal
+resource bridges, every request the bridge itself services must resolve
+(via the open file descriptor) inside that session's bound `workspace_root`,
+and any path component literally named `.git` or `.cortex` is refused. See
+[permissions and containment](docs/acp/permissions-and-containment.md) and
+[security](SECURITY.md) for the full boundary and its limits.
 
 ---
 
@@ -830,40 +826,20 @@ A legacy shared v11 store can be split into a fresh project-local store with
 a new backup, and leaves the source and Markdown unchanged. See
 [storage and migration](docs/project/storage.md).
 
-### Lifecycle hooks
+### Lifecycle hooks (removed, T033)
 
-The bundled hooks call one short `python3` handler and share storage/validation
-services with MCP. Active tasks capture follow-up source messages and compact
-receipts; inactive conversations are not archived. Resume and compaction receive a
-bounded recovery reminder through `SessionStart`, with repeated unchanged reminders
-suppressed. Subagent binding uses explicit native receipts rather than treating a
-parent `session_id` as the child identity.
-The recovery reminder repeats the project-access boundary. When a host explicitly
-identifies the coordinator on a command/file event, `PreToolUse` denies that route
-before dispatch; events without actor identity remain observable and are rejected
-by the audit if they show coordinator project access.
-
-`UserPromptSubmit` can only mark a pending follow-up because that event has no unique
-native message identifier; publication waits for an authoritative typed receipt.
-Stop observations are advisory, and the host may not expose the boundary of a reused
-worker assignment.
-
-On the observed CLI host, Bash hooks receive stdout without an exit code or running
-session receipt. Cortex therefore keeps those hook outcomes unverified, even when
-the text resembles JSON or a command wrapper. Native command receipts remain the
-source of execution status.
-
-Hooks record observations and diagnose unfinished work. They do not select models,
-assign work, approve actions, accept results or force endless continuation. Patch
-checks and the pre-dispatch app-thread-message denial cover only their exact routes;
-text merely mentioning a protected path is not a mutation. Hook coverage is partial,
-and hook failures remain visible. Passive observation, logging, telemetry, and
-diagnostic serialization use a narrow value-free fail-open boundary: a failure may
-emit only a bounded error class/code and continue with `evidence_admissibility` set
-to `unverified`. The boundary never wraps storage, authorization, binding,
-publication, cleanup, or audit work, and never turns a protected or uncertain action
-into success. See [lifecycle hooks](docs/features/lifecycle-hooks/index.md)
-and the [official hook reference](https://learn.chatgpt.com/docs/hooks).
+This subsection historically described the Codex-plugin-harness bundled
+hooks (`python3` `PreToolUse`/`UserPromptSubmit`/`Stop`/`SessionStart`
+handler). T033 removed the Codex-plugin-harness-era lifecycle hook
+dispatcher entirely (`plugins/cortex/hooks/`, `cortex_hook.py`,
+`cortex_runtime/hooks.py`) along with `execution_boundary.py`, the module
+that implemented the app-thread-message denial and private-root deny
+boundary those hooks enforced. There is no packaged hook handler, no
+`PreToolUse`/`UserPromptSubmit`/`Stop`/`SessionStart` event coverage, and no
+host trust prompt for one in the ACP-only product. See
+[security](SECURITY.md) for the current ACP-only source-capture boundary
+and what actually constrains local-disk access
+([permissions and containment](docs/acp/permissions-and-containment.md)).
 
 ## Profiles and model routing
 
@@ -1068,7 +1044,7 @@ The complete installable product lives under `plugins/cortex/`. Root-level
 | `plugins/cortex/scripts/cortex.py` | Seven-operation MCP entry point |
 | `plugins/cortex/.mcp.json` | Direct Python server startup |
 | `plugins/cortex/scripts/cortex_runtime/contracts.py` | Advertised schemas and limits |
-| `plugins/cortex/scripts/cortex_runtime/host_source.py` | Read the current host thread’s typed user input within its project boundary |
+| `plugins/cortex/scripts/cortex_runtime/acp/agent.py` | ACP agent entry point; reads the current session's typed user input within its project boundary |
 | `plugins/cortex/scripts/cortex_runtime/store.py` | SQLite metadata and real Markdown storage |
 | `plugins/cortex/scripts/cortex_runtime/project_storage.py` | Native project binding and project-local store routing |
 | `plugins/cortex/scripts/cortex_runtime/server.py` | Bounded stdio transport and private errors |
@@ -1091,7 +1067,8 @@ sets its own `HOME` and `CODEX_HOME`, prepares the content-stamped package throu
 the supported sync path and launches ordinary Codex in the caller's project.
 It does not create tmux or modify the stable installed plugin.
 The packaged MCP manifest forwards the isolated dependency directory so cached
-MCP startup can launch the gateway with the same hash-locked dependency set.
+MCP startup can resolve its engine adapters with the same hash-locked
+dependency set.
 The Desktop helper derives and validates that prepared owner-only directory
 after `--prepare-only`, overwriting any conflicting ambient value before
 launching Electron.
@@ -1135,8 +1112,11 @@ multiple nested calls, failed calls, or replays remain invalid.
 Launcher tmux/process/capture setup is `launcher_transport`, never qualification
 evidence. The only observed-current-host discovery exception is a complete bounded
 read of an exact advertised coordinator `SKILL.md` or public `.mcp.json`/
-`.codex-plugin/plugin.json` declaration from the isolated bundled release; it cannot
-use a directory, glob, runtime/state/registry file, arbitrary cache path, or mutation.
+`package-identity.json` declaration from the isolated bundled release (T033
+removed the Codex-plugin-harness-era `.codex-plugin/plugin.json` Marketplace
+manifest; package identity/stamp now lives in `package-identity.json`); it
+cannot use a directory, glob, runtime/state/registry file, arbitrary cache
+path, or mutation.
 The separately observed `text(ALL_TOOLS)` envelope is permitted only as a value-free,
 bounded public catalogue label with a complete receipt; filters, queries, paths,
 content extraction, mutations, nested calls, and mixed wrappers are not this exception.
@@ -1419,159 +1399,17 @@ entirely optional.
 
 ## Verification and diagnostics
 
-The Model Gateway lifecycle and provider patch behavior are documented in
-[Model Gateway lifecycle](docs/project/model-gateway.md). Marketplace MCP
-startup enables the gateway by default through the global `CODEX_HOME`
-configuration; set `gateway.enabled = false` for explicit storage-only mode.
-The isolated launcher installs and
-version-checks a clean dependency target from the hash-locked Linux wheel set
-with pip `--require-hashes`, then invokes the prepared Marketplace cache's own
-gateway control entrypoint; runtime health binds the lock manifest digest,
-installed dependency-byte digest, exact stamped payload, and entrypoint
-invocation. If the explicit gateway configuration is changed to
-`gateway.enabled = false`, the launcher ensure path drains the owned child and
-waits for runtime-state removal before reporting it stopped. A reload to the
-disabled state stops the child and request handling rejects any race rather
-than forwarding; if reload cannot signal or drain the owned child, it returns
-failure and the control command exits nonzero. Draining health is not
-readiness. After readiness, Cortex automatically selects its local Codex
-provider at `http://127.0.0.1:8787/backend-api/codex` (or the configured fixed
-loopback listener). It uses Codex's existing OpenAI authentication and preserves
-model choices, reasoning effort and unrelated configuration. It selects the
-remote summary compactor with `remote_compaction_v2 = true` and
-`context_management = false`; both feature edits are journaled and reversible.
-No proxy variables, local CA certificate or special product launcher are needed.
-The proxy has no request-count or connection-slot admission limit: active-request
-tracking exists only for controlled drain, and a full historical 32-request count
-does not produce a capacity 503, `Retry-After`, or an admission queue. Body,
-timeout, protocol, policy, and cancellation checks remain in force. Candidate
-preparation uses the isolated listener (normally 18787) and never changes the
-stable 8787 runtime.
-Provider backups are
-published create-only so concurrent configuration cannot overwrite the first
-recovery point. Gateway configuration and its control directory are private
-owner-only paths; unsafe existing entries fail closed. Provider updates use a
-locked descriptor/content compare-and-swap and refuse to overwrite unrelated
-concurrent edits.
-When a requested listener is occupied by an older same-user Cortex gateway,
-startup verifies its complete command and packaged manifest, sends a controlled
-stop, waits for the listener to drain, and retries. An unrelated process is
-never terminated. The packaged dependency installer keeps its progress output
-off MCP stdout so it cannot corrupt the JSON-RPC handshake. Compaction
-rewriting covers V2 `compaction_trigger` (auto compaction) and the
-legacy `/backend-api/codex/responses/compact` JSON path (manual compaction).
-Recognized legacy JSON is routed in-call to the supported V2 path because the
-production upstream retired `/responses/compact`; opaque legacy bytes retain
-their original path and bytes. The HTTP compaction routes force the upstream-
-required `store: false` and `stream: true` values. The optional WebSocket
-transport inspects only uncompressed direct `response.create` compaction
-messages and rewrites only `model` and `reasoning.effort`, preserving the
-message's other fields; it does not
-apply a separate HTTP store rewrite.
-
-### Automatic provider and compaction paths
-
-After installation or update, the first startup of the installed Cortex MCP
-applies these settings to the global `$CODEX_HOME/config.toml` (normally
-`~/.codex/config.toml`), not a project-local config. Marketplace installation by
-itself does not run this setup; MCP initialization must occur. Model traffic
-uses the new settings when the client next loads configuration.
-
-Automatic setup selects Codex's remote summary compaction mode. The experimental
-`context_management` mode can reset a context window locally without asking a
-model to summarize it; there is no summary request for a proxy to reroute in that
-case. Cortex sets `features.context_management = false` and
-`features.remote_compaction_v2 = true` on connection. These choices take effect
-on the next configuration load, apply to native workers as well as coordinators,
-and restore their previous values on disconnect if still unchanged. Subsequent
-user feature overrides are preserved; opting back into context management also
-opts out of this guarantee of remote summary routing.
-
-Cortex's first MCP startup verifies the owned gateway and updates the effective
-user `config.toml` with a local `cortex` model provider. HTTP/SSE and Responses
-WebSocket requests use the same fixed loopback listener. The gateway establishes
-TLS to `chatgpt.com` and keeps authentication in transit only. WebSocket framing
-and handshakes are separate on each leg, with compression disabled; message
-content, application headers, ping/pong and close behavior are relayed.
-
-Codex applies the route when it next loads configuration. Installing a plugin
-does not guarantee that MCP has started or that an existing task has reloaded
-its provider. A new task or Desktop restart can still be necessary; Cortex
-does not interrupt active tasks. A healthy gateway alone does not prove client
-routing: verify fresh model-request outcomes from that exact client.
-
-Automatic setup requires the normal OpenAI provider. It refuses to replace a
-custom provider or custom upstream. Subsequent user provider edits take
-precedence. A private route journal records the fields Cortex owns, and
-`config.toml.cortex-backup` preserves the original file. Disabling the gateway
-or the recorded Marketplace entry restores matching owned fields and drains
-the gateway; unrelated later edits survive. Plugin removal is observed while
-the independent gateway is running. If it was forcibly killed first, its
-observer cannot perform cleanup. Configuration already loaded by an active
-client changes only on that client's next configuration load.
-
-Codex's installed source markers identify the remote V2 compactor in
-`core/src/compact_remote_v2.rs` and its WebSocket request builder in
-`codex-api/src/endpoint/responses_websocket.rs`, with the request schema fields
-`response.create`, `input`, `reasoning`, `store`, and `stream`. When that V2
-request is sent as an uncompressed direct `response.create` message containing
-an input item whose type is `compaction_trigger`, the gateway receives the bounded
-message and rewrites only `model` and `reasoning.effort`. `store`, `stream`,
-and all other JSON fields are preserved. A direct HTTP V2 request with the same trigger follows the
-existing HTTP policy, which also applies its upstream-required storage/stream
-normalization.
-
-The upstream Codex sources make the automatic route more precise: `core/src/compact_remote_v2.rs`
-sets `CompactionTrigger::Auto` for `run_inline_remote_auto_compact_task`, while
-`core/src/compact_remote_v2_attempt.rs` appends `ResponseItem::CompactionTrigger {}`
-and calls `ModelClientSession::stream`. The shared
-`codex-api/src/endpoint/responses_websocket.rs` serializes that request as
-`ResponsesWsRequest::ResponseCreate` and sends it as a WebSocket text message.
-Thus automatic compaction reaches the same outbound `response.create` WebSocket
-handler as other V2 requests; it does not use `/backend-api/codex/responses/compact`.
-The installed binary is stripped, so these source links establish the trigger
-and handler shape while its exact threshold branch remains unverified locally.
-
-Automatic compaction and a standalone `/compact` action can converge on the
-same remote V2 `response.create`/`compaction_trigger` wire shape. The gateway
-therefore identifies the protocol trigger, not the origin story: its bounded
-log records `auto_compaction` for the HTTP V2 classifier and
-`websocket_compaction` for the WebSocket frame classifier. To distinguish
-automatic from standalone behavior without another submission, correlate
-those sanitized entries with local lifecycle telemetry: a preceding native
-`/compact` user message indicates standalone steering, while a threshold-driven
-compaction has no such user message. Network evidence alone cannot make that
-distinction, and a failed helper receipt must not be retried for this purpose.
-
-For Marketplace installation, the gateway starts by default. The packaged
-Python entrypoint creates the private config, installs
-the hash-locked runtime into `$CODEX_HOME/cortex/deps/<lock-digest>`, and ensures the cached
-gateway and provider; failures abort startup. A verified dependency tree is reused
-by subsequent MCP processes, including workers. Set `gateway.enabled = false` in
-`$CODEX_HOME/cortex/config.toml` for explicit storage-only mode.
-`scripts/cortex-dev` remains the isolated developer launcher,
-uses the same automatic provider code in its disposable profile. The proxy accepts only loopback listener
-authorities and the fixed upstream. Logs contain bounded model/effort,
-request-kind, and status metadata only: cookies, authorization values, request
-bodies, and WebSocket payloads are never written to diagnostics.
-
-The `/backend-api/codex/responses/compact` handler is retained solely as a
-compatibility mapping for older manual callers: decodable JSON is routed to the
-supported V2 path, while opaque legacy bytes remain byte-for-byte pass-through.
-It is not a second WebSocket route or a fallback retry. The HTTP proxy module
-serves HTTP, health and WebSocket traffic on the provider listener.
-Every proxied request emits bounded, secret-free model/effort and request-kind
-telemetry to the private rotating gateway log; malformed ordinary or opaque
-legacy bytes remain unchanged. The proxy preserves path/query, body bytes, and
-all non-authority header pairs; it rewrites only the local incoming `Host`
-authority to the configured upstream authority on the upstream wire so
-Cloudflare virtual-host routing succeeds. This is transport metadata, not a
-semantic body rewrite. Compaction alone rewrites `model` and
-`reasoning.effort`. The outbound HTTP client does not inject an
-`Accept-Encoding` header when the caller omitted it, preventing an unsolicited
-encoded model catalogue; an explicit caller value is forwarded unchanged.
-Automatic response decompression remains disabled, so upstream response headers
-and body bytes are streamed to the caller as received.
+> **T033: the Codex plugin/gateway harness described in earlier revisions of
+> this section was removed entirely** (the owned MITM gateway, its automatic
+> `config.toml` provider/compaction patching, the pinned-dependency
+> installer, and native `~/.codex/agents` profile registration). Cortex is
+> now an ACP-only agent. See [docs/acp/index.md](docs/acp/index.md) for the
+> current ACP integration hub, and
+> [docs/acp/packaging-and-onboarding.md](docs/acp/packaging-and-onboarding.md)
+> for install, pinned versions, first-run setup, diagnostics and uninstall.
+> There is no legacy-comparison/rollback operation to the removed harness.
+> Live product claims for real ACP clients (Zed, codeg) stay pending
+> T035–T037.
 
 Run release-sensitive checks sequentially on one stamped checkout:
 
@@ -1583,10 +1421,11 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q
 git diff --check
 ```
 
-Source tests cover storage, schemas, recovery, source capture, hook behavior,
-profile generation and the observer. They cannot establish model behavior, host
-hook coverage or task quality. Keep raw source messages, reports, logs and host
-transcripts outside repository documentation.
+Source tests cover storage, schemas, recovery, source capture, delegation,
+ACP orchestration and the observer. They cannot establish model behavior or
+real-client GUI/task quality. Keep raw source messages, reports, logs and
+host transcripts outside repository documentation.
+
 
 ### Interactive tmux live-dev workflow
 
@@ -1642,8 +1481,11 @@ Phase 2 cell evidence is collected through the adapter's single sealed
 arguments, atomically records status, capture, events, calls, usage, and audit, and
 creates a final bundle receipt only after validation. Adapter-mediated `stop`
 requires that matching complete bundle, preventing partial capture from deleting
-the transient streams. The exact invocation is documented in
-[`docs/project/phase2-external-evaluator.md`](docs/project/phase2-external-evaluator.md).
+the transient streams. (`docs/project/phase2-external-evaluator.md`, which
+documented the exact invocation, was removed at T033 along with the
+`phase2_cli_*` scripts it described; this whole Phase 2 comparison was
+already user-cancelled, non-blocking and non-scoring — see the status note
+above.)
 
 The control also seals one common `cortex-desktop-dev` observer beside
 the common harness and applies it to both archived arms. Its minimal runtime
@@ -1832,7 +1674,6 @@ baseline, and recommendation reason/JSON sizes are bounded.
 
 See [verification](docs/project/verification.md),
 [host compatibility](docs/project/host-compatibility.md),
-[lifecycle hooks](docs/features/lifecycle-hooks/index.md),
 [comparative evaluation](docs/project/quality-evaluation.md), and
 [Phase 4 telemetry](docs/project/phase4-telemetry.md), and
 [Phase 5 adaptive selection](docs/project/phase5-adaptive-selection.md), and

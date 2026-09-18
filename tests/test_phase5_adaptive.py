@@ -128,7 +128,7 @@ def test_candidate_is_advisory_and_accepted_only_with_complete_independent_evide
 
 def test_availability_is_an_exclusion_not_a_quality_signal():
     value = aggregate()
-    value["availability"]["gateway_provider"] = {"status": "unavailable", "reason": "service-unavailable"}
+    value["availability"]["engine_provider"] = {"status": "unavailable", "reason": "service-unavailable"}
     evidence = PHASE5.build_evidence_bundle(
         [{"evidence_id": "evidence-1", "report_id": "report-1", "source_revision": 33, "artifact_digests": [], "aggregate": PHASE4.aggregate_run(value)}],
         manifest_version="phase5-test-v1",

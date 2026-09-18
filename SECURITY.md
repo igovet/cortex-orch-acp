@@ -19,11 +19,13 @@ The observational collector recognizes only a bounded literal word filter over
 public tool names/descriptions, not arbitrary JavaScript. Publication identity
 comes from public result roots; nested advisory IDs cannot substitute for it,
 and conflicting result copies remain ambiguous evidence.
-Current lifecycle behavior supersedes the historical pre-dispatch enforcement
-descriptions below: hooks never return a runtime veto. Proposed policy denials
-are retained as diagnostics with `runtime_enforcement=none`, not prevented-action
-receipts. Codex sandbox, permissions and approvals remain authoritative; storage
-and audit still report invalid or incomplete evidence rather than invent success.
+Cortex is ACP-only (T033): there is no lifecycle hook dispatcher and no
+`PreToolUse`/`UserPromptSubmit`/`Stop` pre-dispatch enforcement anywhere in
+the packaged product (see "Source capture" below). Remaining references to
+a hook "denial" elsewhere in this document describe removed behavior and
+are corrected in place; where a hook-era claim has no ACP equivalent, this
+document says so rather than restating it as live. Storage and audit still
+report invalid or incomplete evidence rather than invent success.
 Terminal qualification also requires a successful exact native `wait_agent` recorded
 after each corresponding native spawn before an idle-composer result is admissible.
 When the host supplies wait target metadata, it must include the spawned worker;
@@ -134,20 +136,13 @@ Native workers created through `collaboration.spawn_agent` are tracked only with
 and `collaboration.followup_task`. Codex app thread tools (`create_thread`,
 `read_thread`, `wait_threads` and `send_message_to_thread`) are for explicit
 user-owned task management only, not orchestration-worker tracking.
-For an active Cortex task, a `PreToolUse` hook denies the canonical
-`mcp__codex_app__send_message_to_thread` operation and its direct alias before
-dispatch. Because host tool events may not identify a worker, the denial applies to
-the whole active Cortex task, including the coordinator; it does not claim to revoke
-the connector outside Cortex-managed tasks.
-The live observer treats direct, quoted-bracket and simple static-alias worker
-`send_message_to_thread` calls, including known `functions.exec` wrappers, as a
-forbidden orchestration outcome and fails the audit. This is bounded static
-inspection, not exhaustive JavaScript evaluation. The installed Desktop provider is injected dynamically as the `codex_app` MCP
-server. The candidate `[mcp_servers.codex_app] disabled_tools=["send_message_to_thread"]`
-override fails bootstrap with `invalid transport`, so the launcher does not claim
-a host configuration filter or shadow the provider. The active-task hook denial
-enforces the exact app-message calls before dispatch, while the observer retains
-post-call evidence.
+T033 (ACP migration) removed the Codex-plugin-harness lifecycle hook
+dispatcher and its `codex_app`/Desktop-provider integration entirely (see
+"Source capture" below); there is no packaged `PreToolUse` denial of
+`send_message_to_thread` and no static observer classifying that call. The
+rule above is model guidance enforced only by worker instructions and
+task-owned report review, not by any runtime hook or host configuration
+filter.
 English-only worker reasoning and communication do not change exact quoted source
 text or the requested product language; only coordinator replies follow the user's
 response language.
@@ -278,7 +273,7 @@ the assigned owner. Internal/private storage boundaries remain in effect for rea
 Installed plugin/cache/candidate paths and agent registries are not generic
 coordinator evidence sources. Before public task creation, the only permitted
 current-host static discovery is a complete bounded read of an exact advertised
-coordinator `SKILL.md` or the public `.mcp.json`/`.codex-plugin/plugin.json`
+coordinator `SKILL.md` or the public `.mcp.json`/`package-identity.json`
 declaration from the isolated bundled release; directories, globs, arbitrary files,
 runtime/state/registry paths, and mutations remain invalid.
 The only catalogue form retained as pre-binding metadata is exact value-free
@@ -339,14 +334,10 @@ separate declaration-bound read predicate can retain complete, safe read failure
 only after the mandatory worker-SKILL receipt. Duplicate, replayed, ambiguous,
 directory/glob/other-skill, private/project-target, dispatched, truncated, or
 mutating bootstrap actions remain hard invalidators.
-Compaction recovery repeats this boundary. Where the host supplies an explicit
-coordinator identity, the active-task hook denies known command/file tools before
-dispatch. When `agent_id` is absent, the hook establishes worker scope only from a
-matching child-thread/parent-session provenance receipt validated against the
-durable binding; otherwise the event remains a coordinator/system-compatible
-task-scoped observation. Running worker command receipts retain their effective
-cwd, so a later `write_stdin` continuation remains covered without overblocking
-unproven session events.
+This Codex-compaction-recovery hook boundary no longer exists in the
+ACP-only product (see "Source capture" below); there is no lifecycle hook
+to re-establish worker scope across compaction, and no equivalent is
+claimed.
 
 Coordinator completion is also bounded by live ownership and evidence state: a
 terminal final is forbidden while any assigned owner is active or a required
@@ -419,22 +410,34 @@ interpolation, malformed code and private working directories still fail closed.
 Native worker finals identify only the assignment-owned publication; cited input
 or predecessor IDs remain inside that report and cannot satisfy ownership checks.
 
-The trusted `PreToolUse` hook also applies a deny-only worker execution boundary
-to the confirmed task project: shell, file, and patch operands that resolve into
-`.cortex/` are rejected before dispatch with a sanitized nonzero decision.
-The check covers absolute and relative paths, `cd`/shell expansion forms, existing
-symlink routes, and retained stateful `write_stdin` command sessions without opening
-or logging the target. It does not inspect
-or block the bounded `mcp__cortex__read_report` operation, and ordinary workspace,
-Git, Codebase Memory, and external MCP diagnostics remain available. This is a
-narrow preflight control, not an OS sandbox; the observer's fail-closed hard stop
-still remains acceptance-critical if an unauthorized event is observed.
-Only complete attributable `PreToolUse` denials carrying `PERMISSION_DENIED` and
-the explicit `denied_before_dispatch` state are retained as bounded
-prevented-attempt diagnostics, not hook-observation failures or evidence of a
-dispatched host access. Missing or unknown semantic status fails the audit closed.
-They cannot establish acceptance. An actually dispatched unauthorized target remains
-a fail-closed audit finding.
+There is no `PreToolUse` hook, and no equivalent shell/file/patch
+pre-dispatch denial, in the ACP-only product: T033 removed the Codex
+lifecycle hook dispatcher and its supporting `execution_boundary.py`
+module entirely, including their host-dispatch-envelope authorization,
+bundled-skill-read allowance and per-role capability sets. Nothing in the
+ACP path re-implements a general-purpose "deny any tool call that touches
+`.cortex/`" boundary; a worker's engine process is otherwise free to run
+shell commands and touch `.cortex/` files on local disk exactly as any
+other local process running as the same OS user could.
+The containment that does exist is opt-in and narrower: when an ACP engine
+session negotiates the local filesystem/terminal resource bridges
+(`cortex_runtime/engine/fs_bridge.py`, `engine/terminal_bridge.py`,
+`engine/resource_policy.py`, `engine/resource_binding.py`), every
+`fs/read_text_file`, `fs/write_text_file` and terminal `cwd` the *bridge*
+services is required to resolve (via the open file descriptor, not the
+path string) inside that session's bound `workspace_root`, and any path
+component literally named `.git` or `.cortex` inside that workspace is
+refused. This only constrains requests the bridge itself handles; it is
+not a sandbox around the engine's own shell/tool execution, and a worker
+using its engine's native shell/file tools directly (rather than the ACP
+`fs/*`/`terminal/*` bridge) is not covered by it. See
+[permissions and containment](docs/acp/permissions-and-containment.md) for
+the full design and its documented limitations (e.g. hard links).
+Every `tools/call` this repository's own MCP server accepts is still
+required to carry a valid trusted-channel identity before it can touch
+storage (see "Source capture" below and
+`cortex_runtime/trusted_channel.py`); that check is independent of, and
+does not depend on, the removed hook.
 Workers match its index to the exact canonical workspace and check relevant coverage;
 a similarly named project or ready status alone does not establish that match.
 Initial local indexing is scoped to the authorized workspace and does not authorize
@@ -615,54 +618,34 @@ device/inode, owner, and `0700` mode into both authorization and manifest. That
 identity is rechecked before stop, rejecting exact byte copies, renames, symlinks,
 and non-canonical path aliases rather than authenticating bundle content alone.
 
-## Source capture and hooks
+## Source capture
 
-The original request comes from the explicitly validated current native thread and
-project, never model-authored replacement text. The reader searches the current turn
-with bounded memory rather than a fixed tail. It rejects foreign sessions, symlinks
-and unrecognized index formats. Distinct native messages retain separate identities,
-even when text matches. Attachment metadata records recovery routes and explicit gaps;
-it does not imply that an attachment was copied or verified.
+The original request comes from the explicitly validated current ACP session
+turn, never model-authored replacement text (`cortex_runtime/acp/agent.py` and
+`bootstrap_task` in `cortex_runtime/bootstrap.py`). Distinct source events
+retain separate identities even when text matches, deduplicated by
+`(origin, event_id)` rather than by equality of the text itself; a replayed
+event never creates a second task. Attachment metadata records recovery routes
+and explicit gaps; it does not imply that an attachment was copied or
+verified. Source and report provenance (`cortex_runtime/acp/replay_store.py`)
+help the coordinator decide whether earlier evidence is still usable.
 
-Follow-up capture runs only for an already active Cortex task. `normal` suspends
-capture without deleting the archive. With an established project route, a
-host-source failure leaves saved reports accessible with explicit capture
-completeness. A fresh process still requires the validated native index to locate
-the archive; it never scans or guesses a global store. Unavailable sources never become
-invented requirements. Source and report provenance help the coordinator decide
-whether earlier evidence is still usable.
+T033 (ACP migration) removed the Codex-plugin-harness-era lifecycle hook
+dispatcher (`plugins/cortex/hooks/`, `cortex_hook.py`,
+`cortex_runtime/hooks.py`) entirely; there is no packaged `PreToolUse`,
+`UserPromptSubmit`, or `Stop` hook handler, and no host trust prompt for one.
+Every mutation reaches the store only through a dispatched, channel-verified
+`tools/call` (see "Stable release status" above); there is no separate
+hook-mediated `apply_patch` denial path. The final remediation slice also
+deleted `cortex_runtime/execution_boundary.py` (its only production caller,
+`hooks.py`, was already gone) and its dedicated
+`tests/test_host_dispatch_contract.py`; nothing in the ACP path re-implements
+its `authorize_pre_dispatch`/private-root-deny/host-dispatch-envelope/
+bundled-skill-read/role-capability logic (see "P1 semantic capability and
+evidence contract" above for what actually constrains local-disk access in
+ACP).
 
-`UserPromptSubmit` has no unique native message identifier, so the hook records only
-a pending follow-up until an authoritative typed receipt permits publication. Stop
-diagnostics are advisory; when the host does not expose a reused worker assignment's
-boundary, they cannot prove that assignment was stopped or completed.
-
-Bundled lifecycle hooks use one local Python handler, no model calls, and the host's
-ordinary review/trust mechanism. Recovery context contains bounded safe references,
-not raw user text elevated into developer instructions. Unchanged reminders are
-suppressed. Tool observations retain compact result statuses and change signals,
-not raw commands, prompts, patches, credentials or tool-output bodies. Hook actions
-are distinguishable from model actions and do not constitute complete tool coverage.
-Private shape diagnostics retain only approved key names, JSON types and bounded
-counts or lengths. Bash stdout cannot supply execution receipts: JSON-looking text
-and printed wrapper headings remain unverified, with native command outcomes
-observed separately.
-
-Only confirmed registered-file integrity violations may deny an `apply_patch`:
-mutating a published report, deleting/moving an owned draft, or a proven ownership
-conflict. The handler parses actual patch targets; a path mentioned in text is not
-such a target. Unknown actor identity cannot establish an ownership violation.
-Hooks do not grant permission, rewrite tool results, accept work, assign agents or
-force repeated continuation. Stop diagnostics remain advisory. Failures are visible
-and must not be described as a successful observation. The runtime's narrow
-fail-open diagnostic boundary applies only to passive observation, logging,
-telemetry, and diagnostic serialization. It records at most a bounded error
-class/code, marks the diagnostic evidence `unverified`, and continues the caller
-when possible, including storage or permission errors in passive telemetry. It never
-covers authorization, private-path/provenance, binding, replay/truncation,
-publication, cleanup, audit, or a protected/uncertain action.
-
-The offline live auditor requires native participant completion and rejects real
+The offline live auditor requires participant completion and rejects real
 check failures even when an output artifact already matches. This acceptance
 boundary never sends a runtime denial or terminates an executing worker.
 
@@ -670,7 +653,7 @@ boundary never sends a runtime denial or terminates an executing worker.
 
 Use `scripts/cortex-dev` only for the exact isolated `.cortex-dev/.codex` candidate.
 Never change the user's stable installation or settings for development. Real
-Desktop uses the same candidate with a disposable profile. Do not bypass hook trust.
+Desktop uses the same candidate with a disposable profile.
 A successful source test is not CLI/Desktop qualification.
 
 Live parity is strictly CLI-first: Desktop may start only after a CLI **ACCEPT**
@@ -811,96 +794,15 @@ Both call and event must independently carry well-formed, nonempty typed
 `r_[0-9a-f]{12}` report and `d_[0-9a-f]{12}` draft receipts before the ownership
 comparison; missing, empty, malformed, wrong-type, or merely equal null values fail closed.
 
-The Model Gateway starts by default for Marketplace MCP through the global
-`CODEX_HOME` configuration. Set `gateway.enabled = false` for explicit
-storage-only mode. Its local supervisor owns its registered child process and
-may also drain an older same-user Cortex gateway only after matching the exact
-gateway argv and a real Cortex package manifest for the requested loopback
-listener; it never kills an unrelated port owner. Listener and upstream changes
-are applied by a drain-and-restart path; stop waits for owned runtime state to
-disappear and reports a timeout when it cannot. Provider patching validates the
-target as a regular, owner-controlled file, preserves unrelated TOML content,
-writes a first-version backup with create-only publication, and replaces the
-file atomically. Automatic provider setup follows verified readiness, targets
-only the exact loopback listener, enables existing OpenAI authentication and
-WebSocket support, and preserves model/effort preferences and unrelated feature
-flags. It selects `context_management = false` and `remote_compaction_v2 = true`
-so automatic compaction invokes remote summarization instead of a local context
-reset. Both feature edits retain their prior values in the private journal;
-later user overrides survive reconnect and restoration.
-It rejects pre-existing custom provider/upstream configurations. Later user
-route edits are preserved. A private journal tracks owned route and compaction feature fields;
-disable/stop restores matching values rather than replacing the whole config
-with an old backup. The running gateway observes removal or disable of the exact
-Marketplace entry recorded at setup and restores before draining. An absent or
-forcibly killed observer cannot provide uninstall cleanup; already loaded client
-configuration still requires a reload.
-Provider configuration follows the effective `CODEX_HOME` unless an explicit
-override is supplied; it never falls back to a stable config from an isolated
-launcher. Existing commented table headers remain singular and valid. Each
-provider publication uses an owner-only update lock and a descriptor/content
-compare-and-swap check, failing without replacement when an unrelated editor
-changes the Codex file. The gateway configuration file and `cortex` control
-directory reject symlinks, non-regular paths, other-user ownership, and
-group/other permission bits; configured unsafe paths fail closed rather than
-being treated as absent. Each
-request's upstream cancellation is scoped to its own task; a shared client
-session is not closed because another client disconnected. Request path/query,
-body bytes, and header pairs are tunneled without filtering; the incoming
-loopback `Host` authority is rewritten only on the upstream wire to the fixed
-`chatgpt.com` authority because HTTP/1.1 virtual-host routing cannot use the
-local listener authority. This transport-only adjustment prevents Cloudflare
-virtual-host rejection; only the explicit compaction model/effort policy may
-rewrite a request body. Runtime identity
-requires the normalized stamped payload digest and exact Python entrypoint
-arguments, not merely a gateway path appearing somewhere in argv. Reload
-returns failure and the control command exits nonzero when the owned process
-cannot be signaled or drained. The isolated gateway dependency targets are
-cleaned and version-verified after installation; launcher recovery uses the
-prepared Marketplace cache's packaged control entrypoint. Gateway
-Host authority validation rejects empty, malformed, and non-loopback IPv6 forms;
-only explicit loopback authorities are accepted.
-The gateway does not enforce a request-count or connection-slot admission limit.
-Its active-request counter is drain bookkeeping only, so a historical 32-request
-count cannot yield a local capacity 503, `Retry-After`, or an admission queue.
-The isolated candidate uses an unbounded outbound connector while retaining
-transport, protocol, policy, body, timeout, and cancellation safeguards. Candidate
-preparation uses the disposable listener (normally 18787) and does not inspect,
-modify, or restart the stable 8787 runtime.
-The packaged MCP manifest forwards the launcher-provided isolated dependency
-directory; this is required for the cached MCP process to start its pinned
-gateway child without inheriting an ambient dependency path.
-The Desktop launcher derives the canonical prepared dependency directory,
-rejects missing, symlinked, or permissive trees, removes inherited values, and
-overwrites the child environment with the validated owner-only path.
-The isolated launcher uses the complete Linux CPython 3.11/3.12
-`requirements.lock` wheel hash set with pip `--require-hashes` and `--no-compile`.
-Runtime health includes both the lock-manifest digest and installed dependency
-byte digest, so an artifact substituted under an expected version cannot satisfy
-the owned-process identity check. Disabling the explicit gateway drains the
-positively owned child and waits for state removal; a reload transition stops
-the child and an in-flight race is rejected at the proxy, so a disabled
-configuration does not leave a healthy local proxy forwarding requests. A
-draining health result is never accepted as readiness by the supervisor.
-Compaction routing classifies direct V2 `compaction_trigger` requests as
-`auto_compaction` and decodable legacy compact-path requests as
-`manual_compaction`; the HTTP routes rewrite model, reasoning effort, and the
-upstream-required `store: false` and `stream: true` values. The optional
-WebSocket route recognizes only uncompressed direct `response.create`
-compaction messages and rewrites only model and reasoning effort, preserving
-other fields without applying a separate store rewrite. Each WebSocket leg owns
-its handshake, masking and framing. Application headers, text/binary messages,
-ping/pong and close signals are relayed. Upstream redirects are rejected before
-the client can replay credentials, including during WebSocket handshakes.
-Recognized legacy JSON is selected in-call to the supported V2 path because the
-upstream retired `/responses/compact`; opaque legacy bytes retain their
-original path and bytes. No redirect or retry is used. Every proxied request emits bounded model/effort/request-kind telemetry
-without bodies, credentials, or raw headers. Invalid ordinary JSON and opaque
-legacy wire formats remain byte-for-byte pass-through, while unsupported
-encodings and recognized payloads with invalid controls remain explicit errors.
-The outbound HTTP client suppresses only its implicit `Accept-Encoding` header;
-an explicit caller value remains lossless, and automatic response decompression
-is disabled so upstream response bytes are not silently rewritten.
+Cortex is ACP-only (T033): there is no Model Gateway, MITM proxy, local
+supervisor, or provider-config patching. The ACP agent (`cortex_runtime/acp/agent.py`)
+is the sole entrypoint; every `tools/call` it dispatches must carry a valid
+trusted-channel identity (`cortex_runtime/trusted_channel.py`) -- an unchanneled
+call is rejected before any store access (see `channel_required` in
+`tests/test_trusted_channel.py`). There is no local MITM CA, no loopback HTTP/SSE/
+WebSocket listener, and no request tunneling or compaction rewriting; the ACP
+engine adapters (`cortex_runtime/engine/*.py`) talk to their upstream engine
+processes directly.
 
 Offline Phase 4 telemetry is reduced to bounded, owner-private aggregates by
 [`scripts/phase4_telemetry.py`](scripts/phase4_telemetry.py). It rejects raw
@@ -921,27 +823,7 @@ join every selected report by report ID, source revision, and artifact digest;
 unknown-reason lists and recommendation JSON have explicit size bounds, while
 malformed proposals become typed baseline fallbacks.
 
-The client-facing route is the local Codex model provider, using the fixed
-HTTP/SSE/WebSocket listener. No MITM listener, certificate or proxy environment
-variables are created by this path. Only after a successful upstream upgrade
-are WebSocket messages forwarded. Automatic and
-standalone compaction may share the same V2 `response.create` trigger, so
-origin attribution requires correlation with local lifecycle events rather
-than another network submission. The isolated launcher exercises this same
-provider setup only in its prepared candidate profile.
-
-Upstream Codex source confirms the automatic trigger path: `compact_remote_v2.rs`
-labels `run_inline_remote_auto_compact_task` with `CompactionTrigger::Auto`,
-`compact_remote_v2_attempt.rs` appends `ResponseItem::CompactionTrigger {}`
-before calling `ModelClientSession::stream`, and
-`responses_websocket.rs` serializes/sends the request as the shared
-`ResponsesWsRequest::ResponseCreate` WebSocket text message. The gateway therefore
-sees automatic V2 compaction in the same outbound WebSocket handler; it is not
-the retired legacy compact endpoint. Only the installed binary's threshold
-decision remains unverified because its Rust source is stripped.
-
-See [storage](docs/project/storage.md), [hooks](docs/features/lifecycle-hooks/index.md),
-and [verification](docs/project/verification.md).
+See [storage](docs/project/storage.md) and [verification](docs/project/verification.md).
 ## Advisory depth is not authorization
 
 Current governance metadata contains only a validated mode and public record IDs;

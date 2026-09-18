@@ -18,7 +18,6 @@ from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.contracts import StoreError
 from cortex_runtime.ownership import acquire_task_owner, current_owner_epoch
 from cortex_runtime.portable.identity import SourceEvent
-from cortex_runtime.project_storage import ProjectResolver
 from cortex_runtime.server import Server
 from cortex_runtime.store import Store
 from cortex_runtime.trusted_channel import issue_channel
@@ -31,8 +30,7 @@ def bootstrap(tmp_path, owner="owner-1", text="Build a page."):
 
 
 def server_for(tmp_path, channel_id, secret):
-    return Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)),
-                  channel_credentials=(channel_id, secret, str(tmp_path)))
+    return Server(channel_credentials=(channel_id, secret, str(tmp_path)))
 
 
 def call(server, name, arguments=None):

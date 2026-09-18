@@ -90,7 +90,6 @@ def test_concurrent_process_acquisition_has_exactly_one_winner(tmp_path):
 
 def test_delayed_mutation_from_stale_owner_channel_is_rejected_and_writes_nothing(tmp_path):
     from cortex_runtime.server import Server
-    from cortex_runtime.project_storage import ProjectResolver
 
     store, result = bootstrap(tmp_path)
     stale_channel_id, stale_secret = result.channel_id, result.secret
@@ -98,8 +97,7 @@ def test_delayed_mutation_from_stale_owner_channel_is_rejected_and_writes_nothin
     with store.connection() as db:
         assert current_owner_epoch(db, result.task_id) == 2
         before = db.execute('SELECT COUNT(*) FROM drafts').fetchone()[0]
-    server = Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)),
-                     channel_credentials=(stale_channel_id, stale_secret, str(tmp_path)))
+    server = Server(channel_credentials=(stale_channel_id, stale_secret, str(tmp_path)))
     reply = server.dispatch('tools/call', dict(
         name='create_draft', arguments=dict(template='general', request_key='stale-attempt')))
     assert reply['isError']
@@ -114,11 +112,9 @@ def test_delayed_mutation_from_stale_owner_channel_is_rejected_and_writes_nothin
 
 def test_observer_reads_succeed_without_owning(tmp_path):
     from cortex_runtime.server import Server
-    from cortex_runtime.project_storage import ProjectResolver
 
     store, result = bootstrap(tmp_path)
     acquire_task_owner(store, result.task_id, 'owner-2', 1)
-    server = Server(project_resolver=ProjectResolver(lambda *_: str(tmp_path)),
-                     channel_credentials=(result.channel_id, result.secret, str(tmp_path)))
+    server = Server(channel_credentials=(result.channel_id, result.secret, str(tmp_path)))
     reply = server.dispatch('tools/call', dict(name='list_reports', arguments={}))
     assert not reply['isError'], reply

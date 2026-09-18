@@ -6,8 +6,7 @@ The 2026-09-06 replacement retains seven operations and moves binding receipts,
 source revisions/completeness, artifact provenance, change queries, own draft
 discovery and explicit Cortex/normal state into their advertised schemas. The
 coordinator may retrieve necessary original sources and continuation pages.
-Local hooks share storage and validation, without a workflow or approval machine.
-See [storage](storage.md) and [hooks](../features/lifecycle-hooks/index.md).
+See [storage](storage.md).
 
 The review below records earlier designs and corrections; any first-page-only,
 no-hooks, fixed-tail or format-10 statements describe those historical snapshots.

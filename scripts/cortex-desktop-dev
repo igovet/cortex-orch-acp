@@ -86,7 +86,7 @@ LIVE_DEVELOPER_INSTRUCTIONS=(
     'plugin/cache/candidate/registry probing before or after task creation. Before '
     'the public task receipt, the sole static exception is an exact read-only '
     'advertised coordinator SKILL.md or public plugin declaration (.mcp.json or '
-    '.codex-plugin/plugin.json), with a fixed literal file, bounded reader, and '
+    'package-identity.json), with a fixed literal file, bounded reader, and '
     'complete receipt: never a directory, glob, runtime/state file, registry, or '
     'mutation. Each role may inspect its exact advertised SKILL.md first and its directly declared '
     'Markdown reference leaves afterward by ordinary read-only means selected by the model, '
@@ -1285,8 +1285,8 @@ def advertised_skill_paths(read_paths,worker_only=False,coordinator_only=False,
 
     def active_cache_manifest(root, version):
         """Require the cache leaf to belong to the active released payload."""
-        manifest=root/version/'.codex-plugin/plugin.json'
-        trusted=ROOT/'plugins/cortex/.codex-plugin/plugin.json'
+        manifest=root/version/'package-identity.json'
+        trusted=ROOT/'plugins/cortex/package-identity.json'
         if (not manifest.is_file() or manifest.is_symlink()
                 or not trusted.is_file() or trusted.is_symlink()):
             return False
@@ -1314,7 +1314,7 @@ def advertised_skill_paths(read_paths,worker_only=False,coordinator_only=False,
         version=relative.parts[0]
         if not active_cache_manifest(expected,version):return False
         released=Path(*relative.parts[1:])
-        declaration=released in {Path('.mcp.json'),Path('.codex-plugin/plugin.json')}
+        declaration=released in {Path('.mcp.json'),Path('package-identity.json')}
         if declaration:
             if worker_only or not coordinator_only:return False
             source=ROOT/Path('plugins/cortex')/released

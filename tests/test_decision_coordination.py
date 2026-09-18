@@ -9,14 +9,14 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 OBSERVER = runpy.run_path(str(ROOT / 'scripts/cortex-desktop-dev'))
 EVAL = runpy.run_path(str(ROOT / 'scripts/cortex_eval.py'))
-CANDIDATE_VERSION = json.loads((ROOT / 'plugins/cortex/.codex-plugin/plugin.json').read_text())['version']
+CANDIDATE_VERSION = json.loads((ROOT / 'plugins/cortex/package-identity.json').read_text())['version']
 
 
 def trusted_cache(base):
     cache = base / CANDIDATE_VERSION
-    manifest = cache / '.codex-plugin/plugin.json'
+    manifest = cache / 'package-identity.json'
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_bytes((ROOT / 'plugins/cortex/.codex-plugin/plugin.json').read_bytes())
+    manifest.write_bytes((ROOT / 'plugins/cortex/package-identity.json').read_bytes())
     return cache
 
 

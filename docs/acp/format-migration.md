@@ -163,7 +163,9 @@ against the same project at once; the second is refused with
   build recognizes — refused, never attempted.
 - No rollback to the legacy Codex-plugin-harness runtime (gateway, hooks,
   `marketplace_bootstrap`, `.codex-plugin` marketplace wiring) — that
-  runtime is deleted at T033 with no supported path back to it.
+  runtime was deleted at T033 with no supported path back to it; there is
+  no legacy-comparison/rollback operation at all, by explicit product
+  decision.
 - No automatic migration on ordinary `Store()` open for format 10 — an
   operator must run `cortex_migrate.py migrate` explicitly with a backup;
   `Store()` only ever raises `unsupported_storage` for it

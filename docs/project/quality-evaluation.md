@@ -77,7 +77,7 @@ unavailable data is `unverified`. This is an evaluation contract, not automatic
 acceptance or a server/hook gate.
 
 Phase 2 archive identity binds two independent facts: the full normalized payload
-digest and the exact stamped version stored in `.codex-plugin/plugin.json`.
+digest and the exact stamped version stored in `package-identity.json`.
 Preparation, independent audit, both arm preflights, and every per-cell adapter
 command must revalidate those facts. A stopped run with an archive-identity
 contradiction is retained but restarted from 0/12 with a new control; completed

@@ -165,10 +165,11 @@ metadata preserves a usable path or resource and recovery method when available;
 unavailable attachments remain gaps. Failure to fetch later host messages does
 not close the existing archive: operation results expose capture completeness.
 
-Optional, normally trusted [lifecycle hooks](../lifecycle-hooks/index.md) record
-short local metadata and source updates only for an active Cortex task. They do
-not select agents, approve actions, accept results or enforce continuation.
-`normal` suspends Cortex capture while retaining existing documents.
+Source capture runs from the ACP agent's own request handling (T033 removed the
+Codex-plugin-harness-era lifecycle hook dispatcher entirely) and records short
+metadata and source updates only for an active Cortex task. It does not select
+agents, approve actions, accept results or enforce continuation. `normal`
+suspends Cortex capture while retaining existing documents.
 
 See [storage](../../project/storage.md) for reliability and offline migration,
 and [verification](../../project/verification.md) for source and real-host checks.

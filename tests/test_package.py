@@ -16,14 +16,14 @@ from generate_agent_profiles import (
     expected_worker_references,
 )
 
-CANDIDATE_VERSION = json.loads((PLUGIN / '.codex-plugin/plugin.json').read_text())['version']
+CANDIDATE_VERSION = json.loads((PLUGIN / 'package-identity.json').read_text())['version']
 
 
 def trusted_cache(base):
     cache = base / CANDIDATE_VERSION
-    manifest = cache / '.codex-plugin/plugin.json'
+    manifest = cache / 'package-identity.json'
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_bytes((PLUGIN / '.codex-plugin/plugin.json').read_bytes())
+    manifest.write_bytes((PLUGIN / 'package-identity.json').read_bytes())
     return cache
 
 
@@ -77,9 +77,9 @@ def test_release_readiness_keeps_retained_host_runs_historical_and_superseded():
     assert 'Both final host runs used the unchanged current candidate' not in readiness
 
 
-def test_mcp_advertises_isolated_gateway_dependency_environment():
+def test_mcp_advertises_only_the_observation_environment():
     mcp = json.loads((PLUGIN/'.mcp.json').read_text())['mcpServers']['cortex']
-    assert set(mcp['env_vars']) == {'CORTEX_OBSERVATION_DIR', 'CORTEX_DEPENDENCY_DIR'}
+    assert set(mcp['env_vars']) == {'CORTEX_OBSERVATION_DIR'}
 
 
 @pytest.mark.parametrize('ambient', [None, '/tmp/ambient-stale-dependency'])
@@ -935,9 +935,9 @@ def test_coordinator_native_worker_tracking_is_distinct_from_app_task_management
     assert rule in orchestrator
     assert '`create_thread`, `read_thread`, `wait_threads` or `send_message_to_thread`' in orchestrator
     assert 'reserved for explicit user-owned\ntask management, not worker coordination.' in orchestrator
-    assert 'scripts/cortex_runtime/hooks.py' in payload
+    assert 'scripts/cortex_runtime/store.py' in payload
     assert (PLUGIN/'skills/orchestrator/SKILL.md').is_file()
-    package_version = json.loads((PLUGIN/'.codex-plugin/plugin.json').read_text())['version']
+    package_version = json.loads((PLUGIN/'package-identity.json').read_text())['version']
     assert package_version.startswith('1.0.0+sha256.')
     assert payload_digest(PLUGIN).startswith(package_version.rsplit('.', 1)[-1])
     for path, body in expected_profiles().items():
@@ -2026,7 +2026,15 @@ def test_sync_cannot_install_without_isolated_entrypoint():
 
 def test_markdown_local_links():
     import re
-    paths=[ROOT/'README.md',ROOT/'SECURITY.md',ROOT/'PRIVACY.md',*list((ROOT/'docs').rglob('*.md')),*list((PLUGIN/'skills').rglob('*.md')),*list((PLUGIN/'agents').glob('*.toml'))]
+    # T033: docs/project/verification.md is a frozen historical evidence
+    # record (out of scope for this task -- see INVARIANTS.md) that cites
+    # test files by their exact name at the time of that verification pass,
+    # including several Codex-plugin-harness-era test files removed at
+    # T033. Its links are expected to go stale as history accumulates; it
+    # is intentionally excluded here rather than edited.
+    paths=[ROOT/'README.md',ROOT/'SECURITY.md',ROOT/'PRIVACY.md',
+           *(p for p in (ROOT/'docs').rglob('*.md') if p!=ROOT/'docs/project/verification.md'),
+           *list((PLUGIN/'skills').rglob('*.md')),*list((PLUGIN/'agents').glob('*.toml'))]
     for path in paths:
         for link in re.findall(r'\]\(([^)]+)\)',path.read_text()):
             if '://' in link or link.startswith('#'):continue
@@ -2506,8 +2514,6 @@ def test_marketplace_skills_deliver_profiles_and_progressive_references():
         skill_body=body.decode().split('---\n',2)[2].lstrip()
         profile_body=skill_body.removesuffix('\n<!-- END OF COMPLETE CORTEX WORKER SKILL -->\n')
         assert profile_body==profile['developer_instructions']
-    prepare=(ROOT/'scripts/prepare_codex.py').read_text()
-    assert 'cortex_setup.py' not in prepare
 
 
 def test_prompt_and_skill_editing_subagents_use_the_explicit_sol_medium_override():

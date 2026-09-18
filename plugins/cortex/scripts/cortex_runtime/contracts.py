@@ -272,6 +272,7 @@ ERROR_HELP = {
     "coordinator_only": "Only the bound coordinator can change Cortex participation state.",
     "invalid_source_revision": "Use an existing requirements source revision actually used by the report.",
     "storage_error": "Storage did not complete cleanly. Preserve the draft. Check disk space and access, then retry only the identical request and key because publication may be uncertain.",
+    "channel_required": "This server process was launched without CORTEX_CHANNEL_ID/CORTEX_CHANNEL_SECRET/CORTEX_CHANNEL_PROJECT_ROOT. Every tool call requires a trusted channel; the Codex-plugin-harness-era unchanneled identity path was removed. Launch through the ACP orchestrator's engine spawn, which always supplies channel credentials.",
     "channel_unknown": "This trusted channel id and secret pair is not recognized. Use the exact channel_id and secret issued at bootstrap or worker delegation; never guess or reuse another channel's credentials.",
     "channel_expired": "This trusted channel's validity window has passed. Obtain a fresh channel through bootstrap or explicit delegation; an expired channel cannot be renewed in place.",
     "channel_revoked": "This trusted channel was explicitly revoked. Obtain a fresh channel through bootstrap or explicit delegation; a revoked channel is never reactivated.",

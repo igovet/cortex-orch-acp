@@ -22,5 +22,3 @@ in the project verification guide rather than product features.
 ## Known unknowns
 
 Real-host qualification is recorded separately in release-readiness.md.
-
-- [Local lifecycle hooks](lifecycle-hooks/index.md)

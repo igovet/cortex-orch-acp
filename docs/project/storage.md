@@ -135,9 +135,9 @@ collapse distinct native events. `normal` suspends capture and later reactivatio
 must skip the inactive interval rather than backfill ordinary conversations.
 Ambiguous boundaries remain explicit gaps.
 
-Hooks share the same services. A documented `UserPromptSubmit` without a unique
-native message receipt records deferred capture, never a guessed identity or raw
-publication that bypasses a later credential redaction. See [hook coverage](../features/lifecycle-hooks/index.md).
+A source event without a unique native message receipt records deferred capture,
+never a guessed identity or raw publication that bypasses a later credential
+redaction.
 
 ## Offline project split
 

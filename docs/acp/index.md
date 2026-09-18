@@ -95,7 +95,8 @@ check.
   and pinned-dependency manifest/verifier, non-destructive first-run
   setup (storage, connection, route pinning, client recipes), no-paid
   diagnostics, reversible uninstall, and what is Codex-plugin-harness-era
-  (removed at T033) vs. stays](packaging-and-onboarding.md)
+  (removed at T033, including the whole Codex plugin harness) vs.
+  stays](packaging-and-onboarding.md)
 - [Format migration, upgrade and rollback (T032): the no-new-version-needed
   compatibility conclusion (self-healing optional table groups since
   format 11), the existing format 10->11 `migrate` tool hardened with
