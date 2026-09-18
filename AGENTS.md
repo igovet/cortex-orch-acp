@@ -4,25 +4,74 @@ Use `python3`. Runtime behavior belongs entirely below `plugins/cortex/`.
 Do not activate orchestration merely because this repository is named Cortex;
 only an explicit user selection activates the bundled orchestrator skill.
 
+Cortex is an incoming ACP v1 stdio agent (`plugins/cortex/scripts/cortex_acp.py`,
+`plugins/cortex/scripts/cortex_runtime/acp/`), not a plugin hosted inside another
+agent's process. See `docs/acp/index.md` for the full section map. T033 removed
+the entire Codex-plugin/gateway harness (the MITM gateway, the pinned-dependency
+installer, native Codex profile registration, the lifecycle hook dispatcher, the
+Codex-native `_meta` adapter, and the `.codex-plugin/` manifest) — see
+`docs/acp/packaging-and-onboarding.md`'s "What was Codex-plugin-harness-era and
+was removed" and `SECURITY.md`'s "Source capture" section for the exact list.
+Anything below describing that removed harness as though it were current is
+wrong; where this file and `docs/acp/*`/`SECURITY.md` disagree, those are right.
+
 The server stores tasks, advisory governance and Markdown reports. The model
-owns the pipeline, native subagents, steering, evidence interpretation and
-completion. Keep tool argument contracts in the advertised schemas and property
-descriptions only, never in skills or profile instructions. Preserve all 22
-specialist profiles and their shared report protocol. Do not introduce
-compatibility routes, mandatory stages or approval machines. Lifecycle hooks may
-perform short local source-memory, observation and exact registered-file integrity
-work; they never choose agents or decide task acceptance.
+owns the pipeline, delegated engine sessions, steering, evidence interpretation
+and completion. Keep tool argument contracts in the advertised schemas and
+property descriptions only, never in skills or profile instructions. Preserve
+all 22 specialist profiles and their shared report protocol. Do not introduce
+compatibility routes, mandatory stages or approval machines. There is no
+lifecycle hook dispatcher in the packaged product (removed at T033): no
+`PreToolUse`/`UserPromptSubmit`/`Stop` handler and no host trust prompt for one.
+Every mutation reaches the store only through a dispatched, channel-verified
+MCP `tools/call`; local source-memory, observation and registered-file
+integrity work happens inside that same dispatch path, never through a
+separate hook, and nothing there chooses agents or decides task acceptance.
 
 Throughout design, implementation, qualification, and live work, use only
 capabilities that are actually supported and observable in the currently installed
-Codex and host version. Before relying on a capability, verify that it exists in
+host and engine version. Before relying on a capability, verify that it exists in
 that current host. Do not require hypothetical or future host APIs, typed contexts,
 receipts, hooks, enforcement, models, tools, or transports. If a needed capability
 is absent, redesign within current-host mechanisms or report the work genuinely
-impossible; do not wait for or request a new host, synthesize evidence, claim
-`host_enforced`, or mark an attempt ACCEPT. Tests and acceptance scenarios must
-themselves be executable on the currently installed Codex. These constraints do
-not relax the CLI-before-Desktop rule below.
+impossible; do not wait for or request a new host, synthesize evidence, claim a
+host enforced a boundary it did not, or mark an attempt accepted without real
+evidence. Tests and acceptance scenarios must themselves be executable today.
+
+## Evidence discipline carried forward from the removed Codex-plugin audit harness
+
+The paragraphs below this point, up to "Historical: Codex-plugin-harness
+qualification audit contract", describe an automated current-host audit tool
+(`observational_accept`/`host_enforcement_state` labels, `mcp_first_bootstrap`
+and `worker_assignment_policy` attestations, exit-code contract) that was part
+of the removed Codex-plugin harness and is retained here only as a historical
+record — it is not runnable against the ACP product. The general principles it
+encoded still apply and are carried forward as plain rules for any qualification
+evidence, ACP or otherwise:
+
+- Never invent, synthesize, or infer a passing result from an absent signal;
+  an unsupported or unobservable signal is reported as such (`not_applicable`
+  or a retained diagnostic), never silently treated as success.
+- A hard failure, a pending/incomplete state, or mismatched/ambiguous/
+  replayed/truncated evidence blocks acceptance; it is never downgraded to a
+  diagnostic to let a run pass.
+- Evidence must be complete and non-truncated, and must bind to one real,
+  exact, non-replayed identity (task, session, artifact, or report) — no
+  opaque or duplicated binding stands in for it.
+- Report unrun or unverifiable checks explicitly rather than omitting them.
+- No mutation, private-target access, or destructive action is ever excused
+  by "it was only a diagnostic."
+
+For the current ACP product, the equivalent automated, real-host, real-client
+audit tool does not exist yet: live qualification against real ACP clients
+(Zed now; codeg deferred) is `docs/acp/real-client-runbook.md`'s manual
+observation table, all rows explicitly `NOT RUN` as of this writing, owned by
+T035–T038 (see `docs/acp/test-matrix-and-ci.md` for what the automated test
+suite can and cannot close). Do not invent a stand-in procedure or claim a row
+passed without a real, retained observation; state plainly that this is
+unverified where it is.
+
+## Historical: Codex-plugin-harness qualification audit contract (superseded, kept verbatim for record only — not runnable against the ACP product)
 
 For the explicit current-host observational qualification mode, the absence of a
 signal the installed host cannot emit is `not_applicable` or a retained
@@ -92,10 +141,16 @@ not-applicable signal. It exits 1 for every hard failure, policy row, pending or
 open state, mismatch, mutation, truncation, ambiguity, replay, or missing outcome
 proof; diagnostics remain printed in either case.
 
+## End of historical Codex-plugin-harness qualification audit contract
+
 Use one real `pipeline.md` per task, newest edition first with older editions
-below. Other reports are immutable real Markdown files. Store report bodies in
-`.codex/cortex/<task>/` in the project and only metadata/relations in SQLite.
-Both the newest-first catalogue and report content use bounded cursor reads.
+below. Other reports are immutable real Markdown files. Both published task
+documents and the SQLite metadata/relations index live under the one
+project-local `.cortex` store (`<project>/.cortex/cortex.sqlite3`, published
+document bodies under `<project>/.cortex/` alongside it); there is no
+`.codex/cortex` anywhere. `tests/test_package.py` asserts exactly one
+`.cortex/cortex.sqlite3` per project. Both the newest-first catalogue and
+report content use bounded cursor reads.
 Workers select relevant reports rather than reading everything.
 
 Read relevant docs/project and docs/features pages before nontrivial work.
@@ -108,6 +163,51 @@ edit, regenerate its complete content hash with
 `python3 -B scripts/cortex_package.py stamp` before release-sensitive checks.
 Run package, sync and test checks sequentially in the same checkout. Use the
 smallest meaningful tests first. Source-only sync uses `--check` or `--dry-run`.
+
+## Current ACP-era live/model-policy rules
+
+Never touch the user's real Zed (or other ACP client) session, its real
+credentials, or a stable configuration outside an isolated throwaway
+`HOME`/`XDG_CONFIG_HOME`/`XDG_STATE_HOME` (see
+`docs/acp/test-matrix-and-ci.md`). No direct sync into a live host
+configuration is allowed.
+
+Default live/test model policy (`gpt-5.6-luna`, medium/high effort) still
+applies to real engine work under the ACP path — see
+`docs/acp/codex-acp-adapter.md`'s T035 live evidence for `gpt-5.6-luna`
+used through the production `cortex_acp.py` entry point. Heavy models stay
+prohibited in routine live qualification. Any subagent assigned to edit
+prompts or skills must still use only `gpt-5.6-sol` at `medium` reasoning
+effort, recorded as an explicit user-requested override in the assignment;
+this does not change the Luna-only policy for real live-qualification
+workloads.
+
+The no-paid default automated suite
+(`PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q`, see
+`docs/acp/test-matrix-and-ci.md`) cannot reach a paid engine and is not a
+substitute for live qualification. The only opt-in paid probes are
+`scripts/cortex_codex_probe.py` and `scripts/cortex_claude_probe.py`, and
+both refuse to run without explicit `--i-authorize-paid-call` and
+`--approval-ref`. `scripts/cortex_acp_smoke.py` is the no-paid startup smoke
+harness (schema-validated launch/protocol surface only, not GUI evidence).
+
+Real-client qualification — the actual ACP-era equivalent of what the
+removed CLI-before-Desktop procedure below used to gate on — is the manual
+observation table in `docs/acp/real-client-runbook.md` (Zed now; codeg
+deferred), scoped by `docs/acp/test-matrix-and-ci.md`'s 45 live-only
+acceptance cases. As of this writing every row in that runbook is `NOT RUN`;
+this file does not know of a completed real-host qualification and must not
+be edited to claim one. Do not invent a substitute procedure: if the
+runbook or test matrix is silent on some part of what the old procedure
+below used to check (for example, an equivalent to its exact-window-focus
+or duplicate-receipt guards), say plainly that the ACP-era equivalent is
+not yet established rather than restating the old mechanism as current.
+
+This release-verification obligation belongs to the owner of the Cortex
+change. Run live workloads against a separate isolated project, never
+against this checkout itself.
+
+## Historical: Codex-plugin/native-subagent CLI-before-Desktop qualification procedure (superseded, kept verbatim for record only — describes a harness and product model, Cortex hosted as a plugin inside Codex CLI/Desktop driving native Codex subagents via a `$cortex:orchestrator` token, that the ACP migration replaced; not current instruction)
 
 Never install or update the stable user's Cortex plugin. Live preparation must
 use `./scripts/cortex-dev` (or the root forwarding wrapper), which alone prepares
@@ -187,3 +287,5 @@ the audit result has been captured. Use `events` for MCP outcomes and `calls` fo
 argument-free coordinator/worker host-tool invocation; review every call for necessity
 and correct role ownership. CLI/Desktop parity requires consecutive successful real-host
 runs on one unchanged payload. State an unavailable host as unverified.
+
+## End of historical Codex-plugin/native-subagent CLI-before-Desktop qualification procedure
