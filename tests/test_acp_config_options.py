@@ -614,10 +614,16 @@ def test_available_commands_update_sent_after_session_new(tmp_path, monkeypatch)
     update = transport.notifications[0]["params"]["update"]
     assert update["sessionUpdate"] == "available_commands_update"
     names = {item["name"] for item in update["availableCommands"]}
+    # T035 adds `harvest`: a knowledge harvest is explicit-only by the
+    # coordinator's own role, and until it was a command "explicit" had
+    # nothing to express it -- a model had to infer from prose whether the
+    # user had really asked, which is the inference the rule exists to
+    # prevent. Named as the user types it, not `cortex-`-prefixed.
     assert names == {acp_commands.CORTEX_STATUS, acp_commands.CORTEX_MODEL,
                       acp_commands.CORTEX_EFFORT, acp_commands.CORTEX_SETUP,
                       acp_commands.CORTEX_NEW_TASK, acp_commands.CORTEX_STOP,
-                      acp_commands.CORTEX_ANSWER, acp_commands.CORTEX_LANGUAGE}
+                      acp_commands.CORTEX_ANSWER, acp_commands.CORTEX_LANGUAGE,
+                      acp_commands.HARVEST}
     validator = _schema_validator("AvailableCommandsUpdate")
     validator.validate(update)
 

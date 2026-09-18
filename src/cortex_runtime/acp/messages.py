@@ -33,6 +33,18 @@ _CATALOG: dict[str, dict[str, str]] = {
     # prompted with, so a Russian selection still produced English replies
     # for an English-worded request. Rendered in the target language, which
     # is itself the strongest instruction.
+    "harvest_requested": {
+        "en": "The user explicitly requested a knowledge harvest{scope}. Read `knowledge-harvest` "
+              "with `read_skill` and carry it out for this task; this is the explicit request that "
+              "skill requires, not an inference from anything said earlier.",
+        "ru": "Пользователь явно запросил сбор знаний{scope}. Прочитай `knowledge-harvest` через "
+              "`read_skill` и выполни его для этой задачи: это и есть явный запрос, которого требует "
+              "этот скилл, а не вывод из сказанного ранее.",
+    },
+    "harvest_no_task": {
+        "en": "There is no task in this session yet, so there is nothing to harvest. Send a request first.",
+        "ru": "В этой сессии ещё нет задачи, собирать нечего. Сначала отправьте запрос.",
+    },
     "internal_operations_card": {
         "en": "Task bookkeeping",
         "ru": "Служебные операции",

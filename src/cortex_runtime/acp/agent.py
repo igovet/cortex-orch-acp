@@ -1056,6 +1056,9 @@ class Agent:
         if command_id == acp_commands.CORTEX_NEW_TASK:
             self._run_cortex_new_task(request_id, session_id, session, argument, cancel_event)
             return
+        if command_id == acp_commands.HARVEST:
+            self._run_harvest(request_id, session_id, session, argument, cancel_event)
+            return
 
         # cortex-model / cortex-effort / cortex-language: share the exact
         # selection code path with session/set_config_option (see
@@ -1196,6 +1199,36 @@ class Agent:
             return
         self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(reason.value)))
         observe(self.environ, "session/prompt", "command:" + acp_commands.CORTEX_ANSWER)
+
+    def _run_harvest(self, request_id, session_id, session, argument, cancel_event):
+        """T035: `/harvest` -- an explicit knowledge-harvest request for the
+        task this session is already on.
+
+        The coordinator's role keeps a harvest explicit-only, and until this
+        command existed "explicit" had nothing to express it: a model had to
+        decide from prose whether the user had really asked. A command was
+        pressed or it was not.
+
+        Deliberately an ordinary turn on the existing task, not a mechanism
+        of its own: the request is recorded as the user's own message, so
+        steering, continuation, language and every durable guarantee apply to
+        it exactly as they do to anything else the user says.
+        """
+        store = self._store_for(session["project"])
+        language = self._current_language_for_session(store, session) or "en"
+        if session.get("task_id") is None:
+            if self.transport is not None:
+                self.transport.send_notification(protocol.agent_message_chunk(
+                    session_id, acp_messages.render("harvest_no_task", language)))
+                self.transport.send_response(
+                    protocol.result_response(request_id, protocol.prompt_result(StopReason.END_TURN.value)))
+            return
+        scope = argument.strip()
+        text = acp_messages.render(
+            "harvest_requested", language,
+            scope=(f" ({scope})" if scope else ""),
+        )
+        self._run_prompt_body(request_id, session_id, session, text, cancel_event)
 
     def _run_cortex_new_task(self, request_id, session_id, session, argument, cancel_event):
         """T020: creates a brand-new, separate task from ``argument`` and

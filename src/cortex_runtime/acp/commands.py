@@ -48,6 +48,13 @@ CORTEX_NEW_TASK = "cortex-new-task"
 CORTEX_STOP = "cortex-stop"
 CORTEX_ANSWER = "cortex-answer"
 CORTEX_LANGUAGE = "cortex-language"
+# T035: a knowledge harvest is explicit-only by the coordinator's own role
+# ("Keep `cortex:knowledge-harvest` explicit-only"). Until this command
+# existed, "explicit" had no expression: a model had to infer from prose
+# whether the user had really asked for one. A command is unambiguous --
+# it was pressed or it was not -- and the user asked for it by this exact
+# name, not a `cortex-` prefixed one.
+HARVEST = "harvest"
 
 # Trigger text as typed by a user, in recognition priority order (longest
 # first so "/cortex-model" is never mistaken for a shorter prefix).
@@ -55,6 +62,7 @@ _TRIGGERS: tuple[tuple[str, str], ...] = (
     ("/cortex-status", CORTEX_STATUS),
     ("/cortex-new-task", CORTEX_NEW_TASK),
     ("/cortex-language", CORTEX_LANGUAGE),
+    ("/harvest", HARVEST),
     ("/cortex-model", CORTEX_MODEL),
     ("/cortex-effort", CORTEX_EFFORT),
     ("/cortex-setup", CORTEX_SETUP),
@@ -71,6 +79,7 @@ AVAILABLE_COMMANDS: tuple[dict, ...] = (
     dict(name=CORTEX_STOP, description="Urgently stop the active task: cancels every assignment, queued open, and open question. Does not restart through a later message.", input=None),
     dict(name=CORTEX_ANSWER, description="Answer one specific open coordinator question by its listed number (use when more than one question is open).", input=dict(hint="<question-number> <answer text>")),
     dict(name=CORTEX_LANGUAGE, description="Set the language Cortex uses for its own status/question/stop lines: auto, en, or ru.", input=dict(hint="auto|en|ru")),
+    dict(name=HARVEST, description="Explicitly ask for a knowledge harvest of what this task established. Optional scope.", input=dict(hint="<optional scope>")),
 )
 
 
