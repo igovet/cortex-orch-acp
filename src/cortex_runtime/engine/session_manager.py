@@ -21,7 +21,7 @@ from . import stub_handlers
 from .client import EngineClient, EngineProtocolError, EngineTransportClosed
 from .correlation import CorrelationTables
 from .fs_bridge import FsBridge, FsBridgeError
-from .mcp_bridge import build_mcp_servers
+from .mcp_bridge import build_mcp_servers, host_mcp_servers
 from .permissions import DuplicateEnginePermissionRequestId, PermissionBridge
 from .process import EngineProcess
 from .resource_binding import BindingRegistry, ResourceBinding
@@ -197,6 +197,7 @@ class EngineSessionManager:
         max_concurrent_client_requests: int = DEFAULT_MAX_CONCURRENT_CLIENT_REQUESTS,
         terminal_output_persist=None,
         coordinator_refusal_notifier=None,
+        host_mcp_servers=None,
     ):
         """``install`` -- a
         :class:`~.codex_install.CodexAcpInstall`, or ``None`` -- is passed
@@ -233,6 +234,11 @@ class EngineSessionManager:
         self._policy = policy if policy is not None else ResourcePolicy()
         self._host_permission_requester = host_permission_requester
         self._coordinator_refusal_notifier = coordinator_refusal_notifier
+        # The client's own MCP servers, to be offered to this engine
+        # alongside Cortex's own. Held in memory only: a client's env and
+        # header values are its secrets (see engine.mcp_bridge
+        # .host_mcp_servers).
+        self._host_mcp_servers = list(host_mcp_servers or ())
         # T024: optional sink -- see ``engine.terminal_bridge.TerminalBridge``
         # and ``delegation.live_adapters``'s real binding of this to
         # ``recovery.large_output_store``; ``None`` (default) never persists.
@@ -559,6 +565,11 @@ class EngineSessionManager:
             params["mcpServers"] = build_mcp_servers(channel_id, secret, project_root)
         else:
             params["mcpServers"] = []
+        # Cortex's own server first, then the client's -- an engine that
+        # stops at the first name still finds the one this runtime depends
+        # on, and a client entry can never displace it (host_mcp_servers
+        # refuses one called "cortex").
+        params["mcpServers"] = list(params["mcpServers"]) + host_mcp_servers(self._host_mcp_servers)
         if session_new_meta is not None:
             if not isinstance(session_new_meta, dict):
                 raise _fail("invalid_field", "session_new_meta must be a dict.", field="session_new_meta")

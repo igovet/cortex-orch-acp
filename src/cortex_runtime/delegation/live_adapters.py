@@ -635,6 +635,15 @@ class EngineSessionManagerAdapter:
             # this fix -- until :meth:`set_runtime` has actually been called).
             if "host_permission_requester" not in manager_kwargs:
                 manager_kwargs["host_permission_requester"] = self._host_permission_requester
+            if "host_mcp_servers" not in manager_kwargs:
+                # The client's own MCP servers, so a coordinator and every
+                # worker see the same tools the user configured in their
+                # editor. ``None`` until set_runtime has been called, which
+                # is every direct test -- unchanged for them.
+                runtime = getattr(self, "_runtime", None)
+                getter = getattr(runtime, "host_mcp_servers_for_task", None)
+                if getter is not None:
+                    manager_kwargs["host_mcp_servers"] = getter(task_id)
             manager = EngineSessionManager(
                 record, workspace_root, environ=self._environ,
                 channel_credentials=channel_credentials,

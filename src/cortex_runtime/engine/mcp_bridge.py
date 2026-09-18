@@ -38,6 +38,37 @@ def allowed_mcp_servers(role: str) -> tuple[str, ...]:
     return ("cortex",)
 
 
+def host_mcp_servers(servers) -> list[dict[str, object]]:
+    """The client's own MCP servers, as they must look on the wire to an
+    engine.
+
+    The user asked for what they configure in their editor -- a code-memory
+    server, for instance -- to be available to the coordinator and to every
+    worker, which means passing the client's list through instead of
+    dropping it. Two things are still refused rather than forwarded: an
+    entry that does not have a usable name and command (an engine cannot
+    launch it, and a half-entry is worth an omission, not a crash), and any
+    entry calling itself ``cortex``, which would shadow this runtime's own
+    server and hand a client's process the coordinator's channel name.
+
+    Entries are copied, not referenced, and nothing here is ever written to
+    storage or a log: a client's ``env``/``headers`` values are its
+    secrets, and they exist in this process only long enough to be handed
+    to the engine that needs them.
+    """
+    forwarded: list[dict[str, object]] = []
+    for entry in servers or ():
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name or name in _ROLES or name == "cortex":
+            continue
+        if not isinstance(entry.get("command"), str) or not entry["command"]:
+            continue
+        forwarded.append(dict(entry))
+    return forwarded
+
+
 def build_mcp_servers(
     channel_id: str,
     secret: str,

@@ -453,7 +453,14 @@ class Agent:
         session = dict(
             project=project, task_id=None, channel=None, active=None, lock=threading.Lock(),
             owner_epoch=None, pending_selection=None, default_selection=None,
-            pending_language=None, client_capabilities=dict(self.client_capabilities))
+            pending_language=None, client_capabilities=dict(self.client_capabilities),
+            # The client's own MCP servers, kept whole and in memory only so
+            # the engines this session drives are offered the same tools the
+            # user configured in their editor. Storage keeps the stripped
+            # shape above and never these values: an entry's env/headers are
+            # the client's secrets.
+            mcp_servers=[dict(e) for e in raw_mcp_servers if isinstance(e, dict)],
+        )
         self.sessions[session_id] = session
         # A prior explicit choice persisted as the *normal* T008 user-default
         # route/parameters (see _apply_pre_task_selection) is only ever this

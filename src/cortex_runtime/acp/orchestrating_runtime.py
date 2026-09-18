@@ -598,6 +598,10 @@ class OrchestratingRuntime:
         # Assignments dispatched and not yet terminal. A live worker is
         # work in progress, not an absence of progress.
         self._open_assignments: dict[str, set] = {}
+        # The client's own MCP servers for whichever session currently
+        # owns each task. In memory only -- a client's env/header values
+        # are its secrets and are never persisted or logged.
+        self._task_mcp_servers: dict[str, list] = {}
         # T020 (stop-race fix): the cancel_event of whichever start_prompt/
         # answer_question call currently owns this task's continuation loop
         # *in this process* -- lets stop_task() signal that loop to exit
@@ -631,6 +635,7 @@ class OrchestratingRuntime:
         host_elicitor: HostElicitor | None = None,
         emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
         emit_display_update: Callable[[Mapping[str, Any]], bool] | None = None,
+        host_mcp_servers: list | None = None,
         host_permission_requester: Callable | None = None,
         host_fs_requester: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> StopReason:
@@ -692,6 +697,8 @@ class OrchestratingRuntime:
                 self._task_fs_requesters[task_id] = host_fs_requester
             if emit_tool_call is not None:
                 self._task_tool_call_emitters[task_id] = emit_tool_call
+            if host_mcp_servers:
+                self._task_mcp_servers[task_id] = list(host_mcp_servers)
         try:
             return self._run(task_id, session_id, content, emit_update, cancel_event,
                               source_origin=source_origin, source_event_id=source_event_id, host_elicitor=elicitor,
@@ -703,6 +710,7 @@ class OrchestratingRuntime:
                 if self._active_cancel_events.get(task_id) is cancel_event:
                     del self._active_cancel_events[task_id]
                 self._task_tool_call_emitters.pop(task_id, None)
+                self._task_mcp_servers.pop(task_id, None)
                 if host_permission_requester is not None:
                     self._task_permission_requesters.pop(task_id, None)
                 if host_fs_requester is not None:
@@ -3652,6 +3660,17 @@ class OrchestratingRuntime:
             return content.encode("utf-8", "surrogateescape")
 
         return checker
+
+    def host_mcp_servers_for_task(self, task_id: str):
+        """The client's own MCP servers for the session currently running
+        this task, or ``None`` when no session is (the same shape as
+        :meth:`permission_requester_for_task`). Read by
+        ``delegation.live_adapters`` when it opens an engine session, so a
+        coordinator and every worker are offered the same tools the user
+        configured in their editor."""
+        with self._lock:
+            servers = self._task_mcp_servers.get(task_id)
+        return list(servers) if servers else None
 
     def permission_requester_for_task(self, task_id: str):
         """EXT-01 #5: the exact connection-bound
