@@ -106,6 +106,64 @@ def test_missing_telemetry_is_unknown_never_zero_and_never_gates_execution(tmp_p
         assert bucket["tokens_reported"] == {}
 
 
+def test_mixed_known_and_unknown_usage_never_produces_a_falsely_cheap_total(tmp_path):
+    """PR-07: when some calls in a task report tokens and others omit
+    telemetry entirely, the aggregate must not silently treat the missing
+    calls as zero-cost -- ``unknown_basis_calls`` stays a distinct,
+    non-zero count alongside ``tokens_reported`` (which only ever reflects
+    the calls that actually reported), so a caller reading the summary
+    cannot mistake ``tokens_reported`` for the whole task's true usage."""
+    store, task_id = _task(tmp_path)
+
+    observability_usage.record_call_usage(
+        store, task_id=task_id, attempt_id="att-5", engine_session_ref="sess-5a",
+        usage_basis=UsageBasis.ENGINE_REPORTED, usage_values=dict(input_tokens=10, output_tokens=5),
+        stop_reason="end_turn", failed=False,
+    )
+    # An engine that omits telemetry entirely for this call (usage_basis=None).
+    observability_usage.record_call_usage(
+        store, task_id=task_id, attempt_id="att-5", engine_session_ref="sess-5b",
+        usage_basis=None, usage_values=None, stop_reason="end_turn", failed=False,
+    )
+    # An engine that explicitly reports UNKNOWN.
+    observability_usage.record_call_usage(
+        store, task_id=task_id, attempt_id="att-5", engine_session_ref="sess-5c",
+        usage_basis=UsageBasis.UNKNOWN, usage_values=None, stop_reason="end_turn", failed=False,
+    )
+
+    summary = observability_usage.usage_summary(store, task_id)
+    assert summary["total_calls"] == 3
+    assert summary["unknown_basis_calls"] == 2
+    for bucket in summary["by_connection"].values():
+        # Only the one reporting call's tokens are summed -- the two
+        # telemetry-omitted calls are never folded in as zero.
+        assert bucket["tokens_reported"] == dict(input_tokens=10, output_tokens=5)
+        assert bucket["unknown_basis_calls"] == 2
+        assert bucket["calls"] == 3
+    # A caller that reads only tokens_reported without unknown_basis_calls
+    # would undercount this task's true call volume by 2/3 -- the summary
+    # keeps that count directly alongside the (necessarily partial) totals
+    # rather than omitting it, so the undercount can never be silent.
+    assert summary["unknown_basis_calls"] > 0
+
+
+def test_omitted_basis_and_none_values_are_both_stored_as_unknown_not_absent(tmp_path):
+    """A ``None`` usage_basis (an adapter code path that never even calls
+    record_call_usage's usage arguments meaningfully) is normalized to the
+    same 'unknown' basis as an explicit UsageBasis.UNKNOWN -- there is no
+    third, un-attributed state that a total could skip entirely."""
+    store, task_id = _task(tmp_path)
+    record_id = observability_usage.record_call_usage(
+        store, task_id=task_id, attempt_id=None, engine_session_ref="sess-6",
+        usage_basis=None, usage_values=None, stop_reason="end_turn", failed=False,
+    )
+    assert record_id
+    records = observability_usage.list_usage(store, task_id)
+    assert len(records) == 1
+    assert records[0]["basis"] == "unknown"
+    assert records[0]["tokens"] == {}
+
+
 def test_retry_calls_are_each_attributed_separately(tmp_path):
     """A failed call followed by a retry on the same engine session
     produces two distinct usage_records rows -- the retry is never

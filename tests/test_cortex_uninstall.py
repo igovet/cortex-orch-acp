@@ -73,6 +73,37 @@ def test_remove_user_scope_deletes_only_cortex_config_and_state(tmp_path, monkey
     assert unrelated.exists()
 
 
+def test_remove_user_scope_survives_engine_installs_credentials_and_history(tmp_path, monkeypatch):
+    """DEP-06: confirmed user-scope removal deletes only $XDG_CONFIG_HOME/cortex
+    and $XDG_STATE_HOME/cortex -- a real engine's own install/credential
+    directories (outside Cortex's XDG scope -- see
+    ``engine.codex_install._UNTRUSTED_HOME_RELATIVE_ROOTS`` and
+    ``engine.claude_install``'s equivalent) and unrelated user history must
+    survive untouched."""
+    config_home, state_home, home = _isolate(tmp_path, monkeypatch)
+    _seed_cortex_state(tmp_path)
+
+    # Real engine install/credential locations (outside Cortex's own XDG
+    # config/state roots).
+    codeg_config = home / ".config" / "app.codeg" / "auth.json"
+    codeg_config.parent.mkdir(parents=True)
+    codeg_config.write_text('{"api_key": "fake-not-real"}', encoding="utf-8")
+    zed_external_agent = home / ".local" / "share" / "zed" / "external_agents" / "codex-acp" / "binary"
+    zed_external_agent.parent.mkdir(parents=True)
+    zed_external_agent.write_bytes(b"not a real engine binary")
+    # Unrelated user history file.
+    bash_history = home / ".bash_history"
+    bash_history.write_text("ls -la\ncd project\n", encoding="utf-8")
+
+    exit_code = uninstall.main(["--remove-user-scope", "--i-confirm-removal"])
+    assert exit_code == 0
+    assert not (config_home / "cortex").exists()
+    assert not (state_home / "cortex").exists()
+    assert codeg_config.read_text() == '{"api_key": "fake-not-real"}'
+    assert zed_external_agent.read_bytes() == b"not a real engine binary"
+    assert bash_history.read_text() == "ls -la\ncd project\n"
+
+
 def test_remove_project_store_never_touches_planted_user_files_or_git_branch(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     project = tmp_path / "myproject"

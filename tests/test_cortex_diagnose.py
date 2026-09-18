@@ -126,3 +126,39 @@ def test_never_spawns_a_subprocess(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess_module, "run", _forbidden)
     monkeypatch.setattr(subprocess_module, "Popen", _forbidden)
     cortex_diagnose.run_diagnostics()
+
+
+def test_diagnostics_launches_zero_engine_processes_after_full_setup(monkeypatch, tmp_path):
+    """DEP-02: instrument the actual engine-invocation path
+    (``engine.process.EngineProcess``, the class whose constructor is the
+    only ``subprocess.Popen`` call in the engine-launch code path -- see
+    ``engine/process.py``) with a call counter, run ``run_diagnostics``
+    after a full connection/route setup (the config state most likely to
+    tempt a "helpful" capability probe), and assert exactly zero engine
+    launches -- not just that the diagnostics script's own source text
+    never mentions ``subprocess`` (the existing static guard), but that no
+    transitively-imported code path actually launches one at runtime."""
+    _isolate(tmp_path, monkeypatch)
+    setup.init_storage()
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_bytes(b"fake-key")
+    conn = setup.add_connection(name="work", engine="codex-acp", provider="openai",
+                                 auth_mode=AuthMode.API_KEY, key_kind="openai_api_key",
+                                 api_key_reader=lambda: secret_file.read_bytes())
+    setup.pin_route(connection_id=conn["connection_id"], model="gpt-5-codex")
+
+    from cortex_runtime.engine import process as engine_process
+
+    launch_count = {"n": 0}
+    real_init = engine_process.EngineProcess.__init__
+
+    def _counting_init(self, *args, **kwargs):
+        launch_count["n"] += 1
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(engine_process.EngineProcess, "__init__", _counting_init)
+
+    report = cortex_diagnose.run_diagnostics()
+
+    assert launch_count["n"] == 0
+    assert report["overall"] in ("ok", "degraded")

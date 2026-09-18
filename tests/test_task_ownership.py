@@ -118,3 +118,53 @@ def test_observer_reads_succeed_without_owning(tmp_path):
     server = Server(channel_credentials=(result.channel_id, result.secret, str(tmp_path)))
     reply = server.dispatch('tools/call', dict(name='list_reports', arguments={}))
     assert not reply['isError'], reply
+
+
+def test_stale_owner_channel_is_rejected_on_a_delegation_operation(tmp_path):
+    """SEC-13 (T030 fix): a coordinator channel whose owner epoch has been
+    superseded (recovery bumped ownership before revoking the old channel --
+    see server.py's DELEGATION operations comment) must be refused on a
+    delegation mutating operation (``delegate``), not only on the
+    MUTATING_TOOLS path exercised by
+    test_delayed_mutation_from_stale_owner_channel_is_rejected_and_writes_nothing."""
+    from cortex_runtime.server import Server
+
+    store, result = bootstrap(tmp_path)
+    stale_channel_id, stale_secret = result.channel_id, result.secret
+    acquire_task_owner(store, result.task_id, 'owner-2', 1)
+    with store.connection() as db:
+        before = db.execute('SELECT COUNT(*) FROM task_events').fetchone()[0]
+    server = Server(channel_credentials=(stale_channel_id, stale_secret, str(tmp_path)))
+    reply = server.dispatch('tools/call', dict(
+        name='delegate', arguments=dict(
+            title='T', brief='B', role='backend-dev', acceptance='A', request_key='stale-delegate')))
+    import json
+    assert reply['isError'], reply
+    body = json.loads(reply['content'][0]['text'])
+    assert body['error'] == 'stale_ownership_epoch'
+    assert body['write_state'] == 'rejected'
+    with store.connection() as db:
+        after = db.execute('SELECT COUNT(*) FROM task_events').fetchone()[0]
+    assert before == after
+
+
+def test_model_supplied_binding_arguments_cannot_forge_identity(tmp_path):
+    """SEC-13: a delegation-operation caller cannot override its own
+    channel-derived identity (task_id/channel_id/workspace_binding_id/etc.)
+    by supplying those as tool arguments -- the runtime bridge derives
+    identity only from the resolved trusted channel, never from caller
+    arguments, and the schema (``additionalProperties: False``) refuses any
+    such forged binding argument outright."""
+    from cortex_runtime.server import Server
+
+    store, result = bootstrap(tmp_path)
+    server = Server(channel_credentials=(result.channel_id, result.secret, str(tmp_path)))
+    forged_args = dict(
+        title='T', brief='B', role='backend-dev', acceptance='A', request_key='forge1',
+        task_id='t_' + '0' * 12, channel_id='ch_' + '0' * 12, workspace_binding_id='wb_forged',
+    )
+    reply = server.dispatch('tools/call', dict(name='delegate', arguments=forged_args))
+    import json
+    assert reply['isError'], reply
+    body = json.loads(reply['content'][0]['text'])
+    assert body['error'] == 'invalid_arguments', body

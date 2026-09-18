@@ -14,9 +14,12 @@ from cortex_runtime.portable.engine_contract import (
 
 ROOT = Path(__file__).resolve().parents[1]
 # .cortex/ is gitignored (see .gitignore:3) and so is not guaranteed present
-# in a fresh checkout/clone; this path is therefore only used for a
-# best-effort cross-check below, never as the primary assertion source.
+# in a fresh checkout/clone; the mandatory cross-check below therefore reads
+# the vendored copy in tests/fixtures/engine/ (verbatim, see the NOTICE
+# there), and only uses the gitignored original as an additional drift check
+# when it happens to be present locally.
 CAPABILITY_MATRIX = ROOT / ".cortex/acp-migration/T002/CAPABILITY_MATRIX.json"
+VENDORED_CAPABILITY_MATRIX = Path(__file__).resolve().parent / "fixtures" / "engine" / "CAPABILITY_MATRIX.json"
 
 # Verbatim engine-applicable subset of "capabilities_to_record" from
 # .cortex/acp-migration/T002/CAPABILITY_MATRIX.json as read on 2026-09-17:
@@ -45,14 +48,21 @@ def test_engine_capability_matches_matrix_engine_applicable_subset():
 
 
 def test_engine_capability_cross_check_against_capability_matrix_when_present():
-    """Best-effort cross-check: only runs its assertion if the gitignored
-    CAPABILITY_MATRIX.json evidence file happens to be present locally."""
-    if not CAPABILITY_MATRIX.is_file():
-        pytest.skip("CAPABILITY_MATRIX.json is gitignored and not present in this checkout")
-    matrix = json.loads(CAPABILITY_MATRIX.read_text())
+    """Mandatory cross-check: always runs against the vendored copy of
+    CAPABILITY_MATRIX.json (tests/fixtures/engine/), so it cannot silently
+    skip in a fresh clone where the gitignored .cortex/ evidence tree is
+    absent. Additionally verifies the gitignored original is byte-identical
+    to the vendored copy when that original happens to be present."""
+    matrix = json.loads(VENDORED_CAPABILITY_MATRIX.read_text())
     all_capabilities = set(matrix["capabilities_to_record"])
     client_only = set(matrix["cortex_directions"]["capabilities_primarily_incoming_client_offered"])
     assert EXPECTED_ENGINE_APPLICABLE_CAPABILITIES == all_capabilities - client_only
+
+    if CAPABILITY_MATRIX.is_file():
+        assert CAPABILITY_MATRIX.read_text() == VENDORED_CAPABILITY_MATRIX.read_text(), (
+            "tests/fixtures/engine/CAPABILITY_MATRIX.json has drifted from "
+            ".cortex/acp-migration/T002/CAPABILITY_MATRIX.json; re-copy it verbatim"
+        )
 
 
 def test_engine_event_turn_end_requires_stop_reason():

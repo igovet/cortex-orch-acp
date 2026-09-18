@@ -238,6 +238,61 @@ def test_no_progress_budget_ends_turn_blocked_without_infinite_waiting(tmp_path)
     assert any("Blocked" in u for u in updates)
 
 
+def test_repeated_empty_coordinator_turns_end_blocked_and_retain_history(tmp_path):
+    """PR-06: a coordinator that keeps producing literally empty turns
+    (not merely unproductive text) while a worker never progresses must
+    still be stopped by the no-progress budget -- never loop forever
+    re-prompting the model -- and every event/report already recorded
+    stays readable (via list_events) after the turn ends blocked."""
+    call_counts = {"coordinator": 0}
+
+    store, task_id = _task(tmp_path)
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        call_counts["coordinator"] += 1
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(title="Assignment Y", brief="do Y", role="backend-dev", acceptance="Y done", request_key="reqY"))
+            return PromptOutcome(StopReason.END_TURN, "")
+        # Every subsequent turn is a genuinely empty response -- no text,
+        # no tool call, no progress -- exactly the "repeated empty turns"
+        # scenario PR-06 requires exercising.
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def silent_worker(store, channel, session_ref, message, call_index):
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else silent_worker
+
+    runtime, engine = _make_runtime(store, router, wait_timeout_seconds=0.2, max_no_progress_continuations=2)
+    updates = []
+    result = runtime.start_prompt(task_id, "s1", "Do Y.", updates.append, threading.Event())
+    assert result == StopReason.END_TURN
+    # The budget bounds the retry count: it must not have kept calling the
+    # coordinator forever (an infinite model loop).
+    assert call_counts["coordinator"] <= 10
+    with store.connection() as db:
+        state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
+        event_count = db.execute("SELECT COUNT(*) FROM task_events WHERE task_id=?", (task_id,)).fetchone()[0]
+    assert state == "blocked"
+    assert event_count > 0  # history is retained, not discarded, after the blocked close
+    reader_channel = _resolve_owner_channel(store, task_id)
+    events = mcp_tools.dispatch(store, reader_channel, "list_events", dict(request_key="list-after-block"))
+    assert isinstance(events["events"], list) and len(events["events"]) > 0
+
+
+def _resolve_owner_channel(store, task_id):
+    from cortex_runtime.ownership import current_owner_epoch
+    from cortex_runtime.trusted_channel import issue_channel, resolve_channel
+
+    with store.connection() as db:
+        epoch = current_owner_epoch(db, task_id)
+    channel_id, secret = issue_channel(store, task_id, "coordinator", epoch)
+    return resolve_channel(store, channel_id, secret)
+
+
 def test_worker_question_reaches_coordinator_only_then_clarify_then_publish(tmp_path):
     store, task_id = _task(tmp_path)
     phase = {"clarified": False, "accepted": False}

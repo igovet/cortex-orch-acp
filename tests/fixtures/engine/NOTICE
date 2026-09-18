@@ -1,0 +1,17 @@
+tests/fixtures/engine/CAPABILITY_MATRIX.json
+=============================================
+
+This file is a verbatim, unmodified copy of
+.cortex/acp-migration/T002/CAPABILITY_MATRIX.json, vendored here because
+.cortex/ is gitignored (see .gitignore) and therefore not guaranteed present
+in a fresh checkout/clone or CI. It is copied so that
+tests/test_portable_engine_contract.py's cross-check of EngineCapability
+against the recorded capability matrix always runs (never skips) regardless
+of whether the historical .cortex evidence tree happens to be present
+locally.
+
+If the gitignored .cortex source file is also present, the test additionally
+asserts it is byte-identical to this vendored copy, as a drift check.
+
+Do not hand-edit this file; if T002's capability matrix changes, re-copy it
+from .cortex/acp-migration/T002/CAPABILITY_MATRIX.json verbatim.

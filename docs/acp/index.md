@@ -119,6 +119,13 @@ check.
   `cortex_runtime.acp.runtime.UnavailableRuntime`, the production entry
   point's only runtime).
 
+## Test matrix and CI
+
+[test-matrix-and-ci.md](test-matrix-and-ci.md) — the non-paid default test
+command and its two mandatory environment requirements, what enforces that a
+default run cannot start a paid campaign, the non-root CI requirement, and the
+45 acceptance cases that only live qualification can close.
+
 ## Activation model
 
 Cortex only activates when a client explicitly selects/launches it as its

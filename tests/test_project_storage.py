@@ -235,3 +235,61 @@ def test_representative_operations_create_exactly_one_project_store(tmp_path):
     assert legacy_dirs == []
     assert not (worktree/'.cortex').exists()
     assert not (project/'.codex').exists()
+
+
+def test_the_real_launcher_creates_exactly_one_project_store(tmp_path):
+    """SEC-11/T034: bootstrap a task the way a real host actually does --
+    through the shipped launcher entry point (``cortex_acp.py``, spawned as
+    a real subprocess exactly the way Zed would launch it -- see
+    ``acp_fakes.spawn_production_agent``) via ``session/new`` +
+    ``session/prompt`` -- and confirm the launcher/spawn path itself never
+    creates ``project/.codex/cortex``, a second ``.cortex`` anywhere, or
+    any other alternate storage root. ``session/prompt`` is expected to
+    fail with an explicit unresolved-route error (no connection is
+    configured in this isolated test HOME) rather than reach a model --
+    the durable task/session storage is created by ``session/new`` before
+    that point regardless."""
+    import json as _json
+
+    from acp_fakes import spawn_production_agent
+
+    project = tmp_path / 'project'
+    project.mkdir()
+
+    proc = spawn_production_agent()
+    try:
+        def send(message):
+            proc.stdin.write(_json.dumps(message) + '\n')
+            proc.stdin.flush()
+
+        def recv():
+            return _json.loads(proc.stdout.readline())
+
+        send(dict(jsonrpc='2.0', id=1, method='initialize',
+                   params=dict(protocolVersion=1, clientCapabilities={},
+                               clientInfo=dict(name='t', version='1'))))
+        recv()
+        send(dict(jsonrpc='2.0', id=2, method='session/new',
+                   params=dict(cwd=str(project), mcpServers=[])))
+        session_id = recv()['result']['sessionId']
+        recv()  # available_commands_update notification
+
+        send(dict(jsonrpc='2.0', id=3, method='session/prompt',
+                   params=dict(sessionId=session_id, prompt=[dict(type='text', text='Build a page.')])))
+        reply = recv()
+        assert reply['id'] == 3
+        # No connection/route is configured in this isolated HOME, so the
+        # real production runtime must fail explicitly (never a hidden
+        # provider/native fallback, never a real model call) -- the durable
+        # store this test is checking was already created by session/new.
+        assert 'error' in reply
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=15)
+    assert proc.returncode == 0
+
+    sqlite_files, cortex_dirs, legacy_dirs = _walk_sqlite_and_cortex(tmp_path)
+    assert sqlite_files == [project/'.cortex'/'cortex.sqlite3']
+    assert cortex_dirs == [project/'.cortex']
+    assert legacy_dirs == []
+    assert not (project/'.codex').exists()
