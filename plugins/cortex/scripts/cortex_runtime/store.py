@@ -114,6 +114,15 @@ CREATE TABLE IF NOT EXISTS attempt_revisions (
  kind TEXT NOT NULL, head TEXT, dirty_digest TEXT, detail TEXT
 );
 CREATE INDEX IF NOT EXISTS attempt_revisions_by_attempt ON attempt_revisions(attempt_id,captured_at);
+-- T032: durable record of every offline format migration/rollback ever
+-- applied to this exact database file (never mutated, only appended).
+-- Optional, self-healing like attempt_revisions above -- a pre-T032 v11
+-- store simply has zero rows until its next migration/rollback.
+CREATE TABLE IF NOT EXISTS format_history (
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL,
+ from_version INTEGER NOT NULL, to_version INTEGER NOT NULL,
+ backup_path TEXT NOT NULL, backup_digest TEXT NOT NULL, at TEXT NOT NULL
+);
 PRAGMA user_version=11;
 '''
 
