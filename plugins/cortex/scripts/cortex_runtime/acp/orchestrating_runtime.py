@@ -853,18 +853,44 @@ class OrchestratingRuntime:
         reason: str, message_key: str, message_params: Mapping[str, Any],
         emit_update: Callable[[str], bool] | None, language: str | None,
     ) -> bool:
-        """Shared bounded-retry blocked-delivery path for both a
-        ``capsule_oversize`` and a T024 ``budget_overflow`` condition (see
+        """Shared blocked-delivery path for both a ``capsule_oversize`` and a
+        T024 ``budget_overflow`` condition (see
         :meth:`_block_generation_immediately` for the distinct, already-
         bounded ``compaction_blocked`` case): begin/re-check a delivery row
-        for ``capsule_revision``, and only once :data:`MAX_DELIVERY_RETRIES` is
-        reached, permanently block it *and* durably record + (when a real
-        channel is available) emit the localized explicit message -- never
-        silently, and never more than once per bounded-retry exhaustion.
-        Returns ``True`` once permanently blocked (caller must not prompt
-        the engine this turn), ``False`` while still within bounded retries
-        (caller proceeds without the oversized/overflowing content this
-        turn, exactly like the pre-T024 ``capsule_oversize`` path)."""
+        for ``capsule_revision`` and durably record + (when a real channel
+        is available) emit a localized explicit message -- never silently.
+
+        EXT-01 #6: mandatory context that does not fit blocks the engine
+        call on the *first* attempt, not only once :data:`MAX_DELIVERY_RETRIES`
+        is exhausted -- absence of required context is never a transient
+        condition to run the turn through while retries remain. This method
+        therefore always returns ``True`` (the caller must not prompt the
+        engine this turn). Retrying is still legitimate -- a rebuilt
+        capsule, a different presentation, or the coordinator being told
+        the assignment must change, each naturally tried again on a later
+        turn via the ordinary continuation loop -- so while bounded retries
+        remain the delivery row is only ``blocked`` (not ``permanent``, see
+        ``begin_delivery``'s reopen-to-``built`` rule) and a live "will
+        retry" notice goes straight to ``emit_update`` (the *transport*
+        callback for this turn -- no store write). It is deliberately never
+        routed through ``_set_state``/``_emit_localized``: both durably
+        touch ``task_orchestration``/``task_events``, which
+        ``recovery.capsule``'s own section builders and
+        ``_high_watermark`` fold straight into ``capsule_revision`` (see
+        that module's ``continuation_intent.orchestration`` section and its
+        docstring on ``source_high_watermark``) -- recording the retry
+        itself would mint a fresh ``capsule_revision`` on every attempt,
+        making this exact "still overflowing on the *same* content" check
+        (keyed on an unchanged ``capsule_revision``) never accumulate
+        ``retry_count`` and never reach :data:`MAX_DELIVERY_RETRIES` at all.
+        Only once retries are exhausted does the block become permanent,
+        durably recorded with a ``limit:`` prefix and the plain overflow
+        message via the normal task_orchestration/emit_update path -- safe
+        precisely because the pending generation is cleared at that point,
+        so no further capsule build for it will ever observe the change.
+        The two outcomes are therefore always distinguishable: a live-only
+        "will retry" notice (this turn) versus a durable "permanently
+        blocked" task state (every future read)."""
         delivery = self._engine.begin_delivery(session_ref, capsule_revision)
         if delivery is None:
             return False
@@ -883,7 +909,11 @@ class OrchestratingRuntime:
                 self._emit_localized(task_id, emit_update, language or "en", message_key, **message_params)
             return True
         self._engine.mark_delivery_blocked(session_ref, delivery["id"], reason)
-        return False
+        if emit_update is not None:
+            retry_key = f"{message_key}_retry"
+            retry_params = dict(message_params, retry_count=delivery["retry_count"], max_retries=MAX_DELIVERY_RETRIES)
+            emit_update(acp_messages.render(retry_key, language or "en", **retry_params))
+        return True
 
     def _block_generation_immediately(
         self, task_id: str, session_ref: str, capsule_revision: str, reason: str,
@@ -932,17 +962,22 @@ class OrchestratingRuntime:
         (``recovery.presentation.select_presentation``) rather than
         dropping any mandatory content; ``overflow`` or a compaction-guard
         block goes through :meth:`_block_generation_delivery`'s identical
-        bounded-retry/explicit-message path the pre-existing
-        ``capsule_oversize`` case already uses -- never a silent loop or a
-        silently truncated constraint.
+        first-attempt-blocks path the pre-existing ``capsule_oversize`` case
+        already uses -- never a silent loop, never a turn run without the
+        mandatory content, and never a silently truncated constraint.
 
         Returns ``(prompt_text, delivery_id, blocked)``. ``delivery_id`` is
-        ``None`` when nothing was pending, already permanently blocked, or
-        the engine offers no delivery tracking at all (every pre-T022
-        fake/test session runtime). ``blocked`` is ``True`` only once this
-        exact generation has just become permanently blocked -- the caller
-        must end the turn without prompting the engine.
-        """
+        ``None`` when nothing was pending, blocked (retriable or
+        permanent), or the engine offers no delivery tracking at all (every
+        pre-T022 fake/test session runtime). ``blocked`` is ``True``
+        whenever this exact generation could not be packaged to fit this
+        turn -- whether still within :data:`MAX_DELIVERY_RETRIES` (a live
+        "will retry" notice on ``emit_update`` this turn, no durable
+        ``task_orchestration`` state change, and the pending generation
+        kept for a later attempt) or permanently exhausted (durable
+        ``blocked`` task state with a ``limit:`` prefix, pending generation
+        cleared) -- the caller must end the turn without prompting the
+        engine either way (EXT-01 #6)."""
         pending_delivery = getattr(self._engine, "pending_delivery", None)
         if pending_delivery is None:
             return prompt_text, None, False

@@ -651,6 +651,23 @@ boundary never sends a runtime denial or terminates an executing worker.
 
 ## Development and evidence
 
+### Historical: Codex-plugin-harness-era CLI/Desktop development and evidence rules (superseded, kept verbatim for record only — not current instruction, not runnable against the ACP product)
+
+T033 removed the Codex-plugin/gateway/marketplace-bootstrap machinery the
+paragraphs below assume. `scripts/cortex-dev`, `cortex-live-capture-sink`, and
+`cortex_dev_config.py` were deleted as genuinely dead (see
+`docs/acp/packaging-and-onboarding.md`'s "What was Codex-plugin-harness-era and
+was removed"); `scripts/cortex-desktop-dev` and `scripts/cortex-live-smoke` are
+kept, unrun, only as the reference implementation and regression-tested
+specification of the coordinator/worker policy and audit-evidence rules
+described below — see that same doc section for exactly what still means
+something and what does not. Treat everything in this subsection as a
+historical record of a removed harness, not a current procedure; the current
+ACP-product equivalent for real-host qualification does not exist yet (see
+AGENTS.md's "Historical: Codex-plugin/native-subagent CLI-before-Desktop
+qualification procedure" and "Evidence discipline carried forward from the
+removed Codex-plugin audit harness").
+
 Use `scripts/cortex-dev` only for the exact isolated `.cortex-dev/.codex` candidate.
 Never change the user's stable installation or settings for development. Real
 Desktop uses the same candidate with a disposable profile.
@@ -794,6 +811,10 @@ Both call and event must independently carry well-formed, nonempty typed
 `r_[0-9a-f]{12}` report and `d_[0-9a-f]{12}` draft receipts before the ownership
 comparison; missing, empty, malformed, wrong-type, or merely equal null values fail closed.
 
+#### End of historical Codex-plugin-harness-era CLI/Desktop development and evidence rules
+
+## ACP transport, engine adapters, and offline telemetry boundaries
+
 Cortex is ACP-only (T033): there is no Model Gateway, MITM proxy, local
 supervisor, or provider-config patching. The ACP agent (`cortex_runtime/acp/agent.py`)
 is the sole entrypoint; every `tools/call` it dispatches must carry a valid
@@ -824,6 +845,7 @@ unknown-reason lists and recommendation JSON have explicit size bounds, while
 malformed proposals become typed baseline fallbacks.
 
 See [storage](docs/project/storage.md) and [verification](docs/project/verification.md).
+
 ## Advisory depth is not authorization
 
 Current governance metadata contains only a validated mode and public record IDs;

@@ -1480,10 +1480,23 @@ class EngineSessionManagerAdapter:
     def mark_delivery_confirmed(self, session_ref: str, delivery_id: str) -> None:
         from . import deliveries as delegation_deliveries
 
+        row = None
         if self._store is not None:
-            delegation_deliveries.mark_delivery_confirmed(self._store, delivery_id, "session_prompt_response_received")
+            row = delegation_deliveries.mark_delivery_confirmed(
+                self._store, delivery_id, "session_prompt_response_received",
+            )
         with self._lock:
-            self._pending_generation.pop(session_ref, None)
+            # T035 EXT-01 #3 gap closure: this pop is a conditional
+            # transition, not an unconditional delete keyed only on
+            # ``session_ref``. A new compaction can already have queued a
+            # *later* generation (and started its own delivery) while this
+            # delivery -- built against an *older* generation -- was still
+            # in flight; confirming the older one must never erase the
+            # pending requirement for the newer one still owed on this
+            # session.
+            pending = self._pending_generation.get(session_ref)
+            if pending is not None and row is not None and pending.get("id") == row.get("context_generation_id"):
+                self._pending_generation.pop(session_ref, None)
 
     def mark_delivery_uncertain(self, session_ref: str, delivery_id: str, reason: str) -> None:
         from . import deliveries as delegation_deliveries

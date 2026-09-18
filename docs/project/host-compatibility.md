@@ -164,7 +164,11 @@ current-host exceptions do not admit failed writes, missing or ambiguous report
 publication, mutation/private targets, artifact mismatch, replay, truncation, or
 other malformed evidence.
 
-For the current Desktop host only, `cortex-desktop-dev start` may record the
+For the historical Codex-plugin-harness Desktop host only (superseded by the
+T033 ACP migration; `scripts/cortex-desktop-dev` is kept unrun, as a
+coordinator/worker policy reference only — see AGENTS.md's "Historical:
+Codex-plugin/native-subagent CLI-before-Desktop qualification procedure"),
+`cortex-desktop-dev start` may record the
 predeclared exact SHA-256 for the single expected `RESULT.md` artifact. A complete
 observational Desktop outcome is one durable submitted root/direct public task
 receipt, one attributable native child thread, one successful coordinator report

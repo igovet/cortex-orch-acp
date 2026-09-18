@@ -22,6 +22,7 @@ round-trip.
 """
 from __future__ import annotations
 
+import dataclasses
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -166,8 +167,23 @@ class BindingRegistry:
             self._epoch_by_workspace[workspace_binding_id] = new_epoch
 
     def invalidate_generation(self, engine_session_id: str, new_generation: str) -> None:
+        """Bumps the current generation *and* atomically installs a fresh
+        current ``ResourceBinding`` (same identity, new generation) for
+        ``engine_session_id``, so a request made after this call sees a
+        binding that already matches the new generation instead of being
+        refused as stale itself. A request already in flight is holding its
+        own (older, frozen) ``ResourceBinding`` snapshot from before this
+        call -- replacing the registry's copy here does not touch that
+        held reference, so its later staleness check against the bumped
+        generation still correctly refuses it (T035 EXT-01 #3 gap
+        closure)."""
         with self._lock:
             self._generation_by_session[engine_session_id] = new_generation
+            current = self._bindings.get(engine_session_id)
+            if current is not None:
+                self._bindings[engine_session_id] = dataclasses.replace(
+                    current, context_generation_id=new_generation,
+                )
 
     def invalidate_action(self, engine_session_id: str, action_key: str) -> None:
         with self._lock:

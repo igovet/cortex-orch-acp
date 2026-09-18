@@ -710,26 +710,67 @@ def test_budget_overflow_reports_the_concrete_limit_and_never_truncates_constrai
     # schemas) alone overflows it.
     engine.trigger_compaction(session_ref, "tc-overflow", phase="completed")
     monkeypatch.setattr(token_budget, "DEFAULT_CONTEXT_WINDOW_TOKENS", 10)
+    prompt_calls_before_overflow = len(engine.prompt_calls)
+    seen = []
+    # EXT-01 #6: the very first redelivery attempt for this exact pending
+    # generation already blocks -- never proceeds without the mandatory
+    # capsule while bounded retries remain. This is not yet a durable
+    # task-orchestration "blocked" state (see _block_generation_delivery's
+    # own docstring: doing that here would fold a fresh ``updated_at`` into
+    # every subsequent build_capsule call via
+    # continuation_intent.orchestration, changing capsule_revision on every
+    # attempt and permanently preventing retry_count from ever reaching
+    # MAX_DELIVERY_RETRIES) -- only a live "will retry" notice on
+    # emit_update, and the pending generation is still stored.
+    _, delivery_id, blocked = runtime._begin_generation_delivery(
+        task_id, session_ref, COORDINATOR_ROLE_ID, "same pending content", emit_update=seen.append,
+    )
+    assert blocked
+    assert delivery_id is None
+    assert len(seen) == 1
+    assert "retry" in seen[0].lower() or "attempt 0 of" in seen[0]
+    orchestration = _orchestration_row(store, task_id)
+    assert orchestration["state"] != "blocked"
+    # The pending generation itself is still stored (never dropped while
+    # retries remain) -- the fake engine's own pending_delivery still
+    # surfaces it.
+    assert engine.pending_delivery(session_ref) is not None
+
     # Repeated direct redelivery attempts for this exact, unchanged pending
     # generation (task state itself never advances between these calls --
     # exactly the "same capsule_revision" bounded-retry case
     # _block_generation_delivery documents) exercise the real production
-    # method exactly as OrchestratingRuntime's own continuation loop would.
-    blocked = False
+    # method exactly as OrchestratingRuntime's own continuation loop would,
+    # each one still blocking, until MAX_DELIVERY_RETRIES is exhausted and
+    # the block becomes permanent.
     for _ in range(MAX_DELIVERY_RETRIES + 2):
         _, _, blocked = runtime._begin_generation_delivery(
-            task_id, session_ref, COORDINATOR_ROLE_ID, "same pending content",
+            task_id, session_ref, COORDINATOR_ROLE_ID, "same pending content", emit_update=seen.append,
         )
-        if blocked:
+        assert blocked
+        orchestration = _orchestration_row(store, task_id)
+        if orchestration["state"] == "blocked":
             break
 
-    assert blocked
     orchestration = _orchestration_row(store, task_id)
     assert orchestration["state"] == "blocked"
     assert orchestration["wait_reason"] == "limit:budget_overflow"
     explanation = json.loads(orchestration["wait_detail_json"])["explanation"]
     assert "context_window_tokens" in explanation
     assert "split the assignment" in explanation
+    # Once permanently blocked, the pending generation is cleared -- there
+    # is nothing left to retry.
+    assert engine.pending_delivery(session_ref) is None
+    # Distinguishable in what was surfaced along the way: every retry
+    # notice differs from the final permanent one (no wording collision
+    # that would let a client/coordinator confuse "will retry" with
+    # "cannot be delivered at all").
+    assert seen[-1] != seen[0]
+    assert "split the assignment" in seen[-1]
+    # Never once was the engine actually prompted for any of these blocked
+    # redelivery attempts (EXT-01 #6's core regression: a missing mandatory
+    # capsule blocks on the first attempt, not only after retries exhaust).
+    assert len(engine.prompt_calls) == prompt_calls_before_overflow
 
 
 def _orchestration_row(store, task_id):
@@ -738,6 +779,100 @@ def _orchestration_row(store, task_id):
             "SELECT state, wait_reason, wait_detail_json FROM task_orchestration WHERE task_id=?", (task_id,),
         ).fetchone()
     return dict(row)
+
+
+def test_budget_overflow_never_prompts_the_engine_on_first_attempt_end_to_end(tmp_path, monkeypatch):
+    """EXT-01 #6 reviewer regression test, exercised through the *real*
+    ``start_prompt``/``_run`` continuation loop (not a direct
+    ``_begin_generation_delivery`` call): on the very first turn a mandatory
+    capsule does not fit, the coordinator's engine is never prompted at
+    all -- asserted via the actual call count, not just a returned flag --
+    and the pending generation is kept for a legitimate retry (bounded-
+    retry exhaustion itself, keyed on an *unchanged* capsule_revision, is
+    covered directly against ``_begin_generation_delivery`` by
+    ``test_budget_overflow_reports_the_concrete_limit_and_never_truncates_constraints``
+    above -- every ordinary end-to-end turn here legitimately carries new
+    user content, which is itself new task state and so never re-hits the
+    exact same capsule_revision, exactly like every other "two turns ->
+    two distinct generations/deliveries" case in this file)."""
+    from cortex_runtime.recovery import token_budget
+
+    call_count = 0
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        nonlocal call_count
+        call_count += 1
+        return PromptOutcome(StopReason.END_TURN, "ok")
+
+    def router(store, channel, session_ref, launch, instructions):
+        return coordinator_behavior if channel is not None and channel.role == "coordinator" else None
+
+    store, task_id = _task_with_store(tmp_path)
+    runtime, engine = _make_runtime(store, router)
+    cancel_event = threading.Event()
+    runtime.start_prompt(task_id, "s1", "Build a page.", lambda text: True, cancel_event)
+    session_ref = runtime._coordinator_sessions[task_id]
+    assert call_count == 1
+
+    engine.trigger_compaction(session_ref, "tc-overflow-e2e", phase="completed")
+    monkeypatch.setattr(token_budget, "DEFAULT_CONTEXT_WINDOW_TOKENS", 10)
+
+    # First turn after the overflow condition exists: the engine must NOT
+    # be prompted at all this turn.
+    result = runtime.start_prompt(task_id, "s1", "keep going", lambda text: True, cancel_event)
+    assert result == StopReason.END_TURN
+    assert call_count == 1  # unchanged -- the engine was never prompted
+    assert engine.pending_delivery(session_ref) is not None  # kept for retry
+    assert _orchestration_row(store, task_id)["state"] != "blocked"  # not yet a permanent give-up
+
+
+def test_capsule_oversize_never_prompts_the_engine_on_first_attempt_end_to_end(tmp_path, monkeypatch):
+    """The other named EXT-01 #6 condition, end to end: a ``capsule_oversize``
+    ``StoreError`` on the very first delivery attempt blocks before ever
+    prompting the engine, and once the oversize condition clears the
+    generation delivers normally (the legitimate retry path -- a rebuilt
+    capsule -- actually working, not just refusing forever)."""
+    call_count = 0
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        nonlocal call_count
+        call_count += 1
+        return PromptOutcome(StopReason.END_TURN, "ok")
+
+    def router(store, channel, session_ref, launch, instructions):
+        return coordinator_behavior if channel is not None and channel.role == "coordinator" else None
+
+    store, task_id = _task_with_store(tmp_path)
+    runtime, engine = _make_runtime(store, router)
+    cancel_event = threading.Event()
+
+    def boom(*args, **kwargs):
+        raise StoreError("capsule_oversize", "critical_sections_bytes", 1, "<= 0", "too big")
+
+    monkeypatch.setattr(orchestrating_runtime, "build_capsule", boom)
+    result = runtime.start_prompt(task_id, "s1", "Build a page.", lambda text: True, cancel_event)
+    assert result == StopReason.END_TURN
+    assert call_count == 0  # never prompted -- blocked on the very first attempt
+    session_ref = runtime._coordinator_sessions[task_id]
+    assert engine.pending_delivery(session_ref) is not None  # kept for a legitimate retry
+    assert _orchestration_row(store, task_id)["state"] != "blocked"
+
+    # The legitimate retry path: the oversize condition clears (a rebuilt
+    # capsule, standing in for whatever made the next attempt actually
+    # differ) and the very next turn now delivers and prompts normally.
+    monkeypatch.undo()
+    result = runtime.start_prompt(task_id, "s1", "keep going", lambda text: True, cancel_event)
+    assert result == StopReason.END_TURN
+    assert call_count == 1
+    # capsule_deliveries.id is an opaque generated id, never insertion-
+    # ordered -- count states rather than index into an assumed order.
+    deliveries = delegation_deliveries.for_generation(
+        store, "coordinator", delegation_generations.latest_generation(store, session_ref)["id"],
+    )
+    states = [d["state"] for d in deliveries]
+    assert states.count("blocked") == 1
+    assert states.count("delivery_confirmed") == 1
+    assert engine.pending_delivery(session_ref) is None  # confirmed -- nothing left pending
 
 
 def test_capsule_oversize_is_blocked_with_a_named_reason(tmp_path, monkeypatch):

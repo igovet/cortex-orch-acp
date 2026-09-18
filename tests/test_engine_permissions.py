@@ -141,7 +141,31 @@ def test_epoch_change_invalidates_pending_permission(tmp_path):
     assert result == {"outcome": {"outcome": "cancelled"}}
 
 
-def test_generation_change_invalidates_pending_permission(tmp_path):
+def test_generation_change_invalidates_a_reply_already_in_flight(tmp_path):
+    """A request whose host round-trip was already outstanding when the
+    generation bumped (it captured its ``ResourceBinding`` before the bump)
+    is correctly refused as stale. See
+    ``test_generation_bump_after_the_fact_does_not_block_a_new_request``
+    below for the flip side this same T035 EXT-01 #3 fix guarantees: a
+    request made *after* the bump is not also refused."""
+    bindings = BindingRegistry()
+    binding = _binding(tmp_path)
+    bindings.bind(binding)
+
+    def requester(engine_session_id, params, timeout):
+        bindings.invalidate_generation(binding.engine_session_id, "gen_2")
+        return {"outcome": {"outcome": "selected", "optionId": "allow"}}
+
+    bridge = _bridge(bindings=bindings, host_permission_requester=requester)
+    result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=PARAMS)
+    assert result == {"outcome": {"outcome": "cancelled"}}
+
+
+def test_generation_bump_after_the_fact_does_not_block_a_new_request(tmp_path):
+    """T035 EXT-01 #3: invalidating the generation before a *new* request
+    is even made must not itself refuse that new request -- only a reply
+    to a request already in flight before the bump (the case above) is
+    stale."""
     bindings = BindingRegistry()
     binding = _binding(tmp_path)
     bindings.bind(binding)
@@ -149,7 +173,7 @@ def test_generation_change_invalidates_pending_permission(tmp_path):
     requester = lambda engine_session_id, params, timeout: {"outcome": {"outcome": "selected", "optionId": "allow"}}
     bridge = _bridge(bindings=bindings, host_permission_requester=requester)
     result = bridge.handle(engine_session_id="es_a", wire_session_id="w1", wire_request_id=1, params=PARAMS)
-    assert result == {"outcome": {"outcome": "cancelled"}}
+    assert result == {"outcome": {"outcome": "selected", "optionId": "allow"}}
 
 
 def test_action_supersession_invalidates_only_that_action(tmp_path):

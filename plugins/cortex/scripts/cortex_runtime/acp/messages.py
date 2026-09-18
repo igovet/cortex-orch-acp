@@ -128,6 +128,10 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Context overflow on {limit_name} ({context_window_tokens} tokens, {context_window_basis}): {message} No content or constraint was silently dropped.",
         "ru": "Переполнение контекста по лимиту {limit_name} ({context_window_tokens} токенов, {context_window_basis}): {message} Ни одно содержимое или ограничение не было незаметно отброшено.",
     },
+    "budget_overflow_retry": {
+        "en": "Context overflow on {limit_name} ({context_window_tokens} tokens, {context_window_basis}): {message} This is not yet a permanent failure -- will retry packaging (attempt {retry_count} of {max_retries}); the engine will NOT be prompted without this mandatory context in the meantime.",
+        "ru": "Переполнение контекста по лимиту {limit_name} ({context_window_tokens} токенов, {context_window_basis}): {message} Это ещё не окончательный отказ -- будет предпринята повторная попытка упаковки (попытка {retry_count} из {max_retries}); до тех пор движку НЕ будет отправлен запрос без этого обязательного контекста.",
+    },
     "compaction_blocked": {
         "en": "Compaction stopped ({reason}): {message}",
         "ru": "Сжатие контекста остановлено ({reason}): {message}",

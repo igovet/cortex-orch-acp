@@ -1055,12 +1055,23 @@ The complete installable product lives under `plugins/cortex/`. Root-level
 | `plugins/cortex/skills/cortex-control/SKILL.md` | Shared worker reporting protocol |
 | `.agents/plugins/marketplace.json` | Repository Marketplace |
 | `scripts/cortex_package.py` | Complete payload hashing and candidate validation |
-| `scripts/sync-cortex.sh` | Read-only source validation or isolated candidate preparation |
-| `scripts/cortex-dev` | Prepare candidate and launch ordinary interactive Codex |
-| `scripts/cortex-desktop-dev` | Actual Desktop with a disposable profile |
-| `cortex-dev` | Repository-root forwarding launcher |
+| `scripts/sync-cortex.sh` | Read-only source validation (`--check`) |
+| `scripts/cortex-desktop-dev` | Historical Codex-plugin-harness Desktop launcher; not runnable, kept only as coordinator/worker policy reference (see below) |
 
 ### Isolated candidate runtime
+
+> **Historical, not runnable against the ACP product.** T033 removed the
+> Codex-plugin/gateway/marketplace-bootstrap machinery this section describes.
+> `scripts/cortex-dev`, the root `cortex-dev` forwarding launcher,
+> `cortex-live-capture-sink`, and `cortex_dev_config.py` were deleted as
+> genuinely dead. `scripts/cortex-desktop-dev` and `scripts/cortex-live-smoke`
+> are kept, unrun, solely because their pure policy/audit-classification
+> functions are still this project's only reference implementation and
+> regression-tested specification of coordinator/worker policy and
+> audit-evidence rules (see `docs/acp/packaging-and-onboarding.md`'s "What was
+> Codex-plugin-harness-era and was removed" and AGENTS.md's "Historical:
+> Codex-plugin/native-subagent CLI-before-Desktop qualification procedure").
+> The steps below describe that removed procedure verbatim for record only.
 
 `./scripts/cortex-dev` creates or reuses the exact `$HOME/.cortex-dev` candidate,
 sets its own `HOME` and `CODEX_HOME`, prepares the content-stamped package through
@@ -1429,6 +1440,12 @@ host transcripts outside repository documentation.
 
 ### Interactive tmux live-dev workflow
 
+> **Historical, not runnable against the ACP product.** This entire workflow
+> describes the removed Codex-plugin-harness-era CLI-before-Desktop procedure
+> (T033); `scripts/cortex-live-smoke` and `scripts/cortex-desktop-dev` are kept
+> only as a policy/audit reference (see "Isolated candidate runtime" above),
+> not as a runnable launcher. It is retained verbatim for record only.
+>
 > **Phase 2 status (2026-09-11): CANCELLED by the user.** The outcome/efficiency
 > comparison is non-blocking and non-scoring for the stable 1.15.9 release. Do
 > not start a Phase 2 comparison or claim efficacy, scoring, or promotion; the

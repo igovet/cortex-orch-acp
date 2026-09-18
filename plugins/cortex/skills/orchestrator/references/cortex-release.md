@@ -9,8 +9,9 @@ regression evaluation. Regenerate the complete payload hash after final payload 
 before release-sensitive checks. Run package, source-only sync and full tests
 sequentially on the same bytes. Reconcile release pins using actual observed hashes.
 
-Prepare the isolated dev candidate only through cortex-dev. Never update the stable
-plugin or host configuration. Live coordinators use gpt-5.6-luna/high; test workers use
-Luna medium/high. Follow repository CLI-before-Desktop requirements and
-[live qualification](live-qualification.md). Check process metrics as well as artifacts.
+The Codex-plugin-harness-era isolated dev candidate and CLI-before-Desktop
+requirements are historical, superseded by the T033 ACP migration (`scripts/cortex-dev`
+was deleted as genuinely dead; see [live qualification](live-qualification.md)). Never
+update the stable plugin or host configuration. Live coordinators use gpt-5.6-luna/high;
+test workers use Luna medium/high. Check process metrics as well as artifacts.
 Report unrun checks and distinguish implementation, commit, push and acceptance.

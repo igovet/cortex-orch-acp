@@ -42,6 +42,27 @@ still-enforced boundary that no `cortex_runtime/engine/*.py` module may
 import any of these names. Real Codex CLI/Desktop live-product claims for
 the remaining native surface stay pending T035–T037.
 
+Also removed (repository-root `scripts/`, not shipped in the packaged
+plugin): `cortex-dev` (the isolated-candidate CLI-before-Desktop preparer;
+already non-functional — it imported the deleted `cortex_runtime.runtime.state`
+and ran a `prepare_codex.py` that no longer exists), `cortex-live-capture-sink`
+(its only caller), and `cortex_dev_config.py` (its `mcp_servers`/isolated-profile
+opt-in was reachable only through `cortex-dev`). `cortex-desktop-dev` and
+`cortex-live-smoke` are kept, unrun: their `start`/`send`/`stop` launch paths
+are equally non-functional against the removed harness, but their pure
+policy/audit-classification functions (`worker_model_policy`,
+`call_policy_violations`, `current_host_audit_exit_code`, decision-coordination
+checks, including the `phase2-cli-*` receipt schema names referenced from
+SECURITY.md and `tests/test_package.py`) remain the only existing reference
+implementation and regression-tested specification this project holds for
+those rules, exercised by `tests/test_model_policy.py`,
+`tests/test_decision_coordination.py`, `tests/test_observer_evaluation_v2.py`,
+`tests/test_senior_consultant.py`, `tests/test_native_worker_result_fallback.py`,
+`tests/test_diagnostic_boundary.py` and `tests/test_advisory_lane.py`. Neither
+file is a current procedure; see AGENTS.md's "Historical: Codex-plugin/
+native-subagent CLI-before-Desktop qualification procedure" for the retired
+instructions that used to name them.
+
 ### Launch-time environment variables
 
 | Variable | Used by | Status |
