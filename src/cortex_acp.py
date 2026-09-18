@@ -39,6 +39,28 @@ def _fail_closed_on_pinned_mismatch():
         raise SystemExit(1)
 
 
+def _ensure_first_run_configuration():
+    """Everything a first run needs that does not need the user's consent.
+
+    A person installing this agent configures it in their editor and
+    expects it to work; they should have to run a setup step only for the
+    one thing that genuinely requires them -- connecting an engine to
+    their own account, which is never done silently. The route policy is
+    not that: it is a file in their own configuration directory,
+    permitting what is already permitted.
+
+    Never fails startup: a user whose configuration directory cannot be
+    written still gets a working agent, just without a policy file.
+    """
+    try:
+        from cortex_runtime.configuration.route_policy import ensure_default_policy
+
+        ensure_default_policy()
+    except Exception:  # noqa: BLE001 - startup is never blocked by this
+        pass
+
+
 if __name__ == '__main__':
     _fail_closed_on_pinned_mismatch()
+    _ensure_first_run_configuration()
     main(runtime=ProductionOrchestratingRuntime())

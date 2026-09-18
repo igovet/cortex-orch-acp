@@ -147,6 +147,37 @@ def _candidate_paths(project_root: str | os.PathLike | None, environ: Mapping[st
     return paths
 
 
+def ensure_default_policy(environ=None) -> dict:
+    """Create the default policy file if the user has none, anywhere.
+
+    Called on agent start, because a person installing this agent should
+    not have to run a setup step to get a working configuration -- they
+    should have to run one only for the thing that genuinely needs their
+    consent, which is connecting an engine to their own account.
+
+    Writing this file needs no consent: it lands in the user's own
+    configuration directory, permits what is already permitted, and
+    touches nothing else. Never overwrites, never widens anything, and any
+    failure is returned rather than raised -- an agent must still start
+    for a user whose configuration directory is read-only.
+    """
+    try:
+        existing, malformed = load_route_policy(project_root=None, environ=environ)
+        if existing is not None or malformed is not None:
+            return dict(created=False, reason="already_present")
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        scripts = _Path(__file__).resolve().parents[3] / "scripts"
+        if str(scripts) not in _sys.path:
+            _sys.path.insert(0, str(scripts))
+        import cortex_acp_setup
+
+        return cortex_acp_setup.init_route_policy(environ=environ)
+    except Exception as error:  # noqa: BLE001 - never block startup
+        return dict(created=False, reason="failed", detail=str(error))
+
+
 def load_route_policy(
     project_root: str | os.PathLike | None = None, environ: Mapping[str, str] | None = None,
 ) -> tuple[RoutePolicy | None, dict | None]:

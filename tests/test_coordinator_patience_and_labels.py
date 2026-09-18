@@ -734,3 +734,37 @@ def test_a_terminal_content_block_is_never_forwarded_to_the_client():
     on_tool_call("t2", "execute", "Run again", "completed", None,
                  [{"type": "terminal", "terminalId": "exec-b"}])
     assert "content" not in cards[-1], cards[-1]
+
+
+def test_a_native_wait_is_not_shown_and_a_native_subagent_is_refused(tmp_path):
+    """Seen live, and the reason the whole delegation path was bypassed: the
+    coordinator used codex's own subagents and its `wait` instead of
+    `delegate`, so no isolated workspace, no conflict-checked integration,
+    no per-role model policy and no audit ever happened -- and the feed
+    filled with a `wait` the user asked not to see.
+
+    This runtime cannot stop the engine's own tool. It can refuse to
+    dress it up as progress, and it can make sure the coordinator hears
+    about it."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
+
+    store, task_id = _task(tmp_path)
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda *a, **k: None), FakeWorkspace(), FakeConfigSnapshotSource(),
+    )
+    cards: list = []
+    on_tool_call = runtime._engine_tool_call_emitter(cards.append, task_id=task_id)
+
+    on_tool_call("w1", "other", "wait", "completed")
+    assert cards == [], "a native wait is nothing happening; it does not belong in the feed"
+
+    on_tool_call("s1", "other", "Complete subagent implement_zero_division_guard", "completed")
+    assert cards, "a native subagent must not pass unnoticed"
+    assert cards[-1]["status"] == "failed"
+    assert "subagent" in str(cards[-1].get("text", "")).lower()
+
+    # And the coordinator is told, durably, the same way a refused mutation is.
+    with store.connection() as db:
+        notes = [r["payload_json"] for r in db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='progress'", (task_id,))]
+    assert any("subagent" in (n or "").lower() for n in notes), notes

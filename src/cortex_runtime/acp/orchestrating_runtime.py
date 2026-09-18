@@ -158,6 +158,17 @@ _IDENTICAL_INTEGRATION_CONFLICT_LIMIT = 3
 # work, not the bookkeeping that supports it.
 _INTERNAL_TOOL_CALL = re.compile(r"^(?:mcp\.)?cortex[._]")
 
+# The engine's own agent surface. Seen live: a coordinator used codex's
+# subagents and its `wait` instead of `delegate`, so the whole delegation
+# path -- isolated workspace, conflict-checked integration, per-role model
+# policy, audit -- was bypassed, and the feed filled with a native `wait`
+# nobody asked to see. The role forbids these; this is what notices when
+# the prohibition is ignored anyway, and keeps the pure-noise ones out of
+# the feed. Matched on the call's own name, loosely: an engine names them
+# however it likes, and a false positive here costs a card, not work.
+_NATIVE_WAIT = re.compile(r"^\s*wait\b", re.I)
+_NATIVE_SUBAGENT = re.compile(r"\b(?:sub-?agent|spawn[_ ]?agent|spawnagent)\b", re.I)
+
 # How many distinct bookkeeping operations the collapsed card lists.
 _INTERNAL_OPERATIONS_MAX_ENTRIES = 40
 
@@ -1863,6 +1874,7 @@ class OrchestratingRuntime:
                     session_ref, prompt_text, cancel_event, on_delta=_on_coordinator_delta,
                     on_tool_call=self._engine_tool_call_emitter(
                         emit_tool_call, language=language, project_root=self._task_project_root(task_id),
+                        task_id=task_id,
                     ),
                     on_display_update=emit_display_update,
                 )
@@ -2498,10 +2510,29 @@ class OrchestratingRuntime:
                 payload["title"] = "Worker assignment"
         emit_tool_call(payload)
 
+    def _note_native_subagent(self, task_id: str | None, label: str) -> None:
+        """Record that a coordinator used its engine's own agent surface.
+
+        This runtime cannot stop it -- the engine owns that tool and does
+        not ask permission for it -- so what it can do is make it never
+        pass unnoticed: the coordinator is told next turn, exactly like a
+        refused mutation, and the event is durable.
+        """
+        if task_id is None or self._store is None:
+            return
+        try:
+            delegation_events.append_event(
+                self._store, task_id, "progress", f"native_subagent:{label[:60]}",
+                dict(note=acp_messages.render("native_subagent_refused", "en"), detail=label[:200]),
+                origin="runtime",
+            )
+        except Exception:  # noqa: BLE001 - noticing must never break the turn
+            pass
+
     def _engine_tool_call_emitter(
         self, emit_tool_call: Callable[[Mapping[str, Any]], bool] | None,
         *, prefix: str = "", id_scope: str = "coordinator", language: str = "en",
-        project_root: str | None = None,
+        project_root: str | None = None, task_id: str | None = None,
     ):
         """A callback for ``SessionRuntime.prompt``'s ``on_tool_call`` that
         renders each of that session's own engine tool calls as an ACP
@@ -2575,6 +2606,24 @@ class OrchestratingRuntime:
                 ))
                 return
             internal_group[1] = None
+            label = known or title or ""
+            if _NATIVE_WAIT.match(label):
+                # Nothing happened, and the user asked not to see it.
+                return
+            if _NATIVE_SUBAGENT.search(label):
+                # It did happen, and it must not have: show it as the
+                # refusal it is, rather than as ordinary progress.
+                self._note_native_subagent(task_id, label)
+                card_id = f"call:{id_scope}:native:{ref}"
+                first = card_id not in seen
+                seen.add(card_id)
+                emit_tool_call(dict(
+                    new=first, tool_call_id=card_id, status="failed",
+                    title=acp_messages.render("native_subagent_refused", language),
+                    **(dict(kind="other") if first else {}),
+                    text=scrub_display_text(label, max_chars=_TOOL_CALL_TITLE_MAX_CHARS),
+                ))
+                return
             if known is None:
                 # Nothing to show yet. A card reading "tool call" tells a
                 # reader nothing at all, which is the complaint this whole

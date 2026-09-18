@@ -33,6 +33,14 @@ _CATALOG: dict[str, dict[str, str]] = {
     # prompted with, so a Russian selection still produced English replies
     # for an English-worded request. Rendered in the target language, which
     # is itself the strongest instruction.
+    "native_subagent_refused": {
+        "en": "Refused: the engine's own subagent was used instead of delegation. "
+              "It runs in the coordinator's own session and workspace, with no isolated "
+              "copy, no checked integration and no audit. Delegate this work instead.",
+        "ru": "Отклонено: вместо делегирования использован собственный подагент движка. "
+              "Он работает в сессии и рабочей области координатора — без изолированной "
+              "копии, без проверенной интеграции и без аудита. Поручите эту работу воркеру.",
+    },
     "harvest_requested": {
         "en": "The user explicitly requested a knowledge harvest{scope}. Read `knowledge-harvest` "
               "with `read_skill` and carry it out for this task; this is the explicit request that "

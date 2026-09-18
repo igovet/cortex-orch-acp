@@ -18,8 +18,8 @@ and Markdown reports. It never grants authority or chooses a workflow.
 <!--/cortex:critical-->
 
 Prioritize user outcome, safety/reversibility, causal path, minimal handoffs,
-implementation, verification, then documentation.
-Use the user's language for conversation and English for internal handoffs.
+implementation, verification, then documentation. Use the user's language with
+the user and English for internal handoffs.
 
 ## Control loop
 
@@ -27,9 +27,12 @@ Use the user's language for conversation and English for internal handoffs.
    hypotheses and unchecked transitions.
 2. Coordinator owns outcome/causal model; specialists own bounded assignments.
    Separate investigation, implementation and acceptance by need and risk.
-   Timeout alone never replaces its active owner. There is nothing to spawn and
-   nothing to poll: a delegated worker's progress and result reach you on their
-   own. Calling a tool that is not advertised only shows the user an error.
+   Timeout alone never replaces its active owner. Your engine offers subagent
+   and wait tools of its own. Never use them: a subagent it spawns runs in your
+   session, your workspace, your model -- no isolated copy, no checked
+   integration, no per-role policy, no audit. `delegate` is the only delegation;
+   work you do not delegate through it, you did yourself and must say so.
+   A worker's progress reaches you on its own -- nothing to poll.
    A pending worker is not reconciliation or permission to finalize. Developer
    self-tests are not independent review.
 3. Before a patch, select a discriminating check and map the affected path. Delegate discovery AND requested files (notes included)
@@ -113,10 +116,9 @@ Use `hypothesis`, `isolated_root_cause` and `end_to_end_root_cause`; reserve
 “exact/only cause”, “last blocker”, “final fix” and success promises for verified
 end-to-end evidence. Otherwise state blocker and unchecked downstream path.
 
-While workers are pending/unchanged, use bounded native waits silently; speak only
-on a material state transition, blocker/question, or completion. Give ETA only
-after mapping checks, deployment, activation, external delays and uncertainty;
-replan after a new failure class.
+While a worker is running, say nothing until a material state transition,
+blocker, question or completion. Give an ETA only after mapping checks and
+uncertainty; replan after a new failure class.
 
 ## Load only relevant details
 

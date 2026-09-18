@@ -332,3 +332,50 @@ def test_the_default_policy_is_written_where_the_rest_of_the_configuration_lives
     # Idempotent: a second call writes nothing.
     again = cortex_acp_setup.init_route_policy(environ=environ)
     assert again["created"] is False
+
+
+def test_a_first_run_creates_the_policy_without_a_setup_step(tmp_path):
+    """A person installing this agent configures it in their editor and
+    expects it to work. They should have to run a setup step only for the
+    one thing that needs them -- connecting an engine to their account.
+    A policy file in their own configuration directory is not that."""
+    from cortex_runtime.configuration.route_policy import ensure_default_policy, load_route_policy
+
+    home = tmp_path / "home"
+    home.mkdir()
+    environ = {"HOME": str(home)}
+
+    result = ensure_default_policy(environ=environ)
+    assert result["created"] is True, result
+    written = home / ".config" / "cortex" / "route-policy.json"
+    assert written.is_file()
+
+    policy, malformed = load_route_policy(project_root=None, environ=environ)
+    assert malformed is None
+    assert policy is not None, "the file it just wrote must be the file it then reads"
+
+    # Idempotent: a second start changes nothing.
+    again = ensure_default_policy(environ=environ)
+    assert again["created"] is False
+
+
+def test_a_first_run_never_overwrites_a_policy_the_user_already_has(tmp_path):
+    from cortex_runtime.configuration.route_policy import ensure_default_policy
+
+    home = tmp_path / "home"
+    (home / ".config" / "cortex").mkdir(parents=True)
+    mine = home / ".config" / "cortex" / "route-policy.json"
+    mine.write_text(json.dumps({"roles": {}, "default": []}), encoding="utf-8")
+
+    result = ensure_default_policy(environ={"HOME": str(home)})
+    assert result["created"] is False
+    assert json.loads(mine.read_text()) == {"roles": {}, "default": []}
+
+
+def test_an_unwritable_configuration_directory_never_stops_the_agent(tmp_path):
+    """Startup must survive a home it cannot write."""
+    from cortex_runtime.configuration.route_policy import ensure_default_policy
+
+    result = ensure_default_policy(environ={"HOME": "/proc/nonexistent-and-unwritable"})
+    assert result["created"] is False
+    assert "reason" in result

@@ -33,12 +33,21 @@ def test_harvest_remains_explicit_only_in_orchestrator_contract():
     assert "Keep `cortex:knowledge-harvest` explicit-only" in text
 
 
-def test_pending_workers_require_silent_bounded_waits():
+def test_a_running_worker_is_waited_out_silently():
+    """The rule is unchanged -- say nothing until something actually
+    happens. What changed (T035) is that it no longer instructs a "bounded
+    native wait": the engine's own wait tool is exactly what the
+    coordinator must not use, because it comes with the engine's own
+    subagents, which bypass the isolated workspace, the conflict-checked
+    integration and the audit. A Cortex worker's progress arrives on its
+    own; there is nothing to poll.
+    """
     text = (ROOT / "skills/orchestrator/SKILL.md").read_text()
 
     start = text.index("## Honest communication")
     end = text.index("\n## Load only relevant details", start)
     section = text[start:end]
 
-    assert "While workers are pending/unchanged, use bounded native waits silently" in section
-    assert "material state transition, blocker/question, or completion" in section
+    assert "While a worker is running, say nothing until" in section
+    assert "material state transition" in section
+    assert "native" not in section, "the engine's own wait must not be instructed"
