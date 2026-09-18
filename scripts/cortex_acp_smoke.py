@@ -108,6 +108,37 @@ def _plugin_version():
         return "unknown"
 
 
+def _safe_tmp_base():
+    """A system temp root whose own immediate directory has no stray
+    ``.git``/``.cortex`` marker directly inside it.
+
+    ``connections.registry``'s ``_assert_not_nested_in_project_workspace``
+    (deliberately, correctly) fails closed on *any* ancestor directory that
+    contains such a marker, not merely the immediate parent -- so a bare
+    ``.git`` left directly under the shared system ``/tmp`` by any
+    unrelated process on the host (long-lived CI/dev boxes accumulate this)
+    would otherwise make every HOME/XDG dir this harness creates underneath
+    it fail that guard, for a reason that has nothing to do with this
+    harness's own fresh, empty directories. Bounded to a handful of stat
+    calls against a short, fixed candidate list -- never a project-tree
+    walk, never a fix to the guard itself (which stays exactly as strict as
+    it should be for a real project checkout)."""
+    candidates = [os.environ.get("TMPDIR"), "/var/tmp", tempfile.gettempdir()]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate)
+        try:
+            if not path.is_dir():
+                continue
+            if any((path / marker).exists() for marker in (".git", ".cortex")):
+                continue
+        except OSError:
+            continue
+        return str(path)
+    return tempfile.gettempdir()
+
+
 def _minimal_env(home, config_home, state_home):
     """An explicitly built, minimal process environment -- never a copy of
     ``os.environ`` (unlike ``tests/acp_fakes.py``, which does copy the full
@@ -276,8 +307,9 @@ def _count_tasks(project_dir):
 
 
 def run_smoke(*, fixture_connection, report):
-    project_dir = Path(tempfile.mkdtemp(prefix="cortex-acp-smoke-project-")).resolve()
-    home_dir = Path(tempfile.mkdtemp(prefix="cortex-acp-smoke-home-")).resolve()
+    tmp_base = _safe_tmp_base()
+    project_dir = Path(tempfile.mkdtemp(prefix="cortex-acp-smoke-project-", dir=tmp_base)).resolve()
+    home_dir = Path(tempfile.mkdtemp(prefix="cortex-acp-smoke-home-", dir=tmp_base)).resolve()
     assert REPO_ROOT not in project_dir.parents and project_dir != REPO_ROOT, (
         "refusing to use the repository checkout as an ACP project root")
     config_home = home_dir / "config"
@@ -324,6 +356,15 @@ def run_smoke(*, fixture_connection, report):
                            params=dict(cwd=str(project_dir), mcpServers=[])))
         _line, new_reply = session.recv()
         _validate(report, validators, "response", new_reply, "session/new")
+        if "error" in new_reply:
+            # A failed session/new never gets its follow-up
+            # available_commands_update notification (see _dispatch/
+            # _post_session_new_notifications in cortex_runtime.acp.agent --
+            # that notification is only sent after a successful reply).
+            # Blindly recv()-ing for it next would just burn the full
+            # READ_TIMEOUT_SECONDS waiting for a message that is never
+            # coming; fail immediately instead, with the actual error.
+            raise SmokeFailure(f"session/new returned an error: {new_reply['error']!r}")
         new_result = new_reply.get("result", {})
         session_id = new_result.get("sessionId")
         report.record("session/new:has_session_id", isinstance(session_id, str) and bool(session_id))
@@ -413,6 +454,17 @@ def main(argv=None):
         args.report.write_text(text + "\n")
     else:
         sys.stderr.write(text + "\n")
+    if not report.all_passed:
+        # A run that exits 1 must never do so silently: stdout stays
+        # protocol-only (nothing from this harness is ever written there --
+        # the report goes to --report or stderr above, never stdout), but a
+        # human running this by hand gets nothing at all if --report was
+        # given and they don't think to open the file. Print the actual
+        # failing check name(s) to stderr so the reason is visible without
+        # reading the report file.
+        failed = [check for check in report.checks if check["status"] == "fail"]
+        reasons = "; ".join(f"{check['name']}: {check.get('detail')!r}" for check in failed)
+        sys.stderr.write(f"cortex_acp_smoke: FAILED ({len(failed)} check(s)): {reasons}\n")
     return 0 if report.all_passed else 1
 
 

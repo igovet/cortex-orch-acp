@@ -33,6 +33,7 @@ from ..delegation import integration as delegation_integration
 from ..delegation import revision as delegation_revision
 from ..delegation import workspace_isolation as delegation_workspace_isolation
 from ..delegation.deliveries import MAX_DELIVERY_RETRIES
+from ..delegation import provisioning as delegation_provisioning
 from ..delegation.provisioning import ProvisioningService
 from ..engine import failure_classification
 from ..engine import reaper as engine_reaper
@@ -69,6 +70,18 @@ def _bounded_detail(text: str) -> str:
     if len(text) <= _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS:
         return text
     return text[: _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS - 3] + "..."
+
+
+def _provisioning_progress_note(provisioning_sig: tuple[tuple[str, str, str], ...]) -> str:
+    """T035 FINDING-13 #2: a short, honest human-readable rendering of a
+    ``delegation_provisioning.in_progress_snapshot`` result -- named
+    attempts and their current step, so a host/log/human reading
+    ``wait_detail`` (and the model itself, whenever this blocked note is
+    eventually coalesced into a later continuation) can tell "still
+    provisioning, currently at step X" from a generic, undifferentiated
+    "workers_running"."""
+    parts = [f"{assignment_ref} is provisioning (step: {step})" for assignment_ref, step, _updated_at in provisioning_sig]
+    return "Still working: " + "; ".join(parts) + "."
 
 
 # T035: one ACP ToolCall card per delegated assignment (see
@@ -1299,6 +1312,13 @@ class OrchestratingRuntime:
         no_progress = 0
         total = 0
         first = True
+        # T035 FINDING-13 #2: the last-observed delegation_provisioning
+        # in-progress signature (see delegation_provisioning
+        # .in_progress_snapshot) -- None until the first no-progress wait
+        # tick actually checks it, so the very first tick after dispatch
+        # never spuriously counts as "no change" before anything was ever
+        # observed.
+        last_provisioning_sig = None
         while True:
             if cancel_event.is_set():
                 if acp_steering.is_stopped(self._store, task_id):
@@ -1395,6 +1415,38 @@ class OrchestratingRuntime:
                     return StopReason.CANCELLED
                 progressed = self._wait_for_progress(task_id, cancel_event)
                 if not progressed:
+                    # T035 FINDING-13 #2: a no-progress *tick* is not
+                    # itself a stall -- provisioning a worker/coordinator
+                    # engine session is real work with no MEANINGFUL event
+                    # of its own until it finishes (see
+                    # delegation_events.MEANINGFUL_EVENT_TYPES's own
+                    # docstring for why it must stay that way: an
+                    # informative-only notice must never itself wake this
+                    # loop). Before ever charging this tick against the
+                    # no-progress budget, check whether provisioning
+                    # actually advanced a step since the last tick
+                    # (delegation_provisioning.in_progress_snapshot); if it
+                    # did, this is "still coming", not "stuck" -- the
+                    # budget resets instead of depleting, and the
+                    # coordinator's own blocked state names the real
+                    # step/attempt so a human/host (and the model, on
+                    # whatever later continuation actually reaches it) can
+                    # tell the difference. Only a signature that is empty
+                    # (nothing provisioning at all) or unchanged from the
+                    # last tick (provisioning exists but has not moved)
+                    # ever counts as "no progress" -- ties the coordinator's
+                    # patience to observed backend reality instead of a
+                    # fixed tick count with no relationship to it.
+                    provisioning_sig = delegation_provisioning.in_progress_snapshot(self._store, task_id)
+                    if provisioning_sig and provisioning_sig != last_provisioning_sig:
+                        last_provisioning_sig = provisioning_sig
+                        no_progress = 0
+                        self._set_state(
+                            task_id, "blocked", wait_reason="workers_provisioning", no_progress_count=0,
+                            wait_detail=dict(explanation=_provisioning_progress_note(provisioning_sig)),
+                        )
+                        continue
+                    last_provisioning_sig = provisioning_sig
                     no_progress += 1
                     self._set_state(task_id, "blocked", wait_reason="workers_running", no_progress_count=no_progress)
                     if no_progress >= self._max_no_progress:

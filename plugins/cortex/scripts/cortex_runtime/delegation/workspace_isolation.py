@@ -251,6 +251,18 @@ def _remove_owned_tree(root) -> None:
         raise StoreError("unsafe_storage")
     if not shutil.rmtree.avoids_symlink_attacks:
         raise StoreError("unsafe_storage")
+    # T035 coordinator read-only snapshots (see coordinator_root_for) strip
+    # the owner write bit tree-wide; shutil.rmtree needs it back on every
+    # directory to unlink their entries (a kernel check, independent of
+    # ownership). Restoring it here -- always, not only on
+    # coordinator_root_for's own refresh path -- means this, the one
+    # in-application teardown routine every caller (attempt-terminal
+    # cleanup, the reaper sweep) already funnels through, never fails on a
+    # binding that happens to still be read-only, regardless of which path
+    # got it there. This is scoped to Cortex's own owned copy, torn down
+    # right before deletion -- it never re-widens the live, in-use window
+    # a coordinator engine actually runs against.
+    _set_tree_write_bit(str(path), writable=True)
     shutil.rmtree(path)
 
 

@@ -526,6 +526,25 @@ class EngineSessionManagerAdapter:
         # ``terminate_owned``.
         manager = None
         try:
+            # T035 FINDING-13 #3: a cancellation that lands while this
+            # attempt was only queued for capacity is already handled inside
+            # _reserve_capacity_blocking (never reaches here at all); this
+            # and the two checks below are the same ``_cancelled_attempts``/
+            # ``_cancelled_tasks`` bookkeeping re-checked at each subsequent
+            # blocking wire round-trip (``negotiate``'s ``initialize``,
+            # ``create_session``'s ``session/new`` -- each individually
+            # bounded by ``initialize_timeout``/``call_timeout``, never
+            # unbounded), so a cancellation is never left to wait for the
+            # *whole* open() to run to completion (see
+            # ``EngineSessionOpener.open``'s Protocol docstring): the worst
+            # case is whichever single round-trip is already in flight,
+            # not the full multi-step launch. A cancellation observed here
+            # raises the exact same ``QueuedOpenCancelled`` the capacity
+            # wait already raises, so the ``except BaseException`` below
+            # tears the just-spawned process down and releases capacity
+            # through the one existing cleanup path -- no separate cleanup
+            # code needed for this case.
+            self._check_not_cancelled(attempt_id, task_id)
             manager_kwargs = dict(self._manager_kwargs)
             # T026: route each connection's own pinned adapter option_mapping
             # (never a caller-supplied one, which always wins) -- see
@@ -556,6 +575,7 @@ class EngineSessionManagerAdapter:
                 **manager_kwargs,
             )
             manager.negotiate(_requested_capabilities())
+            self._check_not_cancelled(attempt_id, task_id)
             # T026: this engine's own qualified session/new _meta delivery
             # channel (today: claude-agent-acp only -- see
             # _session_new_meta_for's own docstring). codex-acp's own leading-
@@ -565,6 +585,7 @@ class EngineSessionManagerAdapter:
             session_id = manager.create_session(
                 task_id, launch.get("assignment_id") or attempt_id, session_new_meta=session_new_meta,
             )
+            self._check_not_cancelled(attempt_id, task_id)
             # T035 (additive, best-effort): feed this real session's own
             # actually-observed configOptions into catalog.discovery, so the
             # provider/model/thought_level selects reflect the engine's real
@@ -1357,6 +1378,17 @@ class EngineSessionManagerAdapter:
         """Cancel a specific queued (not-yet-opened) attempt promptly."""
         self._cancelled_attempts.add(attempt_id)
         self._notify_activity()
+
+    def _check_not_cancelled(self, attempt_id: str, task_id: str) -> None:
+        """Raise :class:`QueuedOpenCancelled` if ``attempt_id`` (or its
+        whole task) was cancelled -- called by :meth:`open` at each
+        natural boundary between its own blocking steps (see that
+        method's own comment on why this bounds cancellation latency to
+        one in-flight round-trip instead of the whole launch)."""
+        if attempt_id in self._cancelled_attempts:
+            raise QueuedOpenCancelled("attempt")
+        if task_id in self._cancelled_tasks:
+            raise QueuedOpenCancelled("task")
 
     def cancel_task(self, task_id: str) -> None:
         """Cancel every queued open for ``task_id`` promptly."""

@@ -175,6 +175,30 @@ def _last_effect(db, idempotency_key: str, step: str, phase: str):
     ).fetchone()
 
 
+def in_progress_snapshot(store, task_id: str) -> tuple[tuple[str, str, str], ...]:
+    """T035 FINDING-13 #2: a cheap, sortable signature of every currently
+    ``in_progress`` ``delegation_provisioning`` row for ``task_id`` --
+    ``(idempotency_key, step, updated_at)`` tuples, sorted for a stable
+    comparison. Two calls returning an *unequal*, non-empty signature mean
+    provisioning genuinely advanced a step between them (real backend
+    progress, even though no ``MEANINGFUL_EVENT_TYPES`` event exists yet);
+    an *equal* (or empty) signature means nothing moved.
+
+    The one caller (``acp.orchestrating_runtime.OrchestratingRuntime
+    ._continuation_loop``) uses this to decide whether a no-progress wait
+    tick is a genuine stall or the coordinator simply hasn't been told yet
+    that provisioning is still working -- see that call site's own comment
+    for why the no-progress budget must never run out on advancing work.
+    Read-only; never itself claims/advances anything."""
+    with store.connection() as db:
+        rows = db.execute(
+            "SELECT idempotency_key, step, updated_at FROM delegation_provisioning "
+            "WHERE task_id=? AND status='in_progress' ORDER BY idempotency_key",
+            (task_id,),
+        ).fetchall()
+    return tuple((row["idempotency_key"], _base_step(row["step"]), row["updated_at"]) for row in rows)
+
+
 class ProvisioningService:
     """Provisions one delegation's execution binding, recoverably.
 

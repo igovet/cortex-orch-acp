@@ -23,7 +23,7 @@ import pytest
 
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation import capacity
-from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter
+from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter, QueuedOpenCancelled
 from cortex_runtime.engine.client import EngineClient
 from cortex_runtime.portable.errors import PortableError
 from cortex_runtime.portable.identity import SourceEvent
@@ -183,3 +183,106 @@ def test_session_new_failure_stops_the_process_and_releases_capacity(tmp_path, m
     assert row["state"] == "released"
     assert row["release_observation"] == "process_exited"
     assert capacity.count_active(store, connection_id) == 0
+
+
+# --- T035 FINDING-13 #3: cancellation mid-open must abort promptly, not run
+# provisioning to completion -----------------------------------------------
+
+
+def _cancel_after(method_to_finish, adapter, attempt_id, pids):
+    """A monkeypatch replacement for ``EngineClient.call`` that lets the
+    real call for ``method_to_finish`` complete normally (so the process is
+    genuinely already spawned, negotiated, or session-created -- exactly
+    like a real cancellation racing in mid-launch, never before anything
+    started), then simulates ``EngineSessionManagerAdapter.cancel_attempt``
+    landing at that exact instant -- the one moment a real
+    ``_cancel_assignment`` call, running concurrently on the coordinator's
+    own dispatch thread, would set it."""
+    original_call = EngineClient.call
+
+    def _call(self, method, params=None, *, timeout=30.0):
+        pids.append(self._process.process.pid)
+        result = original_call(self, method, params, timeout=timeout)
+        if method == method_to_finish:
+            adapter.cancel_attempt(attempt_id)
+        return result
+
+    return _call
+
+
+def test_cancel_during_negotiate_aborts_before_session_new(tmp_path, monkeypatch):
+    """A cancellation observed right after ``initialize`` (negotiate) must
+    stop this attempt before ``session/new`` is ever sent -- never running
+    the rest of ``open()`` to completion."""
+    store, task_id = _task(tmp_path)
+    adapter, connection_id = _fake_adapter(store, tmp_path)
+    attempt_id = "xa_cancel_negotiate"
+    pids: list[int] = []
+    monkeypatch.setattr(EngineClient, "call", _cancel_after("initialize", adapter, attempt_id, pids))
+
+    with pytest.raises(QueuedOpenCancelled) as excinfo:
+        adapter.open("shared_project_root", dict(task_id=task_id, attempt_id=attempt_id), "instructions")
+    assert excinfo.value.kind == "attempt"
+
+    assert pids, "the real engine process must have actually spawned"
+    assert not adapter._managers  # never registered -- cancelled before completion
+    assert not adapter._sessions
+    assert not adapter._reservations
+    assert _pid_gone(pids[0])  # no orphan process left behind
+
+    row = _reservation_row(store, task_id, attempt_id)
+    assert row["state"] == "released"
+    assert row["release_observation"] == "process_exited"
+    assert capacity.count_active(store, connection_id) == 0
+
+
+def test_cancel_during_create_session_aborts_before_catalog_capture(tmp_path, monkeypatch):
+    """A cancellation observed right after ``session/new`` must still abort
+    this attempt -- the session was created but never gets to run, never
+    registered, never left ready one moment after being cancelled (the
+    exact FINDING-13 #3 symptom)."""
+    store, task_id = _task(tmp_path)
+    adapter, connection_id = _fake_adapter(store, tmp_path)
+    attempt_id = "xa_cancel_session_new"
+    pids: list[int] = []
+    monkeypatch.setattr(EngineClient, "call", _cancel_after("session/new", adapter, attempt_id, pids))
+
+    with pytest.raises(QueuedOpenCancelled) as excinfo:
+        adapter.open("shared_project_root", dict(task_id=task_id, attempt_id=attempt_id), "instructions")
+    assert excinfo.value.kind == "attempt"
+
+    assert pids
+    assert not adapter._managers
+    assert not adapter._sessions
+    assert not adapter._reservations
+    assert _pid_gone(pids[0])
+
+    row = _reservation_row(store, task_id, attempt_id)
+    assert row["state"] == "released"
+    assert row["release_observation"] == "process_exited"
+    assert capacity.count_active(store, connection_id) == 0
+
+
+def test_cancel_before_launch_never_spawns_a_process(tmp_path, monkeypatch):
+    """A cancellation that lands before ``open()`` is even called (the
+    ordinary case -- the coordinator gave up while this attempt was still
+    queued/about to launch) must refuse the launch outright: no process
+    ever spawned, capacity never reserved in the first place."""
+    store, task_id = _task(tmp_path)
+    adapter, connection_id = _fake_adapter(store, tmp_path)
+    attempt_id = "xa_cancel_before_launch"
+    adapter.cancel_attempt(attempt_id)
+
+    with pytest.raises(QueuedOpenCancelled) as excinfo:
+        adapter.open("shared_project_root", dict(task_id=task_id, attempt_id=attempt_id), "instructions")
+    assert excinfo.value.kind == "attempt"
+
+    assert not adapter._managers
+    assert not adapter._sessions
+    assert not adapter._reservations
+    assert capacity.count_active(store, connection_id) == 0
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT 1 FROM capacity_reservations WHERE task_id=? AND attempt_id=?", (task_id, attempt_id),
+        ).fetchone()
+    assert row is None, "a pre-launch cancellation must never even reserve capacity"
