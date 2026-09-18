@@ -253,6 +253,43 @@ class EngineSessionManager:
     # -- lifecycle -------------------------------------------------------
 
     def _ensure_started(self) -> None:
+        """T035 EXT-01 (review "carried, not lost" item): this starts the
+        engine process and its client-request listener thread (see
+        ``EngineClient.start``, ``on_client_request=self._handle_client_request``)
+        -- called from ``negotiate()``/``create_session()``, both well
+        *before* ``delegation.live_adapters.EngineSessionManagerAdapter
+        ._bind_resource`` runs later in ``open()``. A ``session/
+        request_permission``/``fs/*``/``terminal/*`` request that somehow
+        arrives for this engine session in that window finds
+        ``self.bindings.get(engine_session_id) is None`` and is refused
+        (``permission_denied_no_binding``/``no_resource_binding_for_session``)
+        -- strictly safer than before T035 gap closure (previously *every*
+        request failed closed regardless of binding state) and never a
+        regression, but still a real window, not a closed one.
+
+        NOT eliminated here, deliberately: doing so needs either (a)
+        pushing this adapter's own task/generation/ownership-epoch lookups
+        (currently entirely in ``delegation.live_adapters._bind_resource``,
+        which this class has no access to -- no ``store``, no ``task_id``)
+        down into this class so a binding could be registered atomically
+        inside ``create_session()`` itself before returning -- mixing this
+        class's current process/protocol-only responsibility with
+        task-level orchestration concerns it deliberately does not have
+        today; or (b) a bind-pending queue here (mark
+        ``engine_session_id`` pending the moment ``create_session()``
+        registers it, have ``_dispatch_permission``/``_dispatch_fs``/
+        ``_dispatch_terminal`` block briefly on a condition variable until
+        ``bind_resource()`` clears it or a bounded wait elapses) -- adds
+        real latency to every legitimate caller that never intends to bind
+        at all (every non-production/no-store caller in this file's own
+        test suite, which -- see ``_bind_resource``'s own "store-gated"
+        docstring -- deliberately never binds), for a race whose only
+        observable effect today is already the safe one (refuse). Neither
+        was done speculatively without a concrete exploit this refuses to
+        widen into. See
+        ``tests/test_ext01_action_and_epoch_invalidation.py``'s own
+        listener-window test for what is actually asserted instead: the
+        refusal itself, not silence."""
         with self._lock:
             if self._process is not None:
                 return
@@ -416,6 +453,28 @@ class EngineSessionManager:
 
     def invalidate_action(self, engine_session_id: str, action_key: str) -> None:
         self.bindings.invalidate_action(engine_session_id, action_key)
+
+    def _invalidate_actions_pending_for_wire_session(self, engine_session_id: str, wire_session_id: str) -> None:
+        """T035 EXT-01 action-supersession gap closure: ``invalidate_action``
+        had no production caller because nothing tracked *which* action
+        refs (see ``permissions.PermissionBridge._action_ref``) were
+        actually outstanding at the moment a whole turn is superseded --
+        only the bridge's own in-flight bookkeeping has that (see
+        :meth:`~permissions.PermissionBridge.pending_actions_for_wire_session`).
+        Called from :meth:`_abandon_turn` (a turn abandoned mid-stream) and
+        :meth:`cancel_wire` (an explicit cancellation, T035 EXT-01 #4's own
+        independent-cancellation caller) -- both are exactly "this turn's
+        own outstanding tool-call permission requests must never be
+        answered as if they still belonged to a turn that is no longer the
+        current one" (see ``resource_binding.ResourceBinding.is_current``).
+        A tool call requested by a *later* turn on the same wire session
+        (same session id, later prompt) is never affected: this only
+        invalidates the snapshot taken *at this call*, before that later
+        turn's own request is even made."""
+        if self._permission_bridge is None:
+            return
+        for action_key in self._permission_bridge.pending_actions_for_wire_session(wire_session_id):
+            self.bindings.invalidate_action(engine_session_id, action_key)
 
     # -- EngineRuntime -----------------------------------------------
 
@@ -633,6 +692,7 @@ class EngineSessionManager:
         """
         self._process.logs.observe("prompt_turn_abandoned", engine_session_id=engine_session_id, wire_session_id=wire_session_id)
         self._active_turn_token.pop(wire_session_id, None)
+        self._invalidate_actions_pending_for_wire_session(engine_session_id, wire_session_id)
         self.cancel_wire(wire_session_id)
         done_event = self._turn_call_done.get(wire_session_id)
         completed = done_event.wait(self._abandon_wait_seconds) if done_event is not None else True
@@ -730,6 +790,13 @@ class EngineSessionManager:
         wire_session_id = self.correlation.wire_session_id(engine_session_id)
         if wire_session_id is None:
             return
+        # T035 EXT-01 action-supersession gap closure: an explicit
+        # cancellation (see ``delegation.live_adapters``'s independent
+        # cancellation caller, EXT-01 #4) supersedes this session's own
+        # currently-outstanding tool-call permission requests exactly like
+        # an abandoned turn does -- see
+        # ``_invalidate_actions_pending_for_wire_session``'s own docstring.
+        self._invalidate_actions_pending_for_wire_session(engine_session_id, wire_session_id)
         self.cancel_wire(wire_session_id)
 
     def cancel_wire(self, wire_session_id: str) -> None:

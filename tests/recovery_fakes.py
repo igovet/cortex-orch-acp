@@ -88,5 +88,5 @@ class FakeRecoveryEngine:
             self.lookup_states[attempt_id] = "absent"
         # else: leave whatever state it already had (ambiguous/unconfirmed).
 
-    def prompt(self, session_ref, message, cancel_event):
+    def prompt(self, session_ref, message, cancel_event, *, on_delta=None):
         return PromptOutcome(StopReason.END_TURN, "")

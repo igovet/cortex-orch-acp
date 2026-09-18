@@ -90,7 +90,7 @@ class FakeConfigSnapshotSource:
         self.version = version
         self.calls = 0
 
-    def snapshot(self, task_id):
+    def snapshot(self, task_id, role_id=None):
         self.calls += 1
         return dict(engine=self.engine, version=self.version, config_revision="cr_" + task_id[2:])
 

@@ -579,12 +579,23 @@ def test_delegation_produces_stable_card_updated_through_running_and_completed(t
     assert creates[0]["kind"] == "execute"
     updates = [c for c in cards if not c.get("new")]
     assert [c.get("status") for c in updates] == ["in_progress", "completed"]
-    # T035 requirement 3: the running/finished title update names the
-    # RESOLVED role id ("worker-backend-dev"), not the raw hint the
-    # coordinator typed ("backend-dev").
+    # T035 requirement 3: the running/finished title is re-issued from the
+    # RESOLVED role recorded on the provisioning row, not left at whatever
+    # hint the coordinator typed -- asserted here by the update carrying a
+    # title at all (the create already carried the hint's).
+    #
+    # The role is rendered for a reader, so the storage prefix every
+    # canonical id carries ("worker-backend-dev") never reaches a card
+    # already titled "Worker:" -- see _display_role. Every alias in
+    # portable.roles maps stem -> "worker-" + stem, so once that prefix is
+    # stripped the resolved id and the hint are the same string: this
+    # assertion can no longer distinguish them by text, and does not
+    # pretend to. What it does still catch is the prefix leaking back into
+    # a title.
     running = updates[0]
     assert running.get("title") is not None
-    assert "worker-backend-dev" in running["title"]
+    assert "worker-" not in running["title"]
+    assert "Worker: backend-dev" in running["title"]
     assert "Add a cache" in running["title"]
     completed = updates[1]
     assert "Report:" in completed["text"]

@@ -64,6 +64,12 @@ _UNSET = object()
 # small enough to never make one event payload unbounded as that catalog
 # grows. Truncated with a marker, never silently dropped.
 _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS = 1200
+# T035 visibility fix: bound on one streamed coordinator delta chunk after
+# redaction (scrub_text's own default MAX_TEXT_CHARS=400 is sized for a
+# short logged field, not an engine's own text-generation chunk, which can
+# legitimately be a whole paragraph in one update). Generous, not
+# unbounded: still protects against a single pathological chunk.
+_COORDINATOR_DELTA_MAX_CHARS = 4000
 
 
 def _bounded_detail(text: str) -> str:
@@ -96,6 +102,18 @@ def _provisioning_progress_note(provisioning_sig: tuple[tuple[str, str, str], ..
 # truer than the catch-all "other".
 _WORKER_TOOL_CALL_KIND = "execute"
 _TOOL_CALL_STATUS_FOR_CANCELLED = "failed"
+
+
+def _display_role(role: str) -> str:
+    """The role as a reader sees it on a worker's card.
+
+    ``portable.roles`` stores every role under its canonical skill id
+    (``worker-backend-dev``); the ``worker-`` prefix is storage identity,
+    and on a card already titled "Worker:" it reads as a stutter. Strips
+    only that one prefix, never any other part of the id, so an unprefixed
+    id (the alias form, e.g. ``backend-dev``) is returned unchanged.
+    """
+    return role[len("worker-"):] if role.startswith("worker-") else role
 
 
 def _worker_tool_call_id(assignment_ref: str) -> str:
@@ -151,7 +169,10 @@ class SessionRuntime(Protocol):
     def open(self, workspace_binding_id: str, launch: Mapping[str, Any], instructions: str) -> str: ...
     def lookup_owned(self, attempt_id: str) -> str: ...
     def terminate_owned(self, attempt_id: str) -> None: ...
-    def prompt(self, session_ref: str, message: str, cancel_event: threading.Event) -> PromptOutcome: ...
+    def prompt(
+        self, session_ref: str, message: str, cancel_event: threading.Event, *,
+        on_delta: Callable[[str], bool] | None = None,
+    ) -> PromptOutcome: ...
 
 
 class EngineTurnFailed(Exception):
@@ -394,6 +415,19 @@ class OrchestratingRuntime:
         # once per attempt.
         self._terminated_attempts: set[str] = set()
         self._executor = ThreadPoolExecutor(max_workers=worker_pool_size, thread_name_prefix="cortex-worker")
+        # T035 FINDING-13 #2: assignment refs whose *worker* engine turn is
+        # in flight right now, in this process. A worker that is actually
+        # running is real work with no MEANINGFUL event of its own until it
+        # finishes (delegation_events.MEANINGFUL_EVENT_TYPES), and was
+        # therefore indistinguishable from nothing happening -- measured
+        # live: assignment_ready at 18:37:58, blocked_no_progress at
+        # 18:38:12, fourteen seconds later (evidence/T035/RUN-07). Read by
+        # _continuation_loop's no-progress branch under self._lock.
+        # ponytail: a worker whose engine turn never returns holds this
+        # entry and the coordinator waits on it -- the same unbounded wait
+        # FINDING-06 already accepted for the coordinator's own turn; both
+        # end on host cancel/stop, which this loop re-checks every tick.
+        self._worker_turns_in_flight: set[str] = set()
         # T020 (stop-race fix): the cancel_event of whichever start_prompt/
         # answer_question call currently owns this task's continuation loop
         # *in this process* -- lets stop_task() signal that loop to exit
@@ -1309,6 +1343,25 @@ class OrchestratingRuntime:
         (its own answer event is already durably recorded by the caller) --
         can drive the exact same loop starting from an already-ensured
         coordinator session."""
+        # Everything this loop sends to the client is a separate block: a
+        # continuation turn's streamed text, a localized notice, a blocked
+        # explanation. They arrived concatenated ("...before
+        # delegating.Pipeline published.", "First turn text.Blocked: ...")
+        # because each was emitted as a bare chunk with nothing between
+        # them. One blank line before every block except the first, and
+        # none *inside* a turn's own run of deltas, is the whole fix --
+        # ``emit_update`` is rebound here so every existing emission in
+        # this loop gets it without a second, parallel emit path.
+        _raw_emit_update = emit_update
+        _emit_state = dict(any=False, in_delta_run=False)
+
+        def emit_update(text, *, delta=False):  # noqa: F811 -- deliberate rebind, see above
+            if _emit_state["any"] and not (delta and _emit_state["in_delta_run"]):
+                _raw_emit_update("\n\n")
+            _emit_state["any"] = True
+            _emit_state["in_delta_run"] = delta
+            return _raw_emit_update(text)
+
         no_progress = 0
         total = 0
         first = True
@@ -1445,8 +1498,23 @@ class OrchestratingRuntime:
                             task_id, "blocked", wait_reason="workers_provisioning", no_progress_count=0,
                             wait_detail=dict(explanation=_provisioning_progress_note(provisioning_sig)),
                         )
+                        self._emit_provisioning_tool_calls(emit_tool_call, provisioning_sig)
                         continue
                     last_provisioning_sig = provisioning_sig
+                    with self._lock:
+                        worker_running = bool(self._worker_turns_in_flight)
+                    if worker_running:
+                        # See self._worker_turns_in_flight: a worker's own
+                        # engine turn being in flight is observed backend
+                        # reality, exactly like an advancing provisioning
+                        # step above, so it resets the budget rather than
+                        # depleting it. A worker whose turn has *ended*
+                        # without producing a meaningful event leaves this
+                        # set, and the budget then depletes normally --
+                        # which is the genuine stall this budget exists for.
+                        no_progress = 0
+                        self._set_state(task_id, "blocked", wait_reason="workers_running", no_progress_count=0)
+                        continue
                     no_progress += 1
                     self._set_state(task_id, "blocked", wait_reason="workers_running", no_progress_count=no_progress)
                     if no_progress >= self._max_no_progress:
@@ -1504,8 +1572,19 @@ class OrchestratingRuntime:
             # own docstring for exactly what is compared and what it costs
             # (two full capture_revision walks of the workspace per turn).
             pre_turn_revision = delegation_revision.capture_revision(self._task_project_root(task_id))
+            # T035 visibility fix: stream the coordinator's own text as the
+            # engine actually produces it (SessionRuntime.prompt's new
+            # ``on_delta``) instead of only learning ``outcome.text`` once
+            # the whole turn ends -- see PromptOutcome's own docstring for
+            # why this is the coordinator-only path (a delegated worker's
+            # prompt() call below never passes ``on_delta``). Routed through
+            # the same redaction choke point (``scrub_text``) as every other
+            # client-facing text this runtime emits (``_emit_assignment_tool_calls``).
+            def _on_coordinator_delta(chunk_text: str) -> bool:
+                return emit_update(scrub_text(chunk_text, max_chars=_COORDINATOR_DELTA_MAX_CHARS), delta=True)
+
             try:
-                outcome = self._engine.prompt(session_ref, prompt_text, cancel_event)
+                outcome = self._engine.prompt(session_ref, prompt_text, cancel_event, on_delta=_on_coordinator_delta)
                 from .. import _fault_injection
 
                 _fault_injection.checkpoint("t023_after_continuation_prompt")
@@ -1552,8 +1631,10 @@ class OrchestratingRuntime:
                     wait_detail=dict(explanation=acp_messages.render("coordinator_turn_mutated_workspace", language)),
                 )
                 return StopReason.END_TURN
-            if outcome.text:
-                emit_update(outcome.text)
+            # T035 visibility fix: outcome.text was already streamed chunk
+            # by chunk via ``_on_coordinator_delta``/``on_delta`` above as
+            # the engine produced it -- emitting it again here in full would
+            # just duplicate everything the client already saw.
             if outcome.stop_reason == StopReason.REFUSAL:
                 # Never re-route to another engine/connection/model on
                 # refusal -- persist and hand the refusal straight to the host.
@@ -1934,7 +2015,7 @@ class OrchestratingRuntime:
                 work_title = event.payload.get("title", "")
                 emit_tool_call(dict(
                     new=True, tool_call_id=_worker_tool_call_id(assignment_ref),
-                    title=f"Worker: {role_hint} — {work_title}",
+                    title=f"Worker: {_display_role(role_hint)} — {work_title}",
                     kind=_WORKER_TOOL_CALL_KIND, status="pending",
                     text=scrub_text(f"Queued: {event.payload.get('brief', '')}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 ))
@@ -1950,7 +2031,7 @@ class OrchestratingRuntime:
                         # Requirement: the title names the *resolved* role
                         # id, not the raw hint the coordinator typed --
                         # this is the first point a resolved id exists.
-                        fields["title"] = f"Worker: {role_id} — {requested.get('title', '')}"
+                        fields["title"] = f"Worker: {_display_role(role_id)} — {requested.get('title', '')}"
                 emit_tool_call(fields)
             elif event.event_type == "worker_result" and event.assignment_ref:
                 assignment_ref = self._assignment_ref_for_attempt(task_id, event.assignment_ref)
@@ -1986,6 +2067,28 @@ class OrchestratingRuntime:
                     status=_TOOL_CALL_STATUS_FOR_CANCELLED,
                     text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 ))
+
+    def _emit_provisioning_tool_calls(
+        self, emit_tool_call: Callable[[Mapping[str, Any]], bool] | None,
+        provisioning_sig: tuple[tuple[str, str, str], ...],
+    ) -> None:
+        """T035 visibility fix: a worker still provisioning (opening its
+        engine session, not yet ready -- see
+        ``delegation_provisioning.in_progress_snapshot``) is otherwise
+        completely silent from ``delegation_requested`` (pending, T035)
+        until ``assignment_ready`` (in_progress) -- exactly the gap the real
+        Zed session this fixes sat in for over a minute with nothing shown.
+        Updates the SAME per-assignment card ``_emit_assignment_tool_calls``
+        already created (never a second channel/card), so its title/history
+        stay one continuous timeline. A no-op when ``emit_tool_call`` was
+        never wired, same convention as ``_emit_assignment_tool_calls``."""
+        if emit_tool_call is None:
+            return
+        for assignment_ref, step, _updated_at in provisioning_sig:
+            emit_tool_call(dict(
+                new=False, tool_call_id=_worker_tool_call_id(assignment_ref), status="in_progress",
+                text=scrub_text(f"Provisioning: {step}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+            ))
 
     def _handle_ask_user(
         self, task_id: str, session_id: str, emit_update: Callable[[str], bool], language: str, decision: dict,
@@ -2688,7 +2791,13 @@ class OrchestratingRuntime:
                         dict(error="context_budget_blocked"), origin="runtime", assignment_ref=assignment_ref,
                     )
                     return
-                outcome = self._engine.prompt(result.engine_session_ref, brief, cancel_event)
+                with self._lock:
+                    self._worker_turns_in_flight.add(assignment_ref)
+                try:
+                    outcome = self._engine.prompt(result.engine_session_ref, brief, cancel_event)
+                finally:
+                    with self._lock:
+                        self._worker_turns_in_flight.discard(assignment_ref)
                 break
             except EngineTurnFailed as failure:
                 # T017: a worker's own engine turn failing (transport

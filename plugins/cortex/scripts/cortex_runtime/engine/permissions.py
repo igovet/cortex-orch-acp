@@ -271,6 +271,49 @@ class PermissionBridge:
         self._coordinator_refusal_notifier = coordinator_refusal_notifier
         self._lock = threading.Lock()
         self._in_flight: set[tuple[str, object]] = set()
+        # T035 EXT-01 action-supersession gap closure: which portable
+        # action refs (see ``_action_ref``) currently have a host round
+        # trip outstanding, indexed by wire session id -- a plain refcount
+        # rather than a set because two concurrent requests can legitimately
+        # name the *same* toolCallId (an engine retry while the first
+        # round trip is still outstanding), and the second's own eventual
+        # completion must never make the first look "no longer pending" out
+        # from under it. The only reader is
+        # :meth:`pending_actions_for_wire_session`, called by
+        # ``session_manager.EngineSessionManager`` at the one place a whole
+        # turn (and everything it requested permission for) is abandoned or
+        # explicitly cancelled -- see that method's own docstring for why
+        # this bridge, not that caller, is the one with this data at hand.
+        self._pending_actions: dict[str, dict[str, int]] = {}
+
+    def pending_actions_for_wire_session(self, wire_session_id: str) -> list[str]:
+        """Snapshot of every action ref with a host round trip currently
+        outstanding for ``wire_session_id`` -- see
+        ``session_manager.EngineSessionManager._abandon_turn``/``cancel``,
+        the only production callers (T035 EXT-01 action-supersession gap
+        closure)."""
+        with self._lock:
+            return list(self._pending_actions.get(wire_session_id, {}))
+
+    def _track_action_start(self, wire_session_id, action_ref) -> None:
+        if action_ref is None:
+            return
+        with self._lock:
+            by_action = self._pending_actions.setdefault(wire_session_id, {})
+            by_action[action_ref] = by_action.get(action_ref, 0) + 1
+
+    def _track_action_end(self, wire_session_id, action_ref) -> None:
+        if action_ref is None:
+            return
+        with self._lock:
+            by_action = self._pending_actions.get(wire_session_id)
+            if not by_action or action_ref not in by_action:
+                return
+            by_action[action_ref] -= 1
+            if by_action[action_ref] <= 0:
+                del by_action[action_ref]
+            if not by_action:
+                self._pending_actions.pop(wire_session_id, None)
 
     def _observe(self, event, **fields) -> None:
         if self._logs is not None:
@@ -296,11 +339,14 @@ class PermissionBridge:
                 self._observe("permission_duplicate_request_id", engine_session_id=engine_session_id)
                 raise DuplicateEnginePermissionRequestId(str(wire_request_id))
             self._in_flight.add(dedup_key)
+        action_ref = self._action_ref(wire_session_id, params)
+        self._track_action_start(wire_session_id, action_ref)
         try:
-            return self._handle_one(engine_session_id, wire_session_id, params)
+            return self._handle_one(engine_session_id, wire_session_id, params, action_ref)
         finally:
             with self._lock:
                 self._in_flight.discard(dedup_key)
+            self._track_action_end(wire_session_id, action_ref)
 
     def _action_ref(self, wire_session_id, params):
         tool_call = (params or {}).get("toolCall") if isinstance(params, dict) else None
@@ -309,12 +355,11 @@ class PermissionBridge:
             return None
         return self._correlation.portable_tool_call_ref(wire_session_id, wire_tool_call_id)
 
-    def _handle_one(self, engine_session_id, wire_session_id, params) -> dict:
+    def _handle_one(self, engine_session_id, wire_session_id, params, action_ref) -> dict:
         binding = self._bindings.get(engine_session_id)
         if binding is None:
             self._observe("permission_denied_no_binding", engine_session_id=engine_session_id)
             return dict(CANCELLED_OUTCOME)
-        action_ref = self._action_ref(wire_session_id, params)
         snapshot = self._bindings.snapshot(binding, action_key=action_ref)
         if not binding.is_current(snapshot):
             self._observe("permission_denied_stale_binding", engine_session_id=engine_session_id)

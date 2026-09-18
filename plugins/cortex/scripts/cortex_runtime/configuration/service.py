@@ -573,6 +573,57 @@ class ConfigurationService:
             parameters=dict(explicit_override.parameters),
         )
 
+    def resolve_worker_route(self, task_id: str, role_id: str) -> dict[str, object] | None:
+        """EXT-01 carried item: the ordinary-dispatch counterpart to
+        :meth:`resolve_worker`'s ``explicit_override`` branch -- auto-
+        selects the one route this task's own stored mixed-team
+        :class:`~.policy.RouteProfile` authorizes ``role_id`` for, when
+        that authorization is unambiguous, so an ordinary ``delegate()``
+        (which never carries an explicit route choice of its own) can
+        still dispatch a role to a different engine/connection than the
+        coordinator's own.
+
+        Returns ``None`` -- meaning "use the coordinator's own current
+        route, unchanged" -- whenever: there is no current/latest
+        revision to resolve against; this revision's route profile is the
+        default single-route-inheritance marker (``role_routes is None``);
+        or the role's own authorized set (profile narrowed by ceiling,
+        see ``routing.authorization.allowed_routes_for_role``) contains
+        anything other than exactly one route id that both differs from
+        the coordinator's own and has a resolvable ``(engine,
+        connection_id, model)`` recorded for it (``route_details``,
+        T027). Ambiguous (more than one candidate) or empty (role denied,
+        or named only for the coordinator's own route) never guesses --
+        the caller's own downstream ``authorize_dispatch`` still enforces
+        deny-by-default for a role missing from an explicit profile.
+        """
+        from ..routing import authorization as routing_authorization
+
+        coordinator = self.current_or_latest(task_id)
+        if coordinator is None:
+            return None
+        extras = routing_store.get_route_extras(self.store, coordinator["id"])
+        if extras is None:
+            return None
+        profile = extras["route_profile"]
+        if profile.is_default_single_route():
+            return None
+        allowed = routing_authorization.allowed_routes_for_role(
+            profile, coordinator["ceiling_snapshot"], role_id, coordinator["route_id"],
+        )
+        candidates = {
+            route_id for route_id in allowed
+            if route_id != coordinator["route_id"] and route_id in extras["route_details"]
+        }
+        if len(candidates) != 1:
+            return None
+        target_route_id = next(iter(candidates))
+        detail = extras["route_details"][target_route_id]
+        return dict(
+            route_id=target_route_id, route_engine=detail["engine"],
+            route_connection_id=detail["connection_id"], route_model=detail.get("model"),
+        )
+
     # -- UI/command parity adapters --------------------------------------
 
     def ui_select(self, *args, **kwargs) -> dict[str, object]:

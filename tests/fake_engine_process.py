@@ -115,7 +115,18 @@ class FakeEngine:
             if request_log_path and isinstance(method, str):
                 try:
                     with open(request_log_path, "a", encoding="utf-8") as handle:
-                        handle.write(json.dumps(dict(method=method, has_id="id" in message)) + "\n")
+                        # T027/EXT-01 (mixed-team route resolution): also
+                        # log this request's own ``params`` verbatim --
+                        # additive next to the pre-existing ``method``/
+                        # ``has_id`` fields every prior consumer of this log
+                        # already reads, so a test can assert the actual
+                        # wire-level model/effort/mode a
+                        # ``session/set_config_option`` (or any other) call
+                        # sent, not only the DB audit row a production
+                        # caller separately records for the same attempt.
+                        handle.write(json.dumps(dict(
+                            method=method, has_id="id" in message, params=message.get("params"),
+                        )) + "\n")
                 except OSError:
                     pass
             if method == "initialize":

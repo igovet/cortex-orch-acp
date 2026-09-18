@@ -155,7 +155,7 @@ class ConfigurationServiceSnapshotSource:
     def __init__(self, configuration_service) -> None:
         self._service = configuration_service
 
-    def snapshot(self, task_id: str) -> Mapping[str, object]:
+    def snapshot(self, task_id: str, role_id: str | None = None) -> Mapping[str, object]:
         # T031: the active revision if one exists, else the latest
         # proposed-but-not-yet-applied ('selected') one -- resolving which
         # route to *open a session against* no longer requires that
@@ -174,6 +174,29 @@ class ConfigurationServiceSnapshotSource:
                 retry_eligible=False,
             )
         engine = current.get("route_engine")
+        resolved_route = None
+        # EXT-01 (mixed-team delegation via the ordinary path, not only
+        # fallback): a role passed by ``delegation.provisioning.delegate``
+        # may be authorized for a different route than the coordinator's
+        # own (``configuration.service.ConfigurationService
+        # .resolve_worker_route``, T027's stored mixed-team profile).
+        # ``resolved_route`` is ``None`` for every call with no ``role_id``
+        # and for every role that resolves to the coordinator's own route
+        # unchanged -- so an ordinary (non-mixed-team) delegation is
+        # byte-for-byte the same snapshot as before this fix, and
+        # ``delegation.provisioning`` threads a non-``None`` value into the
+        # launch dict only for an actual override, so ``open`` still uses
+        # its own validated ``connection_record_factory`` (live
+        # login/credential state, T009 finding 09) for every attempt that
+        # never overrides the coordinator's route.
+        if role_id is not None:
+            override = self._service.resolve_worker_route(task_id, role_id)
+            if override is not None:
+                engine = override["route_engine"]
+                resolved_route = dict(
+                    route_id=override["route_id"], connection_id=override["route_connection_id"],
+                    model=override.get("route_model"),
+                )
         return dict(
             engine=engine,
             # The exact evidence-qualified version per engine (see
@@ -186,8 +209,18 @@ class ConfigurationServiceSnapshotSource:
             # T023: the connection actually selected by this revision --
             # recovery.coordinator_recovery/registry compares this against
             # a recorded attempt's own route to detect an unauthorized
-            # silent provider switch.
+            # silent provider switch. Always the coordinator's own
+            # connection, unaffected by ``resolved_route`` above (existing
+            # callers/consumers of this field are unchanged).
             route_connection_id=current.get("route_connection_id"),
+            # The single resolved override route id/connection/model for
+            # this attempt (T027 carried item), or ``None`` -- threaded
+            # verbatim into the launch dict by ``delegation.provisioning``
+            # so ``open``'s own dispatch authorization, connection
+            # selection, worker-mode confirmation, and audit all use the
+            # exact same already-resolved value instead of each re-
+            # deriving a different one.
+            resolved_route=resolved_route,
         )
 
 
@@ -219,16 +252,32 @@ class _PortableRevisionConfigureAdapter:
     since ``configuration_revisions`` itself never stores it in plain
     text. Constructed fresh per apply attempt; never cached."""
 
-    def __init__(self, store, manager) -> None:
+    def __init__(self, store, manager, *, route_model_override: str | None = None) -> None:
         self._store = store
         self._manager = manager
+        # EXT-01 (fallback source-vs-target confusion): ``configuration_
+        # route_extras.route_model`` is keyed by ``revision["id"]`` alone
+        # and always names *that revision's own* (coordinator's) model --
+        # never any different route a specific attempt actually opened
+        # against (a fallback's ``route_override["model"]``, or an
+        # ordinary mixed-team attempt's own ``resolved_model``, T027).
+        # ``_apply_worker_mode_floor`` supplies this attempt's own actual
+        # model here so :meth:`configure` never falls back to reading the
+        # wrong (source) model out of ``configuration_route_extras`` for
+        # it; every other caller (``ConfigurationService.apply``, always
+        # the coordinator's own not-yet-overridden route) leaves this
+        # ``None`` and keeps the original extras lookup, unchanged.
+        self._route_model_override = route_model_override
 
     def configure(self, engine_session_id: str, revision: Mapping[str, object]) -> str:
         from ..portable.identity import ConfigurationRevision, ExecutionRoute
         from ..routing import store as routing_store
 
-        extras = routing_store.get_route_extras(self._store, revision["id"])
-        route_model = extras["route_model"] if extras is not None else revision["route_engine"]
+        if self._route_model_override is not None:
+            route_model = self._route_model_override
+        else:
+            extras = routing_store.get_route_extras(self._store, revision["id"])
+            route_model = extras["route_model"] if extras is not None else revision["route_engine"]
         route = ExecutionRoute(
             engine=revision["route_engine"], connection_id=revision["route_connection_id"],
             model=route_model, supported_parameters=tuple(sorted(revision["parameters"].items())),
@@ -488,21 +537,39 @@ class EngineSessionManagerAdapter:
             (channel_id, channel_secret, project_root)
             if channel_id and channel_secret else None
         )
+        # EXT-01 carried item: exactly one resolved connection id for this
+        # attempt, from exactly one of two sources, both already-authorized
+        # or already-role-resolved *before* open() ever runs -- never both,
+        # never neither re-derived independently downstream. A fallback
+        # attempt's ``route_override`` (already authorized by
+        # ``routing.authorization.authorize_fallback``, see
+        # :meth:`attempt_fallback`) always wins when present; an ordinary
+        # mixed-team delegation's own ``resolved_connection_id`` (T027
+        # stored route profile, resolved once by
+        # ``configuration.service.ConfigurationService.resolve_worker_route``
+        # and threaded through unchanged by
+        # ``delegation.provisioning.ProvisioningService``) is used only when
+        # no fallback override is present. Neither is authorized here --
+        # ``_authorize_dispatch`` below still enforces deny-by-default
+        # against this exact same id via ``launch["resolved_route_id"]``.
+        # Absent both (every non-mixed-team, non-fallback attempt -- the
+        # overwhelming majority), the task's own validated
+        # ``connection_record_factory`` (live login/credential state, T009
+        # finding 09) resolves the connection exactly as before this fix.
         route_override = launch.get("route_override")
-        if route_override is not None:
-            # T027: an already-authorized fallback attempt (see
-            # ``routing.authorization.authorize_fallback``, always called by
-            # the caller *before* setting this key) targets a specific,
-            # explicitly-chosen connection instead of this task's current
-            # configuration -- never the factory's own route.
+        override_connection_id = (
+            route_override["connection_id"] if route_override is not None
+            else launch.get("resolved_connection_id")
+        )
+        if override_connection_id is not None:
             from ..connections import registry as connection_registry
 
             state = connection_registry.read_registry(self._environ)
-            record = state.connections.get(route_override["connection_id"])
+            record = state.connections.get(override_connection_id)
             if record is None:
                 raise RuntimeError(
-                    f"EngineSessionManagerAdapter.open: route_override connection "
-                    f"{route_override['connection_id']!r} no longer exists."
+                    f"EngineSessionManagerAdapter.open: resolved connection "
+                    f"{override_connection_id!r} no longer exists."
                 )
         else:
             record = self._connection_record_factory(task_id)
@@ -639,7 +706,7 @@ class EngineSessionManagerAdapter:
                 # ``open()`` (never the whole task), with the just-opened
                 # session/process torn down rather than leaked.
                 try:
-                    self._apply_worker_mode_floor(manager, task_id, session_id, launch)
+                    self._apply_worker_mode_floor(manager, task_id, session_id, launch, record)
                 except WorkerModeNotConfirmed:
                     self.terminate_owned(attempt_id)
                     raise
@@ -869,7 +936,7 @@ class EngineSessionManagerAdapter:
             retry_eligible=False,
         )
 
-    def _apply_worker_mode_floor(self, manager, task_id, session_id, launch) -> None:
+    def _apply_worker_mode_floor(self, manager, task_id, session_id, launch, record) -> None:
         """T035 gap closure: confirm -- not merely request -- this worker's
         own engine mode against ``configuration.policy.WORKER_MODE_FLOOR``
         (see that constant's own docstring for the pinned-build evidence
@@ -931,7 +998,18 @@ class EngineSessionManagerAdapter:
         with self._store.connection() as db:
             row = configuration_store.revision_row_tx(db, task_id, config_revision)
             revision = configuration_store._row_dict(row)
-        mode_floor = WORKER_MODE_FLOOR.get(revision["route_engine"])
+        # EXT-01 (fallback/mixed-team source-vs-target confusion): the
+        # engine mode floor -- and, below, the model this confirm-or-fail
+        # call itself sends -- must be checked/applied against the route
+        # this attempt was *actually opened against* (``record``, the same
+        # already-resolved connection ``open()`` just launched, whether
+        # that is the coordinator's own default route, an ordinary
+        # mixed-team ``resolved_connection_id`` override, or a fallback
+        # ``route_override``), never re-read fresh from
+        # ``config_revision``'s own stored row -- which always names the
+        # *source* route, not this attempt's target, whenever the two
+        # differ.
+        mode_floor = WORKER_MODE_FLOOR.get(record.engine)
         if mode_floor is None:
             return
         observed = manager.observed_config_options(session_id) or []
@@ -944,11 +1022,16 @@ class EngineSessionManagerAdapter:
         if mode_floor not in offered_modes:
             raise WorkerModeNotConfirmed(
                 f"this worker's own engine session never offered mode {mode_floor!r} "
-                f"(engine {revision['route_engine']!r}); its mode cannot be confirmed, "
+                f"(engine {record.engine!r}); its mode cannot be confirmed, "
                 "so it must not run with an unverified permission-request boundary."
             )
-        revision = dict(revision, parameters=dict(revision["parameters"], mode=mode_floor))
-        adapter = _PortableRevisionConfigureAdapter(self._store, manager)
+        route_override = launch.get("route_override")
+        resolved_model = (route_override or {}).get("model") or launch.get("resolved_model")
+        revision = dict(
+            revision, route_engine=record.engine, route_connection_id=record.id,
+            parameters=dict(revision["parameters"], mode=mode_floor),
+        )
+        adapter = _PortableRevisionConfigureAdapter(self._store, manager, route_model_override=resolved_model)
         try:
             adapter.configure(session_id, revision)
         except Exception as rejected:  # noqa: BLE001 - ConfigurationRejected,
@@ -1135,7 +1218,13 @@ class EngineSessionManagerAdapter:
         config_revision = launch.get("config_revision")
         role = launch.get("role_id") or ("worker" if launch.get("assignment_id") else "coordinator")
         route_override = launch.get("route_override")
-        model = (route_override or {}).get("model")
+        # EXT-01: a fallback's own ``route_override["model"]`` and an
+        # ordinary mixed-team attempt's own ``resolved_model`` both name
+        # this attempt's actual target model; only when neither is present
+        # (the coordinator's own route, unoverridden) does the source
+        # revision's own stored ``route_model`` -- correct for that case,
+        # since source and target are the same route -- apply.
+        model = (route_override or {}).get("model") or launch.get("resolved_model")
         if model is None:
             model = "unknown"
             if config_revision:
@@ -1450,6 +1539,45 @@ class EngineSessionManagerAdapter:
             recovery_registry.mark_terminated(self._store, attempt_id, "lookup_owned_absent")
         return state
 
+    def invalidate_owner_epoch(self, attempt_id: str, new_epoch) -> None:
+        """T035 EXT-01 ownership-transfer gap closure:
+        ``engine.resource_binding.BindingRegistry.invalidate_epoch`` had no
+        production caller because nothing on the ownership-transfer side
+        (``ownership.acquire_task_owner_tx``/``reassign_worker_channels_tx``,
+        called from ``recovery.coordinator_recovery``) holds a live
+        ``ResourceBinding`` or its ``workspace_binding_id`` -- only this
+        adapter's own ``attempt_id -> manager -> session_id -> binding``
+        chain does. Resolves ``workspace_binding_id`` from that chain
+        itself, so a caller only ever needs the ``attempt_id`` it already
+        has and the freshly-acquired epoch -- never invented or re-derived
+        data.
+
+        A no-op if this process has no live manager for ``attempt_id``
+        (already terminated -- see :meth:`terminate_owned`, which already
+        invalidates unconditionally via ``bindings.release`` -- or never
+        opened in this process at all, e.g. after a restart; see
+        ``recovery.registry``), since there is then nothing in this
+        process's memory left to invalidate.
+
+        NOT YET CALLED from ``recovery.coordinator_recovery.recover``: that
+        module is outside this change's edit scope. The missing wiring is
+        exactly one call, right after that module's own step 1 commits
+        (``result = ownership.acquire_task_owner_tx(...)``):
+        ``engine.invalidate_owner_epoch(old_attempt_ref, result.epoch)``
+        (``engine`` there is this adapter, already passed into
+        ``recover()``). See this repository's task card for why that one
+        line was left out of this change rather than added speculatively
+        to a file outside the approved edit set."""
+        with self._lock:
+            manager = self._managers.get(attempt_id)
+            session_id = self._sessions.get(attempt_id)
+        if manager is None or session_id is None:
+            return
+        binding = manager.bindings.get(session_id)
+        if binding is None:
+            return
+        manager.invalidate_epoch(binding.workspace_binding_id, str(new_epoch))
+
     def terminate_owned(self, attempt_id: str) -> None:
         with self._lock:
             manager = self._managers.pop(attempt_id, None)
@@ -1686,7 +1814,21 @@ class EngineSessionManagerAdapter:
     # engine ever emits another event.
     _CANCEL_WATCH_POLL_SECONDS = 0.05
 
-    def prompt(self, session_ref: str, message: str, cancel_event: threading.Event):
+    def prompt(
+        self, session_ref: str, message: str, cancel_event: threading.Event, *,
+        on_delta: Callable[[str], bool] | None = None,
+    ):
+        """T035 visibility fix: ``on_delta``, when given, is called with each
+        ``TURN_DELTA`` chunk's text the moment it is yielded by
+        ``manager.prompt_turn()`` -- never buffered until the whole turn
+        ends. Only the coordinator's own call site
+        (``acp.orchestrating_runtime._continuation_loop``) ever passes one;
+        every delegated-worker prompt call keeps passing none, so a raw
+        worker chunk is still never streamed (see ``PromptOutcome``'s own
+        docstring). Best-effort like ``emit_update`` itself -- a callback
+        exception here must never abort an otherwise-successful engine
+        turn, so it is swallowed the same way a dropped/cancelled delivery
+        already is."""
         from ..acp.orchestrating_runtime import EngineTurnFailed, PromptOutcome
         from ..portable.engine_contract import EngineEventKind, StopReason
         from ..portable.errors import PortableError
@@ -1762,6 +1904,11 @@ class EngineSessionManagerAdapter:
                     manager.cancel(session_ref)
                 if event.kind == EngineEventKind.TURN_DELTA and event.delta_text:
                     text_parts.append(event.delta_text)
+                    if on_delta is not None:
+                        try:
+                            on_delta(event.delta_text)
+                        except Exception:  # noqa: BLE001 - best-effort, never fails the turn
+                            pass
                 elif event.kind == EngineEventKind.TOOL_CALL_OBSERVED:
                     # T017: durable evidence, never raw tool output/args --
                     # see delegation.evidence module docstring.

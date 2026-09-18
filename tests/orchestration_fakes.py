@@ -59,7 +59,7 @@ class FakeConfigSnapshotSource:
         self.engine = engine
         self.version = version
 
-    def snapshot(self, task_id):
+    def snapshot(self, task_id, role_id=None):
         return dict(engine=self.engine, version=self.version, config_revision="cr_" + task_id[2:])
 
 
@@ -257,15 +257,24 @@ class FakeSessionRuntime:
                 delegation_capacity.mark_ambiguous(self._store, reservation_id, "timeout_alive")
             self._notify_activity()
 
-    def prompt(self, session_ref, message, cancel_event):
+    def prompt(self, session_ref, message, cancel_event, *, on_delta=None):
         info = self.sessions[session_ref]
         self.prompt_calls.append(session_ref)
         call_index = info["calls"]
         info["calls"] += 1
         behavior = info["behavior"]
         if behavior is None:
-            return PromptOutcome(StopReason.END_TURN, "")
-        return behavior(self._store, info["channel"], session_ref, message, call_index)
+            outcome = PromptOutcome(StopReason.END_TURN, "")
+        else:
+            outcome = behavior(self._store, info["channel"], session_ref, message, call_index)
+        # T035 visibility fix: this fake has no real per-chunk timeline, so
+        # it simulates streaming with the one chunk it actually has (its
+        # own whole outcome text) -- enough for a caller asserting
+        # ``on_delta`` was exercised without needing the full
+        # fake_engine_process JSON-RPC harness for that.
+        if on_delta is not None and outcome.text:
+            on_delta(outcome.text)
+        return outcome
 
     def attempt_fallback(
         self, *, old_attempt_id, new_attempt_id, task_id, role, failure_class,

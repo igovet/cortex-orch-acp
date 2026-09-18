@@ -381,9 +381,9 @@ class GenerationAwareSessionRuntime:
     def shutdown(self):
         self._inner.shutdown()
 
-    def prompt(self, session_ref, message, cancel_event):
+    def prompt(self, session_ref, message, cancel_event, *, on_delta=None):
         delegation_deliveries.mark_continuation_observed_if_pending(self._store, session_ref, "next_prompt")
-        return self._inner.prompt(session_ref, message, cancel_event)
+        return self._inner.prompt(session_ref, message, cancel_event, on_delta=on_delta)
 
     def pending_delivery(self, session_ref):
         generation = self._pending_generation.get(session_ref)

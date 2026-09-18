@@ -128,8 +128,15 @@ class ConfigSnapshotSource(Protocol):
     results.
     """
 
-    def snapshot(self, task_id: str) -> Mapping[str, Any]:
-        """Return at least {'engine': str, 'version': str, 'config_revision': str}."""
+    def snapshot(self, task_id: str, role_id: str | None = None) -> Mapping[str, Any]:
+        """Return at least {'engine': str, 'version': str, 'config_revision': str}.
+
+        ``role_id`` (EXT-01 carried item), when supplied, lets an
+        implementation resolve *that role's own* authorized route (T027
+        mixed-team profile) instead of always the coordinator's -- see
+        ``delegation.live_adapters.ConfigurationServiceSnapshotSource``,
+        the only production implementation. A fake/test double may ignore
+        it and always resolve the coordinator's own route."""
         ...
 
 
@@ -409,7 +416,7 @@ class ProvisioningService:
         # Delivery qualification is checked (and, on refusal, raises) before
         # any external effect -- see module docstring. A pure pre-check call
         # to the (idempotent) config snapshot source supplies engine/version.
-        preview = self._config.snapshot(task_id)
+        preview = self._config.snapshot(task_id, role_id)
         qualify_delivery(
             role_set, delivery_for(preview["engine"], preview["version"]), [],
             allow_unqualified_delivery=self._allow_unqualified_delivery,
@@ -587,7 +594,7 @@ class ProvisioningService:
                     raise
 
     def _step_config_snapshot(self, idempotency_key: str, row) -> None:
-        snapshot = self._config.snapshot(row["task_id"])
+        snapshot = self._config.snapshot(row["task_id"], row["role_id"])
         with self._store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -656,7 +663,7 @@ class ProvisioningService:
                     remediation="Engine session existence for this attempt could not be determined; investigate/terminate it out of band before starting a new delegation.",
                     retry_eligible=False,
                 )
-        preview = self._config.snapshot(row["task_id"])
+        preview = self._config.snapshot(row["task_id"], row["role_id"])
         plan = qualify_delivery(
             role_set, delivery_for(preview["engine"], preview["version"]), [],
             allow_unqualified_delivery=self._allow_unqualified_delivery,
@@ -695,11 +702,25 @@ class ProvisioningService:
                 db.execute("BEGIN IMMEDIATE")
                 _record_effect(db, idempotency_key, "engine_session", "intent", dict(attempt_id=attempt_id))
                 db.commit()
+            # EXT-01 carried item: the one resolved route for this attempt
+            # (this role's own authorized route when the T027 mixed-team
+            # profile names one, else ``None`` -- see
+            # ``ConfigurationServiceSnapshotSource.snapshot``'s own
+            # docstring), threaded verbatim through ``open`` so dispatch
+            # authorization, connection selection, worker-mode
+            # confirmation, and audit all see the exact same value instead
+            # of each re-deriving a possibly-different one. ``None`` for
+            # every non-mixed-team delegation -- ``open`` then falls back
+            # to its own validated ``connection_record_factory``, unchanged.
+            resolved_route = preview.get("resolved_route") or {}
             launch = dict(
                 task_id=row["task_id"], assignment_id=row["assignment_id"], attempt_id=attempt_id,
                 channel_id=row["channel_id"], config_revision=row["config_revision"],
                 context_snapshot_ref=row["context_snapshot_ref"],
                 channel_secret=channel_secret, role_id=row["role_id"],
+                resolved_route_id=resolved_route.get("route_id"),
+                resolved_connection_id=resolved_route.get("connection_id"),
+                resolved_model=resolved_route.get("model"),
             )
             try:
                 session_ref = self._engine.open(row["workspace_binding_id"], launch, role_set.body_portable)
