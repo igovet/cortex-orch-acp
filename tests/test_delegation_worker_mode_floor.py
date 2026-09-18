@@ -1,0 +1,282 @@
+"""T035 gap closure: a worker's own engine mode is confirmed (not merely
+requested) via ``EngineSessionManagerAdapter._apply_worker_mode_floor``,
+using the exact same real fake-engine-subprocess machinery
+``test_delegation_routing_dispatch.py`` already exercises for the
+coordinator's own floor. See ``configuration.policy.WORKER_MODE_FLOOR``'s
+own docstring for why "agent"/"default" (codex-acp/claude-agent-acp) are
+the two floor values, and ``delegation.live_adapters
+.EngineSessionManagerAdapter._apply_worker_mode_floor``'s own docstring for
+exactly what "cannot confirm" means and why it blocks only the one worker
+attempt, never the whole task.
+"""
+from __future__ import annotations
+
+import uuid
+
+import pytest
+
+from cortex_runtime.bootstrap import bootstrap_task
+from cortex_runtime.catalog.discovery import build_catalog, parse_observation
+from cortex_runtime.configuration.policy import COORDINATOR_MODE_FLOOR, WORKER_MODE_FLOOR
+from cortex_runtime.configuration.resolution import ConfigurationInputs
+from cortex_runtime.configuration.service import ConfigurationService
+from cortex_runtime.connections import registry as connection_registry
+from cortex_runtime.delegation import capacity
+from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter, WorkerModeNotConfirmed
+from cortex_runtime.engine.resource_binding import ResourceBinding
+from cortex_runtime.ownership import current_owner_epoch
+from cortex_runtime.portable.identity import OwnershipEpoch, SourceEvent
+from cortex_runtime.store import Store
+
+from engine_fakes import default_scenario, fake_launch_command, isolated_environ, make_connection_record, new_connection_id, write_scenario
+
+
+class _FakeConfigAdapter:
+    def configure(self, engine_session_id, revision):
+        return "evidence-ref"
+
+
+def _bootstrap(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    store = Store(project / ".cortex", project_root=project)
+    result = bootstrap_task(store, SourceEvent(origin="cli", event_id=str(uuid.uuid4())), "Do work.", "owner-1")
+    with store.connection() as db:
+        epoch = current_owner_epoch(db, result.task_id)
+    return store, result.task_id, OwnershipEpoch(epoch=epoch, owner="owner-1")
+
+
+def _entry(connection, model):
+    options = [{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
+                "options": [{"value": model, "name": model}]}]
+    snapshot = build_catalog({connection.id: connection}, {connection.id: parse_observation(options)})
+    return snapshot.entries[0]
+
+
+_MODE_OPTIONS = [
+    dict(value="read-only", name="Ask for approval"),
+    dict(value="agent", name="Approve for me"),
+    dict(value="agent-full-access", name="Full access"),
+]
+
+
+def _connection_and_config(tmp_path, *, mode_options=_MODE_OPTIONS, model="shared-model", configure_behavior_by_option=None):
+    environ = isolated_environ(tmp_path)
+    config_options = [
+        dict(id="model", currentValue=model, options=[dict(value=model, name=model)]),
+    ]
+    if mode_options is not None:
+        config_options.append(dict(id="mode", currentValue=mode_options[0]["value"], options=mode_options))
+    scenario = default_scenario(config_options=config_options)
+    if configure_behavior_by_option:
+        scenario["configure_behavior_by_option"] = configure_behavior_by_option
+    scenario_path = write_scenario(tmp_path, scenario)
+    connection = make_connection_record(new_connection_id(), fake_launch_command(scenario_path), environ=environ)
+    with connection_registry.transaction(environ) as state:
+        state.connections[connection.id] = connection
+    return environ, connection
+
+
+def _propose_and_apply(store, task_id, epoch, connection, model="shared-model"):
+    entry = _entry(connection, model)
+    service = ConfigurationService(store)
+    row = service.propose(
+        task_id, entry, ConfigurationInputs(route=entry.route, parameters={}),
+        expected_revision=0, current_epoch=epoch,
+    )
+    service.apply(task_id, row["id"], _FakeConfigAdapter(), "es_" + "a" * 12, epoch)
+    return row
+
+
+def test_worker_mode_floor_matches_pinned_engine_values():
+    """The exact values this task closes the gap around -- see
+    ``WORKER_MODE_FLOOR``'s own docstring for the pinned-build evidence."""
+    assert WORKER_MODE_FLOOR == {"codex-acp": "agent", "claude-agent-acp": "default"}
+
+
+def test_coordinator_floor_is_unaffected_by_the_new_worker_floor():
+    assert COORDINATOR_MODE_FLOOR == {"codex-acp": "read-only", "claude-agent-acp": "plan"}
+
+
+def test_worker_session_confirms_its_own_mode_over_the_wire(tmp_path):
+    store, task_id, epoch = _bootstrap(tmp_path)
+    environ, connection = _connection_and_config(tmp_path)
+    row = _propose_and_apply(store, task_id, epoch, connection)
+
+    adapter = EngineSessionManagerAdapter(
+        lambda t: connection, lambda t: str(tmp_path), environ=environ, call_timeout=10.0, store=store,
+    )
+    session_ref = adapter.open(
+        "shared_project_root",
+        dict(task_id=task_id, attempt_id="xa_w1", assignment_id="asg1", config_revision=row["id"]),
+        "instructions",
+    )
+    assert session_ref.startswith("es_")
+    manager = adapter._managers["xa_w1"]
+    observed = manager.observed_config_options(session_ref)
+    mode_option = next(option for option in observed if option.get("id") == "mode")
+    # Confirmed, not merely requested: the wire echoed "agent" back as the
+    # session's own currentValue after the real session/set_config_option
+    # round-trip -- see EngineSessionManager.configure's own confirm-or-fail
+    # gate.
+    assert mode_option["currentValue"] == "agent"
+    adapter.terminate_owned("xa_w1")
+
+
+def test_worker_mode_not_offered_blocks_this_attempt_and_leaks_nothing(tmp_path):
+    store, task_id, epoch = _bootstrap(tmp_path)
+    # No "mode" option at all in this engine session's own observed
+    # configOptions -- the engine can never be shown to route a permission
+    # decision through session/request_permission at all.
+    environ, connection = _connection_and_config(tmp_path, mode_options=None)
+    row = _propose_and_apply(store, task_id, epoch, connection)
+
+    adapter = EngineSessionManagerAdapter(
+        lambda t: connection, lambda t: str(tmp_path), environ=environ, call_timeout=10.0, store=store,
+    )
+    with pytest.raises(WorkerModeNotConfirmed):
+        adapter.open(
+            "shared_project_root",
+            dict(task_id=task_id, attempt_id="xa_w1", assignment_id="asg1", config_revision=row["id"]),
+            "instructions",
+        )
+    # The just-opened session/process was torn down, not leaked: no
+    # capacity reservation survives, and the attempt is untracked.
+    assert capacity.count_active(store, connection.id) == 0
+    assert "xa_w1" not in adapter._managers
+    assert "xa_w1" not in adapter._sessions
+
+
+def test_worker_mode_wire_rejection_blocks_this_attempt(tmp_path):
+    store, task_id, epoch = _bootstrap(tmp_path)
+    # "mode" is offered, but the engine's own wire confirm rejects it --
+    # never a silent "assume it worked".
+    environ, connection = _connection_and_config(
+        tmp_path, configure_behavior_by_option={"mode": "error"},
+    )
+    row = _propose_and_apply(store, task_id, epoch, connection)
+
+    adapter = EngineSessionManagerAdapter(
+        lambda t: connection, lambda t: str(tmp_path), environ=environ, call_timeout=10.0, store=store,
+    )
+    with pytest.raises(WorkerModeNotConfirmed):
+        adapter.open(
+            "shared_project_root",
+            dict(task_id=task_id, attempt_id="xa_w1", assignment_id="asg1", config_revision=row["id"]),
+            "instructions",
+        )
+    assert capacity.count_active(store, connection.id) == 0
+
+
+def test_coordinator_open_never_touches_the_worker_mode_floor(tmp_path):
+    """A coordinator launch (no assignment_id) must never run
+    ``_apply_worker_mode_floor`` -- even when the engine offers no "mode"
+    option at all (which would immediately block a worker)."""
+    store, task_id, epoch = _bootstrap(tmp_path)
+    environ, connection = _connection_and_config(tmp_path, mode_options=None)
+    row = _propose_and_apply(store, task_id, epoch, connection)
+
+    adapter = EngineSessionManagerAdapter(
+        lambda t: connection, lambda t: str(tmp_path), environ=environ, call_timeout=10.0, store=store,
+    )
+    session_ref = adapter.open(
+        "shared_project_root", dict(task_id=task_id, attempt_id="xa_c1", config_revision=row["id"]), "instructions",
+    )
+    assert session_ref.startswith("es_")
+    adapter.terminate_owned("xa_c1")
+
+
+def _binding_for(manager, engine_session_id, workspace_root, **overrides):
+    fields = dict(
+        engine_instance_id=manager._process.engine_instance_id, engine_session_id=engine_session_id,
+        context_generation_id="gen_1", assignment_id="asg_1", attempt_id="xa_w1",
+        workspace_binding_id="wb_" + engine_session_id, workspace_root=str(workspace_root), ownership_epoch="epoch_1",
+        role="worker",
+    )
+    fields.update(overrides)
+    return ResourceBinding(**fields)
+
+
+def test_confirmed_worker_mode_and_permission_classifier_work_together(tmp_path):
+    """End to end with fakes (no paid call, no real engine launch): once
+    this worker's own mode is confirmed via ``_apply_worker_mode_floor``,
+    an ordinary tool call is auto-approved by ``PermissionBridge`` without
+    ever reaching the host, and a deletion reaches the host confirmation
+    path -- proving the confirmed mode and the classifier actually work
+    together (the point of this task), not merely that each exists in
+    isolation."""
+    store, task_id, epoch = _bootstrap(tmp_path)
+    environ = isolated_environ(tmp_path)
+
+    host_calls = []
+
+    def host_permission_requester(engine_session_id, params, timeout):
+        host_calls.append(params)
+        return {"outcome": {"outcome": "selected", "optionId": "deny"}}
+
+    reply_log = tmp_path / "replies.jsonl"
+    edit_request = dict(
+        method="session/request_permission",
+        params=dict(
+            sessionId="sess-1",
+            toolCall=dict(toolCallId="tc-edit", kind="edit"),
+            options=[dict(optionId="allow", kind="allow_once"), dict(optionId="deny", kind="reject_once")],
+        ),
+    )
+    delete_request = dict(
+        method="session/request_permission",
+        params=dict(
+            sessionId="sess-1",
+            toolCall=dict(toolCallId="tc-delete", kind="delete"),
+            options=[dict(optionId="allow", kind="allow_once"), dict(optionId="deny", kind="reject_once")],
+        ),
+    )
+    scenario = default_scenario(
+        config_options=[
+            dict(id="model", currentValue="shared-model", options=[dict(value="shared-model", name="shared-model")]),
+            dict(id="mode", currentValue="agent", options=_MODE_OPTIONS),
+        ],
+        prompt_behavior="client_requests_sequence",
+        client_requests=[edit_request, delete_request],
+        client_reply_log_path=str(reply_log),
+    )
+    scenario_path = write_scenario(tmp_path, scenario)
+    connection = make_connection_record(new_connection_id(), fake_launch_command(scenario_path), environ=environ)
+    with connection_registry.transaction(environ) as state:
+        state.connections[connection.id] = connection
+    row = _propose_and_apply(store, task_id, epoch, connection)
+
+    adapter = EngineSessionManagerAdapter(
+        lambda t: connection, lambda t: str(tmp_path), environ=environ, call_timeout=10.0, store=store,
+        host_permission_requester=host_permission_requester,
+    )
+    session_ref = adapter.open(
+        "shared_project_root",
+        dict(task_id=task_id, attempt_id="xa_w1", assignment_id="asg1", config_revision=row["id"]),
+        "instructions",
+    )
+    manager = adapter._managers["xa_w1"]
+    # This is the disclosed, separate, pre-existing gap
+    # (``engine.session_manager.EngineSessionManager.bind_resource`` is
+    # never called by any production caller yet -- see
+    # ``engine.resource_binding``'s own module docstring): out of scope for
+    # this task, which is only about the mode floor, so this test binds the
+    # resource directly exactly as ``test_engine_resource_dispatch.py``'s
+    # own end-to-end coverage already does.
+    manager.bind_resource(_binding_for(manager, session_ref, tmp_path))
+    try:
+        list(manager.prompt_turn(session_ref, "do it"))
+        import json
+
+        replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
+        assert len(replies) == 2
+        # Ordinary "edit": auto-approved locally by PermissionBridge -- the
+        # host requester was never called for it (no host round-trip).
+        assert replies[0]["result"] == {"outcome": {"outcome": "selected", "optionId": "allow"}}
+        # Deletion: reached the host, whose (fake) decision was relayed
+        # verbatim -- never auto-approved.
+        assert replies[1]["result"] == {"outcome": {"outcome": "selected", "optionId": "deny"}}
+        assert len(host_calls) == 1
+        assert host_calls[0]["toolCall"]["toolCallId"] == "tc-delete"
+    finally:
+        adapter.terminate_owned("xa_w1")

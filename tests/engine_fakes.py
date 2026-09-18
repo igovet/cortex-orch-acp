@@ -115,6 +115,29 @@ def default_scenario(**overrides) -> dict:
         session_id="sess-1",
         config_options=[
             dict(id="model", currentValue="gpt-x", options=[dict(value="gpt-x", name="GPT X")]),
+            # T035: a "mode" option offering every real pinned value from
+            # both engines' own vocabularies (codex-acp 1.12.0's
+            # read-only/agent/agent-full-access and claude-agent-acp
+            # 0.78.0's default/acceptEdits/plan/auto/bypassPermissions --
+            # see tests/fixtures/catalog/*_config_options.json's own fixture
+            # notes) so every existing test using this generic, engine-
+            # agnostic default scenario keeps confirming
+            # ``configuration.policy.WORKER_MODE_FLOOR``/
+            # ``COORDINATOR_MODE_FLOOR`` for whichever engine it configures,
+            # without each test needing to script its own "mode" option.
+            dict(
+                id="mode", currentValue="agent",
+                options=[
+                    dict(value="read-only", name="Ask for approval"),
+                    dict(value="agent", name="Approve for me"),
+                    dict(value="agent-full-access", name="Full access"),
+                    dict(value="default", name="Manual"),
+                    dict(value="acceptEdits", name="Accept edits"),
+                    dict(value="plan", name="Plan"),
+                    dict(value="auto", name="Auto"),
+                    dict(value="bypassPermissions", name="Bypass permissions"),
+                ],
+            ),
         ],
         configure_behavior="accept",
         prompt_updates=[

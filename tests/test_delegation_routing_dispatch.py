@@ -61,10 +61,26 @@ def _make_pair(tmp_path, *, same_provider=True):
     engine_dir = tmp_path / "engine"
     engine_dir.mkdir()
     environ = isolated_environ(engine_dir)
-    scenario_a = write_scenario(engine_dir, default_scenario())
+    # T035: this file's own fixture entries always name "shared-model" or
+    # "other-model" (never "gpt-x", ``default_scenario``'s own placeholder)
+    # -- override just the "model" option's values so the worker-mode-floor
+    # confirm wire call (which, unlike a real coordinator ``configure()``
+    # here, always re-sends ``model`` too -- codex-acp's own option mapping
+    # requires it on every call) actually matches what these tests'
+    # ``_entry()`` calls declare; ``default_scenario``'s own "mode" option
+    # (added for this same T035 gap closure) is kept as-is.
+    model_options = dict(
+        id="model", currentValue="shared-model",
+        options=[dict(value="shared-model", name="Shared"), dict(value="other-model", name="Other")],
+    )
+    scenario_a = write_scenario(engine_dir, default_scenario(
+        config_options=[model_options, default_scenario()["config_options"][1]],
+    ))
     engine_dir_b = engine_dir / "b"
     engine_dir_b.mkdir()
-    scenario_b = write_scenario(engine_dir_b, default_scenario())
+    scenario_b = write_scenario(engine_dir_b, default_scenario(
+        config_options=[model_options, default_scenario()["config_options"][1]],
+    ))
     connection_a = make_connection_record(new_connection_id(), fake_launch_command(scenario_a), environ=environ)
     connection_b = make_connection_record(new_connection_id(), fake_launch_command(scenario_b), environ=environ)
     if not same_provider:

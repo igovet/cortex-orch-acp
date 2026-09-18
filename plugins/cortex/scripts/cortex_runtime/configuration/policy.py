@@ -54,6 +54,64 @@ COORDINATOR_MODE_FLOOR: Mapping[str, str] = {
     "claude-agent-acp": "plan",
 }
 
+# T035 gap closure ("a worker's engine mode is never chosen or confirmed by
+# Cortex" -- disclosed, not fixed, by the builder who landed
+# ``engine.permissions.PermissionBridge``): the user's rule is "workers get
+# full working capability except deletion, which must be confirmed", and
+# that rule only binds while the engine actually issues
+# ``session/request_permission`` for it -- ``PermissionBridge`` can only
+# ever classify/relay a request that reaches it. A mode the engine will
+# silently auto-approve everything under (never emitting the request at
+# all) makes the "except deletion" half of the rule a no-op; a mode that
+# asks about literally everything is safe but needlessly slow. This floor
+# picks the narrowest mode still known -- from the pinned installed builds,
+# not merely their own naming -- to always route a genuinely unsafe/
+# destructive action through ``session/request_permission``:
+#
+# - codex-acp 1.12.0 (``dist/index.js`` ``_AgentMode`` table): "agent"
+#   ("Approve for me") has ``approvalPolicy: "on-request"`` with
+#   ``approvalsReviewer: "auto_review"`` -- Codex still asks for "actions
+#   detected as potentially unsafe" (which is where a delete/destructive
+#   shell command lands); only "agent-full-access" sets
+#   ``approvalPolicy: "never"`` (never asks, ever -- the mode this floor
+#   must never pick), and "read-only" cannot edit at all (that is
+#   ``COORDINATOR_MODE_FLOOR``'s own job, not a worker's).
+# - claude-agent-acp 0.78.0 (``dist/permissions/modes.js``,
+#   ``dist/session-mode.js``, ``dist/acp-agent.js`` ``canUseTool``): "default"
+#   ("Manual" -- "Always ask before making changes") is the one mode with no
+#   engine-side auto-allow path at all, so every mutating tool call --
+#   ordinary or destructive -- reaches ``canUseTool``/
+#   ``session/request_permission``. "acceptEdits" auto-accepts file edits
+#   (a delete-by-edit tool call could never reach the bridge at all);
+#   "bypassPermissions" is applied by Claude Code *before* ``canUseTool`` is
+#   ever invoked per that file's own comment ("a request that still reaches
+#   this callback is deliberately bypass-immune") -- it never asks, ever,
+#   the same disqualifying shape as codex's "agent-full-access". "auto"
+#   ("Claude handles permission decisions") also delegates safe-looking
+#   calls without asking; only "default" gives the unconditional guarantee
+#   this floor needs.
+#
+# Applied by ``delegation.live_adapters.EngineSessionManagerAdapter
+# ._apply_worker_mode_floor`` to every worker's own freshly-opened engine
+# session, confirmed (never merely requested) over the wire via the same
+# ``session/set_config_option`` confirm-or-fail path
+# ``configuration.service.ConfigurationService.apply`` already uses for the
+# coordinator floor (see that method's own module-docstring pointer to
+# ``delegation.live_adapters._PortableRevisionConfigureAdapter``) -- see
+# ``_apply_worker_mode_floor``'s own docstring for exactly why it reuses
+# that adapter directly rather than a second ``ConfigurationService.apply``
+# call, and what happens when the engine cannot confirm this floor.
+#
+# HONEST BOUNDARY (unchanged by this floor, see ``engine.permissions``'s own
+# module docstring): this only ever governs a permission decision the
+# engine itself routes through ``session/request_permission``. A native
+# tool that deletes without ever issuing that request is invisible to, and
+# not enforced by, Cortex regardless of which mode a session runs in.
+WORKER_MODE_FLOOR: Mapping[str, str] = {
+    "codex-acp": "agent",
+    "claude-agent-acp": "default",
+}
+
 CANCELLATION = "cancellation"
 REFUSAL = "refusal"
 AUTHORIZATION_LOSS = "authorization_loss"

@@ -239,6 +239,18 @@ class _PortableRevisionConfigureAdapter:
         return self._manager.configure(engine_session_id, portable_revision)
 
 
+class WorkerModeNotConfirmed(RuntimeError):
+    """Raised by :meth:`EngineSessionManagerAdapter._apply_worker_mode_floor`
+    (T035): this worker's own engine mode (``configuration.policy
+    .WORKER_MODE_FLOOR``) could not be confirmed over the wire -- either the
+    engine never offered it at all, or its own confirm-or-fail
+    ``session/set_config_option`` call rejected/only partially applied it.
+    Always caught by :meth:`EngineSessionManagerAdapter.open`, which tears
+    down the just-opened session/process (never leaks it) before
+    re-raising -- see that call site's own comment for why only this one
+    attempt is refused, never the whole task."""
+
+
 class QueuedOpenCancelled(RuntimeError):
     """Raised by :meth:`EngineSessionManagerAdapter.open` (from
     ``_reserve_capacity_blocking``) when a queued-for-capacity open is
@@ -456,6 +468,23 @@ class EngineSessionManagerAdapter:
                 cause="session_replacement" if replacement else "session_open",
             )
             self._maybe_apply_configuration(manager, task_id, session_id, launch)
+            if launch.get("assignment_id"):
+                # T035 gap closure: a worker's own engine mode, unlike the
+                # coordinator's, is never part of ``_maybe_apply_configuration``
+                # (see that method's own docstring -- it skips every worker
+                # launch outright). Unconfirmed, "full working capability
+                # except deletion, which must be confirmed" silently does not
+                # bind (see ``configuration.policy.WORKER_MODE_FLOOR``'s own
+                # docstring). A worker whose mode this cannot confirm must
+                # never run under it -- see ``_apply_worker_mode_floor``'s own
+                # docstring for why that means aborting this one attempt's
+                # ``open()`` (never the whole task), with the just-opened
+                # session/process torn down rather than leaked.
+                try:
+                    self._apply_worker_mode_floor(manager, task_id, session_id, launch)
+                except WorkerModeNotConfirmed:
+                    self.terminate_owned(attempt_id)
+                    raise
         return session_id
 
     def _capture_catalog_observation(self, manager, record, session_id) -> None:
@@ -493,8 +522,11 @@ class EngineSessionManagerAdapter:
         routes").
 
         Only the *coordinator*'s own open() ever confirms/activates a
-        task's configuration (a worker inherits, never confirms, the
-        task's route); a no-op when this ``launch`` carries no
+        task's configuration revision as a whole (a worker inherits the
+        task's route from it, but never re-confirms/re-activates that same
+        revision row here -- see ``_apply_worker_mode_floor`` for the
+        distinct, narrower thing a worker's own open() *does* confirm: just
+        its own engine mode, T035); a no-op when this ``launch`` carries no
         ``config_revision`` (a fake/test double with no real configuration
         behind it -- unchanged pre-T031 behavior) or when that revision is
         not (or no longer) in the ``'selected'`` state -- including the
@@ -535,6 +567,98 @@ class EngineSessionManagerAdapter:
             # or a stale/mismatched epoch race -- never surfaced as an
             # open() failure; see the docstring above.
             pass
+
+    def _apply_worker_mode_floor(self, manager, task_id, session_id, launch) -> None:
+        """T035 gap closure: confirm -- not merely request -- this worker's
+        own engine mode against ``configuration.policy.WORKER_MODE_FLOOR``
+        (see that constant's own docstring for the pinned-build evidence
+        and exactly why those two values, never any other offered mode).
+
+        A no-op, exactly like ``_maybe_apply_configuration``'s own
+        documented no-op cases, when: this ``launch`` carries no
+        ``config_revision`` at all (a fake/test double with no real
+        configuration behind it -- every existing worker-path test that
+        never wires a real ``ConfigurationService`` stays unaffected); or
+        ``route_engine`` names an engine this floor has no entry for (an
+        unrecognized engine has no known-safe mode to confirm -- the same
+        honest gap ``COORDINATOR_MODE_FLOOR`` already discloses).
+
+        Deliberately does **not** call ``ConfigurationService.apply`` a
+        second time on the *same* ``config_revision`` row: by the time a
+        worker opens, that row is almost always already ``'active'`` (the
+        coordinator's own open already confirmed it), and ``apply``'s own
+        turn-gating (``_start_pending_next_use`` requiring a settled
+        ``'selected'`` row) would simply reject it outright -- this is not
+        the coordinator's own task-wide route/model confirmation, only one
+        worker session's own mode. It instead reuses that same method's
+        actual wire-level confirm-or-fail machinery directly: the identical
+        ``_PortableRevisionConfigureAdapter`` (and therefore the identical
+        ``EngineSessionManager.configure`` confirm-or-fail gate and
+        ``confirmation_evidence_ref``-shaped evidence string ``apply``
+        itself would have recorded) against an in-memory copy of the
+        coordinator's own stored revision row with only ``parameters["mode"]``
+        overridden -- never written back to ``configuration_revisions``,
+        since a worker's own mode is not part of that task-wide audit
+        trail.
+
+        Checked directly against this worker session's own live
+        ``session/new``-observed ``configOptions`` (ground truth already
+        available -- unlike ``ConfigurationService.propose``'s coordinator-
+        side floor check, which must fall back to a possibly-stale catalog
+        snapshot because no session exists yet at that point).
+
+        Raises :class:`WorkerModeNotConfirmed` -- never silently continues
+        with an unverified mode -- when: the floor value is not among this
+        session's own observed ``mode`` options at all, or the wire
+        confirm-or-fail call itself rejects/only partially applies it. This
+        is a different judgement call than ``COORDINATOR_MODE_FLOOR``'s own
+        "must not run" (which blocks the entire task's configuration from
+        ever becoming active): blocking *all* delegated work over one
+        worker's mode confirmation failing would be its own outage, but
+        silently letting a worker run in an unconfirmed mode is exactly the
+        gap this closes -- so only *this one worker attempt* is refused
+        (see ``open()``'s own caller, which tears down the just-opened
+        session/process rather than leaking it); other attempts, and the
+        coordinator itself, are unaffected.
+        """
+        config_revision = launch.get("config_revision")
+        if not config_revision:
+            return
+        from ..configuration import store as configuration_store
+        from ..configuration.policy import WORKER_MODE_FLOOR
+
+        with self._store.connection() as db:
+            row = configuration_store.revision_row_tx(db, task_id, config_revision)
+            revision = configuration_store._row_dict(row)
+        mode_floor = WORKER_MODE_FLOOR.get(revision["route_engine"])
+        if mode_floor is None:
+            return
+        observed = manager.observed_config_options(session_id) or []
+        offered_modes = {
+            option.get("value")
+            for entry in observed if isinstance(entry, dict) and entry.get("id") == "mode"
+            for option in (entry.get("options") or [])
+            if isinstance(option, dict)
+        }
+        if mode_floor not in offered_modes:
+            raise WorkerModeNotConfirmed(
+                f"this worker's own engine session never offered mode {mode_floor!r} "
+                f"(engine {revision['route_engine']!r}); its mode cannot be confirmed, "
+                "so it must not run with an unverified permission-request boundary."
+            )
+        revision = dict(revision, parameters=dict(revision["parameters"], mode=mode_floor))
+        adapter = _PortableRevisionConfigureAdapter(self._store, manager)
+        try:
+            adapter.configure(session_id, revision)
+        except Exception as rejected:  # noqa: BLE001 - ConfigurationRejected,
+            # EngineConfigurationPartiallyApplied, EngineConfigurationOutcomeUnknown
+            # (a genuinely indeterminate wire outcome), and any other
+            # unexpected failure of the same wire call all mean the same
+            # thing here: this worker's mode was never actually confirmed,
+            # so it must never run -- see this method's own docstring.
+            raise WorkerModeNotConfirmed(
+                f"the engine did not confirm worker mode {mode_floor!r}: {rejected}"
+            ) from rejected
 
     def attempt_fallback(
         self, *, old_attempt_id: str, new_attempt_id: str, task_id: str, role: str, failure_class: str,
