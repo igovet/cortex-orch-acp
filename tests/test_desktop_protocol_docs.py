@@ -26,16 +26,18 @@ def test_agents_desktop_protocol_binds_expected_result_before_plain_send():
     assert protocol.index("audit exit code") < protocol.index("run plain `stop`")
 
 
-def test_readme_desktop_example_binds_project_root_artifact_before_plain_send():
-    text = (ROOT / "README.md").read_text()
-    start = text.index("./scripts/cortex-desktop-dev start --workdir")
-    end = text.index("./scripts/cortex-desktop-dev stop", start)
-    protocol = text[start:end]
+def test_the_readme_no_longer_documents_the_desktop_procedure():
+    """The README is the setup guide for an ACP agent now.
 
-    assert "--expected-result-path README.md" in protocol
-    assert "--expected-result-sha256 EXACT_RESULT_SHA256" in protocol
-    assert protocol.count("--expected-result-path") == 1
-    assert protocol.index("--expected-result-path README.md") < protocol.index("./scripts/cortex-desktop-dev send")
-    assert protocol.index("--expected-result-sha256 EXACT_RESULT_SHA256") < protocol.index("./scripts/cortex-desktop-dev send")
-    assert "send --prompt-file" not in protocol
-    assert "./scripts/cortex-desktop-dev send\n" in protocol
+    It used to carry the Codex Desktop qualification procedure verbatim, and
+    a test pinned that copy word for word. `scripts/cortex-desktop-dev` is
+    kept but never run (see docs/project/host-compatibility.md), so the
+    procedure is history, not instructions -- and history belongs where it is
+    already recorded, in AGENTS.md, which the test above still guards. A
+    first-time reader opening the README should find how to configure and run
+    Cortex today, not a rehearsal for a host that was removed at T033.
+    """
+    text = (ROOT / "README.md").read_text()
+    assert "cortex-desktop-dev" not in text
+    # The procedure itself is still documented and still guarded.
+    assert "Real Desktop uses `scripts/cortex-desktop-dev`" in (ROOT / "AGENTS.md").read_text()

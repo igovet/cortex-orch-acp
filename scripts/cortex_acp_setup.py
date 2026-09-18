@@ -55,7 +55,13 @@ an unrelated one:
    Never touches the pinned user-default route -- unlike ``pin-route``/
    ``record-observation``, this only refreshes the cached catalog snapshot
    a later selection reads from.
-6. ``print-client-recipes`` -- delegates entirely to the existing T011
+6. ``init-route-policy`` -- write a default, hand-editable
+   ``~/.config/cortex/route-policy.json`` (D-T035-03, see
+   ``cortex_runtime.configuration.route_policy`` for the schema/precedence)
+   pre-populated permitting every role for both supported engines at a
+   sensible effort range; never overwrites an existing file, here or
+   anywhere else the read-precedence chain would already find one.
+7. ``print-client-recipes`` -- delegates entirely to the existing T011
    ``cortex_acp_client_config.py`` (Zed dry-run-by-default entry +
    ``--print-codeg-recipe``); this script never re-implements or
    duplicates that write path.
@@ -80,6 +86,7 @@ sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(SCRIPTS.parent / "src"))
 
 from cortex_runtime.catalog import discovery, refresh as catalog_refresh, store as catalog_store  # noqa: E402
+from cortex_runtime.configuration import route_policy as route_policy_module  # noqa: E402
 from cortex_runtime.configuration import store as configuration_store  # noqa: E402
 from cortex_runtime.connections import onboarding, registry  # noqa: E402
 from cortex_runtime.connections.model import AuthMode  # noqa: E402
@@ -249,6 +256,811 @@ def refresh_catalog(*, connection_id, workspace_root=None, timeout=None, environ
     )
 
 
+def init_route_policy(environ=None):
+    """D-T035-03: write a default, hand-editable ``route-policy.json`` at
+    ``~/.config/cortex/route-policy.json`` (see
+    ``cortex_runtime.configuration.route_policy`` for the exact schema and
+    read precedence) -- pre-populated permitting every role for both
+    engines this project supports, at a sensible effort range, so the file
+    always exists in a working (unrestrictive) state the user can then
+    narrow by hand. Never overwrites an existing file, at this path or any
+    other location ``route_policy.load_route_policy`` would find first;
+    idempotent -- rerunning after a file already exists changes nothing and
+    reports ``created=False``.
+    """
+    existing_policy, malformed = route_policy_module.load_route_policy(project_root=None, environ=environ)
+    # The same XDG rules every other Cortex config obeys (see
+    # connections.registry): a user who moved their configuration with
+    # XDG_CONFIG_HOME would otherwise get this one file written somewhere
+    # their own setup does not look.
+    env = os.environ if environ is None else environ
+    config_home = env.get("XDG_CONFIG_HOME") or ""
+    base = Path(config_home) if config_home.startswith("/") else Path(env.get("HOME") or Path.home()) / ".config"
+    path = base / "cortex" / "route-policy.json"
+    if path.is_file():
+        return dict(path=str(path), created=False, reason="already_exists")
+    if malformed is not None or existing_policy is not None:
+        # A different location in the read-precedence chain already has a
+        # policy (or a malformed one) in effect; writing a second file here
+        # would never actually be read (see load_route_policy's own
+        # first-match-wins docstring) and could confuse the user into
+        # thinking it applies. Report where the existing one actually is
+        # instead of writing a dead file.
+        return dict(path=str(path), created=False, reason="policy_already_in_effect_elsewhere", detail=malformed)
+    default_policy = {
+        "_comment": [
+            "Cortex route policy: which engine, model and effort each kind of worker may be dispatched with.",
+            "Shipped as a recommendation, not a placeholder -- edit it, it is yours.",
+            "'roles' maps a role id (or its short alias, e.g. 'backend-dev') to the routes that role may use.",
+            "'default' applies to any role not named in 'roles'. \"*\" means any model / any effort.",
+            "'default_effort' is used only when nothing else already selected an effort for that route.",
+            "Effort names are the engine's own and are discovered from it, not fixed here: a value a model",
+            "does not support is refused by that engine. Observed values today: low, medium, high, xhigh, max.",
+            "This file can only NARROW what the permission ceiling already allows. It can never widen it,",
+            "so it is a way to spend less, never a way around a limit.",
+            "Roles are grouped by what the work costs to get wrong: design/security/performance/debugging get",
+            "the strongest models, review sits just below, ordinary implementation uses mid models, and",
+            "exploration/planning/generic work uses the cheapest. Change any line you disagree with."
+        ],
+        "roles": {
+            "worker-accessibility-auditor": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-sol",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                }
+            ],
+            "worker-accessibility-fixer": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                }
+            ],
+            "worker-architect": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-6-astra",
+                    "efforts": [
+                        "high",
+                        "xhigh",
+                        "max"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-sol",
+                    "efforts": [
+                        "high",
+                        "xhigh",
+                        "max"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "opus",
+                    "efforts": [
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                }
+            ],
+            "worker-backend-dev": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                }
+            ],
+            "worker-build-verification": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-sol",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                }
+            ],
+            "worker-code-reviewer": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-sol",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                }
+            ],
+            "worker-data-engineer": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                }
+            ],
+            "worker-database-architect": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                }
+            ],
+            "worker-debugger": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-6-astra",
+                    "efforts": [
+                        "high",
+                        "xhigh",
+                        "max"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-sol",
+                    "efforts": [
+                        "high",
+                        "xhigh",
+                        "max"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "opus",
+                    "efforts": [
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                }
+            ],
+            "worker-devops-engineer": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                }
+            ],
+            "worker-explorer": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "low",
+                        "medium",
+                        "high"
+                    ],
+                    "default_effort": "low"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.5",
+                    "efforts": [
+                        "low",
+                        "medium"
+                    ],
+                    "default_effort": "low"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "low",
+                        "medium"
+                    ],
+                    "default_effort": "low"
+                }
+            ],
+            "worker-frontend-dev": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                }
+            ],
+            "worker-fullstack-dev": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                }
+            ],
+            "worker-general": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "low",
+                        "medium",
+                        "high"
+                    ],
+                    "default_effort": "low"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.5",
+                    "efforts": [
+                        "low",
+                        "medium"
+                    ],
+                    "default_effort": "low"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "low",
+                        "medium"
+                    ],
+                    "default_effort": "low"
+                }
+            ],
+            "worker-mobile-dev": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                }
+            ],
+            "worker-performance-engineer": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-6-astra",
+                    "efforts": [
+                        "high",
+                        "xhigh",
+                        "max"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-sol",
+                    "efforts": [
+                        "high",
+                        "xhigh",
+                        "max"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "opus",
+                    "efforts": [
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                }
+            ],
+            "worker-planner": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "low",
+                        "medium",
+                        "high"
+                    ],
+                    "default_effort": "low"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.5",
+                    "efforts": [
+                        "low",
+                        "medium"
+                    ],
+                    "default_effort": "low"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "low",
+                        "medium"
+                    ],
+                    "default_effort": "low"
+                }
+            ],
+            "worker-qa-engineer": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-sol",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                }
+            ],
+            "worker-refactorer": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                }
+            ],
+            "worker-security-auditor": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-6-astra",
+                    "efforts": [
+                        "high",
+                        "xhigh",
+                        "max"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-sol",
+                    "efforts": [
+                        "high",
+                        "xhigh",
+                        "max"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "opus",
+                    "efforts": [
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                }
+            ],
+            "worker-senior-consultant": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-6-astra",
+                    "efforts": [
+                        "high",
+                        "xhigh",
+                        "max"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-sol",
+                    "efforts": [
+                        "high",
+                        "xhigh",
+                        "max"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "opus",
+                    "efforts": [
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                }
+            ],
+            "worker-technical-writer": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "low",
+                        "medium",
+                        "high"
+                    ],
+                    "default_effort": "low"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.5",
+                    "efforts": [
+                        "low",
+                        "medium"
+                    ],
+                    "default_effort": "low"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "low",
+                        "medium"
+                    ],
+                    "default_effort": "low"
+                }
+            ],
+            "worker-ux-designer": [
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-luna",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "high"
+                },
+                {
+                    "engine": "codex-acp",
+                    "model": "gpt-5.6-terra",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                },
+                {
+                    "engine": "claude-agent-acp",
+                    "model": "sonnet",
+                    "efforts": [
+                        "medium",
+                        "high",
+                        "xhigh"
+                    ],
+                    "default_effort": "medium"
+                }
+            ]
+        },
+        "default": [
+            {
+                "engine": "codex-acp",
+                "model": "*",
+                "efforts": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ],
+                "default_effort": "medium"
+            },
+            {
+                "engine": "claude-agent-acp",
+                "model": "*",
+                "efforts": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                ],
+                "default_effort": "medium"
+            }
+        ]
+    }
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp_path = path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(default_policy, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, path)
+    return dict(path=str(path), created=True)
+
+
 def status(environ=None):
     """Read-only report of current setup state; always safe to run."""
     result = dict(storage=None, connections=[], pinned_route=None)
@@ -289,6 +1101,7 @@ def main(argv=None):
 
     sub.add_parser("status", help="Report current setup state (read-only, default).")
     sub.add_parser("init-storage", help="Create/verify owner-private config/state roots.")
+    sub.add_parser("init-route-policy", help="Write a default, hand-editable ~/.config/cortex/route-policy.json (never overwrites an existing one).")
 
     p_conn = sub.add_parser("add-connection", help="Register (or reuse) one authorized connection.")
     p_conn.add_argument("--name", required=True)
@@ -338,6 +1151,9 @@ def main(argv=None):
         return 0
     if step == "init-storage":
         print(_json(init_storage()))
+        return 0
+    if step == "init-route-policy":
+        print(_json(init_route_policy()))
         return 0
     if step == "add-connection":
         reader = _read_secret(args)

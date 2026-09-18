@@ -333,3 +333,37 @@ def test_unbound_session_fails_closed_even_for_an_ordinary_operation(tmp_path):
         assert host_calls == []
     finally:
         adapter.terminate_owned("xa_w1")
+
+
+def test_an_engine_without_an_effort_setting_still_runs_the_worker(tmp_path):
+    """D-T035-03, and the risk the first attempt at it introduced: the
+    configure call that carries a worker's own parameters is confirm-or-fail
+    by design, so asking an engine for an option it does not offer refuses
+    the worker outright. A policy about which effort a role may use must
+    narrow what a worker runs with -- never stop it running on an engine
+    that has no such setting.
+
+    This fake engine offers `mode` and no effort option at all.
+    """
+    store, task_id, epoch = _bootstrap(tmp_path)
+    environ, connection = _connection_and_config(tmp_path)
+    row = _propose_and_apply(store, task_id, epoch, connection)
+
+    adapter = EngineSessionManagerAdapter(
+        lambda t: connection, lambda t: str(tmp_path), environ=environ, call_timeout=10.0, store=store,
+    )
+    session_ref = adapter.open(
+        "shared_project_root",
+        dict(task_id=task_id, attempt_id="xa_eff", assignment_id="asg-eff", config_revision=row["id"],
+             parameters=dict(effort="high")),
+        "instructions",
+    )
+    assert session_ref.startswith("es_")
+    manager = adapter._managers["xa_eff"]
+    observed = manager.observed_config_options(session_ref)
+    assert not [o for o in observed if o.get("id") in ("reasoning_effort", "thought_level", "effort")]
+    # The mode floor is still confirmed: the effort being inapplicable
+    # weakens nothing else.
+    mode_option = next(o for o in observed if o.get("id") == "mode")
+    assert mode_option["currentValue"] == "agent"
+    adapter.terminate_owned("xa_eff")

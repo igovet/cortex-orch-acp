@@ -38,6 +38,7 @@
     "src/cortex_runtime/configuration/__init__.py",
     "src/cortex_runtime/configuration/policy.py",
     "src/cortex_runtime/configuration/resolution.py",
+    "src/cortex_runtime/configuration/route_policy.py",
     "src/cortex_runtime/configuration/service.py",
     "src/cortex_runtime/configuration/store.py",
     "src/cortex_runtime/connections/__init__.py",

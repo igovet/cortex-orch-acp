@@ -574,7 +574,7 @@ class EngineSessionManagerAdapter:
         else:
             record = self._connection_record_factory(task_id)
         if self._store is not None:
-            self._authorize_dispatch(record, task_id, launch)
+            self._authorize_dispatch(record, task_id, launch, project_root=project_root)
         reservation_id = None
         if self._store is not None:
             reservation_id = self._reserve_capacity_blocking(record.id, task_id, attempt_id, launch)
@@ -1036,9 +1036,34 @@ class EngineSessionManagerAdapter:
             )
         route_override = launch.get("route_override")
         resolved_model = (route_override or {}).get("model") or launch.get("resolved_model")
+        # This worker's own parameters, not the coordinator's. The model
+        # already reached its own session (``route_model_override`` below);
+        # the effort did not -- it stayed in the coordinator's revision, so
+        # "which effort this role may use" was a rule with nothing applying
+        # it. The same in-memory revision copy that carries the mode floor
+        # carries it, under whichever of the two parameter names this
+        # revision already uses (see configuration.resolution's own set),
+        # so nothing invents a key the engine's option mapping does not
+        # know.
+        worker_parameters = dict(revision["parameters"], mode=mode_floor)
+        launched_parameters = launch.get("parameters") or {}
+        worker_effort = launched_parameters.get("effort") or launched_parameters.get("thought_level")
+        # Only when this session actually offers an effort option. The
+        # configure call below is confirm-or-fail by design (an unconfirmed
+        # mode must never run), so asking an engine for an option it does
+        # not have would refuse the worker outright -- a policy about which
+        # effort a role may use must narrow what it runs with, never stop
+        # it running on an engine that has no such setting.
+        offered = {
+            option.get("id") for option in (manager.observed_config_options(session_id) or ())
+            if isinstance(option, Mapping)
+        }
+        if worker_effort and offered & {"reasoning_effort", "thought_level", "effort"}:
+            key = "thought_level" if "thought_level" in revision["parameters"] else "effort"
+            worker_parameters[key] = worker_effort
         revision = dict(
             revision, route_engine=record.engine, route_connection_id=record.id,
-            parameters=dict(revision["parameters"], mode=mode_floor),
+            parameters=worker_parameters,
         )
         adapter = _PortableRevisionConfigureAdapter(self._store, manager, route_model_override=resolved_model)
         try:
@@ -1165,7 +1190,7 @@ class EngineSessionManagerAdapter:
             route_engine=record.engine, route_connection_id=record.id, resource_policy=policy,
         )
 
-    def _authorize_dispatch(self, record, task_id, launch) -> None:
+    def _authorize_dispatch(self, record, task_id, launch, project_root=None) -> None:
         """T027: refuse *before* any capacity reservation/process launch
         when this attempt's role is not authorized for the route it is
         about to use, or this task has already exhausted a tracked
@@ -1174,10 +1199,22 @@ class EngineSessionManagerAdapter:
         real configuration behind it) -- never a substitute for the real
         checks in ``configuration.service.ConfigurationService.propose``/
         ``resolve_worker``, which already ran before this launch was ever
-        constructed."""
+        constructed.
+
+        D-T035-03: once the route itself is authorized (or, for a fallback,
+        already authorized up-front by ``routing.authorization
+        .authorize_fallback``), this also narrows by the user's own
+        hand-edited ``configuration.route_policy`` file -- which engine/
+        model/effort combinations this role may actually dispatch with.
+        Checked strictly *after* the route/ceiling authorization above (or
+        skipped below) so a permissive policy can never grant a route the
+        ceiling/profile has already refused -- it can only ever narrow
+        further.
+        """
         config_revision = launch.get("config_revision")
         if not config_revision:
             return
+        from ..configuration import route_policy as route_policy_module
         from ..configuration import store as configuration_store
         from ..configuration.policy import RouteProfile
         from ..routing import authorization as routing_authorization
@@ -1204,14 +1241,51 @@ class EngineSessionManagerAdapter:
         # .authorize_fallback`` -- never re-derived/re-checked here against
         # the *original* route's profile, which would incorrectly forbid
         # the very route change fallback just authorized.
-        if launch.get("route_override") is not None:
+        route_override = launch.get("route_override")
+        if route_override is None:
+            candidate_route_id = launch.get("resolved_route_id") or revision["route_id"]
+            routing_authorization.authorize_dispatch(
+                self._store, task_id=task_id, role=role, route_profile=route_profile,
+                coordinator_route_id=revision["route_id"], candidate_route_id=candidate_route_id,
+                ceiling=revision["ceiling_snapshot"],
+            )
+        model = (route_override or {}).get("model") or launch.get("resolved_model")
+        if model is None and extras is not None:
+            model = extras["route_model"]
+        parameters = launch.get("parameters") or {}
+        requested_effort = parameters.get("effort") or parameters.get("thought_level")
+        if requested_effort is None:
+            requested_effort = revision["parameters"].get("effort") or revision["parameters"].get("thought_level")
+        policy, malformed = route_policy_module.load_route_policy(project_root, self._environ)
+        if malformed is not None:
+            self._record_malformed_route_policy(task_id, malformed)
             return
-        candidate_route_id = launch.get("resolved_route_id") or revision["route_id"]
-        routing_authorization.authorize_dispatch(
-            self._store, task_id=task_id, role=role, route_profile=route_profile,
-            coordinator_route_id=revision["route_id"], candidate_route_id=candidate_route_id,
-            ceiling=revision["ceiling_snapshot"],
-        )
+        if policy is None:
+            return
+        resolved_effort = policy.resolve_effort(role, record.engine, model, requested_effort)
+        if resolved_effort is not None and resolved_effort != requested_effort:
+            # The policy named a default effort for this route and nothing
+            # else selected one; feed it back into ``launch["parameters"]``
+            # (the same per-attempt override surface ``_record_route_audit``
+            # already fingerprints/audits) so the resolved default is what
+            # this attempt is actually recorded as having used -- never a
+            # silent substitution the audit trail would miss.
+            launch["parameters"] = dict(parameters, effort=resolved_effort)
+
+    def _record_malformed_route_policy(self, task_id, detail) -> None:
+        """D-T035-03: a route policy file that exists but cannot be read or
+        parsed must never silently mean "no restrictions" -- recorded
+        durably here (never blocking the attempt: falls back to the
+        previous, policy-free behaviour, exactly like an absent file) so
+        the problem stays visible instead of disappearing."""
+        try:
+            from ..observability import events as observability_events
+
+            observability_events.append_event(
+                self._store, task_id, "route_policy", "malformed", "observed", detail=detail,
+            )
+        except Exception:  # noqa: BLE001 - recording the problem must never itself block dispatch
+            pass
 
     def _record_route_audit(self, record, task_id, attempt_id, launch) -> None:
         """T027: durably audit the actual engine/connection/model/params
