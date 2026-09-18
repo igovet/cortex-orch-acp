@@ -14,9 +14,14 @@ configuration history (``configuration.store`` / ``ConfigurationService``)
 
 - ``provider``: values are distinct ``CatalogEntry.connection_id`` among
   every entry currently selectable for a new execution; names are safe
-  ``<short engine name> · Connection name`` labels (``catalog.labels
-  .build_connection_label``, using ``catalog.labels.engine_short_name``
-  (e.g. ``claude``/``codex``) -- never the raw adapter package id).
+  ``<short engine name> · account`` labels (``catalog.labels
+  .build_provider_label``, using ``catalog.labels.engine_short_name`` (e.g.
+  ``claude``/``codex``) and the connection's own resolved account identity
+  (``connections.account_identity.resolve_account_identity``, read-only
+  from that connection's own isolated credential directory) -- never the
+  raw adapter package id and never the operator-chosen connection
+  nickname; falls back to the engine name alone when no account can be
+  determined).
 - ``model``: values are the chosen provider's own ``ExecutionRoute.model``
   ids; names are safe ``Engine · Connection name · Model`` labels,
   re-disambiguated across the *combined* offered set. If there is nothing
@@ -44,8 +49,9 @@ from typing import Iterable, Mapping, Sequence
 from ..catalog import discovery as catalog_discovery
 from ..catalog import store as catalog_store
 from ..catalog.evidence import Fact, ProvenanceSource
-from ..catalog.labels import build_connection_label, build_model_label, disambiguate_labels, engine_short_name
+from ..catalog.labels import build_model_label, build_provider_label, disambiguate_labels, engine_short_name
 from ..catalog.model import CatalogEntry
+from ..connections import account_identity as connection_account_identity
 from ..connections import registry as connection_registry
 from ..connections.model import ConnectionRecord
 
@@ -205,14 +211,21 @@ def build_provider_option(
     current_connection_id: str | None,
     current_state: str | None,
     current_revision: int | None,
+    environ: Mapping[str, str] | None = None,
 ) -> dict | None:
     """The ``provider`` SessionConfigOption -- which configured connection --
-    or ``None`` when nothing is selectable (T035).
+    or ``None`` when nothing is selectable (T035; account identity added
+    for the "which account" follow-up).
 
     One option per distinct ``CatalogEntry.connection_id`` among
     ``selectable_entries``; ``name`` is the safe ``<short engine name> ·
-    Connection name`` label (``catalog.labels.build_connection_label``),
-    never an endpoint/credential and never the raw adapter package id. When ``current_connection_id`` is set but not among
+    account`` label (``catalog.labels.build_provider_label``, account
+    resolved read-only from *this connection's own* isolated credential
+    directory by ``connections.account_identity.resolve_account_identity``
+    -- never the operator-chosen connection nickname, and never an
+    endpoint/credential/raw adapter package id). When the account cannot be
+    determined the label falls back to the engine name alone -- never a
+    fabricated value and never the nickname. When ``current_connection_id`` is set but not among
     the selectable connections (its connection was removed/deauthorized, or
     it is the raw, never-a-real-connection-id saved ``route_id`` passed
     straight through by ``build_config_options`` when the saved route itself
@@ -229,11 +242,11 @@ def build_provider_option(
     pairs = []
     for connection_id, entry in first_entry_by_connection.items():
         record = connections.get(connection_id)
-        label = (
-            build_connection_label(entry.route.engine, record.name)
-            if record is not None
-            else engine_short_name(entry.route.engine)
-        )
+        if record is not None:
+            account = connection_account_identity.resolve_account_identity(record, environ)
+            label = build_provider_label(entry.route.engine, account)
+        else:
+            label = engine_short_name(entry.route.engine)
         pairs.append((connection_id, label))
     labels = disambiguate_labels(pairs)
     options = [dict(value=connection_id, name=labels[connection_id]) for connection_id, _label in pairs]
@@ -382,6 +395,7 @@ def build_config_options(
     connections: Mapping[str, ConnectionRecord],
     current: Mapping[str, object] | None = None,
     *, include_language: bool = False, language_current: str | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> list[dict]:
     """The full ordered ``configOptions`` list -- ``provider``, then
     ``model`` (within that provider), then ``thought_level`` (within that
@@ -426,7 +440,7 @@ def build_config_options(
     current_connection_id = current_entry.connection_id if current_entry is not None else current_route_id
 
     provider_option = build_provider_option(
-        selectable_entries, connections, current_connection_id, current_state, current_revision)
+        selectable_entries, connections, current_connection_id, current_state, current_revision, environ)
     if provider_option is None:
         if include_language:
             options.append(build_language_option(language_current))

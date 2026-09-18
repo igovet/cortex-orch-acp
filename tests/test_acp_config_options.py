@@ -340,10 +340,12 @@ def test_provider_option_names_never_collide_with_model_option_names():
 
 def test_provider_option_names_use_the_short_engine_name_not_the_adapter_package_id():
     """The user's own requirement (lead-verbatim): the first control must say
-    ``codex``/``claude`` -- never the raw adapter package id -- followed by
-    the connection name, since the connection is what identifies the
-    account. ``engine`` (stored identity) stays the full package id; only
-    the *label* is short."""
+    ``codex``/``claude`` -- never the raw adapter package id. These fixture
+    connections have no resolvable account (a fake credential dir that does
+    not exist on disk), so the label falls back to the engine name alone --
+    never a fabricated account and never the operator-chosen nickname
+    (``claude-sonnet-live``/``codex-luna``, which used to be shown here and
+    told the user nothing about which account is billed)."""
     claude_id, codex_id = "cn_" + "a" * 12, "cn_" + "b" * 12
     connections = {
         claude_id: _fake_connection_record(claude_id, name="claude-sonnet-live", engine="claude-agent-acp"),
@@ -355,15 +357,15 @@ def test_provider_option_names_use_the_short_engine_name_not_the_adapter_package
     ]
     provider_option = config_options.build_provider_option(entries, connections, None, None, None)
     names_by_value = {item["value"]: item["name"] for item in provider_option["options"]}
-    assert names_by_value[claude_id] == "claude · claude-sonnet-live"
-    assert names_by_value[codex_id] == "codex · codex-luna"
+    assert names_by_value[claude_id] == "claude"
+    assert names_by_value[codex_id] == "codex"
     for name in names_by_value.values():
         assert "claude-agent-acp" not in name
         assert "codex-acp" not in name
-    # The connection name -- what tells the user which account -- is never
-    # abbreviated or dropped, unlike the engine part.
-    assert "claude-sonnet-live" in names_by_value[claude_id]
-    assert "codex-luna" in names_by_value[codex_id]
+        # Never the operator nickname either -- it identifies nothing about
+        # which account/subscription is in use.
+        assert "claude-sonnet-live" not in name
+        assert "codex-luna" not in name
     # Display-only: the stored/engine-side identity is unchanged.
     assert entries[0].route.engine == "claude-agent-acp"
     assert entries[1].route.engine == "codex-acp"

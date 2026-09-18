@@ -4,7 +4,8 @@ from __future__ import annotations
 import pytest
 
 from cortex_runtime.catalog.labels import (
-    ENGINE_SHORT_NAMES, build_connection_label, build_label, disambiguate_labels, engine_short_name,
+    ENGINE_SHORT_NAMES, build_connection_label, build_label, build_provider_label,
+    disambiguate_labels, engine_short_name,
 )
 from cortex_runtime.portable.errors import PortableError
 
@@ -234,6 +235,37 @@ def test_engine_short_name_maps_known_adapter_ids_to_their_short_name():
 def test_build_connection_label_uses_the_short_engine_name_not_the_adapter_package_id():
     assert build_connection_label("claude-agent-acp", "claude-sonnet-live") == "claude · claude-sonnet-live"
     assert build_connection_label("codex-acp", "codex-luna") == "codex · codex-luna"
+
+
+# --- build_provider_label: the first selector shows the real account, never
+# the operator-chosen nickname (T035 account-label follow-up) -----------
+
+def test_build_provider_label_shows_the_resolved_account():
+    assert build_provider_label("codex-acp", "igovet+2@gmail.com") == "codex · igovet+2@gmail.com"
+    assert build_provider_label("claude-agent-acp", "igovet@gmail.com") == "claude · igovet@gmail.com"
+
+
+def test_build_provider_label_falls_back_to_engine_alone_without_an_account():
+    assert build_provider_label("codex-acp", None) == "codex"
+    assert build_provider_label("claude-agent-acp", "") == "claude"
+
+
+def test_build_provider_label_never_shows_the_raw_adapter_package_id():
+    label = build_provider_label("codex-acp", "user@example.com")
+    assert "codex-acp" not in label
+
+
+def test_build_provider_label_sanitizes_but_never_rejects_the_account():
+    poisoned = "user‮evil@example.com"
+    label = build_provider_label("codex-acp", poisoned)
+    assert "‮" not in label
+    assert "userevil@example.com" in label
+
+
+def test_build_provider_label_two_connections_same_engine_different_accounts_distinguishable():
+    first = build_provider_label("codex-acp", "igovet@gmail.com")
+    second = build_provider_label("codex-acp", "igovet+1@gmail.com")
+    assert first != second
 
 
 def test_disambiguate_labels_appends_route_suffix_only_on_collision():

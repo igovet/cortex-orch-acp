@@ -551,7 +551,8 @@ class Agent:
         current = self._current_selection_context(store, session)
         language_current = self._current_language_for_session(store, session)
         return acp_config_options.build_config_options(
-            entries, connections, current, include_language=True, language_current=language_current)
+            entries, connections, current, include_language=True, language_current=language_current,
+            environ=self.environ)
 
     def _connection_setup_summary(self, connections):
         if not connections:

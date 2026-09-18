@@ -40,6 +40,7 @@
     "scripts/cortex_runtime/configuration/service.py",
     "scripts/cortex_runtime/configuration/store.py",
     "scripts/cortex_runtime/connections/__init__.py",
+    "scripts/cortex_runtime/connections/account_identity.py",
     "scripts/cortex_runtime/connections/environment.py",
     "scripts/cortex_runtime/connections/model.py",
     "scripts/cortex_runtime/connections/onboarding.py",

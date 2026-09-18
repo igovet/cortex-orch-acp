@@ -224,6 +224,34 @@ def build_connection_label(engine: str, connection_name: str) -> str:
     return label
 
 
+def build_provider_label(engine: str, account: str | None) -> str:
+    """``<short engine name>`` alone, or ``<short engine name> · <account>``
+    when the connection's own resolved account identity is available (T035
+    account-label task) -- the ``provider`` control's own label.
+
+    Unlike :func:`build_connection_label`, the second component is never
+    the operator-chosen connection *name*: a nickname carries no
+    information about which account/subscription is actually being used,
+    which was the whole point of this label. ``account`` must already be
+    the resolved identity claim (see ``connections.account_identity``) or
+    ``None``; when it is ``None`` -- no credential yet, an unreadable file,
+    a failed/timed-out CLI call, or a token without the claim -- this
+    returns the engine name alone, never a fabricated or nickname-derived
+    substitute. Sanitized the same as any other non-connection-name
+    component (never rejected, only cleaned/length-capped)."""
+    engine_component = _sanitize_component(engine_short_name(engine), "engine")
+    if not account:
+        return engine_component
+    try:
+        account_component = _sanitize_component(account, "account")
+    except PortableError:
+        return engine_component
+    label = _SEPARATOR.join((engine_component, account_component))
+    if len(label) > _MAX_TOTAL:
+        label = label[: _MAX_TOTAL - 1].rstrip() + _ELLIPSIS
+    return label
+
+
 def build_model_label(model: str) -> str:
     """Just ``Model`` -- the ``model`` control's own label (T035): the
     ``provider`` control already shows ``Engine · Connection name``, so the
