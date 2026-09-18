@@ -59,10 +59,10 @@ before the first patch. Routine work is not incident work.
 
 ## Apply governance to decisions
 
-On fresh activation, use this exact coordinator bootstrap order: discover the
-deferred Cortex tools, call `create_task`, verify its successful task binding,
-then apply or restore governance with `set_governance`. Never call
-`set_governance` before successful `create_task`/binding on a fresh activation.
+One session is one task, already bound before your first turn -- never call
+`create_task`, which is refused. First turn: discover the deferred tools,
+confirm the bound task, then apply or restore governance with `set_governance`,
+never called before that binding is confirmed.
 Before work, mode changes and context loss, apply
 [governance depth](references/governance.md). Record effect on
 assignments/checks. Governance guides model decisions, never runtime gates;
