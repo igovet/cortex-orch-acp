@@ -244,7 +244,7 @@ def _tool_call_text_content(text):
     return [dict(type="content", content=dict(type="text", text=text))]
 
 
-def tool_call(session_id, tool_call_id, title, kind, status, *, text=None):
+def tool_call(session_id, tool_call_id, title, kind, status, *, text=None, locations=None, content=None):
     """A brand-new ``ToolCall`` (T035 worker-assignment cards): one per
     delegated assignment, keyed by a caller-chosen stable ``tool_call_id``
     (see ``acp.orchestrating_runtime``'s per-assignment id derivation) so
@@ -253,14 +253,22 @@ def tool_call(session_id, tool_call_id, title, kind, status, *, text=None):
     of the pinned schema's four ``ToolCallStatus`` values (``pending``,
     ``in_progress``, ``completed``, ``failed`` -- there is no ``cancelled``;
     see the caller for how a cancelled assignment maps onto ``failed``).
-    ``text``, when given, becomes this card's initial bounded content."""
+    ``text``, when given, becomes this card's initial bounded content;
+    ``content`` (the engine's own ``ToolCallContent[]``, which is how a
+    file diff is carried) takes precedence over it, and ``locations``
+    (``ToolCallLocation[]``) is what lets a client render a touched file as
+    a link instead of as prose."""
     update = dict(sessionUpdate="tool_call", toolCallId=tool_call_id, title=title, kind=kind, status=status)
-    if text:
+    if content:
+        update["content"] = list(content)
+    elif text:
         update["content"] = _tool_call_text_content(text)
+    if locations:
+        update["locations"] = list(locations)
     return notification("session/update", dict(sessionId=session_id, update=update))
 
 
-def tool_call_update(session_id, tool_call_id, *, status=None, title=None, text=None):
+def tool_call_update(session_id, tool_call_id, *, status=None, title=None, text=None, locations=None, content=None):
     """A ``ToolCallUpdate`` for an already-created card (see :func:`tool_call`
     above) -- only the fields actually changing are included, per the pinned
     schema's own "all fields except the tool call ID are optional" contract."""
@@ -269,8 +277,12 @@ def tool_call_update(session_id, tool_call_id, *, status=None, title=None, text=
         update["status"] = status
     if title is not None:
         update["title"] = title
-    if text is not None:
+    if content:
+        update["content"] = list(content)
+    elif text is not None:
         update["content"] = _tool_call_text_content(text)
+    if locations:
+        update["locations"] = list(locations)
     return notification("session/update", dict(sessionId=session_id, update=update))
 
 

@@ -1817,7 +1817,8 @@ class EngineSessionManagerAdapter:
     def prompt(
         self, session_ref: str, message: str, cancel_event: threading.Event, *,
         on_delta: Callable[[str], bool] | None = None,
-        on_tool_call: Callable[[str, str | None, str | None, str | None], None] | None = None,
+        on_tool_call: Callable[..., None] | None = None,
+        on_display_update: Callable[[dict], None] | None = None,
     ):
         """T035 visibility fix: ``on_delta``, when given, is called with each
         ``TURN_DELTA`` chunk's text the moment it is yielded by
@@ -1949,6 +1950,7 @@ class EngineSessionManagerAdapter:
                             on_tool_call(
                                 event.tool_call_ref, event.tool_call_kind,
                                 event.tool_call_title, event.tool_call_status,
+                                event.tool_call_locations, event.tool_call_content,
                             )
                         except Exception:  # noqa: BLE001 - best-effort, never fails the turn
                             pass
@@ -1961,6 +1963,15 @@ class EngineSessionManagerAdapter:
                             self._store, task_id, attempt_id, event.tool_call_ref,
                             event.tool_call_kind, event.tool_call_title, event.tool_call_status,
                         )
+                elif event.kind == EngineEventKind.DISPLAY_UPDATE:
+                    # Shown, never interpreted: this adapter attaches no
+                    # meaning to a thought or a plan, it only makes sure the
+                    # person watching sees what the engine said it is doing.
+                    if on_display_update is not None and event.display_update:
+                        try:
+                            on_display_update(dict(event.display_update))
+                        except Exception:  # noqa: BLE001 - best-effort, never fails the turn
+                            pass
                 elif event.kind == EngineEventKind.COMPACTION_SIGNAL:
                     if self._store is not None:
                         self._observe_compaction_signal(manager, session_ref, event)

@@ -83,9 +83,22 @@ def test_engine_event_usage_update_requires_basis_and_unknown_is_not_zero():
 
 
 def test_engine_event_kinds_are_closed_and_cover_spec():
+    """The set stays closed on purpose: every kind is something this
+    runtime *interprets*, and a new one is a new obligation somewhere.
+
+    ``display_update`` (T035) is the single deliberate exception to that
+    reading, and the reason it is a kind rather than a widening of an
+    existing one: it is the only kind this runtime attaches no meaning to
+    at all. It carries one engine ``session/update`` whose sole purpose is
+    to be shown to a person -- the model's reasoning and its task list --
+    forwarded verbatim. Folding it into ``turn_delta`` would have made a
+    thought indistinguishable from an answer; dropping it (what happened
+    before) left a person watching a session unable to see most of what
+    was going on in it.
+    """
     assert {member.value for member in EngineEventKind} == {
         "turn_delta", "turn_end", "tool_call_observed", "usage_update",
-        "compaction_signal", "error",
+        "compaction_signal", "error", "display_update",
     }
 
 

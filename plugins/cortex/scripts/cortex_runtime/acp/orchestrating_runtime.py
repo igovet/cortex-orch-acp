@@ -221,7 +221,8 @@ class SessionRuntime(Protocol):
     def prompt(
         self, session_ref: str, message: str, cancel_event: threading.Event, *,
         on_delta: Callable[[str], bool] | None = None,
-        on_tool_call: Callable[[str, str | None, str | None, str | None], None] | None = None,
+        on_tool_call: Callable[..., None] | None = None,
+        on_display_update: Callable[[dict], None] | None = None,
     ) -> PromptOutcome: ...
 
 
@@ -538,6 +539,7 @@ class OrchestratingRuntime:
         source_origin: str | None = None, source_event_id: str | None = None,
         host_elicitor: HostElicitor | None = None,
         emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
+        emit_display_update: Callable[[Mapping[str, Any]], bool] | None = None,
         host_permission_requester: Callable | None = None,
         host_fs_requester: Callable[[str, Mapping[str, Any]], Mapping[str, Any]] | None = None,
     ) -> StopReason:
@@ -600,7 +602,8 @@ class OrchestratingRuntime:
         try:
             return self._run(task_id, session_id, content, emit_update, cancel_event,
                               source_origin=source_origin, source_event_id=source_event_id, host_elicitor=elicitor,
-                              emit_tool_call=emit_tool_call)
+                              emit_tool_call=emit_tool_call,
+                              emit_display_update=emit_display_update)
         finally:
             with self._lock:
                 self._active_tasks.discard(task_id)
@@ -1308,6 +1311,7 @@ class OrchestratingRuntime:
         source_origin: str | None = None, source_event_id: str | None = None,
         host_elicitor: HostElicitor | None = None,
         emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
+        emit_display_update: Callable[[Mapping[str, Any]], bool] | None = None,
     ) -> StopReason:
         # T020: an urgent /cortex-stop takes precedence over everything --
         # a stopped task never resumes through an ordinary prompt/steering/
@@ -1406,12 +1410,14 @@ class OrchestratingRuntime:
         return self._continuation_loop(
             task_id, session_id, channel, session_ref, content, emit_update, cancel_event, language, host_elicitor,
             emit_tool_call=emit_tool_call,
+            emit_display_update=emit_display_update,
         )
 
     def _continuation_loop(
         self, task_id, session_id, channel, session_ref, content, emit_update, cancel_event, language,
         host_elicitor: HostElicitor | None = None, *,
         emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
+        emit_display_update: Callable[[Mapping[str, Any]], bool] | None = None,
     ) -> StopReason:
         """The coordinator continuation loop proper: claim/coalesce/prompt/
         process, repeated until a terminal outcome. Factored out of
@@ -1702,6 +1708,7 @@ class OrchestratingRuntime:
                 outcome = self._engine.prompt(
                     session_ref, prompt_text, cancel_event, on_delta=_on_coordinator_delta,
                     on_tool_call=self._engine_tool_call_emitter(emit_tool_call),
+                    on_display_update=emit_display_update,
                 )
                 from .. import _fault_injection
 
@@ -1819,6 +1826,7 @@ class OrchestratingRuntime:
         self, task_id: str, session_id: str, question: questions_store.PendingQuestion, text: str,
         emit_update: Callable[[str], bool], cancel_event: threading.Event, *,
         emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
+        emit_display_update: Callable[[Mapping[str, Any]], bool] | None = None,
     ) -> StopReason:
         """Deliver an explicit ``/cortex-answer`` (see ``acp.commands``) for
         one specific, already-disambiguated open ``question`` -- used when
@@ -1875,6 +1883,7 @@ class OrchestratingRuntime:
             return self._continuation_loop(
                 task_id, session_id, channel, session_ref, text, emit_update, cancel_event, language,
                 emit_tool_call=emit_tool_call,
+                emit_display_update=emit_display_update,
             )
         finally:
             with self._lock:
@@ -2282,7 +2291,10 @@ class OrchestratingRuntime:
         # how a feed of real actions turned into a column of "tool call".
         titles: dict[str, str] = {}
 
-        def on_tool_call(ref: str, kind: str | None, title: str | None, status: str | None) -> None:
+        def on_tool_call(
+            ref: str, kind: str | None, title: str | None, status: str | None,
+            locations=None, content=None,
+        ) -> None:
             card_id = f"call:{id_scope}:{ref}"
             known = titles.get(ref)
             if isinstance(title, str) and title.strip():
@@ -2303,6 +2315,10 @@ class OrchestratingRuntime:
                 # so nothing is lost when it does.
                 pending_status[ref] = status
                 pending_kind.setdefault(ref, kind)
+                if locations:
+                    pending_locations[ref] = locations
+                if content:
+                    pending_content[ref] = content
                 return
             if ref not in seen:
                 seen.add(ref)
@@ -2311,12 +2327,24 @@ class OrchestratingRuntime:
             else:
                 fields["new"] = False
             fields["title"] = f"{prefix}{known}" if prefix else known
+            # Carried verbatim: these are the schema's own display shapes,
+            # and a client turns them into the clickable path and the diff
+            # a reader actually wants. Anything the engine did not send
+            # stays absent rather than being invented.
+            locations = locations if locations else pending_locations.pop(ref, None)
+            content = content if content else pending_content.pop(ref, None)
+            if locations:
+                fields["locations"] = list(locations)
+            if content:
+                fields["content"] = list(content)
             emit_tool_call(fields)
 
         seen: set[str] = set()
         # Status/kind seen for a call the engine has not named yet.
         pending_status: dict[str, str | None] = {}
         pending_kind: dict[str, str | None] = {}
+        pending_locations: dict[str, object] = {}
+        pending_content: dict[str, object] = {}
         return on_tool_call
 
     def _emit_worker_activity_tool_calls(

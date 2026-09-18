@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import threading
+from typing import Mapping
 import time
 import uuid
 from pathlib import Path
@@ -252,8 +253,12 @@ class Agent:
         # already had.
         try:
             self._runtime_accepts_emit_tool_call = 'emit_tool_call' in inspect.signature(runtime.start_prompt).parameters
+            self._runtime_accepts_emit_display_update = (
+                'emit_display_update' in inspect.signature(runtime.start_prompt).parameters
+            )
         except (TypeError, ValueError):
             self._runtime_accepts_emit_tool_call = False
+            self._runtime_accepts_emit_display_update = False
         # EXT-01 #5: detected the same way -- a runtime not updated for this
         # fix (every pre-existing FakeRuntime/test) simply never receives
         # host_permission_requester/host_fs_requester and keeps its own
@@ -640,6 +645,32 @@ class Agent:
 
         return request_fs
 
+    def _make_emit_display_update(self, session_id, cancel_event):
+        """T035: relay one engine ``session/update`` that exists only to be
+        shown -- the model's reasoning (``agent_thought_chunk``) and its
+        task list (``plan``) -- onto this agent's own session, unchanged
+        except for the session id.
+
+        These were previously dropped as unrecognized, so a person watching
+        saw neither. They are forwarded rather than reinterpreted: the
+        schema already defines how a client renders them, and inventing a
+        second representation would only lose detail.
+
+        Only the kinds ``engine.session_manager._DISPLAY_ONLY_UPDATES``
+        allows ever reach here; the engine's own session-state updates are
+        not among them, because this agent's session is not that session.
+        """
+        def emit_display_update(update):
+            if cancel_event.is_set() or self.transport is None:
+                return False
+            if not isinstance(update, Mapping) or not update.get("sessionUpdate"):
+                return False
+            payload = {key: value for key, value in update.items() if key != "sessionId"}
+            return self.transport.send_notification(
+                protocol.notification("session/update", dict(sessionId=session_id, update=payload)),
+            )
+        return emit_display_update
+
     def _make_emit_tool_call(self, session_id, cancel_event):
         """T035: the runtime-facing ``emit_tool_call`` callable -- accepts
         one already-shaped update dict (``tool_call_id``, ``new`` [bool],
@@ -662,12 +693,14 @@ class Agent:
                 notif = protocol.tool_call(
                     session_id, tool_call_id, update.get("title") or "Worker assignment",
                     update.get("kind") or "other", update.get("status") or "pending",
-                    text=update.get("text"),
+                    text=update.get("text"), locations=update.get("locations"),
+                    content=update.get("content"),
                 )
             else:
                 notif = protocol.tool_call_update(
                     session_id, tool_call_id, status=update.get("status"), title=update.get("title"),
-                    text=update.get("text"),
+                    text=update.get("text"), locations=update.get("locations"),
+                    content=update.get("content"),
                 )
             return self.transport.send_notification(notif)
         return emit_tool_call
@@ -834,6 +867,8 @@ class Agent:
             start_prompt_kwargs["host_fs_requester"] = self._make_fs_requester(session_id)
         if self._runtime_accepts_emit_tool_call:
             start_prompt_kwargs["emit_tool_call"] = self._make_emit_tool_call(session_id, cancel_event)
+        if self._runtime_accepts_emit_display_update:
+            start_prompt_kwargs["emit_display_update"] = self._make_emit_display_update(session_id, cancel_event)
         try:
             reason = self.runtime.start_prompt(task_id, session_id, text, emit_update, cancel_event, **start_prompt_kwargs)
         except OrchestrationUnavailable as exc:

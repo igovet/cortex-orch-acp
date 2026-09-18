@@ -257,7 +257,7 @@ class FakeSessionRuntime:
                 delegation_capacity.mark_ambiguous(self._store, reservation_id, "timeout_alive")
             self._notify_activity()
 
-    def prompt(self, session_ref, message, cancel_event, *, on_delta=None, on_tool_call=None):
+    def prompt(self, session_ref, message, cancel_event, *, on_delta=None, on_tool_call=None, on_display_update=None):
         info = self.sessions[session_ref]
         self.prompt_calls.append(session_ref)
         call_index = info["calls"]

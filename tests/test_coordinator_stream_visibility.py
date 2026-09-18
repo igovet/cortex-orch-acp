@@ -273,3 +273,127 @@ def test_a_tool_call_between_two_spoken_messages_separates_them(tmp_path):
     finally:
         for manager in list(adapter._managers.values()):
             manager.shutdown(grace=1.0)
+
+
+def test_a_tool_call_carries_its_file_locations_and_diff_to_the_client(tmp_path):
+    """Reported looking at a live feed: a read should read like a read --
+    the file, as a link -- and an edit should show what changed, the way
+    any normal client shows it. ACP already defines both (``locations``,
+    and ``content`` carrying a ``diff``); the engine sends them and they
+    were being dropped in translation, so a card could only say that
+    *something* happened."""
+    project = tmp_path / "project"
+    project.mkdir()
+    store, task_id = _task(project, "Check in.")
+    engine_dir = tmp_path / "engine"
+    engine_dir.mkdir()
+    environ = isolated_environ(engine_dir)
+    scenario_path = write_scenario(engine_dir, default_scenario(
+        prompt_updates=[
+            dict(sessionUpdate="tool_call", toolCallId="t1", title="Read calc.py", kind="read",
+                 status="in_progress", locations=[dict(path="/project/calc.py", line=4)]),
+            dict(sessionUpdate="tool_call_update", toolCallId="t1", status="completed"),
+            dict(sessionUpdate="tool_call", toolCallId="t2", title="Edit calc.py", kind="edit",
+                 status="completed", locations=[dict(path="/project/calc.py")],
+                 content=[dict(type="diff", path="/project/calc.py",
+                               oldText="def divide(a, b):\n    return a / b\n",
+                               newText="def divide(a, b):\n    if b == 0:\n        raise ValueError('...')\n    return a / b\n")]),
+        ],
+        prompt_stop_reason="end_turn",
+    ))
+    record = make_connection_record(
+        new_connection_id(), launch_command=fake_launch_command(scenario_path), environ=environ,
+    )
+    adapter = EngineSessionManagerAdapter(
+        lambda task_id: record, lambda task_id: str(project), environ=environ, call_timeout=10.0,
+    )
+    runtime = OrchestratingRuntime(
+        store, adapter, FakeWorkspace(), FakeConfigSnapshotSource(),
+        allow_unqualified_delivery=True, wait_timeout_seconds=10.0,
+    )
+    try:
+        channel, _ = runtime._ensure_coordinator(task_id)
+        mcp_tools.dispatch(store, channel, "decide", dict(
+            assignment_ref="task", decision="accept", rationale="Trivial check-in.", request_key="acc1",
+        ))
+        cards: list = []
+        runtime.start_prompt(
+            task_id, "s1", "Just check in.", lambda t: True, threading.Event(), emit_tool_call=cards.append,
+        )
+
+        read_cards = [c for c in cards if c.get("title") == "Read calc.py"]
+        assert read_cards, f"the read never reached the client: {cards}"
+        assert read_cards[0]["kind"] == "read"
+        assert read_cards[0]["locations"] == [dict(path="/project/calc.py", line=4)], read_cards[0]
+        # A status-only update keeps the card, and the name it already had.
+        assert [c["status"] for c in read_cards] == ["in_progress", "completed"]
+
+        edit_cards = [c for c in cards if c.get("title") == "Edit calc.py"]
+        assert edit_cards, f"the edit never reached the client: {cards}"
+        diff = [part for part in edit_cards[0]["content"] if part.get("type") == "diff"]
+        assert diff, edit_cards[0]
+        assert "raise ValueError" in diff[0]["newText"]
+        assert diff[0]["path"] == "/project/calc.py"
+    finally:
+        for manager in list(adapter._managers.values()):
+            manager.shutdown(grace=1.0)
+
+
+def test_the_models_reasoning_and_plan_reach_the_client(tmp_path):
+    """Two whole update kinds -- the model's reasoning and its task list --
+    were dropped as unrecognized, so "I want to see everything that is
+    happening" could not be satisfied no matter how the cards looked."""
+    project = tmp_path / "project"
+    project.mkdir()
+    store, task_id = _task(project, "Check in.")
+    engine_dir = tmp_path / "engine"
+    engine_dir.mkdir()
+    environ = isolated_environ(engine_dir)
+    plan_update = dict(
+        sessionUpdate="plan",
+        entries=[dict(content="Read calc.py", priority="high", status="in_progress"),
+                 dict(content="Add the guard", priority="high", status="pending")],
+    )
+    scenario_path = write_scenario(engine_dir, default_scenario(
+        prompt_updates=[
+            dict(sessionUpdate="agent_thought_chunk", content=dict(type="text", text="Weighing the guard.")),
+            plan_update,
+            # Not display-only: the engine's own session state must never be
+            # forwarded onto this agent's session.
+            dict(sessionUpdate="current_mode_update", currentModeId="agent-full-access"),
+        ],
+        prompt_stop_reason="end_turn",
+    ))
+    record = make_connection_record(
+        new_connection_id(), launch_command=fake_launch_command(scenario_path), environ=environ,
+    )
+    adapter = EngineSessionManagerAdapter(
+        lambda task_id: record, lambda task_id: str(project), environ=environ, call_timeout=10.0,
+    )
+    runtime = OrchestratingRuntime(
+        store, adapter, FakeWorkspace(), FakeConfigSnapshotSource(),
+        allow_unqualified_delivery=True, wait_timeout_seconds=10.0,
+    )
+    try:
+        channel, _ = runtime._ensure_coordinator(task_id)
+        mcp_tools.dispatch(store, channel, "decide", dict(
+            assignment_ref="task", decision="accept", rationale="Trivial check-in.", request_key="acc1",
+        ))
+        shown: list = []
+        runtime.start_prompt(
+            task_id, "s1", "Just check in.", lambda t: True, threading.Event(),
+            emit_display_update=shown.append,
+        )
+        kinds = [u.get("sessionUpdate") for u in shown]
+        assert "agent_thought_chunk" in kinds, shown
+        assert "plan" in kinds, shown
+        assert "current_mode_update" not in kinds, (
+            "the engine's own session state must never be forwarded to this agent's client"
+        )
+        thought = next(u for u in shown if u["sessionUpdate"] == "agent_thought_chunk")
+        assert thought["content"]["text"] == "Weighing the guard."
+        plan = next(u for u in shown if u["sessionUpdate"] == "plan")
+        assert [entry["content"] for entry in plan["entries"]] == ["Read calc.py", "Add the guard"]
+    finally:
+        for manager in list(adapter._managers.values()):
+            manager.shutdown(grace=1.0)

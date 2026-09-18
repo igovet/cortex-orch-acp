@@ -149,6 +149,26 @@ def _session_unusable_error() -> PortableError:
     )
 
 
+# T035: engine ``session/update`` kinds that exist only to be shown, and
+# are therefore forwarded to the client as they are.
+#
+# ``agent_thought_chunk`` is the model's reasoning and ``plan``/
+# ``plan_update``/``plan_removed`` its task list -- both are most of what a
+# person means by "I want to see what it is doing", and both were being
+# dropped as unrecognized.
+#
+# Everything else the schema defines is deliberately NOT here:
+# ``current_mode_update``, ``config_option_update``,
+# ``available_commands_update`` and ``session_info_update`` describe the
+# *engine's* own session, and this agent has its own session with its own
+# modes, options and commands -- forwarding them would tell the client
+# things about a session it is not talking to. ``usage_update`` and the
+# compaction updates are already translated into their own events.
+_DISPLAY_ONLY_UPDATES = frozenset({
+    "agent_thought_chunk", "plan", "plan_update", "plan_removed",
+})
+
+
 class EngineSessionManager:
     """One outgoing engine instance; launches its own process on demand.
 
@@ -913,6 +933,8 @@ class EngineSessionManager:
 
     def _translate_update(self, wire_session_id, update):
         kind = update.get("sessionUpdate")
+        if kind in _DISPLAY_ONLY_UPDATES:
+            return EngineEvent(kind=EngineEventKind.DISPLAY_UPDATE, display_update=dict(update))
         if kind == "agent_message_chunk":
             text = (update.get("content") or {}).get("text", "")
             return EngineEvent(kind=EngineEventKind.TURN_DELTA, delta_text=text)
@@ -937,11 +959,15 @@ class EngineSessionManager:
             title = update.get("title")
             if isinstance(title, str) and len(title) > 200:
                 title = title[:200]
+            locations = update.get("locations")
+            content = update.get("content")
             return EngineEvent(
                 kind=EngineEventKind.TOOL_CALL_OBSERVED, tool_call_ref=ref,
                 tool_call_kind=update.get("kind") if isinstance(update.get("kind"), str) else None,
                 tool_call_title=title if isinstance(title, str) else None,
                 tool_call_status=update.get("status") if isinstance(update.get("status"), str) else None,
+                tool_call_locations=tuple(locations) if isinstance(locations, list) else None,
+                tool_call_content=tuple(content) if isinstance(content, list) else None,
             )
         if kind == "usage_update":
             usage = update.get("usage") or {}

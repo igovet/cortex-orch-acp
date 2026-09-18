@@ -76,6 +76,7 @@ class EngineEventKind(str, Enum):
     TOOL_CALL_OBSERVED = "tool_call_observed"
     USAGE_UPDATE = "usage_update"
     COMPACTION_SIGNAL = "compaction_signal"
+    DISPLAY_UPDATE = "display_update"
     ERROR = "error"
 
 
@@ -102,6 +103,20 @@ class EngineEvent:
     tool_call_kind: str | None = None
     tool_call_title: str | None = None
     tool_call_status: str | None = None
+    # T035: the engine's own ACP presentation for this call -- the file
+    # locations it touches (ToolCallLocation[]) and what it produced
+    # (ToolCallContent[], which is how a diff is carried). Protocol-shaped
+    # display data defined by the schema both engines already speak, not
+    # raw tool arguments or results: a client renders "Read <path>" as a
+    # link and an edit as a diff from exactly these, and without them a
+    # card can only say that *something* happened.
+    tool_call_locations: tuple | None = None
+    tool_call_content: tuple | None = None
+    # T035: one engine ``session/update`` whose only purpose is to be
+    # shown, forwarded verbatim (see engine.session_manager
+    # ._DISPLAY_ONLY_UPDATES for exactly which kinds, and why the engine's
+    # own session-state updates are deliberately not among them).
+    display_update: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, EngineEventKind):
