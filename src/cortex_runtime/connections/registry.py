@@ -236,6 +236,24 @@ def connection_state_dir(connection_id: str, engine: str, environ: dict[str, str
     return state_root(environ) / "connections" / connection_id / subdir
 
 
+# The user's own native credential directory per engine (D-T035-02): fixed,
+# never id-derived -- every referencing connection for a given engine points
+# at the same directory, because that directory is the client's, not ours.
+_ENGINE_CLIENT_NATIVE_DIR = {
+    "codex-acp": ".codex",
+    "claude-agent-acp": ".claude",
+}
+
+
+def client_native_dir(engine: str, environ: dict[str, str] | None = None) -> Path:
+    """The user's own native credential directory a *referencing* (non-owned)
+    ``EngineNativeDir`` must equal -- see ``connections.discovery``."""
+    subdir = _ENGINE_CLIENT_NATIVE_DIR.get(engine)
+    if subdir is None:
+        raise _fail_closed("unsupported_auth_mode", f"Unsupported engine {engine!r} has no native credential directory convention.")
+    return _effective_home(environ) / subdir
+
+
 def canonical_credential_ref(
     connection_id: str,
     engine: str,
@@ -269,6 +287,16 @@ def credential_ref_matches_canonical(record: ConnectionRecord, environ: dict[str
     ref = record.credential_ref
     if isinstance(ref, OsKeyring):
         return True
+    if isinstance(ref, EngineNativeDir) and not ref.owned:
+        # A referencing (non-owned) native dir is never id-derived: every
+        # connection for the same engine references the same user-owned
+        # directory (see client_native_dir), never a per-connection state
+        # root under state_root().
+        try:
+            expected_path = client_native_dir(record.engine, environ)
+        except PortableError:
+            return False
+        return ref.path == str(expected_path)
     try:
         expected = canonical_credential_ref(record.id, record.engine, ref.kind, environ=environ)
     except PortableError:
@@ -294,6 +322,11 @@ def duplicate_credential_paths(connections: dict[str, ConnectionRecord]) -> dict
     for connection_id, record in connections.items():
         ref = record.credential_ref
         if not isinstance(ref, (SecretFile, EngineNativeDir)):
+            continue
+        if isinstance(ref, EngineNativeDir) and not ref.owned:
+            # Referencing connections for the same engine intentionally
+            # share one path (the user's own native directory); that is
+            # not a collision to flag.
             continue
         holder = seen.get(ref.path)
         if holder is not None:

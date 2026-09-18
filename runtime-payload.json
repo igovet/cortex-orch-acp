@@ -43,6 +43,7 @@
     "src/cortex_runtime/configuration/store.py",
     "src/cortex_runtime/connections/__init__.py",
     "src/cortex_runtime/connections/account_identity.py",
+    "src/cortex_runtime/connections/discovery.py",
     "src/cortex_runtime/connections/environment.py",
     "src/cortex_runtime/connections/model.py",
     "src/cortex_runtime/connections/onboarding.py",

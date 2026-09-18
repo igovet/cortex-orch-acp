@@ -2291,7 +2291,8 @@ class OrchestratingRuntime:
         try:
             with self._store.connection() as db:
                 row = db.execute(
-                    "SELECT config_revision FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?",
+                    "SELECT attempt_id, config_revision FROM delegation_provisioning "
+                    "WHERE task_id=? AND idempotency_key=?",
                     (task_id, assignment_ref),
                 ).fetchone()
                 if row is None or not row["config_revision"]:
@@ -2300,14 +2301,24 @@ class OrchestratingRuntime:
                     "SELECT route_engine, parameters FROM configuration_revisions WHERE id=?",
                     (row["config_revision"],),
                 ).fetchone()
+                # ``configuration_revisions`` never stores the model; this
+                # attempt's actual engine/model is what ``live_adapters
+                # ._record_route_audit`` wrote when it dispatched it, which
+                # for a worker is its own route, not the coordinator's.
+                audit = db.execute(
+                    "SELECT engine, model FROM attempt_route_audit WHERE attempt_id=? "
+                    "ORDER BY recorded_at DESC LIMIT 1",
+                    (row["attempt_id"],),
+                ).fetchone() if row["attempt_id"] else None
             if revision is None:
                 return None
             parameters = json.loads(revision["parameters"] or "{}")
         except Exception:  # noqa: BLE001 - a label is never worth failing a card over
             return None
-        parts = [catalog_labels.engine_short_name(revision["route_engine"])]
-        model = parameters.get("model")
-        if model:
+        engine = (audit["engine"] if audit else None) or revision["route_engine"]
+        parts = [catalog_labels.engine_short_name(engine)]
+        model = (audit["model"] if audit else None) or parameters.get("model")
+        if model and model != "unknown":
             parts.append(str(model))
         # Each engine names its own effort knob; whichever one this route
         # carries is the one to show (see configuration.policy).

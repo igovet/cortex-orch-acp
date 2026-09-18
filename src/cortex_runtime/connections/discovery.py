@@ -1,0 +1,180 @@
+"""Engine discovery: find engines the client (e.g. Zed) already installed.
+
+D-T035-02: an engine is no longer something Cortex installs, copies, or
+pins for itself -- it is whatever the user already configured in their
+editor. This module only ever *reads* the client's own installed npm
+package for the two engines this project implements adapters for
+(``codex-acp``, ``claude-agent-acp``); it never downloads, writes, or
+modifies anything. A launch command is only ever built from a package's
+own declared ``package.json`` ``"bin"`` entry -- never a guessed filename
+-- and an engine whose package/bin/node binary cannot actually be found on
+disk is reported as absent, never as a guess.
+
+The credential directory a discovered engine reports
+(``native_credential_dir``) is always the user's own native directory
+(``~/.codex``, ``~/.claude``), never a Cortex-owned copy (see
+``connections.model.EngineNativeDir(owned=False)`` and
+``connections.onboarding.create_referenced_connection``). Accepted cost of
+that reference (D-T035-02, stated rather than hidden): the client's own
+engine process and Cortex's own engine process can now both read/refresh
+the same on-disk credential directory, so a token refresh can race between
+the two; the Cortex-owned copy this replaces existed for exactly that
+reason, and one place of truth was judged worth the trade.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import os
+from pathlib import Path
+import shutil
+
+# Registry package name -> engine id this project has an adapter for.
+_PACKAGE_NAME = {
+    "codex-acp": "@agentclientprotocol/codex-acp",
+    "claude-agent-acp": "@agentclientprotocol/claude-agent-acp",
+}
+
+# The user's own native credential directory per engine -- a fixed,
+# well-known convention (never scanned or guessed).
+_NATIVE_CREDENTIAL_SUBDIR = {
+    "codex-acp": ".codex",
+    "claude-agent-acp": ".claude",
+}
+
+SUPPORTED_ENGINES: tuple[str, ...] = tuple(_PACKAGE_NAME)
+
+
+@dataclass(frozen=True)
+class EngineDiscovery:
+    """One engine actually found installed for the client, ready to launch."""
+
+    engine: str
+    version: str
+    launch_command: tuple[str, str]
+    native_credential_dir: str
+
+
+def _home(environ: dict[str, str] | None) -> Path:
+    env = os.environ if environ is None else environ
+    home = env.get("HOME")
+    return Path(home) if home else Path.home()
+
+
+def _node_binary(environ: dict[str, str] | None) -> str | None:
+    env = os.environ if environ is None else environ
+    override = env.get("CORTEX_NODE_BINARY")
+    if override:
+        return override
+    return shutil.which("node", path=env.get("PATH"))
+
+
+def _registry_root(environ: dict[str, str] | None) -> Path:
+    return _home(environ) / ".local" / "share" / "zed" / "external_agents" / "registry" / "npx"
+
+
+def _declared_bin(package_json_path: Path) -> tuple[str, str] | None:
+    """Return ``(version, bin_target)`` as declared by ``package.json`` itself.
+
+    ``None`` for anything unreadable, unparsable, or without exactly one
+    unambiguous ``"bin"`` target -- never a guessed filename.
+    """
+    try:
+        data = json.loads(package_json_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    version = data.get("version")
+    if not isinstance(version, str) or not version:
+        return None
+    bin_field = data.get("bin")
+    if isinstance(bin_field, str):
+        bin_target = bin_field
+    elif isinstance(bin_field, dict) and len(bin_field) == 1:
+        bin_target = next(iter(bin_field.values()))
+    else:
+        return None
+    if not isinstance(bin_target, str) or not bin_target:
+        return None
+    return version, bin_target
+
+
+def discover_engine(
+    engine: str,
+    *,
+    registry_root: Path | None = None,
+    node_binary: str | None = None,
+    environ: dict[str, str] | None = None,
+) -> EngineDiscovery | None:
+    """Report ``engine`` iff its package is actually installed under the
+    client's registry root, with a real, existing, declared ``bin`` entry
+    point and a usable ``node`` binary. ``None`` otherwise -- never raises.
+    """
+    package_name = _PACKAGE_NAME.get(engine)
+    if package_name is None:
+        return None
+    root = registry_root if registry_root is not None else _registry_root(environ)
+    node = node_binary if node_binary is not None else _node_binary(environ)
+    if not node:
+        return None
+    try:
+        entries = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError:
+        return None
+    for entry in entries:
+        package_json = entry / "node_modules" / package_name / "package.json"
+        try:
+            if not package_json.is_file():
+                continue
+        except OSError:
+            continue
+        declared = _declared_bin(package_json)
+        if declared is None:
+            continue
+        version, bin_target = declared
+        package_dir = package_json.parent
+        try:
+            package_dir_resolved = package_dir.resolve()
+            bin_path = (package_dir / bin_target).resolve()
+        except OSError:
+            continue
+        try:
+            bin_path.relative_to(package_dir_resolved)
+        except ValueError:
+            continue  # declared bin escapes its own package dir; never trust it
+        try:
+            if not bin_path.is_file():
+                continue
+        except OSError:
+            continue
+        native_dir = _home(environ) / _NATIVE_CREDENTIAL_SUBDIR[engine]
+        return EngineDiscovery(
+            engine=engine,
+            version=version,
+            launch_command=(node, str(bin_path)),
+            native_credential_dir=str(native_dir),
+        )
+    return None
+
+
+def discover_all(
+    *,
+    registry_root: Path | None = None,
+    node_binary: str | None = None,
+    environ: dict[str, str] | None = None,
+) -> dict[str, EngineDiscovery]:
+    """Discover every supported engine the client has installed.
+
+    Never raises: a broken/unreadable registry tree, a missing package, or
+    a missing ``node`` binary simply yields fewer (or zero) entries.
+    """
+    found: dict[str, EngineDiscovery] = {}
+    for engine in SUPPORTED_ENGINES:
+        try:
+            result = discover_engine(engine, registry_root=registry_root, node_binary=node_binary, environ=environ)
+        except OSError:
+            result = None
+        if result is not None:
+            found[engine] = result
+    return found

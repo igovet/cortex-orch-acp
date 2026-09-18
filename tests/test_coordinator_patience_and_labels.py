@@ -768,3 +768,46 @@ def test_a_native_wait_is_not_shown_and_a_native_subagent_is_refused(tmp_path):
         notes = [r["payload_json"] for r in db.execute(
             "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='progress'", (task_id,))]
     assert any("subagent" in (n or "").lower() for n in notes), notes
+
+
+def test_a_worker_card_names_the_workers_own_model_not_the_coordinators(tmp_path):
+    """The header reads ``provider · model · effort``, and for a worker the
+    model must be the one that worker was actually dispatched on.
+
+    ``configuration_revisions`` stores no model at all, and the model in
+    ``configuration_route_extras`` is keyed by revision -- it names the
+    *coordinator's* route even for a worker opened on a different one (see
+    ``live_adapters.ConfigurationApplier``'s own EXT-01 note). The record
+    of what a given attempt really ran on is the row ``_record_route_audit``
+    writes at dispatch, so that is what the card reads."""
+    import json as _json
+
+    from cortex_runtime.routing import store as routing_store
+
+    store, task_id = _task(tmp_path)
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda *a, **k: None), FakeWorkspace(), FakeConfigSnapshotSource(),
+    )
+    now = "2026-09-19T00:00:00+00:00"
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO configuration_revisions "
+            "(id, task_id, revision, route_id, route_engine, route_connection_id, parameters, "
+            " ceiling_snapshot, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("cfg-1", task_id, 1, "route-1", "codex", "conn-1",
+             _json.dumps({"effort": "medium"}), "{}", "confirmed", now, now),
+        )
+        db.execute(
+            "INSERT INTO delegation_provisioning "
+            "(idempotency_key, task_id, attempt_id, role_id, step, status, config_revision, "
+            " owner_epoch, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("a_ref", task_id, "att-1", "worker-backend-dev", "engine_session", "done", "cfg-1", 1, now, now),
+        )
+        db.commit()
+    routing_store.record_attempt_audit(
+        store, attempt_id="att-1", task_id=task_id, role="worker-backend-dev", engine="codex",
+        connection_id="conn-1", model="gpt-5-codex", params_fingerprint="fp", config_revision_id="cfg-1",
+        decision="authorized", detail={},
+    )
+
+    assert runtime._delegation_route_label(task_id, "a_ref") == "codex · gpt-5-codex · medium"

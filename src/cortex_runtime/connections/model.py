@@ -196,15 +196,33 @@ def _require_keyring_identifier(value: object, field_name: str) -> str:
 class EngineNativeDir:
     """Reference to an engine's own protected native config directory.
 
-    ``path`` is never caller-supplied for a real connection: onboarding
-    always derives it from ``registry.connection_state_dir(id, engine)``.
+    ``owned=True`` (the default): a Cortex-managed copy, and ``path`` is
+    never caller-supplied for a real connection -- onboarding always
+    derives it from ``registry.connection_state_dir(id, engine)``.
+
+    ``owned=False``: a *reference* to the user's own native credential
+    directory (e.g. ``~/.codex``, ``~/.claude``), created only by
+    ``connections.onboarding.create_referenced_connection`` from
+    ``connections.discovery`` (D-T035-02). Cortex never creates, chmods, or
+    writes to a referenced directory -- it belongs to the client's own
+    engine install. See ``connections.discovery``'s module docstring for
+    the credential-refresh race this trades a copy's staleness for.
     """
 
     path: str
+    owned: bool = True
     kind: str = field(default="engine_native_dir", init=False)
 
     def __post_init__(self) -> None:
         _require_absolute_path(self.path, "path")
+        if not isinstance(self.owned, bool):
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION,
+                code="invalid_field",
+                remediation="'owned' must be an explicit bool.",
+                retry_eligible=False,
+                field="owned",
+            )
 
 
 @dataclass(frozen=True)
@@ -242,7 +260,7 @@ _CREDENTIAL_REF_KINDS = ("engine_native_dir", "secret_file", "os_keyring")
 
 def serialize_credential_ref(ref: CredentialRef) -> dict[str, object]:
     if isinstance(ref, EngineNativeDir):
-        return {"kind": ref.kind, "path": ref.path}
+        return {"kind": ref.kind, "path": ref.path, "owned": ref.owned}
     if isinstance(ref, SecretFile):
         return {"kind": ref.kind, "path": ref.path}
     if isinstance(ref, OsKeyring):
@@ -262,9 +280,15 @@ def deserialize_credential_ref(data: object) -> CredentialRef:
     kind = data.get("kind")
     if kind == "engine_native_dir":
         path = data.get("path")
-        if not isinstance(path, str) or not path or set(data) != {"kind", "path"}:
+        # "owned" is optional on read for backward compatibility: every
+        # record persisted before this field existed was always a
+        # Cortex-owned copy (owned=True).
+        if not isinstance(path, str) or not path or set(data) - {"kind", "path", "owned"}:
             raise _invalid_credential_ref()
-        return EngineNativeDir(path=path)
+        owned = data.get("owned", True)
+        if not isinstance(owned, bool):
+            raise _invalid_credential_ref()
+        return EngineNativeDir(path=path, owned=owned)
     if kind == "secret_file":
         path = data.get("path")
         if not isinstance(path, str) or not path or set(data) != {"kind", "path"}:

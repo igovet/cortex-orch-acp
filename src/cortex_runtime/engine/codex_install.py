@@ -82,13 +82,23 @@ class CodexAcpInstall:
 
 
 # Locations that are never trusted as the source of a pinned install file,
-# even if the recorded hash happens to match a file found there: a Zed
-# registry checkout is refreshed/replaced by Zed itself outside this
-# project's control, and an app's own private data directory is not a
-# location an operator deliberately pinned. Every entry is relative to
-# ``$HOME`` (the explicit ``environ``'s ``HOME``, never a hardcoded one).
+# even if the recorded hash happens to match a file found there: an app's
+# own private data directory is not a location an operator deliberately
+# pinned. Every entry is relative to ``$HOME`` (the explicit ``environ``'s
+# ``HOME``, never a hardcoded one).
+#
+# The client's own agent registry (Zed's ``external_agents``) used to be
+# here, on the reasoning that Zed refreshes it outside this project's
+# control. That reasoning was overtaken by D-T035-02: the engines Cortex
+# runs are the ones the user configured in their client, which is where
+# the client installs them. Refusing to launch from there meant refusing
+# to launch the engine the user chose. The same client already runs those
+# binaries itself, and is what launches Cortex -- treating its install
+# directory as more dangerous than the client running us is not a
+# boundary, it is a contradiction. The install is still identified by its
+# package name and version and its file hash recorded; what is no longer
+# refused is the location.
 _UNTRUSTED_HOME_RELATIVE_ROOTS = (
-    (".local", "share", "zed", "external_agents"),
     (".local", "share", "app.codeg"),
     (".config", "app.codeg"),
 )

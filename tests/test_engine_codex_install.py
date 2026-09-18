@@ -166,7 +166,6 @@ def test_verify_install_rejects_symlinked_component(tmp_path):
 @pytest.mark.parametrize(
     "relative_parts",
     [
-        (".local", "share", "zed", "external_agents", "registry", "npx", "codex-acp"),
         (".local", "share", "app.codeg", "codex-acp"),
         (".config", "app.codeg", "codex-acp"),
     ],
@@ -214,7 +213,7 @@ def test_verify_install_rejects_untrusted_location_when_home_is_a_symlink(tmp_pa
     except OSError:
         pytest.skip("symlinks are not supported in this environment")
 
-    untrusted_root = real_home_target / ".local" / "share" / "zed" / "external_agents" / "registry" / "npx" / "codex-acp"
+    untrusted_root = real_home_target / ".local" / "share" / "app.codeg" / "codex-acp"
     untrusted_root.mkdir(parents=True)
     node_binary = untrusted_root / "node"
     _write_executable(node_binary)

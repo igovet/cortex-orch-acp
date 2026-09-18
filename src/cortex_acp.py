@@ -59,6 +59,20 @@ def _ensure_first_run_configuration():
     except Exception:  # noqa: BLE001 - startup is never blocked by this
         pass
 
+    # D-T035-02: an engine the user already configured in their client (e.g.
+    # Zed) needs no separate Cortex setup step -- discover it and, iff
+    # Cortex has no connection for it yet, register one that references the
+    # user's own native credential directory. Never overwrites or mutates a
+    # connection the user already has, and a discovery problem here never
+    # blocks startup -- the agent still runs with whatever connections
+    # already existed.
+    try:
+        from cortex_runtime.connections import discovery, onboarding
+
+        onboarding.sync_discovered_connections(discovery.discover_all())
+    except Exception:  # noqa: BLE001 - startup is never blocked by this
+        pass
+
 
 if __name__ == '__main__':
     _fail_closed_on_pinned_mismatch()

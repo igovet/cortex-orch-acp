@@ -79,7 +79,7 @@ def test_codex_resolution_fails_closed_on_untrusted_location(tmp_path):
     consistent -- the location itself is never trusted."""
     environ = isolated_environ(tmp_path)
     home = Path(environ["HOME"])
-    untrusted_root = home / ".local" / "share" / "zed" / "external_agents" / "codex-acp"
+    untrusted_root = home / ".local" / "share" / "app.codeg" / "codex-acp"
     scenario_path = write_scenario(tmp_path, default_scenario())
     launch_command, _binary = build_codex_npm_install(untrusted_root, scenario_path)
     record = _record_with_launch_command(tmp_path, launch_command, "codex-acp", environ)

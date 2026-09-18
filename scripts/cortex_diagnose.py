@@ -30,7 +30,7 @@ sys.path.insert(0, str(SCRIPTS.parent / "src"))
 
 from cortex_runtime.acp import config_options as acp_config_options  # noqa: E402
 from cortex_runtime.configuration import store as configuration_store  # noqa: E402
-from cortex_runtime.connections import registry  # noqa: E402
+from cortex_runtime.connections import discovery, registry  # noqa: E402
 from cortex_runtime.connections.model import AuthMode, SUPPORT_MATRIX  # noqa: E402
 from cortex_runtime.engine.instruction_delivery_registry import (  # noqa: E402
     ClaudeAgentAcp0_78Delivery, CodexAcp1_12Delivery, delivery_for,
@@ -124,6 +124,35 @@ def _connection_and_route_checks(environ):
     return checks
 
 
+def _discovery_checks(environ):
+    """D-T035-02: report which supported engines were actually found
+    installed for the client (e.g. Zed), and which were not -- never a
+    guess either way. A discovered engine's connection then shares its
+    native credential directory with the client's own engine process
+    (see ``connections.discovery`` module docstring): that is an accepted
+    race on token refresh, not a hidden one, named here too.
+    """
+    checks = []
+    try:
+        found = discovery.discover_all(environ=environ)
+    except Exception as error:  # noqa: BLE001 - diagnostics never raises
+        return [_check("discovery", "warn", f"Engine discovery failed unexpectedly: {error}", None)]
+    for engine in discovery.SUPPORTED_ENGINES:
+        info = found.get(engine)
+        if info is None:
+            checks.append(_check(f"discovery:{engine}", "skip", f"{engine} is not installed for this client.",
+                                  "Configure this engine in the client (e.g. Zed agent_servers) to use it."))
+        else:
+            checks.append(_check(
+                f"discovery:{engine}", "ok",
+                f"{engine} {info.version} found at {info.launch_command[1]}; shares credentials at "
+                f"{info.native_credential_dir} with the client's own engine process (token-refresh race accepted, "
+                "see D-T035-02).",
+                None,
+            ))
+    return checks
+
+
 def _client_registration_check(zed_settings):
     if zed_settings is None:
         return [_check("client_registration:zed", "skip",
@@ -188,6 +217,7 @@ def run_diagnostics(*, environ=None, zed_settings=None, project=None):
     checks += _pinned_checks()
     checks += _storage_checks(environ)
     checks += _connection_and_route_checks(environ)
+    checks += _discovery_checks(environ)
     checks += _client_registration_check(zed_settings)
     checks += _adapter_qualification_checks()
     checks += _policy_checks(project, environ)

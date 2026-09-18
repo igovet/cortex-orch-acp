@@ -119,14 +119,44 @@ _CODEX_PLATFORM_PACKAGE = {
 }
 
 
+def _resolve_node_package_dir(package_dir: Path, name: str, probe: str) -> Path | None:
+    """Find a dependency directory the way Node resolves it, identified by
+    a file ``probe`` it must actually contain.
+
+    Nested first, then each enclosing ``node_modules``. Only looking
+    nested is only correct for a bundled install: npm hoists shared
+    dependencies to the top of the tree by default, which is exactly how
+    the client installs these engines -- `@openai/codex` sits beside the
+    adapter, not under it -- so a nested-only lookup refused to launch the
+    engine the user had configured (D-T035-02).
+
+    Walks upward rather than guessing a depth, and returns ``None`` rather
+    than a path that does not exist.
+    """
+    nested = package_dir / "node_modules" / Path(name)
+    if (nested / probe).is_file():
+        return nested
+    for parent in package_dir.parents:
+        if parent.name != "node_modules":
+            continue
+        candidate = parent / Path(name)
+        if (candidate / probe).is_file():
+            return candidate
+    return None
+
+
 def _build_codex_install(node_binary: Path, adapter_entry: Path) -> codex_install.CodexAcpInstall:
     package_json = _find_package_json(adapter_entry)
     package_data = _read_package_json(package_json)
     package_dir = package_json.parent
 
-    codex_package_json = package_dir / "node_modules" / "@openai" / "codex" / "package.json"
-    if not codex_package_json.is_file():
-        raise InstallUnresolvable(f"no bundled @openai/codex package found under {package_dir}.")
+    codex_package_dir = _resolve_node_package_dir(package_dir, "@openai/codex", "package.json")
+    codex_package_json = codex_package_dir / "package.json" if codex_package_dir is not None else None
+    if codex_package_json is None:
+        raise InstallUnresolvable(
+            f"no @openai/codex package resolvable from {package_dir} "
+            "(looked inside the adapter and in each enclosing node_modules)."
+        )
     codex_package_data = _read_package_json(codex_package_json)
     bundled_codex_version = codex_package_data.get("version")
     if not isinstance(bundled_codex_version, str) or not bundled_codex_version:
@@ -138,11 +168,17 @@ def _build_codex_install(node_binary: Path, adapter_entry: Path) -> codex_instal
         raise InstallUnresolvable(f"unsupported platform {triple_key!r} for bundled codex binary discovery.")
     platform_package_name = _CODEX_PLATFORM_PACKAGE[target_triple]
     binary_name = "codex.exe" if platform.system() == "Windows" else "codex"
-    bundled_codex_binary = (
-        package_dir / "node_modules" / platform_package_name / "vendor" / target_triple / "bin" / binary_name
-    )
-    if not bundled_codex_binary.is_file():
-        raise InstallUnresolvable(f"bundled codex binary not found at {bundled_codex_binary}.")
+    # Resolved the same way as the package above: the platform binary is
+    # hoisted alongside it in a normal npm install, not nested under the
+    # adapter.
+    vendor_relative = f"vendor/{target_triple}/bin/{binary_name}"
+    platform_package_dir = _resolve_node_package_dir(package_dir, platform_package_name, vendor_relative)
+    bundled_codex_binary = platform_package_dir / vendor_relative if platform_package_dir is not None else None
+    if bundled_codex_binary is None:
+        raise InstallUnresolvable(
+            f"no {platform_package_name} codex binary resolvable from {package_dir} "
+            f"(expected vendor/{target_triple}/bin/{binary_name})."
+        )
 
     return codex_install.CodexAcpInstall(
         node_binary=str(node_binary),

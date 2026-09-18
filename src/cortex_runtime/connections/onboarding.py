@@ -19,6 +19,12 @@ the stored ``credential_ref`` still equals that id-derived canonical value
 and does not collide with any other connection's path before touching
 storage; on mismatch the connection is treated as ``invalid`` and no I/O is
 performed against the tampered value.
+
+:func:`create_referenced_connection` is the one exception to "id-derived":
+it is how D-T035-02's discovery-created connections point at the user's own
+``~/.codex``/``~/.claude`` (``connections.model.EngineNativeDir(owned=False)``),
+never a Cortex-owned copy; that directory is fixed per engine, not per
+connection id, and is never created or written to here.
 """
 from __future__ import annotations
 
@@ -297,6 +303,82 @@ def create_connection(
     return record
 
 
+def create_referenced_connection(
+    *,
+    name: str,
+    engine: str,
+    provider: str,
+    launch_command: tuple[str, ...],
+    reuse: bool = True,
+    environ: dict[str, str] | None = None,
+) -> ConnectionRecord:
+    """Register a connection that *references* the client's own native
+    credential directory (D-T035-02) instead of owning a Cortex-managed copy.
+
+    Always ``auth_mode=native_account``, and ``credential_ref`` is always
+    ``EngineNativeDir(path=registry.client_native_dir(engine), owned=False)``
+    -- never caller-supplied, and never a directory this function creates,
+    chmods, or writes to (it belongs to the user's own client-configured
+    engine install, e.g. via ``connections.discovery``). ``reuse=True`` by
+    default: calling this again for the same engine/provider/launch_command
+    returns the existing connection rather than erroring, so startup
+    discovery (T035) can call it idempotently.
+    """
+    auth_mode = AuthMode.NATIVE_ACCOUNT
+    support = validate_auth_selection(engine, auth_mode, None)
+    fingerprint = trust.fingerprint(engine, provider, None, launch_command)
+    now = _now_iso()
+    with registry.transaction(environ) as state:
+        candidate = None
+        for _attempt in range(_MAX_ID_ATTEMPTS):
+            candidate_id = new_id("cn_")
+            if candidate_id not in state.connections:
+                candidate = candidate_id
+                break
+        if candidate is None:
+            raise _validation_error("identifier_unavailable", "Could not allocate a unique connection id; retry.")
+
+        credential_ref = EngineNativeDir(path=str(registry.client_native_dir(engine, environ)), owned=False)
+
+        record = ConnectionRecord(
+            id=candidate,
+            name=name,
+            engine=engine,
+            provider=provider,
+            auth_mode=auth_mode,
+            key_kind=None,
+            endpoint=None,
+            launch_command=launch_command,
+            credential_ref=credential_ref,
+            approved_fingerprint=fingerprint,
+            state=ConnectionState.AUTHORIZATION_REQUIRED,
+            qualified=support.qualified,
+            created_at=now,
+            updated_at=now,
+        )
+        key = _duplicate_key(record)
+        for existing in state.connections.values():
+            if _duplicate_key(existing) == key:
+                if not reuse:
+                    raise _validation_error(
+                        "connection_already_exists",
+                        "A connection with the same engine/provider/auth_mode/key_kind/"
+                        "endpoint/launch_command already exists; pass reuse=True to reuse it "
+                        "instead of registering a materially identical duplicate.",
+                    )
+                return existing
+        record = ConnectionRecord(
+            id=record.id, name=record.name, engine=record.engine, provider=record.provider,
+            auth_mode=record.auth_mode, key_kind=record.key_kind, endpoint=record.endpoint,
+            launch_command=record.launch_command, credential_ref=record.credential_ref,
+            approved_fingerprint=record.approved_fingerprint,
+            state=_derive_state(record, {**state.connections, record.id: record}, environ),
+            qualified=record.qualified, created_at=record.created_at, updated_at=record.updated_at,
+        )
+        state.connections[record.id] = record
+    return record
+
+
 def set_api_key(connection_id: str, reader: Callable[[], bytes], *, environ: dict[str, str] | None = None) -> ConnectionRecord:
     """Write an API key secret from ``reader()`` bytes; never an argv/string path.
 
@@ -354,8 +436,17 @@ def mark_native_login_pending(connection_id: str, *, environ: dict[str, str] | N
         record = state.connections.get(connection_id)
         if record is None:
             raise _authorization_error("connection_unavailable", "Unknown connection id.")
-        if record.auth_mode != AuthMode.NATIVE_ACCOUNT or not isinstance(record.credential_ref, EngineNativeDir):
-            raise _validation_error("unsupported_auth_mode", "mark_native_login_pending only applies to native_account connections with an engine_native_dir.")
+        if (
+            record.auth_mode != AuthMode.NATIVE_ACCOUNT
+            or not isinstance(record.credential_ref, EngineNativeDir)
+            or not record.credential_ref.owned
+        ):
+            raise _validation_error(
+                "unsupported_auth_mode",
+                "mark_native_login_pending only applies to native_account connections with "
+                "a Cortex-owned engine_native_dir; a referenced connection's directory is the "
+                "user's own client-managed login, never a Cortex-instructed one.",
+            )
         registry.assert_canonical_and_unique(record, state.connections, environ)
         env_var = _ISOLATION_ENV_VAR.get(record.engine)
         if env_var is None:
@@ -425,6 +516,58 @@ _STATE_ERROR_CODE = {
     ConnectionState.UNAVAILABLE: "connection_unavailable",
     ConnectionState.INVALID: "connection_invalid",
 }
+
+
+# T035/D-T035-02: the human-facing provider label for each supported
+# engine's referenced (client-discovered) connection.
+_DISCOVERY_PROVIDER = {
+    "codex-acp": "openai",
+    "claude-agent-acp": "anthropic",
+}
+
+
+def sync_discovered_connections(discovered: dict, *, environ: dict[str, str] | None = None) -> list[ConnectionRecord]:
+    """Give every discovered engine (see ``connections.discovery``) a
+    connection, iff it has none yet; never touches an existing one.
+
+    ``discovered`` is ``connections.discovery.discover_all()``'s return
+    value (``{engine: EngineDiscovery}``). For each engine already present
+    on *any* existing connection (any auth_mode, any credential_ref shape --
+    an engine the user already configured by hand is left exactly as they
+    left it), this is a no-op. Otherwise a new referencing connection is
+    created via :func:`create_referenced_connection`. Idempotent and safe
+    to call on every startup.
+
+    # ponytail: the read-then-create check below is not atomic across the
+    # two registry transactions (a concurrent second startup could still
+    # both pass the "no existing connection" check); create_referenced_connection's
+    # own reuse=True keeps that race harmless as long as both calls agree on
+    # provider/launch_command (true for two runs of the same install).
+    """
+    if not discovered:
+        return []
+    try:
+        existing_engines = {record.engine for record in registry.read_registry(environ).connections.values()}
+    except PortableError:
+        return []
+    created = []
+    for engine, info in discovered.items():
+        if engine in existing_engines:
+            continue
+        provider = _DISCOVERY_PROVIDER.get(engine, engine)
+        try:
+            record = create_referenced_connection(
+                name=f"{engine} (discovered)",
+                engine=engine,
+                provider=provider,
+                launch_command=tuple(info.launch_command),
+                reuse=True,
+                environ=environ,
+            )
+        except PortableError:
+            continue
+        created.append(record)
+    return created
 
 
 def resolve_connection_for_route(connection_id: str, *, environ: dict[str, str] | None = None) -> ConnectionRecord:

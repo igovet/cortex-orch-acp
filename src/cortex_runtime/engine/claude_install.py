@@ -97,13 +97,12 @@ class ClaudeAcpInstall:
                 )
 
 
-# Identical to codex_install's own list (see that module's docstring): both
-# engines are observed installed under the same Zed registry layout, so the
-# same client-managed/other-app locations are never trusted here either.
-# Relative to ``$HOME`` (the explicit ``environ``'s ``HOME``, never a
-# hardcoded one).
+# Identical to codex_install's own list (see that module's comment for why
+# the client's own agent registry is no longer among them: D-T035-02 makes
+# the engines the user configured in their client the engines Cortex runs,
+# and those live exactly there). Relative to ``$HOME`` (the explicit
+# ``environ``'s ``HOME``, never a hardcoded one).
 _UNTRUSTED_HOME_RELATIVE_ROOTS = (
-    (".local", "share", "zed", "external_agents"),
     (".local", "share", "app.codeg"),
     (".config", "app.codeg"),
 )
