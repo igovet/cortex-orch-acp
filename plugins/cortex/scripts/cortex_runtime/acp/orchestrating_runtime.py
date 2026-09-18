@@ -47,6 +47,7 @@ from ..portable.roles import load_role
 from ..recovery.capsule import build_capsule, render_capsule
 from ..trusted_channel import ChannelContext, issue_channel_tx
 from . import messages as acp_messages
+from ..catalog import labels as catalog_labels
 from . import questions_store
 from . import steering as acp_steering
 
@@ -135,6 +136,11 @@ _WORKER_ACTION_LOG_MAX_ENTRIES = 50
 
 # A tool call's title is one line on a card, never a place for a payload.
 _TOOL_CALL_TITLE_MAX_CHARS = 200
+
+# How soon a delegation asked for mid-turn is picked up. Small enough that
+# a worker starts while the coordinator is still talking, large enough that
+# an idle turn is not a busy loop against the store.
+_EARLY_DISPATCH_POLL_SECONDS = 0.25
 
 # A worker card's title (role, work, and the action it is on right now).
 _WORKER_CARD_TITLE_MAX_CHARS = 300
@@ -485,6 +491,9 @@ class OrchestratingRuntime:
         # The last card payload actually sent per assignment, so an
         # unchanged one is never sent twice.
         self._worker_card_sent: dict[str, tuple] = {}
+        # Each worker card's route line (engine, model, effort), kept so
+        # every later body update still says what it is running on.
+        self._worker_card_route: dict[str, str] = {}
         # T020 (stop-race fix): the cancel_event of whichever start_prompt/
         # answer_question call currently owns this task's continuation loop
         # *in this process* -- lets stop_task() signal that loop to exit
@@ -1646,6 +1655,37 @@ class OrchestratingRuntime:
             def _on_coordinator_delta(chunk_text: str) -> bool:
                 return emit_update(scrub_text(chunk_text, max_chars=_COORDINATOR_DELTA_MAX_CHARS), delta=True)
 
+            # T035 FINDING-13 #1, measured: the coordinator calls delegate()
+            # in the middle of its turn, but the delegation was only ever
+            # acted on after prompt() returned (see _process_new_events'
+            # single call site below), so a worker could not start until
+            # the coordinator stopped talking. Live, that was the whole gap
+            # the finding called "provisioning takes eight minutes":
+            # delegation_requested 18:59:08, coordinator gives up 19:04:40,
+            # worker ready 19:05:33 -- one second after the cancellation,
+            # with the open itself taking 0.738s (evidence/T035/RUN-07).
+            #
+            # This watcher runs the same _process_new_events while the turn
+            # is still in flight, so provisioning overlaps the turn that
+            # asked for it. It is the same method, deliberately: its own
+            # dispatch bookkeeping is already written to be race-free
+            # against a concurrent call (see its "P1 #7 fix" comment), so
+            # this adds a caller, not a second code path.
+            _turn_done = threading.Event()
+
+            def _dispatch_while_turn_runs() -> None:
+                while not _turn_done.wait(timeout=_EARLY_DISPATCH_POLL_SECONDS):
+                    if cancel_event.is_set():
+                        return
+                    try:
+                        self._process_new_events(task_id, channel, cancel_event)
+                    except Exception:  # noqa: BLE001 - never fail the turn over an early start
+                        return
+
+            _early_dispatch = threading.Thread(
+                target=_dispatch_while_turn_runs, name="cortex-early-dispatch", daemon=True,
+            )
+            _early_dispatch.start()
             try:
                 outcome = self._engine.prompt(
                     session_ref, prompt_text, cancel_event, on_delta=_on_coordinator_delta,
@@ -1680,6 +1720,11 @@ class OrchestratingRuntime:
                 if claimed:
                     delegation_events.release_claim(self._store, task_id, continuation_id)
                 raise
+            finally:
+                # However this turn ends -- success, engine failure, or a
+                # raise -- the early-dispatch watcher stops with it; it
+                # exists only for the window while the turn is in flight.
+                _turn_done.set()
             self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind=None, stop_reason=outcome.stop_reason)
             if claimed:
                 delegation_events.mark_delivered(self._store, task_id, continuation_id)
@@ -2029,6 +2074,47 @@ class OrchestratingRuntime:
             ).fetchone()
         return _json.loads(row["payload_json"]) if row is not None else None
 
+    def _delegation_route_label(self, task_id: str, assignment_ref: str) -> str | None:
+        """Which engine, model and effort this worker is actually running
+        on, read from its own configuration revision -- never from the
+        task default, which a fallback or a per-role route may not match.
+
+        ``None`` when provisioning has not recorded a revision for this
+        assignment yet, or the revision has since gone: a card without the
+        line is better than a card asserting a route that was not used.
+        """
+        import json
+
+        try:
+            with self._store.connection() as db:
+                row = db.execute(
+                    "SELECT config_revision FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?",
+                    (task_id, assignment_ref),
+                ).fetchone()
+                if row is None or not row["config_revision"]:
+                    return None
+                revision = db.execute(
+                    "SELECT route_engine, parameters FROM configuration_revisions WHERE id=?",
+                    (row["config_revision"],),
+                ).fetchone()
+            if revision is None:
+                return None
+            parameters = json.loads(revision["parameters"] or "{}")
+        except Exception:  # noqa: BLE001 - a label is never worth failing a card over
+            return None
+        parts = [catalog_labels.engine_short_name(revision["route_engine"])]
+        model = parameters.get("model")
+        if model:
+            parts.append(str(model))
+        # Each engine names its own effort knob; whichever one this route
+        # carries is the one to show (see configuration.policy).
+        for key in ("effort", "reasoning_effort", "thought_level"):
+            value = parameters.get(key)
+            if value:
+                parts.append(str(value))
+                break
+        return " · ".join(parts)
+
     def _delegation_provisioning_role(self, task_id: str, assignment_ref: str) -> str | None:
         """Best-effort resolved role id for a delegation, once
         ``ProvisioningService.delegate`` has actually resolved and recorded
@@ -2113,6 +2199,11 @@ class OrchestratingRuntime:
                         fields["title"] = base_title
                         with self._lock:
                             self._worker_card_title[assignment_ref] = base_title
+                route = self._delegation_route_label(task_id, assignment_ref)
+                if route:
+                    fields["text"] = route
+                    with self._lock:
+                        self._worker_card_route[assignment_ref] = route
                 emit_tool_call(fields)
             elif event.event_type == "worker_result" and event.assignment_ref:
                 assignment_ref = self._assignment_ref_for_attempt(task_id, event.assignment_ref)
@@ -2214,6 +2305,7 @@ class OrchestratingRuntime:
             activity = dict(self._worker_activity)
             logs = {ref: list(entries) for ref, entries in self._worker_action_log.items()}
             titles = dict(self._worker_card_title)
+            routes = dict(self._worker_card_route)
         for assignment_ref, latest in activity.items():
             # The sentinel marks text the worker spoke (kept as a rolling
             # tail) rather than a tool call's own one-line title; it never
@@ -2229,8 +2321,14 @@ class OrchestratingRuntime:
             if base:
                 fields["title"] = scrub_text(f"{base} · {latest}", max_chars=_WORKER_CARD_TITLE_MAX_CHARS)
             entries = logs.get(assignment_ref)
+            body_lines = []
+            route = routes.get(assignment_ref)
+            if route:
+                body_lines.append(route)
             if entries:
-                fields["text"] = scrub_text("\n".join(entries), max_chars=_WORKER_ACTION_LOG_MAX_CHARS)
+                body_lines.extend(entries)
+            if body_lines:
+                fields["text"] = scrub_text("\n".join(body_lines), max_chars=_WORKER_ACTION_LOG_MAX_CHARS)
             # This runs on every wait tick, but a worker is not doing
             # something new on every tick: re-sending an identical card is
             # pure wire noise (and a client redrawing it, flicker).
@@ -3001,6 +3099,7 @@ class OrchestratingRuntime:
                         self._worker_activity.pop(assignment_ref, None)
                         self._worker_action_log.pop(assignment_ref, None)
                         self._worker_card_sent.pop(assignment_ref, None)
+                        self._worker_card_route.pop(assignment_ref, None)
                 break
             except EngineTurnFailed as failure:
                 # T017: a worker's own engine turn failing (transport

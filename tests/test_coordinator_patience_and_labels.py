@@ -329,3 +329,47 @@ def test_an_explicit_language_choice_is_told_to_the_coordinator(tmp_path):
     runtime2.start_prompt(task2, "s1", "Add a guard.", [].append, threading.Event())
     assert seen2
     assert "по-русски" not in seen2[0] and "in English" not in seen2[0], seen2[0]
+
+
+def test_a_delegation_starts_while_the_coordinator_is_still_talking(tmp_path):
+    """T035 FINDING-13 #1, measured live: the coordinator calls delegate()
+    mid-turn, but the delegation was only acted on after its whole turn
+    returned -- so the worker could not start until the coordinator stopped
+    talking, which live meant minutes."""
+    store, task_id = _task(tmp_path)
+    delegated = threading.Event()
+    worker_started = threading.Event()
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Assignment X", brief="do X", role="backend-dev",
+                acceptance="X done", request_key="reqX",
+            ))
+            delegated.set()
+            # Keep talking. Before the fix nothing could happen here at all;
+            # the worker only ever started after this returned.
+            started_in_time = worker_started.wait(timeout=5.0)
+            assert started_in_time, "the worker did not start while the coordinator was still in its turn"
+            return PromptOutcome(StopReason.END_TURN, "Delegated X.")
+        return PromptOutcome(StopReason.END_TURN, "Nothing new.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        worker_started.set()
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, router), FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=3,
+    )
+    runtime.start_prompt(task_id, "s1", "Do X.", [].append, threading.Event())
+
+    assert delegated.is_set()
+    assert worker_started.is_set()
+    # No early-dispatch thread outlives the turn it belongs to.
+    assert not [th for th in threading.enumerate() if th.name == "cortex-early-dispatch" and th.is_alive()]
