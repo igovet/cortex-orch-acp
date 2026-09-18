@@ -13,6 +13,7 @@
     "src/cortex_runtime/acp/host_requests.py",
     "src/cortex_runtime/acp/messages.py",
     "src/cortex_runtime/acp/orchestrating_runtime.py",
+    "src/cortex_runtime/acp/pipeline_bootstrap.py",
     "src/cortex_runtime/acp/production_runtime.py",
     "src/cortex_runtime/acp/protocol.py",
     "src/cortex_runtime/acp/questions_store.py",

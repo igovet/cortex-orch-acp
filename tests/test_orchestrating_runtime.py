@@ -576,7 +576,11 @@ def test_delegation_produces_stable_card_updated_through_running_and_completed(t
     creates = [c for c in cards if c.get("new")]
     assert len(creates) == 1  # the card is created exactly once
     assert creates[0]["status"] == "pending"
-    assert creates[0]["kind"] == "execute"
+    # Not "execute": a worker assignment is not a command being run, and a
+    # client rendered it under a "Run Command" heading that described
+    # nothing that was happening. The pinned schema has no kind for
+    # delegation, so the catch-all is the honest one.
+    assert creates[0]["kind"] == "other"
     updates = [c for c in cards if not c.get("new")]
     assert [c.get("status") for c in updates] == ["in_progress", "completed"]
     # T035 requirement 3: the running/finished title is re-issued from the

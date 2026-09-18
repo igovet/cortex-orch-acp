@@ -49,7 +49,9 @@ from ..recovery.capsule import build_capsule, render_capsule
 from ..trusted_channel import ChannelContext, issue_channel_tx
 from . import messages as acp_messages
 from ..catalog import labels as catalog_labels
+from . import pipeline_bootstrap
 from . import questions_store
+from ..routing.store import get_route_extras
 from . import steering as acp_steering
 
 COORDINATOR_ROLE_ID = "orchestrator"
@@ -102,7 +104,11 @@ def _provisioning_progress_note(provisioning_sig: tuple[tuple[str, str, str], ..
 # arbitrary worker actions (edits, commands, searches, ...), never just one
 # of the more specific kinds (read/edit/search/...), and "execute" reads
 # truer than the catch-all "other".
-_WORKER_TOOL_CALL_KIND = "execute"
+# A worker assignment is not a command being run: a client renders
+# "execute" under a "Run Command" heading, which describes nothing that
+# is happening. The pinned schema has no "delegate"/"agent" kind, so the
+# honest choice among its values is the catch-all.
+_WORKER_TOOL_CALL_KIND = "other"
 _TOOL_CALL_STATUS_FOR_CANCELLED = "failed"
 
 
@@ -559,6 +565,10 @@ class OrchestratingRuntime:
         # See _emit_worker_card: the one place that decides create vs
         # update, so the two can never arrive out of order again.
         self._emitted_worker_cards: set[str] = set()
+        # Project revisions this runtime itself produced by applying a
+        # worker's integration. See _integrate_assignment and the
+        # coordinator-turn digest check.
+        self._authorized_project_revisions: dict[str, list] = {}
         # T020 (stop-race fix): the cancel_event of whichever start_prompt/
         # answer_question call currently owns this task's continuation loop
         # *in this process* -- lets stop_task() signal that loop to exit
@@ -1358,6 +1368,35 @@ class OrchestratingRuntime:
 
     # -- main loop ----------------------------------------------------
 
+    def _publish_initial_pipeline(self, task_id: str, channel, request_text: str) -> None:
+        """Best-effort route context for the runtime-published initial
+        pipeline (see ``pipeline_bootstrap``): the bound engine/model, and
+        the effort this task's current configuration revision actually
+        recorded, when one is already resolvable. Never raises -- a failure
+        building this optional context still lets the pipeline publish with
+        an honest "not yet determined" route line (pipeline_bootstrap's own
+        fallback) rather than blocking the turn.
+        """
+        # ponytail: ``configuration_route_extras`` records engine/model but
+        # never a resolved "effort" value (see routing.store's own schema
+        # docstring -- reasoning effort lives only in per-attempt engine
+        # parameters, never durably joined back to a route here), so this
+        # is honestly left unknown rather than guessed; add a real lookup
+        # if a durable source for it ever exists.
+        route_info = None
+        try:
+            preview = self._config.snapshot(task_id)
+            model = None
+            revision_id = preview.get("config_revision")
+            if revision_id:
+                extras = get_route_extras(self._store, revision_id)
+                if extras is not None:
+                    model = extras["route_model"]
+            route_info = dict(engine=preview.get("engine"), model=model, effort=None)
+        except Exception:
+            route_info = None
+        pipeline_bootstrap.publish_initial_pipeline(self._store, task_id, channel, request_text, route_info)
+
     def _run(
         self, task_id, session_id, content, emit_update, cancel_event, *,
         source_origin: str | None = None, source_event_id: str | None = None,
@@ -1382,6 +1421,15 @@ class OrchestratingRuntime:
         # below), as opposed to the task's very first prompt.
         pre_existing = acp_steering.orchestration_exists(self._store, task_id)
         channel, session_ref = self._ensure_coordinator(task_id)
+        if not pre_existing:
+            # Runtime-owned record, no model turn spent on it (see
+            # pipeline_bootstrap module docstring). Gated on ``not
+            # pre_existing`` only as a cheap skip for every later turn --
+            # publish_initial_pipeline's own durable check (the task's
+            # ``reports`` row) is the actual idempotency guarantee, so a
+            # second first-turn (recovery, replacement session) is still
+            # safe even if this in-process flag were ever wrong.
+            self._publish_initial_pipeline(task_id, channel, content)
         recovery_notice = self._pending_recovery_notice.pop(task_id, None)
         if recovery_notice is not None:
             notice_language = self._resolve_language(task_id, content_hint=content)
@@ -1806,7 +1854,21 @@ class OrchestratingRuntime:
             if claimed:
                 delegation_events.mark_delivered(self._store, task_id, continuation_id)
             post_turn_revision = delegation_revision.capture_revision(self._task_project_root(task_id))
-            if delegation_revision.workspace_changed(pre_turn_revision, post_turn_revision):
+            with self._lock:
+                authorized = list(self._authorized_project_revisions.get(task_id, ()))
+            # Compared with the same function the check itself uses -- a
+            # revision is a structure, not a value to match by identity.
+            authorized_now = any(
+                not delegation_revision.workspace_changed(revision, post_turn_revision)
+                for revision in authorized
+            )
+            with self._lock:
+                if authorized_now:
+                    # Consumed: a *further* change, by anyone, is once again
+                    # a revision nobody authorized.
+                    self._authorized_project_revisions.pop(task_id, None)
+                    pre_turn_revision = post_turn_revision
+            if not authorized_now and delegation_revision.workspace_changed(pre_turn_revision, post_turn_revision):
                 # T035 FINDING-12 closure: the coordinator's own turn just
                 # changed (or could not prove it did not change) the shared
                 # project workspace -- refused as a blocking failure of this
@@ -2298,7 +2360,7 @@ class OrchestratingRuntime:
                     lines.append(f"Report: {report_ref}")
                 self._emit_worker_card(
                     emit_tool_call, assignment_ref, status="completed",
-                    text=scrub_text("\n".join(lines), max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                    text=self._worker_card_body(assignment_ref, lines),
                 )
             elif event.event_type == "assignment_failed" and event.assignment_ref:
                 text = f"Not delegated/failed: {event.payload.get('error', 'unknown error')}"
@@ -2316,6 +2378,22 @@ class OrchestratingRuntime:
                     status=_TOOL_CALL_STATUS_FOR_CANCELLED,
                     text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 )
+
+    def _worker_card_body(self, assignment_ref: str, lines) -> str:
+        """A finished worker's card body: what it reports, and under it
+        everything it actually did.
+
+        The action log is consumed here -- this is the last thing that
+        needs it -- so a card is never rebuilt from a stale history."""
+        with self._lock:
+            route = self._worker_card_route.pop(assignment_ref, None)
+            actions = self._worker_action_log.pop(assignment_ref, None)
+        body = list(lines)
+        if route:
+            body.append(route)
+        if actions:
+            body.extend(actions)
+        return scrub_text("\n".join(part for part in body if part), max_chars=_WORKER_ACTION_LOG_MAX_CHARS)
 
     def _emit_worker_card(self, emit_tool_call, assignment_ref: str, *, only_if_new: bool = False, **fields) -> None:
         """Every update to a worker's assignment card goes through here.
@@ -3289,7 +3367,17 @@ class OrchestratingRuntime:
                         self._worker_activity[_ref] = "\u0000" + (previous[1:] + chunk_text)[-_WORKER_ACTIVITY_MAX_CHARS:]
                     return True
 
-                def _on_worker_tool_call(ref, kind, title, status, _ref=assignment_ref) -> None:
+                def _on_worker_tool_call(ref, kind, title, status, *rest, _ref=assignment_ref) -> None:
+                    # Keyword-only ``_ref``: this callback is invoked
+                    # positionally by the adapter, which grew ``locations``
+                    # and ``content`` arguments -- as a positional default
+                    # ``_ref`` silently took ``locations`` instead, the call
+                    # then raised TypeError on the sixth argument, and the
+                    # adapter's own best-effort ``except`` swallowed it. The
+                    # visible result was a worker card that never showed
+                    # anything the worker did, which is the one thing it is
+                    # for. ``*rest`` accepts whatever the adapter carries
+                    # without this needing to know about it.
                     action = (title or "tool call")[:_WORKER_ACTIVITY_MAX_CHARS]
                     with self._lock:
                         self._worker_activity[_ref] = action
@@ -3306,10 +3394,15 @@ class OrchestratingRuntime:
                 finally:
                     with self._lock:
                         self._worker_turns_in_flight.discard(assignment_ref)
+                        # The *current* action is over; the log of what
+                        # this worker did is not. A worker that finishes
+                        # between two wait ticks used to have its whole
+                        # history discarded before anything could show it,
+                        # so its card said only that it had finished. The
+                        # log now survives to the result card, where a
+                        # reader can open it and see what was done.
                         self._worker_activity.pop(assignment_ref, None)
-                        self._worker_action_log.pop(assignment_ref, None)
                         self._worker_card_sent.pop(assignment_ref, None)
-                        self._worker_card_route.pop(assignment_ref, None)
                 break
             except EngineTurnFailed as failure:
                 # T017: a worker's own engine turn failing (transport
@@ -3577,6 +3670,20 @@ class OrchestratingRuntime:
                 payload, origin="runtime", assignment_ref=assignment_ref,
             )
         else:
+            # The project just changed, and this runtime changed it, on the
+            # worker's own request. Record the resulting revision as
+            # authorized: the coordinator-turn digest backstop compares the
+            # project before and after a turn and cannot otherwise tell this
+            # apart from the coordinator writing to the project itself --
+            # observed live blocking a turn that had done everything right
+            # (evidence/T035/RUN-08).
+            try:
+                with self._lock:
+                    self._authorized_project_revisions.setdefault(task_id, []).append(
+                        delegation_revision.capture_revision(project_root),
+                    )
+            except Exception:  # noqa: BLE001 - an unrecorded baseline only costs a false block
+                pass
             delegation_events.append_event(
                 self._store, task_id, "progress", f"integration_applied:{request_key}",
                 dict(kind="integration_applied", assignment_ref=assignment_ref, request_key=request_key,

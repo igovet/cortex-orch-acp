@@ -32,6 +32,7 @@ from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.store import Store
 
 from orchestration_fakes import FakeConfigSnapshotSource, FakeSessionRuntime, FakeWorkspace
+from test_orchestrating_runtime import _publish
 
 
 def _task(tmp_path):
@@ -652,3 +653,55 @@ def test_a_path_inside_the_project_is_shown_relative_to_it():
     plain: list = []
     _R._engine_tool_call_emitter(_R.__new__(_R), plain.append)("r4", "read", "Read '/p/demo/x.py'", "completed")
     assert plain[-1]["title"] == "Read '/p/demo/x.py'"
+
+
+def test_a_worker_tool_call_actually_reaches_its_card(tmp_path):
+    """The card existed, the log was always empty, and the tests passed:
+    they called `_emit_worker_activity_tool_calls` directly instead of
+    going through the callback the adapter really invokes. The adapter
+    grew `locations`/`content` arguments, the worker callback's positional
+    `_ref` default silently ate `locations`, the extra argument raised
+    TypeError, and the adapter's best-effort `except` swallowed it. This
+    goes through the callback, with the adapter's real argument count."""
+    store, task_id = _task(tmp_path)
+    seen: dict = {}
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Guard divide", brief="do X", role="backend-dev",
+                acceptance="X done", request_key="reqX",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Delegated.")
+        return PromptOutcome(StopReason.END_TURN, "Nothing new.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index, on_tool_call=None):
+        # Exactly how delegation.live_adapters calls it: six positionals.
+        on_tool_call("t1", "read", "Read calc.py", "completed",
+                     [{"path": "/p/calc.py"}], None)
+        on_tool_call("t2", "edit", "Edit calc.py", "in_progress",
+                     [{"path": "/p/calc.py"}], [{"type": "diff", "path": "/p/calc.py",
+                                                 "oldText": "a", "newText": "b"}])
+        seen["called"] = True
+        _publish(store, channel, "guard", call_index)
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, router), FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=3,
+    )
+    cards: list = []
+    runtime.start_prompt(task_id, "s1", "Do X.", [].append, threading.Event(), emit_tool_call=cards.append)
+
+    assert seen.get("called"), "the worker's callback never ran; this test proved nothing"
+    bodies = [str(c.get("text", "")) for c in cards]
+    assert any("Read calc.py" in body for body in bodies), f"the worker's actions never reached its card: {cards}"
+    assert any("Edit calc.py" in body for body in bodies), cards
+    # A worker assignment is not a command being run.
+    created = [c for c in cards if c.get("new")]
+    assert created and created[0]["kind"] != "execute", created[0]
