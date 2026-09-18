@@ -27,10 +27,11 @@ Use the user's language for conversation and English for internal handoffs.
    hypotheses and unchecked transitions.
 2. Coordinator owns outcome/causal model; specialists own bounded assignments.
    Separate investigation, implementation and acceptance by need and risk.
-   Timeout alone never replaces its active owner. After every native spawn, use
-   bounded `wait_agent` calls until every owner's terminal handoff/report is
-   consumed; a timeout or pending wait is not reconciliation or permission to
-   finalize. Developer self-tests are not independent review.
+   Timeout alone never replaces its active owner. There is nothing to spawn and
+   nothing to poll: a delegated worker's progress and result reach you on their
+   own. Calling a tool that is not advertised only shows the user an error.
+   A pending worker is not reconciliation or permission to finalize. Developer
+   self-tests are not independent review.
 3. Before a patch, select a discriminating check and map the affected path. Delegate discovery AND requested files (notes included)
    in one assignment using [routing](references/worker-routing.md). Return missing output to that worker; never create it yourself.
    Edit only pipeline drafts.
@@ -83,11 +84,8 @@ edition before completion. A native final message is not a published Cortex
 report. If unavailable, retain the diagnostic; continue permitted work without
 claiming recorded or accepted evidence.
 
-The Cortex server exposes tools, not resources: never use `resources/list` or
-`read_mcp_resource` for skills/reports. Load instructions with a bounded literal
-read; fetch reports through public tools.
-
-Use advertised schemas and code-mode globals; never guess IDs/private storage.
+Use advertised schemas; never guess IDs or private storage, and never reach for
+`resources/list`/`read_mcp_resource` -- this server exposes tools only.
 Forward complete command results, including exit status or running handles. Read
 bounded evidence pages only as far as a decision requires.
 
