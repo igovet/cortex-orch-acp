@@ -246,7 +246,6 @@ ERROR_HELP = {
     "draft_published": "This draft was already published. Retry only the identical write and delivery key to recover its receipt, or create a new draft for changed content.",
     "draft_marker_missing": "The server-issued draft marker is missing or changed. Restore required_first_line from create_draft as the exact first line, keep its following blank line, and retry.",
     "draft_guidance_remaining": "The draft still contains a server template placeholder. Replace the exact received placeholder with complete Markdown below the preserved draft marker, then retry the same write.",
-    "draft_replaced": "The server-created draft file was deleted, replaced, renamed, or recreated. Create a new draft and edit only its body in place; never delete or replace the server-created file.",
     "draft_cursor_stale": "The draft changed after the previous page. Omit the cursor and reread the current draft beginning; do not combine pages from different versions.",
     "draft_conflict": "The draft path now contains bytes different from the report already accepted for this delivery key. Preserve both files and use a new key only if this is intentionally a new report.",
     "invalid_utf8": "The draft is not valid UTF-8. Rewrite the complete file as UTF-8 without byte replacement, truncation, or line-ending normalization.",

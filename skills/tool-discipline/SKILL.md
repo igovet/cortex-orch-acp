@@ -43,6 +43,12 @@ expanded into a guessed directory. Recover a lost path through public evidence.
 Its exact patch may pass directly to the native patch tool or through a safe wrapper
 that forwards it intact. Never construct draft content with executable interpolation,
 shell substitution or evaluation, and never put its body in Cortex writer arguments.
+Fill a draft by writing into the file that already exists at that path: a patch or edit
+tool that modifies it in place, or a shell redirect into that exact path. A tool that
+writes a new file and moves it over the old one replaces the file, and publication is
+then refused however correct the text is. If a publication is refused for that reason,
+the fix is how the file was written, never a new draft: creating another and writing it
+the same way fails the same way.
 
 Inspect success, error and truncation signals before making claims. For discovery,
 use complete schemas already attached when available; otherwise select only needed

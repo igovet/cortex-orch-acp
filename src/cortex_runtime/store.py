@@ -857,11 +857,34 @@ class Store:
         source=self._source(db,task,draft["path"],kind=draft["kind"],error_field="draft_id",error_value=draft_id)
         identity=source.lstat()
         if identity.st_dev!=draft["device"] or identity.st_ino!=draft["inode"]:
-            raise StoreError(
-                "draft_replaced","draft_id",draft["id"],
-                "same server-created file edited in place",
-                "Create a new draft and update its body without deleting, replacing, renaming, or recreating the file.",
+            # A different file object than create_draft made, at the same
+            # path. Every property that bounds *who* could have put it
+            # there still holds, and was just re-checked by _source above:
+            # this exact server-issued path, directly inside the owner-only
+            # draft directory, a regular file, not a symlink, owned by this
+            # uid, with exactly one link. What an inode additionally says is
+            # only *how* the bytes arrived -- edited in place, or written
+            # elsewhere and moved over -- and moving a new file over the old
+            # one is how most write tools write anything. It is not a
+            # principal boundary: both require this same uid, which is the
+            # worker itself.
+            #
+            # Found live, and it stopped a task dead: every publish attempt
+            # was refused, the worker created a fresh draft and tried again
+            # five times in five minutes, then ran an experiment of its own
+            # to work out whether shell redirection preserves an inode. The
+            # remediation this used to print -- "without deleting,
+            # replacing, renaming, or recreating the file" -- is advice an
+            # atomic writer cannot follow.
+            #
+            # The new identity is recorded, so publication, idempotent
+            # retry and the reader all keep comparing against the file that
+            # is actually there.
+            db.execute(
+                "UPDATE drafts SET device=?,inode=? WHERE id=?",
+                (identity.st_dev,identity.st_ino,draft["id"]),
             )
+            draft=self._draft(db,task,thread,draft_id,published_ok=True)
         return draft,source
 
     def _recover(self,db,task,outcome=None):

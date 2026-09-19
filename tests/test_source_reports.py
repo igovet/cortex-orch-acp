@@ -181,21 +181,55 @@ def test_removed_draft_id_marker_is_rejected(publication):
     assert source.exists()
 
 
-def test_deleted_and_recreated_draft_is_rejected_even_with_exact_marker(publication):
+def test_a_draft_written_by_replacing_the_file_still_publishes(publication):
+    """Most write tools write a new file and move it over the old one, so
+    the draft's inode changes even though nothing about it is wrong.
+
+    Found live, and it stopped a task dead: every publish attempt was
+    refused, the worker created a fresh draft and tried again five times in
+    five minutes, then ran an experiment of its own to work out whether
+    shell redirection preserves an inode. What bounds *who* could have put
+    the file there is checked on every call and still holds -- the exact
+    server-issued path inside the owner-only draft directory, a regular
+    non-symlink file, this uid, one link. An inode says only how the bytes
+    arrived, and both ways require that same uid.
+    """
     store,task,base,_=publication
     draft,source,complete=make_draft(store,task,'general','evidence','recreated')
     original=source.stat()
     source.unlink()
-    # Force a distinct allocated identity before recreating the server path.
-    # The store's contract is physical in-place editing, not just matching
-    # Markdown bytes, so this avoids filesystem-dependent immediate inode reuse.
+    # Force a distinct allocated identity before recreating the server path,
+    # so this really is a different file object and not inode reuse.
     tombstone=source.with_name('.draft-recreation-tombstone')
     tombstone.write_bytes(b'occupied replacement identity')
     source.write_bytes(complete)
     assert source.stat().st_dev!=original.st_dev or source.stat().st_ino!=original.st_ino
-    with pytest.raises(StoreError,match='draft_replaced'):
-        publish(store,base,draft,key='recreated')
-    assert source.read_bytes()==complete
+
+    publish(store,base,draft,key='recreated')
+
+    # Published for real: one report file on disk, one row, and the draft
+    # itself consumed.
+    with store.connection() as db:
+        published=db.execute(
+            "SELECT COUNT(*) FROM reports WHERE task_id=? AND kind='report'",(task,),
+        ).fetchone()[0]
+        row=db.execute("SELECT device,inode FROM drafts WHERE id=?",(draft['draft_id'],)).fetchone()
+    assert published>=1
+    assert row is None or (row['device'],row['inode'])!=(original.st_dev,original.st_ino)
+
+
+def test_a_draft_outside_its_own_directory_is_still_refused(publication,tmp_path):
+    """The path checks are what bound who could have written the file, and
+    they are unchanged: a draft path that is a symlink, or points outside
+    the server's own draft directory, is refused whatever its inode."""
+    store,task,base,_=publication
+    draft,source,complete=make_draft(store,task,'general','evidence','elsewhere')
+    outside=tmp_path/'elsewhere.md'
+    outside.write_bytes(complete)
+    source.unlink()
+    source.symlink_to(outside)
+    with pytest.raises(StoreError,match='invalid_draft_path'):
+        publish(store,base,draft,key='elsewhere')
 
 
 def test_failure_after_atomic_publish_rolls_back_task_file_and_keeps_draft(publication,monkeypatch):
