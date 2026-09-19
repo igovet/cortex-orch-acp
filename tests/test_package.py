@@ -72,7 +72,14 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
             'Quality criteria',
             'Recovery',
         } <= headings
-        assert len(instructions) < 12_500
+        # Raised once, for the one rule that makes a worker's isolation
+        # something it understands rather than something it discovers by
+        # being refused: work in your own copy, the project's real paths
+        # are not yours. Live, a worker edited the project directly and
+        # its change reached the coordinator with no integration and no
+        # check at all. This guard exists to stop drift, not to price out
+        # a rule the product needs.
+        assert len(instructions) < 12_900
         assert 'page of at most\n4,000 characters' in instructions
         assert 'not a total context limit' in instructions
         assert 'references/report-publication.md' in instructions

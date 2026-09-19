@@ -52,6 +52,8 @@ asking this bridge at all.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+from pathlib import Path
 import re
 import threading
 
@@ -163,6 +165,73 @@ def _named_for_the_user(params):
     updated = dict(params)
     updated["toolCall"] = named
     return updated
+
+
+# A worker's own draft/pipeline file lives in the project's store, outside
+# its isolated workspace, and filling it is exactly what a worker is for.
+_WORKER_WRITABLE_STORE_FILE = re.compile(r"/\.cortex/(?:draft-reports|pipeline-drafts)/[^/]+$")
+
+# The kinds that change something. "execute" is deliberately not here --
+# see worker_write_outside_workspace's own HONEST BOUNDARY.
+_MUTATING_TOOL_KINDS = frozenset({"edit", "delete", "move"})
+
+# Where an engine puts the path a tool call acts on, besides `locations`.
+_TOOL_PATH_KEYS = ("path", "file_path", "filePath", "abs_path", "absolutePath", "target", "destination")
+
+
+def worker_write_outside_workspace(params, workspace_root: str) -> str | None:
+    """The first path this call would change that lies outside the worker's
+    own isolated workspace, or ``None`` when it changes nothing outside it.
+
+    A worker works on a copy, and its result reaches the project only
+    through the conflict-checked integration step. That was true only by
+    convention: the copy was the worker's working directory, and nothing
+    stopped a worker that knew the project's real path from editing it
+    directly. Live, one did -- its `Edit` named the real
+    ``/var/tmp/.../calc.py``, its own copy stayed untouched, there was no
+    integration step at all, and the coordinator accepted a change that had
+    never been checked against anything.
+
+    A worker's own draft/pipeline file is the one thing it may write
+    outside that copy: it lives in the project's store by design, and
+    filling it is what a worker is for.
+
+    HONEST BOUNDARY: this reads the paths a tool call declares -- its
+    ``locations`` and the usual ``rawInput`` path keys. A shell command can
+    still write wherever the user's own account can; that vector is bounded
+    by ``requires_confirmation`` (which sends destructive shell idioms to
+    the user) and not by this. Closing the declared-path vector is what
+    stops the ordinary case, which is an edit tool pointed at an absolute
+    path.
+    """
+    tool_call = _tool_call(params)
+    if tool_call.get("kind") not in _MUTATING_TOOL_KINDS:
+        return None
+    try:
+        root = Path(workspace_root).resolve()
+    except OSError:
+        return None
+    candidates = []
+    for location in tool_call.get("locations") or ():
+        if isinstance(location, Mapping) and isinstance(location.get("path"), str):
+            candidates.append(location["path"])
+    raw_input = tool_call.get("rawInput")
+    if isinstance(raw_input, Mapping):
+        candidates.extend(raw_input[key] for key in _TOOL_PATH_KEYS if isinstance(raw_input.get(key), str))
+    for candidate in candidates:
+        if not candidate.startswith("/"):
+            # Relative to the worker's own working directory, which is the
+            # workspace itself.
+            continue
+        if _WORKER_WRITABLE_STORE_FILE.search(candidate):
+            continue
+        try:
+            resolved = Path(candidate).resolve()
+        except OSError:
+            return candidate
+        if resolved != root and root not in resolved.parents:
+            return candidate
+    return None
 
 
 def _command_text_only(tool_call: dict) -> str:
@@ -508,11 +577,31 @@ class PermissionBridge:
         if not binding.is_current(snapshot):
             self._observe("permission_denied_stale_binding", engine_session_id=engine_session_id)
             return dict(CANCELLED_OUTCOME)
-        if binding.role == "worker" and not requires_confirmation(params):
-            option_id = _auto_allow_option_id(params)
-            if option_id is not None:
-                self._observe("permission_auto_approved", engine_session_id=engine_session_id)
-                return {"outcome": {"outcome": "selected", "optionId": option_id}}
+        if binding.role == "worker":
+            # A worker works on a copy, and its result reaches the project
+            # only through the conflict-checked integration step. That was
+            # true by convention alone -- the copy was its working
+            # directory -- until a worker pointed its `Edit` at the
+            # project's real path instead: its own copy stayed untouched,
+            # there was no integration at all, and the coordinator accepted
+            # a change nothing had checked. See
+            # worker_write_outside_workspace, including what it does not
+            # cover.
+            outside = worker_write_outside_workspace(params, binding.workspace_root)
+            if outside is not None:
+                self._observe(
+                    "worker_write_outside_workspace_refused",
+                    engine_session_id=engine_session_id, path=outside,
+                )
+                reject_option_id = _auto_reject_option_id(params)
+                if reject_option_id is not None:
+                    return {"outcome": {"outcome": "selected", "optionId": reject_option_id}}
+                return dict(CANCELLED_OUTCOME)
+            if not requires_confirmation(params):
+                option_id = _auto_allow_option_id(params)
+                if option_id is not None:
+                    self._observe("permission_auto_approved", engine_session_id=engine_session_id)
+                    return {"outcome": {"outcome": "selected", "optionId": option_id}}
         if binding.role == "coordinator":
             # T035 FINDING-12 closure: a coordinator never reaches the host
             # at all -- its intent is decided right here, offline, every

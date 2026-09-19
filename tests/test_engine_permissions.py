@@ -574,3 +574,47 @@ def test_a_permission_question_names_the_command_it_is_asking_about():
     assert _named_for_the_user(already) is already
     read = {"toolCall": {"kind": "read", "title": "Read calc.py"}}
     assert _named_for_the_user(read) is read
+
+
+def test_a_worker_may_not_edit_the_project_only_its_own_copy(tmp_path):
+    """A worker works on a copy, and its result reaches the project only
+    through the conflict-checked integration step.
+
+    That was true by convention alone -- the copy was its working
+    directory. Live, a worker pointed its `Edit` at the project's real
+    path instead: its own copy stayed untouched, there was no integration
+    step at all, and the coordinator accepted a change nothing had checked
+    against anything.
+    """
+    from cortex_runtime.engine.permissions import worker_write_outside_workspace
+
+    project = tmp_path / "project"
+    workspace = project / ".cortex" / "workspaces" / "xa_1" / "work"
+    workspace.mkdir(parents=True)
+    root = str(workspace.resolve())
+
+    def edit(path):
+        return worker_write_outside_workspace(
+            {"toolCall": {"kind": "edit", "locations": [{"path": path}]}}, root,
+        )
+
+    # The project's own file: refused, and the refusal names it.
+    assert edit(str(project / "calc.py")) == str(project / "calc.py")
+    # Its own copy: allowed.
+    assert edit(str(workspace / "calc.py")) is None
+    # A relative path is relative to its own working directory.
+    assert edit("calc.py") is None
+    # Its own draft lives in the project's store by design, and filling it
+    # is what a worker is for.
+    assert worker_write_outside_workspace(
+        {"toolCall": {"kind": "edit", "rawInput": {"file_path": str(project / ".cortex/draft-reports/d_1.md")}}},
+        root,
+    ) is None
+    # Reading anything is untouched by this rule.
+    assert worker_write_outside_workspace(
+        {"toolCall": {"kind": "read", "locations": [{"path": "/etc/hosts"}]}}, root,
+    ) is None
+    # Deleting and moving count too, wherever they point.
+    assert worker_write_outside_workspace(
+        {"toolCall": {"kind": "delete", "locations": [{"path": str(project / "README.md")}]}}, root,
+    ) == str(project / "README.md")
