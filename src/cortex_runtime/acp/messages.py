@@ -79,6 +79,12 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Coordinator engine turn failed ({kind}).",
         "ru": "Ход координатора завершился ошибкой движка ({kind}).",
     },
+    "coordinator_replaced_by_another_client": {
+        "en": "This thread was taken over by another client, so this turn ended here. "
+              "The task itself is fine and is continuing there; nothing was lost.",
+        "ru": "Этот тред перехватил другой клиент, поэтому ход здесь завершён. "
+              "С самой задачей всё в порядке, она продолжается там; ничего не потеряно.",
+    },
     "coordinator_turn_mutated_workspace": {
         "en": "Blocked: the coordinator's own turn changed the project workspace (or its "
               "change could not be ruled out). The coordinator is a route, not a worker -- "

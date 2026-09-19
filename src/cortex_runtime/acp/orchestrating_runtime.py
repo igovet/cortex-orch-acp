@@ -1995,8 +1995,19 @@ class OrchestratingRuntime:
                 self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind=failure.kind, stop_reason=None)
                 if claimed:
                     delegation_events.release_claim(self._store, task_id, continuation_id)
-                explanation = acp_messages.render("engine_failure", language, kind=failure.kind)
-                self._emit_localized(task_id, emit_update, language, "engine_failure", kind=failure.kind)
+                # The commonest cause of a transport-level failure here is
+                # not a broken engine at all: another client opened the same
+                # thread, and the takeover fenced this coordinator. Live
+                # (2026-09-19, two clients on one thread) the first client
+                # was told "coordinator engine turn failed (transport_eof)",
+                # which is true and tells the reader nothing. Say which one
+                # it was -- the durable record already knows, because the
+                # task's coordinator attempt is no longer this one.
+                message_key, params = "engine_failure", dict(kind=failure.kind)
+                if self._superseded_by_another_coordinator(task_id, getattr(channel, "attempt_id", None)):
+                    message_key, params = "coordinator_replaced_by_another_client", {}
+                explanation = acp_messages.render(message_key, language, **params)
+                self._emit_localized(task_id, emit_update, language, message_key, **params)
                 self._set_state(
                     task_id, "blocked", wait_reason=f"engine_failure:{failure.kind}",
                     wait_detail=dict(explanation=explanation),
@@ -2467,6 +2478,18 @@ class OrchestratingRuntime:
                 (task_id, assignment_ref),
             ).fetchone()
         return row["role_id"] if row is not None else None
+
+    def _superseded_by_another_coordinator(self, task_id: str, attempt_ref: str | None) -> bool:
+        """True when this task's coordinator attempt is no longer the one
+        this turn was running -- i.e. another client's session took the
+        thread over and fenced this one."""
+        if not attempt_ref:
+            return False
+        with self._store.connection() as db:
+            row = db.execute(
+                "SELECT coordinator_attempt_ref FROM task_orchestration WHERE task_id=?", (task_id,),
+            ).fetchone()
+        return row is not None and row["coordinator_attempt_ref"] not in (None, attempt_ref)
 
     def _coordinator_facing_refs(self, task_id: str, events) -> dict[str, str]:
         """Attempt id -> delegation ref, for the event types a worker keys by

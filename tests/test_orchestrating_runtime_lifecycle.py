@@ -1022,3 +1022,42 @@ def _fetch_one(store, query, params):
 def _fetch_all(store, query, params):
     with store.connection() as db:
         return db.execute(query, params).fetchall()
+
+
+# -- a turn fenced by another client's takeover, not a broken engine --------
+
+def test_a_fenced_coordinator_is_told_it_was_taken_over_not_that_the_engine_broke(tmp_path):
+    """Live (2026-09-19, one thread open in two clients): the second client's
+    takeover fenced the first coordinator, and the first client was told
+    "coordinator engine turn failed (transport_eof)" -- true, and useless to
+    whoever reads it. The durable record already knows which of the two it
+    was: the task's coordinator attempt is no longer this one."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
+    from cortex_runtime.store import Store
+
+    store = Store(tmp_path / ".cortex", project_root=str(tmp_path))
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._store = store
+    with store.connection() as db:
+        db.execute("INSERT INTO tasks (id, project_root, created_at) "
+                   "VALUES ('t1', ?, '2026-01-01T00:00:00+00:00')", (str(tmp_path),))
+        db.execute(
+            "INSERT INTO task_orchestration (task_id, state, coordinator_attempt_ref, updated_at) "
+            "VALUES ('t1', 'running', 'co_new', '2026-01-01T00:00:00+00:00')")
+        db.commit()
+
+    assert runtime._superseded_by_another_coordinator("t1", "co_old") is True
+    assert runtime._superseded_by_another_coordinator("t1", "co_new") is False
+    # Never guessed from an absent attempt id: that is a plain engine failure.
+    assert runtime._superseded_by_another_coordinator("t1", None) is False
+
+
+def test_the_takeover_message_exists_in_every_language_the_others_do(tmp_path):
+    from cortex_runtime.acp import messages as acp_messages
+
+    entry = acp_messages._CATALOG["coordinator_replaced_by_another_client"]
+    assert set(entry) == set(acp_messages._CATALOG["engine_failure"])
+    for language in entry:
+        rendered = acp_messages.render("coordinator_replaced_by_another_client", language)
+        assert "{" not in rendered  # no unfilled placeholder
+        assert rendered.strip()
