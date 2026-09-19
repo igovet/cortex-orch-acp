@@ -302,8 +302,10 @@ WORKER_OPERATIONS = {
     "publish_result": _operation(
         {
             "report_ref": string(
-                "Opaque published-report reference from an acknowledged publication "
-                "receipt (see contracts.REPORT). Never a draft or governance id.",
+                "The report YOU published for this assignment, copied from your own "
+                "publication receipt (see contracts.REPORT). You publish it yourself; "
+                "the coordinator never issues, confirms or hands one over -- asking it "
+                "for one only stalls the assignment. Never a draft or governance id.",
                 14,
                 minimum=14,
                 pattern=r"^r_[0-9a-f]{12}$",

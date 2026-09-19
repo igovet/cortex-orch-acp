@@ -382,7 +382,8 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-def _coalesce(events: list[delegation_events.TaskEvent], revisions: dict[int, dict] | None = None) -> str:
+def _coalesce(events: list[delegation_events.TaskEvent], revisions: dict[int, dict] | None = None,
+              assignment_refs: dict[str, str] | None = None) -> str:
     """Coalesce a batch of claimed events into ONE continuation prompt.
 
     Every claimed event contributes a line (informative-only event types
@@ -396,6 +397,16 @@ def _coalesce(events: list[delegation_events.TaskEvent], revisions: dict[int, di
     ``delegation.revision``) -- appended as a plain label so the
     coordinator can see a check's evidence is bound to one specific
     revision, never silently assumed still current.
+
+    ``assignment_refs``, keyed by attempt id, translates the two event
+    types the *worker* keys by its own attempt id (``worker_result`` and
+    ``worker_question`` -- see ``_assignment_ref_for_attempt``) back to the
+    delegation ref the coordinator was handed by ``delegate``. Without it
+    the coordinator is shown an identifier from an id space it has never
+    seen: live (2026-09-19, two assignments at once) it answered "this does
+    not match any of my assignments" and refused both a real question and a
+    real result, and it could not have answered anyway -- ``clarify`` takes
+    the delegation ref, not an attempt id.
 
     T023 (fresh review, LOW): a ``worker_result`` published concurrently
     with ``recovery.worker_reconciliation``'s own ``assignment_failed
@@ -414,10 +425,11 @@ def _coalesce(events: list[delegation_events.TaskEvent], revisions: dict[int, di
         event.assignment_ref for event in events
         if event.event_type == "worker_result" and event.assignment_ref
     }
+    assignment_refs = assignment_refs or {}
     lines = []
     for event in events:
         payload = event.payload
-        ref = event.assignment_ref or ""
+        ref = assignment_refs.get(event.assignment_ref or "", event.assignment_ref or "")
         if event.event_type == "user_message":
             lines.append(f"User message: {payload.get('content', '')}")
         elif (
@@ -1882,7 +1894,9 @@ class OrchestratingRuntime:
                     delegation_events.release_claim(self._store, task_id, continuation_id)
                 acp_steering.supersede_undelivered_steering(self._store, task_id)
                 return StopReason.CANCELLED
-            prompt_text = _coalesce(claimed, revisions) if claimed else content
+            prompt_text = _coalesce(
+                claimed, revisions, self._coordinator_facing_refs(task_id, claimed),
+            ) if claimed else content
             chosen_language = self._explicit_language(task_id)
             if chosen_language is not None:
                 prompt_text = (
@@ -2453,6 +2467,22 @@ class OrchestratingRuntime:
                 (task_id, assignment_ref),
             ).fetchone()
         return row["role_id"] if row is not None else None
+
+    def _coordinator_facing_refs(self, task_id: str, events) -> dict[str, str]:
+        """Attempt id -> delegation ref, for the event types a worker keys by
+        its own attempt id. Only entries that actually resolve are returned,
+        so an unresolvable one keeps its raw ref rather than vanishing."""
+        refs = {}
+        for event in events:
+            if event.event_type not in ("worker_result", "worker_question"):
+                continue
+            attempt_id = event.assignment_ref
+            if not attempt_id or attempt_id in refs:
+                continue
+            resolved = self._assignment_ref_for_attempt(task_id, attempt_id)
+            if resolved is not None:
+                refs[attempt_id] = resolved
+        return refs
 
     def _assignment_ref_for_attempt(self, task_id: str, attempt_id: str) -> str | None:
         """``worker_result`` events are keyed by the worker's own attempt id

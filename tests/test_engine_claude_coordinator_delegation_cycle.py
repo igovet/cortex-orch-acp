@@ -158,3 +158,50 @@ def test_claude_agent_acp_pinned_delivery_mechanism_is_the_documented_qualified_
     plan = mechanism.plan(_Role(), [])
     assert plan.qualification == DeliveryQualification.QUALIFIED
     assert plan.session_new_meta == {"systemPrompt": "You are a backend developer."}
+
+
+def test_the_result_reaches_the_coordinator_under_the_ref_delegate_gave_it(tmp_path):
+    """Live defect (2026-09-19): the continuation named the worker's attempt
+    id, so the coordinator saw an assignment it had never heard of, refused
+    a real result and a real question, and the task deadlocked with two
+    correct workers. The ref the coordinator is shown must be the one
+    ``delegate`` handed back -- the only one ``clarify``/``decide`` accept."""
+    store, task_id = _task(tmp_path)
+    delegated = {}
+    seen_messages = []
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            delegated["ref"] = mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Assignment A", brief="do A", role="backend-dev", acceptance="A done",
+                request_key="reqA",
+            ))["assignment_ref"]
+            return PromptOutcome(StopReason.END_TURN, "Delegated A.")
+        seen_messages.append(message)
+        if "Assignment A finished" in message:
+            mcp_tools.dispatch(store, channel, "decide", dict(
+                assignment_ref="task", decision="accept", rationale="Delivered.", request_key="acceptall",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Accepted.")
+        return PromptOutcome(StopReason.END_TURN, "Waiting.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        _publish(store, channel, _assignment_title(store, channel))
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    engine = FakeSessionRuntime(store, router)
+    runtime = OrchestratingRuntime(
+        store, engine, FakeWorkspace(),
+        FakeConfigSnapshotSource(engine="claude-agent-acp", version="0.78.0"),
+        wait_timeout_seconds=30.0,
+    )
+    runtime.start_prompt(task_id, "s1", "Ship the report.", [].append, threading.Event())
+
+    result_lines = [m for m in seen_messages if "result" in m]
+    assert result_lines, seen_messages
+    assert any(f"Assignment {delegated['ref']} result" in m for m in result_lines), result_lines
