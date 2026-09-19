@@ -480,3 +480,46 @@ def test_workspace_changed_real_capture_before_and_after_a_write(tmp_path):
     (tmp_path / "a.txt").write_text("two\n")
     after = delegation_revision.capture_revision(tmp_path)
     assert delegation_revision.workspace_changed(before, after) is True
+
+
+def test_a_report_written_but_never_published_never_gates_acceptance(tmp_path):
+    """Writing the report and telling the coordinator about it are two
+    separate, separately-committed steps, and they can come apart.
+
+    Found in a live store: a worker had written a complete, well-formed
+    report -- on disk and in `reports` -- while the task carried no
+    `worker_result` at all, because the turn ended before its
+    `publish_result` ever landed. The gate must fail closed on that: an
+    assignment with no terminal event is not something to accept, however
+    good the file on disk looks.
+    """
+    _init_repo(tmp_path)
+    store, task_id = _task(tmp_path)
+    assignment_ref = "orphaned"
+    report_ref = "r_" + "c" * 12
+
+    # The report exists, exactly as the live store held it.
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "INSERT INTO reports VALUES (?,?,?,?,?)",
+            (report_ref, task_id, "report", f"{report_ref}.md", store._now()),
+        )
+        db.commit()
+        row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
+    from cortex_runtime.store import private_directory, project_task_directory
+
+    task_dir = private_directory(project_task_directory(row["project_root"]) / task_id)
+    (task_dir / f"{report_ref}.md").write_text("# a real report nobody was told about\n", encoding="utf-8")
+
+    # The delegation happened; the result never reached the coordinator.
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", f"delreq-{assignment_ref}",
+        dict(title="T", brief="B", role="backend-dev", acceptance="A"),
+        origin="coordinator", assignment_ref=assignment_ref,
+    )
+
+    ok, reasons = delegation_completion.gate(store, task_id)
+
+    assert not ok
+    assert any("is not terminal" in reason for reason in reasons), reasons
