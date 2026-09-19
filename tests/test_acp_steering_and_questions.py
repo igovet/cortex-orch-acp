@@ -976,3 +976,38 @@ def test_stop_races_the_first_start_prompt_between_bootstrap_and_provisioning(tm
         ).fetchone()
     assert delegated is None
     assert acp_steering.is_stopped(store, task_id) is True
+
+
+def test_an_answered_question_never_parks_the_task_again(tmp_path):
+    """Observed live: the coordinator ended its turn "waiting for user" on
+    a question that had been answered three minutes earlier, while two of
+    its own workers were still running.
+
+    `_check_terminal_decision` reads the latest `coordinator_decision`.
+    Nothing newer ever overwrites an `ask_user` row, so once answered it
+    kept being read as the terminal decision, turn after turn. The accept
+    branch has re-checked for staleness since T017; this one did not.
+    """
+    from cortex_runtime.acp import questions_store
+
+    store, task_id = _task(tmp_path)
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda *a, **k: None), FakeWorkspace(), FakeConfigSnapshotSource(),
+    )
+    channel, _ = runtime._ensure_coordinator(task_id)
+    mcp_tools.dispatch(store, channel, "decide", dict(
+        assignment_ref="task", decision="ask_user", question="English or Russian?",
+        rationale="Need the message language.", request_key="q1",
+    ))
+
+    terminal = runtime._check_terminal_decision(task_id)
+    assert isinstance(terminal, dict) and terminal["kind"] == "ask_user"
+
+    question = questions_store.create_if_absent(
+        store, task_id, f"ask_user:{terminal['decision_id']}", terminal["question"],
+    )
+    assert questions_store.answer(store, question.id, "English", "user")
+
+    assert runtime._check_terminal_decision(task_id) is None, (
+        "an answered question must not keep ending the coordinator's turns"
+    )

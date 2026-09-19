@@ -1449,6 +1449,16 @@ class EngineSessionManagerAdapter:
         route_basis = launch.get("route_basis")
         if route_basis:
             detail["route_basis"] = route_basis
+        # The effort this attempt actually ran with. It exists nowhere else
+        # in the store: ``configuration_revisions`` holds the coordinator's
+        # parameters, and this attempt's own value lives only in ``launch``
+        # (applied to the worker by ``_apply_worker_mode_floor``). Without
+        # it the card naming a worker's route could say provider and model
+        # but never the third thing the user asked to see.
+        attempt_parameters = launch.get("parameters") or {}
+        effort = attempt_parameters.get("effort") or attempt_parameters.get("thought_level")
+        if effort:
+            detail["effort"] = effort
         if is_fallback:
             detail["failure_class"] = launch.get("fallback_failure_class")
         routing_store.record_attempt_audit(

@@ -56,7 +56,13 @@ from . import steering as acp_steering
 
 COORDINATOR_ROLE_ID = "orchestrator"
 DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS = 3
-DEFAULT_MAX_TOTAL_CONTINUATIONS = 50
+# No cap: the coordinator may continue as many times as the work needs
+# ("У координатора не должно быть никаких ограничений, он хоть миллион
+# может сделать продолжений подряд"). A genuine stall is still caught by
+# the no-progress budget, and the user's own cancellation still ends any
+# turn; a fixed number of continuations only ever ended useful work early.
+# Kept as a settable parameter so a test can still bound a loop.
+DEFAULT_MAX_TOTAL_CONTINUATIONS = None
 DEFAULT_WORKER_POOL_SIZE = 4
 DEFAULT_WAIT_TIMEOUT_SECONDS = 5.0
 _WAIT_BACKOFF_START = 0.05
@@ -166,11 +172,18 @@ _INTERNAL_TOOL_CALL = re.compile(r"^(?:mcp\.)?cortex[._]")
 # the prohibition is ignored anyway, and keeps the pure-noise ones out of
 # the feed. Matched on the call's own name, loosely: an engine names them
 # however it likes, and a false positive here costs a card, not work.
+# The engine's own approval/deliberation step, which it reports as a tool
+# call of its own ("Guardian Review": Status/Action/Risk/Authorization/
+# Rationale). It is the engine reviewing itself, not an action taken on
+# the project, and a card for every one of them sits between the commands
+# that are. Matched by name as well as by kind: the kind arrives on the
+# update, not always on the create, so a name is what is available when
+# the card would first be drawn.
+_ENGINE_REVIEW = re.compile(r"\bguardian\s+review\b", re.I)
+
 _NATIVE_WAIT = re.compile(r"^\s*wait\b", re.I)
 _NATIVE_SUBAGENT = re.compile(r"\b(?:sub-?agent|spawn[_ ]?agent|spawnagent)\b", re.I)
 
-# How many distinct bookkeeping operations the collapsed card lists.
-_INTERNAL_OPERATIONS_MAX_ENTRIES = 40
 
 # A worker card's title (role, work, and the action it is on right now).
 _WORKER_CARD_TITLE_MAX_CHARS = 300
@@ -219,6 +232,11 @@ def _project_relative(text: str | None, project_root: str | None) -> str | None:
     return text.replace(root + os.sep, "")
 
 
+# The store's own directory as it appears inside a path or a command
+# line: at the start, or after a separator, quote or whitespace.
+_CORTEX_STORE_SEGMENT = re.compile(r"(?:^|[\s\"'`=(/\\])\.cortex[/\\]")
+
+
 def _touches_store(title: str | None, locations) -> bool:
     """Whether a tool call is working on this project's own store rather
     than on the project.
@@ -232,12 +250,20 @@ def _touches_store(title: str | None, locations) -> bool:
 
     Judged by where the call actually points -- its ``locations`` first,
     and its title only as the fallback for an engine that sends none.
+
+    A title is matched on the ``.cortex/`` path segment wherever it
+    appears, not on an absolute prefix: a run command names its paths
+    inline (``sed -n '1,45p' .cortex/draft-reports/d_...md``), and titles
+    have already had the project root stripped by ``_project_relative``,
+    so there is no leading separator left to anchor on. Everything to do
+    with Cortex's own task files is bookkeeping, whichever tool touches
+    it.
     """
     for location in locations or ():
         path = location.get("path") if isinstance(location, Mapping) else None
-        if isinstance(path, str) and f"{os.sep}.cortex{os.sep}" in path:
+        if isinstance(path, str) and _CORTEX_STORE_SEGMENT.search(path):
             return True
-    return bool(title) and f"{os.sep}.cortex{os.sep}" in title
+    return bool(title) and bool(_CORTEX_STORE_SEGMENT.search(title))
 
 
 def _display_role(role: str) -> str:
@@ -476,7 +502,7 @@ class OrchestratingRuntime:
         *,
         allow_unqualified_delivery: bool = False,
         max_no_progress_continuations: int = DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
-        max_total_continuations: int = DEFAULT_MAX_TOTAL_CONTINUATIONS,
+        max_total_continuations: int | None = DEFAULT_MAX_TOTAL_CONTINUATIONS,
         worker_pool_size: int = DEFAULT_WORKER_POOL_SIZE,
         wait_timeout_seconds: float = DEFAULT_WAIT_TIMEOUT_SECONDS,
         host_elicitor: HostElicitor | None = None,
@@ -1666,11 +1692,6 @@ class OrchestratingRuntime:
                     wait_detail=dict(explanation="Coordination turn interrupted by session/cancel; already-running workers keep running."),
                 )
                 return StopReason.CANCELLED
-            total += 1
-            if total > self._max_total:
-                self._emit_localized(task_id, emit_update, language, "max_total_continuations")
-                self._set_state(task_id, "blocked", wait_reason="limit:max_total_continuations")
-                return StopReason.END_TURN
             continuation_id = new_id("cont_")
             claimed = delegation_events.claim_unconsumed(self._store, task_id, continuation_id)
             # T019: capture this batch's worker_result events' observed
@@ -1723,6 +1744,15 @@ class OrchestratingRuntime:
                         delegation_events.release_claim(self._store, task_id, continuation_id)
                     acp_steering.supersede_undelivered_steering(self._store, task_id)
                     return StopReason.CANCELLED
+                # A cancel (or a delegation, or an integration request)
+                # recorded while this loop is only *waiting* has nobody
+                # else to act on it: the in-turn watcher runs alongside a
+                # coordinator prompt, and here there is none. Without this
+                # such a request sat untouched until the worker being
+                # waited on finished its own turn -- which, now that the
+                # coordinator has no continuation cap and genuinely waits,
+                # can be a very long time.
+                self._process_new_events(task_id, channel, cancel_event, emit_tool_call)
                 progressed = self._wait_for_progress(task_id, cancel_event)
                 if not progressed:
                     # T035 FINDING-13 #2: a no-progress *tick* is not
@@ -1796,6 +1826,21 @@ class OrchestratingRuntime:
                 continue
             first = False
             no_progress = 0
+            # Counted here, where a coordination continuation actually
+            # happens, and nowhere else. At the top of the loop this also
+            # counted every *waiting* tick: a worker running for four
+            # minutes spent the whole budget without the coordinator being
+            # asked anything at all, and the turn then ended claiming it
+            # had exceeded a number of continuations it had never made.
+            # Waiting is bounded by the no-progress budget above and by
+            # the user's own cancellation, not by this.
+            total += 1
+            if self._max_total is not None and total > self._max_total:
+                self._emit_localized(task_id, emit_update, language, "max_total_continuations")
+                self._set_state(task_id, "blocked", wait_reason="limit:max_total_continuations")
+                if claimed:
+                    delegation_events.release_claim(self._store, task_id, continuation_id)
+                return StopReason.END_TURN
             # T020 (stop-race fix): re-check immediately before ever calling
             # the coordinator's engine again -- a /cortex-stop that lands
             # between this iteration's own top-of-loop check and here (for
@@ -2328,8 +2373,8 @@ class OrchestratingRuntime:
                 # ._record_route_audit`` wrote when it dispatched it, which
                 # for a worker is its own route, not the coordinator's.
                 audit = db.execute(
-                    "SELECT engine, model FROM attempt_route_audit WHERE attempt_id=? "
-                    "ORDER BY recorded_at DESC LIMIT 1",
+                    "SELECT engine, model, decision_detail_json FROM attempt_route_audit "
+                    "WHERE attempt_id=? ORDER BY recorded_at DESC LIMIT 1",
                     (row["attempt_id"],),
                 ).fetchone() if row["attempt_id"] else None
             if revision is None:
@@ -2342,13 +2387,24 @@ class OrchestratingRuntime:
         model = (audit["model"] if audit else None) or parameters.get("model")
         if model and model != "unknown":
             parts.append(str(model))
-        # Each engine names its own effort knob; whichever one this route
-        # carries is the one to show (see configuration.policy).
-        for key in ("effort", "reasoning_effort", "thought_level"):
-            value = parameters.get(key)
-            if value:
-                parts.append(str(value))
-                break
+        # The attempt's own effort when it was audited with one -- for a
+        # worker that is the only place it exists; the revision's own
+        # parameters are the coordinator's. Each engine names its own
+        # effort knob (see configuration.policy).
+        audited_effort = None
+        if audit is not None:
+            try:
+                audited_effort = json.loads(audit["decision_detail_json"] or "{}").get("effort")
+            except Exception:  # noqa: BLE001 - a label never fails a card
+                audited_effort = None
+        if audited_effort:
+            parts.append(str(audited_effort))
+        else:
+            for key in ("effort", "reasoning_effort", "thought_level"):
+                value = parameters.get(key)
+                if value:
+                    parts.append(str(value))
+                    break
         return " · ".join(parts)
 
     def _delegation_provisioning_role(self, task_id: str, assignment_ref: str) -> str | None:
@@ -2579,7 +2635,13 @@ class OrchestratingRuntime:
         card here is an accurate "it is reading calc.py", never a diff.
 
         ``prefix`` labels whose call it is once more than one session is
-        working (a worker's role), and ``id_scope`` keeps two sessions'
+        working (a worker's role). It may be a callable, resolved at each
+        call instead of once up front: a worker's route is written down by
+        the runtime as the attempt is dispatched, and a prefix built
+        before that row lands names the engine and model from the
+        coordinator's own revision but has no effort to name -- which is
+        exactly how a header lost the third of the three things it was
+        asked to show. ``id_scope`` keeps two sessions'
         cards from colliding when both engines happen to use the same
         wire tool-call id. Returns ``None`` when no card channel is wired,
         which every pre-existing caller relies on.
@@ -2613,33 +2675,23 @@ class OrchestratingRuntime:
             )
             if _INTERNAL_TOOL_CALL.match(known or title or "") or _touches_store(known or title, locations):
                 # This runtime's own bookkeeping -- create_task,
-                # set_governance, list_events and the rest. A reader asked
-                # for their session, not for its plumbing, and one card per
-                # call buried the actual work. They collapse into a single
-                # card whose body says what was done.
-                name = _INTERNAL_TOOL_CALL.sub("", known or title or "") or "tool call"
-                if internal_group[1] is None:
-                    # A run that was interrupted by real work is finished;
-                    # this call opens a new group rather than reopening a
-                    # block the reader has already scrolled past.
-                    internal_group[0] += 1
-                    internal_group[1] = []
-                entries = internal_group[1]
-                if name and name not in entries:
-                    entries.append(name)
-                    del entries[:-_INTERNAL_OPERATIONS_MAX_ENTRIES]
-                card_id = f"call:{id_scope}:internal:{internal_group[0]}"
-                first = card_id not in seen
-                seen.add(card_id)
-                emit_tool_call(dict(
-                    new=first, tool_call_id=card_id, status="completed",
-                    title=acp_messages.render("internal_operations_card", language),
-                    **(dict(kind="other") if first else {}),
-                    text="\n".join(entries),
-                ))
+                # set_governance, delegate, list_events, and every read or
+                # write of Cortex's own task files. None of it is shown.
+                # Collapsing it into one block was already an improvement
+                # over a card per call, but the block was still plumbing
+                # the reader never asked to see, in a feed that exists to
+                # show the work. The delegation itself is visible as the
+                # worker's own card; the rest has no reader.
                 return
-            internal_group[1] = None
             label = known or title or ""
+            if _ENGINE_REVIEW.search(label) or (kind or pending_kind.get(ref)) == "think":
+                # The engine thinking out loud ("Guardian Review" and the
+                # like). It is not an action taken on the project, and a
+                # card for every deliberation step sits between the
+                # commands that are. The engine's own reasoning already
+                # reaches the client as thought chunks where a client
+                # wants them.
+                return
             if _NATIVE_WAIT.match(label):
                 # Nothing happened, and the user asked not to see it.
                 return
@@ -2676,7 +2728,8 @@ class OrchestratingRuntime:
                 fields["kind"] = _acp_tool_call_kind(kind if kind is not None else pending_kind.get(ref))
             else:
                 fields["new"] = False
-            fields["title"] = f"{prefix}{known}" if prefix else known
+            resolved_prefix = prefix() if callable(prefix) else prefix
+            fields["title"] = f"{resolved_prefix}{known}" if resolved_prefix else known
             # Carried verbatim: these are the schema's own display shapes,
             # and a client turns them into the clickable path and the diff
             # a reader actually wants. Anything the engine did not send
@@ -2696,7 +2749,6 @@ class OrchestratingRuntime:
         # [sequence number, entries of the run in progress or None]. Only
         # consecutive internal calls share a card: one block per run, not
         # one block for the whole session.
-        internal_group: list = [0, None]
         pending_locations: dict[str, object] = {}
         pending_content: dict[str, object] = {}
         return on_tool_call
@@ -2887,6 +2939,21 @@ class OrchestratingRuntime:
         if payload.get("decision") == "accept" and payload.get("assignment_ref") == "task":
             return self._recheck_accept(task_id, row["id"])
         if payload.get("decision") == "ask_user":
+            # Only while that question is actually still open. This is the
+            # latest *decision*, not the latest state: once it was
+            # answered, nothing newer overwrote it, so every later turn
+            # read it again and parked the task on a question that had
+            # been answered minutes earlier -- ending the coordinator's
+            # turn while its workers were still running. The accept branch
+            # above has re-checked for staleness since T017; this one
+            # never did.
+            with self._store.connection() as db:
+                question_row = db.execute(
+                    "SELECT status FROM pending_questions WHERE task_id=? AND dedup_key=?",
+                    (task_id, f"ask_user:{row['id']}"),
+                ).fetchone()
+            if question_row is not None and question_row["status"] != "open":
+                return None
             options = payload.get("options")
             return dict(
                 kind="ask_user", decision_id=row["id"], question=payload.get("question") or "",
@@ -3530,7 +3597,14 @@ class OrchestratingRuntime:
                     # anything the worker did, which is the one thing it is
                     # for. ``*rest`` accepts whatever the adapter carries
                     # without this needing to know about it.
-                    action = (title or "tool call")[:_WORKER_ACTIVITY_MAX_CHARS]
+                    if not title:
+                        # An unnamed call is not an action worth showing:
+                        # putting "tool call" on the card replaces what the
+                        # worker was last actually doing with a word that
+                        # says nothing. Wait for the named update -- the
+                        # per-call cards hold themselves back the same way.
+                        return
+                    action = title[:_WORKER_ACTIVITY_MAX_CHARS]
                     with self._lock:
                         self._worker_activity[_ref] = action
                         log = self._worker_action_log.setdefault(_ref, [])
@@ -3546,12 +3620,19 @@ class OrchestratingRuntime:
                 # same wire tool-call id.
                 with self._lock:
                     feed = self._task_tool_call_emitters.get(task_id)
-                route_label = self._delegation_route_label(task_id, assignment_ref)
-                who = _display_role(result.role_id)
-                if route_label:
-                    who = f"{who} · {route_label}"
+                # Who, then the action on its own line. Run on one line
+                # the command read as a continuation of the model name
+                # ("...gpt-5.6-luna · \"sed -n ...\"") rather than as the
+                # thing the worker is doing. Resolved per call, never once
+                # here: this runs the moment the worker is dispatched, and
+                # the attempt's own route row may land a moment later.
+                def _worker_prefix(_ref=assignment_ref, _role=result.role_id) -> str:
+                    label = self._delegation_route_label(task_id, _ref)
+                    who = _display_role(_role)
+                    return f"{who} · {label}\n" if label else f"{who}\n"
+
                 worker_cards = self._engine_tool_call_emitter(
-                    feed, prefix=f"{who} · ", id_scope=assignment_ref,
+                    feed, prefix=_worker_prefix, id_scope=assignment_ref,
                     project_root=self._task_project_root(task_id),
                 ) if feed is not None else None
 

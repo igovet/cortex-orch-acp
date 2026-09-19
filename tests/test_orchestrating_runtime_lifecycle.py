@@ -910,6 +910,7 @@ def test_assignment_cancel_while_worker_queued_aborts_promptly_no_leak(tmp_path)
             result_b = mcp_tools.dispatch(store, channel, "delegate", dict(title="B", brief="do B", role="backend-dev", acceptance="B done", request_key="reqB"))
             refs["A"] = result_a["assignment_ref"]
             refs["B"] = result_b["assignment_ref"]
+            refs["channel"] = channel
             return PromptOutcome(StopReason.END_TURN, "Delegated A and B.")
         if "Cancel queued" in message:
             queued_title = "B" if opened_title.get("title") == "A" else "A"
@@ -939,11 +940,23 @@ def test_assignment_cancel_while_worker_queued_aborts_promptly_no_leak(tmp_path)
         store, router, connection_id="cn_assign_cancel", capacity_limit=2, wait_timeout_seconds=0.1,
         max_no_progress_continuations=3,
     )
+    # The coordinator has no continuation cap (the user's own decision:
+    # "хоть миллион"), so its first turn no longer returns while a worker
+    # it is waiting on is still running -- it waits, which is the point.
+    # The queued sibling therefore has to be observed and cancelled from
+    # outside, while that turn is still in flight: the cancel is written
+    # exactly as the coordinator's own ``cancel`` tool writes it, and the
+    # running turn's own event watcher is what has to act on it.
+    turn = {}
+    thread = threading.Thread(
+        target=lambda: turn.__setitem__(
+            "result", runtime.start_prompt(task_id, "s1", "Do A and B.", lambda t: True, threading.Event()),
+        ),
+    )
+    thread.start()
     try:
-        result1 = runtime.start_prompt(task_id, "s1", "Do A and B.", lambda t: True, threading.Event())
-        assert result1 == StopReason.END_TURN  # bounded blocked (one held, one queued, nothing meaningful yet)
-        assert opened.is_set()
-        assert "A" in refs and "B" in refs
+        assert opened.wait(timeout=30)
+        assert _poll(lambda: "A" in refs and "B" in refs)
         queued_title = "B" if opened_title["title"] == "A" else "A"
         queued_ref = refs[queued_title]
         queued_row = _poll(lambda: _fetch_one(
@@ -954,12 +967,12 @@ def test_assignment_cancel_while_worker_queued_aborts_promptly_no_leak(tmp_path)
         assert queued_attempt_id not in engine.open_calls  # genuinely never opened
 
         start = time.monotonic()
-        result2 = runtime.start_prompt(task_id, "s1", "Cancel queued worker please.", lambda t: True, threading.Event())
-        elapsed = time.monotonic() - start
-        assert result2 == StopReason.END_TURN
-        assert elapsed < 30  # cancel while queued resolves promptly, not a hang
-
+        mcp_tools.dispatch(
+            store, refs["channel"], "cancel",
+            dict(assignment_ref=queued_ref, reason="no longer needed", request_key="cancelQ"),
+        )
         assert _poll(lambda: queued_attempt_id in engine._cancelled_attempts)
+        assert time.monotonic() - start < 30  # cancel while queued resolves promptly, not a hang
         with store.connection() as db:
             cancelled_rows = db.execute(
                 "SELECT COUNT(*) AS n FROM task_events WHERE task_id=? AND event_type='assignment_cancelled' AND assignment_ref=?",
@@ -975,6 +988,8 @@ def test_assignment_cancel_while_worker_queued_aborts_promptly_no_leak(tmp_path)
         assert queued_attempt_id not in engine._owned  # executor thread freed, nothing left owned for it
     finally:
         hold_open.set()
+        thread.join(timeout=60)
+    assert turn.get("result") == StopReason.END_TURN
 
     # Other task work (the one that actually opened) is unaffected by the
     # queued sibling's cancellation.

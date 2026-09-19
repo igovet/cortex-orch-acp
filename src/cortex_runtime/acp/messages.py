@@ -53,10 +53,6 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "There is no task in this session yet, so there is nothing to harvest. Send a request first.",
         "ru": "В этой сессии ещё нет задачи, собирать нечего. Сначала отправьте запрос.",
     },
-    "internal_operations_card": {
-        "en": "Task bookkeeping",
-        "ru": "Служебные операции",
-    },
     "answer_in_language": {
         "en": "Always write your replies to the user in English, whatever language this prompt is in.",
         "ru": "Всегда пиши свои ответы пользователю по-русски, независимо от того, на каком языке этот запрос.",

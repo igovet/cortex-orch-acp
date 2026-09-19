@@ -478,3 +478,40 @@ def test_steering_after_recovery_is_included_before_continuation(tmp_path):
     assert result == StopReason.END_TURN
     assert any("Please also update the docs." in m for m in prompts_seen)
     engine.prompt = original_prompt
+
+
+def test_a_provably_gone_attempt_gives_its_capacity_slot_back(tmp_path):
+    """Found live: four reservations sat `reserved` for processes that had
+    not existed for half an hour, and every new attempt queued behind them
+    -- "connection 'cn_...' capacity is full" on a machine running nothing
+    at all. Only "alive"/"unknown" went through terminate_owned, which
+    releases on a confirmed exit; "absent" -- the ordinary case after a
+    crash or a restart -- called nothing and released nothing.
+    """
+    from cortex_runtime.delegation import capacity
+    from cortex_runtime.recovery import worker_reconciliation
+
+    store, task_id = _task(tmp_path)
+    engine = FakeRecoveryEngine(store)
+    runtime1 = _runtime(store, engine)
+    channel1, _ = runtime1._ensure_coordinator(task_id)
+    attempt_id, assignment_ref = _delegate_and_provision(runtime1, task_id, channel1)
+
+    reservation = capacity.reserve(
+        store, connection_id="cn_x", task_id=task_id, attempt_id=attempt_id, kind="worker", limit=4,
+    )
+    assert capacity.count_active(store, "cn_x") == 1
+
+    # The engine can prove that attempt's process is gone.
+    engine.lookup_states[attempt_id] = "absent"
+    assert engine.lookup_owned(attempt_id) == "absent"
+    worker_reconciliation.reconcile(store, engine, task_id)
+
+    assert capacity.count_active(store, "cn_x") == 0, "a slot nobody can reclaim wedges the connection"
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT state, release_observation FROM capacity_reservations WHERE reservation_id=?",
+            (reservation,),
+        ).fetchone()
+    assert row["state"] == "released"
+    assert row["release_observation"] == "recovery_worker_absent"

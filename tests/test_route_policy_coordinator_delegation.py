@@ -242,4 +242,7 @@ def test_the_audit_says_the_route_policy_is_what_authorized_this_route(tmp_path)
     audit = routing_store.list_audit_for_attempt(store, result.attempt_id)
     detail = audit[0]["decision_detail"]
     assert detail["route_basis"] == "route_policy"
+    # The effort this attempt ran with exists nowhere else in the store,
+    # and the worker card's header is asked to name it.
+    assert detail["effort"] == "medium"
     adapter.terminate_owned(result.attempt_id)

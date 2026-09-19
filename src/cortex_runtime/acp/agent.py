@@ -115,6 +115,30 @@ def observe(environ, operation, outcome):
     )
 
 
+
+def _store_error_message(error: StoreError) -> str:
+    """What the client is told when the store refuses.
+
+    ``StoreError`` already carries why -- the refused field, what it
+    received, what it expected -- and dropping all of it left a user
+    staring at "Storage failed while handling this request." for causes
+    they could have fixed in a second, such as a ``.cortex`` directory
+    that is not owner-only. Everything here is the user's own local
+    storage state (paths and modes, already truncated by
+    ``contracts._received``), not engine or account data.
+    """
+    parts = [str(error)]
+    if error.field:
+        parts.append(f"field {error.field}")
+    if error.received is not None:
+        parts.append(f"got {error.received}")
+    if error.expected:
+        parts.append(f"expected {error.expected}")
+    if error.correction:
+        parts.append(str(error.correction))
+    return "Storage failed while handling this request: " + "; ".join(parts) + "."
+
+
 class _RealHostElicitor:
     """T020: the real ``acp.orchestrating_runtime.HostElicitor`` -- relays a
     coordinator ``ask_user`` question through the connected host's own
@@ -369,7 +393,7 @@ class Agent:
             observe(self.environ, method, "error")
         except StoreError as exc:
             if has_id:
-                self._reply_error(request_id, -32603, "Storage failed while handling this request.")
+                self._reply_error(request_id, -32603, _store_error_message(exc))
             observe(self.environ, method, str(exc))
         except Exception:
             if has_id:

@@ -11,6 +11,13 @@ Before a call, name the concrete fact, state change or acceptance condition it m
 resolve. Reuse retained results while relevant state is unchanged. A timeout, quiet
 worker or desire to reconfirm does not justify another call.
 
+Your engine offers subagent and spawn tools of its own. Never use them. Work you
+hand to one runs in your session, your workspace and your model: no isolated copy,
+no checked integration, no per-role policy, no audit, and nothing anyone can review
+afterwards. Whatever you do not hand to Cortex, you did yourself and must report as
+your own. A worker delegates nothing at all; it does the work it was given, or says
+it could not.
+
 Use only tools available to this host and role. Read the complete live declaration
 before first use and reload it after context loss; a name or recovery summary is
 insufficient. Use minimal requests with declared defaults and observed identifiers.

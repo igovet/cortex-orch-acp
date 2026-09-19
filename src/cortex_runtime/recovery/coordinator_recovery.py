@@ -158,6 +158,14 @@ def recover(store, engine, task_id: str, *, old_owner_epoch: int, old_attempt_re
     terminate = getattr(engine, "terminate_owned", None)
     if lookup is not None:
         state = lookup(old_attempt_ref)
+        if state == "absent":
+            # Provably gone, so its capacity slot is provably free -- the
+            # ordinary case after a crash or a restart. Nothing released
+            # it before, and a coordinator slot nobody can reclaim wedges
+            # the whole project: every later attempt queues behind it.
+            worker_reconciliation._release_confirmed_capacity(
+                store, old_attempt_ref, "recovery_coordinator_absent",
+            )
         if state == "unknown":
             raise _indeterminate(
                 "coordinator_recovery_indeterminate",

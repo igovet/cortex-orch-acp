@@ -108,10 +108,38 @@ def reconcile(store, engine, task_id: str) -> list[dict]:
             terminate = getattr(engine, "terminate_owned", None)
             if terminate is not None:
                 terminate(attempt_id)
+        if state == "absent":
+            # The engine can prove this attempt's process is gone, so its
+            # capacity slot is provably free. Only "alive"/"unknown" went
+            # through terminate_owned, which releases on a *confirmed*
+            # exit; "absent" called nothing and released nothing, so every
+            # crash or restart permanently consumed a slot. Four of them
+            # left one connection unable to open anything at all, with
+            # every new attempt queued behind reservations whose processes
+            # had not existed for half an hour.
+            _release_confirmed_capacity(store, attempt_id, "recovery_worker_absent")
         _revoke_worker_channel(store, task_id, attempt_id)
         action = _write_recovery_failure_if_still_lost(store, task_id, assignment_ref, worker_key, attempt_id, state)
         actions.append(dict(assignment_ref=assignment_ref, action=action))
     return actions
+
+
+def _release_confirmed_capacity(store, attempt_id: str, observation: str) -> None:
+    """Release this attempt's capacity reservation, if it holds one.
+
+    Best-effort by design: a reservation that is already released, or was
+    never taken (capacity tracking is optional -- see
+    ``delegation.live_adapters.EngineSessionManagerAdapter``), is not a
+    reason to fail a recovery that has otherwise succeeded.
+    """
+    from ..delegation import capacity
+
+    try:
+        reservation_id = capacity.reservation_for_attempt(store, attempt_id)
+        if reservation_id is not None:
+            capacity.release_confirmed(store, reservation_id, observation)
+    except Exception:  # noqa: BLE001 - never fail recovery over bookkeeping
+        pass
 
 
 def _write_recovery_failure_if_still_lost(

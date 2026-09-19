@@ -528,11 +528,12 @@ def test_the_coordinator_can_write_the_project_store_but_not_its_source(tmp_path
     assert (project / "calc.py").read_text().startswith("def divide")
 
 
-def test_only_consecutive_internal_calls_share_one_block():
-    """This runtime's own bookkeeping calls collapse so they do not bury
-    the work -- but a run that real work interrupted is finished. Folding
-    the whole session into one block puts later operations into a card the
-    reader scrolled past long ago."""
+def test_this_runtimes_own_bookkeeping_is_not_shown_at_all():
+    """Collapsing the plumbing into one block was still a block of
+    plumbing in a feed that exists to show the work ("давай служебные
+    операции просто скроем и не будем выводить"). The delegation itself
+    stays visible as the worker's own card; nothing else about Cortex's
+    own tools or task files reaches the reader."""
     from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
 
     cards: list = []
@@ -540,20 +541,13 @@ def test_only_consecutive_internal_calls_share_one_block():
 
     on_tool_call("i1", "other", "mcp.cortex.create_task", "completed")
     on_tool_call("i2", "other", "mcp.cortex.set_governance", "completed")
-    internal = [c for c in cards if c["tool_call_id"].startswith("call:coordinator:internal")]
-    assert len({c["tool_call_id"] for c in internal}) == 1, "a consecutive run is one block"
-    assert internal[-1]["text"].splitlines() == ["create_task", "set_governance"]
+    on_tool_call("i3", "other", "mcp.cortex.delegate", "completed")
+    on_tool_call("i4", "execute", "sed -n '1,45p' .cortex/draft-reports/d_76.md", "completed")
+    assert cards == [], f"nothing of this runtime's own plumbing is shown: {cards}"
 
-    # Real work in between ends that run.
+    # Real work still gets its own card, with its own name.
     on_tool_call("r1", "read", "Read calc.py", "completed")
-    on_tool_call("i3", "other", "mcp.cortex.list_events", "completed")
-
-    blocks = {c["tool_call_id"] for c in cards if ":internal" in c["tool_call_id"]}
-    assert len(blocks) == 2, f"a new run must open a new block: {blocks}"
-    last = [c for c in cards if c["tool_call_id"] == "call:coordinator:internal:2"]
-    assert last[-1]["text"].splitlines() == ["list_events"], last[-1]
-    # The real work kept its own card, with its own name.
-    assert any(c.get("title") == "Read calc.py" for c in cards)
+    assert [c.get("title") for c in cards] == ["Read calc.py"]
 
 
 def test_the_worker_card_appears_while_the_coordinator_is_still_talking(tmp_path):
@@ -606,7 +600,7 @@ def test_edits_to_the_store_are_bookkeeping_not_edits_to_the_project():
     """Filling a draft or writing a report is done with ordinary file
     operations against `<project>/.cortex` -- by design. To a reader those
     are not edits to their code, and one "Editing files" card per report
-    buried the work the report was about."""
+    buried the work the report was about, so they are not shown at all."""
     from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
 
     cards: list = []
@@ -616,9 +610,7 @@ def test_edits_to_the_store_are_bookkeeping_not_edits_to_the_project():
         "e1", "edit", "Edit file", "completed",
         [{"path": "/p/.cortex/draft-reports/r1.md"}], None,
     )
-    assert cards, "the call vanished entirely"
-    assert ":internal" in cards[-1]["tool_call_id"], cards[-1]
-    assert cards[-1]["title"] == "Task bookkeeping"
+    assert cards == [], f"writing a report is not an edit to the project: {cards}"
 
     # A real edit to the project keeps its own card, its diff and its path.
     on_tool_call(
@@ -811,3 +803,205 @@ def test_a_worker_card_names_the_workers_own_model_not_the_coordinators(tmp_path
     )
 
     assert runtime._delegation_route_label(task_id, "a_ref") == "codex · gpt-5-codex · medium"
+
+
+def test_a_worker_card_header_names_the_effort_the_attempt_actually_ran_with(tmp_path):
+    """Provider, model and effort -- all three, or the header is only
+    two-thirds of what was asked for. The effort a worker ran with is
+    written down only on its own audit row: the revision's parameters are
+    the coordinator's, and a worker opened on a policy-chosen route never
+    gets a revision row of its own."""
+    import json as _json
+
+    from cortex_runtime.routing import store as routing_store
+
+    store, task_id = _task(tmp_path)
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda *a, **k: None), FakeWorkspace(), FakeConfigSnapshotSource(),
+    )
+    now = "2026-09-19T00:00:00+00:00"
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO configuration_revisions "
+            "(id, task_id, revision, route_id, route_engine, route_connection_id, parameters, "
+            " ceiling_snapshot, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("cfg-e", task_id, 1, "route-1", "codex", "conn-1",
+             _json.dumps({"effort": "low"}), "{}", "confirmed", now, now),
+        )
+        db.execute(
+            "INSERT INTO delegation_provisioning "
+            "(idempotency_key, task_id, attempt_id, role_id, step, status, config_revision, "
+            " owner_epoch, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("e_ref", task_id, "att-e", "worker-backend-dev", "engine_session", "done", "cfg-e", 1, now, now),
+        )
+        db.commit()
+    routing_store.record_attempt_audit(
+        store, attempt_id="att-e", task_id=task_id, role="worker-backend-dev", engine="codex",
+        connection_id="conn-1", model="gpt-5.6-luna", params_fingerprint="fp", config_revision_id="cfg-e",
+        decision="authorized", detail={"effort": "high"},
+    )
+
+    # "low" is the coordinator's own; this worker ran at "high".
+    assert runtime._delegation_route_label(task_id, "e_ref") == "codex · gpt-5.6-luna · high"
+
+
+def test_a_workers_action_is_shown_under_its_attribution_not_beside_it():
+    """`backend-dev · codex · gpt-5.6-luna · "sed -n '1,45p' calc.py"` reads
+    as though the command were part of the model's name. Who is acting
+    belongs on its own line, above what they did."""
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    cards: list = []
+    emit = runtime._engine_tool_call_emitter(
+        cards.append, prefix="backend-dev · codex · gpt-5.6-luna · high\n", id_scope="a_ref",
+    )
+    emit("t1", "execute", "sed -n '1,45p' calc.py", "in_progress")
+
+    assert cards, "a named call must produce a card"
+    title = cards[-1]["title"]
+    who, _, action = title.partition("\n")
+    assert who == "backend-dev · codex · gpt-5.6-luna · high"
+    assert action == "sed -n '1,45p' calc.py"
+
+
+def test_a_command_reading_cortexs_own_files_is_bookkeeping():
+    """Everything to do with Cortex's own task files is bookkeeping,
+    whichever tool touches it -- including a shell command naming the path
+    inline, which carries no `locations` and, after the project root is
+    stripped, no leading separator to anchor on either."""
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    cards: list = []
+    emit = runtime._engine_tool_call_emitter(cards.append, prefix="backend-dev\n", id_scope="a_ref")
+    emit("t1", "execute", "sed -n '1,45p' .cortex/draft-reports/d_764434be278c.md", "completed")
+    emit("t2", "execute", "python3 -m pytest -q", "completed")
+
+    assert len(cards) == 1, f"only the real command is shown: {cards}"
+    assert cards[0]["title"].endswith("python3 -m pytest -q")
+
+
+def test_the_engine_thinking_out_loud_is_not_an_action_card():
+    """"Guardian Review" and its kin arrived as `think`-kind tool calls and
+    sat between the commands the worker actually ran. Deliberation is not
+    an action taken on the project."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
+
+    cards: list = []
+    on_tool_call = _R._engine_tool_call_emitter(_R.__new__(_R), cards.append)
+
+    on_tool_call("t1", "think", "Guardian Review", "completed")
+    assert cards == [], f"thinking is not an action: {cards}"
+
+    on_tool_call("c1", "execute", "pytest -q", "completed")
+    assert [c.get("title") for c in cards] == ["pytest -q"]
+
+
+def test_two_workers_running_at_once_keep_their_actions_apart(tmp_path):
+    """A session has one message stream and no sub-feeds, so when two
+    workers run at the same time the only thing keeping them apart is
+    attribution and card identity. Both engines happily use the same wire
+    tool-call id ("call_1"), which is exactly the case that would collapse
+    two workers' work onto one card."""
+    import threading as _threading
+
+    from cortex_runtime.portable.engine_contract import StopReason as _Stop
+    from test_orchestrating_runtime import _assignment_title, _make_runtime
+
+    store, task_id = _task(tmp_path)
+    both_started = _threading.Barrier(2, timeout=30)
+    delegated = {"done": False}
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if not delegated["done"]:
+            delegated["done"] = True
+            for title in ("X", "Y"):
+                mcp_tools.dispatch(store, channel, "delegate", dict(
+                    title=title, brief=f"do {title}", role="backend-dev",
+                    acceptance=f"{title} done", request_key=f"req{title}",
+                ))
+            return PromptOutcome(_Stop.END_TURN, "delegated X and Y")
+        return PromptOutcome(_Stop.END_TURN, "")
+
+    def worker_behavior(store, channel, session_ref, message, call_index, on_tool_call=None):
+        title = _assignment_title(store, channel)
+        # Neither worker may finish before the other has started: this is
+        # the concurrent window, not two sequential workers.
+        both_started.wait()
+        if on_tool_call is not None:
+            # Deliberately the same wire id from both engines.
+            on_tool_call("call_1", "execute", f"pytest -q tests/test_{title}.py", "completed", None, None)
+        _publish(store, channel, title, call_index)
+        return PromptOutcome(_Stop.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime, _engine = _make_runtime(store, router)
+    cards: list = []
+    result = runtime.start_prompt(
+        task_id, "s1", "Do X and Y.", lambda t: True, threading.Event(),
+        emit_tool_call=lambda card: (cards.append(card), True)[1],
+    )
+    assert result == _Stop.END_TURN
+
+    actions = [c for c in cards if "pytest -q" in (c.get("title") or "")]
+    assert len(actions) == 2, f"each worker's own action must appear: {[c.get('title') for c in cards]}"
+    assert len({c["tool_call_id"] for c in actions}) == 2, "the same wire id from two workers must not share a card"
+    # Each action is attributed, and each names its own work.
+    for card in actions:
+        who, _, what = card["title"].partition("\n")
+        assert who.startswith("backend-dev"), card
+        assert what.startswith("pytest -q tests/test_"), card
+    assert {c["title"].rsplit("test_", 1)[1] for c in actions} == {"X.py", "Y.py"}
+
+    # Both results reached the coordinator, each exactly once.
+    with store.connection() as db:
+        results = db.execute(
+            "SELECT assignment_ref FROM task_events WHERE task_id=? AND event_type='worker_result'",
+            (task_id,),
+        ).fetchall()
+    assert len({row["assignment_ref"] for row in results}) == 2, "both workers' results must be recorded"
+
+
+def test_a_workers_header_is_resolved_when_the_card_is_drawn_not_before():
+    """The runtime writes down a worker's real route as it dispatches the
+    attempt. A header built a moment earlier falls back to the
+    coordinator's own revision -- which carries the engine and the model,
+    but no effort at all, so the header silently lost exactly one of the
+    three things it exists to show."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
+
+    known: dict = {"label": None}
+    cards: list = []
+    emit = _R._engine_tool_call_emitter(
+        _R.__new__(_R), cards.append,
+        prefix=lambda: f"backend-dev · {known['label']}\n" if known["label"] else "backend-dev\n",
+        id_scope="a_ref",
+    )
+
+    emit("t1", "execute", "pytest -q", "in_progress")
+    assert cards[-1]["title"] == "backend-dev\npytest -q"
+
+    # The attempt's own route row lands.
+    known["label"] = "codex · gpt-5.6-luna · high"
+    emit("t2", "execute", "ruff check", "in_progress")
+    assert cards[-1]["title"] == "backend-dev · codex · gpt-5.6-luna · high\nruff check"
+
+
+def test_the_engines_own_approval_step_is_not_an_action_card():
+    """Codex reports its own approval step as a tool call ("Guardian
+    Review": Status/Action/Risk/Authorization/Rationale). It is the engine
+    reviewing itself, and one card per deliberation sat between every two
+    commands the worker actually ran. Matched by name as well as by kind,
+    because the kind does not always arrive on the create."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
+
+    cards: list = []
+    emit = _R._engine_tool_call_emitter(_R.__new__(_R), cards.append, prefix="backend-dev\n", id_scope="a")
+
+    emit("g1", None, "Guardian Review", "completed")
+    emit("g2", "other", "guardian review", "in_progress")
+    assert cards == [], f"the engine reviewing itself is not an action: {cards}"
+
+    emit("c1", "execute", "pytest -q", "completed")
+    assert [c["title"] for c in cards] == ["backend-dev\npytest -q"]

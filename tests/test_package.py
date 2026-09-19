@@ -352,6 +352,12 @@ def test_native_instruction_boundaries_cover_observed_live_failures():
     assert 'Re-read after user steering' in discipline
     assert 'A wrapper must expose the full nested' in discipline
     assert 'never replay a mutation for reassurance' in discipline
+    # Found live: the coordinator was told not to use its engine's own
+    # subagents, workers never were, and the runtime can only report such
+    # a call after the fact -- it cannot prevent it. Every role gets the
+    # rule, which is why it lives in the skill both roles always load.
+    assert 'Your engine offers subagent and spawn tools of its own. Never use them.' in discipline
+    assert 'A worker delegates nothing at all' in discipline
     assert 'Use the draft reader only after compaction, restart' in publication
     assert 'Correct deterministic edit or argument errors once' in publication
     assert 'successful publication is the final tool action' in publication
