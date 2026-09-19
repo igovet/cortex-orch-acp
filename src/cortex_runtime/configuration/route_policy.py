@@ -133,21 +133,29 @@ def render_table(policy: RoutePolicy) -> str:
     names = sorted(policy.roles)
     if policy.default is not None:
         names.append(_DEFAULT_BUCKET)
-    lines = []
-    for name in names:
-        entries = policy.default if name == _DEFAULT_BUCKET else policy.roles.get(name)
-        if not entries:
-            continue
-        # Never as a bare word: a line reading "default: ..." was read as a
-        # role id and delegated with `role="default"`, which the runtime
-        # refused -- the coordinator had to notice and delegate again.
-        label = "any other role" if name == _DEFAULT_BUCKET else reverse_alias.get(name, name)
-        routes = " | ".join(
+    def _routes(entries, separator):
+        return separator.join(
             f"{entry.engine}/{entry.model} {{{','.join(sorted(entry.efforts))}}}"
             + (f" default={entry.default_effort}" if entry.default_effort else "")
             for entry in entries
         )
-        lines.append(f"{label}: {routes}")
+
+    lines = []
+    for name in names:
+        if name == _DEFAULT_BUCKET:
+            continue
+        entries = policy.roles.get(name)
+        if entries:
+            lines.append(f"{reverse_alias.get(name, name)}: {_routes(entries, ' | ')}")
+    # The fallback never takes the "<role>: <routes>" shape of a row above.
+    # Twice now a coordinator has read that shape as a role name and
+    # delegated with it -- first `role="default"`, then, after that was
+    # relabelled, `role="any other role"`, burning a delegation each time.
+    # A trailing sentence cannot be mistaken for a row.
+    if policy.default:
+        lines.append(
+            "Any role not listed above may use " + _routes(policy.default, " or ") + "."
+        )
     return "\n".join(lines)
 
 

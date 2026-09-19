@@ -226,7 +226,7 @@ def test_render_table_includes_the_default_bucket_and_skips_empty_roles():
     policy = _policy(roles={"worker-explorer": ()}, default=default_entries)
     table = route_policy_module.render_table(policy)
     assert "worker-explorer" not in table
-    assert table == "any other role: codex-acp/* {*}"
+    assert table == "Any role not listed above may use codex-acp/* {*}."
 
 
 def test_render_table_of_no_policy_roles_and_no_default_is_empty():
@@ -412,10 +412,12 @@ def test_an_unwritable_configuration_directory_never_stops_the_agent(tmp_path):
 
 
 def test_the_fallback_bucket_is_never_offered_as_a_role_name():
-    """Live: the table's own `default:` line was read as a role id, the
-    coordinator delegated with role="default", and the runtime refused it
-    -- the delegation had to be made a second time. The bucket is not a
-    role and must not look like one."""
+    """Live, twice. First the table's own `default:` line was read as a role
+    id and delegated with role="default". Relabelling it "any other role"
+    kept the "<role>: <routes>" shape of every other row, so the next
+    coordinator delegated with role="any other role" -- two assignments
+    refused before it noticed (2026-09-19). The fallback must not take the
+    shape of a row at all."""
     from cortex_runtime.configuration.route_policy import RoutePolicy, RoutePolicyEntry, render_table
 
     policy = RoutePolicy(
@@ -424,6 +426,8 @@ def test_the_fallback_bucket_is_never_offered_as_a_role_name():
     )
     table = render_table(policy)
 
-    assert "backend-dev:" in table
-    assert "any other role:" in table
-    assert not any(line.startswith("default:") for line in table.splitlines()), table
+    assert "backend-dev: codex-acp/luna {*}" in table
+    # No line but a real role's may carry the "<name>: <routes>" shape.
+    rows = [line for line in table.splitlines() if ": " in line.split(" {")[0]]
+    assert rows == ["backend-dev: codex-acp/luna {*}"], table
+    assert "Any role not listed above may use claude-agent-acp/sonnet {*}." in table
