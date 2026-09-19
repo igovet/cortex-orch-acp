@@ -48,8 +48,14 @@ class RouteUnresolved(OrchestrationUnavailable):
     away one frame before the client.
     """
 
+    #: Never: a route/configuration/qualification refusal is settled, not a
+    #: transient failure a retry could survive. Read duck-typed by
+    #: ``delegation.provisioning``, which must not import this module.
+    retry_eligible = False
+
     def __init__(self, code: str, remediation: str | None = None) -> None:
         super().__init__(code)
+        self.code = code
         self.remediation = remediation
 
 

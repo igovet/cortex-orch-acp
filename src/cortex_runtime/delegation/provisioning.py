@@ -494,23 +494,47 @@ class ProvisioningService:
                     retry_eligible=False,
                 )
             step = _base_step(row["step"])
-            if step == "workspace":
-                self._step_workspace(idempotency_key, row)
-            elif step == "channel":
-                self._step_channel(idempotency_key, row, channel)
-            elif step == "config_snapshot":
-                self._step_config_snapshot(idempotency_key, row)
-            elif step == "context_snapshot":
-                self._step_context_snapshot(idempotency_key, row, role_set)
-            elif step == "engine_session":
-                self._step_engine_session(idempotency_key, row, channel, role_set, engine=engine, model=model, effort=effort)
-            else:  # pragma: no cover - defensive; STEP_ORDER is closed
+            try:
+              if step == "workspace":
+                  self._step_workspace(idempotency_key, row)
+              elif step == "channel":
+                  self._step_channel(idempotency_key, row, channel)
+              elif step == "config_snapshot":
+                  self._step_config_snapshot(idempotency_key, row)
+              elif step == "context_snapshot":
+                  self._step_context_snapshot(idempotency_key, row, role_set)
+              elif step == "engine_session":
+                  self._step_engine_session(idempotency_key, row, channel, role_set, engine=engine, model=model, effort=effort)
+              else:  # pragma: no cover - defensive; STEP_ORDER is closed
                 raise PortableError(
                     category=PortableErrorCategory.INDETERMINATE_WRITE,
                     code="provisioning_unknown_step",
                     remediation="Unknown provisioning step recorded; this indicates data corruption. Do not retry blindly.",
                     retry_eligible=False,
                 )
+            except BaseException as error:
+                # A refusal that carries its own code and says a retry
+                # cannot help -- an expired login, an unusable connection,
+                # a route the policy forbids -- leaves its reason on this
+                # row before propagating. Live (2026-09-19) the engine's
+                # credentials were removed mid-task and the row sat
+                # 'in_progress' with no reason at all, so nothing could
+                # tell anyone why the worker never started. It is caught
+                # around the whole step, not around one call inside it,
+                # because the same refusal surfaces from resolving the
+                # route, from qualifying delivery and from opening the
+                # session alike. Anything retryable still propagates
+                # untouched, and a step that already recorded its own
+                # failure is unaffected.
+                #
+                # Duck-typed on purpose: this refusal reaches here as a
+                # PortableError from one caller and wrapped in the ACP
+                # layer's own RouteUnresolved from another, and this module
+                # imports neither.
+                code = getattr(error, "code", None)
+                if code and getattr(error, "retry_eligible", True) is False:
+                    self._fail(idempotency_key, code)
+                raise
 
     def _step_workspace(self, idempotency_key: str, row) -> None:
         attempt_id = row["attempt_id"]
@@ -759,21 +783,6 @@ class ProvisioningService:
                 # provisioning-recovery tests).
                 kind = getattr(error, "kind", None)
                 if kind not in ("capacity_unsatisfiable", "capacity_timeout", "attempt", "task", "shutdown"):
-                    # A refusal that already knows its own code is not a
-                    # crash a retry could survive -- an expired login, an
-                    # unusable connection, a route the policy forbids. Live
-                    # (2026-09-19) codex's credentials were removed
-                    # mid-task: the worker could not open, this row stayed
-                    # 'in_progress' with no error_code forever, no
-                    # assignment_failed was ever written, and the
-                    # coordinator kept answering "waiting for the worker's
-                    # report". Record the reason so something can say it.
-                    # Everything else still propagates untouched, so a
-                    # same-process retry can still recover a genuine
-                    # crash/transport failure via lookup_owned.
-                    code = getattr(error, "code", None)
-                    if code and isinstance(error, PortableError) and not error.retry_eligible:
-                        self._fail(idempotency_key, code)
                     raise
                 self._fail(idempotency_key, kind)
                 raise PortableError(
