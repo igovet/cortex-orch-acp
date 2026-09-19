@@ -352,16 +352,27 @@ def _shared_read_skill(store, channel: ChannelContext, args: Mapping[str, Any]) 
     engine that runs it, never fetched, and no channel can read another
     role's body through here.
     """
-    from ..portable.roles import SHARED_ROLE_IDS, load_role
+    from ..portable.roles import SHARED_ROLE_IDS, WORKER_REFERENCE_IDS, load_role, read_reference
 
     requested = args.get("skill")
     skill_id = requested if isinstance(requested, str) else ""
-    skill_id = skill_id.strip().removeprefix("cortex:")
+    skill_id = skill_id.strip().removeprefix("cortex:").removesuffix(".md")
+    if skill_id in WORKER_REFERENCE_IDS:
+        # A reference is text this runtime ships next to the roles, and a
+        # worker has no other way to reach it: its working directory is a
+        # copy of the user's project, not of this installation. Its own
+        # instructions used to point at one with a relative markdown link
+        # -- a path that resolves to nothing there -- and the step that
+        # link explains is the one three workers failed at in a single
+        # day, one asking the coordinator to send it a report reference,
+        # another publishing its report and never saying so.
+        return dict(skill=skill_id, title=skill_id.replace("-", " ").capitalize(),
+                    body=read_reference(skill_id))
     if skill_id not in SHARED_ROLE_IDS:
         raise StoreError(
             "unknown_skill", "skill", str(requested),
-            ", ".join(sorted(SHARED_ROLE_IDS)),
-            "Read one of this runtime's own shared skills.",
+            ", ".join(sorted(SHARED_ROLE_IDS | WORKER_REFERENCE_IDS)),
+            "Read one of this runtime's own shared skills or references.",
         )
     role_set = load_role(skill_id)
     return dict(skill=skill_id, title=role_set.title, body=role_set.body_portable)

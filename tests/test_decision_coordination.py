@@ -739,14 +739,24 @@ def test_missing_steering_receipt_cannot_count_as_success(tmp_path):
 
 
 def test_profiles_route_graph_details_to_generated_reference():
+    """A worker reaches a reference by name, never by path.
+
+    Its working directory is a copy of the user's project, not of this
+    installation, so the relative markdown link these profiles used to
+    carry resolved to nothing there -- and the step one of those
+    references explains, publishing a report and handing back its id, is
+    the step three workers failed at in a single day (2026-09-19). The
+    reference still ships beside the profile, because that is where
+    ``read_skill`` reads it from."""
     canonical=(ROOT/'./agent-sources/references/code-and-evidence.md').read_bytes()
     for path in (ROOT / 'skills').glob('worker-*/SKILL.md'):
         text = path.read_text()
         if path.parent.name == 'worker-senior-consultant':
             assert 'Do not inspect source files' in text
-            assert '[code and evidence discovery]' not in text
+            assert 'code-and-evidence' not in text
             continue
-        assert '[code and evidence discovery](references/code-and-evidence.md)' in text
+        assert 'read_skill("code-and-evidence")' in text
+        assert '](references/' not in text, f"{path}: a worker cannot open a path here"
         assert (path.parent/'references/code-and-evidence.md').read_bytes()==canonical
         assert 'Match a code index to the canonical assignment workspace' in canonical.decode()
         assert 'Confirm consequential graph findings against current source' in canonical.decode()

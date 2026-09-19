@@ -246,6 +246,41 @@ def _extract_critical_rules(text: str) -> tuple[str, ...]:
     return tuple(rules)
 
 
+#: References this runtime ships beside every worker role. A worker cannot
+#: reach them as files -- its working directory is a copy of the user's
+#: project -- so they are readable by id through ``read_skill``.
+WORKER_REFERENCE_IDS = frozenset({
+    "report-publication", "code-and-evidence", "interactive-resources",
+})
+
+
+def read_reference(reference_id: str) -> str:
+    """One shipped reference document by id, for ``read_skill``."""
+    if reference_id not in WORKER_REFERENCE_IDS:
+        raise PortableError(
+            category=PortableErrorCategory.VALIDATION,
+            code="unknown_reference",
+            remediation=f"Unknown reference {reference_id!r}; known: {', '.join(sorted(WORKER_REFERENCE_IDS))}.",
+            retry_eligible=False,
+            field="skill",
+        )
+    for candidate in sorted(SKILLS_ROOT.glob(f"*/references/{reference_id}.md")):
+        try:
+            return candidate.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    raise PortableError(
+        category=PortableErrorCategory.VALIDATION,
+        code="reference_source_unavailable",
+        remediation=(
+            f"Reference {reference_id!r} could not be read from this installation; "
+            "verify the Cortex package is complete."
+        ),
+        retry_eligible=False,
+        field="skill",
+    )
+
+
 def load_role(role_hint: object) -> RoleInstructionSet:
     """Load one role's portable instruction set from its canonical SKILL.md."""
     role_id = resolve_role(role_hint)
@@ -296,6 +331,22 @@ ALWAYS_ON_SKILLS: dict[str, tuple[str, ...]] = {
 }
 
 
+#: Why a worker would reach for a shared skill. Named with its occasion,
+#: because "load these skills" is a ritual and a worker that performs it
+#: spends its context on text that did not apply to its assignment.
+_SKILL_TRIGGERS = {
+    "tool-discipline": "a tool refused you, an argument is a guess, a result came back "
+                       "truncated, or you are about to edit the draft the runtime gave you",
+    "content-safety": "you are about to put someone's private data, a secret, a raw host "
+                      "log or another person's content into an artifact",
+    "context-compaction": "your own context is running out and you must keep working",
+    "coordinator-communication": "you are writing to the coordinator and the wording matters",
+    "documentation-sync": "your change makes existing documentation wrong",
+    "knowledge-harvest": "you were asked to collect what a codebase already knows",
+    "cortex-control": "you need this runtime's own control surface",
+}
+
+
 def composed_instructions(role_set: RoleInstructionSet) -> str:
     """One role's instructions as an engine should receive them: its own
     body, then the always-on shared skills for its kind.
@@ -313,12 +364,22 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
     worker that cannot start at all is worse still, and the omission is
     visible in what was delivered.
     """
+    loadable = sorted(ALWAYS_ON_SKILLS.get(role_set.kind, ()))
     parts = [role_set.body_portable]
-    for skill_id in ALWAYS_ON_SKILLS.get(role_set.kind, ()):
-        try:
-            parts.append(load_role(skill_id).body_portable)
-        except PortableError:
-            continue
+    if loadable:
+        # Named, not pasted. Handing every shared skill over with the role
+        # made the delivered text half again as long before the work even
+        # started, and most of it does not apply to most assignments.
+        # ``read_skill`` is the host this text used to assume was missing:
+        # the skills are one call away, by the names given here.
+        parts.append(
+            "## Shared skills, and when to read one\n\n"
+            "`read_skill(\"<name>\")` returns one of this runtime's shared skills. Read one "
+            "when its own case arises, never as a ritual -- reading text you do not need "
+            "costs you the room to do the work:\n"
+            + "\n".join(f"- `{skill_id}` -- {_SKILL_TRIGGERS[skill_id]}"
+                        for skill_id in loadable if skill_id in _SKILL_TRIGGERS)
+        )
     return "\n\n".join(part.strip() for part in parts if part and part.strip()) + "\n"
 
 

@@ -3762,10 +3762,14 @@ class OrchestratingRuntime:
                         # says nothing. Wait for the named update.
                         return
                     if _NATIVE_SUBAGENT.search(title):
-                        # It did happen and it must not have. Shown as the
-                        # refusal it is, in words, rather than as a line
-                        # reading "Start subagent lcm_worker" that means
-                        # nothing to whoever is watching.
+                        # An engine that has subagents may use them: that
+                        # is its own machinery, and codex-acp 1.12.0 ships
+                        # it (its own dist emits "Start subagent <name>").
+                        # It is still worth naming in the account of the
+                        # work, because a reader seeing "Start subagent
+                        # review" should know the review happened inside
+                        # the worker rather than as an assignment of its
+                        # own.
                         self._note_native_subagent(task_id, title)
                         refusal = acp_messages.render(
                             "native_subagent_refused", self._resolve_language(task_id))

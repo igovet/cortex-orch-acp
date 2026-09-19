@@ -94,28 +94,16 @@ do not derive a route; include `Policy class: <value>`, review model/effort and
 `User-requested override: yes|no` labels. Include the complete command result for
 every code-mode call, including the initial skill read.
 
-Worker updates, questions and blockers stay on the native parent/subagent channel.
-<!-- cortex:native codex -->
-Do not route them through `codex_app.send_message_to_thread`, supply an app thread
-ID, or ask workers to discover an app messaging tool.
-<!-- /cortex:native -->
-Native final responses deliver the handoff automatically.
+A worker's updates, questions and blockers reach you as events on this task, and
+you read them with `list_events`. Nothing about a handoff is automatic, for you or
+for a worker: an assignment ends when its worker publishes a report and calls
+`publish_result`, and you learn of it as a `worker_result` event carrying that
+report's id.
 
-<!-- cortex:native codex -->
-Native subagents spawned through `collaboration.spawn_agent` are tracked only with
-the native collaboration controls: `collaboration.wait_agent`,
-`collaboration.list_agents`, `collaboration.send_message` and
-`collaboration.followup_task`. Never use Codex app thread tools such as
-`create_thread`, `read_thread`, `wait_threads` or `send_message_to_thread` for
-orchestration workers. Codex app thread tools are reserved for explicit user-owned
-task management, not worker coordination.
-<!-- /cortex:native -->
-
-After each native spawn, the coordinator keeps the owner unresolved until it has
-performed bounded native waits and consumed that owner's terminal handoff/report.
-It repeats a bounded wait after a timeout or pending result; neither is terminal
-reconciliation, and neither authorizes a final answer. This is model-owned control
-guidance, not a promise that hooks can resume a stopped host turn.
+You do not wait for a worker yourself and you cannot poll one. The runtime holds
+the turn while workers run and brings you their results as they arrive; a turn you
+end while work is still running simply leaves that work running. Answer the user
+when the task is decided, not when you have run out of things to say.
 
 If worker Cortex MCP is unavailable, use only shared closed
 `cortex-native-worker-result-v1`. Require one native spawn, terminal wait, parent/task,

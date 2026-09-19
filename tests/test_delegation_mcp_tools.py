@@ -383,3 +383,38 @@ def test_an_assignment_that_never_integrated_anything_is_unaffected(tmp_path):
     assert mcp_tools.dispatch(store, coordinator, "decide", dict(
         assignment_ref="review-one", decision="accept", rationale="review is the deliverable",
         request_key="k-e")) is not None
+
+
+def test_a_worker_can_read_the_references_its_own_profile_names(tmp_path):
+    """A worker's working directory is a copy of the user's project, not of
+    this installation, so a relative markdown link in its own instructions
+    resolves to nothing. Live (2026-09-19) the step that link explains --
+    publishing a report and handing back its id -- was the step three
+    workers failed at in one day: one asked the coordinator to send it a
+    report reference, another published and never said so."""
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator)
+
+    for reference in ("report-publication", "code-and-evidence", "interactive-resources"):
+        result = mcp_tools.dispatch(store, worker, "read_skill",
+                                    dict(skill=reference, request_key=f"rk-{reference}"))
+        assert result["skill"] == reference
+        assert result["body"].strip(), reference
+    # The name it is written with in the profile works too.
+    assert mcp_tools.dispatch(
+        store, worker, "read_skill",
+        dict(skill="report-publication.md", request_key="rk-md"))["body"].strip()
+    # And the publication flow is genuinely in there.
+    body = mcp_tools.dispatch(store, worker, "read_skill",
+                              dict(skill="report-publication", request_key="rk-body"))["body"]
+    assert "draft" in body.lower() and "publi" in body.lower()
+
+
+def test_an_unknown_skill_still_names_what_is_readable(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator)
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, worker, "read_skill",
+                           dict(skill="nothing-like-this", request_key="rk-x"))
+    assert str(excinfo.value) == "unknown_skill"
+    assert "report-publication" in excinfo.value.expected

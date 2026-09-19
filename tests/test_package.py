@@ -59,7 +59,7 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
         if profile['name'] == 'senior_consultant':
             assert '## Access boundary' in instructions
             assert 'Do not run commands, tests or project checks' in instructions
-            assert 'references/report-publication.md' in instructions
+            assert 'read_skill("report-publication")' in instructions
             assert 'You may investigate, implement' not in instructions
             continue
         assert {
@@ -82,9 +82,15 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
         assert len(instructions) < 12_900
         assert 'page of at most\n4,000 characters' in instructions
         assert 'not a total context limit' in instructions
-        assert 'references/report-publication.md' in instructions
-        assert 'references/code-and-evidence.md' in instructions
-        assert 'references/interactive-resources.md' in instructions
+        # Named for `read_skill`, never as a path: a worker's working
+        # directory is a copy of the user's project, so the relative link
+        # these profiles used to carry resolved to nothing there -- and
+        # the step report-publication explains is the one three workers
+        # failed at in a single day (2026-09-19).
+        assert 'read_skill("report-publication")' in instructions
+        assert 'read_skill("code-and-evidence")' in instructions
+        assert 'read_skill("interactive-resources")' in instructions
+        assert '](references/' not in instructions
         assert 'Private Cortex evidence has a strict boundary:' in instructions
         assert 'mcp__cortex__read_report' in instructions
         assert 'Missing evidence is a stated gap/impact' in instructions
@@ -143,8 +149,8 @@ def test_worker_safety_and_post_wait_rules_are_payload_guidance():
     assert 'fallback is valid otherwise' in consultant
     assert 'a coordinator read never satisfies it' in worker
     assert 'one bounded command per wrapper' in worker
-    assert "native final names exactly one ID: this worker's own current" in worker
-    assert 'other-worker report ID only in the saved report' in worker
+    assert "`publish_result` names exactly one ID: this worker's own current assignment" in worker
+    assert 'other-worker\nreport ID only in the saved report' in worker
     assert 'Timeout alone never replaces its active owner' in orchestrator
     assert 'Reconcile actual outcomes' in orchestrator
 
@@ -170,15 +176,18 @@ def test_p0_p1_evidence_protocol_remains_model_owned_and_receipt_bound():
 def test_coordinator_native_worker_tracking_is_distinct_from_app_task_management():
     orchestrator = (PLUGIN/'skills/orchestrator/references/worker-routing.md').read_text()
     payload = json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
-    rule = (
-        'Native subagents spawned through `collaboration.spawn_agent` are tracked only with\n'
-        'the native collaboration controls: `collaboration.wait_agent`,\n'
-        '`collaboration.list_agents`, `collaboration.send_message` and\n'
-        '`collaboration.followup_task`.'
-    )
-    assert rule in orchestrator
-    assert '`create_thread`, `read_thread`, `wait_threads` or `send_message_to_thread`' in orchestrator
-    assert 'reserved for explicit user-owned\ntask management, not worker coordination.' in orchestrator
+    # What this used to require was the plugin harness's own vocabulary --
+    # `collaboration.spawn_agent`, Codex app threads -- none of which
+    # exists in an ACP session, checked against the shipped engines on
+    # 2026-09-19. It also told the coordinator that "native final
+    # responses deliver the handoff automatically", which is the same
+    # falsehood the worker protocol carried and the reason workers ended
+    # their turns having published a report and said nothing.
+    assert 'you read them with `list_events`' in orchestrator
+    assert 'Nothing about a handoff is automatic' in orchestrator
+    assert '`publish_result`' in orchestrator
+    assert 'collaboration.' not in orchestrator
+    assert 'create_thread' not in orchestrator
     assert 'src/cortex_runtime/store.py' in payload
     assert (PLUGIN/'skills/orchestrator/SKILL.md').is_file()
     package_version = json.loads((PLUGIN/'package-identity.json').read_text())['version']
@@ -187,7 +196,16 @@ def test_coordinator_native_worker_tracking_is_distinct_from_app_task_management
     for path, body in expected_profiles().items():
         if path.stem == 'senior-consultant':
             continue
-        assert 'Never discover,\ncall or request approval for `codex_app.send_message_to_thread`' in body.decode()
+        # The rule this replaced forbade `codex_app.send_message_to_thread`,
+        # a surface of the plugin harness T033 removed -- checked against
+        # the shipped engine on 2026-09-19, codex-acp 1.12.0 does not
+        # contain that name at all. It cost every worker profile a
+        # paragraph to forbid something that cannot happen, while what a
+        # worker actually gets wrong went unsaid: the same profiles told it
+        # "final handoffs are automatic", and workers duly ended their
+        # turns having published a report and said nothing.
+        assert 'Nothing about\nyour handoff is automatic' in body.decode()
+        assert 'publish_result' in body.decode()
 
 
 
@@ -347,7 +365,9 @@ def test_ordinary_completion_documentation_branches_are_semantic_and_conditional
 def test_shared_worker_protocol_routes_rare_interactive_procedure():
     protocol=(PLUGIN/'agent-sources/worker-protocol.md').read_text()
     reference=(PLUGIN/'agent-sources/references/interactive-resources.md').read_text()
-    assert '[interactive resources](references/interactive-resources.md)' in protocol
+    # By name, not by path: a worker's working directory is a copy of the
+    # user's project, so a relative link here resolves to nothing for it.
+    assert 'read_skill("interactive-resources")' in protocol
     assert 'Never inspect\nglobal processes, ports, tabs or devices' in reference
     assert 'select, create or reuse only owned resources' in reference
     assert 'Stop or close only sessions created by this assignment.' in reference

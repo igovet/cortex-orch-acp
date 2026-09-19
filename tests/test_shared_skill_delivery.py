@@ -27,24 +27,43 @@ from cortex_runtime.portable.roles import (  # noqa: E402
 )
 
 
-def test_a_coordinator_is_given_the_rules_that_always_apply():
+def test_a_coordinator_is_told_which_skills_exist_and_when_to_read_one():
+    """Named with their occasion, not pasted.
+
+    Handing every relevant skill over with the role made the delivered text
+    half again as long before the work started, and most of it did not
+    apply to the assignment in hand. "Load these skills" is a ritual; a
+    reason to read one is not.
+    """
     role = load_role("orchestrator")
     composed = composed_instructions(role)
     assert composed.startswith(role.body_portable.strip()[:80]), "the role's own body comes first"
     for skill_id in ALWAYS_ON_SKILLS["coordinator"]:
-        body = load_role(skill_id).body_portable.strip()
-        assert body[:60] in composed, f"{skill_id} was not delivered"
-    assert len(composed) > len(role.body_portable)
+        assert f"`{skill_id}`" in composed, f"{skill_id} was never named"
+        # Named, and never pasted: the body stays one read away.
+        assert load_role(skill_id).body_portable.strip()[:200] not in composed, skill_id
+    assert 'read_skill' in composed
 
 
-def test_a_worker_is_given_the_rules_that_always_apply():
+def test_a_worker_is_told_which_skills_exist_and_when_to_read_one():
     role = load_role("worker-backend-dev")
     composed = composed_instructions(role)
     for skill_id in ALWAYS_ON_SKILLS["worker"]:
-        assert load_role(skill_id).body_portable.strip()[:60] in composed, skill_id
+        assert f"`{skill_id}`" in composed, skill_id
+        assert load_role(skill_id).body_portable.strip()[:200] not in composed, skill_id
+    # Each one comes with the case that calls for it, so a worker with no
+    # such case spends nothing on it.
+    assert "a tool refused you" in composed
     # Not the coordinator's own communication rules: a worker never talks
     # to the user.
     assert "coordinator-communication" not in ALWAYS_ON_SKILLS["worker"]
+
+
+def test_the_delivered_text_stays_close_to_the_role_itself():
+    """The whole point of naming rather than pasting."""
+    role = load_role("worker-backend-dev")
+    composed = composed_instructions(role)
+    assert len(composed) < len(role.body_portable) * 1.2, len(composed)
 
 
 def test_the_situational_skills_are_not_carried_on_every_turn():

@@ -19,7 +19,8 @@ and Markdown reports. It never grants authority or chooses a workflow.
 
 Prioritize user outcome, safety/reversibility, causal path, minimal handoffs,
 implementation, verification, then documentation. Use the user's language with
-the user and English for internal handoffs.
+the user. Everything a worker receives -- title, brief, acceptance, clarification --
+is English whatever language you are speaking, and so is everything it returns.
 
 ## Control loop
 

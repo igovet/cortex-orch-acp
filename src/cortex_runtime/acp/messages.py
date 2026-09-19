@@ -60,8 +60,17 @@ _CATALOG: dict[str, dict[str, str]] = {
               "принята — приёмка это записанное решение, и его не было.",
     },
     "answer_in_language": {
-        "en": "Always write your replies to the user in English, whatever language this prompt is in.",
-        "ru": "Всегда пиши свои ответы пользователю по-русски, независимо от того, на каком языке этот запрос.",
+        # The second sentence is not decoration. Told only to answer in
+        # Russian, the coordinator wrote its workers' briefs in Russian
+        # too, and a worker's whole world -- brief, acceptance, report --
+        # is English by contract. The language chosen here is the language
+        # of this conversation, and of nothing else.
+        "en": "Always write your replies to the user in English, whatever language this prompt is in. "
+              "This is about talking to the user only: everything you send to a worker -- title, brief, "
+              "acceptance criteria, clarifications -- stays in English, always.",
+        "ru": "Всегда пиши свои ответы пользователю по-русски, независимо от того, на каком языке этот запрос. "
+              "Это касается только общения с пользователем: всё, что ты отправляешь исполнителю — заголовок, "
+              "бриф, критерии приёмки, уточнения — всегда остаётся на английском.",
     },
     "blocked_no_progress": {
         "en": "Blocked: no new worker result, question, or user input arrived after repeated waiting.",

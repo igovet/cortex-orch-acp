@@ -87,8 +87,10 @@ COORDINATOR_OPERATIONS = {
         {
             "title": string("Short English title for the delegated unit of work.", 200),
             "brief": string(
-                "Complete work meaning: outcome, constraints, checks, and owned "
-                "resources. No technical IDs; the runtime fills every binding.",
+                "Complete work meaning, in English: outcome, constraints, checks, and "
+                "owned resources. English whatever language you are speaking with the "
+                "user -- a worker's whole world is English. No technical IDs; the "
+                "runtime fills every binding.",
                 16_000,
             ),
             "role": string(
@@ -97,7 +99,8 @@ COORDINATOR_OPERATIONS = {
                 80,
             ),
             "acceptance": string(
-                "Concrete, evidence-checkable acceptance criteria for this delegation.",
+                "Concrete, evidence-checkable acceptance criteria for this delegation, "
+                "in English like the rest of what a worker is given.",
                 4_000,
             ),
             "engine": string(

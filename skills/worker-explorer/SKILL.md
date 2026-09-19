@@ -45,13 +45,13 @@ Keep the assigned outcome, constraints, checks, revision, evidence and owned
 resources mandatory. Ask about missing/invalid conditions; do not infer scope,
 scan unrelated records, or finish early.
 
-Send progress, blockers, and verification only to the native parent.
-<!--cortex:native codex-->
-Never discover,
-call or request approval for `codex_app.send_message_to_thread` or app messaging; never
-wrap either route.
-<!--/cortex:native-->
-Report an unavailable native route natively; final handoffs are automatic.
+Earlier work on this task reaches you as sources: when your brief refers to it or
+to a predecessor's report, call `list_sources` and read only the entry that matters
+with `read_source`. Never redo what one shows is done.
+
+Send progress, blockers, and verification only to the native parent. Nothing about
+your handoff is automatic: an assignment ends when you publish your report and call
+`publish_result`, and not before.
 
 You may investigate, implement, verify, and document assigned non-code artifacts. Preserve other
 work; do not mutate another worker's surface or use its resources. Report overlap first.
@@ -88,9 +88,9 @@ use fresh exact context;
 never replay the identical `apply_patch` call.
 <!--/cortex:native-->
 
-For detailed graph selection, pagination and fallback rules, read
-[code and evidence discovery](references/code-and-evidence.md) only when structural
-repository investigation is part of the assignment.
+For graph selection, pagination and fallback rules, call
+`read_skill("code-and-evidence")` when structural repository investigation is
+part of the assignment.
 
 ## Evidence and verification
 
@@ -126,31 +126,7 @@ only; leave residue; report blockers/authority.
 
 For interactive resources, use only assignment-owned ones; retain long-running handles
 until terminal receipts and close them before reporting. Read
-[interactive resources](references/interactive-resources.md) when required.
-
-## Current-host native-result fallback
-
-Use this only when the coordinator states worker Cortex MCP is unavailable. It is
-observational evidence, never an assignment receipt, worker publication, host-enforcement
-claim, or audit substitute; do not use it when MCP is available.
-
-In the native final response, emit no prose other than this exact closed JSON block:
-
-````text
-Cortex native worker result:
-```json
-{"schema":"cortex-native-worker-result-v1","worker_thread_id":"<observed native thread>","parent_thread_id":"<observed parent>","task_id":"<observed child task>","profile":"<registered worker profile>","status":"success|failed|blocked","worker_mcp":"unavailable","assignment_digest":"<64 lowercase hex>","artifacts":[{"reference":"relative public artifact","sha256":"<64 lowercase hex>"}],"checks":[{"command":"bounded label","exit_code":0,"receipt_digest":"<64 lowercase hex>"}],"limits":["explicit limit"],"result_digest":"<canonical-body SHA-256>"}
-```
-````
-
-The object has exactly these fields. `result_digest` is SHA-256 of sorted, compact
-canonical JSON after omitting only itself; `assignment_digest` is the observed native
-assignment message digest. Use host-supplied thread/parent/task values; never invent
-them. Artifact hashes are asserted unless independently receipt-bound. Missing,
-duplicate, truncated, replayed, or invalid blocks. The coordinator, not the worker,
-publishes `Delegation evidence: native_worker_result` labelled
-`evidence_source=native_worker_result`, `worker_mcp_unavailable=true`,
-`host_enforcement_state=unverified`, and not worker-authored.
+`read_skill("interactive-resources")` when required.
 
 ## Report and handoff
 
@@ -168,10 +144,11 @@ Open within the first 4,000-character page with conclusion, observations, checke
 requirements, contradictions, limits, disconfirmation, and next action. Put detailed
 paths, commands, and revisions below; omit secrets, private content, and raw host logs.
 
-Before creating or recovering a report draft, read
-[report publication](references/report-publication.md). Publication must finish
-before the final handoff. Do not paste the report body. A saved report is evidence,
-not proof of its own correctness.
+Before drafting or recovering a report, call `read_skill("report-publication")` and
+follow it. Then hand off with `publish_result`, carrying the report id your own
+publication returned: nobody sends you that id, and work never reported reads to
+everyone else as an assignment that produced nothing. Do not paste the report body.
+A saved report is evidence, not proof of its own correctness.
 
 ## Report class selection
 
@@ -214,12 +191,12 @@ Continue safe in-scope work. Send genuine user decisions with facts, options, an
 consequences; do not invent authority, bypass permissions, or start a new conversation.
 Unavailable checks remain open unless scope changes.
 
-After publication, the native final names exactly one ID: this worker's own current
-assignment report ID plus a compact handoff. Put every predecessor, pipeline,
-catalogue, coordinator, and other-worker report ID only in the saved report. Delivery
-is automatic; do not duplicate via cross-task messaging. Only explicit native follow-up
-authorizes another turn. A continuation may reuse retained evidence after checking new
-requirements/revisions; independent claimed verification uses a fresh worker.
+Your `publish_result` names exactly one ID: this worker's own current assignment
+report. Put every predecessor, pipeline, catalogue, coordinator and other-worker
+report ID only in the saved report. Nothing is delivered on your behalf, and
+nothing else you say reaches the coordinator. A continuation may reuse retained
+evidence after checking new requirements/revisions; independent claimed
+verification uses a fresh worker.
 
 ## Recovery
 
