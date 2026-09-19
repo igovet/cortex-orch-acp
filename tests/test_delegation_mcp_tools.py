@@ -322,3 +322,64 @@ def test_clarifying_a_running_assignment_still_works(tmp_path):
     result = mcp_tools.dispatch(store, coordinator, "clarify", dict(
         assignment_ref="running-one", message="use tabs", request_key="k-live"))
     assert result["recorded"] is True
+
+
+def test_an_assignment_whose_integration_conflicted_cannot_be_accepted(tmp_path):
+    """Live (2026-09-19, L3): the editor held an unsaved buffer for the file,
+    so the integration was refused and nothing was written -- and the
+    coordinator accepted the assignment anyway and told the user the change
+    "was integrated into the project and accepted". It was not in the
+    project at all."""
+    store, task_id, coordinator = _task(tmp_path)
+    delegation_events.append_event(
+        store, task_id, "worker_result", "wr-c", dict(report_ref="r_z", summary="done"),
+        origin="worker-ch", assignment_ref="conflicted-one",
+    )
+    delegation_events.append_event(
+        store, task_id, "progress", "integration_conflict:one",
+        dict(kind="integration_conflict", conflict_paths={"calc.py": {"reason": "unsaved_host_buffer"}}),
+        origin="runtime", assignment_ref="conflicted-one",
+    )
+
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, coordinator, "decide", dict(
+            assignment_ref="conflicted-one", decision="accept", rationale="looks good", request_key="k-c"))
+    assert str(excinfo.value) == "integration_conflicted"
+
+
+def test_a_later_successful_integration_clears_the_earlier_conflict(tmp_path):
+    """The conflict is only the *last* word while it is the last word: once
+    the work actually reaches the project, accepting is right again."""
+    store, task_id, coordinator = _task(tmp_path)
+    delegation_events.append_event(
+        store, task_id, "worker_result", "wr-d", dict(report_ref="r_w", summary="done"),
+        origin="worker-ch", assignment_ref="retried-one",
+    )
+    delegation_events.append_event(
+        store, task_id, "progress", "integration_conflict:two",
+        dict(kind="integration_conflict", conflict_paths={"calc.py": {"reason": "unsaved_host_buffer"}}),
+        origin="runtime", assignment_ref="retried-one",
+    )
+    delegation_events.append_event(
+        store, task_id, "progress", "integration_applied:two",
+        dict(kind="integration_applied", applied_paths=["calc.py"]),
+        origin="runtime", assignment_ref="retried-one",
+    )
+
+    assert mcp_tools.dispatch(store, coordinator, "decide", dict(
+        assignment_ref="retried-one", decision="accept", rationale="in the project now",
+        request_key="k-d")) is not None
+
+
+def test_an_assignment_that_never_integrated_anything_is_unaffected(tmp_path):
+    """A review or an investigation changes no files and asks for no
+    integration; it must still be acceptable."""
+    store, task_id, coordinator = _task(tmp_path)
+    delegation_events.append_event(
+        store, task_id, "worker_result", "wr-e", dict(report_ref="r_v", summary="reviewed"),
+        origin="worker-ch", assignment_ref="review-one",
+    )
+
+    assert mcp_tools.dispatch(store, coordinator, "decide", dict(
+        assignment_ref="review-one", decision="accept", rationale="review is the deliverable",
+        request_key="k-e")) is not None

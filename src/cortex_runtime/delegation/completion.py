@@ -108,6 +108,27 @@ def _unintegrated_worker_changes(db, assignment_ref: str, attempt_id: str) -> se
     return pending
 
 
+def latest_integration_conflicted(db, task_id: str, assignment_ref: str) -> dict | None:
+    """The conflict payload when this assignment's most recent integration
+    attempt conflicted and wrote nothing, else ``None``.
+
+    An assignment that never asked for an integration (a review, an
+    investigation) has no such event and is unaffected -- only one that
+    tried and was refused.
+    """
+    row = db.execute(
+        "SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref=? "
+        "AND event_type='progress' AND superseded=0 "
+        "AND (payload_json LIKE '%integration_applied%' OR payload_json LIKE '%integration_conflict%') "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id, assignment_ref),
+    ).fetchone()
+    if row is None:
+        return None
+    payload = json.loads(row["payload_json"])
+    return payload if payload.get("kind") == "integration_conflict" else None
+
+
 def assignment_is_terminal(db, task_id: str, assignment_ref: str) -> bool:
     """True once this assignment has finished, by any of the three ways it
     can: a retained ``worker_result``, an ``assignment_failed``, or an

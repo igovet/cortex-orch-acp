@@ -167,6 +167,25 @@ def _coordinator_decide(store, channel: ChannelContext, args: Mapping[str, Any])
                 "an assignment_ref with a retained worker_result event",
                 "Only accept an assignment after a (non-superseded) worker_result event exists for it.",
             )
+        # Work that is not in the project cannot be accepted. Live
+        # (2026-09-19) an integration was refused because the editor held
+        # an unsaved buffer for that file -- nothing was written -- and the
+        # coordinator accepted the assignment anyway and told the user the
+        # change "was integrated into the project and accepted". It was
+        # not. The refusal is already in its own continuation; this makes
+        # ignoring it impossible rather than merely discouraged.
+        with store.connection() as db:
+            conflict = delegation_completion.latest_integration_conflicted(
+                db, channel.task_id, assignment_ref)
+        if conflict is not None:
+            paths = ", ".join(sorted((conflict.get("conflict_paths") or {}))) or "the project"
+            raise StoreError(
+                "integration_conflicted", "assignment_ref", assignment_ref,
+                "an assignment whose last integration actually reached the project",
+                f"This assignment's last integration conflicted and wrote nothing ({paths}), so its "
+                "work is not in the project. Resolve the conflict and integrate again before accepting; "
+                "accepting now would report work that does not exist.",
+            )
     if decision == "accept" and assignment_ref == "task":
         # T017 completion gating: refuse to even record a task-level accept
         # when it is visibly ungrounded at call time (the runtime rechecks
