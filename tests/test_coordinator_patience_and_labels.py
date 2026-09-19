@@ -51,10 +51,18 @@ def test_display_role_strips_only_the_storage_prefix():
     assert _display_role("") == ""
 
 
-def test_a_worker_turn_in_flight_never_exhausts_the_no_progress_budget(tmp_path):
-    """The live defect: a worker whose engine turn is genuinely running
-    must hold the coordinator's patience open, and the budget must still
-    apply the moment that turn ends without producing anything."""
+def test_a_running_worker_holds_the_turn_open_and_a_silent_one_closes_itself(tmp_path):
+    """Two halves of the same rule.
+
+    A worker that is working holds the coordinator's patience open for as
+    long as it takes -- hours, if the work is hard ("воркер может работать
+    часами ... и это не повод блокировать"). Nothing charges against it.
+
+    And a worker whose turn ends having published nothing, asked nothing
+    and failed in no way is *over*: the assignment records that and
+    closes. Before, it recorded nothing at all and stayed open, which only
+    ever ended because the coordinator's patience ran out -- exactly the
+    behaviour that is now gone."""
     store, task_id = _task(tmp_path)
     worker_may_finish = threading.Event()
     worker_started = threading.Event()
@@ -111,12 +119,16 @@ def test_a_worker_turn_in_flight_never_exhausts_the_no_progress_budget(tmp_path)
 
     assert worker_started.is_set(), "the worker's own turn never started; this test proved nothing"
     assert worker_may_finish.is_set(), "the turn ended before the worker was released -- the budget was charged while it ran"
-    # The budget still applies once the worker's turn is over and nothing
-    # meaningful came of it: the turn ends blocked, never hangs.
+    # The turn ends -- it never hangs -- because the assignment closed
+    # itself rather than because the coordinator gave up on it.
     assert result == StopReason.END_TURN
     with store.connection() as db:
-        final = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
-    assert final["state"] == "blocked"
+        failure = db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='assignment_failed'",
+            (task_id,),
+        ).fetchone()
+    assert failure is not None, "a worker that produced nothing must say so"
+    assert "worker_ended_without_result" in failure["payload_json"]
 
 
 def test_consecutive_coordinator_turns_are_separated_in_the_client_stream(tmp_path):
@@ -227,12 +239,12 @@ def test_a_running_workers_card_shows_what_it_is_doing(tmp_path):
     assert "Reading calc.py" not in "".join(u for u in updates if isinstance(u, str))
 
 
-def test_every_worker_action_is_its_own_card_saying_whose_it_is(tmp_path):
-    """Chosen with the user after watching a run where a worker's work was
-    invisible: a session has one message stream and no sub-feeds, so each
-    action becomes its own card, attributed -- role, and the engine/model/
-    effort it is running on -- which is also what keeps two parallel
-    workers apart."""
+def test_a_running_worker_shows_its_current_command_on_its_own_card(tmp_path):
+    """A card per action filled the feed with a worker's whole transcript
+    and pushed the coordinator's own work out of sight. Each worker has
+    exactly one card instead, and its current command is shown on that
+    card and replaced as it works -- per assignment, so a second worker
+    only ever updates its own."""
     store, task_id = _task(tmp_path)
     worker_may_finish = threading.Event()
 
@@ -277,12 +289,15 @@ def test_every_worker_action_is_its_own_card_saying_whose_it_is(tmp_path):
 
     actions = [c for c in cards if "Read calc.py" in str(c.get("title", ""))
                or "Edit calc.py" in str(c.get("title", ""))]
-    assert len(actions) >= 2, f"the worker's actions never reached the feed: {cards}"
-    assert all("backend-dev" in c["title"] for c in actions), actions
-    # Each action is its own card, never folded into the assignment's.
-    assignment_card = _worker_card_ids(cards)
-    assert all(c["tool_call_id"] not in assignment_card for c in actions), actions
-    assert len({c["tool_call_id"] for c in actions}) == len(actions)
+    assert actions, f"the worker's current command never reached the feed: {cards}"
+    # Every one of them is this worker's own single card, never a card of
+    # its own per action.
+    assignment_cards = _worker_card_ids(cards)
+    assert {c["tool_call_id"] for c in actions} == assignment_cards, actions
+    assert len(assignment_cards) == 1, assignment_cards
+    assert all("Worker: backend-dev" in c["title"] for c in actions), actions
+    # The latest command replaces the previous one on that same card.
+    assert "Edit calc.py" in actions[-1]["title"], actions[-1]
 
 
 def _worker_card_ids(cards):
@@ -695,9 +710,13 @@ def test_a_worker_tool_call_actually_reaches_its_card(tmp_path):
     runtime.start_prompt(task_id, "s1", "Do X.", [].append, threading.Event(), emit_tool_call=cards.append)
 
     assert seen.get("called"), "the worker's callback never ran; this test proved nothing"
-    bodies = [str(c.get("text", "")) for c in cards]
-    assert any("Read calc.py" in body for body in bodies), f"the worker's actions never reached its card: {cards}"
-    assert any("Edit calc.py" in body for body in bodies), cards
+    # Shown one at a time on the card's own title as the worker works --
+    # never as a transcript in its body, which is the worker's own final
+    # message and nothing else.
+    titles = [str(c.get("title", "")) for c in cards]
+    assert any("Read calc.py" in title for title in titles), f"the worker's action never reached its card: {cards}"
+    assert any("Edit calc.py" in title for title in titles), cards
+    assert not any("Read calc.py" in str(c.get("text", "")) for c in cards), cards
     # A worker assignment is not a command being run.
     created = [c for c in cards if c.get("new")]
     assert created and created[0]["kind"] != "execute", created[0]
@@ -945,14 +964,17 @@ def test_two_workers_running_at_once_keep_their_actions_apart(tmp_path):
     assert result == _Stop.END_TURN
 
     actions = [c for c in cards if "pytest -q" in (c.get("title") or "")]
-    assert len(actions) == 2, f"each worker's own action must appear: {[c.get('title') for c in cards]}"
-    assert len({c["tool_call_id"] for c in actions}) == 2, "the same wire id from two workers must not share a card"
-    # Each action is attributed, and each names its own work.
+    assert actions, f"neither worker's command reached the feed: {[c.get('title') for c in cards]}"
+    # Two workers, two cards -- each worker's command lands on its own,
+    # even though both engines deliberately used the same wire call id.
+    assert len({c["tool_call_id"] for c in actions}) == 2, actions
     for card in actions:
-        who, _, what = card["title"].partition("\n")
-        assert who.startswith("backend-dev"), card
-        assert what.startswith("pytest -q tests/test_"), card
-    assert {c["title"].rsplit("test_", 1)[1] for c in actions} == {"X.py", "Y.py"}
+        assert card["title"].startswith("Worker: backend-dev"), card
+    # Each card names its own work, never the other's.
+    per_card = {}
+    for card in actions:
+        per_card[card["tool_call_id"]] = card["title"].rsplit("test_", 1)[1]
+    assert set(per_card.values()) == {"X.py", "Y.py"}, per_card
 
     # Both results reached the coordinator, each exactly once.
     with store.connection() as db:
@@ -1005,3 +1027,28 @@ def test_the_engines_own_approval_step_is_not_an_action_card():
 
     emit("c1", "execute", "pytest -q", "completed")
     assert [c["title"] for c in cards] == ["backend-dev\npytest -q"]
+
+
+def test_this_runtimes_tools_are_hidden_whichever_engine_spells_them():
+    """codex writes `mcp.cortex.create_task`; claude writes
+    `mcp__cortex__delegate`. Matching only the first spelling put every one
+    of the coordinator's own calls straight back into the feed the moment
+    the engine changed -- which is exactly what the user saw on sonnet.
+
+    The engine's own tool-discovery step goes with them: like its
+    self-review, it is the engine working out what it can do, not an
+    action on the project."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
+
+    cards: list = []
+    emit = _R._engine_tool_call_emitter(_R.__new__(_R), cards.append)
+
+    emit("a", "other", "mcp__cortex__delegate", "completed")
+    emit("b", "other", "mcp__cortex__set_governance", "completed")
+    emit("c", "other", "mcp.cortex.create_task", "completed")
+    emit("d", "other", "ToolSearch", "completed")
+    assert cards == [], f"none of this is the user's business: {cards}"
+
+    # Another server's tool is somebody's real work and stays visible.
+    emit("e", "other", "mcp__codebase_memory__search_code", "completed")
+    assert [c["title"] for c in cards] == ["mcp__codebase_memory__search_code"]

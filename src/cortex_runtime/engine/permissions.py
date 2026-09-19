@@ -80,6 +80,88 @@ _DELETION_COMMAND_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Everything above except the truncating redirect, which is handled
+# separately: see _redirects_only_into_the_store.
+_DELETION_COMMAND_WITHOUT_REDIRECT = re.compile(
+    r"(?:^|[;&|]\s*)(?:sudo\s+)?(?:rm|rmdir|unlink|shred|git\s+clean|mv|find\b[^;&|]*-delete)\b"
+    r"|\bdelet(?:e|ing|ed)\b",
+    re.IGNORECASE,
+)
+
+# A truncating redirect and the path it writes to.
+_REDIRECT_TARGET = re.compile(r"(?<!>)>(?!>)\s*'?\"?([^\s'\";&|]+)")
+
+
+def _redirects_only_into_the_store(text: str) -> bool:
+    """True when every truncating redirect in ``text`` writes into
+    Cortex's own store (``.cortex/``), and there is at least one.
+
+    A worker fills its report by writing the draft file the runtime handed
+    it, and a shell heredoc does that with ``>``. Treating every ``>`` as
+    a deletion sent that to the user for approval as an unexplained "Bash"
+    prompt offering to "allow access to draft-reports/" -- a question
+    about Cortex's own bookkeeping that the user has no way to judge and
+    should never have been asked.
+
+    Deliberately narrow: only the redirect is reconsidered. ``rm``,
+    ``shred``, ``git clean`` and the rest still count as deletions
+    wherever they point, including inside the store.
+    """
+    targets = _REDIRECT_TARGET.findall(text)
+    if not targets:
+        return False
+    return all(_CORTEX_STORE_PATH.search(target) for target in targets)
+
+
+# The store's own directory as it appears in a path, absolute or relative.
+_CORTEX_STORE_PATH = re.compile(r"(?:^|/)\.cortex/")
+
+
+# How much of a command a permission card can carry before it stops being
+# a question and becomes a wall of text.
+_PERMISSION_COMMAND_MAX_CHARS = 400
+
+
+def _named_for_the_user(params):
+    """The same request, with the command it is actually asking about put
+    where the user will see it.
+
+    An engine names a shell call after its tool ("Bash"), and the command
+    itself sits in ``rawInput`` -- which a client renders, at best, behind
+    a disclosure. What reached the user was a prompt reading "Run Command
+    / Bash" with a Yes/No: a decision with the one fact needed to make it
+    missing. This only ever *adds* to the title; nothing else about the
+    request is altered, and a request that already names its command is
+    left alone.
+    """
+    tool_call = _tool_call(params)
+    if not tool_call or tool_call.get("kind") != "execute":
+        return params
+    command = " ".join(_command_text_only(tool_call).split())
+    if not command:
+        return params
+    title = tool_call.get("title")
+    title = title if isinstance(title, str) else ""
+    if command[:40] in title:
+        return params
+    if len(command) > _PERMISSION_COMMAND_MAX_CHARS:
+        command = command[: _PERMISSION_COMMAND_MAX_CHARS - 1] + "\u2026"
+    named = dict(tool_call)
+    named["title"] = f"{title}: {command}" if title else command
+    updated = dict(params)
+    updated["toolCall"] = named
+    return updated
+
+
+def _command_text_only(tool_call: dict) -> str:
+    """The command as the engine declared it -- never the title, which is
+    what :func:`_command_text` falls back to for classification."""
+    raw_input = tool_call.get("rawInput")
+    if not isinstance(raw_input, dict):
+        return ""
+    parts = [raw_input[key] for key in ("command", "cmd", "script") if isinstance(raw_input.get(key), str)]
+    return "\n".join(parts)
+
 
 def _tool_call(params) -> dict:
     tool_call = (params or {}).get("toolCall") if isinstance(params, dict) else None
@@ -102,6 +184,42 @@ def _command_text(tool_call: dict) -> str:
     return " ".join(parts)
 
 
+# This runtime's own MCP tools, however an engine spells the server
+# prefix ("mcp__cortex__delegate", "mcp.cortex.create_task", ...). They
+# are Cortex's own control surface, not an action on the project.
+_CORTEX_MCP_TOOL = re.compile(r"(?:^|[^A-Za-z0-9])mcp[._]{1,2}cortex[._]{1,2}", re.I)
+
+
+def is_cortex_own_tool(params) -> bool:
+    """True when this permission request is for one of Cortex's own MCP
+    tools -- ``delegate``, ``set_governance``, ``create_task`` and the
+    rest.
+
+    They carry no ACP ``kind`` of their own (an MCP call is ``"other"``),
+    and an unrecognized kind is refused for a coordinator by design. Live,
+    on claude-agent-acp -- which asks permission for every tool, including
+    MCP ones -- that refused the coordinator's own ``delegate`` and
+    ``set_governance``: it could not delegate, could not set governance,
+    and ended its turn asking the user to grant tool access. Codex never
+    surfaced it because it does not route MCP calls through this prompt.
+
+    Recognized by tool name only (``toolCall.title``/``rawInput`` naming
+    the server-prefixed tool), never by kind -- the point is precisely
+    that the kind says nothing.
+    """
+    tool_call = _tool_call(params)
+    for value in (tool_call.get("title"), tool_call.get("name"), (params or {}).get("toolName")):
+        if isinstance(value, str) and _CORTEX_MCP_TOOL.search(value):
+            return True
+    raw_input = tool_call.get("rawInput")
+    if isinstance(raw_input, dict):
+        for key in ("name", "tool", "toolName"):
+            value = raw_input.get(key)
+            if isinstance(value, str) and _CORTEX_MCP_TOOL.search(value):
+                return True
+    return False
+
+
 def requires_confirmation(params) -> bool:
     """True unless this ``session/request_permission`` call is confidently
     classified as *not* a file deletion -- the default is to ask.
@@ -122,12 +240,22 @@ def requires_confirmation(params) -> bool:
       as a deletion (i.e. this returns ``True``), so an unclassifiable
       request always asks rather than silently proceeding.
     """
+    if is_cortex_own_tool(params):
+        # Cortex's own MCP surface deletes nothing: a worker publishing a
+        # result or reading a skill must not be held for confirmation
+        # merely because an MCP call carries no ACP kind.
+        return False
     tool_call = _tool_call(params)
     kind = tool_call.get("kind")
     if kind in _DELETION_TOOL_KINDS:
         return True
     if kind == "execute":
-        return bool(_DELETION_COMMAND_PATTERN.search(_command_text(tool_call)))
+        text = _command_text(tool_call)
+        if _DELETION_COMMAND_WITHOUT_REDIRECT.search(text):
+            return True
+        if _redirects_only_into_the_store(text):
+            return False
+        return bool(_DELETION_COMMAND_PATTERN.search(text))
     if kind in _NON_DELETION_TOOL_KINDS:
         return False
     return True
@@ -172,6 +300,10 @@ def is_coordinator_mutating(params) -> bool:
     This is the same documented incompleteness as the deletion
     classifier's own, not a new gap this function introduces.
     """
+    if is_cortex_own_tool(params):
+        # Never a project mutation: this is the coordinator using the
+        # runtime it is a coordinator *of*.
+        return False
     tool_call = _tool_call(params)
     if tool_call.get("kind") == "edit":
         return True
@@ -400,7 +532,9 @@ class PermissionBridge:
             self._observe("permission_no_host_requester", engine_session_id=engine_session_id)
             return dict(CANCELLED_OUTCOME)
         try:
-            host_response = self._host_permission_requester(engine_session_id, params, self._call_timeout)
+            host_response = self._host_permission_requester(
+                engine_session_id, _named_for_the_user(params), self._call_timeout,
+            )
         except Exception:  # noqa: BLE001 - any host-side failure/timeout/EOF maps to cancelled
             self._observe("permission_host_request_failed", engine_session_id=engine_session_id)
             return dict(CANCELLED_OUTCOME)

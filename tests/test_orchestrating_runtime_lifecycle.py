@@ -333,13 +333,22 @@ def test_coordinator_max_tokens_with_no_unfinished_action_blocks_not_success(tmp
 # -- durable waiting / no-progress / resumability ---------------------------
 
 def test_blocked_state_is_resumable_with_explanation_and_resets_no_progress(tmp_path):
+    """A task left blocked resumes on the next prompt: the explanation is
+    delivered, durably recorded, and the counter starts over.
+
+    The blocked state is set here directly rather than produced by a
+    stalled worker, because that route is gone: an open assignment no
+    longer exhausts the coordinator's patience at all (a worker may
+    legitimately take hours), and a worker that ends without reporting
+    closes its own assignment. What this test is about -- resuming from
+    blocked -- is unchanged.
+    """
     store, task_id = _task(tmp_path)
+    seen_messages: list = []
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(title="X", brief="do X", role="backend-dev", acceptance="X done", request_key="reqX"))
-            return PromptOutcome(StopReason.END_TURN, "Delegated X.")
-        if "Resuming" in message:
+        seen_messages.append(message)
+        if "Still there?" in message or "Resuming" in message:
             mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="ask_user", rationale="stuck", question="How do I proceed?", request_key="ask1"))
             return PromptOutcome(StopReason.END_TURN, "")
         return PromptOutcome(StopReason.END_TURN, "Still nothing new.")
@@ -353,12 +362,17 @@ def test_blocked_state_is_resumable_with_explanation_and_resets_no_progress(tmp_
         return coordinator_behavior if channel.role == "coordinator" else silent_worker
 
     runtime, engine = _make_runtime(store, router, wait_timeout_seconds=0.1, max_no_progress_continuations=2)
-    result1 = runtime.start_prompt(task_id, "s1", "Do X.", lambda t: True, threading.Event())
-    assert result1 == StopReason.END_TURN
+    runtime._ensure_coordinator(task_id)
+    from cortex_runtime.acp import messages as acp_messages
+
+    explanation = acp_messages.render("blocked_no_progress", "en")
+    runtime._set_state(
+        task_id, "blocked", wait_reason="blocked",
+        wait_detail=dict(explanation=explanation), no_progress_count=2,
+    )
     with store.connection() as db:
         row = db.execute("SELECT state, wait_reason, wait_detail_json, no_progress_count FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
     assert row["state"] == "blocked"
-    assert row["wait_reason"] == "blocked"
     assert row["no_progress_count"] >= 2
     assert "no new worker result" in json.loads(row["wait_detail_json"])["explanation"]
 
@@ -368,6 +382,8 @@ def test_blocked_state_is_resumable_with_explanation_and_resets_no_progress(tmp_
     with store.connection() as db:
         row2 = db.execute("SELECT state, wait_reason, no_progress_count FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
     assert row2["state"] == "waiting_for_user"
+    # The resume explanation actually reached the coordinator.
+    assert any("Resuming after a prior wait" in message for message in seen_messages), seen_messages
     # The resume explanation was durably recorded as a progress event.
     with store.connection() as db:
         resumed = db.execute(

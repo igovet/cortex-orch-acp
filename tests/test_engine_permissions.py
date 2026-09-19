@@ -487,3 +487,83 @@ def test_coordinator_refusal_notifier_failure_never_breaks_the_refusal(tmp_path)
 def test_requires_confirmation_classification(tool_call, expected):
     params = _params(dict(toolCallId="tc-1", **tool_call))
     assert requires_confirmation(params) is expected
+
+
+def test_cortexs_own_tools_are_never_a_project_mutation():
+    """Live, on claude-agent-acp: the coordinator's own `delegate` and
+    `set_governance` were refused, it could do nothing at all, and it
+    ended its turn asking the user to "approve tool access".
+
+    An MCP call carries no ACP kind of its own -- it is `"other"` -- and an
+    unrecognized kind is refused for a coordinator by design. That rule is
+    right for an unknown tool and wrong for the runtime's own control
+    surface: a coordinator using the runtime it is a coordinator *of* is
+    not editing the project. Codex never surfaced this because it does not
+    route MCP calls through the permission prompt at all.
+    """
+    from cortex_runtime.engine.permissions import (
+        is_coordinator_mutating,
+        is_cortex_own_tool,
+        requires_confirmation,
+    )
+
+    for title in ("mcp__cortex__delegate", "mcp.cortex.create_task", "mcp__cortex__publish_result"):
+        params = {"toolCall": {"kind": "other", "title": title}}
+        assert is_cortex_own_tool(params), title
+        assert not is_coordinator_mutating(params), title
+        # A worker publishing its result is not held for confirmation
+        # either, for the same reason.
+        assert not requires_confirmation(params), title
+
+    # Another server's tool is still unclassifiable, and still refused.
+    other = {"toolCall": {"kind": "other", "title": "mcp__something__else"}}
+    assert not is_cortex_own_tool(other)
+    assert is_coordinator_mutating(other)
+
+    # And a real edit is still a mutation, whoever asks.
+    edit = {"toolCall": {"kind": "edit", "title": "Edit calc.py"}}
+    assert not is_cortex_own_tool(edit)
+    assert is_coordinator_mutating(edit)
+
+
+def test_a_worker_filling_its_own_draft_is_not_a_deletion():
+    """A worker writes its report by filling the draft the runtime handed
+    it, and a shell heredoc does that with `>`. Treating every `>` as a
+    deletion sent that to the user as an unexplained "Bash" prompt
+    offering to "allow access to draft-reports/" -- a question about
+    Cortex's own bookkeeping that the user has no way to judge.
+
+    Narrow by design: only the redirect is reconsidered, and only when
+    every target is inside the store."""
+    from cortex_runtime.engine.permissions import requires_confirmation
+
+    def ask(command):
+        return requires_confirmation({"toolCall": {"kind": "execute", "rawInput": {"command": command}}})
+
+    assert not ask("python3 - > .cortex/draft-reports/d_1.md")
+    assert not ask("cat > /p/.cortex/draft-reports/d_1.md <<'EOF'")
+    # The user's own files still ask.
+    assert ask("echo hi > calc.py")
+    assert ask("echo a > .cortex/x.md && echo b > calc.py")
+    # And a real deletion asks wherever it points, store included.
+    assert ask("rm -rf .cortex/draft-reports")
+
+
+def test_a_permission_question_names_the_command_it_is_asking_about():
+    """An engine names a shell call after its tool ("Bash") and leaves the
+    command in rawInput. What reached the user was "Run Command / Bash"
+    with a Yes/No -- a decision with the one fact needed to make it
+    missing."""
+    from cortex_runtime.engine.permissions import _named_for_the_user
+
+    asked = _named_for_the_user(
+        {"toolCall": {"kind": "execute", "title": "Bash", "rawInput": {"command": "rm -rf build/"}}}
+    )
+    assert asked["toolCall"]["title"] == "Bash: rm -rf build/"
+
+    # Nothing else is touched, and a call that already names its command
+    # is left exactly as it is.
+    already = {"toolCall": {"kind": "execute", "title": "rm -rf build/", "rawInput": {"command": "rm -rf build/"}}}
+    assert _named_for_the_user(already) is already
+    read = {"toolCall": {"kind": "read", "title": "Read calc.py"}}
+    assert _named_for_the_user(read) is read

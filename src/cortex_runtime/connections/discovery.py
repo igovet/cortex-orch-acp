@@ -62,11 +62,25 @@ def _home(environ: dict[str, str] | None) -> Path:
 
 
 def _node_binary(environ: dict[str, str] | None) -> str | None:
+    """The node binary to launch a discovered engine with, canonical.
+
+    Resolved through every symlink, because the launch trust check
+    (``engine.codex_install``/``claude_install``) accepts only an
+    already-canonical absolute path -- and the node on a user's PATH is
+    very often a symlink (``~/.local/bin/node`` -> a version manager's
+    real binary). Discovery that reported the symlink produced a
+    connection that could never launch at all, refused with
+    ``engine_install_untrusted_location`` naming the node binary.
+    """
     env = os.environ if environ is None else environ
     override = env.get("CORTEX_NODE_BINARY")
-    if override:
-        return override
-    return shutil.which("node", path=env.get("PATH"))
+    found = override or shutil.which("node", path=env.get("PATH"))
+    if not found:
+        return None
+    try:
+        return str(Path(found).resolve())
+    except OSError:
+        return found
 
 
 def _registry_root(environ: dict[str, str] | None) -> Path:

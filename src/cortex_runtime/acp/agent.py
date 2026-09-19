@@ -280,9 +280,13 @@ class Agent:
             self._runtime_accepts_emit_display_update = (
                 'emit_display_update' in inspect.signature(runtime.start_prompt).parameters
             )
+            self._runtime_accepts_host_mcp_servers = (
+                'host_mcp_servers' in inspect.signature(runtime.start_prompt).parameters
+            )
         except (TypeError, ValueError):
             self._runtime_accepts_emit_tool_call = False
             self._runtime_accepts_emit_display_update = False
+            self._runtime_accepts_host_mcp_servers = False
         # EXT-01 #5: detected the same way -- a runtime not updated for this
         # fix (every pre-existing FakeRuntime/test) simply never receives
         # host_permission_requester/host_fs_requester and keeps its own
@@ -840,6 +844,17 @@ class Agent:
                     # the ACP client, never persisted.
                     session["channel"] = (result.channel_id, result.secret)
                 acp_sessions.bind_task(store, session_id, result.task_id)
+                # The language the user already chose, carried onto the
+                # task the moment it exists. Before a task there is none,
+                # so the choice lives in the session (and in the user's
+                # defaults); nothing moved it across, so a brand-new
+                # thread had no language override at all and the
+                # coordinator was never told to answer in it. Live: the
+                # composer read "Russian" and every reply came back in
+                # English.
+                session_language = self._current_language_for_session(store, session)
+                if session_language is not None:
+                    acp_steering.set_language_override(store, result.task_id, session_language)
             else:
                 result = append_source_event(store, source_event, text, session["task_id"], blocks=staged_blocks, meta=meta)
                 if result.owner_epoch is not None:
@@ -900,6 +915,16 @@ class Agent:
             start_prompt_kwargs["emit_tool_call"] = self._make_emit_tool_call(session_id, cancel_event)
         if self._runtime_accepts_emit_display_update:
             start_prompt_kwargs["emit_display_update"] = self._make_emit_display_update(session_id, cancel_event)
+        if self._runtime_accepts_host_mcp_servers:
+            # The servers the client sent with this session, forwarded to
+            # the coordinator and to every worker (see
+            # ``engine.mcp_bridge.host_mcp_servers``). They were parsed and
+            # kept on the session from the first day and then never passed
+            # anywhere: the bridge that forwards them had tests, and
+            # nothing ever called it. Live evidence: an engine Cortex
+            # launched carried only its own ``cortex`` server, while the
+            # same editor's own agent had the user's three.
+            start_prompt_kwargs["host_mcp_servers"] = session.get("mcp_servers") or None
         try:
             reason = self.runtime.start_prompt(task_id, session_id, text, emit_update, cancel_event, **start_prompt_kwargs)
         except OrchestrationUnavailable as exc:

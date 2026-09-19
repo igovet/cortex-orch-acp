@@ -533,6 +533,11 @@ def test_elicitation_unsupported_falls_back_to_text(tmp_path):
 
 def test_stop_cancels_everything_and_supersedes_queued_steering(tmp_path):
     store, task_id = _task(tmp_path)
+    # Held open for the whole test: "never finishes" has to mean the
+    # worker's turn is still running when the stop lands. A worker that
+    # returns immediately without publishing now closes its own
+    # assignment, and a stop would then have nothing left to cancel.
+    worker_may_finish = threading.Event()
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
         if call_index == 0:
@@ -541,19 +546,32 @@ def test_stop_cancels_everything_and_supersedes_queued_steering(tmp_path):
         return PromptOutcome(StopReason.END_TURN, "")
 
     def worker_behavior(store, channel, session_ref, message, call_index):
-        return PromptOutcome(StopReason.END_TURN, "")  # never finishes
+        worker_may_finish.wait(timeout=30)  # never finishes on its own
+        return PromptOutcome(StopReason.END_TURN, "")
 
     def router(store, channel, session_ref, launch, instructions):
         if channel is None:
             return None
         return coordinator_behavior if channel.role == "coordinator" else worker_behavior
 
-    runtime, engine = _make_runtime(store, router)
-    runtime.start_prompt(task_id, "s1", "Do Z.", lambda t: True, threading.Event())
-    with store.connection() as db:
-        assignment_ref = db.execute(
-            "SELECT assignment_ref FROM task_events WHERE task_id=? AND event_type='delegation_requested'", (task_id,),
-        ).fetchone()["assignment_ref"]
+    runtime, engine = _make_runtime(store, router, wait_timeout_seconds=0.05)
+    turn = threading.Thread(
+        target=lambda: runtime.start_prompt(task_id, "s1", "Do Z.", lambda t: True, threading.Event()),
+        daemon=True,
+    )
+    turn.start()
+    assignment_ref = None
+    for _ in range(300):
+        with store.connection() as db:
+            row = db.execute(
+                "SELECT assignment_ref FROM task_events WHERE task_id=? AND event_type='delegation_requested'",
+                (task_id,),
+            ).fetchone()
+        if row is not None:
+            assignment_ref = row["assignment_ref"]
+            break
+        threading.Event().wait(0.02)
+    assert assignment_ref is not None
     # A steering event never delivered yet (simulating one queued right
     # before the stop):
     acp_steering.record_steering(store, task_id, "s1", "queued-steer-1", "please also do W")
@@ -580,6 +598,12 @@ def test_stop_cancels_everything_and_supersedes_queued_steering(tmp_path):
             "SELECT superseded FROM task_events WHERE task_id=? AND dedup_key='user_steering:s1:queued-steer-1'", (task_id,),
         ).fetchone()
     assert steering_row["superseded"] == 1
+
+    # The stopped turn is allowed to finish before anything else prompts
+    # this task: its own worker is what was being held open.
+    worker_may_finish.set()
+    turn.join(timeout=30)
+    assert not turn.is_alive()
 
     # A later ordinary prompt never restarts work.
     calls_before = len(engine.prompt_calls)
@@ -641,7 +665,13 @@ def test_russian_conversation_gets_russian_system_lines_and_no_worker_leak(tmp_p
     updates = []
     result = runtime.start_prompt(task_id, "s1", "Продолжай, пожалуйста", updates.append, threading.Event())
     assert result == StopReason.END_TURN
-    assert any("Заблокировано" in u for u in updates)
+    # Whatever Cortex says for itself, it says in the user's language. The
+    # line this produces is now the one about an assignment that reached
+    # no worker -- the worker ends its turn without publishing, which
+    # closes its assignment (it used to exhaust the coordinator's patience
+    # instead, and the line was the blocked one).
+    assert any("НЕ было делегировано" in u for u in updates), updates
+    assert not any("was NOT delegated" in u for u in updates), updates
     assert not any(u.startswith("Blocked") for u in updates)
     assert not any("English worker report" in u for u in updates)
 

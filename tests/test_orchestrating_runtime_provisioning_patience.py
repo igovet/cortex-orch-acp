@@ -161,10 +161,12 @@ def test_advancing_provisioning_resets_the_no_progress_budget_but_a_real_stall_s
     result = runtime.start_prompt(task_id, "s1", "Do X.", updates.append, threading.Event())
     watcher_thread.join(timeout=5.0)
 
+    # The turn ends -- it never hangs. It no longer ends *blocked*: the
+    # real assignment's own worker finished its turn having produced
+    # nothing, which now closes that assignment explicitly instead of
+    # leaving the coordinator to run out of patience with it (a worker may
+    # legitimately take hours, so patience with open work is unbounded).
     assert result == StopReason.END_TURN
-    with store.connection() as db:
-        final = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
-    assert final["state"] == "blocked"
     assert stop_watching.is_set(), "the watcher must have finished advancing before the turn ended"
     assert saw_workers_provisioning, "the loop must have observed and reported active provisioning at least once"
     # The invariant is that advancing provisioning never *exhausts* the

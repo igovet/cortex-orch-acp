@@ -420,11 +420,19 @@ def test_composed_production_chain(tmp_path, monkeypatch):
 
         with store.connection() as db:
             provisioned = db.execute(
-                "SELECT attempt_id, workspace_binding_id FROM delegation_provisioning WHERE task_id=?", (task_id,),
+                "SELECT attempt_id, workspace_binding_id, engine_session_ref FROM delegation_provisioning WHERE task_id=?", (task_id,),
             ).fetchone()
         assert provisioned is not None, "the real continuation loop never provisioned a worker"
         attempt_id = provisioned["attempt_id"]
         workspace_binding_id = provisioned["workspace_binding_id"]
+        # Read from the durable provisioning row, not the adapter's live
+        # map: this worker's turn ended without publishing anything, which
+        # closes the assignment and tears its session down -- correct in
+        # production (a worker that reported nothing is over), while phase
+        # 5 below deliberately reuses this exact attempt to drive two
+        # recovery generations through the real adapter.
+        g1_session_ref = provisioned["engine_session_ref"]
+        assert g1_session_ref
 
         # Real isolated workspace copy actually exists, excludes .git/.cortex.
         workspace_root = Path(prod_runtime._workspace.root_for(workspace_binding_id))
@@ -495,7 +503,6 @@ def test_composed_production_chain(tmp_path, monkeypatch):
         # production -- see this file's own module docstring.
         # -------------------------------------------------------------
         adapter = prod_runtime._engine
-        g1_session_ref = adapter._sessions[attempt_id]
         g1 = delegation_generations.latest_generation(store, g1_session_ref)
         assert g1["cause"] == "session_open"
 

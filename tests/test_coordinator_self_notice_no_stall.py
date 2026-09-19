@@ -121,14 +121,14 @@ def test_coordinator_self_notice_does_not_stall_the_turn(tmp_path):
     assert "a mutation was refused" in note_row["payload_json"]
 
 
-def test_genuine_worker_wait_still_waits_and_no_progress_budget_still_ends_turn(tmp_path):
-    """A turn that really is waiting on a worker result (the worker never
-    publishes or asks anything) must still wait out the bounded no-progress
-    budget and end 'blocked' -- the fix must not make genuine waiting a
-    no-op. Reuses the same short-budget pattern as
-    ``test_orchestrating_runtime.test_no_progress_budget_ends_turn_blocked_without_infinite_waiting``,
-    with an explicit elapsed-time floor so the budget is shown to actually
-    have been spent, not skipped."""
+def test_a_worker_that_ends_without_reporting_closes_its_assignment(tmp_path):
+    """A worker that publishes nothing, asks nothing and fails in no way
+    is over, and its assignment says so.
+
+    This used to end the turn 'blocked' instead: the coordinator ran out
+    of patience with an assignment that nothing would ever close. Patience
+    with open work is now unbounded (a worker may legitimately take
+    hours), so the assignment has to close itself or nobody ever would."""
     store, task_id = _task(tmp_path)
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
@@ -162,9 +162,11 @@ def test_genuine_worker_wait_still_waits_and_no_progress_budget_still_ends_turn(
 
     assert result == StopReason.END_TURN
     with store.connection() as db:
-        row = db.execute(
-            "SELECT state, no_progress_count FROM task_orchestration WHERE task_id=?", (task_id,),
+        failure = db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='assignment_failed'",
+            (task_id,),
         ).fetchone()
-    assert row["state"] == "blocked"
-    assert row["no_progress_count"] >= max_no_progress
-    assert any("Blocked" in u for u in updates)
+    assert failure is not None, "a worker that produced nothing must say so"
+    assert "worker_ended_without_result" in failure["payload_json"]
+    # And it ended promptly, rather than hanging on work nobody was doing.
+    assert elapsed < 30

@@ -319,10 +319,16 @@ def test_no_progress_budget_ends_turn_blocked_without_infinite_waiting(tmp_path)
     updates = []
     result = runtime.start_prompt(task_id, "s1", "Do X.", updates.append, threading.Event())
     assert result == StopReason.END_TURN
+    # A worker that ends its turn having produced nothing is over, and
+    # says so; the turn ends because the assignment closed, never because
+    # the coordinator ran out of patience with work still open (a worker
+    # may legitimately take hours).
     with store.connection() as db:
-        state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
-    assert state == "blocked"
-    assert any("Blocked" in u for u in updates)
+        failure = db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='assignment_failed'",
+            (task_id,),
+        ).fetchone()
+    assert failure is not None and "worker_ended_without_result" in failure["payload_json"]
 
 
 def test_repeated_empty_coordinator_turns_end_blocked_and_retain_history(tmp_path):
@@ -361,10 +367,15 @@ def test_repeated_empty_coordinator_turns_end_blocked_and_retain_history(tmp_pat
     # coordinator forever (an infinite model loop).
     assert call_counts["coordinator"] <= 10
     with store.connection() as db:
-        state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
         event_count = db.execute("SELECT COUNT(*) FROM task_events WHERE task_id=?", (task_id,)).fetchone()[0]
-    assert state == "blocked"
-    assert event_count > 0  # history is retained, not discarded, after the blocked close
+        failure = db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='assignment_failed'",
+            (task_id,),
+        ).fetchone()
+    # The silent worker's assignment closed itself; the empty coordinator
+    # turns are what the retry bound above covers.
+    assert failure is not None and "worker_ended_without_result" in failure["payload_json"]
+    assert event_count > 0  # history is retained, not discarded, after the turn ends
     reader_channel = _resolve_owner_channel(store, task_id)
     events = mcp_tools.dispatch(store, reader_channel, "list_events", dict(request_key="list-after-block"))
     assert isinstance(events["events"], list) and len(events["events"]) > 0

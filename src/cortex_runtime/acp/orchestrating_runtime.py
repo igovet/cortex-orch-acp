@@ -162,7 +162,17 @@ _IDENTICAL_INTEGRATION_CONFLICT_LIMIT = 3
 # This runtime's own MCP tools, as an engine names them in a tool call.
 # Their individual cards are noise in a session feed: a reader wants the
 # work, not the bookkeeping that supports it.
-_INTERNAL_TOOL_CALL = re.compile(r"^(?:mcp\.)?cortex[._]")
+# This runtime's own MCP tools, however an engine spells the server
+# prefix: codex writes "mcp.cortex.create_task", claude writes
+# "mcp__cortex__delegate". Matching only the first spelling put every one
+# of the coordinator's own calls back in the feed the moment the engine
+# changed.
+_INTERNAL_TOOL_CALL = re.compile(r"^(?:mcp[._]{1,2})?cortex[._]{1,2}")
+
+# The engine's own tool-discovery step, which it reports as a tool call of
+# its own ("ToolSearch"). Like its self-review below, it is the engine
+# working out what it can do, not an action on the project.
+_ENGINE_TOOL_DISCOVERY = re.compile(r"^\s*tool[_ ]?search\b", re.I)
 
 # The engine's own agent surface. Seen live: a coordinator used codex's
 # subagents and its `wait` instead of `delegate`, so the whole delegation
@@ -1789,26 +1799,41 @@ class OrchestratingRuntime:
                         continue
                     last_provisioning_sig = provisioning_sig
                     with self._lock:
-                        # Only a worker whose engine turn is actually in
-                        # flight holds this open. Treating "an assignment
-                        # exists" as progress was tried and reverted: an
-                        # assignment that never reaches a terminal event
-                        # would then hold the turn open forever, which is
-                        # the same defect mirrored -- a task nobody is
-                        # working on that never ends. The reported symptom
-                        # (blocked while the worker was working) is a
-                        # worker turn that produced nothing, and that is
-                        # where it has to be fixed.
-                        worker_running = bool(self._worker_turns_in_flight)
-                    if worker_running:
-                        # See self._worker_turns_in_flight: a worker's own
-                        # engine turn being in flight is observed backend
-                        # reality, exactly like an advancing provisioning
-                        # step above, so it resets the budget rather than
-                        # depleting it. A worker whose turn has *ended*
-                        # without producing a meaningful event leaves this
-                        # set, and the budget then depletes normally --
-                        # which is the genuine stall this budget exists for.
+                        # An assignment that is open at all -- not merely
+                        # one whose engine turn happens to be in flight
+                        # this instant. A worker may legitimately work for
+                        # hours on something hard ("воркер может работать
+                        # часами если там что то сложное, и это не повод
+                        # блокировать"), and between its own turns, while
+                        # a clarification is being delivered, or inside
+                        # one long tool call, the in-flight set is empty
+                        # while the work is very much alive. Live: the
+                        # budget ran out at 00:34:53 and the worker
+                        # published its result at 00:35:18.
+                        #
+                        # This was tried once before and reverted, because
+                        # an assignment that never terminates then holds
+                        # the turn open forever. That is now the deliberate
+                        # behaviour: waiting on real work has no deadline,
+                        # and cancellation is the way out. The budget below
+                        # still covers the case it was written for -- a
+                        # task with nothing open and nothing happening.
+                        in_flight = set(self._worker_turns_in_flight)
+                        open_refs = set(self._open_assignments.get(task_id) or ())
+                        pending = [f for f in (self._running.get(task_id) or ()) if not f.done()]
+                    if open_refs and not in_flight and not pending:
+                        # Open assignments with nothing running for this
+                        # task at all: their workers' turns are over and
+                        # none of them produced a result, a question or a
+                        # failure. Closed here rather than the instant a
+                        # worker's prompt returns, because a result can
+                        # still be published just after that (see
+                        # ``recovery.worker_reconciliation``'s own late-
+                        # publish race, which must keep winning).
+                        for ref in sorted(open_refs):
+                            self._close_assignment_that_produced_nothing(task_id, ref)
+                        continue
+                    if in_flight or open_refs:
                         no_progress = 0
                         self._set_state(task_id, "blocked", wait_reason="workers_running", no_progress_count=0)
                         self._emit_worker_activity_tool_calls(emit_tool_call)
@@ -2546,20 +2571,19 @@ class OrchestratingRuntime:
                     self._open_assignments.pop(task_id, None)
 
     def _worker_card_body(self, assignment_ref: str, lines) -> str:
-        """A finished worker's card body: what it reports, and under it
-        everything it actually did.
+        """A finished worker's card body: what it reports, and nothing
+        else.
 
-        The action log is consumed here -- this is the last thing that
-        needs it -- so a card is never rebuilt from a stale history."""
+        Not its history: every command it ran was already shown, one at a
+        time, on this same card's own title while it worked -- repeating
+        the whole transcript underneath the result is a wall of text over
+        the one thing a reader opened the card for. The action log is
+        consumed (not rendered) here, the last place that holds it, so a
+        card is never rebuilt from a stale history."""
         with self._lock:
-            route = self._worker_card_route.pop(assignment_ref, None)
-            actions = self._worker_action_log.pop(assignment_ref, None)
-        body = list(lines)
-        if route:
-            body.append(route)
-        if actions:
-            body.extend(actions)
-        return scrub_text("\n".join(part for part in body if part), max_chars=_WORKER_ACTION_LOG_MAX_CHARS)
+            self._worker_card_route.pop(assignment_ref, None)
+            self._worker_action_log.pop(assignment_ref, None)
+        return scrub_text("\n".join(part for part in lines if part), max_chars=_WORKER_ACTION_LOG_MAX_CHARS)
 
     def _emit_worker_card(self, emit_tool_call, assignment_ref: str, *, only_if_new: bool = False, **fields) -> None:
         """Every update to a worker's assignment card goes through here.
@@ -2684,7 +2708,11 @@ class OrchestratingRuntime:
                 # worker's own card; the rest has no reader.
                 return
             label = known or title or ""
-            if _ENGINE_REVIEW.search(label) or (kind or pending_kind.get(ref)) == "think":
+            if (
+                _ENGINE_REVIEW.search(label)
+                or _ENGINE_TOOL_DISCOVERY.match(label)
+                or (kind or pending_kind.get(ref)) == "think"
+            ):
                 # The engine thinking out loud ("Guardian Review" and the
                 # like). It is not an action taken on the project, and a
                 # card for every deliberation step sits between the
@@ -2774,9 +2802,7 @@ class OrchestratingRuntime:
             return
         with self._lock:
             activity = dict(self._worker_activity)
-            logs = {ref: list(entries) for ref, entries in self._worker_action_log.items()}
             titles = dict(self._worker_card_title)
-            routes = dict(self._worker_card_route)
         for assignment_ref, latest in activity.items():
             latest = " ".join(latest.split())
             if not latest:
@@ -2784,16 +2810,11 @@ class OrchestratingRuntime:
             fields: dict[str, Any] = dict(status="in_progress")
             base = titles.get(assignment_ref)
             if base:
-                fields["title"] = scrub_text(f"{base} · {latest}", max_chars=_WORKER_CARD_TITLE_MAX_CHARS)
-            entries = logs.get(assignment_ref)
-            body_lines = []
-            route = routes.get(assignment_ref)
-            if route:
-                body_lines.append(route)
-            if entries:
-                body_lines.extend(entries)
-            if body_lines:
-                fields["text"] = scrub_text("\n".join(body_lines), max_chars=_WORKER_ACTION_LOG_MAX_CHARS)
+                fields["title"] = scrub_text(f"{base}. {latest}", max_chars=_WORKER_CARD_TITLE_MAX_CHARS)
+            # No body while it runs: what it is doing is the title, and
+            # its history is not something a reader asked for. The body is
+            # the worker's own final message, written once when it
+            # reports (see _worker_card_body).
             # This runs on every wait tick, but a worker is not doing
             # something new on every tick: re-sending an identical card is
             # pure wire noise (and a client redrawing it, flicker).
@@ -3611,35 +3632,38 @@ class OrchestratingRuntime:
                         if not log or log[-1] != action:
                             log.append(action)
                             del log[:-_WORKER_ACTION_LOG_MAX_ENTRIES]
+                        feed = self._task_tool_call_emitters.get(task_id)
+                    # Straight away, not on the next wait tick: a worker
+                    # that starts and finishes between two ticks would
+                    # otherwise never show what it did at all, and a
+                    # command that only appears a second after it runs is
+                    # not "what this worker is doing now". The card's own
+                    # send-dedup keeps repeats off the wire.
+                    self._emit_worker_activity_tool_calls(feed)
 
-                # Every action this worker takes is its own card in the
-                # shared feed, prefixed with whose action it is: a session
-                # has one message stream and no sub-feeds, so attribution
-                # is what keeps two workers apart. `id_scope` keeps their
-                # cards from colliding when both engines happen to use the
-                # same wire tool-call id.
+                # The card this worker's commands will be shown on has to
+                # be named before the first of them arrives. The event
+                # path names it too, at assignment_ready, but a worker can
+                # run a command before that event is processed -- and an
+                # unnamed card cannot carry anything.
                 with self._lock:
-                    feed = self._task_tool_call_emitters.get(task_id)
-                # Who, then the action on its own line. Run on one line
-                # the command read as a continuation of the model name
-                # ("...gpt-5.6-luna · \"sed -n ...\"") rather than as the
-                # thing the worker is doing. Resolved per call, never once
-                # here: this runs the moment the worker is dispatched, and
-                # the attempt's own route row may land a moment later.
-                def _worker_prefix(_ref=assignment_ref, _role=result.role_id) -> str:
-                    label = self._delegation_route_label(task_id, _ref)
-                    who = _display_role(_role)
-                    return f"{who} · {label}\n" if label else f"{who}\n"
-
-                worker_cards = self._engine_tool_call_emitter(
-                    feed, prefix=_worker_prefix, id_scope=assignment_ref,
-                    project_root=self._task_project_root(task_id),
-                ) if feed is not None else None
-
-                def _worker_tool_call(*args, _card=worker_cards, _log=_on_worker_tool_call) -> None:
-                    _log(*args)
-                    if _card is not None:
-                        _card(*args)
+                    if assignment_ref not in self._worker_card_title:
+                        route = self._delegation_route_label(task_id, assignment_ref)
+                        who = _display_role(result.role_id) + (f" · {route}" if route else "")
+                        self._worker_card_title[assignment_ref] = (
+                            f"Worker: {who} — {payload.get('title', '')}"
+                        )
+                        if route:
+                            self._worker_card_route[assignment_ref] = route
+                # A worker's actions never become cards of their own. One
+                # card per action filled the feed with a worker's whole
+                # transcript, so what the coordinator was doing scrolled
+                # away between them. Each worker has exactly one card, and
+                # its own current command is shown on it and replaced as
+                # it works (see _emit_worker_activity_tool_calls) -- per
+                # assignment, so a second worker only ever updates its
+                # own.
+                _worker_tool_call = _on_worker_tool_call
 
                 try:
                     outcome = self._engine.prompt(
@@ -3757,6 +3781,56 @@ class OrchestratingRuntime:
                 dict(note=f"Assignment {assignment_ref} worker turn ended: {outcome.stop_reason.value} limit."),
                 origin="runtime", assignment_ref=assignment_ref,
             )
+
+    def _close_assignment_that_produced_nothing(self, task_id: str, assignment_ref: str) -> None:
+        """A worker's turn ended cleanly having published no result, asked
+        no question and failed in no way: the assignment produced nothing
+        and is over.
+
+        Recorded, because until now it was not: the turn simply ended and
+        the assignment stayed open forever. That was survivable only while
+        the coordinator's patience ran out on its own -- and its patience
+        is now deliberately unbounded, because a worker may legitimately
+        work for hours. An assignment nobody is working on any more must
+        therefore close itself, or the coordinator waits on it until the
+        user cancels.
+
+        Never written when the worker did produce something: the check and
+        the write share one transaction, so a result published in the
+        moment between them wins and this event is not written at all.
+        """
+        with self._store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                # Both refs: a worker publishes through its own channel, so
+                # its result/question carries the *attempt's* ref, while
+                # the runtime's own events for the same assignment carry
+                # the idempotency key. Checking only one of the two reads
+                # a worker that did report as one that said nothing.
+                refs = [assignment_ref]
+                attempt_row = db.execute(
+                    "SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?",
+                    (task_id, assignment_ref),
+                ).fetchone()
+                if attempt_row is not None and attempt_row["attempt_id"]:
+                    refs.append(attempt_row["attempt_id"])
+                placeholders = ",".join("?" for _ in refs)
+                existing = db.execute(
+                    f"SELECT 1 FROM task_events WHERE task_id=? AND assignment_ref IN ({placeholders}) "
+                    "AND superseded=0 AND event_type IN ('worker_result','worker_question',"
+                    "'assignment_failed','assignment_cancelled') LIMIT 1",
+                    (task_id, *refs),
+                ).fetchone()
+                if existing is None:
+                    delegation_events.append_event_tx(
+                        db, task_id, "assignment_failed", f"assignment_silent:{assignment_ref}",
+                        dict(error="worker_ended_without_result", assignment_ref=assignment_ref),
+                        origin="runtime", assignment_ref=assignment_ref,
+                    )
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
 
     def _cancel_assignment(self, task_id: str, assignment_ref: str, reason: str) -> None:
         with self._store.connection() as db:
