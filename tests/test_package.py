@@ -235,7 +235,11 @@ def test_orchestrator_routes_conditional_procedures_with_valid_links():
     # Raised again for the rule a live run showed missing: the
     # coordinator told the user "принимаю результат" and called nothing,
     # so the task stayed unaccepted while the user believed it was done.
-    assert len(body) < 8400
+    # Raised once more for the ordering a live run proved the coordinator
+    # cannot infer: a reviewer delegated before integration reported the
+    # implementation "not present", because it was looking at the project
+    # and the change was still in another worker's copy.
+    assert len(body) < 8600
     links = re.findall(r'\]\((references/[^)]+)\)', body)
     assert len(set(links)) >= 7
     for link in links:

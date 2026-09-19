@@ -333,3 +333,34 @@ def test_revision_a_does_not_certify_revision_b_after_conflicting_integration(tm
     ok, reasons = delegation_completion.gate(store, task_id)
     assert not ok
     assert any(reason == f"stale_verification:{assignment_ref}" for reason in reasons)
+
+
+def test_what_the_project_does_not_track_is_not_part_of_a_delivery(tmp_path):
+    """Live, and it cost a whole task: running the self-check inside the
+    worker's copy produced `__pycache__/calc.cpython-312.pyc`, integration
+    treated it as part of the delivery, the host had no such file, and the
+    integration stopped on it -- so the real change never reached the
+    project at all.
+
+    What a project does not track is not something a worker delivers."""
+    import subprocess
+
+    from cortex_runtime.delegation.integration import _not_deliverable
+
+    project = tmp_path / "project"
+    project.mkdir()
+    paths = ["calc.py", "__pycache__/calc.cpython-312.pyc", "__pycache__", "build/out.o", "README.md"]
+
+    # Always generated, repository or not.
+    assert _not_deliverable(str(project), paths) == {"__pycache__", "__pycache__/calc.cpython-312.pyc"}
+
+    # And whatever the project's own rules ignore, once it is a repository.
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    (project / ".gitignore").write_text("build/\n", encoding="utf-8")
+    assert _not_deliverable(str(project), paths) == {
+        "__pycache__", "__pycache__/calc.cpython-312.pyc", "build/out.o",
+    }
+
+    # Never the other way round: a tracked file is always deliverable.
+    assert "calc.py" not in _not_deliverable(str(project), paths)
+    assert "README.md" not in _not_deliverable(str(project), paths)

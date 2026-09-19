@@ -66,7 +66,9 @@ import codecs
 import difflib
 import json
 import os
+import re
 import stat
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -144,6 +146,41 @@ def _record(store, *, task_id, assignment_ref, request_key, attempt_id, workspac
 
 
 # -- path-scoped filesystem reads (main project root) -----------------------
+
+# Generated artifacts that are never a deliverable, whether or not the
+# project is a repository with its own ignore rules.
+_ALWAYS_GENERATED = (
+    re.compile(r"(?:^|/)__pycache__(?:/|$)"),
+    re.compile(r"\.py[co]$"),
+)
+
+
+def _not_deliverable(project_root: str, relpaths) -> set[str]:
+    """The subset of ``relpaths`` the project does not track: what its own
+    git ignore rules exclude, plus always-generated artifacts.
+
+    Asks git once, in the project (the worker's copy has no ``.git`` of
+    its own by design). A project that is not a repository, or a git that
+    fails for any reason, simply contributes nothing here -- the built-in
+    list still applies, and nothing is ever *added* to the delivery by
+    this function.
+    """
+    ignored = {path for path in relpaths if any(rule.search(path) for rule in _ALWAYS_GENERATED)}
+    candidates = [path for path in relpaths if path not in ignored]
+    if not candidates:
+        return ignored
+    try:
+        result = subprocess.run(
+            ["git", "-C", project_root, "check-ignore", "--stdin"],
+            input="\n".join(candidates), capture_output=True, text=True, timeout=10, check=False,
+        )
+    except Exception:  # noqa: BLE001 - no git, no repository, no timeout budget: not a failure
+        return ignored
+    if result.returncode not in (0, 1):
+        return ignored
+    ignored.update(line.strip() for line in result.stdout.splitlines() if line.strip())
+    return ignored
+
 
 def _is_technical(relpath: str) -> bool:
     top = relpath.split("/", 1)[0]
@@ -369,6 +406,13 @@ def integrate(
         if _entries_equal(base_entry, worker_entry):
             continue
         changed[relpath] = (base_entry, worker_entry)
+    # Whatever the project itself does not track is not something a worker
+    # delivers. Live: running the self-check inside the copy produced
+    # __pycache__/calc.cpython-312.pyc, integration treated it as part of
+    # the delivery, the host had no such file, and the whole integration
+    # stopped on it -- the real change never reached the project.
+    for relpath in _not_deliverable(project_root, changed):
+        changed.pop(relpath, None)
 
     plan_writes: dict[str, tuple] = {}
     plan_deletes: set[str] = set()
