@@ -23,10 +23,8 @@ Pass the exact patch intact to the native patch tool, directly or through a safe
 wrapper. An inert JavaScript string or `String.raw` template without substitutions
 is valid. Never construct draft content through executable interpolation, command
 substitution or shell evaluation, and never send the Markdown body through a Cortex
-writer. Do not rewrite, rename, move or delete the draft: fill the file that already exists at
-its path, in place. A tool that writes a new file and moves it over the old one replaces
-the file, and publication is refused however correct the text is; another draft written
-the same way is refused the same way. Build the patch from the
+writer. Do not rename, move or delete the draft: fill the file at the path the server gave you,
+with whatever tool writes it -- a replacement written over that same path is followed. Build the patch from the
 authoritative current marker text; on a context conflict, reread and correct once.
 
 

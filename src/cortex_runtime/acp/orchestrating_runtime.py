@@ -3679,15 +3679,31 @@ class OrchestratingRuntime:
                         )
                         if route:
                             self._worker_card_route[assignment_ref] = route
-                # A worker's actions never become cards of their own. One
-                # card per action filled the feed with a worker's whole
-                # transcript, so what the coordinator was doing scrolled
-                # away between them. Each worker has exactly one card, and
-                # its own current command is shown on it and replaced as
-                # it works (see _emit_worker_activity_tool_calls) -- per
-                # assignment, so a second worker only ever updates its
-                # own.
-                _worker_tool_call = _on_worker_tool_call
+                # Every action a worker takes is its own card in the feed,
+                # attributed, so the whole stream of what is happening is
+                # visible ("давай все таки в чате весь поток выводить что
+                # бы точно понимать что происходит"). Its own assignment
+                # card still carries whatever it is doing right now, so a
+                # reader who is not following every line still sees the
+                # current state. `id_scope` keeps two workers' cards apart
+                # when both engines use the same wire tool-call id.
+                with self._lock:
+                    feed = self._task_tool_call_emitters.get(task_id)
+
+                def _worker_prefix(_ref=assignment_ref, _role=result.role_id) -> str:
+                    label = self._delegation_route_label(task_id, _ref)
+                    who = _display_role(_role)
+                    return f"{who} · {label}\n" if label else f"{who}\n"
+
+                worker_cards = self._engine_tool_call_emitter(
+                    feed, prefix=_worker_prefix, id_scope=assignment_ref,
+                    project_root=self._task_project_root(task_id),
+                ) if feed is not None else None
+
+                def _worker_tool_call(*args, _card=worker_cards, _log=_on_worker_tool_call) -> None:
+                    _log(*args)
+                    if _card is not None:
+                        _card(*args)
 
                 try:
                     outcome = self._engine.prompt(

@@ -5,42 +5,40 @@
 Retain the user's selected coordinator model and effort. Do not propagate that cost
 to every worker.
 
-Apply this mandatory worker-model policy to every subagent assignment. Put model
-and effort in the native request and repeat them in the assignment/pipeline; do
-not rely on an inherited host default.
+Every role's allowed routes -- engine, model and efforts -- are listed for you in
+your own instructions, under "Allowed worker routes per role". That list is the
+policy; this section is only how to choose within it. Put the chosen engine, model
+and effort in the `delegate` call and repeat them in the assignment, rather than
+relying on an inherited default: omitting them takes the role's first allowed
+route, which is a choice you did not make.
 
-- Fact gathering, exploration, source/log reading, known checks, documentation,
-  ordinary implementation and plans of already-known steps use
-  `gpt-5.6-luna`. Prefer `high`; use `xhigh` or `max` when the bounded work needs
-  more reasoning and the current host supports that effort. Do not create a
-  planner just to restate a small task.
-- Only genuinely complex or tightly coupled implementation uses
-  `gpt-5.6-terra`, normally at `medium` or `high`; state the concrete complexity
-  and do not treat file count alone as sufficient. Code review uses Terra at
-  `medium` or `high` by default, with the reason recorded; it is not an
-  automatic escalation of the implementation model.
-- Consequential decisions use `gpt-5.6-sol` at `medium` (`decision`): architectural
-  boundaries, public contracts, migration strategy or a plan with substantial
-  risk. Use `high` (`decision-hard`) for conflicting requirements, difficult
-  rollback, data-loss risk or security-boundary decisions. A narrow security audit
-  may use Sol `medium`/`high`; implementation returns to Luna/Terra.
-- `planner`, `architect`, `database_architect` and similar profiles follow the
-  decision's risk, not the role name. Sol consumes bounded evidence gathered
-  by Luna; they do not replace exploration. A missing fact goes back to its owner.
-- Opt-in `senior_consultant` uses the same decision ladder: Sol `medium` standard
-  or narrow and Sol `high` for harder questions. Consultation stays bounded and
-  advisory; it never changes the coordinator model.
-- Reviews and verifications use the permitted routes without automatic escalation;
-  ordinary review uses Terra, while a narrowly scoped verification that does not
-  require review judgment may use Luna. Record inspected model/effort when
-  relevant; never infer a review route from the implementation model alone.
-- Other models or efforts are outside this coordinator-selected policy.
-  Preserve an explicit user-requested model/effort verbatim; do not reinterpret it
-  as a Cortex recommendation. If a host cannot honor it, report an evidence gap.
+Choose by what the work costs to get wrong, never by habit or by role name:
 
-Record the decision, concrete risk/uncertainty and selected model/effort before
-assigning Sol. Governance changes verification depth, not this ladder.
-These are selection instructions and diagnostic checks, never runtime gates.
+- Ordinary work -- fact gathering, exploration, reading sources or logs, known
+  checks, documentation, implementation of already-understood steps -- takes the
+  cheapest allowed route for that role, at its default effort. Do not create a
+  planner to restate a small task.
+- Genuinely complex or tightly coupled implementation, and ordinary code review,
+  take a mid route, normally at `medium` or `high`. State the concrete complexity;
+  file count alone is not it. A review route is chosen for the review, never
+  inferred from the implementation's route.
+- Consequential decisions -- architectural boundaries, public contracts, migration
+  strategy, a plan with substantial risk -- take the strongest allowed route for
+  that role. Raise the effort again for conflicting requirements, difficult
+  rollback, data-loss risk or a security boundary. Such a route consumes evidence
+  someone cheaper already gathered; it does not replace the gathering, and
+  implementation returns to an ordinary route afterwards.
+- `planner`, `architect`, `database_architect`, opt-in `senior_consultant` and
+  similar follow the decision's risk, not the role name. Consultation stays
+  bounded and advisory; it never changes the coordinator's own route.
+- A route outside the role's allowed list is refused, and the refusal names what
+  is allowed. Preserve an explicit user-requested model/effort verbatim; if it is
+  not allowed for that role, say so rather than silently substituting.
+
+Record the decision, the concrete risk or uncertainty, and the selected
+engine/model/effort before assigning anything above the ordinary route. Governance
+changes verification depth, not this choice. These are selection instructions and
+diagnostic checks, never runtime gates.
 
 Do not switch an active worker's model merely because it is slow or a host wait
 expires.

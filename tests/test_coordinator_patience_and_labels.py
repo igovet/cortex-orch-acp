@@ -289,15 +289,20 @@ def test_a_running_worker_shows_its_current_command_on_its_own_card(tmp_path):
 
     actions = [c for c in cards if "Read calc.py" in str(c.get("title", ""))
                or "Edit calc.py" in str(c.get("title", ""))]
-    assert actions, f"the worker's current command never reached the feed: {cards}"
-    # Every one of them is this worker's own single card, never a card of
-    # its own per action.
+    assert actions, f"the worker's actions never reached the feed: {cards}"
     assignment_cards = _worker_card_ids(cards)
-    assert {c["tool_call_id"] for c in actions} == assignment_cards, actions
     assert len(assignment_cards) == 1, assignment_cards
-    assert all("Worker: backend-dev" in c["title"] for c in actions), actions
-    # The latest command replaces the previous one on that same card.
-    assert "Edit calc.py" in actions[-1]["title"], actions[-1]
+
+    # Each action is its own card in the stream, attributed to the worker.
+    own = [c for c in actions if c["tool_call_id"] not in assignment_cards]
+    assert own, f"the stream must carry each action: {actions}"
+    assert all(c["title"].startswith("backend-dev") for c in own), own
+    assert len({c["tool_call_id"] for c in own}) == len(own), own
+
+    # And the assignment's own card still says what it is doing now.
+    on_card = [c for c in actions if c["tool_call_id"] in assignment_cards]
+    assert on_card, actions
+    assert "Edit calc.py" in on_card[-1]["title"], on_card[-1]
 
 
 def _worker_card_ids(cards):
@@ -965,16 +970,14 @@ def test_two_workers_running_at_once_keep_their_actions_apart(tmp_path):
 
     actions = [c for c in cards if "pytest -q" in (c.get("title") or "")]
     assert actions, f"neither worker's command reached the feed: {[c.get('title') for c in cards]}"
-    # Two workers, two cards -- each worker's command lands on its own,
-    # even though both engines deliberately used the same wire call id.
-    assert len({c["tool_call_id"] for c in actions}) == 2, actions
+    # Both engines deliberately used the same wire call id, so every card
+    # here must still be distinct -- two assignment cards and each
+    # worker's own action card.
+    assert len({c["tool_call_id"] for c in actions}) == len(actions), actions
+    # And no card ever carries the other worker's work.
     for card in actions:
-        assert card["title"].startswith("Worker: backend-dev"), card
-    # Each card names its own work, never the other's.
-    per_card = {}
-    for card in actions:
-        per_card[card["tool_call_id"]] = card["title"].rsplit("test_", 1)[1]
-    assert set(per_card.values()) == {"X.py", "Y.py"}, per_card
+        assert card["title"].rsplit("test_", 1)[1] in ("X.py", "Y.py"), card
+    assert {c["title"].rsplit("test_", 1)[1] for c in actions} == {"X.py", "Y.py"}
 
     # Both results reached the coordinator, each exactly once.
     with store.connection() as db:
