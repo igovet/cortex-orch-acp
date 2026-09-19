@@ -74,7 +74,50 @@ def sweep_capacity(store, engine, *, limit: int = DEFAULT_SWEEP_LIMIT) -> dict:
             actions["terminate_attempted"] += 1
         else:
             actions["unknown_left_ambiguous"] += 1
+    actions.update(_release_reservations_whose_process_is_gone(store, limit=limit))
     return actions
+
+
+def _release_reservations_whose_process_is_gone(store, *, limit: int) -> dict:
+    """Reclaim ``reserved`` rows whose owning process is durably confirmed
+    gone.
+
+    A reservation is taken before the engine process is launched and
+    released when its exit is observed. If the Cortex process dies without
+    observing that exit -- killed, crashed, or torn down by a client that
+    closed the connection -- the row stays ``reserved`` forever and nothing
+    ever reclaims it: the ``ambiguous`` sweep above only ever looks at rows
+    something already transitioned. Live (2026-09-19) four such rows
+    accumulated on one connection whose ``max_concurrent_sessions`` is 4,
+    and every subsequent thread in that project then hung waiting for
+    capacity, silently and forever. Two of the four came from turns that
+    had ended perfectly normally.
+
+    Confirmation is the durable process identity (pid + start time + boot
+    id -- see ``recovery.registry.probe_liveness``), never a guess: a live
+    process, or one this cannot identify at all, keeps its reservation. A
+    reservation younger than its own process record (reserve happens first,
+    launch second) has no record yet and so reads as "unknown" here, which
+    is exactly right -- it is left alone.
+    """
+    from ..delegation import capacity as delegation_capacity
+    from ..recovery import registry as recovery_registry
+
+    with store.connection() as db:
+        rows = db.execute(
+            "SELECT reservation_id, attempt_id FROM capacity_reservations "
+            "WHERE state='reserved' ORDER BY reserved_at ASC LIMIT ?", (limit,),
+        ).fetchall()
+    released = 0
+    for row in rows:
+        process = recovery_registry.lookup_process(store, row["attempt_id"])
+        if process is None:
+            continue
+        if recovery_registry.probe_liveness(process) != "absent":
+            continue
+        delegation_capacity.release_confirmed(store, row["reservation_id"], "process_exited")
+        released += 1
+    return dict(stale_reservations_released=released)
 
 
 def sweep_owned_workspaces(store, *, limit: int = DEFAULT_SWEEP_LIMIT) -> dict:

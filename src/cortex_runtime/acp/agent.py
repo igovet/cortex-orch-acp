@@ -943,11 +943,28 @@ class Agent:
                 request_id, RpcError(-32001, "orchestration_unavailable", data={"retryable": False, "reason": reason_code})))
             observe(self.environ, "session/prompt", reason_code)
             return
-        except Exception:
+        except Exception as exc:
             if cancel_event.is_set():
                 reason = StopReason.CANCELLED
             else:
-                self._reply_error(request_id, -32603, "The runtime failed while processing this prompt.")
+                # Say *what* failed. Live (2026-09-19) a prompt died here
+                # and left nothing behind but "the runtime failed": no type,
+                # no line, nothing on stderr, and the observation says only
+                # "runtime_error". That is unowned time for whoever has to
+                # find it. The class name and the failing source line are
+                # not user content and carry no secret; the message is
+                # deliberately not included, since it can quote a path or a
+                # value.
+                where = ""
+                traceback = exc.__traceback__
+                while traceback is not None:
+                    frame = traceback.tb_frame.f_code
+                    where = f"{os.path.basename(frame.co_filename)}:{traceback.tb_lineno}"
+                    traceback = traceback.tb_next
+                detail = type(exc).__name__ + (f" at {where}" if where else "")
+                print(f"cortex: prompt failed: {detail}", file=sys.stderr, flush=True)
+                self._reply_error(request_id, -32603, "The runtime failed while processing this prompt.",
+                                  data={"failure": detail})
                 observe(self.environ, "session/prompt", "runtime_error")
                 return
         if cancel_event.is_set() and reason != StopReason.CANCELLED:

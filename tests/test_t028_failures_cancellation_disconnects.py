@@ -156,7 +156,8 @@ def test_sweep_capacity_is_bounded_and_idempotent(tmp_path):
     assert second["released"] == 3
     # A third sweep finds nothing left ambiguous -- idempotent no-op.
     third = reaper.sweep_capacity(store, engine, limit=10)
-    assert third == dict(released=0, terminate_attempted=0, unknown_left_ambiguous=0)
+    assert third == dict(released=0, terminate_attempted=0, unknown_left_ambiguous=0,
+                         stale_reservations_released=0)
 
 
 # -- reaper: owned workspaces -----------------------------------------------
@@ -260,3 +261,50 @@ def test_engine_session_manager_adapter_invalidate_session_forwards_to_owning_ma
 
     # An unknown session_ref is a silent no-op -- never raises.
     adapter.invalidate_session("sess_unknown", "session_cancelled")
+
+
+# -- reaper: reservations left behind by a process that never came back ------
+
+def test_sweep_releases_a_reservation_whose_process_is_confirmed_gone(tmp_path):
+    """Live (2026-09-19): a Cortex process that dies without observing its
+    engine's exit leaves the reservation ``reserved`` forever. The ambiguous
+    sweep never looks at those, so four of them filled a connection whose
+    limit is four and every later thread in that project hung waiting for
+    capacity, silently. Two of the four came from turns that ended normally."""
+    from cortex_runtime.recovery import registry as recovery_registry
+
+    store = Store(tmp_path / ".cortex", project_root=str(tmp_path))
+    task_id = _task(store)
+    reservation = delegation_capacity.reserve(store, "cn_x", task_id, "xa_gone", "coordinator", limit=4)
+    recovery_registry.record_process_launch(
+        store, attempt_id="xa_gone", task_id=task_id, role="coordinator",
+        pid=999_999, pgid=999_999, start_ticks="1", boot_id="a-boot-that-is-over",
+        launch_command_digest="d" * 64, connection_id="cn_x", engine_session_ref="es_x",
+    )
+
+    actions = reaper.sweep_capacity(store, _FakeEngine({}))
+
+    assert actions["stale_reservations_released"] == 1
+    with store.connection() as db:
+        row = db.execute("SELECT state, release_observation FROM capacity_reservations "
+                         "WHERE reservation_id=?", (reservation,)).fetchone()
+    assert row["state"] == "released"
+    assert row["release_observation"] == "process_exited"
+
+
+def test_sweep_keeps_a_reservation_it_cannot_confirm_is_gone(tmp_path):
+    """The other half of the same rule: a reservation whose process is alive,
+    or whose process cannot be identified at all (no record yet -- reserving
+    happens before launching), keeps its place. Capacity is never reclaimed
+    on a guess."""
+    store = Store(tmp_path / ".cortex", project_root=str(tmp_path))
+    task_id = _task(store)
+    no_record = delegation_capacity.reserve(store, "cn_x", task_id, "xa_no_record", "worker", limit=4)
+
+    actions = reaper.sweep_capacity(store, _FakeEngine({}))
+
+    assert actions["stale_reservations_released"] == 0
+    with store.connection() as db:
+        state = db.execute("SELECT state FROM capacity_reservations WHERE reservation_id=?",
+                           (no_record,)).fetchone()["state"]
+    assert state == "reserved"
