@@ -37,7 +37,20 @@ class RouteUnresolved(OrchestrationUnavailable):
     ``PortableError.code`` (for example ``no_configuration_revision`` or
     ``instruction_delivery_unqualified``), which ``acp.agent.Agent`` places
     in the ACP error response's ``data.reason`` -- never a silent generic
-    refusal."""
+    refusal.
+
+    ``remediation`` carries the refusal's own sentence, when the underlying
+    :class:`PortableError` had one, so the person reading it is told what
+    to change. Live (2026-09-19) a thread became unusable with nothing but
+    ``route_policy_not_authorized`` on screen, while the refusal itself
+    already knew which role, engine, model and effort it had refused and
+    exactly what the policy allows instead -- and that sentence was thrown
+    away one frame before the client.
+    """
+
+    def __init__(self, code: str, remediation: str | None = None) -> None:
+        super().__init__(code)
+        self.remediation = remediation
 
 
 class ProductionOrchestratingRuntime:
@@ -105,7 +118,7 @@ class ProductionOrchestratingRuntime:
             try:
                 return connection_onboarding.resolve_connection_for_route(connection_id, environ=self._environ)
             except PortableError as error:
-                raise RouteUnresolved(f"{error.code}:{connection_id}") from error
+                raise RouteUnresolved(f"{error.code}:{connection_id}", error.remediation) from error
         return factory
 
     def _runtime_for_project(self, project_root: str) -> OrchestratingRuntime:
@@ -230,7 +243,7 @@ class ProductionOrchestratingRuntime:
             # instruction_delivery_unqualified, second_coordinator_refused,
             # ...) is surfaced by its own concrete code, never collapsed
             # into one generic message.
-            raise RouteUnresolved(error.code) from error
+            raise RouteUnresolved(error.code, error.remediation) from error
 
     def cancel(self, session_id):
         for runtime in list(self._runtimes.values()):

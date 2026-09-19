@@ -455,10 +455,24 @@ class ConfigurationService:
         revision) or any other caller that must not silently reuse an
         unconfirmed/rejected configuration.
         """
+        history = self.history(task_id)
         current = self.current(task_id)
         if current is not None:
+            # A strictly newer live selection wins over the active
+            # revision. It is what the next open will apply anyway (see
+            # ``live_adapters.EngineSessionManagerAdapter
+            # ._maybe_apply_configuration``, which uses ``latest_live``),
+            # and preferring the active one here could keep a thread from
+            # ever opening again: live (2026-09-19) a task was active on an
+            # effort its route policy forbade, the user selected an allowed
+            # one, and every prompt still resolved the forbidden active
+            # revision, failed authorization, and so never reached the
+            # apply that would have promoted the new choice. The only way
+            # out was editing the policy.
+            newer = self.latest_live(task_id)
+            if newer is not None and newer["revision"] > current["revision"] and newer["state"] == "selected":
+                return newer
             return current
-        history = self.history(task_id)
         latest = history[-1] if history else None
         # A 'rejected' latest revision is never returned here: per the
         # ``configuration_revisions_guard`` trigger, 'rejected' is only ever

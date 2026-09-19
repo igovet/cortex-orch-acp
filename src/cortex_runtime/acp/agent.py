@@ -939,8 +939,13 @@ class Agent:
             # "instruction_delivery_unqualified") so the client sees what
             # is actually missing rather than a generic refusal.
             reason_code = str(exc) or "orchestration_unavailable"
+            data = {"retryable": False, "reason": reason_code}
+            remediation = getattr(exc, "remediation", None)
+            if remediation:
+                # What to change, not only what went wrong.
+                data["remediation"] = remediation
             self.transport.send_response(protocol.error_response(
-                request_id, RpcError(-32001, "orchestration_unavailable", data={"retryable": False, "reason": reason_code})))
+                request_id, RpcError(-32001, "orchestration_unavailable", data=data)))
             observe(self.environ, "session/prompt", reason_code)
             return
         except Exception as exc:
