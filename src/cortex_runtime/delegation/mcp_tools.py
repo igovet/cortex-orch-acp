@@ -126,11 +126,26 @@ def _coordinator_decide(store, channel: ChannelContext, args: Mapping[str, Any])
         )
     if decision == "accept" and assignment_ref != "task":
         with store.connection() as db:
+            # Both ids are accepted here on purpose. A ``worker_result``
+            # event is keyed by the worker's own attempt id, while every
+            # coordinator-facing surface (``delegate``'s own answer,
+            # ``clarify``, ``cancel``) speaks the delegation ref. Live
+            # (2026-09-19) the coordinator reached for whichever one it had
+            # just seen; refusing the other would only teach it that
+            # accepting an assignment is a guessing game.
             has_result = db.execute(
                 "SELECT 1 FROM task_events WHERE task_id=? AND assignment_ref=? "
                 "AND event_type='worker_result' AND superseded=0 LIMIT 1",
                 (channel.task_id, assignment_ref),
             ).fetchone()
+            if has_result is None:
+                has_result = db.execute(
+                    "SELECT 1 FROM task_events e "
+                    "JOIN delegation_provisioning p ON p.attempt_id = e.assignment_ref "
+                    "WHERE e.task_id=? AND p.task_id=? AND p.idempotency_key=? "
+                    "AND e.event_type='worker_result' AND e.superseded=0 LIMIT 1",
+                    (channel.task_id, channel.task_id, assignment_ref),
+                ).fetchone()
         if has_result is None:
             raise StoreError(
                 "no_result_to_accept", "assignment_ref", assignment_ref,

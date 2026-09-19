@@ -254,3 +254,35 @@ def test_dispatch_refuses_a_handler_result_that_would_leak_technical_metadata(tm
     with pytest.raises(StoreError) as excinfo:
         mcp_tools.dispatch(store, worker, "ask_question", dict(question="leak?", request_key="k"))
     assert str(excinfo.value) == "internal_leak"
+
+
+def test_decide_accept_takes_the_delegation_ref_as_well_as_the_attempt_id(tmp_path):
+    """Live defect (2026-09-19): a ``worker_result`` is keyed by the
+    worker's own attempt id, but every coordinator-facing surface speaks the
+    delegation ref ``delegate`` returned. Accepting one assignment must work
+    with either one, or accepting becomes a guessing game about which id the
+    coordinator happens to be holding."""
+    store, task_id, coordinator = _task(tmp_path)
+    delegation_ref = "d" * 64
+    attempt_id = "xa_0123456789ab"
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO delegation_provisioning (idempotency_key, task_id, attempt_id, role_id, step, status, "
+            "owner_epoch, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (delegation_ref, task_id, attempt_id, "worker-backend-dev", "ready", "ready", 1,
+             store._now(), store._now()),
+        )
+        db.commit()
+    delegation_events.append_event(
+        store, task_id, "worker_result", "wr-both", dict(report_ref="r_x", summary="done"),
+        origin="worker-ch", assignment_ref=attempt_id,
+    )
+
+    result = mcp_tools.dispatch(store, coordinator, "decide", dict(
+        assignment_ref=delegation_ref, decision="accept", rationale="Verified.", request_key="k-deleg"))
+    assert result is not None
+
+    # The attempt id still works too -- neither id was taken away.
+    result = mcp_tools.dispatch(store, coordinator, "decide", dict(
+        assignment_ref=attempt_id, decision="accept", rationale="Verified.", request_key="k-attempt"))
+    assert result is not None
