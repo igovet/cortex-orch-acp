@@ -182,6 +182,53 @@ def _last_effect(db, idempotency_key: str, step: str, phase: str):
     ).fetchone()
 
 
+def close_rows_for_finished_assignments(store, task_id: str) -> int:
+    """Close provisioning rows whose assignment is already over.
+
+    A step is claimed with a transient ``claimed:<step>`` marker and the row
+    is only moved on by the caller performing it. If that caller's failure
+    is recorded somewhere else -- an ``assignment_failed`` written by the
+    runtime when the engine refused to open the session, say -- the row
+    keeps its claim forever: nothing retries it and nothing fails it. Live
+    (2026-09-19) an engine whose login had expired left exactly that
+    orphan behind.
+
+    No liveness question arises here, so none is asked: an assignment that
+    has already produced a result, a failure or a cancellation is finished,
+    and a provisioning row still short of ``ready`` for it has nothing left
+    to do. A row that reached ``ready`` is untouched -- that is the normal
+    end state of a worker that ran.
+    """
+    from . import completion as delegation_completion
+
+    closed = 0
+    with store.connection() as db:
+        rows = db.execute(
+            "SELECT idempotency_key FROM delegation_provisioning "
+            "WHERE task_id=? AND status='in_progress'", (task_id,),
+        ).fetchall()
+        finished = [
+            row["idempotency_key"] for row in rows
+            if delegation_completion.assignment_is_terminal(db, task_id, row["idempotency_key"])
+        ]
+    for idempotency_key in finished:
+        with store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute(
+                    "UPDATE delegation_provisioning SET status='failed', "
+                    "error_code=COALESCE(error_code, 'assignment_already_finished'), updated_at=? "
+                    "WHERE idempotency_key=? AND status='in_progress'",
+                    (_now(), idempotency_key),
+                )
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+        closed += 1
+    return closed
+
+
 def in_progress_snapshot(store, task_id: str) -> tuple[tuple[str, str, str], ...]:
     """T035 FINDING-13 #2: a cheap, sortable signature of every currently
     ``in_progress`` ``delegation_provisioning`` row for ``task_id`` --

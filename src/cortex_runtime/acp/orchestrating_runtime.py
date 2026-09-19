@@ -1834,6 +1834,10 @@ class OrchestratingRuntime:
                         open_refs = set(self._open_assignments.get(task_id) or ())
                         pending = [f for f in (self._running.get(task_id) or ()) if not f.done()]
                     self._report_assignments_whose_provisioning_failed(task_id)
+                    # And the mirror of it: a row still holding its claim for
+                    # an assignment that is already over leaves an orphan
+                    # nothing would ever touch again.
+                    delegation_provisioning.close_rows_for_finished_assignments(self._store, task_id)
                     if open_refs and not in_flight and not pending:
                         # Open assignments with nothing running for this
                         # task at all: their workers' turns are over and
