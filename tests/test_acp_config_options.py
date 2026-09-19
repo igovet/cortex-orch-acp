@@ -1486,3 +1486,72 @@ def test_config_option_can_still_be_changed_after_session_load(tmp_path, monkeyp
     assert "error" not in reply, reply
     options_by_id = {opt["id"]: opt for opt in reply["result"]["configOptions"]}
     assert options_by_id["thought_level"]["currentValue"] == "high"
+
+
+# --- T036 step 4: one task open in two real clients -------------------------
+#
+# Both clients hold the same task and therefore the same ownership epoch --
+# the epoch fences against *time* (an owner acting after a transfer), never
+# against identity, which is what owner_ref and the channel secrets are for.
+# What must hold here is that neither client can silently lose the other's
+# change.
+
+def _two_clients_on_one_task(tmp_path, environ):
+    project = tmp_path / "project"
+    project.mkdir()
+    first, _t1 = _new_agent(tmp_path, environ)
+    session_id = first._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    _bootstrap_task_for_session(first, session_id, tmp_path)
+    second, second_transport = _new_agent(tmp_path, environ)
+    second._session_load(1, dict(sessionId=session_id, cwd=str(project), mcpServers=[]))
+    return first, second, second_transport, session_id
+
+
+def test_two_clients_changing_one_tasks_settings_leave_one_ordered_history(tmp_path, monkeypatch):
+    """Two clients hold the same task. Each change is proposed against the
+    revision that is current at that moment (the history is re-read per
+    proposal, never carried from a view the client fetched earlier), so the
+    task ends on the later change with one ordered history behind it and
+    never two live selections racing."""
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    _build_and_save_snapshot(record, environ=environ, model_id="model-a", thought_level="high")
+    first, second, second_transport, session_id = _two_clients_on_one_task(tmp_path, environ)
+    store = second._store_for(second.sessions[session_id]["project"])
+    task_id = second.sessions[session_id]["task_id"]
+
+    first._session_set_config_option(10, dict(sessionId=session_id, configId="thought_level", value="high"))
+    second._session_set_config_option(11, dict(sessionId=session_id, configId="thought_level", value="low"))
+
+    reply = next(m for m in second_transport.responses if m.get("id") == 11)
+    assert "error" not in reply, reply
+    options_by_id = {opt["id"]: opt for opt in reply["result"]["configOptions"]}
+    assert options_by_id["thought_level"]["currentValue"] == "low"
+
+    history = ConfigurationService(store).history(task_id)
+    revisions = [row["revision"] for row in history]
+    assert revisions == sorted(set(revisions)), history  # ordered, no duplicate revision
+    live = [row for row in history if row["state"] in ("active", "selected")]
+    assert len({row["revision"] for row in live}) == len(live), history
+
+
+def test_a_reloaded_clients_epoch_goes_stale_when_ownership_moves_on(tmp_path, monkeypatch):
+    """The reconnect fix reads the epoch once, at load. This is what that
+    buys: when ownership moves to someone else afterwards, the reconnected
+    client's epoch is stale and its proposal is refused -- exactly as for a
+    client that never disconnected. Reading the epoch at proposal time
+    instead would make this check pass vacuously forever."""
+    from cortex_runtime.ownership import acquire_task_owner
+
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    _build_and_save_snapshot(record, environ=environ, model_id="model-a", thought_level="high")
+    first, second, second_transport, session_id = _two_clients_on_one_task(tmp_path, environ)
+    task_id = second.sessions[session_id]["task_id"]
+    store = second._store_for(second.sessions[session_id]["project"])
+
+    acquire_task_owner(store, task_id, "acp:somebody-else", first.sessions[session_id]["owner_epoch"].epoch)
+
+    second._session_set_config_option(12, dict(sessionId=session_id, configId="thought_level", value="high"))
+    reply = next(m for m in second_transport.responses if m.get("id") == 12)
+    assert reply["error"]["data"]["code"] == "stale_ownership_epoch", reply
