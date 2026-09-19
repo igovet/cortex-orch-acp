@@ -108,6 +108,33 @@ def _unintegrated_worker_changes(db, assignment_ref: str, attempt_id: str) -> se
     return pending
 
 
+def assignment_is_terminal(db, task_id: str, assignment_ref: str) -> bool:
+    """True once this assignment has finished, by any of the three ways it
+    can: a retained ``worker_result``, an ``assignment_failed``, or an
+    ``assignment_cancelled``.
+
+    Coordinator-facing events key ``assignment_ref`` by the delegate-time
+    idempotency key, worker-facing ones by the provisioned attempt id, so
+    a ``worker_result`` is looked up through ``delegation_provisioning``
+    (the same bridge :func:`gate` walks).
+    """
+    for event_type in ("assignment_failed", "assignment_cancelled"):
+        if db.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND assignment_ref=? AND event_type=? LIMIT 1",
+            (task_id, assignment_ref, event_type),
+        ).fetchone() is not None:
+            return True
+    row = db.execute(
+        "SELECT attempt_id FROM delegation_provisioning WHERE idempotency_key=?", (assignment_ref,),
+    ).fetchone()
+    worker_key = row["attempt_id"] if row is not None else assignment_ref
+    return db.execute(
+        "SELECT 1 FROM task_events WHERE task_id=? AND assignment_ref=? "
+        "AND event_type='worker_result' AND superseded=0 LIMIT 1",
+        (task_id, worker_key),
+    ).fetchone() is not None
+
+
 def _report_file_exists(store, db, task_id: str, report_ref: str) -> bool:
     row = db.execute(
         "SELECT task_id, filename FROM reports WHERE id=?", (report_ref,),

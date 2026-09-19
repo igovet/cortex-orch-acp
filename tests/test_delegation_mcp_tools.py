@@ -286,3 +286,39 @@ def test_decide_accept_takes_the_delegation_ref_as_well_as_the_attempt_id(tmp_pa
     result = mcp_tools.dispatch(store, coordinator, "decide", dict(
         assignment_ref=attempt_id, decision="accept", rationale="Verified.", request_key="k-attempt"))
     assert result is not None
+
+
+def test_clarifying_a_finished_assignment_is_refused_not_silently_recorded(tmp_path):
+    """Live (2026-09-19): after an integration conflict the coordinator
+    clarified an assignment whose worker had already published its result.
+    The call answered "recorded", the coordinator read that as delivered,
+    and the task then waited for a reply that could never come. A
+    clarification nobody can read must say so."""
+    store, task_id, coordinator = _task(tmp_path)
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", "req-done", dict(title="T"),
+        origin="coordinator-ch", assignment_ref="finished-one",
+    )
+    delegation_events.append_event(
+        store, task_id, "worker_result", "wr-done", dict(report_ref="r_y", summary="done"),
+        origin="worker-ch", assignment_ref="finished-one",
+    )
+
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, coordinator, "clarify", dict(
+            assignment_ref="finished-one", message="please redo it", request_key="k-late"))
+    assert str(excinfo.value) == "assignment_already_finished"
+
+
+def test_clarifying_a_running_assignment_still_works(tmp_path):
+    """The other half: an assignment still running takes clarifications as
+    it always did."""
+    store, task_id, coordinator = _task(tmp_path)
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", "req-live", dict(title="T"),
+        origin="coordinator-ch", assignment_ref="running-one",
+    )
+
+    result = mcp_tools.dispatch(store, coordinator, "clarify", dict(
+        assignment_ref="running-one", message="use tabs", request_key="k-live"))
+    assert result["recorded"] is True

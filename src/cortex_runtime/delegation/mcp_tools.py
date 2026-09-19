@@ -97,6 +97,21 @@ def _coordinator_list_events(store, channel: ChannelContext, args: Mapping[str, 
 
 
 def _coordinator_clarify(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
+    # A clarification to an assignment that has already finished can never
+    # be read: the worker published its result and its session is done.
+    # Recording one anyway and answering "recorded" reads as "delivered",
+    # and live (2026-09-19) the coordinator then waited for a reply that
+    # could not come -- after a conflicted integration it clarified a
+    # finished assignment and the task simply stopped. Say so instead;
+    # redoing the work needs a new delegation.
+    with store.connection() as db:
+        if delegation_completion.assignment_is_terminal(db, channel.task_id, args["assignment_ref"]):
+            raise StoreError(
+                "assignment_already_finished", "assignment_ref", args["assignment_ref"],
+                "an assignment that has not yet produced a result, failure or cancellation",
+                "This assignment has already finished, so nothing will read a clarification for it. "
+                "Delegate the remaining work as a new assignment instead.",
+            )
     dedup_key = f"clarify:{args['request_key']}"
     event = delegation_events.append_event(
         store, channel.task_id, "coordinator_clarification", dedup_key,
