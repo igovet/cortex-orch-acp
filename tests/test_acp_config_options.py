@@ -1460,3 +1460,29 @@ def test_default_pointing_at_model_genuinely_absent_from_catalog_still_withdrawn
     ids = {opt["id"]: opt for opt in result2["configOptions"]}
     assert ids["model"]["_meta"]["_cortex"]["state"] == "default_unavailable"
     assert ids["model"]["description"] == "Saved route is unavailable — choose a route"
+
+
+def test_config_option_can_still_be_changed_after_session_load(tmp_path, monkeypatch):
+    """Live defect (Zed, 2026-09-19 11:47): every ``session/set_config_option``
+    after a reconnect was refused with ``missing_ownership_epoch`` -- the
+    client's own declared defaults and the user's own picks in the composer
+    alike ("Failed to set config option: Internal error"). A reconnect
+    restores ``task_id`` from durable storage but never the task's ownership
+    epoch, so the mid-task proposal arrived with no epoch at all."""
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    _build_and_save_snapshot(record, environ=environ, model_id="model-a", thought_level="high")
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, _transport = _new_agent(tmp_path, environ)
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    _bootstrap_task_for_session(agent, session_id, tmp_path)
+
+    loader, loader_transport = _new_agent(tmp_path, environ)
+    loader._session_load(50, dict(sessionId=session_id, cwd=str(project), mcpServers=[]))
+    loader._session_set_config_option(51, dict(sessionId=session_id, configId="thought_level", value="high"))
+
+    reply = next(m for m in loader_transport.responses if m.get("id") == 51)
+    assert "error" not in reply, reply
+    options_by_id = {opt["id"]: opt for opt in reply["result"]["configOptions"]}
+    assert options_by_id["thought_level"]["currentValue"] == "high"

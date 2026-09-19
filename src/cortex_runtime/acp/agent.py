@@ -42,7 +42,7 @@ from .protocol import RpcError
 from .runtime import OrchestrationUnavailable, UnavailableRuntime
 from .transport import StdioTransport, EOF
 from . import replay_store as acp_replay_store
-from ..bootstrap import append_source_event, bootstrap_task
+from ..bootstrap import _current_owner_epoch_obj, append_source_event, bootstrap_task
 from ..catalog.model import CatalogEntry
 from ..configuration.resolution import ConfigurationInputs, resolve_saved_route
 from ..configuration.service import ConfigurationService
@@ -1570,9 +1570,21 @@ class Agent:
             # secret) without re-running session/new. Not itself asserted by
             # any T018 acceptance line -- session/load's own contract is the
             # replay above; this is only convenience continuity.
+            # The task's ownership epoch as it stands at reconnect. Without
+            # it every session/set_config_option on a reloaded thread was
+            # refused with "missing_ownership_epoch" (live in Zed: the
+            # client's declared default_config_options and the user's own
+            # picks in the composer alike). Read once, here, where this
+            # session's claim to the task is already established (the
+            # durable row and its project match, checked above) -- never
+            # re-read at proposal time, so a *later* ownership transfer
+            # correctly makes this session's epoch stale and its proposal
+            # refused, exactly as for a session that never disconnected.
+            with store.connection() as db:
+                restored_epoch = _current_owner_epoch_obj(db, durable["task_id"])
             self.sessions[session_id] = dict(
                 project=project, task_id=durable["task_id"], channel=None, active=None, lock=threading.Lock(),
-                owner_epoch=None, pending_selection=None, default_selection=None,
+                owner_epoch=restored_epoch, pending_selection=None, default_selection=None,
                 pending_language=None, client_capabilities=dict(self.client_capabilities))
         session = self.sessions[session_id]
         # T035 FINDING-08 fix: report the same selection surface as
