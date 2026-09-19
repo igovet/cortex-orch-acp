@@ -1041,3 +1041,35 @@ def test_an_answered_question_never_parks_the_task_again(tmp_path):
     assert runtime._check_terminal_decision(task_id) is None, (
         "an answered question must not keep ending the coordinator's turns"
     )
+
+
+def test_the_language_chosen_before_a_task_reaches_the_task(tmp_path, monkeypatch):
+    """The coordinator is told to answer in a language only through the
+    *task's* own override. A choice made before any task exists lives on
+    the session and in the user's defaults, and nothing carried it across:
+    a brand-new thread had no override at all.
+
+    The first fix read it one line too late -- with the new task_id already
+    on the session, the same lookup answers with that task's own empty
+    override instead of what the session is carrying. Live, the composer
+    read "Russian" and every reply still came back in English.
+    """
+    from cortex_runtime.acp import steering as steering_module
+    from cortex_runtime.acp.agent import Agent
+
+    agent = Agent.__new__(Agent)
+    agent.environ = {"HOME": str(tmp_path)}
+    store, task_id = _task(tmp_path)
+
+    # What the session carries before any task: the user's own default.
+    session = {"task_id": None, "pending_language": "ru"}
+    assert agent._current_language_for_session(store, session) == "ru"
+
+    # Read once the task id is on the session, and the answer is the new
+    # task's own override -- which is exactly nothing.
+    session_with_task = {"task_id": task_id, "pending_language": "ru"}
+    assert agent._current_language_for_session(store, session_with_task) is None
+
+    # So the value has to be taken before, and then recorded on the task.
+    steering_module.set_language_override(store, task_id, "ru")
+    assert steering_module.get_language_override(store, task_id) == "ru"

@@ -111,6 +111,11 @@ class RoutePolicy:
         raise _refuse(role, engine, model, requested_effort, candidates)
 
 
+# The policy's own fallback bucket, which is not a role and must never be
+# rendered as if it were one.
+_DEFAULT_BUCKET = "\x00default"
+
+
 def render_table(policy: RoutePolicy) -> str:
     """D-T035-04: a compact role -> allowed-routes table, one line per role
     actually named in ``policy`` (its own entries, or the ``default``
@@ -127,13 +132,16 @@ def render_table(policy: RoutePolicy) -> str:
     reverse_alias = {full: short for short, full in WORKER_ALIASES.items()}
     names = sorted(policy.roles)
     if policy.default is not None:
-        names.append("default")
+        names.append(_DEFAULT_BUCKET)
     lines = []
     for name in names:
-        entries = policy.default if name == "default" else policy.roles.get(name)
+        entries = policy.default if name == _DEFAULT_BUCKET else policy.roles.get(name)
         if not entries:
             continue
-        label = reverse_alias.get(name, name)
+        # Never as a bare word: a line reading "default: ..." was read as a
+        # role id and delegated with `role="default"`, which the runtime
+        # refused -- the coordinator had to notice and delegate again.
+        label = "any other role" if name == _DEFAULT_BUCKET else reverse_alias.get(name, name)
         routes = " | ".join(
             f"{entry.engine}/{entry.model} {{{','.join(sorted(entry.efforts))}}}"
             + (f" default={entry.default_effort}" if entry.default_effort else "")

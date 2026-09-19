@@ -835,6 +835,11 @@ class Agent:
                 staged_blocks = acp_replay_store.stage_blocks(session["project"], resolved_blocks)
         try:
             if is_first_prompt:
+                # Read before the task exists, which is the whole point:
+                # with a task_id in hand this same lookup answers with the
+                # brand-new task's own (empty) override instead of the
+                # choice the session is carrying.
+                session_language = self._current_language_for_session(store, session)
                 result = bootstrap_task(store, source_event, text, owner_ref=origin, blocks=staged_blocks, meta=meta)
                 session["task_id"] = result.task_id
                 session["owner_epoch"] = result.owner_epoch
@@ -852,7 +857,6 @@ class Agent:
                 # coordinator was never told to answer in it. Live: the
                 # composer read "Russian" and every reply came back in
                 # English.
-                session_language = self._current_language_for_session(store, session)
                 if session_language is not None:
                     acp_steering.set_language_override(store, result.task_id, session_language)
             else:

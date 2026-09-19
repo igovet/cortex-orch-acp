@@ -64,6 +64,50 @@ def _task_directory(store, db, task_id: str):
     return private_directory(cortex_root / task_id)
 
 
+def _unintegrated_worker_changes(db, assignment_ref: str, attempt_id: str) -> set[str]:
+    """Paths this worker changed in its own copy that are not in the
+    project, as the same comparison ``delegation.integration`` itself uses
+    (its recorded base manifest against a fresh scan of its workspace).
+
+    Empty when the worker changed nothing, when an integration for this
+    assignment has already applied its changes, or when the workspace is
+    gone (an attempt whose workspace was cleaned up has nothing pending by
+    definition -- this never guesses that something is missing).
+    """
+    from . import integration as delegation_integration
+
+    applied = db.execute(
+        "SELECT applied_paths_json FROM workspace_integrations "
+        "WHERE assignment_ref=? AND status!='noop'",
+        (assignment_ref,),
+    ).fetchall()
+    already = set()
+    for row in applied:
+        try:
+            already.update(json.loads(row["applied_paths_json"]) or ())
+        except Exception:  # noqa: BLE001 - a malformed row never blocks acceptance
+            continue
+    binding = db.execute(
+        "SELECT root_path, manifest_json, cleaned_up_at FROM workspace_snapshots "
+        "WHERE attempt_id=? ORDER BY created_at DESC LIMIT 1",
+        (attempt_id,),
+    ).fetchone()
+    if binding is None or not binding["root_path"] or binding["cleaned_up_at"]:
+        return set()
+    try:
+        base_manifest = json.loads(binding["manifest_json"] or "{}")
+        worker_manifest = delegation_integration._rescan_workspace(binding["root_path"])
+    except Exception:  # noqa: BLE001 - an unreadable workspace never blocks acceptance
+        return set()
+    pending = set()
+    for relpath in set(base_manifest) | set(worker_manifest):
+        if relpath in already or delegation_integration._is_technical(relpath):
+            continue
+        if not delegation_integration._entries_equal(base_manifest.get(relpath), worker_manifest.get(relpath)):
+            pending.add(relpath)
+    return pending
+
+
 def _report_file_exists(store, db, task_id: str, report_ref: str) -> bool:
     row = db.execute(
         "SELECT task_id, filename FROM reports WHERE id=?", (report_ref,),
@@ -146,14 +190,30 @@ def gate(store, task_id: str) -> tuple[bool, list[str]]:
                         f"assignment {assignment_ref}'s report_ref {report_ref!r} does not "
                         "resolve to a stored report file for this task."
                     )
-                elif any((check.get("evidence") == "observed") for check in (payload.get("checks") or [])):
-                    captured = db.execute(
-                        "SELECT kind, head, dirty_digest FROM attempt_revisions "
-                        "WHERE attempt_id=? AND phase LIKE 'worker_result:%' ORDER BY captured_at DESC LIMIT 1",
-                        (worker_key,),
-                    ).fetchone()
-                    if captured is not None and captured["kind"] == "observed":
-                        observed_checks.append((assignment_ref, dict(captured)))
+                else:
+                    if any((check.get("evidence") == "observed") for check in (payload.get("checks") or [])):
+                        captured = db.execute(
+                            "SELECT kind, head, dirty_digest FROM attempt_revisions "
+                            "WHERE attempt_id=? AND phase LIKE 'worker_result:%' ORDER BY captured_at DESC LIMIT 1",
+                            (worker_key,),
+                        ).fetchone()
+                        if captured is not None and captured["kind"] == "observed":
+                            observed_checks.append((assignment_ref, dict(captured)))
+                    # A delivered change that is still only in the worker's
+                    # own copy is not in the project, whatever the report
+                    # says. Live, twice: a worker did the work correctly in
+                    # its workspace, nobody integrated it, the coordinator
+                    # accepted, and the project file was exactly as it had
+                    # been -- the user was told the task was done and
+                    # nothing had changed.
+                    pending = _unintegrated_worker_changes(db, assignment_ref, worker_key)
+                    if pending:
+                        shown = ", ".join(sorted(pending)[:5])
+                        reasons.append(
+                            f"assignment {assignment_ref} changed {shown} in its own workspace and "
+                            "those changes are not in the project: integrate them (or record why "
+                            "they are not wanted) before accepting."
+                        )
 
         unconsumed_meaningful = db.execute(
             "SELECT event_type FROM task_events WHERE task_id=? AND consumed_by IS NULL AND superseded=0 "
