@@ -225,10 +225,20 @@ def test_a_running_workers_card_shows_what_it_is_doing(tmp_path):
 
     # What the worker is doing reaches the feed while it is doing it, as
     # its own card, saying whose action it is.
-    activity = [c for c in cards if "Reading calc.py" in str(c.get("title", ""))]
+    activity = [c for c in cards if "Reading calc.py" in str(c.get("text", ""))]
     assert activity, f"the running worker's own turn never reached the feed: {cards}"
-    assert all("backend-dev" in c["title"] for c in activity), activity
-    assert all(c["status"] == "in_progress" for c in activity)
+    # Its title names the worker and its assignment, and stays put: what it
+    # is doing goes in the block below, not into the heading. (An update
+    # that only adds to the body carries no title at all.)
+    titled = [c for c in cards if c.get("title")]
+    assert titled and all("backend-dev" in c["title"] for c in titled), titled
+    assert all("Reading calc.py" not in c.get("title", "") for c in cards), cards
+    assert any(c.get("status") == "in_progress" for c in activity), activity
+    # And it is still there at the end: the account of the work is never
+    # blanked, least of all by the result that finally explains it.
+    final = [c for c in cards if c.get("status") in ("completed", "failed")]
+    if final:
+        assert "Reading calc.py" in str(final[-1].get("text", "")), final[-1]
     # The assignment keeps exactly one card of its own, never one per action.
     assignment_cards = {c["tool_call_id"] for c in cards if c["tool_call_id"].startswith("worker:")}
     assert len(assignment_cards) == 1, cards
@@ -277,7 +287,7 @@ def test_a_running_worker_shows_its_current_command_on_its_own_card(tmp_path):
 
     def release_later():
         for _ in range(200):
-            if any("Edit calc.py" in str(c.get("title", "")) for c in list(cards)):
+            if any("Edit calc.py" in str(c.get("text", "")) for c in list(cards)):
                 break
             threading.Event().wait(0.02)
         worker_may_finish.set()
@@ -287,22 +297,22 @@ def test_a_running_worker_shows_its_current_command_on_its_own_card(tmp_path):
     runtime.start_prompt(task_id, "s1", "Do X.", [].append, threading.Event(), emit_tool_call=cards.append)
     releaser.join(timeout=10.0)
 
-    actions = [c for c in cards if "Read calc.py" in str(c.get("title", ""))
-               or "Edit calc.py" in str(c.get("title", ""))]
+    actions = [c for c in cards if "Read calc.py" in str(c.get("text", ""))
+               or "Edit calc.py" in str(c.get("text", ""))]
     assert actions, f"the worker's actions never reached the feed: {cards}"
+
+    # Everything this worker does belongs to its one card. Nothing it does
+    # becomes a card of its own in the feed.
     assignment_cards = _worker_card_ids(cards)
     assert len(assignment_cards) == 1, assignment_cards
+    assert all(c["tool_call_id"] in assignment_cards for c in actions), actions
 
-    # Each action is its own card in the stream, attributed to the worker.
-    own = [c for c in actions if c["tool_call_id"] not in assignment_cards]
-    assert own, f"the stream must carry each action: {actions}"
-    assert all(c["title"].startswith("backend-dev") for c in own), own
-    assert len({c["tool_call_id"] for c in own}) == len(own), own
-
-    # And the assignment's own card still says what it is doing now.
-    on_card = [c for c in actions if c["tool_call_id"] in assignment_cards]
-    assert on_card, actions
-    assert "Edit calc.py" in on_card[-1]["title"], on_card[-1]
+    # Both actions are there, in order, visibly separated -- not one
+    # replacing the other.
+    latest = actions[-1]["text"]
+    assert "Read calc.py" in latest and "Edit calc.py" in latest, latest
+    assert latest.index("Read calc.py") < latest.index("Edit calc.py"), latest
+    assert "───" in latest, latest
 
 
 def _worker_card_ids(cards):
@@ -715,13 +725,12 @@ def test_a_worker_tool_call_actually_reaches_its_card(tmp_path):
     runtime.start_prompt(task_id, "s1", "Do X.", [].append, threading.Event(), emit_tool_call=cards.append)
 
     assert seen.get("called"), "the worker's callback never ran; this test proved nothing"
-    # Shown one at a time on the card's own title as the worker works --
-    # never as a transcript in its body, which is the worker's own final
-    # message and nothing else.
-    titles = [str(c.get("title", "")) for c in cards]
-    assert any("Read calc.py" in title for title in titles), f"the worker's action never reached its card: {cards}"
-    assert any("Edit calc.py" in title for title in titles), cards
-    assert not any("Read calc.py" in str(c.get("text", "")) for c in cards), cards
+    # Accumulated in the worker's own card, under a title that names the
+    # worker and stays put.
+    bodies = [str(c.get("text", "")) for c in cards]
+    assert any("Read calc.py" in body for body in bodies), f"the worker's action never reached its card: {cards}"
+    assert any("Edit calc.py" in body for body in bodies), cards
+    assert not any("Read calc.py" in str(c.get("title", "")) for c in cards), cards
     # A worker assignment is not a command being run.
     created = [c for c in cards if c.get("new")]
     assert created and created[0]["kind"] != "execute", created[0]
@@ -968,16 +977,19 @@ def test_two_workers_running_at_once_keep_their_actions_apart(tmp_path):
     )
     assert result == _Stop.END_TURN
 
-    actions = [c for c in cards if "pytest -q" in (c.get("title") or "")]
-    assert actions, f"neither worker's command reached the feed: {[c.get('title') for c in cards]}"
-    # Both engines deliberately used the same wire call id, so every card
-    # here must still be distinct -- two assignment cards and each
-    # worker's own action card.
-    assert len({c["tool_call_id"] for c in actions}) == len(actions), actions
-    # And no card ever carries the other worker's work.
+    actions = [c for c in cards if "pytest -q" in (c.get("text") or "")]
+    assert actions, f"neither worker's command reached the feed: {[c.get('text') for c in cards]}"
+    # Both engines deliberately used the same wire call id. Each worker's
+    # work still lands on its own card, and no card ever carries the
+    # other's: that is what keeps two running workers legible.
     for card in actions:
-        assert card["title"].rsplit("test_", 1)[1] in ("X.py", "Y.py"), card
-    assert {c["title"].rsplit("test_", 1)[1] for c in actions} == {"X.py", "Y.py"}
+        assert card["text"].rsplit("test_", 1)[1].startswith(("X.py", "Y.py")), card
+    by_card = {}
+    for card in actions:
+        by_card.setdefault(card["tool_call_id"], set()).add(
+            card["text"].rsplit("test_", 1)[1][:4].rstrip())
+    assert len(by_card) == 2, by_card
+    assert all(len(files) == 1 for files in by_card.values()), by_card
 
     # Both results reached the coordinator, each exactly once.
     with store.connection() as db:

@@ -146,6 +146,34 @@ _WORKER_ACTIVITY_MAX_CHARS = 300
 
 # How many past actions a worker's expanded card keeps.
 _WORKER_ACTION_LOG_MAX_ENTRIES = 50
+#: What separates one worker action from the next inside its card. Asked
+#: for directly: the worker's actions belong in its own block, one under
+#: another, each visibly separate -- never as separate cards in the feed.
+_WORKER_ACTION_SEPARATOR = "\n───\n"
+#: Bound for that accumulated block, oldest actions dropped first.
+_WORKER_ACTION_LOG_MAX_CHARS = 6000
+
+
+def _joined_worker_actions(entries: list[str]) -> str:
+    """One worker's actions as one block, newest last, each separated.
+
+    Bounded from the front: when a long-running worker overflows the
+    budget the oldest actions go, because the recent ones are the ones a
+    reader is looking at. Never a silent truncation in the middle of a
+    line -- whole actions only.
+    """
+    kept: list[str] = []
+    budget = _WORKER_ACTION_LOG_MAX_CHARS
+    for entry in reversed(entries):
+        line = " ".join(entry.split())
+        if not line:
+            continue
+        cost = len(line) + len(_WORKER_ACTION_SEPARATOR)
+        if kept and cost > budget:
+            break
+        budget -= cost
+        kept.append(line)
+    return _WORKER_ACTION_SEPARATOR.join(reversed(kept))
 
 # A tool call's title is one line on a card, never a place for a payload.
 _TOOL_CALL_TITLE_MAX_CHARS = 200
@@ -641,7 +669,6 @@ class OrchestratingRuntime:
         self._worker_card_sent: dict[str, tuple] = {}
         # Each worker card's route line (engine, model, effort), kept so
         # every later body update still says what it is running on.
-        self._worker_card_route: dict[str, str] = {}
         # Worker cards this runtime has actually emitted a create for.
         # See _emit_worker_card: the one place that decides create vs
         # update, so the two can never arrive out of order again.
@@ -2563,7 +2590,7 @@ class OrchestratingRuntime:
                     emit_tool_call, assignment_ref, only_if_new=True,
                     title=f"Worker: {_display_role(role_hint)} — {work_title}",
                     kind=_WORKER_TOOL_CALL_KIND, status="pending",
-                    text=scrub_text(f"Queued: {event.payload.get('brief', '')}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                    entry=scrub_text(f"Queued: {event.payload.get('brief', '')}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 )
             elif event.event_type == "assignment_ready" and event.assignment_ref:
                 assignment_ref = event.assignment_ref
@@ -2581,11 +2608,9 @@ class OrchestratingRuntime:
                         fields["title"] = base_title
                         with self._lock:
                             self._worker_card_title[assignment_ref] = base_title
-                route = self._delegation_route_label(task_id, assignment_ref)
-                if route:
-                    fields["text"] = route
-                    with self._lock:
-                        self._worker_card_route[assignment_ref] = route
+                # The route is in the title. The body belongs to the
+                # worker's own actions, and putting anything else there
+                # takes the space they are for.
                 self._emit_worker_card(emit_tool_call, assignment_ref, **fields)
             elif event.event_type == "worker_result" and event.assignment_ref:
                 assignment_ref = self._assignment_ref_for_attempt(task_id, event.assignment_ref)
@@ -2604,7 +2629,7 @@ class OrchestratingRuntime:
                     lines.append(f"Report: {report_ref}")
                 self._emit_worker_card(
                     emit_tool_call, assignment_ref, status="completed",
-                    text=self._worker_card_body(assignment_ref, lines),
+                    entry="\n".join(part for part in lines if part),
                 )
             elif event.event_type == "assignment_failed" and event.assignment_ref:
                 self._close_assignment(task_id, event.assignment_ref)
@@ -2614,7 +2639,7 @@ class OrchestratingRuntime:
                     text += f" {detail}"
                 self._emit_worker_card(
                     emit_tool_call, event.assignment_ref, status="failed",
-                    text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                    entry=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 )
             elif event.event_type == "assignment_cancelled" and event.assignment_ref:
                 self._close_assignment(task_id, event.assignment_ref)
@@ -2622,7 +2647,7 @@ class OrchestratingRuntime:
                 self._emit_worker_card(
                     emit_tool_call, event.assignment_ref,
                     status=_TOOL_CALL_STATUS_FOR_CANCELLED,
-                    text=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                    entry=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 )
 
     def _close_assignment(self, task_id: str, assignment_ref: str) -> None:
@@ -2635,20 +2660,16 @@ class OrchestratingRuntime:
                 if not open_refs:
                     self._open_assignments.pop(task_id, None)
 
-    def _worker_card_body(self, assignment_ref: str, lines) -> str:
-        """A finished worker's card body: what it reports, and nothing
-        else.
-
-        Not its history: every command it ran was already shown, one at a
-        time, on this same card's own title while it worked -- repeating
-        the whole transcript underneath the result is a wall of text over
-        the one thing a reader opened the card for. The action log is
-        consumed (not rendered) here, the last place that holds it, so a
-        card is never rebuilt from a stale history."""
+    def _append_worker_entry(self, assignment_ref: str, entry: str) -> None:
+        """Add one line to a worker's transcript, never a repeat of the last."""
+        line = " ".join(str(entry).split())
+        if not line:
+            return
         with self._lock:
-            self._worker_card_route.pop(assignment_ref, None)
-            self._worker_action_log.pop(assignment_ref, None)
-        return scrub_text("\n".join(part for part in lines if part), max_chars=_WORKER_ACTION_LOG_MAX_CHARS)
+            log = self._worker_action_log.setdefault(assignment_ref, [])
+            if not log or log[-1] != line:
+                log.append(line)
+                del log[:-_WORKER_ACTION_LOG_MAX_ENTRIES]
 
     def _emit_worker_card(self, emit_tool_call, assignment_ref: str, *, only_if_new: bool = False, **fields) -> None:
         """Every update to a worker's assignment card goes through here.
@@ -2665,9 +2686,26 @@ class OrchestratingRuntime:
         card has actually been emitted for this task yet. The default title
         is filled in for a create that arrives update-shaped, because a
         card must be named when it is created.
+
+        The body is not a caller's to set. Four different paths used to
+        write it -- the queued brief, provisioning, the worker's actions,
+        the result -- and each replaced what the one before it had put
+        there, so the reader watched the account of the work blank itself
+        twice and end as a summary of a transcript they never got to read.
+        A caller contributes an ``entry``; the body is always the whole
+        accumulated transcript, rendered here. Nothing can erase it.
         """
         if emit_tool_call is None or not assignment_ref:
             return
+        entry = fields.pop("entry", None)
+        if entry:
+            self._append_worker_entry(assignment_ref, entry)
+        fields.pop("text", None)
+        with self._lock:
+            transcript = list(self._worker_action_log.get(assignment_ref) or ())
+        body = _joined_worker_actions(transcript)
+        if body:
+            fields["text"] = scrub_text(body, max_chars=_WORKER_ACTION_LOG_MAX_CHARS + 2000)
         card_id = _worker_tool_call_id(assignment_ref)
         with self._lock:
             first = card_id not in self._emitted_worker_cards
@@ -2681,6 +2719,15 @@ class OrchestratingRuntime:
         payload = dict(fields)
         payload["tool_call_id"] = card_id
         payload["new"] = first
+        # One card, one state: now that the body is computed here rather
+        # than handed in, two paths can easily arrive at the identical
+        # card, and re-sending it is wire noise and a redraw for whoever
+        # is watching.
+        signature = tuple(sorted((key, str(value)) for key, value in payload.items() if key != "new"))
+        with self._lock:
+            if not first and self._worker_card_sent.get(card_id) == signature:
+                return
+            self._worker_card_sent[card_id] = signature
         if first:
             payload.setdefault("kind", _WORKER_TOOL_CALL_KIND)
             payload.setdefault("status", "pending")
@@ -2875,19 +2922,15 @@ class OrchestratingRuntime:
             fields: dict[str, Any] = dict(status="in_progress")
             base = titles.get(assignment_ref)
             if base:
-                fields["title"] = scrub_text(f"{base}. {latest}", max_chars=_WORKER_CARD_TITLE_MAX_CHARS)
-            # No body while it runs: what it is doing is the title, and
-            # its history is not something a reader asked for. The body is
-            # the worker's own final message, written once when it
-            # reports (see _worker_card_body).
-            # This runs on every wait tick, but a worker is not doing
-            # something new on every tick: re-sending an identical card is
-            # pure wire noise (and a client redrawing it, flicker).
-            signature = (fields.get("title"), fields.get("text"))
-            with self._lock:
-                if self._worker_card_sent.get(assignment_ref) == signature:
-                    continue
-                self._worker_card_sent[assignment_ref] = signature
+                # The title names the worker and its assignment and then
+                # stays put. What it is doing right now belongs in the
+                # block below, with everything else it has done -- asked
+                # for directly, after a feed where every action was its
+                # own card.
+                fields["title"] = scrub_text(base, max_chars=_WORKER_CARD_TITLE_MAX_CHARS)
+            # The body is the whole transcript, and _emit_worker_card
+            # renders and de-duplicates it -- this runs on every wait tick
+            # and a worker is not doing something new on every tick.
             self._emit_worker_card(emit_tool_call, assignment_ref, **fields)
 
     def _emit_provisioning_tool_calls(
@@ -2909,7 +2952,10 @@ class OrchestratingRuntime:
         for assignment_ref, step, _updated_at in provisioning_sig:
             self._emit_worker_card(
                 emit_tool_call, assignment_ref, status="in_progress",
-                text=scrub_text(f"Provisioning: {step}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                # An entry like any other: a worker opening its engine
+                # session is the only thing happening yet, and a card that
+                # stays blank through it reads as nothing happening at all.
+                entry=scrub_text(f"Provisioning: {step}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
             )
 
     def _handle_ask_user(
@@ -3235,7 +3281,7 @@ class OrchestratingRuntime:
                 emit_tool_call, assignment_ref,
                 title=f"Worker: {_display_role(payload.get('role') or '?')} — {payload.get('title', '')}",
                 kind=_WORKER_TOOL_CALL_KIND, status="pending",
-                text=scrub_text(f"Queued: {payload.get('brief', '')}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                entry=scrub_text(f"Queued: {payload.get('brief', '')}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
             )
             with self._lock:
                 self._open_assignments.setdefault(task_id, set()).add(assignment_ref)
@@ -3715,11 +3761,25 @@ class OrchestratingRuntime:
                         # worker was last actually doing with a word that
                         # says nothing. Wait for the named update.
                         return
+                    if _NATIVE_SUBAGENT.search(title):
+                        # It did happen and it must not have. Shown as the
+                        # refusal it is, in words, rather than as a line
+                        # reading "Start subagent lcm_worker" that means
+                        # nothing to whoever is watching.
+                        self._note_native_subagent(task_id, title)
+                        refusal = acp_messages.render(
+                            "native_subagent_refused", self._resolve_language(task_id))
+                        self._append_worker_entry(_ref, f"{refusal} ({title.strip()})")
+                        with self._lock:
+                            feed = self._task_tool_call_emitters.get(task_id)
+                        self._emit_worker_activity_tool_calls(feed)
+                        return
                     if (
                         _INTERNAL_TOOL_CALL.match(title)
                         or _touches_store(title, rest[0] if rest else None)
                         or _ENGINE_REVIEW.search(title)
                         or _ENGINE_TOOL_DISCOVERY.match(title)
+                        or _NATIVE_WAIT.match(title)
                         or kind == "think"
                     ):
                         # The same rule the feed uses, applied to the one
@@ -3757,38 +3817,17 @@ class OrchestratingRuntime:
                         self._worker_card_title[assignment_ref] = (
                             f"Worker: {who} — {payload.get('title', '')}"
                         )
-                        if route:
-                            self._worker_card_route[assignment_ref] = route
-                # Every action a worker takes is its own card in the feed,
-                # attributed, so the whole stream of what is happening is
-                # visible ("давай все таки в чате весь поток выводить что
-                # бы точно понимать что происходит"). Its own assignment
-                # card still carries whatever it is doing right now, so a
-                # reader who is not following every line still sees the
-                # current state. `id_scope` keeps two workers' cards apart
-                # when both engines use the same wire tool-call id.
-                with self._lock:
-                    feed = self._task_tool_call_emitters.get(task_id)
-
-                def _worker_prefix(_ref=assignment_ref, _role=result.role_id) -> str:
-                    label = self._delegation_route_label(task_id, _ref)
-                    who = _display_role(_role)
-                    return f"{who} · {label}\n" if label else f"{who}\n"
-
-                worker_cards = self._engine_tool_call_emitter(
-                    feed, prefix=_worker_prefix, id_scope=assignment_ref,
-                    project_root=self._task_project_root(task_id),
-                ) if feed is not None else None
-
-                def _worker_tool_call(*args, _card=worker_cards, _log=_on_worker_tool_call) -> None:
-                    _log(*args)
-                    if _card is not None:
-                        _card(*args)
-
+                # A worker's actions never become cards of their own in the
+                # feed. They accumulate inside that worker's own card, one
+                # under another, separated -- which is what was asked for
+                # after a feed where every action was a separate entry and
+                # two workers' entries interleaved. The filtering stays
+                # where it was: this runtime's own bookkeeping and anything
+                # touching .cortex is not something the worker "did".
                 try:
                     outcome = self._engine.prompt(
                         result.engine_session_ref, brief, cancel_event,
-                        on_delta=_on_worker_delta, on_tool_call=_worker_tool_call,
+                        on_delta=_on_worker_delta, on_tool_call=_on_worker_tool_call,
                     )
                 finally:
                     with self._lock:
