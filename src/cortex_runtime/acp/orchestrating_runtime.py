@@ -3357,6 +3357,10 @@ class OrchestratingRuntime:
         new engine.
         """
         def _refuse(reason: str) -> None:
+            if self._assignment_already_reported(task_id, assignment_ref):
+                # The worker reported and its session then closed; that
+                # close is not a failure of the assignment.
+                return
             delegation_events.append_event(
                 self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}:fallback",
                 dict(error=f"fallback_refused:{reason}", failure_class=failure_class), origin="runtime",
@@ -3622,8 +3626,21 @@ class OrchestratingRuntime:
                         # An unnamed call is not an action worth showing:
                         # putting "tool call" on the card replaces what the
                         # worker was last actually doing with a word that
-                        # says nothing. Wait for the named update -- the
-                        # per-call cards hold themselves back the same way.
+                        # says nothing. Wait for the named update.
+                        return
+                    if (
+                        _INTERNAL_TOOL_CALL.match(title)
+                        or _touches_store(title, rest[0] if rest else None)
+                        or _ENGINE_REVIEW.search(title)
+                        or _ENGINE_TOOL_DISCOVERY.match(title)
+                        or kind == "think"
+                    ):
+                        # The same rule the feed uses, applied to the one
+                        # line a worker's card carries: "mcp__cortex__
+                        # write_report" is this runtime's own bookkeeping,
+                        # and putting it on the card replaces the last
+                        # thing the worker was actually doing with
+                        # plumbing.
                         return
                     action = title[:_WORKER_ACTIVITY_MAX_CHARS]
                     with self._lock:
@@ -3732,11 +3749,12 @@ class OrchestratingRuntime:
                         # fallback-eligible at all) -- the ordinary
                         # engine-failure event is the only one written for
                         # this path, carrying the distinguishable class.
-                        delegation_events.append_event(
-                            self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
-                            dict(error=f"engine_failure:{failure.kind}", kind=failure.kind, failure_class=failure_class),
-                            origin="runtime", assignment_ref=assignment_ref,
-                        )
+                        if not self._assignment_already_reported(task_id, assignment_ref):
+                            delegation_events.append_event(
+                                self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
+                                dict(error=f"engine_failure:{failure.kind}", kind=failure.kind, failure_class=failure_class),
+                                origin="runtime", assignment_ref=assignment_ref,
+                            )
                     # Else: _attempt_worker_route_fallback already recorded
                     # the concrete refusal reason itself -- never a second,
                     # duplicate assignment_failed event for the same failure.
@@ -3781,6 +3799,40 @@ class OrchestratingRuntime:
                 dict(note=f"Assignment {assignment_ref} worker turn ended: {outcome.stop_reason.value} limit."),
                 origin="runtime", assignment_ref=assignment_ref,
             )
+
+    def _assignment_already_reported(self, task_id: str, assignment_ref: str) -> bool:
+        """Whether this assignment already has a terminal event of its own.
+
+        Live: a worker published its result at 02:04:39 and its engine
+        session then closed, which the runtime read as an engine failure
+        and recorded as ``fallback_refused`` one second later -- a failure
+        event for an assignment that had just succeeded. Recovery has
+        re-checked for exactly this since T023; the engine-failure path
+        never did.
+
+        Both refs, for the same reason ``_close_assignment_that_produced_
+        nothing`` checks both: a worker reports through its own channel,
+        so its result carries the attempt's ref.
+        """
+        try:
+            with self._store.connection() as db:
+                refs = [assignment_ref]
+                row = db.execute(
+                    "SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?",
+                    (task_id, assignment_ref),
+                ).fetchone()
+                if row is not None and row["attempt_id"]:
+                    refs.append(row["attempt_id"])
+                placeholders = ",".join("?" for _ in refs)
+                found = db.execute(
+                    f"SELECT 1 FROM task_events WHERE task_id=? AND assignment_ref IN ({placeholders}) "
+                    "AND superseded=0 AND event_type IN ('worker_result','worker_question',"
+                    "'assignment_cancelled') LIMIT 1",
+                    (task_id, *refs),
+                ).fetchone()
+            return found is not None
+        except Exception:  # noqa: BLE001 - never fail a failure path over this
+            return False
 
     def _close_assignment_that_produced_nothing(self, task_id: str, assignment_ref: str) -> None:
         """A worker's turn ended cleanly having published no result, asked

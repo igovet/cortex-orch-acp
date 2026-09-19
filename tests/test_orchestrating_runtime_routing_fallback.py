@@ -426,3 +426,50 @@ def test_hard_denylisted_classes_never_trigger_fallback(tmp_path, failure_class)
     assert len(rows) == 1
     import json as _json
     assert _json.loads(rows[0]["payload_json"])["error"] == "fallback_refused:fallback_not_authorized"
+
+
+def test_a_session_closing_after_a_published_result_is_not_a_failure(tmp_path):
+    """Live: a worker published its result at 02:04:39, its engine session
+    then closed, and the runtime read that close as an engine failure and
+    recorded `fallback_refused` for the assignment one second later -- a
+    failure event for an assignment that had just succeeded.
+
+    Recovery has re-checked for exactly this since T023; the engine-failure
+    path never did."""
+    import uuid as _uuid
+
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
+    from cortex_runtime.bootstrap import bootstrap_task
+    from cortex_runtime.delegation import events as delegation_events
+    from cortex_runtime.portable.identity import SourceEvent
+    from cortex_runtime.store import Store
+
+    project = tmp_path / "project"
+    project.mkdir()
+    store = Store(project / ".cortex", project_root=project)
+    task_id = bootstrap_task(
+        store, SourceEvent(origin="cli", event_id=str(_uuid.uuid4())), "Do X.", "owner-1",
+    ).task_id
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._store = store
+
+    assignment_ref = "a" * 64
+    assert not runtime._assignment_already_reported(task_id, assignment_ref)
+
+    # The worker reports through its own channel, so the result carries the
+    # attempt's ref, not the assignment's.
+    now = "2026-09-19T00:00:00+00:00"
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO delegation_provisioning "
+            "(idempotency_key, task_id, attempt_id, role_id, step, status, owner_epoch, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (assignment_ref, task_id, "xa_1", "worker-backend-dev", "ready", "ready", 1, now, now),
+        )
+        db.commit()
+    delegation_events.append_event(
+        store, task_id, "worker_result", "worker_result:xa_1",
+        dict(summary="done", report_ref="r_1"), origin="worker", assignment_ref="xa_1",
+    )
+
+    assert runtime._assignment_already_reported(task_id, assignment_ref)

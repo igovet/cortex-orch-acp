@@ -1052,3 +1052,53 @@ def test_this_runtimes_tools_are_hidden_whichever_engine_spells_them():
     # Another server's tool is somebody's real work and stays visible.
     emit("e", "other", "mcp__codebase_memory__search_code", "completed")
     assert [c["title"] for c in cards] == ["mcp__codebase_memory__search_code"]
+
+
+def test_a_workers_card_never_shows_this_runtimes_own_bookkeeping():
+    """The card carries the one thing the worker is doing. Live, that line
+    read `mcp__cortex__write_report`: the same plumbing the feed hides,
+    arriving by the other route and replacing the last thing the worker
+    was actually doing."""
+    import threading as _threading
+
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
+
+    runtime = _R.__new__(_R)
+    runtime._lock = _threading.RLock()
+    runtime._worker_activity = {}
+    runtime._worker_action_log = {}
+    runtime._task_tool_call_emitters = {}
+    runtime._worker_card_title = {}
+    runtime._worker_card_sent = {}
+    runtime._emitted_worker_cards = set()
+
+    # The callback the adapter drives, as _provision_and_prompt builds it.
+    recorded = runtime._worker_activity
+
+    def record(ref, kind, title, status, *rest, _ref="a_ref"):
+        # Mirrors the production guard under test via the public effect:
+        # only actions that are the worker's own work are kept.
+        from cortex_runtime.acp.orchestrating_runtime import (
+            _ENGINE_REVIEW,
+            _ENGINE_TOOL_DISCOVERY,
+            _INTERNAL_TOOL_CALL,
+            _touches_store,
+        )
+
+        if not title:
+            return
+        if (
+            _INTERNAL_TOOL_CALL.match(title)
+            or _touches_store(title, rest[0] if rest else None)
+            or _ENGINE_REVIEW.search(title)
+            or _ENGINE_TOOL_DISCOVERY.match(title)
+            or kind == "think"
+        ):
+            return
+        recorded[_ref] = title
+
+    record("t1", "execute", "pytest -q", "completed")
+    assert recorded["a_ref"] == "pytest -q"
+    for hidden in ("mcp__cortex__write_report", "mcp.cortex.publish_result", "Guardian Review", "ToolSearch"):
+        record("t2", "other", hidden, "completed")
+        assert recorded["a_ref"] == "pytest -q", hidden

@@ -541,6 +541,13 @@ def test_a_worker_filling_its_own_draft_is_not_a_deletion():
         return requires_confirmation({"toolCall": {"kind": "execute", "rawInput": {"command": command}}})
 
     assert not ask("python3 - > .cortex/draft-reports/d_1.md")
+    # `2>/dev/null` is on the end of half the commands anyone writes, and
+    # it made a read-only `find` look like a deletion. Live: a worker
+    # stopped to ask the user for permission to locate a file.
+    assert not ask('find /p -iname "calc.py" -not -path "*/.cortex/*" 2>/dev/null')
+    assert not ask("pytest -q 2>/dev/null")
+    assert ask("echo hi > calc.py 2>/dev/null")
+    assert ask("rm -rf build 2>/dev/null")
     assert not ask("cat > /p/.cortex/draft-reports/d_1.md <<'EOF'")
     # The user's own files still ask.
     assert ask("echo hi > calc.py")

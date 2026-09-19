@@ -92,9 +92,14 @@ _DELETION_COMMAND_WITHOUT_REDIRECT = re.compile(
 _REDIRECT_TARGET = re.compile(r"(?<!>)>(?!>)\s*'?\"?([^\s'\";&|]+)")
 
 
-def _redirects_only_into_the_store(text: str) -> bool:
-    """True when every truncating redirect in ``text`` writes into
-    Cortex's own store (``.cortex/``), and there is at least one.
+def _redirects_only_where_nothing_can_be_lost(text: str) -> bool:
+    """True when every truncating redirect in ``text`` writes somewhere
+    nothing can be destroyed, and there is at least one.
+
+    Two such places: Cortex's own store (``.cortex/``) and ``/dev/null``.
+    The second matters more than it looks -- ``2>/dev/null`` is on the end
+    of half the commands anyone writes, and it made a read-only ``find``
+    look like a deletion and stop to ask the user.
 
     A worker fills its report by writing the draft file the runtime handed
     it, and a shell heredoc does that with ``>``. Treating every ``>`` as
@@ -110,7 +115,14 @@ def _redirects_only_into_the_store(text: str) -> bool:
     targets = _REDIRECT_TARGET.findall(text)
     if not targets:
         return False
-    return all(_CORTEX_STORE_PATH.search(target) for target in targets)
+    return all(
+        _CORTEX_STORE_PATH.search(target) or target in _DISCARD_TARGETS
+        for target in targets
+    )
+
+
+# Writing here destroys nothing.
+_DISCARD_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
 
 
 # The store's own directory as it appears in a path, absolute or relative.
@@ -253,7 +265,7 @@ def requires_confirmation(params) -> bool:
         text = _command_text(tool_call)
         if _DELETION_COMMAND_WITHOUT_REDIRECT.search(text):
             return True
-        if _redirects_only_into_the_store(text):
+        if _redirects_only_where_nothing_can_be_lost(text):
             return False
         return bool(_DELETION_COMMAND_PATTERN.search(text))
     if kind in _NON_DELETION_TOOL_KINDS:
