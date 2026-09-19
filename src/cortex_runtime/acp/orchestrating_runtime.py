@@ -3582,7 +3582,19 @@ class OrchestratingRuntime:
                 # these keys, so ``.get`` keeps them replaying as omitted.
                 engine=payload.get("engine"), model=payload.get("model"), effort=payload.get("effort"),
             )
-        except PortableError as error:
+        except Exception as error:
+            # Duck-typed, and deliberately so. The same refusal reaches here
+            # as a PortableError from one caller and wrapped in this layer's
+            # own RouteUnresolved from another -- and catching only the
+            # former meant an engine whose login had expired produced no
+            # assignment_failed at all: the exception went on to the thread
+            # that swallows anything so a late worker start never breaks the
+            # turn, the provisioning row stayed claimed, and the coordinator
+            # kept answering that the worker was still working (live,
+            # 2026-09-19). Anything with no code of its own still
+            # propagates untouched.
+            if getattr(error, "code", None) is None:
+                raise
             result = None
             if error.code in ("capacity_unsatisfiable", "capacity_timeout"):
                 # T027: this delegation's own attempt was allocated (and its
@@ -3619,9 +3631,19 @@ class OrchestratingRuntime:
                         # the concrete refusal reason itself.
                         return
             if result is None:
+                # An engine that answers with its own JSON-RPC error gives a
+                # number, not a name: live this was recorded as
+                # ``error: -32000`` with an empty detail, which tells nobody
+                # anything. Name the class of failure ourselves and carry
+                # the engine's own words, which is the part a person can
+                # actually act on ("Authentication required: run /login").
+                code = error.code if isinstance(error.code, str) else "engine_refused_session"
+                detail = (getattr(error, "remediation", None)
+                          or getattr(error, "message", None)
+                          or "")
                 delegation_events.append_event(
                     self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
-                    dict(error=error.code, role=payload["role"], detail=_bounded_detail(error.remediation)),
+                    dict(error=code, role=payload["role"], detail=_bounded_detail(detail)),
                     origin="runtime", assignment_ref=assignment_ref,
                 )
                 return

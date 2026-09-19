@@ -42,10 +42,10 @@ Nothing activates by itself. Cortex runs when you select it in your editor.
 | --- | --- | --- |
 | Agent entry point | `src/cortex_acp.py` in this repository | not edited; referenced from your editor |
 | Editor registration | your editor's settings (`agent_servers` in Zed) | you |
-| Engine connections | `~/.config/cortex/connections.json` | `scripts/cortex_acp_setup.py` |
-| Connection secrets | `~/.config/cortex/secrets/<connection id>` | setup tooling only |
-| Engine credential dirs | `~/.local/state/cortex/connections/<id>/` | setup tooling only |
-| Installed engines | `~/.local/state/cortex/engines/<engine>/` | you, or your package manager |
+| Engine connections | `~/.config/cortex/connections.json` | Cortex, on first run; `scripts/cortex_acp_setup.py` for the rest |
+| Connection secrets (API-key connections only) | `~/.config/cortex/secrets/<connection id>` | setup tooling only |
+| Engine credentials | your own native directories, `~/.codex` and `~/.claude` | the engine's own CLI (`codex`, `claude`) |
+| Engine installs | wherever your editor put them (Zed: `~/.local/share/zed/external_agents/`) | your editor |
 | Route + effort policy | `~/.config/cortex/route-policy.json` | you, by hand |
 | Your defaults | `~/.config/cortex/defaults.json` | the model/effort selectors in the editor |
 | One project's tasks | `<project>/.cortex/` | Cortex |
@@ -56,9 +56,26 @@ A project's `.cortex/` holds `cortex.sqlite3` (tasks, events, audit),
 your source: keep it out of version control if you do not want task history in
 your repository.
 
-## Setting it up
+## Setting it up in Zed
 
-### 1. Register Cortex in your editor
+Three things have to be true. Zed already gives you the first two if you use
+its external agents at all.
+
+### 1. The engines
+
+Cortex does not install, copy or pin an engine. It runs the ones **your editor
+already installed**, from where your editor put them. In Zed that is the agent
+registry under `~/.local/share/zed/external_agents/`, filled when you add
+`codex-acp` or `claude-agent-acp` as external agents.
+
+Sign in to each engine with its own CLI (`codex`, `claude`), as you would to
+use it on its own. Cortex reads those native credential directories
+(`~/.codex`, `~/.claude`) by reference — it never copies them and never asks
+you for a token. One consequence worth knowing: your editor's own engine
+process and Cortex's engine process then share one credential directory, so a
+token refresh can race between them.
+
+### 2. Cortex itself, registered as a custom agent
 
 Zed reads `agent_servers` from `~/.config/zed/settings.json`:
 
@@ -73,31 +90,48 @@ Zed reads `agent_servers` from `~/.config/zed/settings.json`:
 }
 ```
 
-`scripts/cortex_acp_client_config.py` prints that entry for your checkout and,
-with `--apply --i-consent-to-write` and an explicit settings path, writes it
-for you — backed up and atomic. It writes nothing by default.
+Use absolute paths, and keep `-B` — it stops Python writing bytecode into the
+checkout. `env` stays empty: Cortex never takes Zed's own model credentials.
 
-Select **Cortex** in the agent panel. It never activates on its own, and it
-never uses your editor's own model credentials.
+`scripts/cortex_acp_client_config.py` prints exactly that entry for your
+checkout; with `--apply --i-consent-to-write` and an explicit settings path it
+writes it for you, backed up and atomic. It writes nothing by default.
 
-### 2. Connect an engine
+Then pick **Cortex** in the agent panel. It never starts on its own.
 
-Cortex does not install codex-acp or claude-agent-acp, and it does not take
-your CLI's credentials by itself. Install the engine, then create a connection:
+### 3. Nothing else, usually
+
+On its first start Cortex finds the engines your editor installed, gives each
+one a connection pointing at your own credentials, and writes a default
+`~/.config/cortex/route-policy.json` permitting both. None of that needs your
+consent, because none of it reaches outside your own configuration.
+
+You only need the setup tool for the cases that genuinely need you:
 
 ```bash
-python3 -B scripts/cortex_acp_setup.py status
+python3 -B scripts/cortex_acp_setup.py status          # what Cortex found, read-only
 python3 -B scripts/cortex_acp_setup.py add-connection --help
 ```
 
-Each step is separate and idempotent on purpose: consent for one is never
-consent for another. With no connection, Cortex advertises no model and
-refuses to orchestrate rather than silently reaching for something.
+— a second account for the same engine, an API-key connection instead of a CLI
+login, or an engine installed somewhere your editor does not manage. With no
+usable connection at all, Cortex advertises no model and refuses to
+orchestrate rather than silently reaching for something.
 
-`/cortex-setup` in the editor prints the same guidance without changing
-anything.
+`/cortex-setup` in the editor prints the same guidance and changes nothing.
 
-### 3. Choose the model for a task
+### Checking the three in one command
+
+```bash
+python3 -B scripts/cortex_diagnose.py --format text
+```
+
+It reports the engines it can see, each connection's state, storage and
+schema — and never makes a model call.
+
+## Using it
+
+### Choose the model for a task
 
 The bar under the message box selects, in order: **engine and account** →
 **model of that engine** → **effort of that model** → **language**. What you
@@ -116,15 +150,15 @@ Equivalent commands, for a client without those selectors:
 | `/cortex-stop` | stop the active task and every worker it started |
 | `/cortex-answer <n> <text>` | answer one open coordinator question |
 
-### 4. Decide who may use what — `route-policy.json`
+### Decide who may use what — `route-policy.json`
 
 The coordinator's own route is your choice in the editor. Which routes a
 *worker* may use is the policy file:
 
 `~/.config/cortex/route-policy.json`
 
-It is created with both engines permitted on first setup, and you edit it by
-hand. Cortex reads, in precedence order:
+Cortex writes it on its first run with both engines permitted; after that it
+is yours to edit by hand. Cortex reads, in precedence order:
 
 1. `<project>/.cortex/route-policy.json` — this project only
 2. `$CORTEX_ROUTE_POLICY` — a path you set in your editor's `env` for Cortex
@@ -136,7 +170,7 @@ the permission ceiling forbids — otherwise editing a file would be a way
 around the ceiling, which is the one thing a ceiling is for. A malformed file
 is recorded and ignored, never read as "no restrictions".
 
-### 5. MCP servers
+### MCP servers
 
 Whatever MCP servers you configure in your editor are passed on to every
 engine Cortex runs — the coordinator and every worker see the same tools you
@@ -181,7 +215,14 @@ project's task store.
 4. The worker asks to integrate. Changes are applied against a known base,
    conflict-checked, never last-write-wins — and never at all if your editor
    has unsaved changes to a file being written.
-5. The coordinator reads the report and accepts or sends the worker back.
+5. The coordinator reads the report and accepts or sends the worker back. It
+   cannot accept work that is not in your project: if that integration
+   conflicted and wrote nothing, acceptance is refused until the conflict is
+   resolved and the change actually lands.
+
+When something cannot be done, it is said rather than waited out: a worker
+whose engine refuses to start (an expired login, for instance) ends as a named
+failure carrying the engine's own words, not as a worker that never appears.
 
 The coordinator cannot edit your project: its workspace is a read-only copy,
 and a turn that changed the real project is refused. Its own store
