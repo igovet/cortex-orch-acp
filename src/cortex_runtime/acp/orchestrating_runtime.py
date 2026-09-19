@@ -1833,6 +1833,7 @@ class OrchestratingRuntime:
                         in_flight = set(self._worker_turns_in_flight)
                         open_refs = set(self._open_assignments.get(task_id) or ())
                         pending = [f for f in (self._running.get(task_id) or ()) if not f.done()]
+                    self._report_assignments_whose_provisioning_failed(task_id)
                     if open_refs and not in_flight and not pending:
                         # Open assignments with nothing running for this
                         # task at all: their workers' turns are over and
@@ -3935,6 +3936,39 @@ class OrchestratingRuntime:
             return found is not None
         except Exception:  # noqa: BLE001 - never fail a failure path over this
             return False
+
+    def _report_assignments_whose_provisioning_failed(self, task_id: str) -> None:
+        """Turn a delegation that could not even be provisioned into a
+        failure somebody is told about.
+
+        A worker that never opens produces no events at all: no
+        ``assignment_ready``, no result, no failure -- so neither the
+        open-assignment sweep below nor the coordinator has anything to go
+        on. Live (2026-09-19) the engine's credentials were removed
+        mid-task: the provisioning row sat there with its reason, the
+        coordinator answered "waiting for the worker's report" three turns
+        running, and nothing ever said the worker could not start.
+
+        Only rows that already carry a reason (a refusal that knew its own
+        code) are reported; a row still in progress is still in progress.
+        """
+        with self._store.connection() as db:
+            rows = db.execute(
+                "SELECT idempotency_key, error_code FROM delegation_provisioning "
+                "WHERE task_id=? AND status='failed' AND error_code IS NOT NULL",
+                (task_id,),
+            ).fetchall()
+        for row in rows:
+            assignment_ref = row["idempotency_key"]
+            if self._assignment_already_reported(task_id, assignment_ref):
+                continue
+            delegation_events.append_event(
+                self._store, task_id, "assignment_failed",
+                f"provisioning_failed:{assignment_ref}",
+                dict(error=row["error_code"], assignment_ref=assignment_ref,
+                     detail="the worker could not be started"),
+                origin="runtime", assignment_ref=assignment_ref,
+            )
 
     def _close_assignment_that_produced_nothing(self, task_id: str, assignment_ref: str) -> None:
         """A worker's turn ended cleanly having published no result, asked

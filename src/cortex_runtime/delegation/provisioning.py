@@ -759,6 +759,21 @@ class ProvisioningService:
                 # provisioning-recovery tests).
                 kind = getattr(error, "kind", None)
                 if kind not in ("capacity_unsatisfiable", "capacity_timeout", "attempt", "task", "shutdown"):
+                    # A refusal that already knows its own code is not a
+                    # crash a retry could survive -- an expired login, an
+                    # unusable connection, a route the policy forbids. Live
+                    # (2026-09-19) codex's credentials were removed
+                    # mid-task: the worker could not open, this row stayed
+                    # 'in_progress' with no error_code forever, no
+                    # assignment_failed was ever written, and the
+                    # coordinator kept answering "waiting for the worker's
+                    # report". Record the reason so something can say it.
+                    # Everything else still propagates untouched, so a
+                    # same-process retry can still recover a genuine
+                    # crash/transport failure via lookup_owned.
+                    code = getattr(error, "code", None)
+                    if code and isinstance(error, PortableError) and not error.retry_eligible:
+                        self._fail(idempotency_key, code)
                     raise
                 self._fail(idempotency_key, kind)
                 raise PortableError(

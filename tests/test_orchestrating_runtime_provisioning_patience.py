@@ -181,3 +181,65 @@ def test_advancing_provisioning_resets_the_no_progress_budget_but_a_real_stall_s
         "advancing provisioning must never exhaust the no-progress budget "
         f"(max_no_progress_continuations=4, saw {max_no_progress_seen_while_advancing})"
     )
+
+
+# -- a worker that could not be started at all ------------------------------
+
+def test_a_delegation_that_could_not_be_provisioned_is_reported_as_a_failure(tmp_path):
+    """Live (2026-09-19, L5): the engine's credentials were removed
+    mid-task. The worker could not open, so it produced no events at all --
+    no assignment_ready, no result, no failure -- and the coordinator kept
+    answering "waiting for the worker's report" while nothing anywhere said
+    the worker could not start."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
+    from cortex_runtime.delegation import events as delegation_events
+    from cortex_runtime.store import Store
+
+    store = Store(tmp_path / ".cortex", project_root=str(tmp_path))
+    with store.connection() as db:
+        db.execute("INSERT INTO tasks (id, project_root, created_at) VALUES ('t1', ?, '2026-01-01T00:00:00+00:00')",
+                   (str(tmp_path),))
+        db.execute(
+            "INSERT INTO delegation_provisioning (idempotency_key, task_id, attempt_id, role_id, step, status, "
+            "error_code, owner_epoch, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("assign-1", "t1", "xa_1", "worker-backend-dev", "engine_session", "failed",
+             "connection_requires_reauthorization", 1, store._now(), store._now()))
+        db.commit()
+
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._store = store
+    runtime._report_assignments_whose_provisioning_failed("t1")
+
+    events = [e for e in delegation_events.list_since(store, "t1") if e.event_type == "assignment_failed"]
+    assert len(events) == 1, events
+    assert events[0].payload["error"] == "connection_requires_reauthorization"
+    assert events[0].assignment_ref == "assign-1"
+
+    # Idempotent: a second sweep says it once, not twice.
+    runtime._report_assignments_whose_provisioning_failed("t1")
+    again = [e for e in delegation_events.list_since(store, "t1") if e.event_type == "assignment_failed"]
+    assert len(again) == 1, again
+
+
+def test_a_provisioning_row_still_in_progress_is_not_reported(tmp_path):
+    """Still starting is not the same as failed to start."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
+    from cortex_runtime.delegation import events as delegation_events
+    from cortex_runtime.store import Store
+
+    store = Store(tmp_path / ".cortex", project_root=str(tmp_path))
+    with store.connection() as db:
+        db.execute("INSERT INTO tasks (id, project_root, created_at) VALUES ('t1', ?, '2026-01-01T00:00:00+00:00')",
+                   (str(tmp_path),))
+        db.execute(
+            "INSERT INTO delegation_provisioning (idempotency_key, task_id, attempt_id, role_id, step, status, "
+            "owner_epoch, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("assign-2", "t1", "xa_2", "worker-backend-dev", "engine_session", "in_progress",
+             1, store._now(), store._now()))
+        db.commit()
+
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._store = store
+    runtime._report_assignments_whose_provisioning_failed("t1")
+
+    assert not [e for e in delegation_events.list_since(store, "t1") if e.event_type == "assignment_failed"]
