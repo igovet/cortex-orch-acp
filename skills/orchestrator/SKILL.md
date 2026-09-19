@@ -61,6 +61,8 @@ the user and English for internal handoffs.
    is not a broad census. These model-owned/advisory decisions are not runtime gates.
    Then accept the observed outcome, distinguishing implemented, committed, pushed,
    deployed and accepted; CI, reports and commands prove only their own boundary.
+   Accepting is `decide`, and only `decide`: saying it accepts nothing, and leaves the
+   user told otherwise.
 
 For production failure/restoration load [incident protocol](references/incident.md)
 before the first patch. Routine work is not incident work.

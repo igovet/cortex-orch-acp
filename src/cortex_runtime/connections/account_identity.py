@@ -24,6 +24,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 from . import environment, registry
 from .model import ConnectionRecord
@@ -54,7 +55,12 @@ def resolve_account_identity(record: ConnectionRecord, environ: dict[str, str] |
 
 def _codex_account_identity(record: ConnectionRecord, environ: dict[str, str] | None) -> str | None:
     try:
-        directory = registry.connection_state_dir(record.id, record.engine, environ)
+        # Whichever directory this connection actually uses -- the client's
+        # own once it references it, not a Cortex-owned copy it no longer
+        # reads. Live: the user re-authenticated their codex CLI and the
+        # account shown in Zed stayed on the previous one, because the
+        # label came from the old copy while every session ran on theirs.
+        directory = Path(environment.credential_directory(record, environ))
         raw = registry.read_owner_file(directory / "auth.json")
     except Exception:
         return None

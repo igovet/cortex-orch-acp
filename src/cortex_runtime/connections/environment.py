@@ -254,10 +254,25 @@ def build_process_env(
     return result
 
 
-def _isolation_dir(record, environ: dict[str, str] | None = None) -> str:
+def credential_directory(record, environ: dict[str, str] | None = None) -> str:
+    """The engine-native credential directory this connection actually
+    uses -- the one its ``credential_ref`` names when it references the
+    client's own (``~/.codex``, ``~/.claude``), and its Cortex-owned copy
+    otherwise.
+
+    The one place that answers this question. Reading the Cortex-owned
+    directory directly instead showed the account signed in to a copy that
+    is no longer used: live, the user re-authenticated their codex CLI and
+    Cortex went on naming the previous account, because the label was read
+    from the old copy while every session ran on the client's.
+    """
     if isinstance(record.credential_ref, EngineNativeDir):
         return record.credential_ref.path
     return str(registry.connection_state_dir(record.id, record.engine, environ))
+
+
+def _isolation_dir(record, environ: dict[str, str] | None = None) -> str:
+    return credential_directory(record, environ)
 
 
 def describe_process_env(env: dict[str, str]) -> tuple[str, ...]:

@@ -53,6 +53,12 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "There is no task in this session yet, so there is nothing to harvest. Send a request first.",
         "ru": "В этой сессии ещё нет задачи, собирать нечего. Сначала отправьте запрос.",
     },
+    "delivered_but_not_accepted": {
+        "en": "This turn ended with a worker's change integrated into the project and the task "
+              "still not accepted: acceptance is a recorded decision, and none was made.",
+        "ru": "Ход завершён: изменение исполнителя интегрировано в проект, но задача так и не "
+              "принята — приёмка это записанное решение, и его не было.",
+    },
     "answer_in_language": {
         "en": "Always write your replies to the user in English, whatever language this prompt is in.",
         "ru": "Всегда пиши свои ответы пользователю по-русски, независимо от того, на каком языке этот запрос.",

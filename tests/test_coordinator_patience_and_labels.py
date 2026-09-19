@@ -1102,3 +1102,34 @@ def test_a_workers_card_never_shows_this_runtimes_own_bookkeeping():
     for hidden in ("mcp__cortex__write_report", "mcp.cortex.publish_result", "Guardian Review", "ToolSearch"):
         record("t2", "other", hidden, "completed")
         assert recorded["a_ref"] == "pytest -q", hidden
+
+
+def test_a_turn_that_delivered_without_accepting_says_so(tmp_path):
+    """Live: the coordinator told the user "принимаю результат" and called
+    nothing. The work sat integrated in the project, the task stayed
+    unaccepted, and the user believed it was done.
+
+    The runtime speaks for the record, not for the model's prose: when a
+    turn ends with a change integrated and no decision accepting it, it
+    says exactly that."""
+    from cortex_runtime.delegation import events as delegation_events
+
+    store, task_id = _task(tmp_path)
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda *a, **k: None), FakeWorkspace(), FakeConfigSnapshotSource(),
+    )
+
+    # Nothing delivered yet: nothing to say.
+    assert runtime._integrated_without_acceptance(task_id) is False
+
+    delegation_events.append_event(
+        store, task_id, "progress", "integrate:req-1",
+        dict(applied_paths=["calc.py"], kind="integration_applied"), origin="runtime",
+    )
+    assert runtime._integrated_without_acceptance(task_id) is True
+
+    delegation_events.append_event(
+        store, task_id, "coordinator_decision", "decide:acc-1",
+        dict(assignment_ref="task", decision="accept", rationale="verified"), origin="coordinator",
+    )
+    assert runtime._integrated_without_acceptance(task_id) is False

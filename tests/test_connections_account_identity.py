@@ -227,3 +227,34 @@ def test_resolve_account_identity_never_raises_for_unsupported_engine(tmp_path, 
     record = onboarding.set_api_key(record.id, reader=lambda: b"fake-test-secret-key", environ=environ)
     # api_key mode: no id_token to decode, must gracefully fall back.
     assert account_identity.resolve_account_identity(record, environ) is None
+
+
+def test_a_referencing_connection_shows_the_account_the_client_is_signed_in_as(tmp_path, monkeypatch):
+    """Once a connection references the client's own credential directory,
+    that is where its account lives.
+
+    Live: the user re-authenticated their codex CLI and Zed went on showing
+    the previous account. Every session was already running on the client's
+    directory; only the label was still read from the Cortex-owned copy the
+    connection had stopped using.
+    """
+    from dataclasses import replace
+
+    from cortex_runtime.connections.model import EngineNativeDir
+
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _native_codex_connection(environ)
+    # The copy it no longer uses still holds the old account.
+    _write_codex_auth_json(record, environ, {"tokens": {"id_token": _fake_id_token()}})
+    assert account_identity.resolve_account_identity(record, environ) == "igovet+2@gmail.com"
+
+    native = Path(environ["HOME"]) / ".codex"
+    native.mkdir(parents=True, exist_ok=True)
+    registry.atomic_write_private(
+        native / "auth.json",
+        json.dumps({"tokens": {"id_token": _fake_id_token(email="igovet@gmail.com")}}).encode("utf-8"),
+        directory=native,
+    )
+    referencing = replace(record, credential_ref=EngineNativeDir(path=str(native), owned=False))
+
+    assert account_identity.resolve_account_identity(referencing, environ) == "igovet@gmail.com"

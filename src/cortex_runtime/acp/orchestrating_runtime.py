@@ -2089,6 +2089,13 @@ class OrchestratingRuntime:
                     return StopReason.END_TURN
                 continue
             if not has_unconsumed and not running:
+                # Live: the coordinator told the user "принимаю результат"
+                # and called nothing, so the work sat integrated and the
+                # task unaccepted while the user believed it was done. The
+                # record is what the runtime can speak for, so it says what
+                # the record holds -- never by reading the model's prose.
+                if self._integrated_without_acceptance(task_id):
+                    self._emit_localized(task_id, emit_update, language, "delivered_but_not_accepted")
                 self._set_state(task_id, "idle_awaiting_user", wait_reason="idle_awaiting_user")
                 return StopReason.END_TURN
             # else: loop again -- either events already pending or we will
@@ -3799,6 +3806,32 @@ class OrchestratingRuntime:
                 dict(note=f"Assignment {assignment_ref} worker turn ended: {outcome.stop_reason.value} limit."),
                 origin="runtime", assignment_ref=assignment_ref,
             )
+
+    def _integrated_without_acceptance(self, task_id: str) -> bool:
+        """A worker's change is in the project and nothing accepted it.
+
+        Both halves read the durable record only: an ``integrate`` progress
+        row for this task, and no ``coordinator_decision`` accepting it
+        afterwards. A turn that ends any other way (still running, waiting
+        on a question, nothing delivered yet) says nothing.
+        """
+        try:
+            with self._store.connection() as db:
+                integrated = db.execute(
+                    "SELECT id FROM task_events WHERE task_id=? AND event_type='progress' "
+                    "AND dedup_key LIKE 'integrate:%' ORDER BY id DESC LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                if integrated is None:
+                    return False
+                accepted = db.execute(
+                    "SELECT 1 FROM task_events WHERE task_id=? AND event_type='coordinator_decision' "
+                    "AND id>? AND payload_json LIKE ? LIMIT 1",
+                    (task_id, integrated["id"], '%"decision": "accept"%'),
+                ).fetchone()
+            return accepted is None
+        except Exception:  # noqa: BLE001 - never fail a turn over a notice
+            return False
 
     def _assignment_already_reported(self, task_id: str, assignment_ref: str) -> bool:
         """Whether this assignment already has a terminal event of its own.

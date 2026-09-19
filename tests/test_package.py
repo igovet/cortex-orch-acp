@@ -232,7 +232,10 @@ def test_orchestrator_routes_conditional_procedures_with_valid_links():
     # adds the one rule that makes the delivered per-role route table
     # usable: that choosing the worker's provider/model/effort is the
     # coordinator's own job.
-    assert len(body) < 8300
+    # Raised again for the rule a live run showed missing: the
+    # coordinator told the user "принимаю результат" and called nothing,
+    # so the task stayed unaccepted while the user believed it was done.
+    assert len(body) < 8400
     links = re.findall(r'\]\((references/[^)]+)\)', body)
     assert len(set(links)) >= 7
     for link in links:
