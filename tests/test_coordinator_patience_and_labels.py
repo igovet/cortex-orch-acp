@@ -1136,3 +1136,50 @@ def test_a_turn_that_delivered_without_accepting_says_so(tmp_path):
         dict(assignment_ref="task", decision="accept", rationale="verified"), origin="coordinator",
     )
     assert runtime._integrated_without_acceptance(task_id) is False
+
+
+# -- a worker that published its report and never said so -------------------
+
+def test_a_silent_worker_that_published_a_report_delivers_it_instead_of_failing(tmp_path):
+    """Live (2026-09-19, the user's own thread): a worker published report
+    r_1777da4c6513 through its own channel at 14:43:10, the runtime declared
+    the assignment empty five seconds later, and the coordinator delegated
+    the identical work again from scratch. The work existed; only the
+    sentence about it was missing."""
+    from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
+    from cortex_runtime.delegation import events as delegation_events
+    from cortex_runtime.store import Store
+
+    store = Store(tmp_path / ".cortex", project_root=str(tmp_path))
+    thread = "thread-of-the-worker"
+    with store.connection() as db:
+        db.execute("INSERT INTO tasks (id, project_root, created_at) VALUES ('t1', ?, '2026-01-01T00:00:00+00:00')",
+                   (str(tmp_path),))
+        db.execute("INSERT INTO thread_bindings (thread_id, parent_thread_id, task_id) VALUES (?,NULL,'t1')",
+                   (thread,))
+        db.execute(
+            "INSERT INTO delegation_provisioning (idempotency_key, task_id, attempt_id, role_id, step, status, "
+            "owner_epoch, created_at, updated_at) VALUES ('assign-1','t1','xa_1','worker-backend-dev','engine_session',"
+            "'ready',1,?,?)", (store._now(), store._now()))
+        db.execute(
+            "INSERT INTO trusted_channels (channel_id, secret_hash, task_id, principal_thread_id, "
+            "parent_principal_thread_id, role, assignment_id, attempt_id, workspace_binding_id, "
+            "context_generation_id, owner_epoch, issued_at) VALUES ('ch_1','h','t1',?,NULL,'worker','a1','xa_1',"
+            "NULL,NULL,1,?)", (thread, store._now()))
+        db.execute("INSERT INTO reports (id, task_id, kind, filename, created_at) "
+                   "VALUES ('r_published','t1','report','r_published.md',?)", (store._now(),))
+        db.execute(
+            "INSERT INTO drafts (id, task_id, owner_thread_id, kind, template, path, created_at, device, inode, "
+            "published_report_id, published_digest) VALUES ('d_1','t1',?,'report','implementation','/x/d_1.md',?,"
+            "1,1,'r_published','digest')", (thread, store._now()))
+        db.commit()
+
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._store = store
+    runtime._close_assignment_that_produced_nothing("t1", "assign-1")
+
+    events = delegation_events.list_since(store, "t1")
+    assert not [e for e in events if e.event_type == "assignment_failed"], events
+    result = next(e for e in events if e.event_type == "worker_result")
+    assert result.payload["report_ref"] == "r_published"
+    assert "without reporting it" in result.payload["summary"]

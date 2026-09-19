@@ -4036,11 +4036,43 @@ class OrchestratingRuntime:
                     (task_id, *refs),
                 ).fetchone()
                 if existing is None:
-                    delegation_events.append_event_tx(
-                        db, task_id, "assignment_failed", f"assignment_silent:{assignment_ref}",
-                        dict(error="worker_ended_without_result", assignment_ref=assignment_ref),
-                        origin="runtime", assignment_ref=assignment_ref,
-                    )
+                    # Before declaring that nothing came of this: did the
+                    # worker publish a report and simply never say so? Live
+                    # (2026-09-19, a user's own thread) one did exactly
+                    # that -- report r_1777da4c6513 published through its
+                    # own channel at 14:43:10, the assignment declared
+                    # empty at 14:43:15, and the same work delegated again
+                    # from scratch. The work existed; only the sentence
+                    # about it was missing.
+                    #
+                    # Attribution is durable and exact, never a guess: the
+                    # draft records the thread that owns it, and that
+                    # thread is this attempt's own worker channel.
+                    published = db.execute(
+                        "SELECT d.published_report_id AS report_ref FROM drafts d "
+                        "JOIN trusted_channels c ON c.principal_thread_id = d.owner_thread_id "
+                        "WHERE d.task_id=? AND c.task_id=? AND c.attempt_id IN "
+                        f"({placeholders}) AND d.kind='report' "
+                        "AND d.published_report_id IS NOT NULL "
+                        "ORDER BY d.created_at DESC LIMIT 1",
+                        (task_id, task_id, *refs),
+                    ).fetchone()
+                    if published is not None and published["report_ref"]:
+                        delegation_events.append_event_tx(
+                            db, task_id, "worker_result", f"assignment_silent_result:{assignment_ref}",
+                            dict(report_ref=published["report_ref"],
+                                 summary="The worker published this report and then ended its turn "
+                                         "without reporting it. Read the report itself: nothing else "
+                                         "was said about the work.",
+                                 checks=[]),
+                            origin="runtime", assignment_ref=assignment_ref,
+                        )
+                    else:
+                        delegation_events.append_event_tx(
+                            db, task_id, "assignment_failed", f"assignment_silent:{assignment_ref}",
+                            dict(error="worker_ended_without_result", assignment_ref=assignment_ref),
+                            origin="runtime", assignment_ref=assignment_ref,
+                        )
                 db.commit()
             except BaseException:
                 db.rollback()
