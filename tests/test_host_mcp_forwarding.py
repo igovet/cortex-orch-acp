@@ -209,7 +209,7 @@ def test_cortex_registry_supplies_servers_when_client_sends_none(tmp_path):
         "allowed_tools": ["inspect"], "command": "/home/user/.local/bin/codebase-memory-mcp",
         "args": [],
         "env": [{"name": "MEMORY_TOKEN", "value": "in-memory-only"}],
-        "read_paths": [], "read_only_tools": [], "network": False,
+        "read_paths": [], "write_paths": [], "read_only_tools": [], "network": False,
     }]
 
 

@@ -13,3 +13,6 @@ docs/implementation
 # Root-level artifacts produced by Desktop parity smoke qualification.
 /desktop-parity-prompt.txt
 /desktop-smoke.md
+
+.playwright-cli/
+.playwright-mcp/

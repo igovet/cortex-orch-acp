@@ -1,15 +1,14 @@
-import { presentToolSemantics } from "./shared/tool-presentation.ts";
-import { workerEventSchema } from "./shared/worker-history.js";
 import { isHiddenOperation } from "./shared/timeline-visibility.ts";
 import { useAgent, type PluginClientContext, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { Animated, Pressable, Text, View } from "react-native";
 import { z } from "zod";
-import { WorkerPanel, TranscriptEvent } from "./client/worker-panel.js";
+import { WorkerPanel } from "./client/worker-panel.js";
 import { selectWorker } from "./client/worker-selection.js";
 import { WorkerPopover } from "./client/worker-popover.js";
 import { isWorkerTimelineRunning } from "./client/worker-timeline-status.js";
+import { workerCardMetadata } from "./client/worker-display.ts";
 
 const workerTimelineSchema = z.object({
   callId: z.string(),
@@ -23,25 +22,6 @@ const workerTimelineSchema = z.object({
 });
 
 type WorkerTimelineData = z.output<typeof workerTimelineSchema>;
-
-/**
- * Worker cards use the ACP tool title as their portable metadata channel.
- * Runtime titles are currently shaped as:
- * `Worker: profile · provider · model · effort — assignment title`.
- * Keep parsing tolerant for older cards that omitted route metadata.
- */
-function workerCardMetadata(title: string, status: WorkerTimelineData["status"]) {
-  const body = title.trim().replace(/^Worker:\s*/i, "");
-  const [route, ...nameParts] = body.split(/\s+—\s+/, 2);
-  const routeParts = route.split(/\s+·\s+/).map((part) => part.trim()).filter(Boolean);
-  const workerName = (nameParts.join(" — ").trim() || routeParts[0] || "assignment");
-  const profile = routeParts[0] || "worker";
-  const statusLabel = status === "running" ? "working" : status === "failed" ? "failed" : status === "canceled" ? "cancelled" : status;
-  return {
-    workerName,
-    subtitle: [profile, ...routeParts.slice(1), statusLabel].join(" · "),
-  };
-}
 
 function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }: PluginTimelineItemProps<z.output<typeof workerTimelineSchema>> & { workspaceId: string | null; onOpen: () => void }) {
   const metadata = workerCardMetadata(item.data.title, item.data.status);
@@ -69,31 +49,29 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
     };
   }, [isWorking, opacity]);
 
+  // A worker is its own block in the coordinator's timeline, never a
+  // plain row between tool calls: bordered card, labelled, opens its panel.
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`Open worker ${metadata.workerName}`}
       onPress={() => workspaceId && (selectWorker(agentId, item.data.assignmentRef), onOpen())}
-      style={{ paddingVertical: layout.compact ? 6 : 8, paddingHorizontal: 0 }}
+      style={{ marginVertical: layout.compact ? 6 : 8, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8,
+        backgroundColor: theme.colors.surface1, paddingHorizontal: 12, paddingVertical: 10, gap: 6 }}
     >
-      <Animated.View style={{ opacity }}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
-          <View style={{ width: 14, flexShrink: 0 }}><Icon name="Users" size={14} color={theme.colors.foregroundMuted} /></View>
-          <Text numberOfLines={2} ellipsizeMode="tail" style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontWeight: "600" }}>Worker: {metadata.workerName}</Text>
+      <Animated.View style={{ opacity, gap: 6 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          <Icon name="Bot" size={12} color={theme.colors.foregroundMuted} />
+          <Text style={{ flex: 1, color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600", letterSpacing: 0.6, textTransform: "uppercase" }}>Worker</Text>
+          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>Open ›</Text>
         </View>
-        <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.colors.foregroundMuted, fontSize: 12, marginLeft: 21 }}>{metadata.subtitle}</Text>
+        <Text numberOfLines={2} ellipsizeMode="tail" style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>{metadata.workerName}</Text>
+        <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{metadata.subtitle}</Text>
       </Animated.View>
     </Pressable>
   );
 }
 
-
-const toolRowSchema = z.object({ event: workerEventSchema });
-function CortexToolRow({ theme, item }: PluginTimelineItemProps<z.output<typeof toolRowSchema>>) {
-  const [expanded, setExpanded] = useState(false);
-  return <TranscriptEvent event={item.data.event} updates={[item.data.event]} expanded={expanded}
-    onToggle={() => setExpanded(!expanded)} theme={theme} />;
-}
 
 export default function contribute(client: PluginClientContext) {
   client.addTimelineTransformer({
@@ -105,23 +83,13 @@ export default function contribute(client: PluginClientContext) {
     query: { itemType: "tool_call" },
     transform({ item }) {
       if (isHiddenOperation(item.name)) return { items: [] };
-      if (!item.callId.startsWith("worker:")) {
-        const original = typeof item.metadata?.cortexOriginalName === "string" ? item.metadata.cortexOriginalName : item.name;
-        const detail = item.detail;
-        const informational = !presentToolSemantics({ name: original, toolKind: detail.type,
-          rawInput: item.metadata?.cortexRawInput ?? (detail.type === "unknown" ? detail.input : detail) }).expandable;
-        if (!informational && typeof item.metadata?.cortexOriginalName !== "string" && !/^mcp(?:__|\.)cortex(?:__|\.)/.test(original)) return undefined;
-        const event = {
-          id: 0, type: "tool_call", text: "", createdAt: "", activity_ref: `tool:${item.callId}`,
-          title: original, status: item.status === "running" ? "in_progress" : item.status,
-          tool_kind: detail.type === "shell" ? "execute" : detail.type,
-          raw_input: item.metadata?.cortexRawInput ?? (detail.type === "unknown" ? detail.input : detail),
-          raw_output: informational ? undefined : item.metadata?.cortexRawOutput ?? (detail.type === "unknown" ? detail.output : detail),
-          error: item.status === "failed" ? item.error : null,
-        };
-        return { items: [{ type: "plugin", id: `cortex-tool:${item.callId}`, kind: "cortex-tool", version: 1,
-          data: JSON.parse(JSON.stringify({ event })) }] };
-      }
+      // Coordinator calls stay native tool_call items. Paseo's overview
+      // mode groups a run of native calls into one expandable row before any
+      // transformer runs and hands the transformer only the run's latest
+      // call; a plugin row here would replace the whole run with that call.
+      // The server projection already gives them readable names and native
+      // read/edit/shell detail.
+      if (!item.callId.startsWith("worker:")) return undefined;
       return {
         items: [{
           type: "plugin",
@@ -138,7 +106,6 @@ export default function contribute(client: PluginClientContext) {
       };
     },
   });
-  client.addTimelineRenderer({ kind: "cortex-tool", version: 1, schema: toolRowSchema, Component: CortexToolRow });
   client.addTimelineRenderer({
     kind: "worker-row",
     version: 1,

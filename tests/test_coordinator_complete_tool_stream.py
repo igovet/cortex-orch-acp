@@ -1,15 +1,11 @@
 """Every observed ACP action remains visible, including partial updates."""
 import threading
 import pytest
-from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime, _worker_action_tool_call_id
+from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
 
 
 def emitter(cards, **kwargs):
     return OrchestratingRuntime.__new__(OrchestratingRuntime)._engine_tool_call_emitter(cards.append, **kwargs)
-
-
-def test_worker_identity_includes_exact_attempt():
-    assert _worker_action_tool_call_id('assignment','first','call')!=_worker_action_tool_call_id('assignment','retry','call')
 
 
 @pytest.mark.parametrize('title',['Terminal','Read','Write','Wait','update_plan','mcp__cortex__read_report',

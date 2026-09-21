@@ -246,7 +246,11 @@ def test_composed_production_chain(tmp_path, monkeypatch,engine):
         assert all(node['result']['report_digest'] for node in context['nodes'])
         updates=[m['params']['update'] for m in harness.stdout.lines if m.get('method')=='session/update']
         titles=[u.get('title','') for u in updates]
-        for operation in ['plan_submit','draft_write','write_report','result_submit','synthesis_submit']:
+        for operation in ['plan_submit','synthesis_submit']:
             assert any(operation in title for title in titles),(operation,titles)
+        # What a worker does stays in the worker: never a coordinator card.
+        for operation in ['draft_write','write_report','result_submit']:
+            assert not any(operation in title for title in titles),(operation,titles)
+        assert not any(str(u.get('toolCallId','')).startswith('worker-action:') for u in updates)
         assert not any(m.get('method')=='session/request_permission' for m in harness.stdout.lines)
     finally:harness.stop()

@@ -12,8 +12,12 @@ bridge::
         "command": "/absolute/path/to/server", "args": [],
         "env": {"TOKEN": "secret"}, "enabled": true,
         "allowed_tools": ["inspect"], "read_only_tools": ["inspect"],
-        "read_paths": ["/absolute/path/to/server"], "network": false
+        "read_paths": ["/absolute/path/to/server"],
+        "write_paths": ["/absolute/path/to/its/cache"], "network": false
     }}}
+
+External servers run with the owner's real ``HOME``; ``write_paths`` is the
+only writable state they get beyond the task scope (e.g. an index cache).
 
 Only the user-global registry (``$XDG_CONFIG_HOME/cortex/mcp-servers.json``)
 is trusted. A project-local registry is deliberately unsupported because the
@@ -124,12 +128,15 @@ def _normalize_entries(raw: object, path: Path) -> list[dict[str, object]]:
         allowed_tools=spec.get('allowed_tools')
         if not isinstance(allowed_tools,list) or not allowed_tools or any(not isinstance(tool,str) or not tool for tool in allowed_tools):
             raise _error('external_mcp_explicit_tool_grants_required',f'{path}: {name}.allowed_tools must name the exact permitted tools.')
-        read_paths=spec.get('read_paths',[])
-        if not isinstance(read_paths,list) or any(not isinstance(value,str) or not Path(value).is_absolute() for value in read_paths):
-            raise _error('invalid_mcp_registry',f'{path}: {name}.read_paths must contain absolute paths.')
+        grants={}
+        for key in ('read_paths','write_paths'):
+            grants[key]=spec.get(key,[])
+            if not isinstance(grants[key],list) or any(not isinstance(value,str) or not Path(value).is_absolute() for value in grants[key]):
+                raise _error('invalid_mcp_registry',f'{path}: {name}.{key} must contain absolute paths.')
         if type(spec.get('network',False)) is not bool:
             raise _error('invalid_mcp_registry',f'{path}: {name}.network must be boolean.')
-        entry.update(allowed_tools=list(allowed_tools),read_paths=list(read_paths),network=spec.get('network',False))
+        entry.update(allowed_tools=list(allowed_tools),read_paths=list(grants['read_paths']),
+                     write_paths=list(grants['write_paths']),network=spec.get('network',False))
         readonly=spec.get('read_only_tools',[])
         if not isinstance(readonly,list) or any(tool not in allowed_tools for tool in readonly):
             raise _error('invalid_mcp_registry',f'{path}: {name}.read_only_tools must be a subset of allowed_tools.')

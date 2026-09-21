@@ -160,11 +160,16 @@ function visibleTimeline(event: ProviderEvent): boolean {
     || event.item.type === "tool_call" && isHiddenOperation(event.item.name)));
 }
 
-function presentTimeline(event: ProviderEvent): ProviderEvent {
+export function presentTimeline(event: ProviderEvent): ProviderEvent {
   const projected = nativeToolDetail(restoreReplayUserMessage(repairFailedTimelineError(event)));
-  if (projected.type !== "timeline.item" || projected.item.type !== "tool_call"
-      || projected.item.callId.startsWith("worker:")) return projected;
+  if (projected.type !== "timeline.item" || projected.item.type !== "tool_call") return projected;
   const item = projected.item;
+  // Paseo's overview mode never groups a `plan` detail. A worker card must
+  // stay its own row: grouped, it would become the run's visible latest call
+  // and the client's worker-row transform would hide every call before it.
+  if (item.callId.startsWith("worker:")) {
+    return { ...projected, item: { ...item, detail: { type: "plan", text: item.name } } };
+  }
   const rawInput = item.metadata?.cortexRawInput ?? (item.detail.type === "unknown" ? item.detail.input : item.detail);
   const semantics = presentToolSemantics({ name: item.name, rawInput });
   return { ...projected, item: { ...item, name: semantics.label,

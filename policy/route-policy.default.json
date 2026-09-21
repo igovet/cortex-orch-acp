@@ -6,7 +6,7 @@
     "'default' applies to any role not named in 'roles'. \"*\" means any model / any effort.",
     "'default_effort' is used only when nothing else already selected an effort for that route.",
     "Effort names are the engine's own and are discovered from it, not fixed here: a value a model",
-    "does not support is refused by that engine. The coordinator may select every model-supported effort.",
+    "does not support is refused by that engine. Observed values today: low, medium, high, xhigh, max.",
     "This file can only NARROW what the permission ceiling already allows. It can never widen it,",
     "so it is a way to spend less, never a way around a limit.",
     "Roles are grouped by what the work costs to get wrong: design/security/performance/debugging get",
@@ -14,10 +14,6 @@
     "exploration/planning/generic work uses the cheapest. Change any line you disagree with."
   ],
   "roles": {
-    "coordinator": [
-      {"engine": "codex-acp", "model": "*", "efforts": ["*"], "default_effort": "medium"},
-      {"engine": "claude-agent-acp", "model": "*", "efforts": ["*"], "default_effort": "medium"}
-    ],
     "worker-accessibility-auditor": [
       {
         "engine": "codex-acp",
@@ -487,6 +483,20 @@
         "engine": "claude-agent-acp",
         "model": "sonnet",
         "efforts": ["medium", "high", "xhigh"],
+        "default_effort": "medium"
+      }
+    ],
+    "coordinator": [
+      {
+        "engine": "codex-acp",
+        "model": "*",
+        "efforts": ["*"],
+        "default_effort": "medium"
+      },
+      {
+        "engine": "claude-agent-acp",
+        "model": "*",
+        "efforts": ["*"],
         "default_effort": "medium"
       }
     ]

@@ -39,8 +39,8 @@ def proxy(tmp_path):
     script=tmp_path/'server.py';script.write_text(SERVER)
     config=dict(name='fixture',command='/usr/bin/python3',args=['-B',str(script)],allowed_tools=['inspect'],read_only_tools=['inspect'],read_paths=[str(script)])
     path=Path(__file__).resolve().parents[1]/'src/cortex_runtime/engine/external_proxy.py'
-    def start(overrides=None):
-        env=dict(PATH='/usr/bin:/bin',PYTHONDONTWRITEBYTECODE='1',
+    def start(overrides=None,home=None):
+        env=dict(PATH='/usr/bin:/bin',PYTHONDONTWRITEBYTECODE='1',**({'HOME':str(home)} if home else {}),
             CORTEX_CHANNEL_PROJECT_ROOT=str(root),CORTEX_CHANNEL_ID=task.channel_id,CORTEX_CHANNEL_SECRET=task.secret,
             CORTEX_EXTERNAL_SERVER=json.dumps(dict(config,**(overrides or {}))))
         return subprocess.Popen([sys.executable,'-B',str(path)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,bufsize=0)
@@ -80,15 +80,38 @@ def test_external_gateway_grants_filter_containment_replay_and_revocation(proxy)
     finally: close(proc)
 
 
+@pytest.mark.parametrize('key',['read_paths','write_paths'])
 @pytest.mark.parametrize('grant',['root','parent','private'])
-def test_external_read_grant_cannot_overlay_private_masks(proxy,grant):
+def test_external_path_grant_cannot_overlay_private_masks(proxy,grant,key):
     store,task,machine,root,start=proxy
     paths={'root':root,'parent':root.parent,'private':root/'.cortex'}
-    proc=start(dict(read_paths=[str(paths[grant])]))
+    proc=start({key:[str(paths[grant])]}) if key=='write_paths' else start(dict(read_paths=[str(paths[grant])]))
     try:
         proc.wait(timeout=5)
         assert proc.returncode==65
         assert b'refused startup' in proc.stderr.read()
+    finally: close(proc)
+
+
+def test_server_runs_with_owner_home_and_writes_granted_state(proxy, tmp_path):
+    """An index keyed by project path must land in the owner's real cache."""
+    store,task,machine,root,start=proxy
+    home=tmp_path/'home';cache=home/'.cache'/'index';cache.mkdir(parents=True)
+    script=tmp_path/'home_server.py'
+    script.write_text('''import json,os,sys
+from pathlib import Path
+for line in sys.stdin:
+ q=json.loads(line)
+ if 'id' not in q: continue
+ Path(os.environ['HOME'],'.cache','index','db').write_text('indexed')
+ result={'content':[{'type':'text','text':json.dumps({'home':os.environ['HOME']})}]}
+ print(json.dumps({'jsonrpc':'2.0','id':q['id'],'result':result}),flush=True)
+''')
+    proc=start(dict(args=['-B',str(script)],read_paths=[str(script)],write_paths=[str(cache)]),home=home)
+    try:
+        response=call(proc,1,'tools/call',dict(name='inspect',arguments={}))
+        assert json.loads(response['result']['content'][0]['text'])==dict(home=str(home))
+        assert (cache/'db').read_text()=='indexed'
     finally: close(proc)
 
 
@@ -119,6 +142,24 @@ def test_nonreading_peer_write_has_a_real_deadline():
                 write_frame(stream,b'x'*1000000,start+.1)
             assert time.monotonic()-start < 1
         finally: os.close(reader)
+
+
+def test_pipes_above_fd_setsize_still_carry_frames():
+    """The sandbox pins one descriptor per granted path, so a worker with a
+    broad scope hands the proxy child pipes numbered above 1024."""
+    import resource,time
+    from cortex_runtime.engine.external_proxy import Frames, write_frame
+    soft,hard=resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard!=resource.RLIM_INFINITY and hard<1100: pytest.skip('RLIMIT_NOFILE too low')
+    resource.setrlimit(resource.RLIMIT_NOFILE,(max(soft,1100),hard))
+    reader,writer=os.pipe()
+    high_reader,high_writer=os.dup2(reader,1050),os.dup2(writer,1051)
+    os.close(reader);os.close(writer)
+    try:
+        with os.fdopen(high_reader,'rb',buffering=0) as rs, os.fdopen(high_writer,'wb',buffering=0) as ws:
+            write_frame(ws,b'{"id":1}\n',time.monotonic()+1)
+            assert Frames(rs).read(time.monotonic()+1)==b'{"id":1}\n'
+    finally: resource.setrlimit(resource.RLIMIT_NOFILE,(soft,hard))
 
 
 def test_network_grant_includes_system_resolution_files_and_loopback(proxy, tmp_path):

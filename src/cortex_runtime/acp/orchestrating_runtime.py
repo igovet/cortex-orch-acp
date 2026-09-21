@@ -643,16 +643,6 @@ def _worker_tool_call_id(assignment_ref: str) -> str:
     return f"worker:{assignment_ref}"
 
 
-def _worker_action_tool_call_id(assignment_ref: str, attempt_ref: str, tool_ref: str) -> str:
-    """Stable per-attempt identity for one worker project/MCP action.
-
-    Engine providers commonly restart their wire call counter after a route
-    fallback. Include the durable attempt identity so the same provider ref
-    from two attempts cannot overwrite or deduplicate the other card.
-    """
-    return f"worker-action:{assignment_ref}:{attempt_ref}:{tool_ref}"
-
-
 @dataclass(frozen=True)
 class PromptOutcome:
     """One engine session turn's outcome, as observed by this runtime.
@@ -3920,12 +3910,10 @@ class OrchestratingRuntime:
                     with self._lock:
                         feed = self._worker_card_emitter(task_id, _ref)
                     _flush_worker_message_block(feed=feed)
-                    display = self._task_display_emitters.get(task_id)
-                    if display is not None:
-                        display({**update, "_meta": {**update.get("_meta", {}),
-                                                    "cortex.assignment": _ref}})
                     kind = str(update.get("sessionUpdate") or update.get("type") or "display")
-                    text_value = _worker_display_text(update) or json.dumps(update, ensure_ascii=False)
+                    text_value = _worker_display_text(update)
+                    if not text_value:
+                        return
                     self._record_worker_activity(
                         task_id, _ref, result.attempt_id, f"display:{new_id('display_')}",
                         text_value, kind=kind, content_value=update,
@@ -4052,16 +4040,10 @@ class OrchestratingRuntime:
                     if metadata_only_read(title, kind, raw_input):
                         content = None
                         raw_output = {'status': 'failed'} if _acp_tool_call_status(status) == 'failed' else None
+                    # The call is recorded for the worker panel only. It is
+                    # never a sibling card in the coordinator's timeline.
                     if feed is None or not ref:
                         return
-                    feed(dict(
-                        tool_call_id=_worker_action_tool_call_id(assignment_ref, str(result.attempt_id), str(ref)),
-                        new=str(ref) not in worker_tool_cards,
-                        title=str(title or "Worker tool call"), kind=_acp_tool_call_kind(kind),
-                        status=_acp_tool_call_status(status), locations=_client_safe_raw(locations or []),
-                        content=_client_safe_content(content or []), raw_input=_client_safe_raw(raw_input),
-                        raw_output=_client_safe_raw(raw_output),
-                    ))
                     tool_ref = str(ref)
                     first = tool_ref not in worker_tool_cards
                     if first:

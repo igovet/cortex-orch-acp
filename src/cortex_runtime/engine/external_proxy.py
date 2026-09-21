@@ -24,6 +24,14 @@ from cortex_runtime.orchestration.state import event, encoded
 from cortex_runtime.contracts import StoreError
 
 
+def _ready(fd, event, timeout):
+    """poll, not select: the sandbox pins one descriptor per granted path, so
+    the child's pipes routinely sit above select()'s FD_SETSIZE of 1024."""
+    poller = select.poll()
+    poller.register(fd, event)
+    return bool(poller.poll(max(0, timeout)*1000))
+
+
 class Frames:
     """Bound each full JSON line, including a peer that writes only one byte."""
     def __init__(self, stream):
@@ -35,7 +43,7 @@ class Frames:
             raise StoreError('external_mcp_timeout')
         while b'\n' not in self.buffer:
             remaining = deadline-time.monotonic()
-            if remaining <= 0 or not select.select([self.stream], [], [], remaining)[0]:
+            if remaining <= 0 or not _ready(self.stream.fileno(), select.POLLIN, remaining):
                 raise StoreError('external_mcp_timeout')
             chunk = os.read(self.stream.fileno(), 65536)
             if not chunk:
@@ -54,7 +62,7 @@ def write_frame(stream, data, deadline):
     view = memoryview(data)
     while view:
         remaining = deadline-time.monotonic()
-        if remaining <= 0 or not select.select([], [fd], [], remaining)[1]:
+        if remaining <= 0 or not _ready(fd, select.POLLOUT, remaining):
             raise StoreError('external_mcp_write_timeout')
         try:
             count = os.write(fd, view)
@@ -82,14 +90,21 @@ def main():
             # Administrator-owned registry values are the only extra grants.
             index=command.index('--chdir')
             grants=[]
-            for value in config.get('read_paths',[]):
-                path=Path(value)
-                project=Path(root).resolve()
-                if (not path.is_absolute() or not path.exists() or PRIVATE.intersection(path.parts)
-                    or any(parent.is_symlink() for parent in (path,*path.parents))
-                    or path==project or path in project.parents or project in path.parents):
-                    raise StoreError('external_mcp_read_grant_invalid')
-                grants+=['--ro-bind',str(path),str(path)]
+            project=Path(root).resolve()
+            for key,bind,code in (('read_paths','--ro-bind','external_mcp_read_grant_invalid'),
+                                  ('write_paths','--bind','external_mcp_write_grant_invalid')):
+                for value in config.get(key,[]):
+                    path=Path(value)
+                    if (not path.is_absolute() or not path.exists() or PRIVATE.intersection(path.parts)
+                        or any(parent.is_symlink() for parent in (path,*path.parents))
+                        or path==project or path in project.parents or project in path.parents):
+                        raise StoreError(code)
+                    grants+=[bind,str(path),str(path)]
+            # The owner's real HOME, never the sandbox scratch: a server's
+            # per-user state (an index keyed by project path) must be the one
+            # the owner already has. Only granted paths under it are mounted.
+            if os.environ.get('HOME','').startswith('/'):
+                grants+=['--setenv','HOME',os.environ['HOME']]
             for item in config.get('env',[]):
                 grants+=['--setenv',item['name'],item['value']]
             command[index:index]=grants

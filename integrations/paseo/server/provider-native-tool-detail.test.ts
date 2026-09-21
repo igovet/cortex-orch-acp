@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { nativeToolDetail } from "./provider.ts";
+import { nativeToolDetail, presentTimeline } from "./provider.ts";
 
 test("maps Claude Read raw input/output to Paseo read detail", () => {
   const event = nativeToolDetail({
@@ -112,4 +112,17 @@ test("keeps non-file Cortex MCP cards on the generic detail path", () => {
   if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
   assert.equal(event.item.detail.type, "unknown");
   assert.equal(event.item.metadata, undefined);
+});
+
+test("worker cards use the one detail Paseo overview never groups", () => {
+  const event = presentTimeline({
+    type: "timeline.item",
+    sessionId: "s",
+    item: {
+      type: "tool_call", id: "worker:a1", callId: "worker:a1", name: "Worker: debugger — audit",
+      status: "running", error: null, detail: { type: "unknown", input: null, output: null },
+    },
+  });
+  if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
+  assert.deepEqual(event.item.detail, { type: "plan", text: "Worker: debugger — audit" });
 });
