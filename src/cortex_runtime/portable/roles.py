@@ -337,35 +337,40 @@ def load_role(role_hint: object) -> RoleInstructionSet:
     )
 
 
-# Shared skills that are not situational: they describe how to behave at
-# all times, so waiting for a model to decide to load them means they do
-# not apply until it does. Delivered with the role itself.
-#
-# The rest of SHARED_ROLE_IDS is situational (documentation-sync when
-# documentation is actually affected, knowledge-harvest when a harvest is
-# explicitly asked for, context-compaction on a compaction, cortex-control
-# for retention) and is read on demand instead -- knowledge-harvest alone
-# is 18KB, which no turn should pay for unconditionally.
-ALWAYS_ON_SKILLS: dict[str, tuple[str, ...]] = {
-    "coordinator": ("tool-discipline", "coordinator-communication", "content-safety"),
-    "worker": ("tool-discipline", "content-safety"),
+#: Every skill and reference a role can read with `read_skill`, named with
+#: the delivered role text rather than pasted into it: knowledge-harvest
+#: alone is 18KB, which no turn should pay for unconditionally. A readable
+#: skill a model is never told about is as good as missing, so each one
+#: that fits the role is named here. `cortex-control` is the coordinator's
+#: retention command; workers get its report examples through `index`.
+NAMED_SKILLS: dict[str, tuple[str, ...]] = {
+    "coordinator": ("tool-discipline", "coordinator-communication", "content-safety",
+                    "context-compaction", "documentation-sync", "knowledge-harvest",
+                    "cortex-control"),
+    "worker": ("tool-discipline", "content-safety", "report-publication", "code-and-evidence",
+               "interactive-resources", "index", "context-compaction", "documentation-sync",
+               "knowledge-harvest"),
     "shared": (),
 }
 
 
-#: Why a worker would reach for a shared skill. Named with its occasion,
-#: because "load these skills" is a ritual and a worker that performs it
-#: spends its context on text that did not apply to its assignment.
+#: Why a model would reach for each one. Named with its occasion, because
+#: "load these skills" is a ritual and a model that performs it spends its
+#: context on text that did not apply to its assignment.
 _SKILL_TRIGGERS = {
-    "tool-discipline": "a tool refused you, an argument is a guess, a result came back "
-                       "truncated, or you are about to edit the draft the runtime gave you",
-    "content-safety": "you are about to put someone's private data, a secret, a raw host "
-                      "log or another person's content into an artifact",
-    "context-compaction": "your own context is running out and you must keep working",
-    "coordinator-communication": "you are writing to the coordinator and the wording matters",
+    "tool-discipline": "a tool refused you, an argument is a guess, a result was truncated, "
+                       "or you will edit the runtime's draft",
+    "content-safety": "private data, a secret, a raw host log or someone else's content "
+                      "may enter an artifact",
+    "context-compaction": "your context is running out mid-work",
+    "coordinator-communication": "you write to the user and the wording matters",
     "documentation-sync": "your change makes existing documentation wrong",
     "knowledge-harvest": "you were asked to collect what a codebase already knows",
-    "cortex-control": "you need this runtime's own control surface",
+    "cortex-control": "the user asked for the `clear N days` retention command",
+    "report-publication": "you draft and publish your report and result",
+    "code-and-evidence": "you locate code (code index first) or need saved report detail",
+    "interactive-resources": "you need a browser, device, port or server session",
+    "index": "you want a full-report example",
 }
 
 
@@ -386,7 +391,7 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
     worker that cannot start at all is worse still, and the omission is
     visible in what was delivered.
     """
-    loadable = sorted(ALWAYS_ON_SKILLS.get(role_set.kind, ()))
+    loadable = NAMED_SKILLS.get(role_set.kind, ())
     parts = [role_set.body_portable]
     if loadable:
         # Named, not pasted. Handing every shared skill over with the role
@@ -395,11 +400,10 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
         # ``read_skill`` is the host this text used to assume was missing:
         # the skills are one call away, by the names given here.
         parts.append(
-            "## Shared skills, and when to read one\n\n"
-            "The `read_skill` tool on the `cortex` MCP server returns one of this runtime's "
-            "shared skills. Use that Cortex tool rather than an engine-native skill loader. Read one "
-            "when its own case arises, never as a ritual -- reading text you do not need "
-            "costs you the room to do the work:\n"
+            "## Skills, and when to read one\n\n"
+            "The `read_skill` tool on the `cortex` MCP server returns one by the exact id "
+            "below; use it, not an engine-native skill loader. Read one only when its case "
+            "arises -- text you do not need costs room for the work:\n"
             + "\n".join(f"- `{skill_id}` -- {_SKILL_TRIGGERS[skill_id]}"
                         for skill_id in loadable if skill_id in _SKILL_TRIGGERS)
         )

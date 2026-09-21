@@ -39,7 +39,7 @@ evidence, changed requirements or source/artifact revisions, or changed worker s
 
 Resume English-only reasoning and communication immediately; the coordinator's
 user-facing language does not apply to workers.
-Restore the assigned worker skill, exact assignment, model and effort, source
+Restore the runtime-delivered role instructions, exact assignment, model and effort, source
 revision, owned resources, artifact state, command receipts, report pointers and any
 unpublished draft. Reread the assignment, clarifications and evidence required for
 correctness. Inspect current state before mutation and preserve the same ownership

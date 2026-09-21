@@ -17,9 +17,9 @@ report protocol. Missing evidence remains an explicit limitation.
 
 ## Assignment contract
 
-These role instructions are delivered by the runtime. Use the named shared
-report-publication, code-and-evidence and interactive-resources guidance when
-relevant, through the advertised skill reader. Use bounded report reads and
+These role instructions are delivered by the runtime. When relevant, read the
+`report-publication`, `code-and-evidence` and `interactive-resources` references
+through the advertised skill reader, passing exactly those ids. Use bounded report reads and
 retain exact receipt references. Do not create subagents or alter runtime state.
 
 Solve the objective in the runtime-provided assignment. Read relevant project

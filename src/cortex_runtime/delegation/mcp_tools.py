@@ -187,7 +187,8 @@ def _shared_read_skill(store, channel: ChannelContext, args: Mapping[str, Any]) 
 
     requested = args.get("skill")
     skill_id = requested if isinstance(requested, str) else ""
-    skill_id = skill_id.strip().removeprefix("cortex:").removesuffix(".md")
+    # Skills link their references as `references/<id>.md`; accept the link too.
+    skill_id = skill_id.strip().removeprefix("cortex:").removeprefix("references/").removesuffix(".md")
     role_kind = "coordinator" if channel is not None and channel.role == "coordinator" else "worker"
     references = (COORDINATOR_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS if role_kind == "coordinator"
                   else WORKER_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS)

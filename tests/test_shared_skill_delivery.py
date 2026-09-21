@@ -23,10 +23,16 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from cortex_runtime.contracts import StoreError  # noqa: E402
 from cortex_runtime.delegation.mcp_tools import _shared_read_skill  # noqa: E402
 from cortex_runtime.portable.roles import (  # noqa: E402
-    ALWAYS_ON_SKILLS, SHARED_ROLE_IDS, composed_instructions, load_role,
+    NAMED_SKILLS, SHARED_ROLE_IDS, composed_instructions, load_role,
     read_reference,
 )
 from cortex_runtime.portable.errors import PortableError  # noqa: E402
+
+
+def _read(skill_id, kind):
+    from types import SimpleNamespace
+    channel = SimpleNamespace(role="coordinator") if kind == "coordinator" else None
+    return _shared_read_skill(None, channel, {"skill": skill_id})["body"]
 
 
 def test_a_coordinator_is_told_which_skills_exist_and_when_to_read_one():
@@ -40,10 +46,10 @@ def test_a_coordinator_is_told_which_skills_exist_and_when_to_read_one():
     role = load_role("orchestrator")
     composed = composed_instructions(role)
     assert composed.startswith(role.body_portable.strip()[:80]), "the role's own body comes first"
-    for skill_id in ALWAYS_ON_SKILLS["coordinator"]:
+    for skill_id in NAMED_SKILLS["coordinator"]:
         assert f"`{skill_id}`" in composed, f"{skill_id} was never named"
         # Named, and never pasted: the body stays one read away.
-        assert load_role(skill_id).body_portable.strip()[:200] not in composed, skill_id
+        assert _read(skill_id, "coordinator").strip()[:200] not in composed, skill_id
     assert 'read_skill' in composed
     assert "`read_skill` tool on the `cortex` MCP server" in composed
     assert "engine-native skill loader" in composed
@@ -53,15 +59,15 @@ def test_a_coordinator_is_told_which_skills_exist_and_when_to_read_one():
 def test_a_worker_is_told_which_skills_exist_and_when_to_read_one():
     role = load_role("worker-backend-dev")
     composed = composed_instructions(role)
-    for skill_id in ALWAYS_ON_SKILLS["worker"]:
+    for skill_id in NAMED_SKILLS["worker"]:
         assert f"`{skill_id}`" in composed, skill_id
-        assert load_role(skill_id).body_portable.strip()[:200] not in composed, skill_id
+        assert _read(skill_id, "worker").strip()[:200] not in composed, skill_id
     # Each one comes with the case that calls for it, so a worker with no
     # such case spends nothing on it.
     assert "a tool refused you" in composed
     # Not the coordinator's own communication rules: a worker never talks
     # to the user.
-    assert "coordinator-communication" not in ALWAYS_ON_SKILLS["worker"]
+    assert "coordinator-communication" not in NAMED_SKILLS["worker"]
     assert "`read_skill` tool on the `cortex` MCP server" in composed
 
 
@@ -96,11 +102,13 @@ def test_only_shared_skills_are_readable():
             _shared_read_skill(None, None, {"skill": denied})
 
 
-def test_every_always_on_skill_is_a_real_shared_skill():
-    for kind, skills in ALWAYS_ON_SKILLS.items():
+def test_every_named_skill_is_readable_by_its_role():
+    """A role is told these ids; each must resolve through the reader for it."""
+    for kind, skills in NAMED_SKILLS.items():
         for skill_id in skills:
-            assert skill_id in SHARED_ROLE_IDS, (kind, skill_id)
-            assert load_role(skill_id).body_portable.strip()
+            assert _read(skill_id, kind).strip(), (kind, skill_id)
+    # The coordinator's retention command is not a worker's to run.
+    assert "cortex-control" not in NAMED_SKILLS["worker"]
 
 
 def test_reference_inventory_is_bounded_and_role_scoped():
@@ -114,3 +122,31 @@ def test_reference_inventory_is_bounded_and_role_scoped():
     ):
         with pytest.raises(PortableError):
             read_reference(reference_id, role_kind=role_kind)
+
+
+def test_every_skill_name_the_instructions_write_resolves_through_the_reader():
+    """A live worker asked for `shared-report-publication` because its
+    protocol called the references "shared"; skills link references as
+    `references/<id>.md`. Every name a prompt writes must reach the reader."""
+    import re
+    from types import SimpleNamespace
+
+    coordinator = SimpleNamespace(role="coordinator")
+    links = {
+        "coordinator": [REPO_ROOT / "skills/orchestrator/SKILL.md", REPO_ROOT / "skills/cortex-control/SKILL.md",
+                        REPO_ROOT / "skills/cortex-control/references/index.md"],
+        "worker": [REPO_ROOT / "skills/cortex-control/references/index.md"],
+    }
+    for role, paths in links.items():
+        channel = coordinator if role == "coordinator" else None
+        for path in paths:
+            for target in re.findall(r"\]\((references/[a-z-]+\.md|[a-z-]+-example\.md)\)", path.read_text()):
+                if role == "worker" and not target.endswith("-example.md") and target != "references/index.md":
+                    continue
+                assert _shared_read_skill(None, channel, {"skill": target})["body"], (path, target)
+    for protocol in ("agent-sources/worker-protocol.md", "agent-sources/consultant-protocol.md"):
+        text = (REPO_ROOT / protocol).read_text()
+        assert "shared\nreport-publication" not in text and "shared report-publication" not in text
+        for skill_id in ("report-publication", "code-and-evidence", "interactive-resources"):
+            assert f"`{skill_id}`" in text
+            assert _shared_read_skill(None, None, {"skill": skill_id})["body"]
