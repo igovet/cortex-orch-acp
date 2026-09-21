@@ -38,6 +38,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -608,6 +609,59 @@ def test_saved_default_survives_a_refresh_that_changes_parameters_for_the_same_m
     assert migrated["defaults"]["route_model"] == _MODEL
 
 
+def test_stale_route_migration_does_not_overwrite_a_concurrent_explicit_default(tmp_path, monkeypatch):
+    """A migration must abandon its stale snapshot when another session
+    selects a new global default before the compare-and-write point."""
+    environ = _isolate(tmp_path, monkeypatch)
+    from cortex_runtime.configuration import store as configuration_store
+
+    configuration_store.write_user_defaults(
+        {
+            "route_id": "old-route",
+            "route_connection_id": "cn_old",
+            "route_model": "old-model",
+            "parameters": {"thought_level": "medium"},
+        },
+        configuration_store.read_user_defaults(environ)["ceiling"],
+        environ,
+    )
+    original_read = configuration_store.read_user_defaults
+    original_write = configuration_store.write_user_defaults
+    reads = 0
+
+    def read_with_explicit_selection(environ=None):
+        nonlocal reads
+        reads += 1
+        current = original_read(environ)
+        if reads == 2:
+            explicit = dict(
+                current["defaults"],
+                route_id="explicit-route",
+                route_connection_id="cn_explicit",
+                route_model="explicit-model",
+                parameters={"thought_level": "high"},
+            )
+            original_write(explicit, current["ceiling"], environ)
+            return original_read(environ)
+        return current
+
+    monkeypatch.setattr(configuration_store, "read_user_defaults", read_with_explicit_selection)
+    agent = object.__new__(Agent)
+    agent.environ = environ
+    entry = SimpleNamespace(
+        route=SimpleNamespace(id="migrated-route", model="old-model"),
+        connection_id="cn_old",
+    )
+
+    agent._persist_migrated_default(entry, {"thought_level": "none"})
+
+    saved = original_read(environ)["defaults"]
+    assert saved["route_id"] == "explicit-route"
+    assert saved["route_connection_id"] == "cn_explicit"
+    assert saved["route_model"] == "explicit-model"
+    assert saved["parameters"] == {"thought_level": "high"}
+
+
 def test_saved_default_fails_closed_naming_the_withdrawn_model(tmp_path, monkeypatch):
     """Requirement #2: a refresh that genuinely withdraws the saved model
     still fails closed -- but names the model, never the opaque
@@ -906,4 +960,3 @@ def test_an_unusable_route_never_falls_back_to_a_different_working_connection(tm
     for orch_runtime in list(runtime._runtimes.values()):
         for manager in list(orch_runtime._engine._managers.values()):
             manager.shutdown(grace=2.0)
-

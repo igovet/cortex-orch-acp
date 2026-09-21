@@ -95,6 +95,100 @@ def test_permission_request_with_binding_and_host_requester_relays_selection(tmp
         manager.shutdown(grace=2.0)
 
 
+def test_native_claude_inline_python_other_request_is_auto_approved_on_fake_wire(tmp_path):
+    """Exercise the exact Claude ACP ``kind=other`` Bash request shape."""
+    reply_log = tmp_path / "replies.jsonl"
+    command = """PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PY'
+def luminance(rgb):
+    return sum(rgb) / len(rgb)
+
+text = (255, 255, 255)
+background = (0, 0, 0)
+from math import pow
+print(round(pow((luminance(text) + 0.05) / (luminance(background) + 0.05), 1), 2))
+PY"""
+    scenario = default_scenario(
+        prompt_behavior="client_requests_sequence",
+        client_requests=[dict(
+            method="session/request_permission",
+            params=dict(
+                sessionId="sess-1",
+                toolCall=dict(
+                    toolCallId="tc-inline-contrast", kind="other", title="Bash",
+                    rawInput={"command": command},
+                ),
+                options=[dict(optionId="allow", kind="allow_once"),
+                         dict(optionId="deny", kind="reject_once")],
+            ),
+        )],
+        client_reply_log_path=str(reply_log),
+    )
+    host_calls = []
+    manager = _make_manager(
+        tmp_path, scenario,
+        host_permission_requester=lambda *args: host_calls.append(args),
+    )
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        manager.bind_resource(_binding_for(manager, session_id, tmp_path))
+        list(manager.prompt_turn(session_id, "run contrast check"))
+        replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
+        assert replies[0]["result"] == {
+            "outcome": {"outcome": "selected", "optionId": "allow"}
+        }
+        assert host_calls == []
+    finally:
+        manager.shutdown(grace=2.0)
+
+
+def test_coordinator_inline_ui_check_is_auto_approved_locally_on_fake_wire(tmp_path):
+    """A safe coordinator inline check is not a host permission.
+
+    The command is observable, project-bound verification even though it does
+    not invoke pytest/unittest.  It is still a bounded, non-destructive project
+    check, so the coordinator can run it without a misleading host prompt.
+    """
+    reply_log = tmp_path / "replies.jsonl"
+    command = (
+        "python3 -c 'from pathlib import Path; "
+        "assert \"focus-visible\" in Path(\"styles.css\").read_text()'"
+    )
+    scenario = default_scenario(
+        prompt_behavior="client_requests_sequence",
+        client_requests=[dict(
+            method="session/request_permission",
+            params=dict(
+                sessionId="sess-1",
+                toolCall=dict(
+                    toolCallId="tc-coordinator-inline-check", kind="other", title="Bash",
+                    rawInput={"command": command},
+                ),
+                options=[dict(optionId="allow", kind="allow_once"),
+                         dict(optionId="deny", kind="reject_once")],
+            ),
+        )],
+        client_reply_log_path=str(reply_log),
+    )
+    host_calls = []
+    manager = _make_manager(
+        tmp_path, scenario,
+        host_permission_requester=lambda *args: host_calls.append(args),
+    )
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        manager.bind_resource(_binding_for(manager, session_id, tmp_path, role="coordinator"))
+        list(manager.prompt_turn(session_id, "run the UI check"))
+        replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
+        assert replies[0]["result"] == {
+            "outcome": {"outcome": "selected", "optionId": "allow"}
+        }
+        assert host_calls == []
+    finally:
+        manager.shutdown(grace=2.0)
+
+
 def test_duplicate_engine_request_id_gets_a_protocol_error(tmp_path):
     reply_log = tmp_path / "replies.jsonl"
     release_event = threading.Event()

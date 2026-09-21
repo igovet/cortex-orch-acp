@@ -1,10 +1,13 @@
 """Build truthful ACP ``SessionConfigOption`` entries for one ACP session.
 
-Three independent axes exist (T035; previously ``model`` alone fused
-provider+engine+model into one opaque route select -- that fusion is
-undone here): ``provider`` (category ``provider``), ``model`` (category
-``model``, scoped to the chosen provider), and ``thought_level`` (category
-``thought_level``, scoped to the chosen model). All three are built from
+Zed receives three independent axes: ``provider`` (category ``provider``),
+``model`` (category ``model``, scoped to the chosen provider), and
+``thought_level`` (category ``thought_level``, scoped to the chosen model).
+    Paseo renders only the ``model`` category in its picker, so its model option
+    lists every selectable route with exact route IDs and unambiguous labels;
+    selecting one also changes the provider. Its provider axis is intentionally
+    omitted because the selected route already identifies the account. All
+    options are built from
 the *actual* connection registry + cached catalog snapshots
 (``catalog.store``, falling back to a static, honestly-labelled
 ``catalog.model_seed`` seed when a connection has never yet been observed
@@ -22,9 +25,10 @@ configuration history (``configuration.store`` / ``ConfigurationService``)
   raw adapter package id and never the operator-chosen connection
   nickname; falls back to the engine name alone when no account can be
   determined).
-- ``model``: values are the chosen provider's own ``ExecutionRoute.model``
-  ids; names are safe ``Engine · Connection name · Model`` labels,
-  re-disambiguated across the *combined* offered set. If there is nothing
+- ``model``: Zed values are the chosen provider's own
+  ``ExecutionRoute.model`` ids. Paseo values are exact route IDs across all
+  providers, with the model name first and a short provider name beneath it.
+  If there is nothing
   selectable, the option is omitted entirely -- never an empty select,
   never a fake value.
 - ``thought_level``: values are exactly the ``(name, value)`` pairs recorded
@@ -48,7 +52,6 @@ from typing import Iterable, Mapping, Sequence
 
 from ..catalog import discovery as catalog_discovery
 from ..catalog import store as catalog_store
-from ..catalog.evidence import Fact, ProvenanceSource
 from ..catalog.labels import build_model_label, build_provider_label, disambiguate_labels, engine_short_name
 from ..catalog.model import CatalogEntry
 from ..connections import account_identity as connection_account_identity
@@ -56,6 +59,67 @@ from ..connections import onboarding as connection_onboarding
 from ..connections import registry as connection_registry
 from ..connections.model import ConnectionRecord
 from ..portable.errors import PortableError
+
+
+def filter_entries_by_route_policy(
+    entries: Sequence[CatalogEntry], project_root: str | None = None,
+    environ: Mapping[str, str] | None = None, *, role: str = "coordinator",
+) -> tuple[CatalogEntry, ...]:
+    """Apply the project's route policy to the ACP selector surface.
+
+    The dispatch path remains the final authorization boundary.  Filtering
+    here keeps Zed and ``/cortex-model`` truthful, so a route that the policy
+    would reject is not presented as selectable in the first place.  A
+    malformed policy is deliberately left to the existing dispatch-side
+    diagnostic; it must not turn a UI refresh into an invented empty catalog.
+    """
+    if not entries:
+        return tuple()
+    from ..configuration import route_policy
+
+    policy, malformed = route_policy.load_route_policy(project_root, environ)
+    if policy is None or malformed is not None:
+        return tuple(entries)
+    allowed: list[CatalogEntry] = []
+    for entry in entries:
+        try:
+            policy.resolve_effort(role, entry.route.engine, entry.route.model, None)
+        except PortableError:
+            continue
+        allowed.append(entry)
+    return tuple(allowed)
+
+
+def allowed_efforts_for_entry(
+    entry: CatalogEntry, project_root: str | None = None,
+    environ: Mapping[str, str] | None = None, *, role: str = "coordinator",
+) -> frozenset[str] | None:
+    """Return policy-permitted effort values for one offered route.
+
+    ``None`` means no policy restriction.  A wildcard policy is intersected
+    with the engine-advertised values by the caller, while an explicit policy
+    narrows the advertised values to exactly its permitted set.
+    """
+    # Direct callers that build a standalone option set have no project
+    # scope, so they must retain the catalog's truthful engine-advertised
+    # values. Session callers always provide their concrete project root.
+    if project_root is None:
+        return None
+    from ..configuration import route_policy
+
+    policy, malformed = route_policy.load_route_policy(project_root, environ)
+    if policy is None or malformed is not None:
+        return None
+    entries = policy.roles.get(role)
+    if entries is None:
+        entries = policy.default
+    if entries is None:
+        return None
+    matches = [item for item in entries if item.matches(entry.route.engine, entry.route.model)]
+    if not matches:
+        return frozenset()
+    values = set().union(*(set(item.efforts) for item in matches))
+    return None if route_policy.WILDCARD in values else frozenset(values)
 
 # T035: three independent axes -- provider (which configured connection),
 # model (within that provider), and thought_level (reasoning effort) --
@@ -66,6 +130,10 @@ from ..portable.errors import PortableError
 PROVIDER_OPTION_ID = "provider"
 MODEL_OPTION_ID = "model"
 THOUGHT_LEVEL_OPTION_ID = "thought_level"
+_EFFORT_STRENGTH = {name: index for index, name in enumerate(
+    ("low", "medium", "high", "xhigh", "max", "ultra")
+)}
+_ENGINE_DEFAULT_VALUE = "default"
 # T020: a third, independent configId -- never tied to model/route
 # selectability (unlike model/thought_level, always offered once a caller
 # opts in via build_config_options(..., include_language=True), including
@@ -86,22 +154,6 @@ UNAVAILABLE_STATES = frozenset({"default_unavailable", "selection_unavailable"})
 # currentValue purposes (see module docstring); 'rejected'/'failed' never
 # count -- a rejected proposal must not silently become the shown value.
 _LIVE_SELECTION_STATES = frozenset({"selected", "pending_next_use", "active"})
-
-_CONFIRMED_FACTS = (Fact.CONFIGURATION_APPLIED, Fact.EXECUTION_VERIFIED)
-
-
-def _evidence_note(entry: CatalogEntry) -> str:
-    if any(entry.evidence.has(fact) for fact in _CONFIRMED_FACTS):
-        return "confirmed by an engine"
-    # T035: a statically-seeded model (catalog.model_seed, never an
-    # engine's own advertisement) is labelled "seeded", distinctly from
-    # "unverified" (a real discovery observation that just hasn't been
-    # executed yet) -- never reported as observed/confirmed.
-    obtained = entry.evidence.get(Fact.CATALOG_OBTAINED)
-    if obtained is not None and obtained.source == ProvenanceSource.SEED:
-        return "seeded — not yet confirmed by an engine"
-    return "unverified — not yet confirmed by an engine"
-
 
 def _state_suffix(state: str | None) -> str | None:
     if state in ("selected", "pending_next_use"):
@@ -299,21 +351,30 @@ def build_provider_option(
     return option
 
 
+def _model_description(
+    entry: CatalogEntry,
+    connections: Mapping[str, ConnectionRecord] | None,
+    environ: Mapping[str, str] | None,
+) -> str:
+    """Paseo's grey line identifies the provider, without repeating the model."""
+    return engine_short_name(entry.route.engine)
+
+
 def build_model_option(
     provider_entries: Sequence[CatalogEntry],
     current_model: str | None,
     current_state: str | None,
     current_revision: int | None,
+    *,
+    connections: Mapping[str, ConnectionRecord] | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> dict | None:
     """The ``model`` SessionConfigOption for the currently chosen provider --
     values are plain ``ExecutionRoute.model`` ids (T035; previously whole
     fused route ids), or ``None`` when the provider has no selectable model.
-    ``name`` is the bare, sanitized model id (``catalog.labels
-    .build_model_label``) -- never the full ``Engine · Connection · Model``
-    route label (``CatalogEntry.label``), which the ``provider`` option
-    already conveys via its own ``Engine · Connection name`` label; repeating
-    that identical prefix on every model entry made them render identically
-    once a host truncated the shared prefix (FINDING-04).
+    ``name`` is the engine-provided friendly model name when available, with
+    the stable model id as a backwards-compatible fallback. Engine/account
+    provider name is placed in the secondary description.
 
     ``current_state`` must be the *provider* option's own effective state
     (see ``build_config_options``, mirroring how ``build_thought_level_option``
@@ -325,15 +386,22 @@ def build_model_option(
     (e.g. a persisted default from a provider that has since dropped that
     model) the same way.
     """
+    provider_entries = tuple(
+        entry for entry in provider_entries
+        if entry.route.model.casefold() != _ENGINE_DEFAULT_VALUE
+    )
     if not provider_entries:
         return None
     first_entry_by_model: dict[str, CatalogEntry] = {}
     for entry in provider_entries:
         first_entry_by_model.setdefault(entry.route.model, entry)
-    pairs = [(model, build_model_label(entry.route.model)) for model, entry in first_entry_by_model.items()]
+    pairs = [
+        (model, build_model_label(entry.model_name or entry.route.model))
+        for model, entry in first_entry_by_model.items()
+    ]
     labels = disambiguate_labels(pairs)
     options = [
-        dict(value=model, name=labels[model], description=_evidence_note(entry))
+        dict(value=model, name=labels[model], description=_model_description(entry, connections, environ))
         for model, entry in first_entry_by_model.items()
     ]
     value_ids = set(first_entry_by_model)
@@ -358,11 +426,91 @@ def build_model_option(
     return option
 
 
+def build_combined_model_option(
+    selectable_entries: Sequence[CatalogEntry],
+    connections: Mapping[str, ConnectionRecord],
+    current_route_id: str | None,
+    fallback_connection_id: str,
+    current_state: str | None,
+    current_revision: int | None,
+    environ: Mapping[str, str] | None = None,
+) -> dict | None:
+    """Offer every selectable route in clients that expose only a model picker.
+
+    A model ID is the value when it names exactly one selectable route. Paseo's
+    CLI supplies that ID for ``--model`` and validates it against these values
+    before issuing ``session/set_config_option``. Duplicate model IDs retain
+    exact route IDs so a choice can never silently select another account.
+    The provider option is intentionally omitted by ``build_config_options``
+    when this combined representation is selected; the route value already
+    identifies the provider/account and Paseo must not render a duplicate
+    provider selector.
+    """
+    selectable_entries = tuple(
+        entry for entry in selectable_entries
+        if entry.route.model.casefold() != _ENGINE_DEFAULT_VALUE
+    )
+    if not selectable_entries:
+        return None
+    values = combined_model_values(selectable_entries)
+    pairs = [(entry.route.id, build_model_label(entry.model_name or entry.route.model))
+             for entry in selectable_entries]
+    labels = disambiguate_labels(pairs)
+    options = [
+        dict(value=values[entry.route.id], name=labels[entry.route.id],
+             description=_model_description(entry, connections, environ))
+        for entry in selectable_entries
+    ]
+    ids = {entry.route.id for entry in selectable_entries}
+    unavailable = current_route_id is not None and current_route_id not in ids
+    if unavailable:
+        current_value = next(
+            (values[entry.route.id] for entry in selectable_entries
+             if entry.connection_id == fallback_connection_id),
+            values[selectable_entries[0].route.id],
+        )
+        effective_state = "default_unavailable" if current_state == "default" else "selection_unavailable"
+        description = _UNAVAILABLE_DESCRIPTION
+    else:
+        current_value = values[current_route_id] if current_route_id else next(
+            (values[entry.route.id] for entry in selectable_entries
+             if entry.connection_id == fallback_connection_id),
+            values[selectable_entries[0].route.id],
+        )
+        effective_state = current_state
+        description = _state_suffix(current_state)
+    option: dict = dict(id=MODEL_OPTION_ID, name="Model", type="select", category="model",
+                        currentValue=current_value, options=options)
+    if description:
+        option["description"] = description
+    meta = _cortex_meta(effective_state, current_revision)
+    if meta:
+        option["_meta"] = meta
+    return option
+
+
+def combined_model_values(selectable_entries: Sequence[CatalogEntry]) -> dict[str, str]:
+    """Map each route to a unique value accepted by Paseo's model selector."""
+    counts: dict[str, int] = {}
+    route_ids = {entry.route.id for entry in selectable_entries}
+    for entry in selectable_entries:
+        counts[entry.route.model] = counts.get(entry.route.model, 0) + 1
+    return {
+        entry.route.id: (
+            entry.route.model
+            if counts[entry.route.model] == 1 and entry.route.model not in route_ids
+            else entry.route.id
+        )
+        for entry in selectable_entries
+    }
+
+
 def build_thought_level_option(
     current_entry: CatalogEntry | None,
     current_parameters: Mapping[str, object],
     current_state: str | None,
     current_revision: int | None,
+    *, allowed_efforts: frozenset[str] | None = None,
 ) -> dict | None:
     """The ``thought_level`` SessionConfigOption, or ``None`` when the
     currently selected route reports no ``thought_level`` parameter.
@@ -381,8 +529,11 @@ def build_thought_level_option(
     if current_entry is None:
         return None
     values = sorted({
-        value for name, value in current_entry.route.supported_parameters if name == THOUGHT_LEVEL_OPTION_ID
-    })
+        value for name, value in current_entry.route.supported_parameters
+        if name == THOUGHT_LEVEL_OPTION_ID and value.casefold() != _ENGINE_DEFAULT_VALUE
+    }, key=lambda value: (_EFFORT_STRENGTH.get(value.casefold(), len(_EFFORT_STRENGTH)), value.casefold()))
+    if allowed_efforts is not None:
+        values = [value for value in values if value in allowed_efforts]
     if not values:
         return None
     options = [dict(value=value, name=value) for value in values]
@@ -405,14 +556,15 @@ def build_thought_level_option(
     return option
 
 
-def build_language_option(current_value: str | None) -> dict:
+def build_language_option(current_value: str | None, *, as_mode: bool = False) -> dict:
     """The ``language`` SessionConfigOption -- ``auto``/``en``/``ru``.
     ``current_value`` is the stored override (``None`` means "auto", the
     default); any other/unknown stored value also falls back to shown as
     ``"auto"`` rather than fabricating an unlisted value."""
     current = current_value if current_value in _LANGUAGE_VALUES else "auto"
     return dict(
-        id=LANGUAGE_OPTION_ID, name="Language", type="select", category="other",
+        id=LANGUAGE_OPTION_ID, name="Coordinator language" if as_mode else "Language", type="select",
+        category="mode" if as_mode else "other",
         currentValue=current,
         description="Language for Cortex's own status/question/stop lines; auto detects from your messages.",
         options=[dict(value=value, name=_LANGUAGE_NAMES[value]) for value in _LANGUAGE_VALUES],
@@ -424,15 +576,15 @@ def build_config_options(
     connections: Mapping[str, ConnectionRecord],
     current: Mapping[str, object] | None = None,
     *, include_language: bool = False, language_current: str | None = None,
+    language_as_mode: bool = False,
     environ: Mapping[str, str] | None = None,
+    project_root: str | None = None,
+    combined_model_picker: bool = False,
 ) -> list[dict]:
-    """The full ordered ``configOptions`` list -- ``provider``, then
-    ``model`` (within that provider), then ``thought_level`` (within that
-    model), then -- only when ``include_language`` is explicitly requested
-    (see ``acp.agent._config_options_for_session``, which always sets it) --
-    ``language`` (T035: three independent axes, never one fused route
-    select; see module docstring and ``build_provider_option``/
-    ``build_model_option``).
+    """The full ordered ``configOptions`` list: provider, model, thought
+    level, and optionally language. By default model values are scoped to
+    the provider. With ``combined_model_picker`` the model option contains
+    exact routes across providers for a client that renders only models.
 
     ``current`` is ``None`` or ``{"route_id", "state", "revision", "parameters"}``
     describing the most recent live selection (see
@@ -452,6 +604,14 @@ def build_config_options(
     ``selectable_entries`` is empty (no model is selectable yet): language
     is never gated on route/connection availability.
     """
+    # Some engines advertise a literal ``default`` model/effort as an
+    # implementation alias.  It is not a concrete choice for a person and
+    # must not leak into either client's model picker.  Keep the underlying
+    # catalog evidence intact; only the public selection surface is filtered.
+    selectable_entries = tuple(
+        entry for entry in selectable_entries
+        if entry.route.model.casefold() != _ENGINE_DEFAULT_VALUE
+    )
     current = current or {}
     options: list[dict] = []
     current_route_id = current.get("route_id")
@@ -468,23 +628,58 @@ def build_config_options(
     # trick) treats it as unavailable rather than "no selection at all".
     current_connection_id = current_entry.connection_id if current_entry is not None else current_route_id
 
-    provider_option = build_provider_option(
-        selectable_entries, connections, current_connection_id, current_state, current_revision, environ)
-    if provider_option is None:
+    # Paseo's composer has one native model picker and resolves the account
+    # from that model choice. Exposing our independent provider axis here
+    # makes Paseo render a second account/provider selector (for example
+    # "Codex · user@example.com" and "Claude · user@example.com"), which is
+    # an invalid duplicate control for this client. Keep the provider axis
+    # for Zed and other ACP clients, while Paseo receives only the combined
+    # route model picker plus effort and coordinator language.
+    if not selectable_entries:
         if include_language:
-            options.append(build_language_option(language_current))
+            options.append(build_language_option(language_current, as_mode=language_as_mode))
         return options
-    options.append(provider_option)
-    provider_effective_state = provider_option.get("_meta", {}).get("_cortex", {}).get("state", current_state)
-    chosen_connection_id = provider_option["currentValue"]
+    if combined_model_picker:
+        provider_effective_state = current_state
+        chosen_connection_id = (
+            current_entry.connection_id
+            if current_entry is not None
+            else selectable_entries[0].connection_id
+        )
+    else:
+        provider_option = build_provider_option(
+            selectable_entries, connections, current_connection_id, current_state, current_revision, environ)
+        if provider_option is None:
+            if include_language:
+                options.append(build_language_option(language_current, as_mode=language_as_mode))
+            return options
+        options.append(provider_option)
+        provider_effective_state = provider_option.get("_meta", {}).get("_cortex", {}).get("state", current_state)
+        chosen_connection_id = provider_option["currentValue"]
     provider_entries = [entry for entry in selectable_entries if entry.connection_id == chosen_connection_id]
     current_model = current_entry.route.model if current_entry is not None else None
 
-    model_option = build_model_option(provider_entries, current_model, provider_effective_state, current_revision)
+    if combined_model_picker:
+        model_option = build_combined_model_option(
+            selectable_entries, connections,
+            current_route_id, chosen_connection_id, provider_effective_state,
+            current_revision, environ,
+        )
+    else:
+        model_option = build_model_option(
+            provider_entries, current_model, provider_effective_state, current_revision,
+            connections=connections, environ=environ,
+        )
     if model_option is not None:
         options.append(model_option)
         chosen_model = model_option["currentValue"]
-        chosen_entry = next((entry for entry in provider_entries if entry.route.model == chosen_model), None)
+        combined_values = combined_model_values(selectable_entries) if combined_model_picker else {}
+        chosen_entry = next(
+            (entry for entry in selectable_entries
+             if combined_values[entry.route.id] == chosen_model), None
+        ) if combined_model_picker else next(
+            (entry for entry in provider_entries if entry.route.model == chosen_model), None
+        )
         # Always the model option's own *effective* state (never the raw
         # current["state"]): when the provider/route is unavailable, the
         # model option's state is already "default_unavailable"/
@@ -494,11 +689,13 @@ def build_config_options(
         # value.
         model_effective_state = model_option.get("_meta", {}).get("_cortex", {}).get("state", provider_effective_state)
         thought_option = build_thought_level_option(
-            chosen_entry, current.get("parameters") or {}, model_effective_state, current_revision)
+            chosen_entry, current.get("parameters") or {}, model_effective_state, current_revision,
+            allowed_efforts=allowed_efforts_for_entry(chosen_entry, project_root, environ),
+        )
         if thought_option is not None:
             options.append(thought_option)
     if include_language:
-        options.append(build_language_option(language_current))
+        options.append(build_language_option(language_current, as_mode=language_as_mode))
     return options
 
 

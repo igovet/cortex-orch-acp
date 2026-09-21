@@ -208,5 +208,5 @@ def test_claude_agent_acp_run_carries_no_codex_metadata_anywhere(tmp_path):
     session_new_params = json.loads(session_new_dump_path.read_text(encoding="utf-8"))
     dumped_text = json.dumps(session_new_params)
     assert "codex" not in dumped_text.lower()
-    assert session_new_params["_meta"]["systemPrompt"] == role.body_portable
+    assert session_new_params["_meta"]["systemPrompt"] == {"append": role.body_portable}
     assert "codex" not in role.body_portable.lower()

@@ -59,6 +59,18 @@ def test_server_created_draft_contains_same_short_id_and_template(publication):
     assert path.stat().st_mode&0o777==0o600
 
 
+@pytest.mark.parametrize('template', ('implementation', 'verification', 'pipeline'))
+def test_routine_draft_does_not_prepopulate_an_incident_decision(publication, template):
+    store,task,_,_=publication
+    draft=call_store(store,'create_draft',dict(task_id=task,template=template,request_key='routine-'+template))
+    markdown=draft['markdown']
+    assert markdown.startswith(draft['required_first_line']+'\n\n')
+    assert 'Opening decision brief' in markdown or template=='pipeline'
+    assert '## Incident decision' not in markdown
+    assert 'incident_decision:' not in markdown
+    assert '## Evidence links and delivery state' in markdown or template=='pipeline'
+
+
 def test_existing_draft_can_be_recovered_with_bounded_cursor(publication):
     store,task,_,_=publication
     draft=call_store(store,'create_draft',dict(task_id=task,template='planning',request_key='read-planning'))
@@ -262,17 +274,24 @@ def test_copy_and_rename_stay_inside_destination_filesystem(publication,monkeypa
 
 @pytest.mark.parametrize('template', ('general','planning','investigation','implementation','verification','documentation','synthesis','pipeline'))
 def test_unfilled_template_cannot_be_published(publication, template):
-    store,task,base,_=publication
+    store,task,base,project=publication
     draft=call_store(store,'create_draft',dict(task_id=task,template=template,request_key=template))
     path=Path(draft['draft_path'])
     original=path.read_text()
+    assert draft['required_replacement_count']==len(draft['replaceable_markers'])
+    assert draft['replaceable_markers']
     with pytest.raises(StoreError,match='draft_guidance_remaining'):
         publish(store,base,draft)
     assert path.read_text()==original
     for marker in draft['replaceable_markers']:
         original=original.replace(marker,'Verified evidence; no remaining work.')
     path.write_text(original)
-    assert publish(store,base,draft)['replayed'] is False
+    receipt=publish(store,base,draft)
+    assert receipt['replayed'] is False
+    assert not path.exists()
+    published=project/'.cortex'/task/('pipeline.md' if template=='pipeline' else receipt['report_id']+'.md')
+    assert published.read_text()==original
+    assert read_all(store,task,receipt['report_id'])==original
 
 
 def test_crash_before_pipeline_commit_restores_backup(publication):

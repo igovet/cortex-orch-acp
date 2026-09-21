@@ -4,6 +4,17 @@ Written at T034. This page states how the mandatory automated matrix is run,
 what guarantees a default run cannot spend money, and which acceptance cases
 automated evidence deliberately cannot close.
 
+Current candidate additions — isolated snapshot failure, candidate staging,
+plan-graph bindings, revise continuations and MCP broker — have
+offline tests, but no completed real Zed/Codex/Claude observation. The paid
+Codex and Claude probes remain unrun. No passing offline test changes a
+`NOT RUN` real-client row into a pass.
+The broker suite forces a random token whose first byte is `-`, then checks
+that the actual stdio relay still connects and advertises tools. It also
+checks an MCP child that exits before `tools/list` and the prompt-level error
+classification. Those no-paid checks cannot establish a real client's MCP
+availability; its actual first prompt remains a live observation.
+
 ## The non-paid default command
 
 ```
@@ -13,10 +24,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q
 Two environment requirements are not cosmetic; both were learned by losing
 runs to them:
 
-- `PYTHONDONTWRITEBYTECODE=1` is mandatory. `tests/test_package.py` verifies
-  the shipped payload contains no compiled bytecode, so a `.pyc` written by
-  the run itself makes the package check fail with `bytecode in payload`.
-  Subprocesses do not inherit `python3 -B`, only the environment variable.
+- `PYTHONDONTWRITEBYTECODE=1` remains required for candidate checks and is
+  recommended for the suite. Subprocesses do not inherit `python3 -B`, only
+  the environment variable. Package enumeration also excludes local
+  `__pycache__`, `.pyc`, and `.pyo` residue from the shipped payload and
+  isolated candidate copy; these execution artifacts are never package
+  inputs, so stamping does not require destructive cleanup of ignored files.
 - `HOME` and `TMPDIR` must lie outside **every** git repository, ancestors
   included. The storage guards refuse to treat a directory inside a checkout
   as a user home, and a scratch home under a user directory that is itself a

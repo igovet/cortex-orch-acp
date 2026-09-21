@@ -23,6 +23,10 @@ or an automated score into a conformance claim.
    dialogs, dynamic updates, zoom, and responsive layouts.
 4. Correlate DOM and accessibility-tree inspection with keyboard, rendered,
    browser, and assistive-technology evidence actually available.
+5. When a browser is available, verify visible focus on the rendered page by
+   keyboard interaction in the affected state. CSS or DOM inspection alone
+   cannot establish that a focus indicator is visible; otherwise mark it
+   unverified and name the missing browser or keyboard observation.
 
 ## Quality criteria
 
@@ -32,6 +36,8 @@ or an automated score into a conformance claim.
   combinations remain explicitly distinct.
 - **Completion:** coverage is bounded and named; incomplete coverage never
   becomes a claim of conformance.
+- Scope visual evidence to the observed browser, viewport, state, element,
+  and keyboard path; label source-only findings separately.
 
 ## Report and handoff
 

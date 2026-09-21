@@ -45,7 +45,7 @@ class _SilentManager:
         self.cancel_calls: list[str] = []
         self._release_gate = threading.Event()
 
-    def prompt_turn(self, session_ref, message):
+    def prompt_turn(self, session_ref, message, *, prompt_blocks=None):
         self._release_gate.wait()
         return
         yield  # pragma: no cover -- unreachable; makes this a generator function

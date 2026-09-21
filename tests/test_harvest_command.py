@@ -22,11 +22,14 @@ def test_the_command_is_named_what_the_user_types():
     assert "harvest" in names, names
     entry = next(c for c in acp_commands.AVAILABLE_COMMANDS if c["name"] == "harvest")
     assert entry["input"], "a harvest may be scoped, so the command takes optional text"
+    assert "optional" in entry["input"]["hint"]
 
 
 def test_it_is_recognized_by_exact_prefix_only():
     assert acp_commands.recognize([{"type": "text", "text": "/harvest"}]) == ("harvest", "")
     assert acp_commands.recognize([{"type": "text", "text": "/harvest auth module"}]) == ("harvest", "auth module")
+    assert acp_commands.recognize([{"type": "text", "text": "/harvest-refresh"}]) == ("harvest-refresh", "")
+    assert acp_commands.recognize([{"type": "text", "text": "/harvest-refresh auth module"}]) == ("harvest-refresh", "auth module")
     # Never inferred from prose -- which is the whole point of the command.
     assert acp_commands.recognize([{"type": "text", "text": "please harvest the knowledge"}]) is None
     assert acp_commands.recognize([{"type": "text", "text": "/harvesting"}]) is None
@@ -44,6 +47,8 @@ def test_the_request_names_itself_as_explicit_and_says_how_to_read_the_skill():
     assert "(auth module)" in scoped
 
 
-def test_there_is_a_plain_answer_when_no_task_exists_yet():
+def test_harvest_request_does_not_require_a_prior_task_or_goal():
     for language in ("en", "ru"):
-        assert acp_messages.render("harvest_no_task", language).strip()
+        text = acp_messages.render("harvest_requested", language, scope="")
+        assert "prior" not in text.lower()
+        assert "goal" not in text.lower()

@@ -6,7 +6,6 @@ from jsonschema import validate
 
 from cortex_runtime.contracts import BY_NAME
 from cortex_runtime.governance import governance_snapshot
-from cortex_runtime.hook_storage import HookStorage
 from cortex_runtime.store import Store
 
 
@@ -49,32 +48,35 @@ def test_latest_depth_is_public_task_wide_and_survives_replay_restart(bound):
 
 
 def test_recovery_changes_with_depth_and_contains_no_rationale_body(bound):
-    store, root, _ = bound
-    hooks = HookStorage(store)
-    context = hooks.context('parent', str(root))
-    before = hooks.snapshot(context)
+    store, root, created = bound
+    with store.connection() as db:
+        task_id = db.execute("SELECT task_id FROM thread_bindings WHERE thread_id=?", ('parent',)).fetchone()[0]
+    def snapshot():
+        with store.connection() as db:
+            return governance_snapshot(db, task_id)
+    before = snapshot()
     selected = store.call('set_governance', dict(mode='full', rationale='DO_NOT_INJECT_PRIVATE_RATIONALE',
                                                request_key='full'), 'parent')
-    after = hooks.snapshot(context)
-    assert after['state_key'] != before['state_key']
-    assert after['governance']['mode'] == 'full'
-    assert after['governance']['report_id'] == selected['report_id']
+    after = snapshot()
+    assert after['mode'] != before['mode']
+    assert after['mode'] == 'full'
+    assert after['report_id'] == selected['report_id']
     assert 'DO_NOT_INJECT_PRIVATE_RATIONALE' not in json.dumps(after)
     choose(store, 'light')
-    assert hooks.snapshot(context)['governance']['mode'] == 'light'
+    assert snapshot()['mode'] == 'light'
 
 
 def test_normal_state_is_separate_from_depth_and_resumes_same_choice(bound):
     store, root, _ = bound
     choose(store, 'full', key='pause', state='normal')
-    assert HookStorage(store).context('parent', str(root)) is None
+    assert store.call('list_reports', {}, 'parent')['binding']['state'] == 'normal'
     read = store.call('list_reports', {}, 'parent')
     assert read['governance']['mode'] == 'full'
     assert read['binding']['state'] == 'normal'
     resumed = choose(store, 'full', key='resume', state='cortex')
     assert resumed['binding']['state'] == 'cortex'
     assert resumed['governance']['mode'] == 'full'
-    assert HookStorage(store).context('parent', str(root)) is not None
+    assert resumed['binding']['state'] == 'cortex'
 
 
 def test_unavailable_advisory_projection_does_not_block_public_work(bound):

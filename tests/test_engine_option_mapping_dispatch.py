@@ -46,14 +46,18 @@ def test_option_mapping_for_dispatches_by_engine_name():
     assert _option_mapping_for("some-future-engine") is None
 
 
-def test_session_new_meta_for_only_claude_agent_acp_builds_a_payload():
-    assert _session_new_meta_for("codex-acp", "1.12.0", "Be helpful.") is None
-    assert _session_new_meta_for("claude-agent-acp", "0.78.0", "Be helpful.") == {"systemPrompt": "Be helpful."}
+def test_session_new_meta_for_pinned_engines_builds_a_payload():
+    assert _session_new_meta_for("codex-acp", "1.12.0", "Be helpful.") == {"systemPrompt": "Be helpful."}
+    assert _session_new_meta_for("claude-agent-acp", "0.78.0", "Be helpful.") == {
+        "systemPrompt": {"append": "Be helpful."},
+        "claudeCode": {"options": {"disallowedTools": ["Agent", "Task"], "strictMcpConfig": True}},
+    }
     # Unrecognized version: UNSUPPORTED plan, never a payload.
     assert _session_new_meta_for("claude-agent-acp", "0.11.0", "Be helpful.") is None
-    # No instructions at all: nothing to build.
-    assert _session_new_meta_for("claude-agent-acp", "0.78.0", None) is None
-    assert _session_new_meta_for("claude-agent-acp", "0.78.0", "") is None
+    # A Claude session without role text still cannot launch native subagents.
+    expected_restriction = {"claudeCode": {"options": {"disallowedTools": ["Agent", "Task"], "strictMcpConfig": True}}}
+    assert _session_new_meta_for("claude-agent-acp", "0.78.0", None) == expected_restriction
+    assert _session_new_meta_for("claude-agent-acp", "0.78.0", "") == expected_restriction
 
 
 def _open_one(tmp_path, engine, config_options):
@@ -114,7 +118,7 @@ def test_claude_agent_acp_route_uses_claude_option_mapping_and_rejects_codex_sha
         manager.shutdown(grace=2.0)
 
 
-def test_claude_agent_acp_session_new_never_carries_codex_meta_and_vice_versa(tmp_path):
+def test_each_pinned_adapter_gets_its_own_session_new_meta(tmp_path):
     # claude-agent-acp: instructions delivered via the real session/new
     # _meta.systemPrompt channel (T026) -- never absent, never a codex-
     # style leading-prompt-block artifact.
@@ -139,10 +143,14 @@ def test_claude_agent_acp_session_new_never_carries_codex_meta_and_vice_versa(tm
         manager.shutdown(grace=2.0)
 
     dumped = json.loads(session_new_dump.read_text(encoding="utf-8"))
-    assert dumped.get("_meta") == {"systemPrompt": "You are a backend developer."}
+    assert dumped.get("_meta") == {
+        "systemPrompt": {"append": "You are a backend developer."},
+        "claudeCode": {"options": {"disallowedTools": ["Agent", "Task"], "strictMcpConfig": True}},
+    }
 
-    # codex-acp: no session/new _meta at all -- its own qualified channel
-    # (a leading session/prompt block) is not a session/new-level payload.
+    # The verified private Codex adapter forwards this metadata to App Server.
+    # Role text is not repeated in an ordinary user prompt; recovery carries
+    # only the task capsule through the conversation channel.
     session_new_dump_codex = tmp_path / "codex-session-new.json"
     engine_dir_codex = tmp_path / "codex-dump"
     engine_dir_codex.mkdir()
@@ -166,4 +174,4 @@ def test_claude_agent_acp_session_new_never_carries_codex_meta_and_vice_versa(tm
         manager.shutdown(grace=2.0)
 
     dumped_codex = json.loads(session_new_dump_codex.read_text(encoding="utf-8"))
-    assert "_meta" not in dumped_codex
+    assert dumped_codex.get("_meta") == {"systemPrompt": "You are a backend developer."}

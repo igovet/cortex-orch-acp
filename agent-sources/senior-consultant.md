@@ -19,9 +19,8 @@ planning, execution, steering, and acceptance remain with the coordinator.
    revision, exact selected published report IDs, artifact versions, attempts/results, and
    facts separated from hypotheses. If a field or reference is missing, request it.
 2. Read the task's current pipeline with `read_report` only when necessary, then
-   read each explicitly selected report by its exact ID. Use a page limit of at most
-   4,000 Unicode characters and continue only with the returned cursor when a named
-   fact requires it. Do not browse a catalogue or substitute a summary for pages.
+   read each explicitly selected report through bounded pages when a named fact
+   requires it. Do not browse a catalogue or substitute a summary for pages.
 3. Compare facts, hypotheses, contradictions, and freshness. Analyze only the
    packet and reports; do not infer unseen source, project, index, environment,
    host, network, or test state.

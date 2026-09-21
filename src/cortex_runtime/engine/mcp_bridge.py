@@ -1,11 +1,11 @@
 """Builds the ``mcpServers`` array Cortex sends on ``session/new``.
 
-Exactly one stdio entry: the Cortex MCP server itself, launched with only
-the explicit ``(channel_id, secret, project_root)`` credentials passed to
-``create_session`` -- never a host client's own ``mcpServers`` (there is no
-parameter for one; a host-supplied MCP server list is never accepted by
-this API). The secret is placed only into this one dict's ``env`` list,
-never logged, never included in any exception message or observation (see
+The Cortex MCP server itself is always first and is launched with only the
+explicit ``(channel_id, secret, project_root)`` credentials passed to
+``create_session``. Additional stdio entries may come from the Cortex-owned
+MCP registry or the incoming client's ``mcpServers`` list; they are forwarded
+after Cortex's own entry so they cannot shadow its authenticated channel.
+Secrets are kept in memory only, never written to project state or logs (see
 ``tests/test_engine_isolation.py`` for log-scanning coverage).
 """
 from __future__ import annotations
@@ -19,11 +19,13 @@ from pathlib import Path
 # up from this deeper package).
 SCRIPTS_DIR = Path(__file__).resolve().parents[2]
 CORTEX_MCP_SCRIPT = SCRIPTS_DIR / "cortex.py"
+MCP_RELAY_SCRIPT = Path(__file__).with_name("broker.py")
 
 _CHANNEL_ID_PATTERN = re.compile(r"^ch_[0-9a-f]{12}$")
 _CHANNEL_SECRET_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
 
 _ROLES = ("coordinator", "worker")
+_ENGINES = ("codex-acp", "claude-agent-acp")
 
 
 def allowed_mcp_servers(role: str) -> tuple[str, ...]:
@@ -38,7 +40,7 @@ def allowed_mcp_servers(role: str) -> tuple[str, ...]:
     return ("cortex",)
 
 
-def host_mcp_servers(servers) -> list[dict[str, object]]:
+def host_mcp_servers(servers, *, role: str | None = None, engine: str | None = None) -> list[dict[str, object]]:
     """The client's own MCP servers, as they must look on the wire to an
     engine.
 
@@ -57,6 +59,8 @@ def host_mcp_servers(servers) -> list[dict[str, object]]:
     to the engine that needs them.
     """
     forwarded: list[dict[str, object]] = []
+    if role is not None and role not in _ROLES:
+        raise ValueError(f"role must be one of {_ROLES!r}.")
     for entry in servers or ():
         if not isinstance(entry, dict):
             continue
@@ -65,7 +69,24 @@ def host_mcp_servers(servers) -> list[dict[str, object]]:
             continue
         if not isinstance(entry.get("command"), str) or not entry["command"]:
             continue
-        forwarded.append(dict(entry))
+        roles = entry.get("roles")
+        if roles is not None and (
+            not isinstance(roles, list) or not roles
+            or any(item not in _ROLES for item in roles)
+        ):
+            continue
+        if roles is not None and role is not None and role not in roles:
+            continue
+        engines = entry.get("engines")
+        if engines is not None and (
+            not isinstance(engines, list) or not engines
+            or any(item not in _ENGINES for item in engines)
+        ):
+            continue
+        if engines is not None and engine not in engines:
+            continue
+        # Registry admission rules are internal, never ACP wire data.
+        forwarded.append({key: value for key, value in entry.items() if key not in ("roles", "engines")})
     return forwarded
 
 
@@ -77,6 +98,8 @@ def build_mcp_servers(
     python_executable: str | None = None,
     script_path: str | Path | None = None,
     role: str | None = None,
+    relay_endpoint: str | None = None,
+    relay_token: str | None = None,
 ) -> list[dict[str, object]]:
     """``role`` (optional, ``"coordinator"``/``"worker"``) -- when given,
     every server name this builds is asserted to be in
@@ -93,15 +116,23 @@ def build_mcp_servers(
     script = str(script_path or CORTEX_MCP_SCRIPT)
     if role is not None:
         assert "cortex" in allowed_mcp_servers(role)
+    if (relay_endpoint is None) != (relay_token is None):
+        raise ValueError("relay_endpoint and relay_token must be supplied together.")
+    args = ["-B", script]
+    if relay_endpoint is not None:
+        if not relay_endpoint.startswith("/") or not relay_token:
+            raise ValueError("relay endpoint and token must be valid.")
+        args = ["-B", str(MCP_RELAY_SCRIPT), "--relay", relay_endpoint, relay_token]
+    environment = [] if relay_endpoint is not None else [
+        dict(name="CORTEX_CHANNEL_ID", value=channel_id),
+        dict(name="CORTEX_CHANNEL_SECRET", value=secret),
+        dict(name="CORTEX_CHANNEL_PROJECT_ROOT", value=project_root),
+    ]
     return [
         dict(
             name="cortex",
             command=python,
-            args=["-B", script],
-            env=[
-                dict(name="CORTEX_CHANNEL_ID", value=channel_id),
-                dict(name="CORTEX_CHANNEL_SECRET", value=secret),
-                dict(name="CORTEX_CHANNEL_PROJECT_ROOT", value=project_root),
-            ],
+            args=args,
+            env=environment,
         )
     ]

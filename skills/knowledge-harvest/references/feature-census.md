@@ -139,12 +139,24 @@ page without repeating repository-wide discovery.
 ### Harvest refresh
 
 1. Rebuild the complete inventory without trusting current feature pages.
-2. Map the fresh inventory to the existing registry and audit every page.
+2. Map the fresh inventory to the existing registry and audit every project and
+   feature page against current source. Correct stale facts, links and coverage;
+   preserve supported manual content. Do not substitute chat or report summaries.
 3. Rewrite generated sections and add/split pages until the matrix has no
    unexplained gaps.
-4. Run a separate read-only completeness review from the source inventory.
-5. Repeat the documentation planning comparison. Pass only when it proposes no
-   factual changes and no new feature page.
+4. Compare the post-write pages and manifest with the fresh source inventory,
+   including every relevant occurrence across the target repository's
+   documentation and otherwise unchanged pages whenever a documented behavior,
+   default or output is corrected, even if source is unchanged. Inventory all
+   affected executable
+   examples, compare safe executions' exact exit status and stdout with the
+   documented results, and retain unexecutable examples as unresolved. Run
+   relevant deterministic documentation checks. The writer can do this;
+   assign a separate reviewer to inspect current source and post-write docs
+   independently for those corrected claims. Otherwise escalate only
+   for a concrete uncertainty, without a routine reviewer stage.
+5. Finish when the comparison finds no further factual change or feature page
+   to add; record any check that could not run and any unresolved gap.
 
 ## Failure conditions
 
@@ -169,4 +181,8 @@ claiming completion when:
 - feature pages omit consequential behavior, state, configuration, failure,
   integration, operations, or verification details;
 - documentation claims were copied from delegation reports without source/test checks;
-- refresh lacks an independent post-write census and no-change second pass.
+- refresh lacks a source-backed post-write comparison, leaves stale facts in
+  existing pages or examples, or claims completion despite an unexplained gap;
+- documented behavior, defaults or output were corrected without a targeted search
+  of existing examples, safe example-result comparison, and a separate worker's
+  source-backed review.

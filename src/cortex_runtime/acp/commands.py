@@ -4,8 +4,9 @@ support (see ``config_options.py``).
 
 Four commands, never a separate configuration implementation of their own:
 
-- ``/cortex-status`` -- report the current/pending model + thought_level and
-  connection setup state; no input, never mutates anything.
+- ``/cortex-status`` -- report the current/pending model + thought_level,
+  connection setup state, and the engine execution mode; no input,
+  never mutates anything.
 - ``/cortex-model <route label or route id>`` -- select a whole route
   (provider+model together) by its disambiguated label or route id, across
   every configured provider; routed through
@@ -19,10 +20,8 @@ Four commands, never a separate configuration implementation of their own:
   ``configId="provider"`` then ``configId="model"`` instead.
 - ``/cortex-effort <value>`` -- select a ``thought_level`` value; same
   sharing for ``configId="thought_level"``.
-- ``/cortex-setup`` -- static onboarding guidance naming connection setup
-  steps (``connections.onboarding.create_connection`` /
-  ``set_api_key``/``mark_native_login_pending``/``validate``); never prints a
-  secret, never mutates anything.
+- ``/cortex-setup`` -- state-aware onboarding and repair guidance using the
+  public setup CLI; never prints a secret or mutates a connection.
 
 Recognition: a prompt consisting of exactly one ``text`` content block whose
 *trimmed* text starts with a registered command name followed by end of
@@ -55,6 +54,7 @@ CORTEX_LANGUAGE = "cortex-language"
 # it was pressed or it was not -- and the user asked for it by this exact
 # name, not a `cortex-` prefixed one.
 HARVEST = "harvest"
+HARVEST_REFRESH = "harvest-refresh"
 
 # Trigger text as typed by a user, in recognition priority order (longest
 # first so "/cortex-model" is never mistaken for a shorter prefix).
@@ -62,6 +62,7 @@ _TRIGGERS: tuple[tuple[str, str], ...] = (
     ("/cortex-status", CORTEX_STATUS),
     ("/cortex-new-task", CORTEX_NEW_TASK),
     ("/cortex-language", CORTEX_LANGUAGE),
+    ("/harvest-refresh", HARVEST_REFRESH),
     ("/harvest", HARVEST),
     ("/cortex-model", CORTEX_MODEL),
     ("/cortex-effort", CORTEX_EFFORT),
@@ -71,7 +72,7 @@ _TRIGGERS: tuple[tuple[str, str], ...] = (
 )
 
 AVAILABLE_COMMANDS: tuple[dict, ...] = (
-    dict(name=CORTEX_STATUS, description="Show the current and pending model/thought-level selection and connection setup state. Never changes anything.", input=None),
+    dict(name=CORTEX_STATUS, description="Show model/thought-level, connection state, and engine execution mode. Never changes anything.", input=None),
     dict(name=CORTEX_MODEL, description="Select the model by its route label or route id.", input=dict(hint="<route label or route id>")),
     dict(name=CORTEX_EFFORT, description="Select the thought_level (reasoning effort) value for the current model.", input=dict(hint="<value>")),
     dict(name=CORTEX_SETUP, description="Show onboarding guidance for connecting a model provider. Never changes anything, never prints a secret.", input=None),
@@ -79,7 +80,8 @@ AVAILABLE_COMMANDS: tuple[dict, ...] = (
     dict(name=CORTEX_STOP, description="Urgently stop the active task: cancels every assignment, queued open, and open question. Does not restart through a later message.", input=None),
     dict(name=CORTEX_ANSWER, description="Answer one specific open coordinator question by its listed number (use when more than one question is open).", input=dict(hint="<question-number> <answer text>")),
     dict(name=CORTEX_LANGUAGE, description="Set the language Cortex uses for its own status/question/stop lines: auto, en, or ru.", input=dict(hint="auto|en|ru")),
-    dict(name=HARVEST, description="Explicitly ask for a knowledge harvest of what this task established. Optional scope.", input=dict(hint="<optional scope>")),
+    dict(name=HARVEST, description="Start or continue an explicit knowledge harvest. Optional text narrows the documentation scope; bare command covers the project.", input=dict(hint="<optional scope>")),
+    dict(name=HARVEST_REFRESH, description="Explicitly refresh project documentation from current source. Text is an optional scope.", input=dict(hint="<optional scope>")),
 )
 
 
@@ -125,9 +127,19 @@ def resolve_model_argument(argument: str, selectable_entries: Sequence[CatalogEn
         if argument == entry.route.id:
             return entry.route.id
     lowered = argument.lower()
-    for entry in selectable_entries:
-        if entry.disambiguated_label.lower() == lowered or entry.label.lower() == lowered:
-            return entry.route.id
+    exact = [
+        entry for entry in selectable_entries
+        if entry.disambiguated_label.lower() == lowered or entry.label.lower() == lowered
+    ]
+    if len(exact) == 1:
+        return exact[0].route.id
+    # The ACP selector exposes the engine model id as the value users see in
+    # Zed. Accept that same id in the slash command when it identifies one
+    # offered route; retain the full label/id requirement when providers
+    # offer the same model more than once.
+    model_matches = [entry for entry in selectable_entries if entry.route.model.lower() == lowered]
+    if len(model_matches) == 1:
+        return model_matches[0].route.id
     return None
 
 
@@ -147,11 +159,14 @@ def parse_answer_argument(argument: str) -> tuple[int, str] | None:
     return index, text
 
 
-def build_status_text(*, config_options: Sequence[Mapping[str, object]], connection_setup_summary: str) -> str:
+def build_status_text(*, config_options: Sequence[Mapping[str, object]],
+                      connection_setup_summary: str, execution_mode: str | None = None) -> str:
     """Pure, read-only ``/cortex-status`` report text."""
     lines = ["Cortex configuration status:"]
     if not config_options:
         lines.append("- model: none selectable yet (" + connection_setup_summary + ")")
+        if execution_mode is not None:
+            lines.append(f"- execution: {execution_mode}")
         return "\n".join(lines)
     for option in config_options:
         current = option.get("currentValue")
@@ -163,23 +178,61 @@ def build_status_text(*, config_options: Sequence[Mapping[str, object]], connect
         state_note = option.get("description") or ""
         lines.append(f"- {option.get('id')}: {label}" + (f" {state_note}" if state_note else ""))
     lines.append(f"- connections: {connection_setup_summary}")
+    if execution_mode is not None:
+        lines.append(f"- execution: {execution_mode}")
     return "\n".join(lines)
 
 
 SETUP_GUIDANCE = (
-    "No model is selectable yet for this project. To connect a provider:\n"
-    "1. Register a connection (engine + provider + auth mode) via the Cortex "
-    "connection onboarding flow (connections.onboarding.create_connection).\n"
-    "2. Supply credentials out of band: for an API-key connection, set the key "
-    "via set_api_key (stored only in a private, owner-only secret file or the "
-    "OS keyring, never printed here); for a native-account connection, "
-    "complete that engine's own native login, then finish with "
-    "mark_native_login_pending's reported next step.\n"
-    "3. Confirm the connection with validate(); once it reports 'configured', "
-    "its models will start appearing in the model selector (or /cortex-model).\n"
+    "No model is selectable yet for this project. To connect an engine:\n"
+    "1. Follow docs/acp/packaging-and-onboarding.md to register a pinned install "
+    "with the add-connection command and its --install-record option.\n"
+    "2. Complete the engine's native login in the isolated directory shown by "
+    "setup, or provide an API key through a private file or stdin.\n"
+    "3. Run `python3 -B scripts/cortex_acp_setup.py validate-connection "
+    "--connection ID` using the ID returned by setup. Once it reports "
+    "'configured', start a new Cortex session to refresh models.\n"
     "This message never contains a secret and never mutates any connection."
 )
 
 
-def build_setup_text() -> str:
+def build_setup_text(*, connection_states: Mapping[str, int] | None = None) -> str:
+    """Return setup guidance that reflects the registered connection state.
+
+    A native connection is registered before its engine login is complete.  In
+    that state the user needs to authorize the existing connection, not create
+    a duplicate one. ``connection_states`` contains counts keyed by persisted
+    state value only; it never carries credential references or filesystem
+    paths.
+    """
+    states = connection_states or {}
+    if states.get("authorization_required", 0):
+        return (
+            "A connection is already registered but is awaiting authorization.\n"
+            "1. Complete that engine's native login in the isolated engine directory "
+            "shown during connection setup.\n"
+            "2. Run `python3 -B scripts/cortex_acp_setup.py validate-connection "
+            "--connection ID` using its existing ID until it reports 'configured'.\n"
+            "3. Once configured, its models will start appearing in the model selector "
+            "(or /cortex-model).\n"
+            "Do not register another connection for the same engine and account. "
+            "This message never contains a secret and never mutates any connection."
+        )
+    if states.get("unavailable", 0):
+        return (
+            "A registered connection is currently unavailable.\n"
+            "Check that the configured engine is installed and reachable, then run "
+            "`python3 -B scripts/cortex_acp_setup.py validate-connection --connection ID`. "
+            "If the connection is no longer usable, repair or remove "
+            "that registration before adding a replacement.\n"
+            "This message never contains a secret and never mutates any connection."
+        )
+    if states.get("invalid", 0):
+        return (
+            "A registered connection has invalid configuration.\n"
+            "Review its engine, provider, and authentication settings, repair the existing "
+            "registration, then run `python3 -B scripts/cortex_acp_setup.py "
+            "validate-connection --connection ID` again.\n"
+            "This message never contains a secret and never mutates any connection."
+        )
     return SETUP_GUIDANCE

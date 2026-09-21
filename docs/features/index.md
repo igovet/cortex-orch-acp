@@ -1,24 +1,15 @@
 # Feature index
 
-| Feature | Runtime owner | Entry points | Source evidence | Documentation | Verification | Status |
-| --- | --- | --- | --- | --- | --- | --- |
-| Markdown storage and retention | Local Python runtime | Seven MCP operations; explicit cleanup command | src/cortex_runtime/ | [Reports](markdown-reports/index.md) | tests/test_markdown_store.py; tests/test_source_reports.py; tests/test_retention.py; tests/test_stdio.py; tests/test_thread_context.py | documented |
-| Coordination and project knowledge | Model and bundled skills | Explicit orchestration, help, harvest, refresh, clear, normal; completion-time documentation-impact review | skills/; ./agents/ | [Knowledge routing](knowledge-routing/index.md) | Package checks and real-host scenarios | documented |
+| Feature | Runtime owner | Entry point | Verification |
+| --- | --- | --- | --- |
+| Markdown reports and task state | ACP runtime | MCP report and pipeline operations | `tests/test_source_reports.py`, `tests/test_pipeline_bootstrap.py` |
+| Knowledge routing | Coordinator and bundled skills | Explicit orchestration or harvest route | profile/package checks |
+| Advisory lane | Coordinator | Optional configured advisory provider | advisory unit tests |
+| Senior consultant | Coordinator and consultant profile | Risk-triggered optional assignment | consultant contract tests |
 
-## Inventory totals
+The current runtime has no plugin manifest, native Codex harness, gateway,
+lifecycle hook dispatcher or host-side profile registration. Those historical
+surfaces are excluded from this index.
 
-Two feature groups: seven storage operations, one host-side retention command,
-23 specialist profiles, including the opt-in report-only senior consultant, and knowledge/routing skills. Two documented groups.
-
-## Unmapped surfaces
-
-No additional installable runtime surface found in the current package manifest.
-
-## Exclusions
-
-Repository packaging, CI and live transport are development support, described
-in the project verification guide rather than product features.
-
-## Known unknowns
-
-Real-host qualification is recorded separately in release-readiness.md.
+Real ACP client behavior is tracked in [`docs/acp/real-client-runbook.md`](../acp/real-client-runbook.md).
+Rows remain `NOT RUN` until a real isolated client observation is retained.

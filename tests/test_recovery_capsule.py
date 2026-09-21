@@ -12,7 +12,7 @@ import uuid
 import pytest
 
 from cortex_runtime.bootstrap import bootstrap_task
-from cortex_runtime.contracts import StoreError
+from cortex_runtime.contracts import StoreError, TOOLS
 from cortex_runtime.delegation import mcp_tools
 from cortex_runtime.ownership import current_owner_epoch
 from cortex_runtime.portable.identity import SourceEvent
@@ -87,6 +87,26 @@ def _publish_worker_result(store, worker, *, summary="A concise result.", body="
 # -- structural: all nine sections always present ---------------------
 
 
+def test_permission_receipt_visible_to_own_worker_and_coordinator_only(tmp_path):
+    from cortex_runtime.delegation.evidence import record_permission_response
+
+    store, task_id, coordinator = _task(tmp_path)
+    first = _delegate(store, coordinator, request_key="receipt-one")
+    second = _delegate(store, coordinator, request_key="receipt-two")
+    own_ref = first["assignment_ref"]
+    other_ref = second["assignment_ref"]
+    _provision_worker(store, task_id, coordinator, own_ref, assignment_id="a_one", attempt_id="xa_one")
+    _provision_worker(store, task_id, coordinator, other_ref, assignment_id="a_two", attempt_id="xa_two")
+    record_permission_response(store, task_id, "xa_one", "tc_rm", "rm -- only-this.txt", "allow_once")
+    own = build_capsule(store, task_id, dict(role="worker", assignment_ref=own_ref, attempt_id="xa_one"))
+    other = build_capsule(store, task_id, dict(role="worker", assignment_ref=other_ref, attempt_id="xa_two"))
+    all_receipts = build_capsule(store, task_id, dict(role="coordinator"))
+    assert own["sections"]["publications_and_checks"]["own_permission_receipts"][0]["host_outcome"] == "allow_once"
+    assert other["sections"]["publications_and_checks"]["own_permission_receipts"] == []
+    assert all_receipts["sections"]["publications_and_checks"]["permission_receipts"][0]["tool_call_ref"] == "tc_rm"
+    assert "only-this.txt" in render_capsule(own)
+
+
 def test_coordinator_capsule_has_every_required_section(tmp_path):
     store, task_id, coordinator = _task(tmp_path)
     cap = build_capsule(store, task_id, dict(role="coordinator"))
@@ -107,6 +127,24 @@ def test_worker_capsule_has_every_required_section(tmp_path):
     cap = build_capsule(store, task_id, dict(role="worker", assignment_ref=delegated["assignment_ref"], attempt_id="xa_test1"))
     assert set(cap["sections"]) == set(CANONICAL_SECTIONS)
     assert cap["sections"]["pipeline_and_assignments"]["own_assignment"]["title"] == "Task title"
+
+
+def test_worker_capsule_allowed_tools_match_worker_tools_list_surface(tmp_path):
+    """The recovery receipt names every tool the worker channel advertises."""
+    from cortex_runtime.delegation import contracts as delegation_contracts
+
+    store, task_id, coordinator = _task(tmp_path)
+    delegated = _delegate(store, coordinator)
+    _provision_worker(store, task_id, coordinator, delegated["assignment_ref"])
+    cap = build_capsule(
+        store, task_id,
+        dict(role="worker", assignment_ref=delegated["assignment_ref"], attempt_id="xa_test1"),
+    )
+
+    expected = ({entry["name"] for entry in TOOLS} - {"create_task"}) | set(delegation_contracts.schemas_for("worker"))
+    assert set(cap["sections"]["role_and_tool_access"]["allowed_mcp_tools"]) == expected
+    assert "create_task" not in expected
+    assert {"create_draft", "write_report", "read_report", "publish_result"} <= expected
 
 
 def test_unknown_task_refused(tmp_path):
@@ -158,6 +196,58 @@ def test_coordinator_capsule_sees_every_assignment(tmp_path):
     cap = build_capsule(store, task_id, dict(role="coordinator"))
     refs = {a["assignment_ref"] for a in cap["sections"]["pipeline_and_assignments"]["assignments"]}
     assert refs == {d1["assignment_ref"], d2["assignment_ref"]}
+
+
+def test_coordinator_assignment_route_uses_exact_attempt_audit(tmp_path):
+    from cortex_runtime.routing.store import record_attempt_audit
+
+    store, task_id, coordinator = _task(tmp_path)
+    delegated = _delegate(store, coordinator)
+    ref = delegated["assignment_ref"]
+    _provision_worker(store, task_id, coordinator, ref, attempt_id="xa_actual")
+    record_attempt_audit(
+        store, attempt_id="xa_actual", task_id=task_id, role="worker-backend-dev",
+        engine="codex", connection_id="conn_luna", model="gpt-5.6-luna",
+        params_fingerprint="f" * 64, config_revision_id=None, decision="authorized",
+        detail={"effort": "high"},
+    )
+    cap = build_capsule(store, task_id, dict(role="coordinator"))
+    assignment = cap["sections"]["pipeline_and_assignments"]["assignments"][0]
+    assert assignment["assignment_ref"] == ref
+    assert assignment["observed_worker_route"]["engine"] == "codex"
+    assert assignment["observed_worker_route"]["model"] == "gpt-5.6-luna"
+    assert assignment["observed_worker_route"]["effort"] == "high"
+    assert "gpt-5.6-luna" in render_capsule(cap)
+
+
+def test_assignment_acceptance_does_not_become_task_acceptance_in_context(tmp_path):
+    from cortex_runtime.delegation.events import append_event
+
+    store, task_id, coordinator = _task(tmp_path)
+    delegated = _delegate(store, coordinator)
+    ref = delegated["assignment_ref"]
+    append_event(store, task_id, "coordinator_decision", "assignment-accepted",
+                 dict(assignment_ref=ref, decision="accept", rationale="Worker result accepted."),
+                 origin="coordinator", assignment_ref=ref)
+    cap = build_capsule(store, task_id, dict(role="coordinator"))
+    acceptance = cap["sections"]["continuation_intent"]["task_acceptance"]
+    assert acceptance["accepted"] is False
+    assert acceptance["task_accept_decision_cursor"] is None
+    append_event(store, task_id, "coordinator_decision", "task-accept-attempt",
+                 dict(assignment_ref="task", decision="accept", rationale="Claimed complete."),
+                 origin="coordinator", assignment_ref="task")
+    cap = build_capsule(store, task_id, dict(role="coordinator"))
+    acceptance = cap["sections"]["continuation_intent"]["task_acceptance"]
+    assert acceptance["task_accept_decision_cursor"] is not None
+    assert acceptance["accepted"] is False  # durable task state has not accepted it
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO task_orchestration (task_id,state,updated_at) VALUES (?,'accepted',?) "
+            "ON CONFLICT(task_id) DO UPDATE SET state='accepted'",
+            (task_id, store._now()),
+        )
+    cap = build_capsule(store, task_id, dict(role="coordinator"))
+    assert cap["sections"]["continuation_intent"]["task_acceptance"]["accepted"] is True
 
 
 # -- malicious/inaccurate summary cannot change structural facts --------
@@ -382,7 +472,7 @@ def test_normal_capsule_is_not_oversize(tmp_path):
 
 def test_read_capsule_mcp_tool_coordinator(tmp_path):
     store, task_id, coordinator = _task(tmp_path)
-    result = mcp_tools.dispatch(store, coordinator, "read_capsule", dict(request_key="rq1"))
+    result = mcp_tools.dispatch(store, coordinator, "read_capsule", {})
     assert result["recipient"] == dict(role="coordinator")
     assert result["for_task_id"] == task_id
     assert "task_id" not in result  # leak-guard field never present at top level
@@ -392,7 +482,7 @@ def test_read_capsule_mcp_tool_worker_own_only(tmp_path):
     store, task_id, coordinator = _task(tmp_path)
     d1 = _delegate(store, coordinator)
     worker = _provision_worker(store, task_id, coordinator, d1["assignment_ref"])
-    result = mcp_tools.dispatch(store, worker, "read_capsule", dict(request_key="rq1"))
+    result = mcp_tools.dispatch(store, worker, "read_capsule", {})
     assert result["recipient"]["role"] == "worker"
     assert result["recipient"]["assignment_ref"] == d1["assignment_ref"]
 
@@ -404,7 +494,7 @@ def test_read_capsule_schema_accepts_no_task_or_recipient_selector(tmp_path):
     own resolved identity (see mcp_tools._shared_read_capsule)."""
     store, task_id, coordinator = _task(tmp_path)
     with pytest.raises(StoreError, match="invalid_arguments"):
-        mcp_tools.dispatch(store, coordinator, "read_capsule", dict(request_key="rq1", task_id="t_other"))
+        mcp_tools.dispatch(store, coordinator, "read_capsule", dict(task_id="t_other"))
 
 
 def test_read_capsule_unprovisioned_worker_channel_refused_cleanly(tmp_path):
@@ -419,7 +509,7 @@ def test_read_capsule_unprovisioned_worker_channel_refused_cleanly(tmp_path):
         db.commit()
     worker = resolve_channel(store, channel_id, secret)
     with pytest.raises(StoreError, match="capsule_unavailable"):
-        mcp_tools.dispatch(store, worker, "read_capsule", dict(request_key="rq1"))
+        mcp_tools.dispatch(store, worker, "read_capsule", {})
 
 
 def test_at_revision_bounds_constraints_section(tmp_path):

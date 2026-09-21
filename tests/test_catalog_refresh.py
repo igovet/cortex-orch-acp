@@ -14,10 +14,15 @@ import stat
 import time
 from pathlib import Path
 
+import pytest
+
 from cortex_runtime.catalog import codex_debug_models, refresh as catalog_refresh, store as catalog_store
 from cortex_runtime.catalog.discovery import build_catalog, parse_observation
 from cortex_runtime.catalog.evidence import Fact, ProvenanceSource
+from cortex_runtime.acp import config_options as acp_config_options
 from cortex_runtime.connections.model import AuthMode, ConnectionRecord, ConnectionState, EngineNativeDir
+from cortex_runtime.engine.client import EngineProtocolError
+from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter
 
 from engine_fakes import (
     build_codex_npm_install,
@@ -114,6 +119,37 @@ def test_refresh_never_sends_prompt(tmp_path):
     assert "session/new" in logged_methods
 
 
+def test_live_catalog_capture_keeps_codex_per_model_effort_ceiling(tmp_path, monkeypatch):
+    """A live session capture must not overwrite per-model Codex efforts.
+
+    The ACP session/new payload can expose one shared fallback set, while
+    Codex's own offline model catalog has the authoritative per-model set.
+    This is the same enrichment used by prompt-free refresh and must also be
+    applied by the ordinary worker/coordinator session capture path.
+    """
+    environ = isolated_environ(tmp_path)
+    record = _connection("cn_" + "a" * 12, "codex-acp")
+    options = _load_options("codex_acp_config_options.json")
+    manager = type("Manager", (), {
+        "_install": object(),
+        "observed_config_options": lambda self, _session: options,
+    })()
+    monkeypatch.setattr(
+        catalog_refresh, "_resolve_install_for_refresh", lambda _record, _environ: manager._install,
+    )
+    monkeypatch.setattr(
+        catalog_refresh, "_codex_effort_ceiling",
+        lambda _record, _install, _environ, timeout: {"model-a": ("low",), "model-b": ("high",)},
+    )
+    adapter = EngineSessionManagerAdapter(lambda _cid: record, lambda _tid: str(tmp_path), environ=environ)
+    adapter._capture_catalog_observation(manager, record, "session-1")
+
+    entries = acp_config_options.selectable_entries_from_snapshots({record.id: record}, environ)
+    by_model = {entry.route.model: entry.route.supported_parameters for entry in entries}
+    assert dict(by_model["model-a"])["thought_level"] == "low"
+    assert dict(by_model["model-b"])["thought_level"] == "high"
+
+
 def test_refresh_module_never_references_session_manager():
     """perform_refresh must never even construct an EngineSessionManager
     (whose prompt_turn method exists) -- a static source check on top of
@@ -174,6 +210,59 @@ def test_empty_config_options_is_a_recorded_failure_not_a_crash(tmp_path):
     assert outcome.attempted and not outcome.success
     assert outcome.reason == "no_config_options_advertised"
     assert outcome.snapshot_id is None
+
+
+def test_authentication_required_refresh_failure_is_actionable_and_redacted(monkeypatch, tmp_path):
+    record, environ = _fake_record(tmp_path, default_scenario())
+    secret = "Bearer super-secret-token"
+
+    def refuse_session(*args, **kwargs):
+        raise EngineProtocolError(-32000, f"Authentication required: {secret}", {"token": secret})
+
+    monkeypatch.setattr(catalog_refresh, "_read_catalog_from_engine", refuse_session)
+    outcome = catalog_refresh.perform_refresh(record, str(tmp_path), environ=environ, timeout=5.0)
+
+    assert outcome.attempted and not outcome.success
+    assert outcome.reason == "authorization_required"
+    assert secret not in repr(outcome)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        EngineProtocolError(-32000, "provider-specific wording"),
+        EngineProtocolError("Authentication required", None),
+    ],
+)
+def test_authentication_required_classification_accepts_only_bounded_protocol_signals(monkeypatch, tmp_path, error):
+    record, environ = _fake_record(tmp_path, default_scenario())
+    monkeypatch.setattr(catalog_refresh, "_read_catalog_from_engine", lambda *args, **kwargs: (_ for _ in ()).throw(error))
+
+    outcome = catalog_refresh.perform_refresh(record, str(tmp_path), environ=environ, timeout=5.0)
+
+    assert outcome.reason == "authorization_required"
+
+
+def test_different_protocol_code_with_authentication_text_stays_generic(monkeypatch, tmp_path):
+    record, environ = _fake_record(tmp_path, default_scenario())
+    error = EngineProtocolError(-32001, "Authentication required")
+    monkeypatch.setattr(catalog_refresh, "_read_catalog_from_engine", lambda *args, **kwargs: (_ for _ in ()).throw(error))
+
+    outcome = catalog_refresh.perform_refresh(record, str(tmp_path), environ=environ, timeout=5.0)
+
+    assert outcome.reason == "engine_unreachable:EngineProtocolError"
+
+
+def test_other_protocol_error_remains_generic_and_does_not_echo_engine_text(monkeypatch, tmp_path):
+    record, environ = _fake_record(tmp_path, default_scenario())
+    secret = "api-key=super-secret"
+    error = EngineProtocolError(-32001, secret)
+    monkeypatch.setattr(catalog_refresh, "_read_catalog_from_engine", lambda *args, **kwargs: (_ for _ in ()).throw(error))
+
+    outcome = catalog_refresh.perform_refresh(record, str(tmp_path), environ=environ, timeout=5.0)
+
+    assert outcome.reason == "engine_unreachable:EngineProtocolError"
+    assert secret not in repr(outcome)
 
 
 # --- selection is never blocked by a refresh --------------------------------
@@ -371,6 +460,7 @@ def test_refresh_narrows_per_model_efforts_when_install_is_real_and_verifiable(t
     debug_models_body = f"import sys; sys.stdout.write({payload!r})"
     launch_command, _binary = build_codex_npm_install(
         tmp_path / "install", engine_scenario_path, codex_debug_models_body=debug_models_body,
+        private_adapter_shape=True,
     )
     record = make_connection_record(new_connection_id(), launch_command=launch_command, engine="codex-acp", environ=environ)
 

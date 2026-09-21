@@ -112,6 +112,10 @@ class EngineEvent:
     # card can only say that *something* happened.
     tool_call_locations: tuple | None = None
     tool_call_content: tuple | None = None
+    # ACP-defined rawInput/rawOutput are optional structured display data.
+    # They are redacted at the incoming ACP client boundary before replay.
+    tool_call_raw_input: object | None = None
+    tool_call_raw_output: object | None = None
     # T035: one engine ``session/update`` whose only purpose is to be
     # shown, forwarded verbatim (see engine.session_manager
     # ._DISPLAY_ONLY_UPDATES for exactly which kinds, and why the engine's

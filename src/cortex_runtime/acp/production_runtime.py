@@ -23,7 +23,7 @@ from ..configuration.service import ConfigurationService
 from ..delegation.live_adapters import (
     ConfigurationServiceSnapshotSource, EngineSessionManagerAdapter,
 )
-from ..delegation.workspace_isolation import IsolatedSnapshotWorkspaceProvisioner
+from ..delegation.workspace_isolation import DirectProjectWorkspaceProvisioner
 from ..contracts import StoreError
 from ..portable.errors import PortableError
 from ..project_storage import canonical_project, migrate_legacy_project_storage, project_store_directory
@@ -148,13 +148,23 @@ class ProductionOrchestratingRuntime:
         except StoreError as error:
             self.last_reconcile = str(error)
         configuration_service = ConfigurationService(store)
-        # T025: one isolated-snapshot provisioner per project (not per task
-        # -- ``WorkspaceProvisioner.create`` only ever receives an
-        # ``attempt_id``; see that class's own docstring for how it
-        # resolves the owning task). Falls back to the pre-T025 shared
-        # project root automatically (recorded, visible) whenever a
-        # snapshot cannot safely be taken.
-        workspace_provisioner = IsolatedSnapshotWorkspaceProvisioner(store, str(project))
+        # One project-bound provisioner per project. Both worker and
+        # coordinator sessions use the exact ACP project root opened in Zed,
+        # so the coordinator observes worker edits made during the same turn.
+        # Mutation refusal and the project-change backstop remain active; this
+        # path intentionally does not claim OS-level read-only containment.
+        # Workers edit the exact project directory supplied by the ACP host.
+        # The provisioner holds a durable per-project writer lock for each
+        # live worker; there is no private-copy execution fallback.
+        workspace_provisioner = DirectProjectWorkspaceProvisioner(store, str(project))
+        def resolve_workspace(binding_id, launch):
+            if binding_id == "shared_project_root":
+                return workspace_provisioner.coordinator_root_for(launch["task_id"])[0]
+            root = workspace_provisioner.root_for(binding_id)
+            if not root:
+                raise StoreError("workspace_snapshot_unavailable")
+            return root
+
         adapter = EngineSessionManagerAdapter(
             self._connection_record_factory(configuration_service), lambda task_id: str(project),
             environ=self._environ,
@@ -171,30 +181,15 @@ class ProductionOrchestratingRuntime:
             # store is supplied (see ``EngineSessionManagerAdapter``'s own
             # docstring); this project's real store is exactly that.
             store=store,
-            # T035 (FINDING-12/-13 closure): "shared_project_root" is the
-            # literal sentinel ``acp.orchestrating_runtime`` passes as
-            # ``workspace_binding_id`` only for a *coordinator* open (see
-            # that module's ``_open_coordinator_session`` call site) -- no
-            # real ``workspace_snapshots`` row is ever keyed by that exact
-            # string, so ``root_for`` on it always returned ``None`` and
-            # this used to fall straight through to the real, writable
-            # ``project`` -- the coordinator's whole prior workspace. Route
-            # it instead to ``coordinator_root_for``'s read-only snapshot;
-            # every other (worker) binding id is unaffected. See that
-            # method's own docstring for exactly what this does and does
-            # not prevent.
-            workspace_resolver=lambda binding_id, launch: (
-                workspace_provisioner.coordinator_root_for(launch["task_id"])[0]
-                if binding_id == "shared_project_root"
-                else workspace_provisioner.root_for(binding_id) or str(project)
-            ),
-            # EXT-01 finding #1 fix: an isolated worker's ``workspace_root``
-            # above is a throwaway copy that excludes both ``.git`` and
-            # ``.cortex`` -- it must never be handed to the engine's Cortex
-            # MCP server as the project root (that store does not exist
-            # there). This project's one real store always lives at
-            # ``project`` itself, regardless of which workspace a given
-            # attempt executes in.
+            # ``shared_project_root`` is the literal sentinel used for the
+            # coordinator and direct-project workers. Resolve it through the
+            # project-bound provisioner so the engine cwd is always the exact
+            # Zed project, never a stale coordinator snapshot.
+            workspace_resolver=resolve_workspace,
+            workspace_lock_factory=workspace_provisioner.writer_lock,
+            broker_mcp=True,
+            # The Cortex MCP server and both engine roles use the exact
+            # project root opened by the ACP client.
             project_root_factory=lambda task_id: str(project),
         )
         # T028: bounded owned-resource reaper sweep, once per project at
@@ -232,6 +227,7 @@ class ProductionOrchestratingRuntime:
         self, task_id, session_id, content, emit_update, cancel_event, *,
         project_root=None, source_origin=None, source_event_id=None, host_elicitor=None,
         emit_tool_call=None, host_permission_requester=None, host_fs_requester=None,
+        host_mcp_servers=None, prompt_blocks=None, client_surface=None,
     ):
         if not project_root:
             raise RouteUnresolved("project_root_unresolved")
@@ -242,6 +238,9 @@ class ProductionOrchestratingRuntime:
                 source_origin=source_origin, source_event_id=source_event_id, host_elicitor=host_elicitor,
                 host_permission_requester=host_permission_requester, host_fs_requester=host_fs_requester,
                 emit_tool_call=emit_tool_call,
+                host_mcp_servers=host_mcp_servers,
+                prompt_blocks=prompt_blocks,
+                client_surface=client_surface,
             )
         except PortableError as error:
             # Every qualification/configuration/ownership refusal this
@@ -255,6 +254,11 @@ class ProductionOrchestratingRuntime:
         for runtime in list(self._runtimes.values()):
             runtime.cancel(session_id)
 
+    def cancel_task(self, task_id, session_id, *, project_root, emit_tool_call=None):
+        """Forward Paseo's task-wide ``session/cancel`` to the owning project."""
+        runtime = self._runtime_for_project(project_root)
+        return runtime.cancel_task(task_id, session_id, emit_tool_call=emit_tool_call)
+
     def disconnect(self, session_id):
         """T028: forwarded from ``acp.agent.Agent._handle_eof``/
         ``handle_writer_closed`` for every session on the disconnected
@@ -264,9 +268,9 @@ class ProductionOrchestratingRuntime:
 
     # -- T020 /cortex-stop / /cortex-answer entrypoints ------------------
 
-    def stop_task(self, task_id, session_id, emit_update, *, project_root):
+    def stop_task(self, task_id, session_id, emit_update, *, project_root, emit_tool_call=None):
         runtime = self._runtime_for_project(project_root)
-        return runtime.stop_task(task_id, session_id, emit_update)
+        return runtime.stop_task(task_id, session_id, emit_update, emit_tool_call=emit_tool_call)
 
     def answer_question(self, task_id, session_id, question, text, emit_update, cancel_event, *, project_root, emit_tool_call=None):
         runtime = self._runtime_for_project(project_root)

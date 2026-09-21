@@ -35,7 +35,12 @@ File shape (JSON)::
 Location, read in precedence order (first one that exists on disk wins;
 never merged across locations): ``<project>/.cortex/route-policy.json``,
 the path named by the ``CORTEX_ROUTE_POLICY`` environment variable,
-``~/.cortex/route-policy.json``, ``~/.config/cortex/route-policy.json``.
+``$XDG_CONFIG_HOME/cortex/route-policy.json`` (or
+``~/.config/cortex/route-policy.json`` when ``XDG_CONFIG_HOME`` is unset),
+then the legacy-compatible ``~/.cortex/route-policy.json`` location. The
+XDG location is deliberately before the legacy home location so the loader
+agrees with ``scripts/cortex_acp_setup.py`` and with the rest of the user
+configuration store.
 Absent everywhere means "no constraint beyond the permission ceiling" --
 never a failure, and never means every role is denied.
 """
@@ -63,7 +68,10 @@ class RoutePolicyEntry:
     def matches(self, engine: str, model: str | None) -> bool:
         if self.engine != engine:
             return False
-        return self.model == WILDCARD or model is None or self.model == model
+        # An unknown model cannot satisfy a model-specific policy. Worker
+        # route selection binds the first named model before this check;
+        # direct dispatch authorization fails closed if it remains unknown.
+        return self.model == WILDCARD or self.model == model
 
     def permits_effort(self, effort: str) -> bool:
         return WILDCARD in self.efforts or effort in self.efforts
@@ -116,7 +124,7 @@ class RoutePolicy:
 _DEFAULT_BUCKET = "\x00default"
 
 
-def render_table(policy: RoutePolicy) -> str:
+def render_table(policy: RoutePolicy, *, available_engines: set[str] | frozenset[str] | None = None) -> str:
     """D-T035-04: a compact role -> allowed-routes table, one line per role
     actually named in ``policy`` (its own entries, or the ``default``
     bucket when the file names one) -- delivered with the coordinator's
@@ -134,6 +142,8 @@ def render_table(policy: RoutePolicy) -> str:
     if policy.default is not None:
         names.append(_DEFAULT_BUCKET)
     def _routes(entries, separator):
+        if available_engines is not None:
+            entries = tuple(entry for entry in entries if entry.engine in available_engines)
         return separator.join(
             f"{entry.engine}/{entry.model} {{{','.join(sorted(entry.efforts))}}}"
             + (f" default={entry.default_effort}" if entry.default_effort else "")
@@ -145,17 +155,18 @@ def render_table(policy: RoutePolicy) -> str:
         if name == _DEFAULT_BUCKET:
             continue
         entries = policy.roles.get(name)
-        if entries:
-            lines.append(f"{reverse_alias.get(name, name)}: {_routes(entries, ' | ')}")
+        rendered = _routes(entries or (), ' | ')
+        if rendered:
+            lines.append(f"{reverse_alias.get(name, name)}: {rendered}")
     # The fallback never takes the "<role>: <routes>" shape of a row above.
     # Twice now a coordinator has read that shape as a role name and
     # delegated with it -- first `role="default"`, then, after that was
     # relabelled, `role="any other role"`, burning a delegation each time.
     # A trailing sentence cannot be mistaken for a row.
     if policy.default:
-        lines.append(
-            "Any role not listed above may use " + _routes(policy.default, " or ") + "."
-        )
+        rendered = _routes(policy.default, " or ")
+        if rendered:
+            lines.append("Any role not listed above may use " + rendered + ".")
     return "\n".join(lines)
 
 
@@ -190,8 +201,16 @@ def _candidate_paths(project_root: str | os.PathLike | None, environ: Mapping[st
     env_path = environ.get(ENV_VAR)
     if env_path:
         paths.append(Path(env_path))
+    # The setup command writes to the same XDG root used by the connection
+    # registry.  Keep the fallback for an unset (or relative, invalid) XDG
+    # value identical to setup's behaviour, and retain ~/.cortex only as a
+    # lower-precedence compatibility location.  A duplicate fallback is
+    # omitted so malformed-file first-match semantics remain unambiguous.
+    raw_xdg = environ.get("XDG_CONFIG_HOME") or ""
+    xdg_base = Path(raw_xdg) if raw_xdg.startswith("/") else home / ".config"
+    xdg_path = xdg_base / "cortex" / "route-policy.json"
+    paths.append(xdg_path)
     paths.append(home / ".cortex" / "route-policy.json")
-    paths.append(home / ".config" / "cortex" / "route-policy.json")
     return paths
 
 

@@ -290,6 +290,14 @@ def test_other_enclosing_git_repo_containing_xdg_config_home_still_rejected(tmp_
     assert excinfo.value.code == "connection_storage_under_project"
 
 
+def test_home_global_acp_session_marker_does_not_block_user_configuration(tmp_path):
+    home = tmp_path / "home"
+    (home / ".cortex").mkdir(parents=True)
+    environ = dict(HOME=str(home))
+    assert registry.config_root(environ) == home / ".config" / "cortex"
+    assert registry.state_root(environ) == home / ".local" / "state" / "cortex"
+
+
 def test_cortex_marker_ancestor_still_rejected_even_under_home(tmp_path):
     home = tmp_path / "home"
     (home / ".cortex" / "xdg-config").mkdir(parents=True)

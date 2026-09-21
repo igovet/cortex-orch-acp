@@ -65,6 +65,7 @@ class FakeEngine:
     def __init__(self, scenario: dict):
         self.scenario = scenario
         self._cancel_events: dict[str, threading.Event] = {}
+        self._prompt_counts: dict[str, int] = {}
         self._client_request_id = 1_000_000
         # T014: pending requests *this* fake engine issued to the client
         # (session/request_permission, fs/*, terminal/*), keyed by the id
@@ -78,6 +79,13 @@ class FakeEngine:
             try:
                 with open(env_dump_path, "w", encoding="utf-8") as handle:
                     json.dump(sorted(os.environ.keys()), handle)
+            except OSError:
+                pass
+        env_dump_values_path = self.scenario.get("env_dump_values_path")
+        if env_dump_values_path:
+            try:
+                with open(env_dump_values_path, "w", encoding="utf-8") as handle:
+                    json.dump(dict(os.environ), handle)
             except OSError:
                 pass
         if self.scenario.get("ignore_sigterm"):
@@ -294,6 +302,13 @@ class FakeEngine:
 
     def _handle_prompt(self, request_id, params) -> None:
         session_id = params.get("sessionId")
+        prompt_number = self._prompt_counts.get(session_id, 0)
+        self._prompt_counts[session_id] = prompt_number + 1
+        prompt_log_path = self.scenario.get("prompt_log_path")
+        if prompt_log_path:
+            with open(prompt_log_path, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps(dict(session_id=session_id, prompt_number=prompt_number,
+                                             prompt=params.get("prompt")), ensure_ascii=False) + "\n")
         # Cancellation is scoped to one turn, never sticky across a later
         # turn on the same session -- reset at the start of every prompt
         # (matches real ACP semantics: a fresh session/prompt call starts a
@@ -342,7 +357,10 @@ class FakeEngine:
             return
 
         honor_cancel = behavior != "ignore_cancel"
-        for update in self.scenario.get("prompt_updates") or []:
+        updates = self.scenario.get("prompt_updates") or []
+        if behavior == "updates_then_wait_for_cancel_once" and prompt_number > 0:
+            updates = []
+        for update in updates:
             if honor_cancel and cancel_event.is_set():
                 break
             delay = update.get("delay", 0.0)
@@ -352,15 +370,31 @@ class FakeEngine:
             if behavior == "malformed_then_normal":
                 _write_malformed(self.scenario.get("malformed_mode") or "non_json")
 
+        if behavior == "updates_then_wait_for_cancel_once" and prompt_number == 0:
+            cancel_event.wait()
+            _result(request_id, dict(stopReason="cancelled"))
+            return
+
         if behavior == "client_request":
             request = self.scenario.get("client_request") or dict(method="request_permission", params={})
             self._client_request_id += 1
             _write_json(dict(jsonrpc="2.0", id=self._client_request_id, method=request["method"], params=request.get("params") or {}))
-        elif behavior == "client_requests_sequence":
+        elif behavior in {"client_requests_sequence", "client_requests_sequence_skip_role_refusal"}:
             # T014: send each scripted agent->client request in turn,
             # waiting for (and logging, if client_reply_log_path is set)
-            # each reply before sending the next.
-            for request in self.scenario.get("client_requests") or []:
+            # each reply before sending the next. The role-refusal variant
+            # lets the coordinator react to Cortex's new instruction without
+            # replaying the scripted bad action, while fresh worker sessions
+            # still exercise their own permission requests.
+            requests = self.scenario.get("client_requests") or []
+            prompt_blocks = params.get("prompt") or []
+            prompt_text = " ".join(
+                block.get("text", "") for block in prompt_blocks
+                if isinstance(block, dict) and isinstance(block.get("text"), str)
+            )
+            if behavior == "client_requests_sequence_skip_role_refusal" and "Cortex role restriction" in prompt_text:
+                requests = []
+            for request in requests:
                 self._send_client_request(request, wait_timeout=request.get("wait_timeout", 5.0))
         elif behavior == "client_requests_fire":
             # T014 review: send every scripted request back-to-back with no

@@ -2,42 +2,22 @@
 
 ## 1.0.0 (unreleased)
 
-Cortex is now an ACP project unrelated to Codex. Reset the semantic version and
-reset the package/runtime version scheme accordingly: stamps move from
-`1.16.0+codex.sha256.<16 hex>` to `1.0.0+sha256.<16 hex>`, where the 16 hex
-characters remain the first 16 characters of the unchanged payload-digest
-computation. The manifest, MCP server, package validator/candidate preparation
-and the worker-skill live execution gate now accept only the new format.
+Cortex is an incoming ACP stdio agent with a project-local runtime and
+outgoing Codex and Claude ACP engines. The 1.0.0 release resets the package
+identity to a content-stamped ACP payload.
 
-Remove the Codex plugin harness entirely (T033): the owned MITM/gateway
-supervisor and its aiohttp/zstandard dependency, the pinned-dependency pip
-installer, native `~/.codex/agents` profile registration, the local
-lifecycle hook dispatcher (`hooks.json`/`hooks.py`), the Codex-native
-unchanneled MCP `_meta` identity adapter and its `server.py` dispatch
-branch, the native-index host-source reader, and the `phase2_cli_*`
-external-evaluator preparation scripts and tests. `server.py` now requires
-a trusted channel for every `tools/call`. Relocate the package
-identity/stamp out of the deleted `.codex-plugin/plugin.json` into
-`./package-identity.json` (same `1.0.0+sha256.<16 hex>`
-scheme and stamp/validate semantics), and relocate the still-needed
-payload-digest and dev-candidate dependency-identity helpers out of the
-deleted `cortex_runtime.runtime.state` into `scripts/cortex_package.py`.
-There is no legacy-comparison/rollback operation to the removed harness,
-by explicit product decision. Live product claims for the remaining
-native/ACP client surface stay pending T035–T037.
-Delete the now-dead `execution_boundary.py` (its only caller, `hooks.py`,
-was already removed above) and its dedicated
-`tests/test_host_dispatch_contract.py`; keep `tests/test_diagnostic_boundary.py`'s
-still-live `diagnostic_boundary.py` coverage and drop only its
-`execution_boundary`-dependent case. Correct `SECURITY.md`, `README.md`,
-and `docs/project/host-compatibility.md`, which still described
-`PreToolUse`-hook enforcement (app-thread-message denial, private-root
-deny, host-dispatch-envelope authorization, bundled-skill-read allowance,
-role capability sets) as live; they now state plainly that no such hook
-exists and describe the actual ACP-path containment
-(`engine/fs_bridge.py`, `engine/terminal_bridge.py`,
-`engine/resource_policy.py`, `engine/resource_binding.py`) and its
-narrower scope and gap.
+This revision adds durable requirements, assignments and attempts; isolated
+worker snapshots; exact staged candidates; candidate-bound checks; recoverable
+integration; and explicit revision continuation. Instruction and context packets
+record their sources and actual delivery, including session replacement. Report
+publication remains separate from worker completion and coordinator decision.
+
+The retired Codex plugin, gateway, native-subagent observer, capability manifest,
+old hook storage and phase evaluation harnesses are removed from the active
+package, tests and documentation. All 23 profiles and eight report templates
+remain supported. Offline checks establish source behavior only. Real Zed and
+engine qualification is tracked in docs/acp/real-client-runbook.md and remains
+unverified until retained live observations exist.
 
 ## 1.15.9
 

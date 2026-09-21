@@ -32,7 +32,7 @@ class _FakeManager:
     def __init__(self, events):
         self._events = list(events)
 
-    def prompt_turn(self, session_ref, message):
+    def prompt_turn(self, session_ref, message, *, prompt_blocks=None):
         for event in self._events:
             yield event
 

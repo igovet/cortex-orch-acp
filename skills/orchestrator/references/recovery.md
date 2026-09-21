@@ -1,6 +1,6 @@
 # Recovery after actual context loss
 
-Load cortex:context-compaction and resume the same native task. Recover current
+Read `context-compaction` through `read_skill` and resume the same ACP task. Recover current
 pipeline, user sources/attachments and the evidence necessary to restore outcome,
 causal model, ownership, revision and open checks. Inspect potentially partial edits
 before mutation. Reuse the same owner/context where possible; timeout alone does not

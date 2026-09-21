@@ -47,6 +47,124 @@ _KEY_VALUE_SECRET = re.compile(
 _LONG_OPAQUE_TOKEN = re.compile(r"\b(?=[A-Za-z0-9_\-]*\d)[A-Za-z0-9_\-]{24,}\b")
 
 
+class StreamingRedactor:
+    """Redact a text stream without exposing a secret split across chunks.
+
+    Text ending in a lexical word run is retained until a delimiter or the
+    end of the stream.  This is the smallest useful holdback for the token
+    and credential key/value expressions above: a chunk containing the first
+    half of a credential therefore cannot be emitted before its second half
+    arrives.  All released text is scrubbed as a complete unit, and ``flush``
+    is equivalent to ``scrub_text`` over the concatenated input.
+    """
+
+    _MAX_PENDING = 4096
+
+    def __init__(self, *, max_chars: int = MAX_TEXT_CHARS) -> None:
+        self.max_chars = max_chars
+        self._pending = ""
+        self._discarding = False
+
+    @staticmethod
+    def _hold_start(text: str) -> int:
+        # Keep the entire current whitespace-delimited lexical field. A
+        # secret may be split at every possible character boundary, so no
+        # prefix of that field is safe to emit until its delimiter arrives.
+        digest_prefix = re.search(
+            r"(?is)(?:sha[- ]?256|hash|digest)\s*:\s*[a-f0-9]*$", text,
+        )
+        if digest_prefix:
+            return digest_prefix.start()
+        digest_field = re.search(
+            r"(?is)(?:sha[- ]?256|hash|digest)\s*:\s*[a-f0-9]{64}\s*$", text,
+        )
+        if digest_field:
+            return digest_field.start()
+        digest_complete = re.search(
+            r"(?is)(?:sha[- ]?256|hash|digest)\s*:\s*[a-f0-9]{64}\b", text,
+        )
+        if digest_complete:
+            return digest_complete.start()
+        if text and text[-1].isspace():
+            stripped = text.rstrip()
+            field = re.search(r"(?:^|\s)([^\s]+)$", stripped)
+            if field:
+                token = field.group(1)
+                if (re.fullmatch(r"(?i)(?:bearer|token)", token)
+                        or re.search(r"(?i)(?:api[_-]?key|token|secret|password|authorization)\s*[=:]$", stripped)
+                        or re.search(r"(?i)(?:sha[- ]?256|hash|digest)\s*:$", stripped)):
+                    return field.start(1)
+            return len(text)
+        match = re.search(r"\s+[^\s]*$", text)
+        if not match:
+            start = 0
+        else:
+            start = match.start() + 1
+        prefix = text[:start].rstrip()
+        # Bearer/token credentials and SHA-256 claims use two lexical fields;
+        # retain their prefix together with the value so the scrubber sees
+        # the complete expression and accepted-final digest checks still
+        # receive the exact candidate text.
+        if re.search(r"(?i)(?:bearer|token)$", prefix):
+            start = prefix.rfind(" ") + 1
+        elif re.search(r"(?i)sha[- ]?256\s*:$", prefix):
+            start = prefix.rfind(" ") + 1
+        elif re.search(r"(?i)(?:hash|digest)\s*:$", prefix):
+            start = prefix.rfind(" ") + 1
+        elif re.search(
+            r"(?i)(?:api[_-]?key|token|secret|password|authorization)\s*[=:][^\s]*$",
+            prefix,
+        ):
+            start = prefix.rfind(" ") + 1
+        return start
+
+    def push(self, value: Any) -> str:
+        text = value if isinstance(value, str) else str(value)
+        if not text:
+            return ""
+        if self._discarding:
+            boundary = re.search(r"\s", text)
+            if boundary is None:
+                return ""
+            self._discarding = False
+            text = text[boundary.end():]
+            if not text:
+                return ""
+        self._pending += text
+        if len(self._pending) > self._MAX_PENDING:
+            self._pending = ""
+            self._discarding = True
+            return "[REDACTED_STREAM]"
+        hold = self._hold_start(self._pending)
+        released, self._pending = self._pending[:hold], self._pending[hold:]
+        return self._scrub(released)
+
+    def flush(self, *, preserve_labeled_digests: bool = False) -> str:
+        pending, self._pending = self._pending, ""
+        self._discarding = False
+        return self._scrub(pending, preserve_labeled_digests=preserve_labeled_digests) if pending else ""
+
+    def _scrub(self, value: str, *, preserve_labeled_digests: bool = False) -> str:
+        """Scrub a released field while retaining a labelled SHA-256 value.
+
+        A labelled digest is evidence for the accepted-final guard, not a
+        credential. Keeping its exact 64 hex characters lets that guard make
+        the comparison after streaming; unlabelled long numeric runs still
+        use the ordinary opaque-token redaction rule.
+        """
+        labelled = re.match(
+            r"(?is)^(.*?\b(?:sha[- ]?256|hash|digest)\s*:\s*)([a-f0-9]{64})(?=$|[\s.,)\]:])(.*)$",
+            value,
+        )
+        if labelled and preserve_labeled_digests:
+            return (
+                scrub_text(labelled.group(1), max_chars=self.max_chars)
+                + labelled.group(2)
+                + scrub_text(labelled.group(3) or "", max_chars=self.max_chars)
+            )
+        return scrub_text(value, max_chars=self.max_chars)
+
+
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:16]
 

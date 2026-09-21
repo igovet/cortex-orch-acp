@@ -62,6 +62,8 @@ from . import store as catalog_store
 from .discovery import build_catalog, parse_observation
 
 DEFAULT_REFRESH_TIMEOUT_SECONDS = 30.0
+_ACP_AUTHENTICATION_REQUIRED_CODE = -32000
+_AUTHENTICATION_REQUIRED_TEXT = "authentication required"
 
 
 def _now() -> str:
@@ -144,6 +146,33 @@ def _resolve_install_for_refresh(record, environ):
         return None
 
 
+def _is_authentication_required_error(error: BaseException) -> bool:
+    """Return whether *error* is the ACP authentication-required response.
+
+    The JSON-RPC code is the authoritative signal.  The exact, bounded text
+    fallback also covers older/partially adapted engines that construct an
+    ``EngineProtocolError`` with only the standard phrase.  We deliberately
+    inspect neither ``data`` nor arbitrary exception text: those fields may
+    contain credentials, provider details, or other engine-controlled data.
+    """
+    from ..engine.client import EngineProtocolError
+
+    if not isinstance(error, EngineProtocolError):
+        return False
+    if getattr(error, "code", None) == _ACP_AUTHENTICATION_REQUIRED_CODE:
+        return True
+    code = getattr(error, "code", None)
+    message = getattr(error, "message", None)
+    # A text-only fallback is accepted only when the other protocol field is
+    # absent.  A different numeric code paired with an engine-authored phrase
+    # remains an unknown protocol failure and must stay fail-closed.
+    if code is None and isinstance(message, str) and message.strip().casefold() == _AUTHENTICATION_REQUIRED_TEXT:
+        return True
+    if message is None and isinstance(code, str) and code.strip().casefold() == _AUTHENTICATION_REQUIRED_TEXT:
+        return True
+    return False
+
+
 def _codex_effort_ceiling(record, install, environ, timeout):
     """Best-effort per-model reasoning-effort supplement (T035 follow-up
     "per-model efforts") for a codex-acp connection with a verified
@@ -192,6 +221,8 @@ def perform_refresh(
             record, workspace_root, environ=environ, timeout=timeout, install=install,
         )
     except Exception as error:  # noqa: BLE001 - an engine launch/call failure is never fatal
+        if _is_authentication_required_error(error):
+            return RefreshOutcome(record.id, True, False, "authorization_required", None, at)
         return RefreshOutcome(record.id, True, False, f"engine_unreachable:{type(error).__name__}", None, at)
     if not raw_options:
         return RefreshOutcome(record.id, True, False, "no_config_options_advertised", None, at)

@@ -156,14 +156,14 @@ def test_isolated_worker_real_mcp_subprocess_uses_project_root_not_workspace(tmp
     # there would be no store there at all and this would fail closed with
     # task_not_bound.
     replies = _wire_call([sys.executable, "-B"], [str(CORTEX_PY)], wire_env, _init_and("tools/call", dict(
-        name="list_sources", arguments=dict(request_key="list-ext01"),
+        name="list_sources", arguments={},
     )))
     listed = json.loads(replies[1]["result"]["content"][0]["text"])
     assert listed["entries"], "expected the bootstrap source to be readable from the real project store"
     source_ref = listed["entries"][0]["source_ref"]
 
     replies = _wire_call([sys.executable, "-B"], [str(CORTEX_PY)], wire_env, _init_and("tools/call", dict(
-        name="read_source", arguments=dict(source_ref=source_ref, request_key="read-ext01"),
+        name="read_source", arguments=dict(source_ref=source_ref),
     )))
     read = json.loads(replies[1]["result"]["content"][0]["text"])
     assert "design notes" in read.get("chunk", "")

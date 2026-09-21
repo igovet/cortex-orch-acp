@@ -1,6 +1,16 @@
 # Portable role instructions and delegation provisioning (T015)
 
-Scope: preserve the T001 specialization inventory from a portable canonical
+This page preserves the T015 design and test scope. Its statements about
+fake-only provisioning, the then-current delegation operation list, and
+Claude instruction delivery are historical snapshots, not the current ACP
+runtime contract. For live wiring, event behavior, candidate checks and
+current operations, use [orchestration](orchestration.md); for the exact
+delivery mechanisms and their evidence limits, use the
+[Codex](codex-acp-adapter.md) and
+[Claude](claude-agent-acp-adapter.md) adapter pages. Current tool arguments
+are defined only by the schemas the server advertises.
+
+Historical T015 scope: preserve the T001 specialization inventory from a portable canonical
 source per role, expose a small internal delegation interface, and provision
 its technical execution context (workspace/channel/config/context/engine
 session) atomically and recoverably. Production wiring of this service into
@@ -10,13 +20,12 @@ task's code is only exercised here against fakes/stubs.
 ## Canonical role sources
 
 The actually-loaded specialization mechanism, per the T001 baseline, is the
-packaged `skills/` directory (the native-plugin `.codex-plugin/plugin.json`
-manifest that once declared it was removed at T033; ACP engine adapters
-read these files directly): 23 `skills/worker-*/
+packaged `skills/` directory (ACP engine adapters read these files
+directly): 23 `skills/worker-*/
 SKILL.md`, `skills/orchestrator/SKILL.md`, and 7 shared/coordinator skills
 (`cortex-control`, `coordinator-communication`, `content-safety`,
 `tool-discipline`, `knowledge-harvest`, `documentation-sync`,
-`context-compaction`). The 22 non-consultant worker skills and their Codex
+`context-compaction`). The 22 non-consultant worker skills and their
 `agents/*.toml` renderings are both generated, byte-identically, from one
 shared template (`./agent-sources/worker-protocol.md` +
 `consultant-protocol.md` + a per-role `agent-sources/<role>.md`) by
@@ -24,6 +33,15 @@ shared template (`./agent-sources/worker-protocol.md` +
 shared skills are hand-maintained directly under `skills/`. `portable.roles`
 loads its `RoleInstructionSet` from the shipped `skills/*/SKILL.md` files
 (the real loaded artifact), not by re-running the generator.
+
+The orchestrator role and all worker role bodies explicitly prohibit their
+engine's native subagent tools. Shared `tool-discipline` repeats the rule, but
+its catalog entry alone does not deliver its full text on the first turn.
+
+`read_skill` serves bounded package references by exact ID. Workers may read
+their three shared report/source/resource references and the optional report
+examples. Coordinators may read the orchestrator references and examples.
+Neither role can read another role's instructions through this route.
 
 ## Native markers
 
@@ -78,7 +96,7 @@ qualified without live proof (T035+).
 
 | Engine | Version | Channel | Qualification |
 |---|---|---|---|
-| codex-acp | 1.12.0 (pinned) | nonce-tagged leading `session/prompt` text block (`engine.codex_adapter_acp.build_first_prompt_blocks`) | `qualified` -- T035 live evidence (real run, `gpt-5.6-luna`: instructions followed, a guessed closing tag rejected); see `docs/acp/codex-acp-adapter.md`'s "Instruction delivery" section |
+| codex-acp | 1.12.0 (pinned) | App Server `thread/start.developerInstructions` via the verified private adapter | Wire payload observed; model visibility and native compaction persistence remain unqualified; see `docs/acp/codex-acp-adapter.md` |
 | claude-agent-acp | any | none | `unsupported` -- no static evidence of any delivery mechanism yet |
 | anything else | any | none | `unsupported` (unknown engine/version never guesses a qualification) |
 
@@ -116,6 +134,19 @@ unchanged. `schemas_for(role_kind)` returns a fresh deep copy every call
 returned schema), and `validate` raises `contracts.StoreError` with a
 concrete field/received/expected/correction on any deviation, including an
 attempted id field.
+
+When a task already has a published worker result, `delegate` requires an
+explicit handoff choice. `handoff_mode="report_review"` carries the exact
+`predecessor_report_ref` from the prior `worker_result`; `independent` states
+that the new worker does not review that report. The report reference is
+copied from the event, never reconstructed from a title or summary, and the
+worker prompt requires a trusted `read_report` receipt before relying on it.
+
+The plan graph and executable delegation use different identifiers. The
+assignment ID returned by `update_plan(action="add_assignment")` is the plan
+node used by `bind_candidate`, `predecessors`, and `plan_assignment_ref`.
+The opaque `assignment_ref` returned by `delegate` identifies the executable
+worker assignment. Supplying one in place of the other is rejected.
 
 ## Provisioning: one semantic operation, recoverable
 

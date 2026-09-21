@@ -116,7 +116,9 @@ def test_open_launches_through_a_verified_codex_install(tmp_path):
         prompt_updates=[dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text="ok"))],
         prompt_stop_reason="end_turn",
     ))
-    launch_command, _binary = build_codex_npm_install(tmp_path / "install", scenario_path)
+    launch_command, _binary = build_codex_npm_install(
+        tmp_path / "install", scenario_path, private_adapter_shape=True,
+    )
     connection_id = new_connection_id()
     record = make_connection_record(connection_id, launch_command=launch_command, engine="codex-acp", environ=environ)
     adapter = _adapter(record, tmp_path, environ)

@@ -1,4 +1,4 @@
-"""T025: isolated per-attempt workspaces and the serialized shared-root fallback.
+"""Isolated per-attempt workspaces.
 
 Two ``WorkspaceProvisioner`` (see ``delegation.provisioning``) implementations:
 
@@ -25,16 +25,14 @@ Two ``WorkspaceProvisioner`` (see ``delegation.provisioning``) implementations:
   writing into one can never be observed by, or overwrite, the other's
   copy or the main project tree -- only an explicit, later
   :mod:`delegation.integration` call touches the main tree.
-* :class:`SerializedSharedRootWorkspaceProvisioner` -- the pre-T025
+* :class:`SerializedSharedRootWorkspaceProvisioner` -- an explicit legacy
   behaviour (see ``delegation.live_adapters.SharedProjectRootWorkspaceProvisioner``,
   which this supersedes for a *conflicting* writer), extended with an
   advisory per-project exclusive :meth:`writer_lock` so that when a
   snapshot cannot safely be taken (size/entry caps exceeded, or an
-  unreadable entry), conflicting writers are explicitly serialized --
-  never run concurrently -- instead of silently sharing one root with no
-  protection at all. ``IsolatedSnapshotWorkspaceProvisioner.create`` falls
-  back to this mode automatically and records the fallback (``mode`` column)
-  so the limitation is visible in durable state, not just a code comment.
+  unreadable entry), callers may explicitly serialize writers. The isolated
+  provisioner never selects this mode implicitly: a failed snapshot is a hard
+  error because a shared root cannot provide isolated ownership or evidence.
 
 Every filesystem check here follows the same conservative, symlink-averse
 conventions as ``delegation.revision``/``project_storage`` (``O_NOFOLLOW``,
@@ -82,6 +80,17 @@ CREATE TABLE IF NOT EXISTS workspace_snapshots (
  cleanup_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS workspace_snapshots_by_attempt ON workspace_snapshots(attempt_id, created_at);
+CREATE TABLE IF NOT EXISTS workspace_snapshot_lineage (
+ workspace_binding_id TEXT PRIMARY KEY REFERENCES workspace_snapshots(workspace_binding_id),
+ candidate_id TEXT NOT NULL,
+ created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workspace_candidate_seeds (
+ assignment_ref TEXT PRIMARY KEY,
+ task_id TEXT NOT NULL REFERENCES tasks(id),
+ candidate_id TEXT NOT NULL,
+ created_at TEXT NOT NULL
+);
 '''
 
 
@@ -340,6 +349,71 @@ class IsolatedSnapshotWorkspaceProvisioner:
             raise StoreError("workspace_task_unresolved")
         return row["task_id"]
 
+    def register_candidate_seed(self, assignment_ref: str, candidate_id: str, *, task_id: str) -> None:
+        """Bind one exact ready candidate to a future assignment.
+
+        The assignment reference is the durable provisioning idempotency key;
+        callers never pass an arbitrary filesystem path to ``create``.
+        """
+        from . import candidates
+
+        candidate = candidates.get_candidate(self._store, candidate_id)
+        if (candidate is None or candidate.get("task_id") != task_id
+                or candidate.get("project_root") != self._project_root
+                or candidate.get("status") != "ready" or candidate.get("cleaned_up_at")):
+            raise StoreError("candidate_seed_not_ready")
+        stage = Path(candidate["stage_path"])
+        candidates_root = StorageLocator(self._project_root).store_dir() / "candidates"
+        try:
+            if stage.resolve(strict=True).parent.parent != candidates_root.resolve(strict=True):
+                raise StoreError("unsafe_candidate_path")
+        except FileNotFoundError as error:
+            raise StoreError("candidate_stage_missing") from error
+        with self._store.connection() as db:
+            existing = db.execute(
+                "SELECT task_id,candidate_id FROM workspace_candidate_seeds WHERE assignment_ref=?",
+                (assignment_ref,),
+            ).fetchone()
+            if existing is not None:
+                if existing["task_id"] != task_id or existing["candidate_id"] != candidate_id:
+                    raise StoreError("candidate_seed_binding_conflict")
+                return
+            db.execute(
+                "INSERT INTO workspace_candidate_seeds(assignment_ref,task_id,candidate_id,created_at) "
+                "VALUES(?,?,?,?)",
+                (assignment_ref, task_id, candidate_id, _now()),
+            )
+
+    def _candidate_source_for_attempt(self, attempt_id: str, task_id: str):
+        with self._store.connection() as db:
+            provisioning = db.execute(
+                "SELECT idempotency_key FROM delegation_provisioning WHERE attempt_id=? AND task_id=?",
+                (attempt_id, task_id),
+            ).fetchone()
+            if provisioning is None:
+                return None
+            seed = db.execute(
+                "SELECT candidate_id FROM workspace_candidate_seeds WHERE assignment_ref=? AND task_id=?",
+                (provisioning["idempotency_key"], task_id),
+            ).fetchone()
+        if seed is None:
+            return None
+        from . import candidates
+
+        candidate = candidates.get_candidate(self._store, seed["candidate_id"])
+        if (candidate is None or candidate.get("status") != "ready"
+                or candidate.get("task_id") != task_id
+                or candidate.get("project_root") != self._project_root):
+            raise StoreError("candidate_seed_not_ready")
+        stage = Path(candidate["stage_path"])
+        candidates_root = StorageLocator(self._project_root).store_dir() / "candidates"
+        try:
+            if stage.resolve(strict=True).parent.parent != candidates_root.resolve(strict=True):
+                raise StoreError("unsafe_candidate_path")
+        except FileNotFoundError as error:
+            raise StoreError("candidate_stage_missing") from error
+        return seed["candidate_id"], str(stage)
+
     def create(self, attempt_id: str, *, task_id: str | None = None) -> str:
         """``task_id``: normally resolved from the already-inserted
         ``delegation_provisioning`` row for ``attempt_id`` (a worker's
@@ -355,24 +429,32 @@ class IsolatedSnapshotWorkspaceProvisioner:
         state_root = self._state_root()
         base_dest = state_root / attempt_id / "base"
         work_dest = state_root / attempt_id / "work"
+        candidate_seed = self._candidate_source_for_attempt(attempt_id, task_id)
+        source_root = candidate_seed[1] if candidate_seed else self._project_root
         try:
             os.mkdir(state_root / attempt_id, 0o700)
-            manifest = capture_and_copy_workspace(self._project_root, str(base_dest))
+            manifest = capture_and_copy_workspace(source_root, str(base_dest))
+            if candidate_seed:
+                from . import candidates
+                candidate = candidates.get_candidate(self._store, candidate_seed[0])
+                copied_manifest = candidates._manifest(str(base_dest))
+                if candidate is None or candidates._digest_manifest(copied_manifest) != candidate.get("content_digest"):
+                    raise StoreError("candidate_seed_changed_during_copy")
             shutil.copytree(base_dest, work_dest, symlinks=True)
-        except (WorkspaceSnapshotUnavailable, OSError) as error:
+        except (WorkspaceSnapshotUnavailable, OSError, StoreError) as error:
             shutil.rmtree(state_root / attempt_id, ignore_errors=True)
-            self._record(
-                binding_id, attempt_id, task_id, mode="serialized_shared_root", root_path=None, base_path=None,
-                manifest={}, base=dict(kind="unavailable", head=None, dirty_digest=None,
-                                        detail=str(getattr(error, "reason", error))),
-            )
-            return binding_id
+            reason = str(getattr(error, "reason", error))
+            # A shared root cannot be made isolated by a prompt or advisory
+            # lock. Fail closed and expose the precise reason to the caller.
+            raise StoreError(f"workspace_snapshot_unavailable:{reason}") from error
         base = delegation_revision.capture_revision(str(work_dest))
         self._record(binding_id, attempt_id, task_id, mode="isolated_snapshot", root_path=str(work_dest),
-                      base_path=str(base_dest), manifest=manifest, base=base)
+                      base_path=str(base_dest), manifest=manifest, base=base,
+                      candidate_id=candidate_seed[0] if candidate_seed else None)
         return binding_id
 
-    def _record(self, binding_id, attempt_id, task_id, *, mode, root_path, base_path, manifest, base) -> None:
+    def _record(self, binding_id, attempt_id, task_id, *, mode, root_path, base_path, manifest, base,
+                candidate_id=None) -> None:
         with self._store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -382,6 +464,11 @@ class IsolatedSnapshotWorkspaceProvisioner:
                      json.dumps(manifest, sort_keys=True), base.get("kind"), base.get("head"),
                      base.get("dirty_digest"), _now(), None, None),
                 )
+                if candidate_id is not None:
+                    db.execute(
+                        "INSERT INTO workspace_snapshot_lineage(workspace_binding_id,candidate_id,created_at) VALUES(?,?,?)",
+                        (binding_id, candidate_id, _now()),
+                    )
                 db.commit()
             except BaseException:
                 db.rollback()
@@ -458,16 +545,10 @@ class IsolatedSnapshotWorkspaceProvisioner:
         arbitrarily stale one, while never leaving more than one live copy
         per task on disk.
 
-        Falls back to the real, writable ``project_root`` -- the pre-
-        existing, pre-T035-physical-prevention behaviour -- only when a
-        snapshot genuinely cannot be taken (the same
-        ``WorkspaceSnapshotUnavailable`` cases :meth:`create` already
-        handles for a worker: size/entry caps, an unreadable entry). That
-        case is recorded in the ``mode`` column exactly like a worker's own
-        ``serialized_shared_root`` fallback -- visible in durable state --
-        and returned as this method's own second value so the caller can
-        treat it as the honest exception it is, never assume prevention
-        silently held.
+        Snapshot failure is a hard error. Returning the real project root
+        would let a coordinator mutate user files while looking like a normal
+        workspace, so the caller receives the same exact
+        ``workspace_snapshot_unavailable:<reason>`` error as a worker.
         """
         attempt_id = f"coordinator__{task_id}"
         previous = self._row_for_attempt(attempt_id)
@@ -478,7 +559,7 @@ class IsolatedSnapshotWorkspaceProvisioner:
         binding_id = self.create(attempt_id, task_id=task_id)
         row = self.row_for_binding(binding_id)
         if row["mode"] != "isolated_snapshot":
-            return self._project_root, "unavailable_writable_fallback"
+            raise StoreError("workspace_snapshot_unavailable:non_isolated_binding")
         root = row["root_path"]
         _set_tree_write_bit(root, writable=False)
         _link_project_store(root, self._project_root)
@@ -512,12 +593,18 @@ class IsolatedSnapshotWorkspaceProvisioner:
 
     def cleanup_binding(self, binding_id: str, *, reason: str) -> bool:
         """Remove only a Cortex-owned snapshot workspace, and only after the
-        caller has confirmed its lifecycle is terminal (assignment terminal
-        and any integration recorded, or cancelled) -- this method itself
-        performs no lifecycle check; see ``cleanup_terminal_attempt``. Never
-        touches ``project_root`` or any user-owned path."""
+        caller has confirmed its lifecycle is terminal. It additionally
+        refuses to remove a copy while its bytes are unaccounted for by an
+        exact integration result. Never touches ``project_root`` or any
+        user-owned path."""
         row = self.row_for_binding(binding_id)
         if row is None or row["cleaned_up_at"] is not None:
+            return False
+        if not self._cleanup_is_safe(row):
+            # Preserve the copy when its outcome is uncertain. The reaper or
+            # coordinator can retry after an exact integration is recorded;
+            # deleting it here would make completion unable to prove whether
+            # worker changes were lost.
             return False
         state_root = self._state_root()
         for path in (row["root_path"], row["base_path"]):
@@ -551,6 +638,47 @@ class IsolatedSnapshotWorkspaceProvisioner:
                 db.rollback()
                 raise
         return True
+
+    def _cleanup_is_safe(self, row) -> bool:
+        """Return true only when no unaccounted worker bytes would be lost."""
+        if row["mode"] != "isolated_snapshot":
+            # Legacy rows point at the project root and are never owned by
+            # this provisioner, so cleanup must not act on them.
+            return False
+        root = row["root_path"]
+        if not root or not os.path.isdir(root):
+            return False
+        try:
+            from . import integration as delegation_integration
+
+            base = json.loads(row["manifest_json"] or "{}")
+            current = delegation_integration._rescan_workspace(root)
+        except Exception:
+            return False
+        pending = {
+            path for path in set(base) | set(current)
+            if path not in _EXCLUDED_TOP_LEVEL
+            and not delegation_integration._is_technical(path)
+            and not delegation_integration._entries_equal(base.get(path), current.get(path))
+        }
+        if not pending:
+            return True
+        with self._store.connection() as db:
+            integration_rows = db.execute(
+                "SELECT status, applied_paths_json FROM workspace_integrations "
+                "WHERE attempt_id=? ORDER BY created_at DESC",
+                (row["attempt_id"],),
+            ).fetchall()
+        for result in integration_rows:
+            if result["status"] != "applied":
+                continue
+            try:
+                applied = set(json.loads(result["applied_paths_json"] or "[]"))
+            except Exception:
+                continue
+            if pending.issubset(applied):
+                return True
+        return False
 
 
 def resolve_attempt_root(store, task_id: str, attempt_id: str):
@@ -647,3 +775,42 @@ class SerializedSharedRootWorkspaceProvisioner:
         serializes every conflicting writer against this one shared root
         (never two at once), across threads and processes alike."""
         return _WriterLock(self._lock_path(), timeout=timeout)
+
+
+class DirectProjectWorkspaceProvisioner:
+    """Bind worker attempts to the exact project opened by the ACP client.
+
+    The ACP project is the source of truth for edits.  Workers are serialized
+    with the same durable writer lock used by the legacy shared-root
+    provisioner; a worker never receives a private snapshot or an implicit
+    fallback path.  Coordinator sessions use the same exact project root so
+    they observe worker edits made during the same turn.  Mutation refusal
+    and the project-change backstop remain separate controls; this class does
+    not claim OS-level read-only containment.
+    """
+
+    def __init__(self, store, project_root: str):
+        self._store = store
+        self._project_root = canonical_project(project_root)
+        self._shared = SerializedSharedRootWorkspaceProvisioner(self._project_root)
+
+    def create(self, attempt_id: str, **_kwargs) -> str:
+        return self._shared.create(attempt_id)
+
+    def lookup(self, attempt_id: str) -> str:
+        return self._shared.lookup(attempt_id)
+
+    def remove(self, attempt_id: str) -> None:
+        return self._shared.remove(attempt_id)
+
+    def root_for(self, binding_id: str) -> str | None:
+        return self._project_root if binding_id == "shared_project_root" else None
+
+    def coordinator_root_for(self, task_id: str) -> tuple[str, str]:
+        # Keep the task argument for interface parity with the legacy
+        # snapshot provisioner. It must not select a frozen copy: ACP workers
+        # and the coordinator share the exact project opened in Zed.
+        return str(self._project_root), "direct_project_root"
+
+    def writer_lock(self, *, timeout=None) -> _WriterLock:
+        return self._shared.writer_lock(timeout=timeout)

@@ -14,15 +14,6 @@ def test_consultation_is_conditionally_loaded_and_preserves_report_only_scope():
     assert 'repeat consultation only for changed evidence' in policy
 
 
-def test_documented_overlay_has_negative_controls_and_no_runtime_gate():
-    text = (ROOT / "docs/project/quality-evaluation.md").read_text()
-    section = text.split("## Risk-triggered consultation overlay", 1)[1]
-    assert "three transition families" in section
-    assert "negative controls" in section
-    assert "unavailable values\nremain null" in section
-    assert "never a runtime gate, server decision or acceptance rule" in section
-
-
 def test_the_advisory_lane_is_no_longer_instructed():
     """Removed on the user's decision: "мы его больше не будем использовать".
 

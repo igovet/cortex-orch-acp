@@ -22,6 +22,7 @@ from __future__ import annotations
 import collections
 import inspect
 import json
+import sqlite3
 import os
 import sys
 import threading
@@ -40,13 +41,17 @@ from . import steering as acp_steering
 from .host_requests import HostRequestClosed, HostRequester, HostRequestError, HostRequestTimeout
 from .protocol import RpcError
 from .runtime import OrchestrationUnavailable, UnavailableRuntime
+from .orchestrating_runtime import is_hidden_tool_update
 from .transport import StdioTransport, EOF
 from . import replay_store as acp_replay_store
+from ..catalog import refresh as catalog_refresh
 from ..bootstrap import _current_owner_epoch_obj, append_source_event, bootstrap_task
 from ..catalog.model import CatalogEntry
+from ..catalog.evidence import Fact, ProvenanceSource
 from ..configuration.resolution import ConfigurationInputs, resolve_saved_route
 from ..configuration.service import ConfigurationService
 from ..configuration import store as configuration_store
+from ..configuration.mcp_servers import load_mcp_servers
 from ..connections import registry as connection_registry
 from ..contracts import StoreError
 from ..diagnostic_boundary import emit_bounded_diagnostic, run_passive_diagnostic
@@ -58,6 +63,13 @@ from ..store import Store, private_directory
 
 PLUGIN = Path(__file__).resolve().parents[3]
 _PROMPT_JOIN_TIMEOUT = 5.0
+# Paseo discovers the provider catalog from the synchronous ``session/new``
+# response and does not consume a later config_option_update while building
+# its model picker.  Give a fresh, seed-only catalog a short opportunity to
+# obtain the engine's real options.  This is deliberately bounded: an
+# unavailable/slow engine leaves the truthful seed response in place and the
+# normal post-session refresh remains the fallback.
+_PASEO_DISCOVERY_WAIT_SECONDS = 3.0
 
 # Bound on how many recent JSON-RPC request ids one connection remembers for
 # the session/prompt duplicate-id rejection below (Agent._track_request_id).
@@ -195,6 +207,49 @@ class _RealHostElicitor:
         return answer if isinstance(answer, str) and answer else None
 
 
+class _PaseoQuestionElicitor:
+    """Paseo plugin bridge using ACP's core permission card as a choice UI."""
+
+    def __init__(self, host_requester: HostRequester, *, session_id: str, timeout: float = 30.0) -> None:
+        self._host_requester = host_requester
+        self._session_id = session_id
+        self._timeout = timeout
+        self._question_id = None
+
+    def set_question_id(self, question_id: str) -> None:
+        self._question_id = question_id
+
+    def elicit(self, session_id: str, question: str, options: list[str] | None) -> str | None:
+        del session_id
+        choices = list(options or [])
+        if not choices:
+            return None
+        option_ids = {f"cortex-question-{index}": value for index, value in enumerate(choices, 1)}
+        params = dict(
+            sessionId=self._session_id,
+            toolCall=dict(
+                toolCallId=f"cortex-question:{self._question_id or self._session_id}",
+                kind="other", title=question[:4000],
+                rawInput={"__cortex_question": True, "questionId": self._question_id, "question": question[:4000]},
+            ),
+            options=[
+                dict(optionId=option_id, name=value, kind="allow_once")
+                for option_id, value in option_ids.items()
+            ],
+            _meta=dict(cortexQuestion=True),
+        )
+        try:
+            result = self._host_requester.request("session/request_permission", params, timeout=self._timeout)
+        except (HostRequestTimeout, HostRequestClosed, HostRequestError):
+            return None
+        if not isinstance(result, dict):
+            return None
+        outcome = result.get("outcome")
+        if not isinstance(outcome, dict) or outcome.get("outcome") != "selected":
+            return None
+        return option_ids.get(outcome.get("optionId"))
+
+
 class Agent:
     """One ACP connection's worth of state: sessions, stores, dispatch.
 
@@ -303,6 +358,19 @@ class Agent:
             )
         except (TypeError, ValueError):
             self._runtime_accepts_host_fs_requester = False
+        try:
+            self._runtime_accepts_prompt_blocks = 'prompt_blocks' in inspect.signature(runtime.start_prompt).parameters
+            self._runtime_accepts_client_surface = 'client_surface' in inspect.signature(runtime.start_prompt).parameters
+        except (TypeError, ValueError):
+            self._runtime_accepts_prompt_blocks = False
+            self._runtime_accepts_client_surface = False
+        try:
+            cancel_task_params = inspect.signature(runtime.cancel_task).parameters
+            self._runtime_accepts_cancel_task_project_root = 'project_root' in cancel_task_params
+            self._runtime_accepts_cancel_task_emitter = 'emit_tool_call' in cancel_task_params
+        except (AttributeError, TypeError, ValueError):
+            self._runtime_accepts_cancel_task_project_root = False
+            self._runtime_accepts_cancel_task_emitter = False
         self.environ = environ if environ is not None else os.environ
         self.version = _agent_version()
         self.stores = {}
@@ -314,6 +382,11 @@ class Agent:
         self.client_capabilities = {}
         self._workers = []
         self._workers_lock = threading.Lock()
+        # Host history and outbound queue insertion share one lock per ACP
+        # session.  This makes the durable sequence and live notification
+        # order identical even when coordinator/worker callbacks race.
+        self._history_locks = {}
+        self._history_locks_lock = threading.Lock()
         self._seen_request_ids = collections.OrderedDict()
 
     def bind_transport(self, transport):
@@ -399,6 +472,11 @@ class Agent:
             if has_id:
                 self._reply_error(request_id, -32603, _store_error_message(exc))
             observe(self.environ, method, str(exc))
+        except PortableError as exc:
+            if has_id:
+                mapped = self._portable_error_to_rpc(exc)
+                self._reply_error(request_id, mapped.code, mapped.message, mapped.data)
+            observe(self.environ, method, exc.code)
         except Exception:
             if has_id:
                 self._reply_error(request_id, -32603, "Internal error while handling this request.")
@@ -429,6 +507,9 @@ class Agent:
             observe(self.environ, method, "success")
         elif method == "session/set_config_option":
             self._session_set_config_option(request_id, params)
+            observe(self.environ, method, "success")
+        elif method == "session/set_mode":
+            self._session_set_mode(request_id, params)
             observe(self.environ, method, "success")
         elif method == "session/load":
             self._session_load(request_id, params)
@@ -475,7 +556,8 @@ class Agent:
             acp_replay_store.sweep_orphaned_staging(project)
         except Exception:
             pass
-        stripped_servers = protocol.strip_mcp_servers(raw_mcp_servers)
+        effective_mcp_servers = load_mcp_servers(project, client_servers=raw_mcp_servers, environ=self.environ)
+        stripped_servers = protocol.strip_mcp_servers(effective_mcp_servers)
         session_id = new_id("acps_")
         acp_sessions.create_session(store, session_id, project, self.client_info, self.client_capabilities, stripped_servers)
         session = dict(
@@ -487,7 +569,12 @@ class Agent:
             # user configured in their editor. Storage keeps the stripped
             # shape above and never these values: an entry's env/headers are
             # the client's secrets.
-            mcp_servers=[dict(e) for e in raw_mcp_servers if isinstance(e, dict)],
+            mcp_servers=effective_mcp_servers,
+            # Connection ids for which this session already attempted the
+            # bounded discovery wait.  The post-session refresh skips these
+            # ids so a timed-out probe is not launched a second time while
+            # its daemon probe is still unwinding.
+            catalog_refresh_started=set(),
         )
         self.sessions[session_id] = session
         # A prior explicit choice persisted as the *normal* T008 user-default
@@ -497,6 +584,7 @@ class Agent:
         # _current_selection_context. It lives only in this session's memory
         # (never re-marked as "pending" anywhere durable).
         session["default_selection"] = self._default_selection_from_user_defaults()
+        self._wait_for_paseo_live_catalog(session)
         options = self._config_options_for_session(session, store)
         result = dict(sessionId=session_id)
         if options:
@@ -506,17 +594,147 @@ class Agent:
     def _post_session_new_notifications(self, session_id):
         """Sent by the caller after the session/new response itself (see
         ``_dispatch``): ``available_commands_update`` is not part of the
-        ``NewSessionResponse`` payload, only ever a follow-up notification."""
+        ``NewSessionResponse`` payload, only ever a follow-up notification.
+
+        Catalog discovery is deliberately started after the response has been
+        sent.  A fresh ACP session must become usable immediately, while the
+        engine-advertised model list is refreshed in the background and then
+        delivered as a normal ``config_option_update``.  Starting this before
+        the response would allow a slow engine to reorder protocol frames.
+        """
         if self.transport is not None:
             self.transport.send_notification(
                 protocol.available_commands_update(session_id, acp_commands.AVAILABLE_COMMANDS))
+        self._start_catalog_refresh(session_id)
+
+    def _start_catalog_refresh(self, session_id):
+        """Refresh every configured engine for a new ACP session.
+
+        This is prompt-free discovery (``initialize`` + ``session/new`` only),
+        not a model turn.  Each engine runs in its own daemon thread so one
+        unavailable provider cannot delay the ``session/new`` response or
+        another provider.  ``perform_refresh`` is fail-closed and preserves
+        the last good snapshot on every failure; consequently a failed refresh
+        emits no selector update and leaves the current catalog visible.
+
+        The transport check also keeps direct in-process unit calls—which do
+        not have a live ACP connection—from accidentally starting real engine
+        processes.
+        """
+        if self.transport is None:
+            return
+        session = self.sessions.get(session_id)
+        if session is None:
+            return
+        project = session["project"]
+        try:
+            connections = connection_registry.read_registry(self.environ).connections
+        except Exception:
+            return
+        for record in connections.values():
+            if record.id in session.get("catalog_refresh_started", set()):
+                continue
+            session.setdefault("catalog_refresh_started", set()).add(record.id)
+            thread = threading.Thread(
+                target=self._refresh_catalog_for_session,
+                args=(session_id, session, project, record),
+                name=f"cortex-catalog-refresh-{record.id}",
+                daemon=True,
+            )
+            thread.start()
+
+    def _wait_for_paseo_live_catalog(self, session):
+        """Bounded live discovery for Paseo's initial provider catalog.
+
+        Paseo's provider discovery reads only the ``session/new`` response.
+        A static seed is useful for truthful fallback, but it intentionally
+        carries no effort values.  When the session is a Paseo session and
+        any selectable entry is seed-provenance, probe those connections in
+        parallel and wait briefly for a real engine observation.  The probe
+        is prompt-free and uses the existing refresh path; no effort values
+        are synthesized on timeout or failure.
+        """
+        if not self._combined_model_picker() or self.transport is None:
+            return
+        try:
+            entries, connections = self._selectable_entries_and_connections(session["project"])
+        except Exception:
+            return
+        seed_connections = {
+            entry.connection_id
+            for entry in entries
+            if (entry.evidence.get(Fact.CATALOG_OBTAINED) is not None
+                and entry.evidence.get(Fact.CATALOG_OBTAINED).source is ProvenanceSource.SEED)
+        }
+        records = [connections[connection_id] for connection_id in seed_connections if connection_id in connections]
+        if not records:
+            return
+        started = session.setdefault("catalog_refresh_started", set())
+        records = [record for record in records if record.id not in started]
+        if not records:
+            return
+        done = threading.Event()
+        remaining = {record.id for record in records}
+        lock = threading.Lock()
+
+        def refresh(record):
+            try:
+                catalog_refresh.perform_refresh(record, session["project"], environ=self.environ)
+            except Exception:
+                pass
+            finally:
+                with lock:
+                    remaining.discard(record.id)
+                    if not remaining:
+                        done.set()
+
+        for record in records:
+            started.add(record.id)
+            threading.Thread(
+                target=refresh, args=(record,),
+                name=f"cortex-paseo-discovery-{record.id}", daemon=True,
+            ).start()
+        done.wait(_PASEO_DISCOVERY_WAIT_SECONDS)
+
+    def _refresh_catalog_for_session(self, session_id, session, project, record):
+        """Run one prompt-free refresh and publish only a successful result."""
+        try:
+            outcome = catalog_refresh.perform_refresh(
+                record, project, environ=self.environ,
+            )
+        except Exception:
+            # ``perform_refresh`` already converts expected failures to an
+            # unsuccessful outcome.  Keep this last-resort guard here so a
+            # provider implementation bug cannot kill the ACP connection's
+            # background worker or create a false selector update.
+            return
+        if not outcome.success or self.transport is None:
+            return
+        if self.sessions.get(session_id) is not session:
+            return
+        try:
+            store = self._store_for(project)
+            options = self._config_options_for_session(session, store)
+            if options:
+                self.transport.send_notification(protocol.config_option_update(session_id, options))
+        except Exception:
+            # The snapshot is durable even if the client disconnected while
+            # the refresh completed.  It will be picked up by the next ACP
+            # session; never turn a notification failure into a session error.
+            return
 
     # -- configuration options / commands (shared by session/new,
     #    session/set_config_option, and the /cortex-* command equivalents) --
 
-    def _selectable_entries_and_connections(self):
+    def _selectable_entries_and_connections(self, project_root=None):
         registry_state = connection_registry.read_registry(self.environ)
         entries = acp_config_options.selectable_entries_from_snapshots(registry_state.connections, self.environ)
+        entries = acp_config_options.filter_entries_by_route_policy(
+            entries, project_root, self.environ)
+        # A literal engine ``default`` is an internal alias, not a concrete
+        # model choice. Keep its catalog record for evidence, but omit it from
+        # both ACP selectors and the equivalent /cortex-model command.
+        entries = tuple(entry for entry in entries if entry.route.model.casefold() != "default")
         return entries, registry_state.connections
 
     def _default_selection_from_user_defaults(self):
@@ -588,11 +806,15 @@ class Agent:
         explicit, validated constructor parameter -- T020 fresh-review fix,
         MEDIUM: previously an unbounded ``os.environ`` lookup reachable in
         production code; see ``__init__``)."""
+        if self.host_requester is None:
+            return None
+        if self.environ.get("CORTEX_PASEO_QUESTION_UI") == "1":
+            return _PaseoQuestionElicitor(
+                self.host_requester, session_id=session_id, timeout=self._elicitation_timeout_seconds,
+            )
         capabilities = self.client_capabilities if isinstance(self.client_capabilities, dict) else {}
         elicitation = capabilities.get("elicitation")
         if not isinstance(elicitation, dict) or elicitation.get("form", None) is None:
-            return None
-        if self.host_requester is None:
             return None
         return _RealHostElicitor(self.host_requester, timeout=self._elicitation_timeout_seconds)
 
@@ -701,12 +923,57 @@ class Agent:
             if not isinstance(update, Mapping) or not update.get("sessionUpdate"):
                 return False
             payload = {key: value for key, value in update.items() if key != "sessionId"}
-            return self.transport.send_notification(
-                protocol.notification("session/update", dict(sessionId=session_id, update=payload)),
-            )
+            return self._persist_and_enqueue_update(session_id, payload, cancel_event)
         return emit_display_update
 
-    def _make_emit_tool_call(self, session_id, cancel_event):
+    def _history_lock(self, session_id):
+        with self._history_locks_lock:
+            return self._history_locks.setdefault(session_id, threading.Lock())
+
+    def _persist_and_enqueue_update(self, session_id, update, cancel_event):
+        """Record a real runtime update before offering it to the host.
+
+        ``send_notification`` only means that the bounded transport accepted
+        the frame; its writer may fail later.  Recording first preserves the
+        event for reconnect in that case without claiming host receipt.  A
+        persistence failure is fail-closed: no update is enqueued and the
+        prompt is cancelled.
+        """
+        if cancel_event.is_set() or self.transport is None:
+            return False
+        with self._history_lock(session_id):
+            try:
+                persisted = self._record_host_update(session_id, update)
+            except Exception:
+                persisted = False
+            if not persisted:
+                cancel_event.set()
+                return False
+            delivered = self.transport.send_notification(
+                protocol.notification("session/update", dict(sessionId=session_id, update=update)),
+            )
+            if not delivered:
+                cancel_event.set()
+            return delivered
+
+    def _record_host_update(self, session_id, update):
+        """Persist one structured runtime update before transport enqueue.
+
+        A true return means only that the event is durable and may safely be
+        offered to the bounded transport; it never claims that Zed rendered
+        or even wrote the frame.  A false return is fail-closed.
+        """
+        session = self.sessions.get(session_id)
+        if session is None:
+            return False
+        try:
+            store = self._store_for(session["project"])
+            acp_replay_store.append_host_update(store, session_id, update)
+        except (StoreError, OSError, ValueError, TypeError, sqlite3.Error):
+            return False
+        return True
+
+    def _make_emit_tool_call(self, session_id, cancel_event, on_message_boundary=None):
         """T035: the runtime-facing ``emit_tool_call`` callable -- accepts
         one already-shaped update dict (``tool_call_id``, ``new`` [bool],
         ``title``/``kind``/``status``/``text`` -- fields the runtime omits
@@ -725,19 +992,26 @@ class Agent:
                 return False
             tool_call_id = update["tool_call_id"]
             if update.get("new"):
+                # A tool card is a timeline boundary.  Text emitted after a
+                # new tool call must receive a fresh messageId so Paseo never
+                # merges coordinator prose on either side of the tool.
+                if on_message_boundary is not None:
+                    on_message_boundary()
                 notif = protocol.tool_call(
                     session_id, tool_call_id, update.get("title") or "Worker assignment",
                     update.get("kind") or "other", update.get("status") or "pending",
                     text=update.get("text"), locations=update.get("locations"),
-                    content=update.get("content"),
+                    content=update.get("content"), raw_input=update.get("raw_input"),
+                    raw_output=update.get("raw_output"),
                 )
             else:
                 notif = protocol.tool_call_update(
                     session_id, tool_call_id, status=update.get("status"), title=update.get("title"),
                     text=update.get("text"), locations=update.get("locations"),
-                    content=update.get("content"),
+                    content=update.get("content"), raw_input=update.get("raw_input"),
+                    raw_output=update.get("raw_output"),
                 )
-            return self.transport.send_notification(notif)
+            return self._persist_and_enqueue_update(session_id, notif["params"]["update"], cancel_event)
         return emit_tool_call
 
     def _current_language_for_session(self, store, session):
@@ -755,18 +1029,60 @@ class Agent:
         return self._default_language_from_user_defaults()
 
     def _config_options_for_session(self, session, store):
-        entries, connections = self._selectable_entries_and_connections()
+        entries, connections = self._selectable_entries_and_connections(session["project"])
         current = self._current_selection_context(store, session)
+        # Catalog refreshes mint a new route id when the engine's advertised
+        # parameters change.  A fresh, task-less session can therefore still
+        # inherit a valid saved (connection, model) choice whose old route id
+        # is no longer present.  Resolve that identity before building the
+        # dependent Paseo model/thought-level options; otherwise the combined
+        # picker marks the saved route unavailable and substitutes its first
+        # model (for example Sol for a saved Luna selection).
+        if current and current.get("state") == "default":
+            route_ids = {entry.route.id for entry in entries}
+            if current.get("route_id") not in route_ids:
+                saved = session.get("default_selection") or {}
+                connection_id = saved.get("connection_id")
+                model = saved.get("model")
+                match = next(
+                    (entry for entry in entries
+                     if entry.connection_id == connection_id and entry.route.model == model),
+                    None,
+                )
+                if match is not None:
+                    current = dict(current, route_id=match.route.id)
         language_current = self._current_language_for_session(store, session)
         return acp_config_options.build_config_options(
             entries, connections, current, include_language=True, language_current=language_current,
-            environ=self.environ)
+            language_as_mode=self._combined_model_picker(),
+            environ=self.environ, project_root=session["project"],
+            combined_model_picker=self._combined_model_picker())
+
+    def _combined_model_picker(self):
+        """Paseo currently renders the model selector but not the provider selector.
+
+        This only changes option presentation; route policy and dispatch remain
+        the same. Zed continues to receive its separate provider/model axes.
+        """
+        return str(self.client_info.get("name", "")).casefold() == "paseo"
 
     def _connection_setup_summary(self, connections):
         if not connections:
             return "no connection registered yet; see /cortex-setup"
-        configured = sum(1 for record in connections.values() if record.state.value == "configured")
-        return f"{configured}/{len(connections)} connection(s) configured"
+        state_counts = self._connection_state_counts(connections)
+        configured = state_counts["configured"]
+        details = [f"{configured}/{len(connections)} connection(s) configured"]
+        if state_counts["authorization_required"]:
+            details.append(f"{state_counts['authorization_required']} awaiting authorization")
+        if state_counts["unavailable"]:
+            details.append(f"{state_counts['unavailable']} unavailable")
+        if state_counts["invalid"]:
+            details.append(f"{state_counts['invalid']} invalid")
+        return "; ".join(details)
+
+    @staticmethod
+    def _connection_state_counts(connections):
+        return collections.Counter(record.state.value for record in connections.values())
 
     def _session_prompt(self, request_id, params):
         session_id, text, raw_blocks = protocol.validate_session_prompt_params(params)
@@ -790,6 +1106,14 @@ class Agent:
     def _run_prompt(self, request_id, session_id, session, text, cancel_event, recognized=None, raw_blocks=None, meta=None):
         try:
             if recognized is not None:
+                try:
+                    with self._history_lock(session_id):
+                        acp_replay_store.append_host_transcript(
+                            self._store_for(session["project"]), session_id, "user_message", text)
+                except (StoreError, OSError, ValueError, TypeError, sqlite3.Error):
+                    self._reply_error(request_id, -32603, "Could not record command prompt.")
+                    observe(self.environ, "session/prompt", "command_history_failed")
+                    return
                 self._run_command_body(request_id, session_id, session, recognized, cancel_event)
                 return
             self._run_prompt_body(request_id, session_id, session, text, cancel_event, raw_blocks, meta)
@@ -831,8 +1155,41 @@ class Agent:
         staged_blocks = []
         if raw_blocks:
             resolved_blocks = acp_replay_store.resolve_prompt_blocks(raw_blocks, session["project"])
+            image_failures = [
+                capture for capture in resolved_blocks
+                if capture.kind == "image" and capture.availability != "stored"
+            ]
+            if image_failures:
+                # An image is meaningful to the selected engine only when
+                # its exact bytes are retained. Refuse before bootstrap or
+                # append so an oversized/unreadable image can never be
+                # recorded as accepted and then forwarded from the raw
+                # inbound request. Keep the response bounded: MIME and the
+                # capture policy reason are enough to remediate it.
+                reason = image_failures[0].reason or "capture_unavailable"
+                self._reply_error(
+                    request_id, -32602,
+                    "Image content could not be captured within Cortex limits.",
+                    data={"reason": reason, "retryable": False},
+                )
+                observe(self.environ, "session/prompt", "image_capture_rejected:" + reason)
+                return
             if resolved_blocks:
                 staged_blocks = acp_replay_store.stage_blocks(session["project"], resolved_blocks)
+            staged_image_failures = [
+                item.capture for item in staged_blocks
+                if item.capture.kind == "image" and item.capture.availability != "stored"
+            ]
+            if staged_image_failures:
+                reason = staged_image_failures[0].reason or "capture_unavailable"
+                acp_replay_store.cleanup_staged(staged_blocks)
+                self._reply_error(
+                    request_id, -32602,
+                    "Image content could not be captured within Cortex limits.",
+                    data={"reason": reason, "retryable": False},
+                )
+                observe(self.environ, "session/prompt", "image_capture_rejected:" + reason)
+                return
         try:
             if is_first_prompt:
                 # Read before the task exists, which is the whole point:
@@ -875,24 +1232,49 @@ class Agent:
             for b in staged_blocks
         ] if not result.replayed else []
         if is_first_prompt:
-            self._propose_pending_selection_for_new_task(store, session, task_id)
+            # The selector is rendered by the ACP client, while the first
+            # task's configuration is only materialised after the durable
+            # bootstrap.  Re-send the *applied* selection before opening an
+            # engine session so a stale client-side label cannot silently
+            # disagree with the route recorded for this attempt.  Do not
+            # send a fallback surface when no saved route was applied: that
+            # would make an unconfigured task look configured.
+            applied_selection = self._propose_pending_selection_for_new_task(store, session, task_id)
+            if applied_selection and self.transport is not None and not cancel_event.is_set():
+                self.transport.send_notification(
+                    protocol.config_option_update(session_id, self._config_options_for_session(session, store))
+                )
+        # Keep inbound capture compatible with older store adapters; replay
+        # assigns a per-row fallback id when this legacy-style row has none.
         acp_replay_store.append_host_transcript(store, session_id, "user_message", text, attachment_descriptors)
+        # One prompt turn is one logical assistant message.  Every streamed
+        # delta in this turn carries the same ACP messageId, while a later
+        # turn gets a fresh id and therefore cannot be merged by Paseo.
+        message_id_state = {"value": f"assistant:{event_id}", "counter": 0}
+
+        def rotate_message_id():
+            message_id_state["counter"] += 1
+            message_id_state["value"] = f"assistant:{event_id}:{message_id_state['counter']}"
 
         def emit_update(chunk_text):
             if cancel_event.is_set() or self.transport is None:
                 return False
-            delivered = self.transport.send_notification(protocol.agent_message_chunk(session_id, chunk_text))
-            if delivered:
+            with self._history_lock(session_id):
                 try:
-                    acp_replay_store.append_host_transcript(store, session_id, "agent_message", chunk_text)
-                except StoreError:
-                    pass
-            if not delivered:
-                # The client cannot keep up: never grow memory without
-                # bound and never drop a *response* -- only this
-                # notification is dropped, and the prompt is cancelled.
-                cancel_event.set()
-            return delivered
+                    acp_replay_store.append_host_transcript(
+                        store, session_id, "agent_message", chunk_text, message_id=message_id_state["value"],
+                    )
+                except (StoreError, OSError, ValueError, TypeError, sqlite3.Error):
+                    cancel_event.set()
+                    return False
+                delivered = self.transport.send_notification(
+                    protocol.agent_message_chunk(session_id, chunk_text, message_id_state["value"])
+                )
+                if not delivered:
+                    # The client cannot keep up: the event remains durable,
+                    # but this turn must stop rather than silently continue.
+                    cancel_event.set()
+                return delivered
 
         start_prompt_kwargs = {}
         if self._runtime_accepts_project_root:
@@ -916,7 +1298,9 @@ class Agent:
         if self._runtime_accepts_host_fs_requester:
             start_prompt_kwargs["host_fs_requester"] = self._make_fs_requester(session_id)
         if self._runtime_accepts_emit_tool_call:
-            start_prompt_kwargs["emit_tool_call"] = self._make_emit_tool_call(session_id, cancel_event)
+            start_prompt_kwargs["emit_tool_call"] = self._make_emit_tool_call(
+                session_id, cancel_event, rotate_message_id,
+            )
         if self._runtime_accepts_emit_display_update:
             start_prompt_kwargs["emit_display_update"] = self._make_emit_display_update(session_id, cancel_event)
         if self._runtime_accepts_host_mcp_servers:
@@ -929,6 +1313,10 @@ class Agent:
             # launched carried only its own ``cortex`` server, while the
             # same editor's own agent had the user's three.
             start_prompt_kwargs["host_mcp_servers"] = session.get("mcp_servers") or None
+        if self._runtime_accepts_prompt_blocks:
+            start_prompt_kwargs["prompt_blocks"] = raw_blocks
+        if self._runtime_accepts_client_surface:
+            start_prompt_kwargs["client_surface"] = self.client_info.get("name")
         try:
             reason = self.runtime.start_prompt(task_id, session_id, text, emit_update, cancel_event, **start_prompt_kwargs)
         except OrchestrationUnavailable as exc:
@@ -1022,15 +1410,15 @@ class Agent:
         session["pending_selection"] = None
         session["default_selection"] = None
         if pending is None:
-            return
-        entries, connections = self._selectable_entries_and_connections()
+            return False
+        entries, connections = self._selectable_entries_and_connections(session["project"])
         catalog_entry, withdrawn_model = self._resolve_pending_route(entries, connections, pending)
         if catalog_entry is None:
             if withdrawn_model is not None:
                 observe(self.environ, "session/prompt", f"pending_selection_model_withdrawn:{withdrawn_model}")
             else:
                 observe(self.environ, "session/prompt", "pending_selection_route_unavailable")
-            return
+            return False
         if catalog_entry.route.id != pending.get("route_id"):
             self._persist_migrated_default(catalog_entry, pending.get("parameters") or {})
             observe(self.environ, "session/prompt", "pending_selection_route_migrated")
@@ -1040,6 +1428,8 @@ class Agent:
             service.ui_select(task_id, catalog_entry, inputs, 0, session["owner_epoch"])
         except PortableError:
             observe(self.environ, "session/prompt", "pending_selection_apply_failed")
+            return False
+        return True
 
     def _resolve_pending_route(self, entries, connections, pending):
         """T035 FINDING-05: resolve a saved pre-task selection (``pending``,
@@ -1086,14 +1476,30 @@ class Agent:
         current route id (a refresh minted a new one for the same
         connection+model) -- self-healing ``defaults.json`` so the next
         task resolves directly by id again, without needing
-        :meth:`_resolve_pending_route`'s fallback path at all."""
-        current = configuration_store.read_user_defaults(self.environ)
-        defaults = dict(current["defaults"])
-        defaults["route_id"] = catalog_entry.route.id
-        defaults["route_connection_id"] = catalog_entry.connection_id
-        defaults["route_model"] = catalog_entry.route.model
-        defaults["parameters"] = dict(parameters)
-        configuration_store.write_user_defaults(defaults, current["ceiling"], self.environ)
+        :meth:`_resolve_pending_route`'s fallback path at all.
+
+        The saved value belongs to the session that observed it.  Another
+        session may explicitly select a new default while this session is
+        resolving its stale route, so this is a compare-before-write under
+        the registry's existing cross-process lock.  Agent-owned explicit
+        default writes use the same lock (see ``_write_user_defaults``).
+        """
+        observed = configuration_store.read_user_defaults(self.environ)
+        with connection_registry.transaction(self.environ):
+            current = configuration_store.read_user_defaults(self.environ)
+            if current != observed:
+                return
+            defaults = dict(current["defaults"])
+            defaults["route_id"] = catalog_entry.route.id
+            defaults["route_connection_id"] = catalog_entry.connection_id
+            defaults["route_model"] = catalog_entry.route.model
+            defaults["parameters"] = dict(parameters)
+            configuration_store.write_user_defaults(defaults, current["ceiling"], self.environ)
+
+    def _write_user_defaults(self, defaults, ceiling) -> None:
+        """Write user defaults while coordinating with migration writes."""
+        with connection_registry.transaction(self.environ):
+            configuration_store.write_user_defaults(defaults, ceiling, self.environ)
 
     def _run_command_body(self, request_id, session_id, session, recognized, cancel_event):
         command_id, argument = recognized
@@ -1108,19 +1514,35 @@ class Agent:
             if self.transport is None:
                 return
             if not cancel_event.is_set():
-                self.transport.send_notification(protocol.agent_message_chunk(session_id, text_reply))
+                with self._history_lock(session_id):
+                    try:
+                        acp_replay_store.append_host_transcript(
+                            store, session_id, "agent_message", text_reply,
+                            message_id=f"assistant:command:{session_id}:{request_id}",
+                        )
+                    except (StoreError, OSError, ValueError, TypeError, sqlite3.Error):
+                        self._reply_error(request_id, -32603, "Could not record command output.")
+                        observe(self.environ, "session/prompt", "command_history_failed")
+                        return
+                    if not self.transport.send_notification(protocol.agent_message_chunk(
+                        session_id, text_reply, f"assistant:command:{session_id}:{request_id}"
+                    )):
+                        cancel_event.set()
             reason = StopReason.CANCELLED.value if cancel_event.is_set() else StopReason.END_TURN.value
             self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(reason)))
             observe(self.environ, "session/prompt", "command:" + command_id)
 
         if command_id == acp_commands.CORTEX_STATUS:
-            entries, connections = self._selectable_entries_and_connections()
+            entries, connections = self._selectable_entries_and_connections(session["project"])
             options = self._config_options_for_session(session, store)
             _reply(acp_commands.build_status_text(
-                config_options=options, connection_setup_summary=self._connection_setup_summary(connections)))
+                config_options=options, connection_setup_summary=self._connection_setup_summary(connections),
+                execution_mode="direct-user (no OS filesystem isolation)"))
             return
         if command_id == acp_commands.CORTEX_SETUP:
-            _reply(acp_commands.build_setup_text())
+            connections = self._selectable_entries_and_connections(session["project"])[1]
+            _reply(acp_commands.build_setup_text(
+                connection_states=self._connection_state_counts(connections)))
             return
         if command_id == acp_commands.CORTEX_STOP:
             self._run_cortex_stop(request_id, session_id, session, cancel_event, _reply)
@@ -1131,8 +1553,11 @@ class Agent:
         if command_id == acp_commands.CORTEX_NEW_TASK:
             self._run_cortex_new_task(request_id, session_id, session, argument, cancel_event)
             return
-        if command_id == acp_commands.HARVEST:
-            self._run_harvest(request_id, session_id, session, argument, cancel_event)
+        if command_id in (acp_commands.HARVEST, acp_commands.HARVEST_REFRESH):
+            self._run_harvest(
+                request_id, session_id, session, argument, cancel_event,
+                refresh=(command_id == acp_commands.HARVEST_REFRESH),
+            )
             return
 
         # cortex-model / cortex-effort / cortex-language: share the exact
@@ -1151,9 +1576,12 @@ class Agent:
                 _reply("Usage: /cortex-language auto|en|ru")
                 return
         else:
-            entries, _connections = self._selectable_entries_and_connections()
+            entries, _connections = self._selectable_entries_and_connections(session["project"])
             if command_id == acp_commands.CORTEX_MODEL:
                 config_id = acp_config_options.MODEL_OPTION_ID
+                if not entries:
+                    _reply("No model is selectable yet. Use /cortex-setup to configure an authorized engine connection.")
+                    return
                 resolved = acp_commands.resolve_model_argument(argument, entries)
                 if resolved is None:
                     _reply(f"No matching model for {argument!r}. Use /cortex-status to see the current options.")
@@ -1164,6 +1592,10 @@ class Agent:
                 resolved = argument.strip() or None
                 if resolved is None:
                     _reply("/cortex-effort requires a value. Use /cortex-status to see the current options.")
+                    return
+                options = self._config_options_for_session(session, store)
+                if not any(item["id"] == config_id for item in options):
+                    _reply("No thought level is selectable for the current model. Use /cortex-status to inspect options, or /cortex-setup if no model is available.")
                     return
 
         if session["task_id"] is not None:
@@ -1215,7 +1647,10 @@ class Agent:
         if task_id is None:
             reply("There is no active task on this session to stop.")
             return
-        method, kwargs = self._runtime_call_kwargs("stop_task", project_root=session["project"])
+        method, kwargs = self._runtime_call_kwargs(
+            "stop_task", project_root=session["project"],
+            emit_tool_call=self._make_emit_tool_call(session_id, cancel_event),
+        )
         if method is None:
             reply("This runtime does not support /cortex-stop.")
             return
@@ -1261,10 +1696,14 @@ class Agent:
             observe(self.environ, "session/prompt", "capture_failed")
             return
 
+        assistant_message_id = f"assistant:command:{session_id}:{request_id}"
+
         def emit_update(chunk_text):
             if cancel_event.is_set() or self.transport is None:
                 return False
-            return self.transport.send_notification(protocol.agent_message_chunk(session_id, chunk_text))
+            return self.transport.send_notification(protocol.agent_message_chunk(
+                session_id, chunk_text, assistant_message_id,
+            ))
 
         try:
             reason = answer_method(task_id, session_id, question, text, emit_update, cancel_event, **answer_kwargs)
@@ -1275,32 +1714,44 @@ class Agent:
         self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(reason.value)))
         observe(self.environ, "session/prompt", "command:" + acp_commands.CORTEX_ANSWER)
 
-    def _run_harvest(self, request_id, session_id, session, argument, cancel_event):
+    def _run_harvest(self, request_id, session_id, session, argument, cancel_event, *, refresh=False):
         """T035: `/harvest` -- an explicit knowledge-harvest request for the
-        task this session is already on.
+        task this session is already on, or the first task in the project.
 
         The coordinator's role keeps a harvest explicit-only, and until this
         command existed "explicit" had nothing to express it: a model had to
         decide from prose whether the user had really asked. A command was
         pressed or it was not.
 
-        Deliberately an ordinary turn on the existing task, not a mechanism
-        of its own: the request is recorded as the user's own message, so
+        For an existing task this is an ordinary turn, not a mechanism of its
+        own: the request is recorded as the user's own message, so
         steering, continuation, language and every durable guarantee apply to
         it exactly as they do to anything else the user says.
+
+        The first request, with or without an argument, creates the task and
+        uses a complete project-documentation goal when no scope is supplied.
+        An optional argument narrows that goal. It goes
+        through `_run_prompt_body` so first-prompt configuration, language,
+        durable capture and runtime identity handling remain identical to a
+        normal first prompt. The explicit harvest instruction is appended to
+        that goal and is visible to the coordinator in the same prompt turn.
         """
         store = self._store_for(session["project"])
         language = self._current_language_for_session(store, session) or "en"
-        if session.get("task_id") is None:
-            if self.transport is not None:
-                self.transport.send_notification(protocol.agent_message_chunk(
-                    session_id, acp_messages.render("harvest_no_task", language)))
-                self.transport.send_response(
-                    protocol.result_response(request_id, protocol.prompt_result(StopReason.END_TURN.value)))
-            return
         scope = argument.strip()
+        key = "harvest_refresh_requested" if refresh else "harvest_requested"
+        if session.get("task_id") is None:
+            if scope:
+                goal = scope
+            elif refresh:
+                goal = "Update the project's existing source-backed documentation"
+            else:
+                goal = "Create complete source-backed documentation for the project"
+            instruction = acp_messages.render(key, language, scope=(f" ({scope})" if scope else ""))
+            self._run_prompt_body(request_id, session_id, session, f"{goal}\n\n{instruction}", cancel_event)
+            return
         text = acp_messages.render(
-            "harvest_requested", language,
+            key, language,
             scope=(f" ({scope})" if scope else ""),
         )
         self._run_prompt_body(request_id, session_id, session, text, cancel_event)
@@ -1316,7 +1767,10 @@ class Agent:
         text = argument.strip()
         if not text:
             if self.transport is not None:
-                self.transport.send_notification(protocol.agent_message_chunk(session_id, "Usage: /cortex-new-task <task text>"))
+                self.transport.send_notification(protocol.agent_message_chunk(
+                    session_id, "Usage: /cortex-new-task <task text>",
+                    f"assistant:command:{session_id}:{request_id}",
+                ))
                 self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(StopReason.END_TURN.value)))
             return
         store = self._store_for(session["project"])
@@ -1330,10 +1784,14 @@ class Agent:
             return
         new_task_id = result.task_id
 
+        assistant_message_id = f"assistant:command:{session_id}:{request_id}"
+
         def emit_update(chunk_text):
             if cancel_event.is_set() or self.transport is None:
                 return False
-            return self.transport.send_notification(protocol.agent_message_chunk(session_id, chunk_text))
+            return self.transport.send_notification(protocol.agent_message_chunk(
+                session_id, chunk_text, assistant_message_id,
+            ))
 
         try:
             if self._runtime_accepts_project_root and self._runtime_accepts_source_identity:
@@ -1356,7 +1814,9 @@ class Agent:
         language = acp_messages.select_language(None, [])
         if self.transport is not None:
             self.transport.send_notification(protocol.agent_message_chunk(
-                session_id, acp_messages.render("new_task_created", language, task_id=new_task_id)))
+                session_id, acp_messages.render("new_task_created", language, task_id=new_task_id),
+                assistant_message_id,
+            ))
             self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(reason.value)))
         observe(self.environ, "session/prompt", "command:" + acp_commands.CORTEX_NEW_TASK)
 
@@ -1373,16 +1833,17 @@ class Agent:
         docstrings; ``/cortex-model`` instead goes through
         ``_apply_route_selection`` -- see ``_run_command_body``).
 
-        T035: ``provider``, ``model``, and ``thought_level`` are three
-        independent configIds (see ``acp.config_options`` module
-        docstring) -- never one fused route select. Changing ``provider``
+        Zed receives independent ``provider``, ``model``, and
+        ``thought_level`` configIds. Paseo's model option instead carries
+        exact route IDs across providers because it displays only that
+        category. Changing ``provider``
         necessarily changes engine and so may change the valid model/effort
         sets: the same model *name* is kept if the new provider happens to
         offer it too, otherwise the new provider's own first model is used
         explicitly (never a silently-kept invalid model, never a silently
         dropped selection) and ``thought_level`` is always reset (a
         different route's supported values may differ entirely). Changing
-        ``model`` (within the current provider) also resets
+        ``model`` also resets
         ``thought_level`` for the same reason; only changing
         ``thought_level`` itself preserves the current provider+model.
 
@@ -1420,23 +1881,33 @@ class Agent:
             (item for item in previous_options if item["id"] == acp_config_options.MODEL_OPTION_ID), None)
         current_model = model_option["currentValue"] if model_option is not None else None
 
-        entries, _connections = self._selectable_entries_and_connections()
+        entries, _connections = self._selectable_entries_and_connections(session["project"])
+        combined_model_picker = self._combined_model_picker()
+        combined_values = acp_config_options.combined_model_values(entries) if combined_model_picker else {}
+        if combined_model_picker and current_model is not None:
+            current_entry = next(
+                (entry for entry in entries if combined_values[entry.route.id] == current_model), None)
+            current_model_name = current_entry.route.model if current_entry is not None else None
+        else:
+            current_model_name = current_model
 
         if config_id == acp_config_options.PROVIDER_OPTION_ID:
             provider_entries = [entry for entry in entries if entry.connection_id == value]
-            target_entry = next((entry for entry in provider_entries if entry.route.model == current_model), None)
+            target_entry = next((entry for entry in provider_entries if entry.route.model == current_model_name), None)
             if target_entry is None and provider_entries:
                 target_entry = provider_entries[0]
             parameters_override: dict = {}
         elif config_id == acp_config_options.MODEL_OPTION_ID:
             target_entry = next(
                 (entry for entry in entries
-                 if entry.connection_id == current_connection_id and entry.route.model == value), None)
+                 if (combined_values[entry.route.id] == value if combined_model_picker else
+                     entry.connection_id == current_connection_id and entry.route.model == value)), None)
             parameters_override = {}
         else:
             target_entry = next(
                 (entry for entry in entries
-                 if entry.connection_id == current_connection_id and entry.route.model == current_model), None)
+                 if (combined_values[entry.route.id] == current_model if combined_model_picker else
+                     entry.connection_id == current_connection_id and entry.route.model == current_model)), None)
             parameters_override = {config_id: value}
 
         if target_entry is None:
@@ -1448,11 +1919,11 @@ class Agent:
 
     def _apply_route_selection(self, store, session, catalog_entry):
         """Select a whole route (provider+model together) in one step --
-        used only by the ``/cortex-model`` command's free-text resolution
+        used by the ``/cortex-model`` command's free-text resolution
         (which matches by full route id/label across *every* provider, see
-        ``resolve_model_argument``/``_run_command_body``), unlike the
-        protocol-level ``configId='model'`` axis, which is always scoped to
-        the currently selected provider (see ``_apply_config_selection``).
+        ``resolve_model_argument``/``_run_command_body``). The Paseo model
+        picker uses the same cross-provider route identity through
+        ``_apply_config_selection``.
         Always resets ``thought_level``, exactly like a protocol-level
         provider/model change."""
         if session["task_id"] is None:
@@ -1481,7 +1952,7 @@ class Agent:
         defaults["route_connection_id"] = catalog_entry.connection_id
         defaults["route_model"] = catalog_entry.route.model
         defaults["parameters"] = merged_parameters
-        configuration_store.write_user_defaults(defaults, current["ceiling"], self.environ)
+        self._write_user_defaults(defaults, current["ceiling"])
         session["pending_selection"] = dict(
             route_id=catalog_entry.route.id, parameters=merged_parameters,
             connection_id=catalog_entry.connection_id, model=catalog_entry.route.model,
@@ -1530,7 +2001,7 @@ class Agent:
             current = configuration_store.read_user_defaults(self.environ)
             defaults = dict(current["defaults"])
             defaults["language"] = normalized
-            configuration_store.write_user_defaults(defaults, current["ceiling"], self.environ)
+            self._write_user_defaults(defaults, current["ceiling"])
             session["pending_language"] = normalized
         else:
             acp_steering.set_language_override(store, task_id, normalized)
@@ -1552,11 +2023,37 @@ class Agent:
         self.transport.send_response(protocol.result_response(request_id, protocol.set_config_option_response(options)))
         self.transport.send_notification(protocol.config_option_update(session_id, options))
 
+    def _session_set_mode(self, request_id, params):
+        """Paseo renders ACP modes but hides generic ``other`` options.
+
+        In that client only, Cortex presents its existing coordinator-language
+        choice as a mode and maps the standard ``session/set_mode`` request to
+        the same durable language selection used by Zed's config option and
+        ``/cortex-language``. No engine execution mode is changed.
+        """
+        session_id, mode_id = protocol.validate_set_mode_params(params)
+        if not self._combined_model_picker():
+            raise RpcError(-32601, "session/set_mode is not available for this client.")
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise RpcError(-32602, "Unknown sessionId.")
+        with session["lock"]:
+            store = self._store_for(session["project"])
+            _accepted, options, error = self._apply_config_selection(
+                store, session, acp_config_options.LANGUAGE_OPTION_ID, "value_id", mode_id,
+            )
+        if error is not None:
+            self.transport.send_response(protocol.error_response(request_id, error))
+            return
+        self.transport.send_response(protocol.result_response(request_id, {}))
+        self.transport.send_notification(protocol.config_option_update(session_id, options))
+
     def _session_load(self, request_id, params):
         """(T018) Display-only history replay -- see ``acp.replay_store``
         module docstring and ``docs/acp/input-history-and-replay.md``.
 
-        Pure read over the durable ``acp_host_sessions``/``host_transcript``
+        Pure read over the durable ``acp_host_sessions``/``host_transcript``/
+        ``host_updates``
         rows: never calls ``runtime.start_prompt``, never opens an engine
         session, never writes ``source_events``/``task_events``/
         ``deliveries``/reports -- this method issues no ``BEGIN IMMEDIATE``
@@ -1574,17 +2071,43 @@ class Agent:
         durable = acp_sessions.get_session(store, session_id)
         if durable is None or durable["project_root"] != project:
             raise RpcError(-32602, "Unknown sessionId.")
-        for entry in acp_replay_store.replay_session(store, session_id):
+        history = acp_replay_store.replay_session(store, session_id)
+        for replay_index, entry in enumerate(history):
+            if entry["kind"] == "update":
+                if is_hidden_tool_update(entry.get("update")):
+                    continue
+                queued = self.transport.send_notification(
+                    protocol.notification("session/update", dict(sessionId=session_id, update=entry["update"]))
+                )
+                if not queued:
+                    raise RpcError(-32603, "Cannot enqueue complete session history.")
+                continue
             text = entry["text"]
             for attachment in entry["attachments"]:
                 text += (
                     f"\n[attachment: {attachment.get('name') or attachment.get('uri') or attachment.get('kind')} "
                     f"({attachment.get('availability')}) source_ref={attachment.get('source_ref')}]"
                 )
+            message_id = entry.get("message_id") or f"replay:{session_id}:{replay_index}"
             if entry["kind"] == "user_message":
-                self.transport.send_notification(protocol.user_message_chunk(session_id, text))
+                queued = self.transport.send_notification(protocol.user_message_chunk(session_id, text, message_id))
             else:
-                self.transport.send_notification(protocol.agent_message_chunk(session_id, text))
+                queued = self.transport.send_notification(protocol.agent_message_chunk(session_id, text, message_id))
+            if not queued:
+                raise RpcError(-32603, "Cannot enqueue complete session history.")
+        # A result/cancellation can win the race with a worker turn's final
+        # card update.  Replay the exact durable terminal evidence for an
+        # already-present worker card so Paseo does not keep rendering it as
+        # working after reconnect.  This helper is read-only: session/load
+        # never mutates the transcript or task store.
+        for update in acp_replay_store.terminal_worker_card_reconciliation(
+            store, durable["task_id"], history,
+        ):
+            queued = self.transport.send_notification(
+                protocol.notification("session/update", dict(sessionId=session_id, update=update)),
+            )
+            if not queued:
+                raise RpcError(-32603, "Cannot enqueue complete session history.")
         if session_id not in self.sessions:
             # Best-effort: lets a subsequent session/prompt on this
             # connection continue the same durable task (via
@@ -1607,8 +2130,23 @@ class Agent:
             self.sessions[session_id] = dict(
                 project=project, task_id=durable["task_id"], channel=None, active=None, lock=threading.Lock(),
                 owner_epoch=restored_epoch, pending_selection=None, default_selection=None,
-                pending_language=None, client_capabilities=dict(self.client_capabilities))
+                pending_language=None, client_capabilities=dict(self.client_capabilities),
+                # ``session/load`` is a reconnect, not a new client identity.
+                # The incoming client still supplies the current session's
+                # MCP configuration, and that configuration must reach the
+                # coordinator/workers just as it does after ``session/new``.
+                # Durable storage intentionally retains only shape metadata
+                # (never env/header values), so use this request-local copy.
+                mcp_servers=load_mcp_servers(project, client_servers=raw_mcp_servers, environ=self.environ),
+            )
         session = self.sessions[session_id]
+        # A client may issue session/load on an Agent object that already has
+        # the durable session (for example after a transport-level retry).
+        # Refresh the request-scoped MCP configuration in that case too;
+        # otherwise a changed client list would silently keep stale servers.
+        session["mcp_servers"] = load_mcp_servers(
+            project, client_servers=raw_mcp_servers, environ=self.environ,
+        )
         # T035 FINDING-08 fix: report the same selection surface as
         # session/new, not a bare null. ``_config_options_for_session`` ->
         # ``_current_selection_context`` already does the right thing here
@@ -1631,7 +2169,29 @@ class Agent:
         if session is None:
             return
         try:
-            self.runtime.cancel(session_id)
+            # Paseo's Workers control means "stop this task", including
+            # already-running workers.  The notification carries no reply
+            # channel, so the runtime records the terminal card update and
+            # session/load replays it if this transport disappears.
+            task_id = session.get("task_id")
+            is_paseo = str(self.client_info.get("name", "")).casefold() == "paseo"
+            cancel_task = getattr(self.runtime, "cancel_task", None)
+            if is_paseo and task_id and cancel_task is not None:
+                cancel_kwargs = {}
+                if self._runtime_accepts_cancel_task_project_root:
+                    cancel_kwargs["project_root"] = session["project"]
+                if self._runtime_accepts_cancel_task_emitter and self.transport is not None:
+                    # A notification has no response channel.  This emitter
+                    # still persists before enqueueing, and the runtime's
+                    # durable session-owner check prevents cross-session
+                    # updates.  If the transport is already gone, omit it so
+                    # the runtime appends the terminal update for replay.
+                    cancel_kwargs["emit_tool_call"] = self._make_emit_tool_call(
+                        session_id, threading.Event(),
+                    )
+                cancel_task(task_id, session_id, **cancel_kwargs)
+            else:
+                self.runtime.cancel(session_id)
         except Exception:
             pass
         with session["lock"]:

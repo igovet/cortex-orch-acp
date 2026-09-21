@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import threading
 import uuid
+from pathlib import Path
 
+from cortex_runtime.acp import pipeline_bootstrap
 from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation import mcp_tools
@@ -51,6 +53,27 @@ def _task(tmp_path):
     store = Store(project / ".cortex", project_root=project)
     result = bootstrap_task(store, SourceEvent(origin="cli", event_id=str(uuid.uuid4())), "Check in.", "owner-1")
     return store, result.task_id
+
+
+def _publish_current_pipeline(store, channel):
+    """Give the task-level acceptance gate a real coordinator edition."""
+    draft = store.call(
+        "create_draft", {"template": "pipeline"},
+        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True,
+    )
+    body = pipeline_bootstrap._fill_template(draft["markdown"], channel.task_id, "Check in.", None)
+    Path(draft["draft_path"]).write_text(body, encoding="utf-8")
+    return store.call(
+        "write_report",
+        {
+            "draft_id": draft["draft_id"],
+            "title": "Current pipeline",
+            "summary": "Coordinator-authored current pipeline edition",
+            "author": "coordinator",
+            "request_key": "test-current-pipeline-" + uuid.uuid4().hex,
+        },
+        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True,
+    )
 
 
 def test_claude_agent_acp_coordinator_session_runs_through_the_real_session_manager(tmp_path):
@@ -83,6 +106,10 @@ def test_claude_agent_acp_coordinator_session_runs_through_the_real_session_mana
     try:
         channel, session_ref = runtime._ensure_coordinator(task_id)
         assert session_ref.startswith("es_")
+        manager = adapter._managers[list(adapter._managers)[0]]
+        assert manager.correlation.wire_session_id(session_ref) is not None
+        assert manager._record.engine == "claude-agent-acp"
+        _publish_current_pipeline(store, channel)
         mcp_tools.dispatch(store, channel, "decide", dict(
             assignment_ref="task", decision="accept",
             rationale="Trivial check-in, nothing to delegate.", request_key="acc1",
@@ -96,9 +123,7 @@ def test_claude_agent_acp_coordinator_session_runs_through_the_real_session_mana
         with store.connection() as db:
             state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
         assert state == "accepted"
-        manager = adapter._managers[list(adapter._managers)[0]]
-        assert manager.correlation.wire_session_id(session_ref) is not None
-        assert manager._record.engine == "claude-agent-acp"
+        assert not adapter._managers  # accepted task releases its owned engine
     finally:
         for manager in list(adapter._managers.values()):
             manager.shutdown(grace=2.0)
@@ -109,4 +134,4 @@ def test_claude_agent_acp_coordinator_session_runs_through_the_real_session_mana
     import json
 
     dumped = json.loads(session_new_dump.read_text(encoding="utf-8"))
-    assert dumped.get("_meta", {}).get("systemPrompt", "").startswith("---\nname: orchestrator")
+    assert dumped.get("_meta", {}).get("systemPrompt", {}).get("append", "").startswith("---\nname: orchestrator")

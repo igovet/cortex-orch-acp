@@ -49,9 +49,9 @@ _CATALOG: dict[str, dict[str, str]] = {
               "`read_skill` и выполни его для этой задачи: это и есть явный запрос, которого требует "
               "этот скилл, а не вывод из сказанного ранее.",
     },
-    "harvest_no_task": {
-        "en": "There is no task in this session yet, so there is nothing to harvest. Send a request first.",
-        "ru": "В этой сессии ещё нет задачи, собирать нечего. Сначала отправьте запрос.",
+    "harvest_refresh_requested": {
+        "en": "The user explicitly requested a documentation refresh{scope}. Read `knowledge-harvest` with `read_skill` and update the project's source-backed documentation for this task; this is an explicit request, not an inference.",
+        "ru": "Пользователь явно запросил обновление документации{scope}. Прочитай `knowledge-harvest` через `read_skill` и обнови подтверждённую источниками документацию проекта для этой задачи: это явный запрос, а не вывод.",
     },
     "delivered_but_not_accepted": {
         "en": "This turn ended with a worker's change integrated into the project and the task "
@@ -128,6 +128,14 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Acceptance refused: {reasons}",
         "ru": "Принятие отклонено: {reasons}",
     },
+    "final_digest_withheld": {
+        "en": "Cortex withheld a digest absent from the published pipeline. Read that report for the verified value.",
+        "ru": "Cortex скрыл хеш, которого нет в опубликованном pipeline.md. Точное проверенное значение приведено в этом отчёте.",
+    },
+    "accepted_status_correction": {
+        "en": "Cortex status: the task is accepted. The preceding wait/status text was stale.",
+        "ru": "Статус Cortex: задача принята. Предыдущий текст ожидания или статуса был устаревшим.",
+    },
     "resume_context": {
         "en": "Resuming after a prior wait ({wait_reason}): {explanation}",
         "ru": "Возобновление после ожидания ({wait_reason}): {explanation}",
@@ -151,6 +159,14 @@ _CATALOG: dict[str, dict[str, str]] = {
     "question_answer_none_open": {
         "en": "There is no open question to answer right now.",
         "ru": "Сейчас нет открытого вопроса для ответа.",
+    },
+    "question_already_answered": {
+        "en": "That question was answered concurrently; your reply was recorded but not applied. Send it again if it is new guidance.",
+        "ru": "На этот вопрос уже ответили параллельно; ваш ответ сохранён, но не применён. Отправьте его снова, если это новое указание.",
+    },
+    "question_options_label": {
+        "en": "Options:",
+        "ru": "Варианты ответа:",
     },
     "new_task_created": {
         "en": "Started a new, separate task ({task_id}); the active task is unaffected.",

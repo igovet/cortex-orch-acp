@@ -10,8 +10,11 @@ on assignments/checks in the pipeline, not a decorative mode label.
   focused checks; one native executor is acceptable when independent acceptance is
   not required. The coordinator does not replace that executor for code discovery
   or project writes; a read-only question still needs its specialist owner.
-- `light`: examine affected components and regression risks; use an independent
-  reviewer/verifier for a nontrivial change, and research only a concrete uncertainty.
+- `light`: examine affected components and regression risks. Treat a user-visible
+  UI implementation as nontrivial unless the pipeline records a concrete low-risk
+  rationale tied to its acceptance boundary; normally use an independent reviewer
+  or verifier. Implementer and coordinator checks do not satisfy that independent
+  ownership. Research only a concrete uncertainty.
 - `full`: cover the consequential end-to-end path, separate uncertain diagnosis
   from implementation, and require independent verification for production,
   security, migrations or substantial behavior changes, with integration and

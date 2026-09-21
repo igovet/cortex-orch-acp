@@ -3,16 +3,17 @@
 Read this reference only for structural repository discovery or when saved report
 detail is needed.
 
-Use the live `codebase_memory` contracts for structural discovery. Discover only the
-needed provider-qualified operation names and read their complete advertised schemas;
-a lookup restricted to Cortex operations does not establish graph-tool availability.
+Use a code index for structural discovery only when one is available in the
+current host. Discover the needed operation names and read their complete
+advertised schemas. Otherwise use bounded repository-native source search.
 
-Match a code index to the canonical assignment workspace using the full root returned
-by `list_projects`, not a similar name or another worktree. If multiple entries match, compare
+When a code index is available, match it to the exact project directory opened in
+the ACP client using the full root returned by `list_projects`, not a similar name
+or another worktree. If multiple entries match, compare
 `index_status` and relevant `check_index_coverage` results to select the healthy index
 covering the assigned scope. A ready index can still exclude the entire subsystem.
 Retain the selection within the assignment. If no matching index exists, initial
-`index_repository` use is allowed for the authorized workspace; this does not authorize
+`index_repository` use is allowed for the authorized project; this does not authorize
 changing ignore rules or indexing other projects.
 
 Use the smallest operation that answers the question: `search_graph` for definitions,
@@ -34,7 +35,7 @@ graph tools, infer absence from no hits or rebuild an index after every small ch
 Fresh source, executable configuration and observed tests outrank derived graph
 relationships.
 
-In code-investigation reports, identify the selected index and matching workspace,
+In code-investigation reports, identify the selected index and matching project,
 or the concrete limitation that required source fallback. Merely listing available
 tools is not evidence that graph discovery was performed.
 

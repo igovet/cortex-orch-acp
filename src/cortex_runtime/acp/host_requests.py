@@ -15,8 +15,10 @@ chose for a request *to* this agent.
 """
 from __future__ import annotations
 
+import collections
 import itertools
 import threading
+import time
 
 
 class HostRequestClosed(Exception):
@@ -49,11 +51,18 @@ class _Pending:
 class HostRequester:
     """One per incoming ACP connection (see ``acp.agent.Agent.bind_transport``)."""
 
+    # Late replies are retained only long enough to preserve the distinction
+    # between an expected late response and an unrelated/forged id.  This is
+    # deliberately bounded: a dead host must not turn repeated timeouts into
+    # an ever-growing in-memory request ledger.
+    _MAX_TIMEOUT_TOMBSTONES = 1024
+
     def __init__(self, transport, *, logs=None):
         self._transport = transport
         self._logs = logs
         self._lock = threading.Lock()
         self._pending: dict[str, _Pending] = {}
+        self._timed_out = collections.OrderedDict()
         self._counter = itertools.count(1)
         self._closed = threading.Event()
 
@@ -67,11 +76,37 @@ class HostRequester:
         body = dict(jsonrpc="2.0", id=request_id, method=method)
         if params is not None:
             body["params"] = params
-        self._transport.send_response(body)  # never dropped, same guarantee as a reply
-        got = entry.event.wait(timeout)
-        if not got:
-            entry.timed_out = True
+        # A host request is a response-shaped frame on the incoming ACP
+        # connection, but it still has a live future behind it.  If the
+        # writer is already closed, do not leave that future pending until
+        # the permission timeout: fail closed immediately and remove the
+        # request from the in-flight table.
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        remaining = max(0.0, deadline - time.monotonic())
+        sent = self._transport.send_response(body, timeout=remaining)
+        if sent is False:
+            with self._lock:
+                self._pending.pop(request_id, None)
+            writer_closed = getattr(self._transport, "writer_closed", None)
+            if callable(writer_closed) and writer_closed():
+                raise HostRequestClosed(method)
             raise HostRequestTimeout(method)
+        got = entry.event.wait(max(0.0, deadline - time.monotonic()))
+        if not got:
+            with self._lock:
+                current = self._pending.get(request_id)
+                if current is entry and not entry.event.is_set():
+                    entry.timed_out = True
+                    self._pending.pop(request_id, None)
+                    self._timed_out[request_id] = None
+                    self._timed_out.move_to_end(request_id)
+                    while len(self._timed_out) > self._MAX_TIMEOUT_TOMBSTONES:
+                        self._timed_out.popitem(last=False)
+                    raise HostRequestTimeout(method)
+                # A response won the timeout race while the caller was
+                # acquiring the lock.  Consume it below instead of falsely
+                # reporting a timeout.
+                self._pending.pop(request_id, None)
         response = entry.response
         with self._lock:
             self._pending.pop(request_id, None)
@@ -97,6 +132,14 @@ class HostRequester:
             entry = self._pending.get(request_id)
             already_set = entry.event.is_set() if entry is not None else None
         if entry is None:
+            with self._lock:
+                was_timed_out = request_id in self._timed_out
+                if was_timed_out:
+                    self._timed_out.pop(request_id, None)
+            if was_timed_out:
+                if self._logs is not None:
+                    self._logs.observe("host_request_late_or_duplicate_response", request_id=request_id)
+                return True
             if self._logs is not None:
                 self._logs.observe("host_request_unknown_response_id", request_id=request_id)
             return True

@@ -86,6 +86,50 @@ def test_embedded_text_and_blob_stored_with_sha256(tmp_path):
     assert entries[1]["sha256"] == hashlib.sha256(b"\x00\x01binary").hexdigest()
 
 
+def test_image_exact_bytes_and_mime_are_persisted_and_read_back(tmp_path):
+    import base64
+    import hashlib
+
+    image_bytes = b"\x89PNG\r\n\x1a\n\x00opaque-image-bytes"
+    blocks = [dict(type="image", data=base64.b64encode(image_bytes).decode("ascii"),
+                   mimeType="image/png")]
+    resolved = replay_store.resolve_prompt_blocks(blocks, str(tmp_path))
+    assert resolved[0].availability == "stored"
+    assert resolved[0].body == image_bytes
+    store, result = _task(tmp_path)
+    staged = replay_store.stage_blocks(str(tmp_path), resolved)
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        replay_store.record_blocks_tx(store, db, result.task_id, result.report_id, staged, [], [])
+        db.commit()
+
+    source = replay_store.read_source(store, result.task_id, f"{result.report_id}:0")
+    assert source["kind"] == "image"
+    assert source["mime"] == "image/png"
+    assert source["sha256"] == hashlib.sha256(image_bytes).hexdigest()
+    assert source["total_size"] == len(image_bytes)
+    assert source["encoding"] == "base64"
+    assert base64.b64decode(source["chunk"]) == image_bytes
+
+
+def test_invalid_or_oversized_images_never_produce_a_stored_body(tmp_path):
+    import base64
+
+    invalid = replay_store.resolve_prompt_blocks(
+        [dict(type="image", data="not-base64!", mimeType="image/png")], str(tmp_path)
+    )[0]
+    assert invalid.availability == "inaccessible"
+    assert invalid.reason == "invalid_blob_encoding"
+    assert invalid.body is None
+
+    oversized = replay_store.resolve_prompt_blocks(
+        [dict(type="image", data=base64.b64encode(b"x" * (replay_store.MAX_BLOCK_BYTES + 1)).decode(),
+              mimeType="image/png")], str(tmp_path)
+    )[0]
+    assert oversized.availability == "too_large"
+    assert oversized.body is None
+
+
 def test_over_cap_block_recorded_as_too_large_not_partially_stored(tmp_path):
     big = "x" * (replay_store.MAX_BLOCK_BYTES + 1)
     blocks = [dict(type="resource", resource=dict(uri="mem://big", text=big))]
@@ -573,21 +617,21 @@ def test_mcp_read_source_cross_task_ref_refused(tmp_path):
     other_dir.mkdir()
     store_b, result_b = _task(other_dir, origin="acp:sb", event_id="eb")
     channel_a = _coordinator_channel(store_a, result_a.task_id, result_a.owner_epoch)
-    listed = mcp_tools.dispatch(store_a, channel_a, "list_sources", dict(request_key="r1"))
+    listed = mcp_tools.dispatch(store_a, channel_a, "list_sources", {})
     own_ref = listed["entries"][0]["source_ref"]
     # A ref for A's own task through A's channel works.
-    ok = mcp_tools.dispatch(store_a, channel_a, "read_source", dict(request_key="r2", source_ref=own_ref))
+    ok = mcp_tools.dispatch(store_a, channel_a, "read_source", dict(source_ref=own_ref))
     assert ok["chunk"] == "hello world"
     # The SAME store/db but a channel issued for task B must never resolve
     # a source_ref belonging to a different task -- refused, not leaked.
     with pytest.raises(StoreError):
-        mcp_tools.dispatch(store_a, channel_a, "read_source", dict(request_key="r3", source_ref=f"{result_b.report_id}:-1"))
+        mcp_tools.dispatch(store_a, channel_a, "read_source", dict(source_ref=f"{result_b.report_id}:-1"))
 
 
 def test_list_sources_mcp_tool_available_on_coordinator_and_worker(tmp_path):
     store, result = _task(tmp_path)
     channel = _coordinator_channel(store, result.task_id, result.owner_epoch)
-    listed = mcp_tools.dispatch(store, channel, "list_sources", dict(request_key="r1"))
+    listed = mcp_tools.dispatch(store, channel, "list_sources", {})
     assert listed["entries"][0]["kind"] == "text"
 
 
@@ -604,7 +648,6 @@ def test_migration_from_b19d288_schema_gains_replay_tables_on_open(tmp_path):
     from cortex_runtime.delegation.evidence_store import EVIDENCE_SCHEMA
     from cortex_runtime.delegation.events_store import TASK_EVENTS_SCHEMA
     from cortex_runtime.delegation.store import DELEGATION_SCHEMA
-    from cortex_runtime.hook_storage import HOOK_SCHEMA
     from cortex_runtime.store import APPLICATION_ID, SCHEMA, private_directory
     from cortex_runtime.trusted_channel import IDENTITY_SCHEMA
 
@@ -613,9 +656,9 @@ def test_migration_from_b19d288_schema_gains_replay_tables_on_open(tmp_path):
     db = sqlite3.connect(path)
     try:
         db.executescript(
-            "BEGIN;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA +
+            "BEGIN;\n" + SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA +
             ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA +
-            f"PRAGMA application_id={APPLICATION_ID};\nPRAGMA user_version=11;\nCOMMIT;")
+            f"PRAGMA application_id={APPLICATION_ID};\nPRAGMA user_version=12;\nCOMMIT;")
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert not (tables & {"source_blocks", "source_block_reads", "host_transcript"})
     finally:
@@ -664,6 +707,8 @@ class _CountingFakeRuntime:
 
     def __init__(self):
         self.start_prompt_calls = []
+        self.cancel_task_calls = []
+        self.cancel_task_emitters = []
 
     def start_prompt(self, task_id, session_id, content, emit_update, cancel_event):
         self.start_prompt_calls.append((task_id, session_id, content))
@@ -672,6 +717,16 @@ class _CountingFakeRuntime:
 
     def cancel(self, session_id):
         return None
+
+    def cancel_task(self, task_id, session_id, emit_tool_call=None):
+        self.cancel_task_calls.append((task_id, session_id))
+        self.cancel_task_emitters.append(emit_tool_call)
+        if emit_tool_call is not None:
+            emit_tool_call(dict(
+                tool_call_id="worker:cancel-live", new=False,
+                status="failed", text="Cancelled: stop",
+            ))
+        return True
 
 
 def _isolated_environ():
@@ -687,6 +742,57 @@ def _row_counts(store, task_id):
             deliveries=db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0],
             reports=db.execute("SELECT COUNT(*) FROM reports WHERE task_id=?", (task_id,)).fetchone()[0],
         )
+
+
+def test_paseo_session_cancel_routes_to_task_wide_stop(tmp_path):
+    runtime = _CountingFakeRuntime()
+    agent = Agent(runtime, environ=_isolated_environ())
+    agent.client_info = {"name": "Paseo"}
+    agent.bind_transport(_RecordingTransport())
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    agent.sessions[session_id]["task_id"] = "task-running"
+
+    agent._session_cancel({"sessionId": session_id})
+
+    assert runtime.cancel_task_calls == [("task-running", session_id)]
+
+
+def test_paseo_session_cancel_emits_terminal_card_on_current_transport(tmp_path):
+    runtime = _CountingFakeRuntime()
+    agent = Agent(runtime, environ=_isolated_environ())
+    agent.client_info = {"name": "Paseo"}
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    agent.sessions[session_id]["task_id"] = "task-running"
+    create = agent._make_emit_tool_call(session_id, threading.Event())
+    assert create(dict(
+        tool_call_id="worker:cancel-live", new=True, title="Worker",
+        kind="other", status="in_progress", text="Working",
+    ))
+
+    agent._session_cancel({"sessionId": session_id})
+
+    updates = [n["params"]["update"] for n in transport.notifications]
+    assert updates[-1]["toolCallId"] == "worker:cancel-live"
+    assert updates[-1]["status"] == "failed"
+    assert runtime.cancel_task_emitters[-1] is not None
+
+
+def test_non_paseo_session_cancel_keeps_turn_scope(tmp_path):
+    runtime = _CountingFakeRuntime()
+    agent = Agent(runtime, environ=_isolated_environ())
+    agent.client_info = {"name": "Zed"}
+    agent.bind_transport(_RecordingTransport())
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    agent.sessions[session_id]["task_id"] = "task-running"
+
+    agent._session_cancel({"sessionId": session_id})
+
+    assert runtime.cancel_task_calls == []
 
 
 def test_session_load_replays_history_in_order_with_zero_mutations(tmp_path):
@@ -714,7 +820,14 @@ def test_session_load_replays_history_in_order_with_zero_mutations(tmp_path):
     loader_transport = _RecordingTransport()
     loader.bind_transport(loader_transport)
     loader.initialized = True
-    loader._session_load(42, dict(sessionId=session_id, cwd=str(tmp_path), mcpServers=[]))
+    reconnect_servers = [dict(
+        name="project-memory", command="/usr/bin/project-memory",
+        args=["--workspace", str(tmp_path)],
+        env=[dict(name="MEMORY_TOKEN", value="reconnect-secret")],
+    )]
+    loader._session_load(42, dict(
+        sessionId=session_id, cwd=str(tmp_path), mcpServers=reconnect_servers,
+    ))
 
     after = _row_counts(store, session["task_id"])
     assert before == after  # zero source/task_events/deliveries/reports mutations
@@ -727,6 +840,225 @@ def test_session_load_replays_history_in_order_with_zero_mutations(tmp_path):
     reply = loader_transport.response_for(42)
     assert reply is not None and "error" not in reply
     assert loader.runtime.start_prompt_calls == []  # never opened an engine/runtime turn
+    # A resumed ACP session must preserve the client's request-local MCP
+    # configuration for the next prompt.  The durable store only keeps safe
+    # shape metadata; secrets are retained in this process exactly as they
+    # are after session/new, and are never written by session/load.
+    assert loader.sessions[session_id]["mcp_servers"] == reconnect_servers
+    changed_servers = [dict(name="different-server", command="/usr/bin/different-server")]
+    loader._session_load(43, dict(
+        sessionId=session_id, cwd=str(tmp_path), mcpServers=changed_servers,
+    ))
+    assert loader.sessions[session_id]["mcp_servers"] == changed_servers
+
+
+def test_session_load_replays_durable_structured_worker_cards(tmp_path):
+    """A reconnect restores worker/tool cards as ACP updates, in order.
+
+    Zed owns the visual card state; Cortex must therefore persist and replay
+    the exact updates it actually delivered instead of attempting to rebuild
+    cards from model text or task events.
+    """
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    new_result = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))
+    session_id = new_result["sessionId"]
+    emitter = agent._make_emit_tool_call(session_id, threading.Event())
+    assert emitter(dict(tool_call_id="worker:a", new=True, title="Backend worker", kind="other", status="in_progress", text="Running tests"))
+    assert emitter(dict(tool_call_id="worker:a", new=False, status="completed", text="Published report"))
+
+    loader = Agent(_CountingFakeRuntime(), environ=agent.environ)
+    loader_transport = _RecordingTransport()
+    loader.bind_transport(loader_transport)
+    loader.initialized = True
+    loader._session_load(22, dict(sessionId=session_id, cwd=str(tmp_path), mcpServers=[]))
+
+    updates = [n["params"]["update"] for n in loader_transport.notifications]
+    assert [u["sessionUpdate"] for u in updates] == ["tool_call", "tool_call_update"]
+    assert updates[0]["toolCallId"] == "worker:a"
+    assert updates[1]["status"] == "completed"
+    assert loader.runtime.start_prompt_calls == []
+
+
+@pytest.mark.parametrize("terminal_status", ["completed", "failed"])
+def test_session_load_replays_terminal_worker_card_statuses(tmp_path, terminal_status):
+    """Paseo's worker renderer must receive terminal status after reload.
+
+    A completed result and a cancellation (represented by ACP's supported
+    failed status) are both durable card updates; replay must preserve the
+    exact status rather than leaving the initial in-progress projection live.
+    """
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    agent.bind_transport(_RecordingTransport())
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    emitter = agent._make_emit_tool_call(session_id, threading.Event())
+    assert emitter(dict(tool_call_id="worker:a", new=True, title="Backend worker", kind="other", status="in_progress", text="Working"))
+    assert emitter(dict(tool_call_id="worker:a", new=False, status=terminal_status, text="Terminal evidence"))
+
+    loader = Agent(_CountingFakeRuntime(), environ=agent.environ)
+    loader_transport = _RecordingTransport()
+    loader.bind_transport(loader_transport)
+    loader.initialized = True
+    loader._session_load(22, dict(sessionId=session_id, cwd=str(tmp_path), mcpServers=[]))
+
+    updates = [n["params"]["update"] for n in loader_transport.notifications]
+    assert updates[-1]["toolCallId"] == "worker:a"
+    assert updates[-1]["status"] == terminal_status
+
+
+def test_session_load_reconciles_stale_worker_card_from_durable_result(tmp_path):
+    """A historical in-progress card is corrected from a real worker result."""
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    agent.bind_transport(_RecordingTransport())
+    agent.initialized = True
+    new_result = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))
+    session_id = new_result["sessionId"]
+    store = agent._store_for(str(tmp_path))
+    session = acp_sessions.get_session(store, session_id)
+    assert session is not None
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id=str(uuid.uuid4())), "replay", "owner")
+    acp_sessions.bind_task(store, session_id, task.task_id)
+    session = acp_sessions.get_session(store, session_id)
+    assignment_ref = "assignment-replay-result"
+    emitter = agent._make_emit_tool_call(session_id, threading.Event())
+    assert emitter(dict(tool_call_id=f"worker:{assignment_ref}", new=True, title="Worker", kind="other", status="in_progress", text="Working"))
+    from cortex_runtime.delegation import events as delegation_events
+    delegation_events.append_event(
+        store, session["task_id"], "delegation_requested", "replay-delegation",
+        {"title": "Worker", "role": "backend-dev"}, origin="runtime", assignment_ref=assignment_ref,
+    )
+    delegation_events.append_event(
+        store, session["task_id"], "worker_result", "replay-result",
+        {"summary": "Published report", "checks": []}, origin="runtime", assignment_ref=assignment_ref,
+    )
+    loader = Agent(_CountingFakeRuntime(), environ=agent.environ)
+    loader_transport = _RecordingTransport()
+    loader.bind_transport(loader_transport)
+    loader.initialized = True
+    loader._session_load(22, dict(sessionId=session_id, cwd=str(tmp_path), mcpServers=[]))
+    updates = [n["params"]["update"] for n in loader_transport.notifications]
+    assert updates[-1]["toolCallId"] == f"worker:{assignment_ref}"
+    assert updates[-1]["status"] == "completed"
+
+
+@pytest.mark.parametrize("result_first", [True, False])
+def test_session_load_result_wins_over_task_stop_cancellation(tmp_path, result_first):
+    """A published worker result remains completed when stop is separate."""
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    agent.bind_transport(_RecordingTransport())
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(tmp_path))
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id=str(uuid.uuid4())), "replay", "owner")
+    acp_sessions.bind_task(store, session_id, task.task_id)
+    emitter = agent._make_emit_tool_call(session_id, threading.Event())
+    assignment_ref = "assignment-result-stop-order"
+    assert emitter(dict(tool_call_id=f"worker:{assignment_ref}", new=True, title="Worker", kind="other", status="in_progress", text="Working"))
+    events = [
+        ("worker_result", "result-order", {"summary": "Published report", "checks": []}),
+        ("assignment_cancelled", "cancel-order", {"reason": "urgent stop (/cortex-stop)"}),
+    ]
+    if not result_first:
+        events.reverse()
+    for event_type, dedup, payload in events:
+        delegation_events.append_event(
+            store, task.task_id, event_type, dedup, payload, origin="runtime", assignment_ref=assignment_ref,
+        )
+    loader = Agent(_CountingFakeRuntime(), environ=agent.environ)
+    loader_transport = _RecordingTransport()
+    loader.bind_transport(loader_transport)
+    loader.initialized = True
+    loader._session_load(22, dict(sessionId=session_id, cwd=str(tmp_path), mcpServers=[]))
+    updates = [n["params"]["update"] for n in loader_transport.notifications]
+    assert updates[-1]["toolCallId"] == f"worker:{assignment_ref}"
+    assert updates[-1]["status"] == "completed"
+
+
+def test_session_load_fails_when_history_cannot_be_enqueued(tmp_path):
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    agent.bind_transport(_RecordingTransport())
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(tmp_path))
+    replay_store.append_host_transcript(store, session_id, "agent_message", "recorded")
+
+    class FullTransport(_RecordingTransport):
+        def send_notification(self, message, timeout=None):
+            return False
+
+    loader = Agent(_CountingFakeRuntime(), environ=agent.environ)
+    loader.bind_transport(FullTransport())
+    loader.initialized = True
+    with pytest.raises(RpcError, match="Cannot enqueue complete session history"):
+        loader._session_load(22, dict(sessionId=session_id, cwd=str(tmp_path), mcpServers=[]))
+    assert not loader.transport.responses
+    assert loader.runtime.start_prompt_calls == []
+
+
+def test_outbound_text_is_persisted_before_enqueue_and_fails_closed(tmp_path, monkeypatch):
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    cancel = threading.Event()
+    original = replay_store.append_host_transcript
+
+    def fail_agent_text(store, sid, kind, text, attachments=None):
+        if kind == "agent_message":
+            raise StoreError("history unavailable")
+        return original(store, sid, kind, text, attachments)
+
+    monkeypatch.setattr(replay_store, "append_host_transcript", fail_agent_text)
+    agent._run_prompt(request_id=1, session_id=session_id, session=agent.sessions[session_id],
+                      text="hello", cancel_event=cancel,
+                      raw_blocks=[dict(type="text", text="hello")])
+    assert cancel.is_set()
+    assert not any(n["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+                   for n in transport.notifications)
+
+
+def test_structured_history_persistence_failure_prevents_enqueue(tmp_path, monkeypatch):
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    cancel = threading.Event()
+
+    def fail(*args, **kwargs):
+        raise StoreError("history unavailable")
+
+    monkeypatch.setattr(replay_store, "append_host_update", fail)
+    assert not agent._make_emit_display_update(session_id, cancel)(dict(sessionUpdate="plan", entries=[]))
+    assert cancel.is_set()
+    assert not transport.notifications
+
+
+def test_structured_update_is_durable_before_transport_enqueue(tmp_path):
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    observed = []
+    original = replay_store.append_host_update
+
+    def record_then_observe(store, sid, update):
+        result = original(store, sid, update)
+        observed.append((result, len(transport.notifications)))
+        return result
+
+    # At persistence time no live frame has yet been enqueued.
+    import unittest.mock as mock
+    with mock.patch.object(replay_store, "append_host_update", side_effect=record_then_observe):
+        emit = agent._make_emit_tool_call(session_id, threading.Event())
+        assert emit(dict(tool_call_id="worker:a", new=True, title="Worker", status="pending"))
+    assert observed == [(0, 0)]
+    assert len(transport.notifications) == 1
 
 
 def test_session_load_unknown_session_errors(tmp_path):
@@ -737,6 +1069,32 @@ def test_session_load_unknown_session_errors(tmp_path):
     with pytest.raises(RpcError) as excinfo:
         agent._session_load(1, dict(sessionId="acps_never_existed", cwd=str(tmp_path), mcpServers=[]))
     assert excinfo.value.code == -32602
+
+
+def test_replay_skips_corrupt_transcript_row_without_fabricating_history(tmp_path):
+    """A damaged attachment payload cannot take the whole reconnect down.
+
+    The text body is not replayed with invented attachment metadata: the
+    malformed row is omitted and the surrounding valid updates remain
+    available.
+    """
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    new_result = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))
+    session_id = new_result["sessionId"]
+    store = agent._store_for(str(tmp_path))
+    replay_store.append_host_transcript(store, session_id, "agent_message", "valid before")
+    with store.connection() as db:
+        db.execute(
+            "UPDATE host_transcript SET attachments_json=? WHERE session_id=? AND seq=0",
+            ("{broken", session_id),
+        )
+        db.commit()
+    replay_store.append_host_transcript(store, session_id, "agent_message", "valid after")
+    history = replay_store.replay_session(store, session_id)
+    assert [item["text"] for item in history] == ["valid after"]
 
 
 def test_replayed_assistant_text_never_becomes_user_input(tmp_path):
@@ -794,7 +1152,7 @@ def test_pre_t018_source_events_gains_meta_json_column_on_open(tmp_path):
          epoch INTEGER NOT NULL, acquired_at TEXT NOT NULL
         );
         '''
-        db.executescript("BEGIN;\n" + SCHEMA + pre_t018_identity_schema + f"PRAGMA application_id={APPLICATION_ID};\nPRAGMA user_version=11;\nCOMMIT;")
+        db.executescript("BEGIN;\n" + SCHEMA + pre_t018_identity_schema + f"PRAGMA application_id={APPLICATION_ID};\nPRAGMA user_version=12;\nCOMMIT;")
         db.execute("INSERT INTO tasks VALUES (?,?,?)", ("t_legacy0001", str(tmp_path), "2020-01-01T00:00:00.000000"))
         db.execute("INSERT INTO source_events VALUES (?,?,?,?)", ("cli", "evt-1", "t_legacy0001", "2020-01-01T00:00:00.000000"))
         db.commit()
@@ -845,7 +1203,7 @@ def test_pre_t018_source_events_ledger_state_backfilled_legacy_recorded(tmp_path
          epoch INTEGER NOT NULL, acquired_at TEXT NOT NULL
         );
         '''
-        db.executescript("BEGIN;\n" + SCHEMA + pre_t018_identity_schema + f"PRAGMA application_id={APPLICATION_ID};\nPRAGMA user_version=11;\nCOMMIT;")
+        db.executescript("BEGIN;\n" + SCHEMA + pre_t018_identity_schema + f"PRAGMA application_id={APPLICATION_ID};\nPRAGMA user_version=12;\nCOMMIT;")
         db.execute("INSERT INTO tasks VALUES (?,?,?)", ("t_legacy0002", str(tmp_path), "2020-01-01T00:00:00.000000"))
         db.execute("INSERT INTO source_events VALUES (?,?,?,?)", ("acps_legacy", "evt-legacy", "t_legacy0002", "2020-01-01T00:00:00.000000"))
         db.commit()

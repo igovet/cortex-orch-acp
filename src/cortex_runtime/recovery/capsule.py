@@ -54,6 +54,7 @@ import json
 from typing import Any, Mapping
 
 from ..contracts import StoreError
+from ..channeled_tools import channeled_base_tool_names
 from ..store import digest as _sha256_hex
 from ..store import encode as _canonical_json
 # T024: the approx-token figure below uses the one shared, conservative
@@ -468,6 +469,11 @@ def _section_pipeline_and_assignments(db, task_id: str, recipient: dict) -> dict
                 brief=payload.get("brief"), acceptance=payload.get("acceptance"),
             )
             entry.update(_assignment_state(db, task_id, assignment_ref, worker_key))
+            # The configuration revision is a policy snapshot, not proof of
+            # the worker route. Mixed-team and fallback dispatches can use a
+            # different model and effort. Keep the exact attempt audit beside
+            # the assignment it describes.
+            entry["observed_worker_route"] = _attempt_route(db, task_id, worker_key)
             assignments.append(entry)
         section["assignments"] = assignments
         return section
@@ -489,6 +495,23 @@ def _section_pipeline_and_assignments(db, task_id: str, recipient: dict) -> dict
     entry.update(_assignment_state(db, task_id, assignment_ref, recipient["attempt_id"]))
     section["own_assignment"] = entry
     return section
+
+
+def _attempt_route(db, task_id: str, attempt_id: str) -> dict:
+    row = db.execute(
+        "SELECT id, attempt_id, engine, connection_id, model, decision, "
+        "decision_detail_json FROM attempt_route_audit "
+        "WHERE task_id=? AND attempt_id=? ORDER BY recorded_at DESC, id DESC LIMIT 1",
+        (task_id, attempt_id),
+    ).fetchone()
+    if row is None:
+        return _unavailable("no_attempt_route_audit_for_assignment")
+    detail = json.loads(row["decision_detail_json"] or "{}")
+    return dict(
+        audit_id=row["id"], attempt_id=row["attempt_id"], engine=row["engine"],
+        connection_id=row["connection_id"], model=row["model"],
+        effort=detail.get("effort"), decision=row["decision"],
+    )
 
 
 # --------------------------------------------------------------------
@@ -550,7 +573,12 @@ def _coordinator_decisions_for(db, task_id: str, assignment_ref: str | None = No
 
 
 def _section_publications_and_checks(db, task_id: str, recipient: dict) -> dict:
+    receipt_query = (
+        "SELECT attempt_id,tool_call_ref,command_sha256,command_text,host_outcome "
+        "FROM permission_receipts WHERE task_id=?"
+    )
     if recipient["role"] == "coordinator":
+        receipts = db.execute(receipt_query + " ORDER BY created_at DESC LIMIT ?", (task_id, _MAX_LIST_ENTRIES)).fetchall()
         rows = db.execute(
             "SELECT DISTINCT assignment_ref FROM task_events WHERE task_id=? AND event_type='delegation_requested'",
             (task_id,),
@@ -568,10 +596,16 @@ def _section_publications_and_checks(db, task_id: str, recipient: dict) -> dict:
         return dict(
             results_by_assignment=by_assignment,
             coordinator_decisions=_coordinator_decisions_for(db, task_id)[-_MAX_LIST_ENTRIES:],
+            permission_receipts=[dict(row) for row in receipts],
         )
     results = _worker_results_for(db, task_id, recipient["attempt_id"])
     decisions = _coordinator_decisions_for(db, task_id, recipient["assignment_ref"])
-    return dict(own_results=results, coordinator_decisions_for_own_assignment=decisions)
+    receipts = db.execute(
+        receipt_query + " AND attempt_id=? ORDER BY created_at DESC LIMIT ?",
+        (task_id, recipient["attempt_id"], _MAX_LIST_ENTRIES),
+    ).fetchall()
+    return dict(own_results=results, coordinator_decisions_for_own_assignment=decisions,
+                own_permission_receipts=[dict(row) for row in receipts])
 
 
 # --------------------------------------------------------------------
@@ -719,7 +753,15 @@ def _section_role_and_tool_access(db, task_id: str, recipient: dict) -> dict:
         section["role_source"] = _unavailable("role_id_not_recorded_for_this_assignment")
     section["instruction_delivery"] = provisioning["instruction_delivery"] if provisioning is not None else None
     try:
-        section["allowed_mcp_tools"] = sorted(delegation_contracts.schemas_for(recipient["role"]))
+        # A worker's trusted MCP server advertises the base Cortex tools and
+        # the role-scoped delegation tools together.  Keep this derived list
+        # identical to the server's ``tools/list`` surface; listing only the
+        # delegation schemas made a recovered worker believe that
+        # create_draft/write_report/read_report and the other base operations
+        # were unavailable even though the channel exposed them.
+        base_tools = set(channeled_base_tool_names())
+        role_tools = set(delegation_contracts.schemas_for(recipient["role"]))
+        section["allowed_mcp_tools"] = sorted(base_tools | role_tools)
     except StoreError:
         section["allowed_mcp_tools"] = _unavailable("unknown_role_kind")
     # T022: compaction-support tier/owner and current context-generation
@@ -774,6 +816,14 @@ def _section_continuation_intent(db, task_id: str, recipient: dict) -> dict:
             )
         decisions = _coordinator_decisions_for(db, task_id)
         section["last_coordinator_decision"] = decisions[-1] if decisions else _unavailable("no_coordinator_decision_recorded")
+        task_accepts = [d for d in decisions if d["assignment_ref"] == "task" and d["decision"] == "accept" and not d["superseded"]]
+        state = orchestration["state"] if orchestration is not None else None
+        section["task_acceptance"] = dict(
+            accepted=state == "accepted" and bool(task_accepts),
+            stored_task_state=state,
+            task_accept_decision_cursor=task_accepts[-1]["cursor"] if task_accepts else None,
+            note="An assignment decision or report prose does not accept the task; only a durable task-level decision with accepted task state does.",
+        )
     else:
         cancel = db.execute(
             "SELECT 1 FROM task_events WHERE task_id=? AND assignment_ref=? AND event_type='assignment_cancel_requested' LIMIT 1",
@@ -1057,6 +1107,7 @@ _TEXT_FIELD_TRUST = {
     "rationale": "derived_summary",
     "text": "user_direct",
     "note_text": "derived_summary",
+    "command_text": "worker_report",
 }
 
 

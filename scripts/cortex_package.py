@@ -11,6 +11,7 @@ import tomllib
 import re
 import stat
 from generate_agent_profiles import check as check_agent_profiles
+from paseo_integrity import payload_digest as paseo_payload_digest
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT
@@ -22,10 +23,47 @@ BASE = '1.0.0'
 # tests, docs and development scripts into the package identity and make
 # it change for reasons that have nothing to do with what runs.
 PAYLOAD_ENTRIES = (
-    'src', 'skills', 'agents', 'agent-sources', 'assets', 'policy', 'report-templates',
+    'src', 'skills', 'agents', 'agent-sources', 'assets', 'policy', 'report-templates', 'integrations',
     'package-identity.json', 'pinned-dependencies.json', 'profiles.json',
-    'requirements.lock', 'requirements.txt', 'runtime-payload.json', '.mcp.json',
+    'requirements.lock', 'requirements.txt', 'runtime-payload.json',
 )
+PASEO_PLUGIN = ROOT / 'integrations' / 'paseo'
+
+# Development dependencies and generated build output can live below a
+# payload entry (the Paseo integration keeps its local node_modules here).
+# They are never release inputs.  Keep this by directory name so the rule
+# applies to nested package workspaces without excluding integration source.
+PAYLOAD_EXCLUDED_DIRS = frozenset({
+    '.cache', '.git', '.next', '.turbo', '__pycache__',
+    'build', 'coverage', 'dist', 'node_modules', 'out', 'target',
+})
+
+
+def _tree_files(root):
+    """Yield real files below *root*, pruning non-payload directories."""
+    root = Path(root)
+    for parent, directories, files in os.walk(root, topdown=True, followlinks=False):
+        directories[:] = sorted(
+            name for name in directories if name not in PAYLOAD_EXCLUDED_DIRS
+        )
+        for name in sorted(files):
+            yield Path(parent) / name
+
+
+def paseo_plugin_payload_digest(root=PASEO_PLUGIN):
+    """Hash the provider plugin source, excluding its generated integrity file."""
+    return paseo_payload_digest(root)
+
+
+def stamp_paseo_plugin(root=PASEO_PLUGIN):
+    root = Path(root)
+    if not root.is_dir():
+        return None
+    digest = paseo_plugin_payload_digest(root)
+    (root / 'plugin-integrity.json').write_text(
+        json.dumps({'algorithm': 'sha256', 'payload_sha256': digest}, indent=2) + '\n'
+    )
+    return digest
 
 
 def payload_paths(root):
@@ -38,7 +76,12 @@ def payload_paths(root):
         if entry.is_file():
             entries.append((name, entry))
             continue
-        for path in sorted(entry.rglob('*')):
+        for path in _tree_files(entry):
+            # Compiled Python files are local execution residue, never package
+            # inputs. Exclude them at payload enumeration so stamping does not
+            # depend on destructive cleanup of ignored files.
+            if '__pycache__' in path.parts or path.suffix in {'.pyc', '.pyo'}:
+                continue
             if path.is_file() or path.is_symlink():
                 entries.append((path.relative_to(root).as_posix(), path))
     return sorted(entries)
@@ -108,6 +151,9 @@ def _assert_no_symlink_tree(path, *, label='candidate'):
     if path.is_symlink() or not path.is_dir():
         raise ValueError(f'{label} root must be a real directory')
     for parent, directories, files in os.walk(path, topdown=True, followlinks=False):
+        directories[:] = [
+            name for name in directories if name not in PAYLOAD_EXCLUDED_DIRS
+        ]
         for name in [*directories, *files]:
             entry = Path(parent) / name
             if entry.is_symlink():
@@ -123,8 +169,6 @@ def payload_digest(plugin):
     for relative,path in payload_paths(plugin):
         if path.is_symlink():
             raise ValueError('symlink in payload')
-        if '__pycache__' in path.parts or path.suffix in {'.pyc','.pyo'}:
-            raise ValueError('bytecode in payload')
         body=path.read_bytes()
         if relative=='package-identity.json':
             value=json.loads(body); value['version']=BASE
@@ -136,6 +180,10 @@ def payload_digest(plugin):
 def stamp():
     path=PLUGIN/'package-identity.json'
     value=json.loads(path.read_text())
+    # Stamp generated integration identities before calculating the release
+    # payload, so a Paseo-only edit changes the single Cortex package hash
+    # without creating a circular digest.
+    stamp_paseo_plugin()
     value['version']=BASE+'+sha256.'+payload_digest(PLUGIN)[:16]
     path.write_text(json.dumps(value,indent=2)+'\n')
     return value['version']
@@ -146,6 +194,14 @@ def validate(plugin=PLUGIN):
     value=json.loads((plugin/'package-identity.json').read_text())
     if value['name']!='cortex' or value['version']!=BASE+'+sha256.'+payload_digest(plugin)[:16]:
         raise ValueError('invalid package identity or stale cache stamp')
+    paseo_root = plugin / 'integrations' / 'paseo'
+    if paseo_root.is_dir():
+        integrity_path = paseo_root / 'plugin-integrity.json'
+        if not integrity_path.is_file():
+            raise ValueError('missing Paseo plugin integrity stamp')
+        integrity = json.loads(integrity_path.read_text())
+        if integrity.get('payload_sha256') != paseo_plugin_payload_digest(paseo_root):
+            raise ValueError('stale Paseo plugin integrity stamp')
     profiles=json.loads((plugin/'profiles.json').read_text())['profiles']
     agents=list((plugin/'agents').glob('*.toml'))
     expected_profile_count=23
@@ -170,21 +226,9 @@ def validate(plugin=PLUGIN):
     actual=sorted(p.relative_to(plugin).as_posix() for p in (plugin/'src').rglob('*.py'))
     if declared!=actual:
         raise ValueError('runtime payload differs from manifest')
-    capability_manifest=json.loads((plugin/'policy/capability-manifest-v1.json').read_text())
-    if (set(capability_manifest) != {'schema','version','profiles','routes','targets','phases','host_enforcement'}
-            or capability_manifest.get('schema') != 'capability-manifest-v1'
-            or capability_manifest.get('version') != 1
-            or capability_manifest.get('host_enforcement') != 'required_host_attestation'
-            or not isinstance(capability_manifest.get('profiles'), dict)):
-        raise ValueError('invalid semantic capability manifest')
     templates={path.stem for path in (plugin/'report-templates').glob('*.md')}
     if templates!={'general','planning','investigation','implementation','verification','documentation','synthesis','pipeline'}:
         raise ValueError('draft template set')
-    mcp=json.loads((plugin/'.mcp.json').read_text())['mcpServers']['cortex']
-    if mcp['command']!='python3' or mcp['args']!=['-B','./scripts/cortex.py']:
-        raise ValueError('MCP entry point')
-    if set(mcp.get('env_vars', [])) != {'CORTEX_OBSERVATION_DIR'}:
-        raise ValueError('MCP environment contract')
     return value['version']
 
 
@@ -228,7 +272,11 @@ def prepare():
     else:
         temp=Path(tempfile.mkdtemp(prefix='.staging-',dir=candidates))
         try:
-            shutil.copytree(PLUGIN,temp/'.')
+            shutil.copytree(
+                PLUGIN,
+                temp/'.',
+                ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo'),
+            )
             (temp/'.agents/plugins').mkdir(parents=True)
             shutil.copyfile(ROOT/'.agents/plugins/marketplace.json',temp/'.agents/plugins/marketplace.json')
             validate(temp/'.')

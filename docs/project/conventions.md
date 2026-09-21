@@ -1,73 +1,26 @@
 # Conventions
 
-Use Python 3.11+ and `python3`, with no runtime third-party dependencies. Keep
-installable behavior under `./`. All tool arguments, retry contracts
-and size limits belong in advertised schemas and descriptions, not prompt prose.
+Use Python 3 and keep product behavior below `./`. Tool argument contracts
+belong in the advertised MCP schemas and descriptions, not in skills or
+profiles. Mutations enter the store through the channel-verified dispatch
+path.
 
-Use one project-local SQLite store at `<project>/.cortex/cortex.sqlite3`.
-The native host index locates and validates the canonical project but never supplies
-a home-wide Cortex store. Same-project access is serialized; different projects
-have independent stores. The same `.cortex` root contains immutable task Markdown,
-pipeline and reports plus editable `draft-reports` and `pipeline-drafts`. When a
-recognized `<project>/.codex/cortex` legacy tree exists, the runtime transfers only
-missing validated components before opening the project store; conflicts and unsafe identities fail closed,
-with no fallback reads or duplicate writes. Use one Markdown pipeline per task with newest editions first. Ordinary reports
-are immutable. Workers receive obligations directly and select only necessary
-optional reports. The model owns coordination, evidence interpretation and final
-judgment. No mandatory specialist sequence or protocol compatibility is allowed.
-The coordinator answers short questions, reads necessary user sources and evidence,
-owns pipeline editions and delegates the main technical work. A bounded worker can
-research, implement, verify and document its result. Additional agents require a
-concrete benefit; direct tiny edits versus delegation need measured total cost.
-Pages bound individual reads, not the amount of requirements that may be recovered.
-Bounded independent discovery may precede the first pipeline edition. Record useful
-durable state before dependency, shared-resource or acceptance decisions rather than
-requiring pipeline publication as a universal first stage.
+Each project has one `.cortex/cortex.sqlite3` store. Published task documents,
+reports and the current `pipeline.md` are project-local. Reports are immutable;
+the pipeline is newest edition first. SQLite is the durable index and in-memory
+state is only a cache.
 
-Before ordinary acceptance, review verified changes for durable/public documentation
-impact. Route supported impact by assigning the appropriate documentation owner to
-load/apply `documentation-sync`, then use only Cortex report/public-evidence reads to
-compare the owner's cited artifact hashes and check results before acceptance; record
-sufficient no-impact evidence concisely. The coordinator does not read another role's
-`SKILL.md`. Any additional project inspection, file read/hash or command verification
-must be delegated to an appropriate worker and returned in a task-bound report; the
-coordinator must not rerun project checks itself. Missing inspection is not no impact,
-and partial or inconclusive inspection withholds acceptance pending bounded
-evidence, synchronization, or sufficient no-impact evidence. This review never activates
-explicit-only harvest or a runtime gate.
+The model owns coordination and semantic acceptance. The runtime owns storage,
+identity, isolation, idempotency, provenance and recovery. No mandatory
+specialist sequence, hidden approval machine or compatibility route may be
+introduced.
 
-Lifecycle hooks perform short local storage and integrity work. They do not select
-specialists, approve actions, accept results or impose mandatory stages. Confirmed
-registered-file integrity violations and the narrow worker private-root execution
-boundary may deny a patch; no other workflow decision is enforced. Hook metadata
-and model actions remain separately observable.
+Workers receive an explicit assignment, a bounded context packet and only the
+reports required for that assignment. A worker may implement, verify and
+document a bounded change. Add another worker only for a concrete independent
+benefit.
 
-Use semantic version 1.0.0 for this release. Recompute the complete payload hash
-before package checks or tests after every installable edit. Run release-sensitive
-checks sequentially. Do not modify stable Codex configuration or plugin caches.
-Use the dedicated isolated candidate launcher for real-host verification.
-
-Plugin instructions use standard marketplace skill loading: an attached complete
-body or the exact advertised SKILL.md path, plus needed declared Markdown references.
-The model may choose any supported ordinary read-only means for those exact declared
-resources; declared references never satisfy the initial complete worker-SKILL receipt.
-Already attached live schemas need no catalogue bootstrap or prescribed first-call
-batch. Do not read agent TOML, server internals or enumerate the installation. No
-personal registration, copied skill bodies or custom loader is needed. Inert
-JavaScript wrappers may carry a literal patch unchanged to the native patch tool;
-executable interpolation/substitution and report bodies in the Cortex writer are
-forbidden. See
-[host compatibility](host-compatibility.md).
-
-Current isolated live qualification uses Luna/high for every coordinator and Luna
-at medium/high for native workers. Product routing is stricter and explicit: Luna
-is the default/priority worker model for ordinary, research, exploration and
-fact gathering, preferring high and allowing xhigh/max for bounded implementation
-when supported; Terra is reserved for complex implementation and is the default
-for code review. Consequential decisions use Sol medium, difficult risk trade-offs
-Sol high. Security implementation
-returns to Luna/Terra; source exploration stays Luna. Reviews and
-verifications use the permitted model and effort routes without automatic
-escalation from the implementation they inspect.
-Explicit user-requested overrides remain intact. The isolated test policy does not
-replace the product's coordinator model selection.
+Use `python3 -B`, preserve the no-paid default test policy, and report live ACP
+client checks as unverified until the real-client runbook has a retained
+observation. Release-sensitive generation, stamping, package and sync checks
+run sequentially.

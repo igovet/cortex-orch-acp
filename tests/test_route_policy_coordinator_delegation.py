@@ -11,6 +11,8 @@ wiring, never a hand-rolled substitute.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -45,10 +47,11 @@ def _make_connection(tmp_path, environ, *, engine, model, request_log):
     module's own tests) so ``_apply_worker_mode_floor``'s effort
     application actually has an option to apply this feature's own
     requested/policy-resolved effort onto."""
+    effort_option_id = "reasoning_effort" if engine == "codex-acp" else "effort"
     config_options = [
         dict(id="model", currentValue=model, options=[dict(value=model, name=model)]),
         dict(id="mode", currentValue=_MODE_BY_ENGINE[engine][0]["value"], options=_MODE_BY_ENGINE[engine]),
-        dict(id="effort", currentValue="medium", options=[
+        dict(id=effort_option_id, currentValue="medium", options=[
             dict(value="medium", name="Medium"), dict(value="high", name="High"),
         ]),
     ]
@@ -99,7 +102,7 @@ def _effort_calls(log_path):
     return [
         entry for entry in _read_log(log_path)
         if entry["method"] == "session/set_config_option"
-        and (entry.get("params") or {}).get("configId") in ("effort", "thought_level")
+        and (entry.get("params") or {}).get("configId") in ("effort", "thought_level", "reasoning_effort")
     ]
 
 
@@ -134,7 +137,7 @@ def test_explicit_engine_not_authorized_for_role_is_refused_naming_what_is_allow
     store, task_id, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b = _setup(
         tmp_path,
         roles={"worker-code-reviewer": [
-            {"engine": "codex-acp", "model": "coordinator-model", "efforts": ["medium"], "default_effort": "medium"},
+            {"engine": "codex-acp", "model": "coordinator-model", "efforts": ["*"], "default_effort": None},
         ]},
     )
     with pytest.raises(PortableError) as excinfo:
@@ -183,6 +186,63 @@ def test_omitted_engine_falls_back_to_the_roles_first_allowed_policy_entry(tmp_p
     adapter.terminate_owned(result.attempt_id)
 
 
+def test_omitted_engine_does_not_discard_disallowed_requested_effort(tmp_path):
+    """A qualification policy blocks planner low before a paid worker launch."""
+    store, task_id, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b = _setup(
+        tmp_path,
+        default=[
+            {"engine": "codex-acp", "model": "coordinator-model", "efforts": ["medium", "high"], "default_effort": "high"},
+        ],
+    )
+    with pytest.raises(PortableError) as excinfo:
+        provisioning.delegate(
+            channel, "Plan", "Plan the work.", "planner", "Plan is source-backed.", "req-low",
+            effort="low",
+        )
+    assert excinfo.value.code == "route_policy_not_authorized"
+    assert _read_log(log_a) == []
+    assert _read_log(log_b) == []
+    result = provisioning.delegate(
+        channel, "Plan", "Plan the work.", "planner", "Plan is source-backed.", "req-high",
+    )
+    assert result.status == "ready"
+    assert _effort_calls(log_a)[-1]["params"]["value"] == "high"
+    assert _read_log(log_b) == []
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_explicit_engine_without_model_binds_project_policy_model(tmp_path):
+    store, task_id, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b = _setup(
+        tmp_path,
+        default=[
+            {"engine": "codex-acp", "model": "coordinator-model", "efforts": ["medium", "high"], "default_effort": "high"},
+        ],
+    )
+    result = provisioning.delegate(
+        channel, "Plan", "Plan the work.", "planner", "Plan is source-backed.", "req-engine-only",
+        engine="codex-acp",
+    )
+    assert result.status == "ready"
+    assert _effort_calls(log_a)[-1]["params"]["value"] == "high"
+    audit = routing_store.list_audit_for_attempt(store, result.attempt_id)
+    assert audit[0]["model"] == "coordinator-model"
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_disposable_qualification_policy_rejects_observed_terra_low_worker_before_launch(tmp_path):
+    store, task_id, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b = _setup(tmp_path)
+    fixture = Path(__file__).resolve().parents[1] / "policy" / "route-policy.qualification-luna.json"
+    (tmp_path / "project" / ".cortex" / "route-policy.json").write_bytes(fixture.read_bytes())
+    with pytest.raises(PortableError) as excinfo:
+        provisioning.delegate(
+            channel, "Plan", "Plan the work.", "planner", "Plan is source-backed.", "req-terra-low",
+            engine="codex-acp", model="gpt-5.6-terra", effort="low",
+        )
+    assert excinfo.value.code == "route_policy_not_authorized"
+    assert _read_log(log_a) == []
+    assert _read_log(log_b) == []
+
+
 def test_omitted_engine_with_no_policy_entry_for_role_keeps_current_behaviour(tmp_path):
     """No route policy entries at all for this role (and no 'default'
     bucket) -- unchanged: dispatches on the coordinator's own connection,
@@ -192,6 +252,77 @@ def test_omitted_engine_with_no_policy_entry_for_role_keeps_current_behaviour(tm
     assert result.status == "ready"
     assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
     assert _read_log(log_b) == []
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_policy_route_skips_engine_connection_without_launch_command(tmp_path):
+    """A discovery placeholder must not shadow a launchable ACP connection."""
+    store, task_id, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b = _setup(
+        tmp_path,
+        default=[
+            {"engine": "codex-acp", "model": "coordinator-model", "efforts": ["*"], "default_effort": None},
+        ],
+    )
+    placeholder_id = new_connection_id()
+    placeholder = replace(
+        connection_a,
+        id=placeholder_id,
+        name="discovery-placeholder",
+        launch_command=None,
+        credential_ref=replace(
+            connection_a.credential_ref,
+            path=str(connection_registry.connection_state_dir(placeholder_id, "codex-acp", isolated_environ(tmp_path))),
+        ),
+    )
+    with connection_registry.transaction(isolated_environ(tmp_path)) as state:
+        state.connections = {placeholder.id: placeholder, **state.connections}
+
+    result = provisioning.delegate(channel, "Review", "Review it.", "code-reviewer", "Approve.", "req-placeholder")
+    assert result.status == "ready"
+    assert _read_log(log_a)
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_omitted_policy_route_skips_unconfigured_engine(tmp_path):
+    """An allowed engine that is absent from this isolated runtime is not
+    advertised or selected ahead of the connected engine."""
+    store, task_id, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b = _setup(
+        tmp_path,
+        roles={"worker-code-reviewer": [
+            {"engine": "claude-agent-acp", "model": "reviewer-model", "efforts": ["medium"], "default_effort": "medium"},
+            {"engine": "codex-acp", "model": "coordinator-model", "efforts": ["*"], "default_effort": None},
+        ]},
+    )
+    with connection_registry.transaction(isolated_environ(tmp_path)) as state:
+        state.connections.pop(connection_b.id)
+
+    result = provisioning.delegate(channel, "Review", "Review it.", "code-reviewer", "Approve.", "req-unconfigured")
+    assert result.status == "ready"
+    assert _read_log(log_a)
+    assert _read_log(log_b) == []
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_policy_route_preserves_task_selected_account_for_same_engine(tmp_path):
+    """An alternate configured account must not shadow the task route."""
+    store, task_id, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b = _setup(
+        tmp_path,
+        default=[
+            {"engine": "codex-acp", "model": "coordinator-model", "efforts": ["*"], "default_effort": None},
+        ],
+    )
+    alternate_log = tmp_path / "alternate.jsonl"
+    alternate = _make_connection(
+        tmp_path, isolated_environ(tmp_path), engine="codex-acp", model="coordinator-model",
+        request_log=alternate_log,
+    )
+    with connection_registry.transaction(isolated_environ(tmp_path)) as state:
+        state.connections = {alternate.id: alternate, connection_a.id: connection_a, connection_b.id: connection_b}
+
+    result = provisioning.delegate(channel, "Review", "Review it.", "code-reviewer", "Approve.", "req-account")
+    assert result.status == "ready"
+    assert _read_log(log_a)
+    assert _read_log(alternate_log) == []
     adapter.terminate_owned(result.attempt_id)
 
 

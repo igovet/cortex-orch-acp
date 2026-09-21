@@ -34,11 +34,31 @@ the fresh, lead- and agent-re-verified dist file:line citations below (read
 | `requestPermission`/`readTextFile` (client-side fs/permission calls the agent makes) | `dist/acp-agent.js:559-565, 5124-5170` |
 | `usage_update` incl. `total_cost_usd` | `dist/acp-agent.js:2756,3504-3513`; `dist/usage-markdown.js:22,147` |
 | `session/new`'s `params._meta.systemPrompt` (string override or `{append, excludeDynamicSections}` object, merged with the SDK's `{"type":"preset","preset":"claude_code"}` default) | `dist/acp-agent.js:5887-5901` |
+| `session/new`'s `params._meta.claudeCode.options.disallowedTools` is merged into the SDK query's `disallowedTools` before launch | `dist/acp-agent.js:5910-5918,6065`; bundled SDK 0.3.270 `sdk.d.ts:1477-1482` and `sdk.mjs` forwarding to CLI `--disallowedTools` |
+| `session/new`'s `params._meta.claudeCode.options.strictMcpConfig` reaches the SDK query, whose CLI transport passes `--strict-mcp-config` | `dist/acp-agent.js:5910-5918,6021-6036`; bundled SDK 0.3.270 `sdk.d.ts:2139-2145` and `sdk.mjs` forwarding the flag |
 | `_session/steering` (a distinct, non-system-prompt continuation/idle-behavior extension — never treated here as an instructions channel) | `dist/acp-agent.js:160-163,955-959,1626-1737` |
 | Context compaction lifecycle | `dist/context-compaction.js` (see `.cortex/acp-migration/evidence/T002/static-capability-findings.md:38`) |
 
 Nothing here claims a main-branch/newer-release capability, and nothing
 above was exercised live (see the T035/T036 rows at the end of this page).
+
+Claude ACP reports Cortex MCP tool titles as `mcp__cortex__decide` (and can
+omit the title on a later result update). The coordinator's pending-event
+acceptance refusal boundary correlates those updates by tool-call reference,
+so two exact refusals cancel only that engine turn and deliver the pending
+event in the next continuation. A composed fake-ACP wire test covers this
+transition; the 2026-09-20 live Sonnet run exposed the prior title mismatch,
+but the corrected transition has not yet been observed in a real client.
+
+For external MCP scalability, the pinned adapter forwards explicit
+`session/new` servers into the Claude Agent SDK. The bundled SDK 0.3.270 types
+describe deferred MCP tools when tool search is enabled, but the ACP adapter
+does not report whether that search ran or expose a complete aggregate tool
+count to Cortex. Cortex's registry filters whole servers by role and engine;
+it does not filter individual tools or enforce a catalogue-size limit. Keep
+each route's enabled server set narrow and use a server's own tool/service
+filter for a large catalogue. A real session must retain tool-discovery and
+call evidence before deferred loading is claimed to work for that route.
 
 ## Pinned install requirements (manual recipe placeholder)
 
@@ -79,12 +99,13 @@ are observed installed under the identical Zed registry layout.
 environ)` returns `(launch_command, pinned_engine_vars)`, where
 `pinned_engine_vars` is **always the empty dict** — a deliberate difference
 from codex-acp's own `{"CODEX_PATH", "NO_BROWSER"}`: this pinned release
-bundles no separate binary to pin an env var to. This connection's own
-`CLAUDE_CONFIG_DIR` isolation variable (per-connection, id-derived
-directory) is already set generically for every `claude-agent-acp`
+bundles no separate binary to pin an env var to. The connection's
+`CLAUDE_CONFIG_DIR` is already set generically for every `claude-agent-acp`
 connection by `connections.environment.build_process_env`'s
 `_ISOLATION_ENV_VAR` mapping (T006) — no per-launch escape hatch is
-required or accepted. `connections.environment.build_process_env`'s
+required or accepted. Discovered connections reference the user's existing
+`~/.claude` directory; explicitly created native-account connections can
+still use a Cortex-owned directory. `connections.environment.build_process_env`'s
 `pinned_engine_vars` parameter remains validated as accepted **only** for
 `record.engine == "codex-acp"`; a caller must therefore never pass this
 function's `pinned_engine_vars` return value there for a claude-agent-acp
@@ -119,6 +140,40 @@ counts/cost, never a confirmed model identity).
 
 ## Instruction delivery: QUALIFIED via `session/new _meta.systemPrompt` (0.78.0 only)
 
+The installed Claude SDK can defer opening the Cortex MCP stdio relay until
+the first `session/prompt`: a no-model-call, real `session/new` diagnostic on
+2026-09-20 created a session but observed no relay connection. The broker
+therefore records the actual relay's connection and successful `tools/list`,
+or its child PID and exit status if it closes first. A premature close during
+the prompt cancels that turn and reports `cortex_mcp_connection_failed` with
+a bounded reason. An absent pre-prompt connection never counts as failure or
+success. The relay token now has a fixed leading letter because an unprefixed
+URL-safe token could begin with `-` and be parsed as an option by the
+installed Python `argparse` relay launcher. This explains a reproducible
+no-paid startup-close regression; the transient live failure's discarded
+token bytes were not retained, so that individual case cannot be proved
+byte-for-byte after the fact.
+
+Every Cortex-created session at this pinned version also sends
+`_meta.claudeCode.options.disallowedTools: ["Agent", "Task"]` and
+`strictMcpConfig: true`, including a session without role text. The installed
+adapter passes both into the Claude Agent SDK query before launch. The SDK
+passes `--disallowedTools` and `--strict-mcp-config` to the CLI. The former's
+declared contract removes those native subagent launch tools from the model
+context and denies their execution. The latter's declared contract limits
+MCP discovery to the session's explicit `mcpServers`, excluding Claude's
+user/project settings, plugins, and on-disk agent frontmatter MCP servers.
+This matters because the adapter otherwise loads user/project/local settings
+and the discovered native-account connection uses the production
+`CLAUDE_CONFIG_DIR` for authentication. This option does not disable non-MCP
+plugin skills or hooks, and no live Claude call has yet verified the CLI's
+behavior on a Cortex session.
+`TaskCreate` and related plan tools are separate. This is a static and
+fake-wire-supported prevention mechanism, not a completed real-client
+observation; the existing post-event refusal remains a defense if an engine
+ever emits a native subagent call despite the restriction. This change is
+independent of the observed Codex worker native-subagent attempt.
+
 `engine.instruction_delivery_registry.ClaudeAgentAcp0_78Delivery` is
 **QUALIFIED** for exactly `("claude-agent-acp", "0.78.0")`, channel
 `session/new _meta.systemPrompt`. This reclassifies an earlier T026 pass
@@ -134,6 +189,8 @@ lead- and agent-verified 2026-09-17):
    (`acp-agent.js:5887-5901`): a string fully overrides the SDK's own
    `{"type":"preset","preset":"claude_code"}` default; an object form
    merges `append`/`excludeDynamicSections`, locked to `type: "preset"`.
+   Cortex sends the object form with `append`, preserving the engine's
+   `claude_code` preset and adding its role instructions.
 2. The result is assigned to local `systemPrompt`, placed into
    `options.systemPrompt` (`acp-agent.js:6019`), and that same `options`
    is passed as `query({prompt: input, options})`

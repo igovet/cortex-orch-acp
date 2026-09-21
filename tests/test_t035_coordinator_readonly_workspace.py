@@ -35,6 +35,7 @@ from __future__ import annotations
 import os
 import stat
 import threading
+import time
 import uuid
 
 import pytest
@@ -44,10 +45,13 @@ from cortex_runtime.acp.production_runtime import ProductionOrchestratingRuntime
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.configuration import policy as configuration_policy
 from cortex_runtime.delegation import mcp_tools
+from cortex_runtime.delegation import events as delegation_events
+from cortex_runtime.delegation import revision as delegation_revision
 from cortex_runtime.delegation import workspace_isolation
 from cortex_runtime.portable.engine_contract import StopReason
 from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.store import Store
+from cortex_runtime.contracts import StoreError
 
 from orchestration_fakes import FakeConfigSnapshotSource, FakeSessionRuntime, FakeWorkspace
 
@@ -170,11 +174,11 @@ def test_worker_workspace_is_unaffected_and_still_writable(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 3. Production wiring actually routes the coordinator's sentinel binding id
-#    to the read-only workspace, not the real (writable) project.
+# 3. Production wiring routes the coordinator's sentinel binding id to the
+#    exact project opened by ACP. A worker edit must be visible immediately.
 # ---------------------------------------------------------------------------
 
-def test_production_runtime_wires_coordinator_sentinel_to_readonly_root(tmp_path, monkeypatch):
+def test_production_runtime_wires_coordinator_sentinel_to_exact_project_root(tmp_path, monkeypatch):
     environ = _isolate(tmp_path, monkeypatch)
     project = _project(tmp_path)
     store = Store(project / ".cortex", project_root=str(project))
@@ -186,14 +190,19 @@ def test_production_runtime_wires_coordinator_sentinel_to_readonly_root(tmp_path
     assert resolver is not None
 
     resolved_root = resolver("shared_project_root", dict(task_id=task_id))
-    assert resolved_root != str(project)
+    assert resolved_root == str(project)
     assert open(os.path.join(resolved_root, "tracked.txt")).read() == "original\n"
-    with pytest.raises(PermissionError):
-        open(os.path.join(resolved_root, "tracked.txt"), "w")
 
-    # A real worker binding id is unaffected: it still falls through to
-    # root_for()/the writable project fallback, never the coordinator path.
-    assert resolver("some_unknown_worker_binding", dict(task_id=task_id)) == str(project)
+    # A worker may complete while this coordinator session is still alive.
+    # The coordinator cwd must observe the exact edit, rather than a snapshot
+    # captured before the worker started.
+    (project / "tracked.txt").write_text("worker edit\n")
+    assert open(os.path.join(resolved_root, "tracked.txt")).read() == "worker edit\n"
+
+    # An unknown worker binding fails closed. Falling through to the writable
+    # project root would let a stale or forged binding bypass isolation.
+    with pytest.raises(StoreError, match="workspace_snapshot_unavailable"):
+        resolver("some_unknown_worker_binding", dict(task_id=task_id))
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +242,216 @@ def test_backstop_still_blocks_the_turn_when_the_real_project_changes(tmp_path):
         ).fetchone()
     assert row["state"] == "blocked"
     assert row["wait_reason"] == "coordinator_turn_mutated_workspace"
+
+
+def test_direct_worker_edit_during_coordinator_turn_waits_for_exact_publication(tmp_path):
+    store = Store(tmp_path / ".cortex", project_root=tmp_path)
+    task_id = _task(store)
+    sentinel = tmp_path / "worker-owned.txt"
+    sentinel.write_text("disposable\n")
+    attempt_id = "xa_worker_pending"
+    _bind_attempt(store, task_id, attempt_id)
+    with store.connection() as db:
+        db.execute(
+            "UPDATE delegation_provisioning SET workspace_binding_id='shared_project_root', "
+            "status='ready' WHERE attempt_id=?", (attempt_id,),
+        )
+    delegation_revision.record_attempt_revision(
+        store, attempt_id, f"worker_start:{attempt_id}", tmp_path,
+    )
+    guard_seen = threading.Event()
+    cancel_event = threading.Event()
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            # The worker changed the live project while this coordinator
+            # prompt ran, but has not yet published its exact result.
+            sentinel.unlink()
+        else:
+            cancel_event.set()
+        return PromptOutcome(StopReason.END_TURN, "waiting")
+
+    engine = FakeSessionRuntime(
+        store, lambda store, channel, session_ref, launch, instructions:
+        coordinator_behavior if channel and channel.role == "coordinator" else None,
+    )
+    runtime = OrchestratingRuntime(
+        store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
+        allow_unqualified_delivery=True, wait_timeout_seconds=0.1,
+    )
+    with runtime._lock:
+        runtime._open_assignments[task_id] = {f"idem-{attempt_id}"}
+    original_still_open = runtime._direct_worker_still_open
+
+    def observed_open(task_ref):
+        result = original_still_open(task_ref)
+        if result:
+            guard_seen.set()
+        return result
+
+    runtime._direct_worker_still_open = observed_open
+    result = []
+    running = threading.Thread(
+        target=lambda: result.append(runtime.start_prompt(
+            task_id, "s1", "Go.", lambda _t: True, cancel_event,
+        )),
+    )
+    running.start()
+    assert guard_seen.wait(5), "the post-turn guard must see the direct worker still open"
+    delegation_revision.record_attempt_revision(
+        store, attempt_id, "worker_publish:r_worker_pending", tmp_path,
+    )
+    # A coordinator-side test/tool can create Python bytecode after the
+    # worker publication capture. Manifest attribution must recognize this
+    # harmless generated-only delta, while still blocking any other path.
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "coordinator_test.pyc").write_bytes(b"cache")
+    delegation_events.append_event(
+        store, task_id, "worker_result", "publish:worker_pending",
+        dict(report_ref="r_worker_pending", summary="Removed sentinel", checks=[]),
+        origin="worker-channel", assignment_ref=attempt_id,
+    )
+    runtime._notify()
+    running.join(timeout=5)
+    assert not running.is_alive()
+    assert len(engine.prompt_calls) == 2, "the worker result must reach a coordinator continuation"
+    with store.connection() as db:
+        assert db.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND event_type='progress' "
+            "AND payload_json LIKE '%coordinator_turn_mutated_workspace%'",
+            (task_id,),
+        ).fetchone() is None
+        assert db.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? "
+            "AND dedup_key LIKE 'direct_worker_change_pending:%'", (task_id,),
+        ).fetchone() is not None
+    assert runtime._pending_direct_worker_change(task_id) is None
+
+
+@pytest.mark.parametrize("worker_outcome", ["failed", "mismatched_publication"])
+def test_direct_worker_without_matching_publication_cannot_explain_project_change(tmp_path, worker_outcome):
+    store = Store(tmp_path / ".cortex", project_root=tmp_path)
+    task_id = _task(store)
+    attempt_id = "xa_worker_mismatch"
+    _bind_attempt(store, task_id, attempt_id)
+    with store.connection() as db:
+        db.execute(
+            "UPDATE delegation_provisioning SET workspace_binding_id='shared_project_root', "
+            "status='ready' WHERE attempt_id=?", (attempt_id,),
+        )
+    (tmp_path / "worker-owned.txt").write_text("original\n")
+    delegation_revision.record_attempt_revision(
+        store, attempt_id, f"worker_start:{attempt_id}", tmp_path,
+    )
+    guard_seen = threading.Event()
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        (tmp_path / "worker-owned.txt").write_text("changed\n")
+        return PromptOutcome(StopReason.END_TURN, "waiting")
+
+    engine = FakeSessionRuntime(
+        store, lambda store, channel, session_ref, launch, instructions:
+        coordinator_behavior if channel and channel.role == "coordinator" else None,
+    )
+    runtime = OrchestratingRuntime(
+        store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
+        allow_unqualified_delivery=True, wait_timeout_seconds=0.1,
+    )
+    with runtime._lock:
+        runtime._open_assignments[task_id] = {f"idem-{attempt_id}"}
+    original_still_open = runtime._direct_worker_still_open
+
+    def observed_open(task_ref):
+        result = original_still_open(task_ref)
+        if result:
+            guard_seen.set()
+        return result
+
+    runtime._direct_worker_still_open = observed_open
+    result = []
+    running = threading.Thread(
+        target=lambda: result.append(runtime.start_prompt(
+            task_id, "s1", "Go.", lambda _t: True, threading.Event(),
+        )),
+    )
+    running.start()
+    assert guard_seen.wait(5)
+    if worker_outcome == "mismatched_publication":
+        # ``guard_seen`` is set by the wrapper around
+        # ``_direct_worker_still_open``.  The runtime still has to return
+        # from that query and durably append the pending boundary before the
+        # worker can publish.  Without this synchronization, the publication
+        # can race the first post-turn revision capture: the runtime may
+        # observe the worker's matching tree, authorize it, and then the
+        # test's deliberately unrelated edit arrives after that guard,
+        # leaving the task transiently idle instead of blocked.  Assert the
+        # real durable boundary rather than relying on scheduler timing.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with store.connection() as db:
+                pending = db.execute(
+                    "SELECT 1 FROM task_events WHERE task_id=? "
+                    "AND event_type='progress' "
+                    "AND dedup_key LIKE 'direct_worker_change_pending:%'",
+                    (task_id,),
+                ).fetchone()
+            if pending is not None:
+                break
+            time.sleep(0.005)
+        else:
+            pytest.fail("runtime did not persist the direct-worker pending boundary")
+        delegation_revision.record_attempt_revision(
+            store, attempt_id, "worker_publish:r_worker_mismatch", tmp_path,
+        )
+        (tmp_path / "unattributed.txt").write_text("not in the worker publication\n")
+        delegation_events.append_event(
+            store, task_id, "worker_result", "publish:worker_mismatch",
+            dict(report_ref="r_worker_mismatch", summary="Worker done", checks=[]),
+            origin="worker-channel", assignment_ref=attempt_id,
+        )
+    else:
+        delegation_events.append_event(
+            store, task_id, "assignment_failed", "failed:worker_mismatch",
+            dict(error="worker exited"), origin="runtime", assignment_ref=f"idem-{attempt_id}",
+        )
+    runtime._close_assignment(task_id, f"idem-{attempt_id}")
+    runtime._notify()
+    running.join(timeout=5)
+    assert not running.is_alive()
+    with store.connection() as db:
+        state = db.execute(
+            "SELECT state, wait_reason FROM task_orchestration WHERE task_id=?", (task_id,),
+        ).fetchone()
+        if worker_outcome == "mismatched_publication":
+            publication = db.execute(
+                "SELECT kind, dirty_digest FROM attempt_revisions "
+                "WHERE attempt_id=? AND phase=?",
+                (attempt_id, "worker_publish:r_worker_mismatch"),
+            ).fetchone()
+            assert publication is not None
+            assert publication["kind"] == "observed"
+            result_event = db.execute(
+                "SELECT 1 FROM task_events WHERE task_id=? "
+                "AND event_type='worker_result' AND assignment_ref=?",
+                (task_id, attempt_id),
+            ).fetchone()
+            assert result_event is not None
+        else:
+            publication = None
+    assert state["state"] == "blocked"
+    assert state["wait_reason"] == "coordinator_turn_mutated_workspace"
+    if publication is not None:
+        # The unrelated file was written after the worker's captured
+        # publication revision, so the current observed tree must differ.
+        current = delegation_revision.capture_revision(tmp_path)
+        assert current["kind"] == "observed"
+        assert current["dirty_digest"] != publication["dirty_digest"]
+    # A pause/restart cannot silently erase the unresolved attribution.
+    replacement = OrchestratingRuntime(
+        store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
+        allow_unqualified_delivery=True,
+    )
+    assert replacement._pending_direct_worker_change(task_id) is not None
 
 
 # ---------------------------------------------------------------------------

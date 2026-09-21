@@ -84,10 +84,21 @@ store) in `tests/test_acp_input_history_and_replay.py`; this task never
 promises exactly-once *external* (engine-side) execution, only a
 reconcilable durable ledger.
 
+## Streaming message identity
+
+Each coordinator prompt turn gets one assistant `messageId`. Every streamed
+`agent_message_chunk` for that turn carries the same id, so clients can append
+the chunks into one visible message. When a new tool call starts, Cortex rotates
+the id before sending later prose; a later continuation turn also receives a
+fresh id. This prevents Paseo from merging text across tool boundaries or
+separate turns. The id is stored with the host transcript and is sent again by
+`session/load`; older rows without an id receive a deterministic replay id for
+that replay entry, without claiming that the old stream had a historical id.
+
 ## Attachments and availability
 
 `protocol.py` now advertises `promptCapabilities.embeddedContext=true`
-(the only capability flip in this task -- `image`/`audio` stay `false`,
+(the capability set now includes `image: true`; `audio` stays `false`,
 still rejected `-32602`) and accepts an `EmbeddedResource` (`resource`)
 content block alongside `text`/`resource_link`. `acp.replay_store.
 resolve_prompt_blocks` classifies every non-text block truthfully, never
@@ -120,7 +131,10 @@ block whose resolution or staging fails is still recorded, as
 file snapshots are read through one `O_NOFOLLOW` descriptor whose real path,
 type, owner, link count and size are checked on the descriptor itself.
 
-`image`/`audio` blocks remain rejected with `-32602` (unadvertised).
+`image` blocks are accepted, decoded with strict base64 validation, stored as
+owner-private bytes with their exact MIME type, and forwarded unchanged in
+the engine's ACP `session/prompt` content array. `audio` remains rejected
+with `-32602` because it is unadvertised.
 
 ## Trust labels
 
@@ -179,13 +193,76 @@ equality and a runtime call-count assertion. A replayed
 `agent_message_chunk` is never captured as a new source event (there is no
 capture path anywhere near `_session_load`).
 
-`host_transcript` (the sole read source for replay) is written by
+`host_transcript` and the companion `host_updates` table (the sole read
+sources for replay) are written by
 `acp.agent`: once per accepted prompt (the exact captured user text plus
-attachment descriptors) and once per successfully delivered
-`agent_message_chunk` emitted to the host. It is never read by, or fed
-into, `OrchestratingRuntime`/engine context -- display history and engine
-context recovery are deliberately different data (engine context recovery
-is T021/T022 scope).
+attachment descriptors) and once per runtime-produced
+`agent_message_chunk` offered to the host. Slash-command prompts and their
+text replies follow the same display-history path. Structured updates such as
+`tool_call`, `tool_call_update`, and display-only plan/thought updates are
+stored as the exact update payload before enqueueing the notification and
+replayed as `session/update` notifications in the same sequence. This
+preserves a real runtime event even if the transport writer fails after
+enqueueing, without claiming that the host rendered it. These records are
+never read by, or fed into,
+`OrchestratingRuntime`/engine context -- display history and engine context
+recovery are deliberately different data (engine context recovery is
+T021/T022 scope). Paseo may apply its presentation filters while replaying:
+hidden Cortex MCP and private `.cortex` operations remain durable records even
+when they are not rendered in the coordinator or worker feed.
+
+The native Paseo provider also accounts for a Paseo 0.8 load ordering quirk:
+the SDK can emit historical `timeline.item` events before `session.opened`.
+The provider buffers those items separately per session, forwards
+`session.opened` first, and then forwards the buffered items in their original
+order. The buffer is bounded at 4,096 items and approximately 16 MiB of JSON;
+an overflow fails closed and is reported as an unsupported/incomplete client
+replay rather than silently dropping or partially accepting history. A
+`session.closed` or `session.runtime_failed` event clears only that session's
+buffer.
+
+Paseo 0.8 has a second ordering defect inside its bundled ACP bridge: it can
+discard `session/update` notifications received before the `session/load`
+response because it assigns the native session id too late. The installed
+Cortex provider therefore launches the repository-owned
+`integrations/paseo/server/acp-load-shim.mjs` stdio relay. It buffers only
+`session/update` frames whose `params.sessionId` exactly matches the active
+`session/load` request, forwards the exact response first, and flushes the
+frames on the next event-loop turn. The relay is bounded at the same 4,096
+items and approximately 16 MiB, rejects malformed or truncated frames, and
+terminates the child on failure. This changes only the client-facing ordering
+needed by Paseo 0.8; Cortex remains ACP-compliant toward its own engine
+client. It is a compatibility path for Paseo 0.8, not a general ACP ordering
+rule.
+
+### Failed tool items in Paseo
+
+Paseo 0.8 requires every failed timeline tool item to carry a non-null error
+display value, while ACP permits a failed tool update whose `rawOutput` is
+omitted. The repository-owned native `cortex-acp` Paseo provider applies a
+presentation-boundary transformer for this case: when the observed status is
+`failed` and the output is null, it retains `failed` and supplies the bounded
+message `Tool call failed: <title>`. The transformer does not invent an
+underlying cause, change the runtime result, or turn a failure into success.
+This is a client rendering compatibility path, not a replay reconstruction
+or a runtime fallback attempt.
+
+The Paseo 0.8 production observation retained in the [real-client
+record](evidence/paseo-2026-09-20/live-acp-regressions.md) predates this
+transformer and reproduced the failed-history problem. Offline coverage and
+source inspection do not qualify the client behavior; the post-fix live agent
+run remains `NOT RUN` until a fresh disposable-client observation records the
+result.
+
+There is deliberately no reconstruction fallback for sessions created before
+`host_updates` was introduced, or for a run whose structured update was not
+recorded. Task events, assignment rows, and tool-result observations prove
+that work happened in the runtime, but they do not prove which ACP update was
+delivered to this client, in what order, or whether the client rendered it.
+Synthesizing a tool card from those records during `session/load` would turn
+runtime evidence into a false host-delivery claim. Such a session replays its
+durable text transcript only; exact structured updates are available from the
+point at which this recording path is active.
 
 `session/resume` stays unsupported (`protocol.UNSUPPORTED_METHODS`): its
 semantics (resuming a *live* engine turn, not display history) are a

@@ -19,6 +19,7 @@ from .catalog.store import CATALOG_SCHEMA
 from .configuration.store import CONFIGURATION_SCHEMA
 from .contracts import StoreError
 from .delegation.store import DELEGATION_SCHEMA
+from .delegation.work_graph import WORK_GRAPH_SCHEMA
 from .delegation.events_store import TASK_EVENTS_SCHEMA
 from .delegation.capacity_store import CAPACITY_SCHEMA
 from .delegation.evidence_store import EVIDENCE_SCHEMA
@@ -29,7 +30,6 @@ from .delegation.workspace_isolation import WORKSPACE_SCHEMA
 from .delegation.integration import INTEGRATION_SCHEMA
 from .routing.store import ROUTING_SCHEMA
 from .observability.store import OBSERVABILITY_SCHEMA
-from .hook_storage import HOOK_SCHEMA
 from .store import APPLICATION_ID, SCHEMA, regular, sync_directory
 from .trusted_channel import IDENTITY_SCHEMA
 
@@ -37,70 +37,82 @@ from .trusted_channel import IDENTITY_SCHEMA
 _MUTATIONS = {"create_task", "set_governance", "create_draft", "write_report"}
 
 # Trusted-channel/ownership tables (see trusted_channel.IDENTITY_SCHEMA) are
-# an OPTIONAL group on top of the SCHEMA+HOOK_SCHEMA core: an existing v11
+# an OPTIONAL group on top of the core schema: an existing v11
 # store predating T005 has none of them; a store created or opened by the
 # current store.py always has all three. Any other combination (partial
 # presence, or an unexpected extra table) is rejected as unsupported_storage.
 _IDENTITY_TABLES = frozenset({"trusted_channels", "source_events", "task_owners"})
 
 # task_route_selections (see catalog.store.CATALOG_SCHEMA) is a second,
-# independent optional group on top of SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA: a
+# independent optional group on top of SCHEMA+IDENTITY_SCHEMA: a
 # pre-T007 v11 store has none of it, a store.py-created store always has it.
 _CATALOG_TABLES = frozenset({"task_route_selections"})
 
 # configuration_revisions/project_configuration_defaults (see
 # configuration.store.CONFIGURATION_SCHEMA) are a third, independent
-# optional group on top of SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA:
+# optional group on top of SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA:
 # a pre-T008 v11 store has none of them, a store.py-created store always has
 # both.
 _CONFIGURATION_TABLES = frozenset({"configuration_revisions", "project_configuration_defaults"})
 
 # acp_host_sessions (see acp.sessions.ACP_SESSION_SCHEMA) is a fourth,
 # independent optional group on top of
-# SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA: a
+# SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA: a
 # pre-T009 v11 store has none of it, a store.py-created store always has it.
 _ACP_TABLES = frozenset({"acp_host_sessions"})
 
 # delegation_provisioning/delegation_effects (see delegation.store.
 # DELEGATION_SCHEMA) are a fifth, independent optional group on top of
-# SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+# SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
 # ACP_SESSION_SCHEMA: a pre-T015 v11 store has neither table, a
 # store.py-created store always has both.
 _DELEGATION_TABLES = frozenset({"delegation_provisioning", "delegation_effects"})
 
+# Durable requirements/assignments are an optional additive group for stores
+# created before the work-graph rollout. Current ACP stores always include it.
+_WORK_GRAPH_TABLES = frozenset({
+    "work_requirements", "work_requirement_revisions", "work_assignments",
+    "work_assignment_predecessors", "work_assignment_attempts", "work_graph_operations",
+})
+
 # task_events/task_orchestration (see delegation.events_store.
 # TASK_EVENTS_SCHEMA) are a sixth, independent optional group on top of
-# SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+# SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
 # ACP_SESSION_SCHEMA+DELEGATION_SCHEMA: a pre-T016 v11 store has neither
 # table, a store.py-created store always has both.
 _TASK_EVENTS_TABLES = frozenset({"task_events", "task_orchestration"})
 
 # capacity_reservations (see delegation.capacity_store.CAPACITY_SCHEMA) is a
 # seventh, independent optional group on top of
-# SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+# SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
 # ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA: a pre-T017 v11
 # store has none of it, a store.py-created store always has it.
 _CAPACITY_TABLES = frozenset({"capacity_reservations"})
 
 # tool_result_observations (see delegation.evidence_store.EVIDENCE_SCHEMA)
 # is an eighth, independent optional group on top of
-# SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+# SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
 # ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA: a
 # pre-T017 v11 store has none of it, a store.py-created store always has it.
 _EVIDENCE_TABLES = frozenset({"tool_result_observations"})
+# Trusted-channel report-read receipts were added after the original evidence
+# group. Keep them independent so legacy format-11 sources with only the
+# original evidence table remain inspectable and split-able.
+_REPORT_READ_TABLES = frozenset({"report_read_observations"})
+_PERMISSION_RECEIPT_TABLES = frozenset({"permission_receipts"})
 
-# source_blocks/source_block_reads/host_transcript (see
+# source_blocks/source_block_reads/host_transcript/host_updates (see
 # acp.replay_store.REPLAY_SCHEMA) are a ninth, independent optional group on
-# top of SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+# top of SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
 # ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+
 # EVIDENCE_SCHEMA: a pre-T018 v11 store has none of them, a store.py-created
 # store always has all three.
-_REPLAY_TABLES = frozenset({"source_blocks", "source_block_reads", "host_transcript"})
+_REPLAY_TABLES = frozenset({"source_blocks", "source_block_reads", "host_transcript", "host_updates"})
 
 # pending_questions/pending_question_late_answers (see
 # acp.questions_store.PENDING_QUESTIONS_SCHEMA) are a tenth, independent
 # optional group on top of
-# SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+# SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
 # ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+
 # EVIDENCE_SCHEMA+REPLAY_SCHEMA: a pre-T020 v11 store has neither table, a
 # store.py-created store always has both.
@@ -108,7 +120,7 @@ _QUESTIONS_TABLES = frozenset({"pending_questions", "pending_question_late_answe
 
 # task_language (see acp.steering.TASK_LANGUAGE_SCHEMA) is an eleventh,
 # independent optional group on top of
-# SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+# SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
 # ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+
 # EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA: a pre-T020 v11
 # store has none of it, a store.py-created store always has it.
@@ -167,10 +179,18 @@ _SELECTIONS = {
     "acp_host_sessions": "SELECT x.* FROM acp_host_sessions x WHERE x.project_root=?",
     "delegation_provisioning": "SELECT x.* FROM delegation_provisioning x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "delegation_effects": "SELECT x.* FROM delegation_effects x JOIN delegation_provisioning p ON p.idempotency_key=x.idempotency_key JOIN tasks t ON t.id=p.task_id WHERE t.project_root=?",
+    "work_requirements": "SELECT x.* FROM work_requirements x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "work_requirement_revisions": "SELECT x.* FROM work_requirement_revisions x JOIN work_requirements q ON q.requirement_id=x.requirement_id JOIN tasks t ON t.id=q.task_id WHERE t.project_root=?",
+    "work_assignments": "SELECT x.* FROM work_assignments x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "work_assignment_predecessors": "SELECT x.* FROM work_assignment_predecessors x JOIN work_assignments a ON a.assignment_id=x.assignment_id JOIN tasks t ON t.id=a.task_id WHERE t.project_root=?",
+    "work_assignment_attempts": "SELECT x.* FROM work_assignment_attempts x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "work_graph_operations": "SELECT x.* FROM work_graph_operations x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "task_events": "SELECT x.* FROM task_events x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "task_orchestration": "SELECT x.* FROM task_orchestration x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "capacity_reservations": "SELECT x.* FROM capacity_reservations x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "tool_result_observations": "SELECT x.* FROM tool_result_observations x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "report_read_observations": "SELECT x.* FROM report_read_observations x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "permission_receipts": "SELECT x.* FROM permission_receipts x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "reports": "SELECT x.* FROM reports x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "source_cursors": "SELECT x.* FROM source_cursors x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "source_messages": "SELECT x.* FROM source_messages x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -186,13 +206,10 @@ _SELECTIONS = {
     "draft_revisions": "SELECT x.* FROM draft_revisions x JOIN drafts d ON d.id=x.draft_id JOIN tasks t ON t.id=d.task_id WHERE t.project_root=?",
     "task_changes": "SELECT x.* FROM task_changes x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "source_turns": "SELECT x.* FROM source_turns x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
-    "hook_pending_sources": "SELECT x.* FROM hook_pending_sources x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
-    "hook_events": "SELECT x.* FROM hook_events x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
-    "hook_hints": "SELECT x.* FROM hook_hints x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
-    "hook_agent_bindings": "SELECT x.* FROM hook_agent_bindings x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "source_blocks": "SELECT x.* FROM source_blocks x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "source_block_reads": "SELECT x.* FROM source_block_reads x JOIN reports r ON r.id=x.report_id JOIN tasks t ON t.id=r.task_id WHERE t.project_root=?",
     "host_transcript": "SELECT x.* FROM host_transcript x JOIN acp_host_sessions s ON s.session_id=x.session_id WHERE s.project_root=?",
+    "host_updates": "SELECT x.* FROM host_updates x JOIN acp_host_sessions s ON s.session_id=x.session_id WHERE s.project_root=?",
     "pending_questions": "SELECT x.* FROM pending_questions x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "pending_question_late_answers": "SELECT x.* FROM pending_question_late_answers x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "task_language": "SELECT x.* FROM task_language x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -219,13 +236,14 @@ _COPY_ORDER = (
     "task_route_selections", "configuration_revisions", "project_configuration_defaults",
     "acp_host_sessions",
     "delegation_provisioning", "delegation_effects",
-    "task_events", "task_orchestration", "capacity_reservations", "tool_result_observations",
+    "work_requirements", "work_requirement_revisions", "work_assignments",
+    "work_assignment_predecessors", "work_assignment_attempts", "work_graph_operations",
+    "task_events", "task_orchestration", "capacity_reservations", "tool_result_observations", "report_read_observations", "permission_receipts",
     "reports", "source_cursors", "source_messages",
     "editions", "governance", "drafts", "pending_source_deletions",
     "pending_deletions", "binding_receipts", "source_resets", "source_revisions",
     "report_provenance", "draft_revisions", "task_changes", "source_turns",
-    "hook_pending_sources", "hook_events", "hook_hints", "hook_agent_bindings",
-    "source_blocks", "source_block_reads", "host_transcript",
+    "source_blocks", "source_block_reads", "host_transcript", "host_updates",
     "pending_questions", "pending_question_late_answers",
     "task_language", "task_stopped",
     "context_generations", "compaction_owners", "compaction_events_seen", "capsule_deliveries",
@@ -339,6 +357,10 @@ def _evidence_present(db):
     return names == _EVIDENCE_TABLES
 
 
+def _permission_receipts_present(db):
+    return _PERMISSION_RECEIPT_TABLES <= _table_names(db)
+
+
 def _replay_present(db):
     """True only when every T018 replay table exists; false only when none do."""
     names = _table_names(db) & _REPLAY_TABLES
@@ -423,7 +445,7 @@ def _observability_present(db):
 def _expected_layout():
     db = sqlite3.connect(":memory:")
     try:
-        db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA)
+        db.executescript(SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA)
         tables = _table_names(db)
         columns = {
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA table_xinfo({_identifier(table)})"))
@@ -433,7 +455,7 @@ def _expected_layout():
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA foreign_key_list({_identifier(table)})"))
             for table in tables
         }
-        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES - _GENERATIONS_TABLES - _PROCESS_REGISTRY_TABLES - _BUDGET_TABLES - _WORKSPACE_TABLES - _ROUTING_TABLES - _OBSERVABILITY_TABLES
+        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _WORK_GRAPH_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _PERMISSION_RECEIPT_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES - _GENERATIONS_TABLES - _PROCESS_REGISTRY_TABLES - _BUDGET_TABLES - _WORKSPACE_TABLES - _ROUTING_TABLES - _OBSERVABILITY_TABLES
         return core, columns, foreign_keys
     finally:
         db.close()
@@ -442,7 +464,7 @@ def _expected_layout():
 def _validate_format(db):
     if db.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
         raise StoreError("unsupported_storage")
-    if db.execute("PRAGMA user_version").fetchone()[0] != 11:
+    if db.execute("PRAGMA user_version").fetchone()[0] != 12:
         raise StoreError("unsupported_storage")
     core, columns, foreign_keys = _expected_layout()
     actual = _table_names(db)
@@ -454,9 +476,15 @@ def _validate_format(db):
     configuration_present = _configuration_present(db)
     acp_present = _acp_present(db)
     delegation_present = _delegation_present(db)
+    graph_names = _table_names(db) & _WORK_GRAPH_TABLES
+    if graph_names and graph_names != _WORK_GRAPH_TABLES:
+        raise StoreError("unsupported_storage")
+    graph_present = graph_names == _WORK_GRAPH_TABLES
     task_events_present = _task_events_present(db)
     capacity_present = _capacity_present(db)
     evidence_present = _evidence_present(db)
+    report_read_present = _REPORT_READ_TABLES <= _table_names(db)
+    permission_receipts_present = _permission_receipts_present(db)
     replay_present = _replay_present(db)
     questions_present = _questions_present(db)
     language_present = _language_present(db)
@@ -474,9 +502,12 @@ def _validate_format(db):
         | (_CONFIGURATION_TABLES if configuration_present else set())
         | (_ACP_TABLES if acp_present else set())
         | (_DELEGATION_TABLES if delegation_present else set())
+        | (_WORK_GRAPH_TABLES if graph_present else set())
         | (_TASK_EVENTS_TABLES if task_events_present else set())
         | (_CAPACITY_TABLES if capacity_present else set())
         | (_EVIDENCE_TABLES if evidence_present else set())
+        | (_REPORT_READ_TABLES if report_read_present else set())
+        | (_PERMISSION_RECEIPT_TABLES if permission_receipts_present else set())
         | (_REPLAY_TABLES if replay_present else set())
         | (_QUESTIONS_TABLES if questions_present else set())
         | (_LANGUAGE_TABLES if language_present else set())
@@ -541,32 +572,10 @@ def _ensure_relations(db, identity_present):
              WHERE r.id IS NULL OR NOT EXISTS (
                  SELECT 1 FROM thread_bindings b WHERE b.thread_id=x.thread_id AND b.task_id=x.task_id
              ) LIMIT 1""",
-        """SELECT 1 FROM hook_agent_bindings x LEFT JOIN thread_bindings p
-                  ON p.thread_id=x.parent_thread_id AND p.task_id=x.task_id
-             LEFT JOIN thread_bindings a ON a.thread_id=x.agent_id
-             WHERE p.thread_id IS NULL OR (a.thread_id IS NOT NULL AND a.task_id!=x.task_id) LIMIT 1""",
-        """SELECT 1 FROM hook_pending_sources x WHERE NOT EXISTS (
-                 SELECT 1 FROM thread_bindings b WHERE b.thread_id=x.thread_id AND b.task_id=x.task_id
-             ) AND NOT EXISTS (
-                 SELECT 1 FROM hook_agent_bindings a WHERE a.agent_id=x.thread_id AND a.task_id=x.task_id
-             ) LIMIT 1""",
-        """SELECT 1 FROM hook_events x WHERE NOT EXISTS (
-                 SELECT 1 FROM thread_bindings b WHERE b.thread_id=x.thread_id AND b.task_id=x.task_id
-             ) AND NOT EXISTS (
-                 SELECT 1 FROM hook_agent_bindings a WHERE a.agent_id=x.thread_id AND a.task_id=x.task_id
-             ) LIMIT 1""",
-        """SELECT 1 FROM hook_hints x WHERE NOT EXISTS (
-                 SELECT 1 FROM thread_bindings b WHERE b.thread_id=x.thread_id AND b.task_id=x.task_id
-             ) AND NOT EXISTS (
-                 SELECT 1 FROM hook_agent_bindings a WHERE a.agent_id=x.thread_id AND a.task_id=x.task_id
-             ) LIMIT 1""",
         """SELECT 1 FROM task_changes x WHERE x.kind NOT IN
                   ('source','report','hook','artifact','source_gap','source_pending') LIMIT 1""",
         """SELECT 1 FROM task_changes x WHERE x.kind IN ('source','report') AND NOT EXISTS (
                  SELECT 1 FROM reports r WHERE r.id=x.reference AND r.task_id=x.task_id
-             ) LIMIT 1""",
-        """SELECT 1 FROM task_changes x WHERE x.kind IN ('hook','artifact') AND NOT EXISTS (
-                 SELECT 1 FROM hook_events h WHERE h.event_key=x.reference AND h.task_id=x.task_id
              ) LIMIT 1""",
         """SELECT 1 FROM task_changes x WHERE x.kind='source_pending' AND x.reference IS NOT NULL LIMIT 1""",
     )
@@ -744,10 +753,10 @@ def _create_destination(source_db, temporary, project_root):
     try:
         target.execute("PRAGMA foreign_keys=ON")
         # Destination initialization always matches what store.py creates for
-        # a fresh store: core SCHEMA+HOOK_SCHEMA plus the identity tables,
+        # a fresh store: core SCHEMA plus the identity tables,
         # regardless of whether the (possibly legacy, pre-T005) source has
         # them. A legacy source simply leaves them empty in the destination.
-        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA +
+        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA +
                              f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
         target.execute("BEGIN IMMEDIATE")
         source_identity_present = _identity_present(source_db)
@@ -755,9 +764,15 @@ def _create_destination(source_db, temporary, project_root):
         source_configuration_present = _configuration_present(source_db)
         source_acp_present = _acp_present(source_db)
         source_delegation_present = _delegation_present(source_db)
+        source_graph_names = _table_names(source_db) & _WORK_GRAPH_TABLES
+        if source_graph_names and source_graph_names != _WORK_GRAPH_TABLES:
+            raise StoreError("unsupported_storage")
+        source_graph_present = source_graph_names == _WORK_GRAPH_TABLES
         source_task_events_present = _task_events_present(source_db)
         source_capacity_present = _capacity_present(source_db)
         source_evidence_present = _evidence_present(source_db)
+        source_report_read_present = _REPORT_READ_TABLES <= _table_names(source_db)
+        source_permission_receipts_present = _permission_receipts_present(source_db)
         source_replay_present = _replay_present(source_db)
         source_questions_present = _questions_present(source_db)
         source_language_present = _language_present(source_db)
@@ -797,6 +812,8 @@ def _create_destination(source_db, temporary, project_root):
                 # destination's freshly-created delegation tables empty for
                 # the same reason.
                 rows = ()
+            elif table in _WORK_GRAPH_TABLES and not source_graph_present:
+                rows = ()
             elif table in _TASK_EVENTS_TABLES and not source_task_events_present:
                 # No task-event rows exist to carry; leave the destination's
                 # freshly-created task-event tables empty for the same reason.
@@ -810,6 +827,10 @@ def _create_destination(source_db, temporary, project_root):
                 # No tool-result-observation rows exist to carry; leave the
                 # destination's freshly-created evidence table empty for the
                 # same reason.
+                rows = ()
+            elif table in _REPORT_READ_TABLES and not source_report_read_present:
+                rows = ()
+            elif table in _PERMISSION_RECEIPT_TABLES and not source_permission_receipts_present:
                 rows = ()
             elif table in _REPLAY_TABLES and not source_replay_present:
                 # No T018 source-block/host-transcript rows exist to carry;
@@ -1002,7 +1023,7 @@ def split_project(source_directory, project_root, backup, *, access_stopped=Fals
             raise StoreError("split_source_changed")
         succeeded = True
         return dict(project_root=str(project_root), destination=str(destination), backup=str(backup),
-                    tasks=selected, schema_version=11, application_id=APPLICATION_ID,
+                    tasks=selected, schema_version=12, application_id=APPLICATION_ID,
                     markdown_copied=False, source_modified=False)
     except StoreError:
         raise

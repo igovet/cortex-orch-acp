@@ -24,7 +24,9 @@ from cortex_runtime.contracts import StoreError  # noqa: E402
 from cortex_runtime.delegation.mcp_tools import _shared_read_skill  # noqa: E402
 from cortex_runtime.portable.roles import (  # noqa: E402
     ALWAYS_ON_SKILLS, SHARED_ROLE_IDS, composed_instructions, load_role,
+    read_reference,
 )
+from cortex_runtime.portable.errors import PortableError  # noqa: E402
 
 
 def test_a_coordinator_is_told_which_skills_exist_and_when_to_read_one():
@@ -43,6 +45,9 @@ def test_a_coordinator_is_told_which_skills_exist_and_when_to_read_one():
         # Named, and never pasted: the body stays one read away.
         assert load_role(skill_id).body_portable.strip()[:200] not in composed, skill_id
     assert 'read_skill' in composed
+    assert "`read_skill` tool on the `cortex` MCP server" in composed
+    assert "engine-native skill loader" in composed
+    assert "Use Cortex MCP `read_skill`," in role.body_portable
 
 
 def test_a_worker_is_told_which_skills_exist_and_when_to_read_one():
@@ -57,6 +62,7 @@ def test_a_worker_is_told_which_skills_exist_and_when_to_read_one():
     # Not the coordinator's own communication rules: a worker never talks
     # to the user.
     assert "coordinator-communication" not in ALWAYS_ON_SKILLS["worker"]
+    assert "`read_skill` tool on the `cortex` MCP server" in composed
 
 
 def test_the_delivered_text_stays_close_to_the_role_itself():
@@ -95,3 +101,16 @@ def test_every_always_on_skill_is_a_real_shared_skill():
         for skill_id in skills:
             assert skill_id in SHARED_ROLE_IDS, (kind, skill_id)
             assert load_role(skill_id).body_portable.strip()
+
+
+def test_reference_inventory_is_bounded_and_role_scoped():
+    assert "# Worker routing" in read_reference("worker-routing", role_kind="coordinator")
+    assert "# Report publication" in read_reference("report-publication", role_kind="worker")
+    assert "# " in read_reference("report-example", role_kind="worker")
+    for reference_id, role_kind in (
+        ("worker-routing", "worker"),
+        ("report-publication", "coordinator"),
+        ("../orchestrator/SKILL", "coordinator"),
+    ):
+        with pytest.raises(PortableError):
+            read_reference(reference_id, role_kind=role_kind)

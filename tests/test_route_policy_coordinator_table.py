@@ -12,8 +12,10 @@ import json
 import threading
 
 from cortex_runtime.acp.orchestrating_runtime import PromptOutcome
+from cortex_runtime.connections import registry as connection_registry
 from cortex_runtime.portable.engine_contract import StopReason
 
+from engine_fakes import isolated_environ, make_connection_record, new_connection_id
 from test_orchestrating_runtime import _make_runtime, _task
 
 
@@ -24,8 +26,20 @@ def _write_policy(tmp_path, roles=None, default=None):
     )
 
 
-def test_coordinator_instructions_carry_the_allowed_routes_table(tmp_path):
+def test_coordinator_instructions_carry_the_allowed_routes_table(tmp_path, monkeypatch):
     store, task_id = _task(tmp_path)
+    # The instructions advertise connected routes, not every route written
+    # in policy.  Use a separate user-scoped registry outside the project.
+    environ_root = tmp_path.parent / (tmp_path.name + "-engine")
+    environ_root.mkdir()
+    environ = isolated_environ(environ_root)
+    connection = make_connection_record(
+        new_connection_id(), ("/usr/bin/python3", "-V"), environ=environ,
+    )
+    with connection_registry.transaction(environ) as state:
+        state.connections[connection.id] = connection
+    for key in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "PATH"):
+        monkeypatch.setenv(key, environ[key])
     _write_policy(tmp_path, roles={
         "worker-backend-dev": [
             {"engine": "codex-acp", "model": "gpt-5.6-terra", "efforts": ["medium", "high"], "default_effort": "medium"},

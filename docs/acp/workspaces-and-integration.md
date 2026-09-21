@@ -1,10 +1,66 @@
-# Parallel workspaces and safe integration (T025)
+# Project-root writers and safe integration
 
-Base: T016's `SharedProjectRootWorkspaceProvisioner` (every delegated
-attempt shares the task's one project root; not isolated). This task adds
-real per-attempt isolation and an explicit, revision-checked integration
-step, without ever running `git reset`/`git stash`/`git worktree` against a
-user's real repository.
+## Current ACP contract
+
+The project opened by the ACP client (Zed today) is the worker destination.
+Every mutating attempt is bound to that exact `project_root`; Cortex does not
+silently substitute a hidden snapshot, temporary checkout, or worker copy.
+The coordinator's working directory is also that exact current project root.
+It must see worker edits made during the same session; a startup copy can give
+it stale source and test results. This does not grant the coordinator a Cortex
+writer lease or make its native tools OS-level read-only.
+Workers acquire a serialized writer lease, and the runtime records the lease
+owner, ownership epoch, input revision, affected paths, output revision and
+write outcome in the project-local `.cortex` store.
+
+Immediately before mutation, Cortex rechecks the binding, current project
+revision and any negotiated unsaved editor buffers. Immediately after the
+write it captures the resulting revision and records the observed filesystem
+delta. A stale revision, overlapping Cortex writer, unavailable binding,
+partial write or uncertain process result is a durable failure/conflict. It is
+never reported as successful completion and never redirected to another
+directory. The writer lock serializes Cortex-owned workers only: it cannot
+prevent Zed, the user, or another external process from editing the project.
+
+The direct integration operation is reconciliation of the already-authorized
+project root. When the recorded attempt delta is already present it returns a
+durable `noop`/reconciliation result; it does not apply a hidden candidate.
+When no host `fs` capability is negotiated, `host_buffer_state` remains
+`unknown`. That is an explicit evidence limitation, not proof that there was
+no unsaved Zed buffer and not a strict prevention guarantee. A coordinator
+must keep that limitation visible when deciding acceptance.
+
+Checks run against the exact project revision associated with the attempt and
+retain command observation separately from the coordinator's semantic
+assessment. A report, tool return, or process exit code alone is not proof that
+the user's requirement is satisfied. Native check commands use the user's OS
+permissions; the runtime does not enforce filesystem read-only or network
+isolation for them. The coordinator decides whether to
+accept, revise or stop after reading the durable report and current evidence.
+
+The Cortex writer lock coordinates Cortex processes only. It cannot prevent an
+unrelated editor or process from changing the same directory between two
+observations; such drift is recorded and blocks acceptance until reconciled.
+
+The coordinator-turn revision guard accounts for a direct-project worker that
+edits while the coordinator prompt is still running and publishes later. Cortex
+records the unresolved event boundary in the task store and waits for that
+worker's exact observed final tree before allowing acceptance. A failed worker,
+missing publication, unavailable capture or differing current tree leaves the
+task blocked; a pause or restart does not erase the pending boundary. This is
+observed revision reconciliation, not proof of which same-user OS process made
+each write. Native coordinator tools remain outside a preventive filesystem
+boundary, so their writes cannot be ruled out solely by a matching digest.
+
+The remainder of this page documents the pre-direct-write snapshot/candidate
+implementation retained for migration and audit of existing task stores. It is
+not the destination model for new ACP worker attempts.
+
+# Historical snapshot and candidate implementation (migration/audit only)
+
+The following T016/T025 material describes the former snapshot-based
+implementation. It is retained to explain migration of existing stores and
+old evidence; it is not the current production destination contract above.
 
 ## Workspace model
 
@@ -63,20 +119,34 @@ binding's `workspace_root`, so plain containment (not the technical-storage
 check) already refuses it — confirmed explicitly by test, not merely
 inferred.
 
-### `SerializedSharedRootWorkspaceProvisioner` (fallback)
+### Snapshot failure
 
-When a snapshot cannot be safely taken (a cap exceeded, or an unreadable
-entry), `create` falls back automatically, records `mode=
-'serialized_shared_root'` (visible, durable — not just a code comment) in
-`workspace_snapshots`, and every attempt shares the project root exactly as
-before T025. `SerializedSharedRootWorkspaceProvisioner.writer_lock()`
-supplies a per-project, cross-thread/cross-process exclusive advisory lock
-(`fcntl.flock` on a `.cortex`-owned lock file) so conflicting writers are
-actually serialized instead of merely hoping a prompt-level file scope is
-respected — prompt scopes are never a lock (task card step 2).
-`delegation.integration.integrate` for a serialized-fallback attempt is a
-recorded no-op: there is no separate copy left to merge, the worker already
-wrote directly to the shared root under the lock.
+Production delegation uses `IsolatedSnapshotWorkspaceProvisioner`. If its
+entry, byte, or time cap is exceeded, or an entry cannot be read safely,
+workspace creation fails. It does not switch to a shared project root.
+`SerializedSharedRootWorkspaceProvisioner` remains a separate legacy class,
+but is not an automatic production fallback; its existence does not make
+shared-root worker writes an acceptable isolation substitute.
+
+## Candidate staging before integration
+
+`prepare_candidate` requests an isolated stage built from exact finished
+assignment attempts. The main runtime copies the current project into a
+candidate and applies those selected attempts there. The candidate records
+source bindings, a project-base digest, content digest, and any conflict
+paths. `candidate_ready` or `candidate_conflict`/`candidate_failed` appears
+through `list_events`. Preparation does not write the user's project.
+
+The coordinator may call `request_check` for a ready candidate and exact
+content digest. The runtime runs its direct argv in a read-only candidate
+sandbox, retains a bounded command observation, and reports unknown outcomes
+without replaying the command. `read_check` returns that observation;
+`assess_check` records the coordinator's separate interpretation. The
+coordinator may then call `integrate` with the exact `candidate_ref` and
+`expected_base_digest`.
+The main runtime checks that binding and the current project base before
+application. A changed base or overlapping path is a conflict, never a
+silent replacement. Candidate selection remains a coordinator decision.
 
 ## Integration
 
@@ -225,8 +295,7 @@ command, while the real project `.cortex` store stays unreachable; a
 worker's own execution files excluding `.cortex` while a real publish still
 lands in the main project's logical store; revision A not certifying a
 differing revision B (both the "integration hasn't happened yet" and the
-"main drifted after a clean integration" cases); the no-isolation
-serialized-writer fallback (visible `mode` column, a real
-`fcntl.flock`-backed exclusive lock, and integration degrading to a
-documented no-op); and cleanup removing only the Cortex-owned snapshot
+"main drifted after a clean integration" cases); the separately testable
+legacy serialized-writer class (not a production fallback); and cleanup
+removing only the Cortex-owned snapshot
 directories it created.

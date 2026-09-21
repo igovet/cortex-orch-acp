@@ -17,7 +17,7 @@ Registry approval.
 | Version | Plugin's own `1.0.0+sha256.<hash>` stamp (`./package-identity.json`) | Whether Registry versioning reuses this exact string or a separate scheme is undecided. |
 | Launch command | `python3 -B <abs>/src/cortex_acp.py` | Real, already-working launch command (this task); Registry distribution channel (binary/npx/uvx) not decided. |
 | Protocol version | `1` (`cortex_runtime/acp/protocol.py: PROTOCOL_VERSION`) | |
-| Capabilities summary | `loadSession: false`; text-only prompt content; no HTTP/SSE MCP transport | From `protocol.initialize_result`; must stay truthful/in sync with the actual implementation at submission time. |
+| Capabilities summary | `loadSession: true`; text, image, `resource_link`, and embedded `resource` prompt content; audio unsupported; no HTTP/SSE MCP transport | From `protocol.initialize_result`; must stay truthful/in sync with the actual implementation at submission time. |
 | Short description | "Cortex: an incoming ACP agent for Cortex orchestration" (draft wording, not final) | |
 | Homepage / repository | (not decided — depends on where this repository is eventually published) | |
 | Maintainer contact | (not decided) | |

@@ -10,7 +10,6 @@ import sqlite3
 import pytest
 
 from cortex_runtime.contracts import StoreError
-from cortex_runtime.hook_storage import HookStorage
 from cortex_runtime.store import NativeSource
 from cortex_runtime.split import APPLICATION_ID, split_project
 from cortex_runtime.store import Store
@@ -21,7 +20,6 @@ TABLES = (
     "editions", "governance", "deliveries", "drafts", "pending_source_deletions",
     "pending_deletions", "binding_receipts", "source_resets", "source_revisions",
     "report_provenance", "draft_revisions", "task_changes", "source_turns",
-    "hook_pending_sources", "hook_events", "hook_hints", "hook_agent_bindings",
 )
 
 
@@ -64,14 +62,6 @@ def _populate(store, project, task, thread, label):
         "create_draft", dict(template="investigation", request_key="unfinished-" + label),
         "worker-" + label, thread,
     )
-    hooks = HookStorage(store)
-    context = hooks.context(thread, str(project))
-    hooks.note_prompt(context, "pending-" + label)
-    worker = hooks.register_agent(thread, str(project), "hook-worker-" + label)
-    hooks.record(worker, "PostToolUse", "event-" + label,
-                 dict(status="exited", exit_code=0, tool_name="exec_command",
-                      actor_scope="actor", actor_thread_id="hook-worker-" + label))
-    hooks.claim_hint(worker, "Stop", "state-" + label)
     store.call(
         "set_governance",
         dict(mode="minimal", rationale="pause-" + label, state="normal",
@@ -112,10 +102,6 @@ def _expected_rows(source, table, task, project):
         "source_revisions": ("task_id=?", (task,)),
         "task_changes": ("task_id=?", (task,)),
         "source_turns": ("task_id=?", (task,)),
-        "hook_pending_sources": ("task_id=?", (task,)),
-        "hook_events": ("task_id=?", (task,)),
-        "hook_hints": ("task_id=?", (task,)),
-        "hook_agent_bindings": ("task_id=?", (task,)),
     }
     if table in direct:
         return _rows(source, table, *direct[table])
@@ -155,7 +141,7 @@ def test_split_preserves_all_selected_metadata_and_never_copies_markdown(tmp_pat
 
     destination = first / ".cortex" / "cortex.sqlite3"
     assert result == dict(project_root=str(first), destination=str(destination), backup=str(backup),
-                          tasks=1, schema_version=11, application_id=APPLICATION_ID,
+                          tasks=1, schema_version=12, application_id=APPLICATION_ID,
                           markdown_copied=False, source_modified=False)
     assert (source_dir / "cortex.sqlite3").read_bytes() == source_before
     assert _file_digests(tmp_path) == markdown_before
@@ -164,7 +150,7 @@ def test_split_preserves_all_selected_metadata_and_never_copies_markdown(tmp_pat
          closing(sqlite3.connect(destination)) as selected, \
          closing(sqlite3.connect(backup)) as saved:
         assert selected.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
-        assert selected.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert selected.execute("PRAGMA user_version").fetchone()[0] == 12
         assert selected.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert selected.execute("PRAGMA foreign_key_check").fetchall() == []
         assert selected.execute("SELECT id,project_root FROM tasks").fetchall() == [(first_task, str(first))]
@@ -243,21 +229,6 @@ def test_split_fails_closed_on_unknown_format11_tables_or_columns(tmp_path, alte
         split_project(source_dir, project, backup, access_stopped=True)
     assert not backup.exists()
     assert not (project / ".cortex" / "cortex.sqlite3").exists()
-
-
-def test_split_rejects_cross_project_logical_relation(tmp_path):
-    source_dir = tmp_path / "global"; source_dir.mkdir(mode=0o700)
-    first = tmp_path / "first"; second = tmp_path / "second"; first.mkdir(); second.mkdir()
-    store = Store(source_dir)
-    first_task, first_thread = _create(store, first, "first")
-    second_task, _ = _create(store, second, "second")
-    with store.connection() as db:
-        db.execute("INSERT INTO hook_agent_bindings VALUES (?,?,?,?,?)",
-                   ("cross-project-agent", first_thread, second_task, "cross-receipt", "now"))
-    backup = tmp_path / "backup.sqlite3"
-    with pytest.raises(StoreError, match="split_source_relations_invalid"):
-        split_project(source_dir, second, backup, access_stopped=True)
-    assert not backup.exists()
 
 
 def test_split_rejects_active_cooperative_access(tmp_path):

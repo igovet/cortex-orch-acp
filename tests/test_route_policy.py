@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +27,31 @@ from cortex_runtime.portable.errors import PortableError
 from cortex_runtime.portable.identity import OwnershipEpoch, SourceEvent
 from cortex_runtime.routing import authorization as routing_authorization
 from cortex_runtime.store import Store
+
+
+def test_disposable_luna_qualification_policy_is_project_scoped_and_exact(tmp_path):
+    fixture = Path(__file__).resolve().parents[1] / "policy" / "route-policy.qualification-luna.json"
+    project = tmp_path / "disposable-project"
+    (project / ".cortex").mkdir(parents=True)
+    (project / ".cortex" / "route-policy.json").write_bytes(fixture.read_bytes())
+    policy, malformed = route_policy_module.load_route_policy(
+        project, {"HOME": str(tmp_path / "isolated-home")},
+    )
+    assert malformed is None
+    assert policy is not None
+    for role in ("coordinator", "worker-planner", "worker-technical-writer"):
+        assert policy.resolve_effort(role, "codex-acp", "gpt-5.6-luna", None) == "high"
+        assert policy.resolve_effort(role, "codex-acp", "gpt-5.6-luna", "medium") == "medium"
+        with pytest.raises(PortableError):
+            policy.resolve_effort(role, "codex-acp", None, "high")
+        for engine, model, effort in (
+            ("codex-acp", "gpt-5.6-terra", "low"),
+            ("codex-acp", "gpt-5.6-luna", "low"),
+            ("claude-agent-acp", "sonnet", "medium"),
+        ):
+            with pytest.raises(PortableError) as refused:
+                policy.resolve_effort(role, engine, model, effort)
+            assert refused.value.code == "route_policy_not_authorized"
 
 
 # --- helpers -------------------------------------------------------------
@@ -97,7 +123,7 @@ def test_absent_everywhere_is_no_constraint(tmp_path):
     assert policy is None and malformed is None
 
 
-def test_precedence_project_beats_env_beats_home_cortex_beats_home_config(tmp_path):
+def test_precedence_project_beats_env_beats_xdg_config_beats_home_cortex(tmp_path):
     project = tmp_path / "proj"
     home = tmp_path / "home"
     env_file = tmp_path / "env-policy.json"
@@ -119,9 +145,84 @@ def test_precedence_project_beats_env_beats_home_cortex_beats_home_config(tmp_pa
     (project / ".cortex" / "route-policy.json").unlink()
     assert _engines(project) == {"e-env"}
     env_file.unlink()
-    assert _engines(project) == {"e-home-cortex"}
-    (home / ".cortex" / "route-policy.json").unlink()
     assert _engines(project) == {"e-config"}
+    (home / ".config" / "cortex" / "route-policy.json").unlink()
+    assert _engines(project) == {"e-home-cortex"}
+
+
+def test_explicit_xdg_config_home_is_loaded_before_legacy_home_location(tmp_path):
+    """The setup writer and loader must share the explicit XDG root.
+
+    Keep HOME and XDG_CONFIG_HOME separate: this catches the historical bug
+    where setup wrote to XDG_CONFIG_HOME/cortex but the loader only inspected
+    HOME/.config/cortex.
+    """
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg-config"
+    home.mkdir()
+    xdg.mkdir()
+    environ = {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)}
+    _write(xdg / "cortex" / "route-policy.json", {
+        "default": [{"engine": "e-xdg", "efforts": ["high"]}],
+    })
+    _write(home / ".cortex" / "route-policy.json", {
+        "default": [{"engine": "e-legacy", "efforts": ["high"]}],
+    })
+
+    policy, malformed = route_policy_module.load_route_policy(
+        project_root=None, environ=environ,
+    )
+
+    assert malformed is None
+    assert policy is not None
+    assert {entry.engine for entry in policy.default} == {"e-xdg"}
+
+
+def test_explicit_xdg_malformed_policy_blocks_legacy_fallback(tmp_path):
+    """A malformed higher-precedence XDG file remains fail-closed."""
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg-config"
+    home.mkdir()
+    xdg.mkdir()
+    environ = {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)}
+    bad = xdg / "cortex" / "route-policy.json"
+    bad.parent.mkdir(parents=True)
+    bad.write_text("{not valid json", encoding="utf-8")
+    _write(home / ".cortex" / "route-policy.json", {
+        "default": [{"engine": "e-legacy", "efforts": ["high"]}],
+    })
+
+    policy, malformed = route_policy_module.load_route_policy(
+        project_root=None, environ=environ,
+    )
+
+    assert policy is None
+    assert malformed is not None
+    assert malformed["path"] == str(bad)
+
+
+def test_loaded_xdg_policy_authorizes_only_declared_route_and_effort(tmp_path):
+    """The split HOME/XDG case also exercises the authorization boundary."""
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg-config"
+    home.mkdir()
+    xdg.mkdir()
+    environ = {"HOME": str(home), "XDG_CONFIG_HOME": str(xdg)}
+    _write(xdg / "cortex" / "route-policy.json", {
+        "roles": {"implementation": [{
+            "engine": "codex-acp", "model": "luna",
+            "efforts": ["high"], "default_effort": "high",
+        }]},
+    })
+
+    policy, malformed = route_policy_module.load_route_policy(
+        project_root=None, environ=environ,
+    )
+    assert malformed is None and policy is not None
+    assert policy.resolve_effort("implementation", "codex-acp", "luna", "high") == "high"
+    with pytest.raises(PortableError) as excinfo:
+        policy.resolve_effort("implementation", "codex-acp", "luna", "low")
+    assert excinfo.value.code == "route_policy_not_authorized"
 
 
 # --- malformed --------------------------------------------------------------
@@ -234,6 +335,19 @@ def test_render_table_of_no_policy_roles_and_no_default_is_empty():
     assert route_policy_module.render_table(policy) == ""
 
 
+def test_render_table_filters_engines_without_launchable_connections():
+    policy = route_policy_module.RoutePolicy(
+        roles={"worker-backend-dev": (
+            route_policy_module.RoutePolicyEntry("claude-agent-acp", "sonnet", frozenset({"medium"}), "medium"),
+            route_policy_module.RoutePolicyEntry("codex-acp", "luna", frozenset({"high"}), "high"),
+        )},
+        default=None,
+    )
+    table = route_policy_module.render_table(policy, available_engines=frozenset({"codex-acp"}))
+    assert "codex-acp/luna" in table
+    assert "claude-agent-acp/sonnet" not in table
+
+
 # --- ceiling still wins over a permissive policy ------------------------
 
 def test_ceiling_still_wins_over_permissive_policy(tmp_path):
@@ -309,6 +423,7 @@ def test_authorize_dispatch_applies_default_effort_when_none_selected(tmp_path):
     record = type("Rec", (), {"engine": "codex-acp", "id": "cn_x"})()
     adapter._authorize_dispatch(record, task_id, launch, project_root=project)
     assert launch["parameters"]["effort"] == "medium"
+    assert launch["effort_source"] == "route_policy_default"
 
 
 def test_authorize_dispatch_absent_policy_changes_nothing(tmp_path):

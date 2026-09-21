@@ -66,6 +66,13 @@ def test_permission_request_round_trips_over_the_real_connection_and_client_answ
     observed = {}
 
     def on_worker_prompt(store, channel, session_ref, call_index):
+        # A worker that ends without a durable result now receives one bounded
+        # same-session completion follow-up.  The permission round-trip belongs
+        # to the original turn; the follow-up should finish without issuing a
+        # second unrelated permission request (and overwriting this assertion
+        # with the follow-up timeout).
+        if call_index >= 1:
+            return PromptOutcome(StopReason.END_TURN, "Worker A finished: done")
         requester = harness.runtime.permission_requester_for_task(channel.task_id)
         assert requester is not None, "no requester registered for this in-flight task"
         result = requester(
@@ -102,12 +109,15 @@ def test_permission_request_round_trips_over_the_real_connection_and_client_answ
         harness.stop()
 
 
-def test_permission_requester_is_deregistered_once_the_turn_ends_failing_closed(tmp_path):
-    """Once ``start_prompt`` returns, this task's own registered requester
-    is gone -- a permission request that arrives for it later (outside any
-    in-flight turn) has nothing to relay to and falls back to the same
-    fail-closed ``None`` as "no host requester at all", never a stale
-    reused one."""
+def test_permission_requester_survives_coordinator_turn_for_background_worker(tmp_path):
+    """A worker can ask the user after the coordinator yielded.
+
+    ``start_prompt`` returning only ends the coordinator turn; it does not
+    close the ACP connection or the task.  The old per-turn cleanup removed
+    the requester here, causing a worker permission request to silently
+    select ``reject_once``.  The requester is released by connection close
+    or a terminal task transition instead.
+    """
     task_id_holder = {}
 
     def on_worker_prompt(store, channel, session_ref, call_index):
@@ -124,7 +134,32 @@ def test_permission_requester_is_deregistered_once_the_turn_ends_failing_closed(
         harness.response_for(prompt_id)
 
         assert task_id_holder["task_id"]
-        assert harness.runtime.permission_requester_for_task(task_id_holder["task_id"]) is None
+        task_id = task_id_holder["task_id"]
+        requester = harness.runtime.permission_requester_for_task(task_id)
+        assert requester is not None
+
+        result_holder = {}
+        request_thread = threading.Thread(
+            target=lambda: result_holder.setdefault("result", requester(
+                "es_late_worker_session",
+                dict(sessionId="unused", toolCall=dict(toolCallId="tc-late", kind="delete"),
+                     options=[dict(optionId="allow", kind="allow_once"),
+                              dict(optionId="deny", kind="reject_once")]),
+                5.0,
+            )),
+            daemon=True,
+        )
+        request_thread.start()
+        request = harness.wait_for(lambda m: m.get("method") == "session/request_permission")
+        assert request["params"]["sessionId"] == session_id
+        harness.send_raw(dict(jsonrpc="2.0", id=request["id"],
+                              result={"outcome": {"outcome": "selected", "optionId": "deny"}}))
+        request_thread.join(2.0)
+        assert result_holder["result"] == {"outcome": {"outcome": "selected", "optionId": "deny"}}
+
+        # The terminal/connection cleanup path still releases the closure.
+        harness.runtime._release_task_host_requesters(task_id)
+        assert harness.runtime.permission_requester_for_task(task_id) is None
     finally:
         harness.stop()
 

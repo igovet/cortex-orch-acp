@@ -18,6 +18,7 @@ from cortex_runtime.catalog import discovery, store as catalog_store
 from cortex_runtime.configuration.service import ConfigurationService
 from cortex_runtime.connections import onboarding
 from cortex_runtime.connections.model import AuthMode
+from cortex_runtime.portable.engine_contract import StopReason
 
 
 def _isolate(tmp_path, monkeypatch):
@@ -81,6 +82,7 @@ def test_resolve_model_argument_by_route_id_or_label(tmp_path, monkeypatch):
     assert acp_commands.resolve_model_argument(entry.route.id, entries) == entry.route.id
     assert acp_commands.resolve_model_argument(entry.disambiguated_label, entries) == entry.route.id
     assert acp_commands.resolve_model_argument(entry.disambiguated_label.upper(), entries) == entry.route.id
+    assert acp_commands.resolve_model_argument(entry.route.model, entries) == entry.route.id
     assert acp_commands.resolve_model_argument("no-such-model", entries) is None
 
 
@@ -116,6 +118,20 @@ class _NoopRuntime:
         return None
 
 
+class _HarvestRuntime:
+    """No-paid runtime probe that records the prompt handed to orchestration."""
+
+    def __init__(self):
+        self.prompts = []
+
+    def start_prompt(self, task_id, session_id, content, emit_update, cancel_event):
+        self.prompts.append((task_id, session_id, content))
+        return StopReason.END_TURN
+
+    def cancel(self, session_id):
+        return None
+
+
 def _new_agent(environ):
     agent = Agent(_NoopRuntime(), environ=environ)
     transport = _RecordingTransport()
@@ -123,6 +139,123 @@ def _new_agent(environ):
     agent.initialized = True
     agent.client_capabilities = {}
     return agent, transport
+
+
+def test_harvest_with_goal_bootstraps_a_fresh_project_session(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = _HarvestRuntime()
+    agent = Agent(runtime, environ=environ)
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    agent.client_capabilities = {}
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    session = agent.sessions[session_id]
+
+    agent._run_command_body(
+        request_id=91, session_id=session_id, session=session,
+        recognized=(acp_commands.HARVEST, "compose project documentation"),
+        cancel_event=threading.Event(),
+    )
+
+    assert session["task_id"] is not None
+    assert len(runtime.prompts) == 1
+    assert "compose project documentation" in runtime.prompts[0][2]
+    assert "knowledge-harvest" in runtime.prompts[0][2]
+    assert next(message for message in transport.responses if message.get("id") == 91)["result"]["stopReason"] == "end_turn"
+
+
+def test_bare_harvest_on_a_fresh_session_starts_full_project_documentation(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = _HarvestRuntime()
+    agent = Agent(runtime, environ=environ)
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    agent.client_capabilities = {}
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    session = agent.sessions[session_id]
+
+    agent._run_command_body(
+        request_id=92, session_id=session_id, session=session,
+        recognized=(acp_commands.HARVEST, ""), cancel_event=threading.Event(),
+    )
+
+    assert session["task_id"] is not None
+    assert len(runtime.prompts) == 1
+    assert "complete source-backed documentation" in runtime.prompts[0][2]
+
+
+@pytest.mark.parametrize("command_id", [acp_commands.HARVEST_REFRESH])
+def test_harvest_refresh_starts_or_continues_a_project_task(tmp_path, monkeypatch, command_id):
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = _HarvestRuntime()
+    agent = Agent(runtime, environ=environ)
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    agent.client_capabilities = {}
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    session = agent.sessions[session_id]
+
+    agent._run_command_body(
+        request_id=94, session_id=session_id, session=session,
+        recognized=(command_id, "API docs"), cancel_event=threading.Event(),
+    )
+
+    assert session["task_id"] is not None
+    assert "API docs" in runtime.prompts[0][2]
+    assert "documentation refresh" in runtime.prompts[0][2]
+
+
+def test_bare_harvest_refresh_uses_update_goal_on_a_fresh_session(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = _HarvestRuntime()
+    agent = Agent(runtime, environ=environ)
+    agent.bind_transport(_RecordingTransport())
+    agent.initialized = True
+    agent.client_capabilities = {}
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+
+    agent._run_command_body(
+        request_id=95, session_id=session_id, session=agent.sessions[session_id],
+        recognized=(acp_commands.HARVEST_REFRESH, ""), cancel_event=threading.Event(),
+    )
+
+    assert "Update the project's existing source-backed documentation" in runtime.prompts[0][2]
+
+
+def test_harvest_with_goal_continues_the_existing_task(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = _HarvestRuntime()
+    agent = Agent(runtime, environ=environ)
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    agent.client_capabilities = {}
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    _store, task_id = _bootstrap(agent, session_id)
+    session = agent.sessions[session_id]
+
+    agent._run_command_body(
+        request_id=93, session_id=session_id, session=session,
+        recognized=(acp_commands.HARVEST, "refresh API docs"),
+        cancel_event=threading.Event(),
+    )
+
+    assert session["task_id"] == task_id
+    assert runtime.prompts[0][0] == task_id
+    assert "refresh API docs" in runtime.prompts[0][2]
 
 
 def _bootstrap(agent, session_id):
@@ -217,6 +350,29 @@ def test_cortex_status_never_mutates_configuration(tmp_path, monkeypatch):
                              recognized=("cortex-status", ""), cancel_event=cancel_event)
     after = ConfigurationService(store).history(task_id)
     assert before == after == ()
+    text = transport.notifications[-1]["params"]["update"]["content"]["text"]
+    assert "- execution: direct-user (no OS filesystem isolation)" in text
+
+
+def test_status_execution_mode_and_command_text_replay_after_reconnect(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, transport = _new_agent(environ)
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+
+    agent._session_prompt(9, dict(sessionId=session_id,
+                                  prompt=[dict(type="text", text="/cortex-status")]))
+    for worker in list(agent._workers):
+        worker.join(timeout=10)
+    assert next(message for message in transport.responses if message.get("id") == 9)["result"]["stopReason"] == "end_turn"
+
+    loader, replay_transport = _new_agent(environ)
+    loader._session_load(10, dict(sessionId=session_id, cwd=str(project), mcpServers=[]))
+    updates = [item["params"]["update"] for item in replay_transport.notifications]
+    assert [item["sessionUpdate"] for item in updates] == ["user_message_chunk", "agent_message_chunk"]
+    assert updates[0]["content"]["text"] == "/cortex-status"
+    assert "- execution: direct-user (no OS filesystem isolation)" in updates[1]["content"]["text"]
 
 
 def test_cortex_setup_guidance_never_contains_a_secret(tmp_path, monkeypatch):
@@ -236,6 +392,71 @@ def test_cortex_setup_guidance_never_contains_a_secret(tmp_path, monkeypatch):
     text = chunk["params"]["update"]["content"]["text"]
     assert "fake-test-secret-key" not in text
     assert "connection" in text.lower()
+
+
+def test_cortex_setup_guidance_explains_pending_authorization_without_re_registration():
+    text = acp_commands.build_setup_text(
+        connection_states={"configured": 0, "authorization_required": 1}
+    )
+    assert "already registered" in text
+    assert "awaiting authorization" in text
+    assert "Do not register another connection" in text
+    assert "isolated engine directory" in text
+    assert "mark_native_login_pending" not in text
+    assert "credential" not in text.lower()
+    assert "/home/" not in text
+
+
+def test_cortex_setup_guidance_keeps_zero_connection_onboarding():
+    text = acp_commands.build_setup_text(connection_states={})
+    assert "add-connection" in text
+    assert "--install-record" in text
+    assert "validate-connection" in text
+    assert "connections.onboarding" not in text
+    assert "mark_native_login_pending" not in text
+
+
+@pytest.mark.parametrize("command_id,argument,expected", [
+    ("cortex-model", "anything", "No model is selectable yet"),
+    ("cortex-effort", "high", "No thought level is selectable"),
+])
+def test_route_commands_explain_missing_options_without_internal_config_id(
+    tmp_path, monkeypatch, command_id, argument, expected,
+):
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, transport = _new_agent(environ)
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    agent._run_command_body(
+        request_id=99, session_id=session_id, session=agent.sessions[session_id],
+        recognized=(command_id, argument), cancel_event=threading.Event(),
+    )
+    chunks = [n for n in transport.notifications
+              if n["params"]["update"]["sessionUpdate"] == "agent_message_chunk"]
+    assert chunks and expected in chunks[-1]["params"]["update"]["content"]["text"]
+    assert "configId" not in chunks[-1]["params"]["update"]["content"]["text"]
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [("unavailable", "currently unavailable"), ("invalid", "invalid configuration")],
+)
+def test_cortex_setup_guidance_repairs_registered_connection(state, expected):
+    text = acp_commands.build_setup_text(connection_states={"configured": 0, state: 1})
+    assert expected in text
+    assert "add-connection" not in text
+    assert "validate-connection" in text
+    assert "/home/" not in text
+
+
+def test_cortex_setup_guidance_prioritizes_pending_state_in_mixed_registry():
+    text = acp_commands.build_setup_text(connection_states={
+        "configured": 1, "authorization_required": 1, "unavailable": 1, "invalid": 1,
+    })
+    assert "awaiting authorization" in text
+    assert "currently unavailable" not in text
+    assert "invalid configuration" not in text
 
 
 def test_pre_task_commands_never_create_a_task(tmp_path, monkeypatch):

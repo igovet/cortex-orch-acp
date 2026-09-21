@@ -122,6 +122,8 @@ def _serialize_entry(entry: CatalogEntry) -> dict[str, object]:
         "disambiguated_label": entry.disambiguated_label,
         "evidence": _serialize_evidence(entry.evidence),
         "catalog_snapshot_id": entry.catalog_snapshot_id,
+        "model_name": entry.model_name,
+        "model_description": entry.model_description,
         # T024: optional -- absent (None) for every entry with no evidenced
         # route context-window; a cached snapshot written before this field
         # existed simply has no key here, which deserializes back to None.
@@ -151,6 +153,8 @@ def _deserialize_entry(data: object) -> CatalogEntry:
         disambiguated_label=data["disambiguated_label"],
         evidence=_deserialize_evidence(data["evidence"]),
         catalog_snapshot_id=data["catalog_snapshot_id"],
+        model_name=data.get("model_name"),
+        model_description=data.get("model_description"),
         context_window_tokens=data.get("context_window_tokens"),
     )
 

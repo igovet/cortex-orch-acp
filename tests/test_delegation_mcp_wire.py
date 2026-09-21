@@ -88,7 +88,8 @@ def test_coordinator_tools_list_includes_role_filtered_delegation_tools(tmp_path
     project, store, task_id, channel_id, secret = _bootstrap(tmp_path)
     replies = _call(project, channel_id, secret, _init_and("tools/list", {}), tmp_path)
     names = {t["name"] for t in replies[1]["result"]["tools"]}
-    assert {"create_task", "write_report", "delegate", "list_events", "clarify", "cancel", "decide"} <= names
+    assert "create_task" not in names
+    assert {"write_report", "delegate", "list_events", "clarify", "cancel", "decide"} <= names
     # T018: list_sources/read_source are shared read-only source-history
     # operations, available on both coordinator and worker channels.
     assert {"list_sources", "read_source"} <= names
@@ -105,7 +106,27 @@ def test_coordinator_tools_list_includes_role_filtered_delegation_tools(tmp_path
     assert "read_diagnostics" in names
     assert "read_skill" in names, "the situational shared skills must be reachable"
     assert "ask_question" not in names and "publish_result" not in names
-    assert len(names) == 19
+    assert len(names) == 24
+
+    # These are the schemas actually advertised over MCP to the coordinator.
+    tools = {item["name"]: item for item in replies[1]["result"]["tools"]}
+    report = tools["read_report"]
+    assert "request_key" not in report["inputSchema"]["properties"]
+    assert "no request_key" in report["description"]
+    assert "report_ref is not an accepted read_report argument" in report["description"]
+    report_id = report["inputSchema"]["properties"]["report_id"]
+    assert "Copy the exact report_ref value" in report_id["description"]
+    assert report_id["pattern"] == r"^r_[0-9a-f]{12}$"
+    assert "worker_result or publish_result" in report["description"]
+    assert "report_ref is not an accepted read_report argument" in report["description"]
+    assert "report_ref is not an accepted argument name" in report["inputSchema"]["properties"]["report_id"]["description"]
+    events = tools["list_events"]["inputSchema"]
+    assert events["required"] == []
+    assert "request_key" not in events["properties"]
+    assert events["properties"]["limit"]["maximum"] == 200
+    assert "default 50" in events["properties"]["limit"]["description"]
+    assert "returned cursor" in events["properties"]["limit"]["description"]
+    assert "skill" in tools["read_skill"]["inputSchema"]["properties"]
 
 
 def test_worker_tools_list_is_worker_only(tmp_path):
@@ -198,10 +219,13 @@ def test_worker_publish_then_coordinator_decide_accept_over_the_wire(tmp_path):
 
     with store.connection() as db:
         events = db.execute(
-            "SELECT event_type FROM task_events WHERE task_id=? ORDER BY id", (task_id,),
+            "SELECT event_type, payload_json FROM task_events WHERE task_id=? ORDER BY id", (task_id,),
         ).fetchall()
     types = [row["event_type"] for row in events]
-    assert types == ["worker_result", "worker_question", "coordinator_decision"]
+    assert types == ["worker_result", "worker_question", "coordinator_decision", "progress"]
+    followup = json.loads(events[-1]["payload_json"])
+    assert followup["kind"] == "assignment_accept_requires_task"
+    assert followup["assignment_ref"] == attempt_id
 
 
 def test_worker_channel_cannot_call_a_coordinator_operation_over_the_wire(tmp_path):

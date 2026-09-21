@@ -165,6 +165,14 @@ def test_checks_schema_rejects_unadvertised_field_and_bad_outcome(tmp_path):
         raise AssertionError("expected StoreError for an invalid outcome value")
     except StoreError:
         pass
+
+    # An attempted check whose result cannot be established has a distinct
+    # durable outcome.  It must not be misreported as ``not_run`` (which means
+    # the check was never attempted).
+    delegation_contracts.validate("worker", "publish_result", dict(
+        report_ref="r_" + "0" * 12, summary="ok", request_key="k-unverified",
+        checks=[dict(name="rendered page", outcome="unverified")],
+    ))
     try:
         delegation_contracts.validate("worker", "publish_result", dict(
             report_ref="r_" + "0" * 12, summary="ok", request_key="k1",

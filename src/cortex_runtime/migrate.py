@@ -1,21 +1,16 @@
-"""Explicit offline format-11 upgrade/rollback safety for one project store.
+"""Explicit offline format-12 upgrade/rollback safety for one project store.
 
 Three operations, all offline (stopped-access) and never touching Markdown:
 
 - ``plan()``:    read-only; reports the exact intended change, or a no-op.
-- ``migrate()``: the only versioned schema change this runtime has ever
-  needed (format 10 -> 11, T005); verified backup first, then one atomic
-  SQLite transaction, then a ``format_history`` row.
-- ``rollback()``: restores a verified, format-compatible backup file
-  byte-for-byte. Never recreates a second storage root and never deletes
+- ``migrate()``: upgrades old format 10/11 stores to ACP-only format 12;
+  verified backup first, then one atomic SQLite transaction, then a
+  ``format_history`` row. Format 12 removes retired Codex hook tables.
+- ``rollback()``: restores a verified, format-compatible backup file exactly.
+  Never recreates a second storage root and never deletes
   ``.cortex``; refuses an unverifiable or incompatible backup.
 
-See docs/acp/format-migration.md for the full compatibility conclusion:
-every schema addition since format 11 (T005 onward) is one independent,
-self-healing, all-or-nothing optional table group created by
-``CREATE TABLE IF NOT EXISTS`` on the next ``Store()`` open (see
-``store.py``, and the group inventory in ``split.py``) -- no further
-version bump has ever been required, and none is invented here.
+See docs/acp/format-migration.md for the compatibility and backup procedure.
 """
 from __future__ import annotations
 
@@ -28,6 +23,7 @@ import os
 from pathlib import Path
 import sqlite3
 import stat
+import time
 import uuid
 
 from . import _fault_injection
@@ -36,20 +32,60 @@ from .catalog.store import CATALOG_SCHEMA
 from .configuration.store import CONFIGURATION_SCHEMA
 from .contracts import StoreError
 from .delegation.store import DELEGATION_SCHEMA
+from .delegation.work_graph import WORK_GRAPH_SCHEMA
 from .delegation.events_store import TASK_EVENTS_SCHEMA
 from .delegation.capacity_store import CAPACITY_SCHEMA
 from .delegation.evidence_store import EVIDENCE_SCHEMA
 from .routing.store import ROUTING_SCHEMA
-from .hook_storage import HOOK_SCHEMA
 from .store import APPLICATION_ID, SCHEMA, private_directory, regular, sync_directory
 from .trusted_channel import IDENTITY_SCHEMA
 
 # Formats this exact runtime build knows how to recognize at all: 10 (the
-# pre-T005 layout migrate() upgrades from) and 11 (the only format any
-# store.py-created database has ever used since). Anything else -- a
+# pre-T005 layout), 11 (the pre-ACP-hook-removal layout), and 12 (the only
+# format any current store.py-created database uses). Anything else -- a
 # backup or live file from an unrelated/newer/older application_id or
 # user_version -- is never opened for rollback or reported by plan().
-_KNOWN_VERSIONS = (10, 11)
+_KNOWN_VERSIONS = (10, 11, 12)
+_LEGACY_HOOK_TABLES = (
+    "hook_pending_sources", "hook_events", "hook_hints",
+    "hook_agent_bindings", "hook_command_sessions",
+)
+
+# A normal Store opener may race another opener while SQLite is switching the
+# journal/WAL state during initialization.  The format probe must wait for a
+# short, bounded interval in that case; a zero timeout turns an otherwise
+# harmless opener race into an uncaught ``sqlite3.OperationalError``.
+_LIVE_HEADER_PROBE_ATTEMPTS = 8
+_LIVE_HEADER_PROBE_DELAY = 0.02
+
+
+def _read_live_header(source):
+    """Read the committed live header, retrying only transient lock errors.
+
+    This probe is intentionally read-only.  A persistent lock is reported as
+    ``storage_busy`` and an invalid/ambiguous header remains the caller's
+    responsibility, so no migration is attempted on uncertain state.
+    """
+    uri = source.resolve().as_uri() + "?mode=ro"
+    for attempt in range(_LIVE_HEADER_PROBE_ATTEMPTS):
+        db = None
+        try:
+            # Keep each individual wait bounded as well as the overall retry
+            # window.  This also handles a lock that appears after connect.
+            db = sqlite3.connect(uri, uri=True, timeout=_LIVE_HEADER_PROBE_DELAY,
+                                 isolation_level=None)
+            app = db.execute("PRAGMA application_id").fetchone()[0]
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            return app, version
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error).lower() and "busy" not in str(error).lower():
+                raise
+            if attempt == _LIVE_HEADER_PROBE_ATTEMPTS - 1:
+                raise StoreError("storage_busy") from error
+            time.sleep(_LIVE_HEADER_PROBE_DELAY * (attempt + 1))
+        finally:
+            if db is not None:
+                db.close()
 
 
 def _now():
@@ -61,7 +97,7 @@ def plan(directory):
     directory = private_directory(directory)
     source = directory / "cortex.sqlite3"
     if not (source.exists() or source.is_symlink()):
-        return dict(action="none", note="no store exists yet; the next Store() open initializes format 11 directly")
+        return dict(action="none", note="no store exists yet; the next Store() open initializes format 12 directly")
     regular(source)
     # ``mode=ro`` alone still lets SQLite create the ``-shm``/``-wal``
     # sidecars on open when neither already exists (it must be ready to
@@ -91,11 +127,65 @@ def plan(directory):
     if app != APPLICATION_ID or version not in _KNOWN_VERSIONS:
         raise StoreError("unsupported_storage")
     if version == 10:
-        return dict(action="migrate", from_version=10, to_version=11, tables_present=tables,
+        return dict(action="migrate", from_version=10, to_version=12, tables_present=tables,
                     note="run migrate(directory, backup, access_stopped=True) with a fresh, unused backup path")
-    return dict(action="none", current_version=11, tables_present=tables,
+    if version == 11:
+        return dict(action="migrate", from_version=11, to_version=12, tables_present=tables,
+                    note="run migrate(directory, backup, access_stopped=True) to remove legacy hook metadata")
+    return dict(action="none", current_version=12, tables_present=tables,
                 note="already at the only format this runtime writes; any table group this store predates "
                      "self-heals (CREATE TABLE IF NOT EXISTS) on the next Store() open -- no migration needed")
+
+
+def auto_migrate_format11(directory):
+    """Upgrade a legacy format-11 store before a live ``Store`` opens it.
+
+    This is deliberately a narrow wrapper around :func:`migrate`: it only
+    recognizes the exact legacy format, allocates a fresh backup in the
+    project-local private directory, and lets the existing exclusive-lock,
+    verified-backup, transactional migration enforce all safety guarantees.
+    A concurrent opener either observes the still-legacy store and receives
+    ``storage_busy`` or observes the exact v12 header committed by the other
+    opener and continues normally.
+    """
+    directory = private_directory(directory)
+    source = directory / "cortex.sqlite3"
+    if not source.exists() and not source.is_symlink():
+        return None
+    regular(source)
+    # Unlike ``plan()``, this probe must observe a committed user_version in
+    # an existing WAL.  Use a normal read-only connection (not immutable=1),
+    # then close it before the exclusive migration lock is requested.
+    app, version = _read_live_header(source)
+    if app != APPLICATION_ID or version != 11:
+        return None
+
+    # Keep automatic backups beside the database, under a private directory.
+    # A UUID and O_EXCL in migrate() ensure this path is never reused or
+    # overwritten, including after a crashed opener.
+    backup_dir = private_directory(directory / ".migration-backups")
+    backup = backup_dir / ("cortex.sqlite3.format11-" + uuid.uuid4().hex + ".bak")
+    try:
+        return migrate(directory, backup, access_stopped=True)
+    except StoreError as error:
+        # A second opener can finish its initial v11 probe while the first
+        # opener migrates and releases the lock.  In that case migrate()
+        # acquires the lock, observes the now-current v12 header, and
+        # reports unsupported_storage rather than storage_busy.  Re-read
+        # after either race outcome and only treat an exact committed v12
+        # header as the other opener having completed successfully.
+        if str(error) not in ("storage_busy", "unsupported_storage"):
+            raise
+        # Another opener may have completed the migration between our probe
+        # and the exclusive-lock attempt.  Re-read the live WAL-aware header
+        # once after a short scheduling window; only retain storage_busy when
+        # the file is still format 11 (for example, a genuinely live legacy
+        # runtime still owns the shared lock).
+        time.sleep(0.05)
+        current_app, current_version = _read_live_header(source)
+        if current_app == APPLICATION_ID and current_version == 12:
+            return None
+        raise
 
 
 def migrate(directory, backup, *, access_stopped=False):
@@ -115,11 +205,14 @@ def migrate(directory, backup, *, access_stopped=False):
         except BlockingIOError: raise StoreError("storage_busy") from None
         _fault_injection.checkpoint("migrate_before_backup")
         db=sqlite3.connect(source,timeout=0,isolation_level=None)
-        if db.execute("PRAGMA application_id").fetchone()[0]!=APPLICATION_ID or db.execute("PRAGMA user_version").fetchone()[0]!=10:
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if db.execute("PRAGMA application_id").fetchone()[0]!=APPLICATION_ID or version not in (10,11):
             raise StoreError("unsupported_storage")
-        db.execute("PRAGMA locking_mode=EXCLUSIVE")
-        db.execute("BEGIN EXCLUSIVE"); db.commit()
-        fd=os.open(backup,os.O_CREAT|os.O_EXCL|os.O_RDWR|os.O_NOFOLLOW,0o600);os.close(fd)
+        # Build the recovery artifact from SQLite's logical snapshot.  This
+        # includes committed pages still residing in a WAL; copying only the
+        # main file here could silently omit those rows.
+        fd=os.open(backup,os.O_CREAT|os.O_EXCL|os.O_RDWR|os.O_NOFOLLOW,0o600)
+        os.close(fd)
         target=sqlite3.connect(backup)
         db.backup(target)
         if target.execute("PRAGMA integrity_check").fetchone()[0]!="ok":raise StoreError("migration_backup_invalid")
@@ -130,29 +223,32 @@ def migrate(directory, backup, *, access_stopped=False):
         _fault_injection.checkpoint("migrate_after_backup_before_schema")
         # Existing v10 tables and immutable Markdown are untouched. Add metadata,
         # initialize known source order and mark older authored provenance unknown (0).
-        db.executescript("BEGIN EXCLUSIVE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+ROUTING_SCHEMA)
         db.execute("PRAGMA foreign_keys=ON")
-        rows=db.execute("SELECT thread_id FROM thread_bindings").fetchall()
-        for (thread,) in rows:
-            db.execute("INSERT INTO binding_receipts VALUES (?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",(thread,"b_"+uuid.uuid4().hex,"cortex"))
-        for (task,) in db.execute("SELECT id FROM tasks").fetchall():
-            messages=db.execute("""SELECT s.thread_id,s.message_id,s.report_id FROM source_messages s
-                WHERE task_id=? ORDER BY (SELECT MIN(sequence) FROM editions WHERE report_id=s.report_id),s.message_id""",(task,)).fetchall()
-            for revision,(thread,message,report) in enumerate(messages,1):
-                db.execute("INSERT INTO source_revisions VALUES (?,?,?,?,?,?)",(task,revision,thread,message,report,"[]"))
-        db.execute("INSERT INTO report_provenance SELECT sequence,0,'[]' FROM editions")
-        db.execute("INSERT INTO draft_revisions SELECT id,0 FROM drafts")
-        for scope,operation,key,response in db.execute("SELECT scope,operation,delivery_key,response FROM deliveries WHERE operation='write_report'").fetchall():
-            receipt=json.loads(response)
-            receipt.update(source_revision=0,artifacts=[])
-            db.execute("UPDATE deliveries SET response=? WHERE scope=? AND operation=? AND delivery_key=?",(json.dumps(receipt,ensure_ascii=False,sort_keys=True,separators=(",",":")),scope,operation,key))
+        db.executescript("BEGIN EXCLUSIVE;\n"+SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+WORK_GRAPH_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+ROUTING_SCHEMA)
+        if version == 10:
+            rows=db.execute("SELECT thread_id FROM thread_bindings").fetchall()
+            for (thread,) in rows:
+                db.execute("INSERT INTO binding_receipts VALUES (?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",(thread,"b_"+uuid.uuid4().hex,"cortex"))
+            for (task,) in db.execute("SELECT id FROM tasks").fetchall():
+                messages=db.execute("""SELECT s.thread_id,s.message_id,s.report_id FROM source_messages s
+                    WHERE task_id=? ORDER BY (SELECT MIN(sequence) FROM editions WHERE report_id=s.report_id),s.message_id""",(task,)).fetchall()
+                for revision,(thread,message,report) in enumerate(messages,1):
+                    db.execute("INSERT INTO source_revisions VALUES (?,?,?,?,?,?)",(task,revision,thread,message,report,"[]"))
+            db.execute("INSERT INTO report_provenance SELECT sequence,0,'[]' FROM editions")
+            db.execute("INSERT INTO draft_revisions SELECT id,0 FROM drafts")
+            for scope,operation,key,response in db.execute("SELECT scope,operation,delivery_key,response FROM deliveries WHERE operation='write_report'").fetchall():
+                receipt=json.loads(response)
+                receipt.update(source_revision=0,artifacts=[])
+                db.execute("UPDATE deliveries SET response=? WHERE scope=? AND operation=? AND delivery_key=?",(json.dumps(receipt,ensure_ascii=False,sort_keys=True,separators=(",",":")),scope,operation,key))
+        for table in _LEGACY_HOOK_TABLES:
+            db.execute("DROP TABLE IF EXISTS " + table)
         if db.execute("PRAGMA foreign_key_check").fetchone() is not None:raise StoreError("migration_integrity_failed")
         db.execute("INSERT INTO format_history VALUES (NULL,?,?,?,?,?,?)",
-                   ("migrate",10,11,str(backup),backup_digest,_now()))
+                   ("migrate",version,12,str(backup),backup_digest,_now()))
         _fault_injection.checkpoint("migrate_after_schema_before_commit")
         db.commit()
         db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        return dict(from_version=10,to_version=11,backup=str(backup),backup_digest=backup_digest,markdown_rewritten=False)
+        return dict(from_version=version,to_version=12,backup=str(backup),backup_digest=backup_digest,markdown_rewritten=False)
     except BaseException:
         if db is not None:db.rollback()
         raise
@@ -163,7 +259,7 @@ def migrate(directory, backup, *, access_stopped=False):
 
 
 def rollback(directory, backup, *, access_stopped=False, confirm=False):
-    """Restore one verified, format-compatible backup file byte-for-byte.
+    """Restore one verified, format-compatible backup file exactly.
 
     Never recreates a second storage root and never deletes ``.cortex`` --
     only ``cortex.sqlite3`` (and its WAL/SHM/journal sidecars) inside the
@@ -178,6 +274,17 @@ def rollback(directory, backup, *, access_stopped=False, confirm=False):
     directory=private_directory(directory); target=directory/"cortex.sqlite3"
     backup=Path(backup).expanduser().absolute()
     regular(backup)
+    # The backup is an input to a destructive restore.  Keep the containing
+    # directory owner-only as well as the file itself, so an attacker cannot
+    # replace or observe the backup through a shared directory.
+    backup_parent=backup.parent
+    parent_info=backup_parent.lstat()
+    if (backup_parent.resolve()!=backup_parent or
+            stat.S_ISLNK(parent_info.st_mode) or
+            not stat.S_ISDIR(parent_info.st_mode) or
+            parent_info.st_uid!=os.getuid() or
+            stat.S_IMODE(parent_info.st_mode)&0o077):
+        raise StoreError("unsafe_storage")
     lock=directory/".access.lock"
     lock_fd=os.open(lock,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
     temp=None
@@ -192,32 +299,37 @@ def rollback(directory, backup, *, access_stopped=False, confirm=False):
         # convention for unconfirmed writes elsewhere in this store.
         for stale in directory.glob(".rollback-*.tmp"):
             regular(stale); stale.unlink()
-        verify=sqlite3.connect(backup.resolve().as_uri()+"?mode=ro",uri=True,timeout=0,isolation_level=None)
-        try:
-            app=verify.execute("PRAGMA application_id").fetchone()[0]
-            version=verify.execute("PRAGMA user_version").fetchone()[0]
-            if app!=APPLICATION_ID or version not in _KNOWN_VERSIONS:
-                raise StoreError("rollback_backup_incompatible")
-            if verify.execute("PRAGMA integrity_check").fetchone()[0]!="ok":
-                raise StoreError("rollback_backup_invalid")
-        finally:
-            verify.close()
-        backup_digest=hashlib.sha256(backup.read_bytes()).hexdigest()
         _fault_injection.checkpoint("rollback_before_restore")
         temp=directory/(".rollback-"+uuid.uuid4().hex+".tmp")
         fd=os.open(temp,os.O_CREAT|os.O_EXCL|os.O_RDWR|os.O_NOFOLLOW,0o600)
+        backup_fd=None
         try:
-            with backup.open("rb") as source_stream:
-                while True:
-                    chunk=source_stream.read(1024*1024)
-                    if not chunk: break
-                    os.write(fd,chunk)
+            backup_fd=os.open(backup,os.O_RDONLY|os.O_NOFOLLOW)
+            source_info=os.fstat(backup_fd)
+            if (not stat.S_ISREG(source_info.st_mode) or
+                    source_info.st_uid!=os.getuid() or source_info.st_nlink!=1 or
+                    stat.S_IMODE(source_info.st_mode)&0o077):
+                raise StoreError("unsafe_storage")
+            while True:
+                chunk=os.read(backup_fd,1024*1024)
+                if not chunk: break
+                view=memoryview(chunk)
+                while view:
+                    written=os.write(fd,view)
+                    view=view[written:]
             os.fsync(fd)
         finally:
             os.close(fd)
+            if backup_fd is not None:
+                os.close(backup_fd)
         _fault_injection.checkpoint("rollback_after_temp_write")
+        backup_digest=hashlib.sha256(temp.read_bytes()).hexdigest()
         restored_check=sqlite3.connect(temp)
         try:
+            app=restored_check.execute("PRAGMA application_id").fetchone()[0]
+            version=restored_check.execute("PRAGMA user_version").fetchone()[0]
+            if app!=APPLICATION_ID or version not in _KNOWN_VERSIONS:
+                raise StoreError("rollback_backup_incompatible")
             if restored_check.execute("PRAGMA integrity_check").fetchone()[0]!="ok":
                 raise StoreError("rollback_backup_invalid")
         finally:
@@ -259,12 +371,12 @@ def main(argv=None):
     migrate_parser=sub.add_parser("migrate",help="Apply the only versioned migration this runtime has (format 10->11).")
     migrate_parser.add_argument("--storage-dir",required=True)
     migrate_parser.add_argument("--backup",required=True,help="New owner-private SQLite backup file; never overwritten.")
-    migrate_parser.add_argument("--access-stopped",action="store_true",help="Confirm all CLI/Desktop/MCP/hook access has been stopped; back up project task directories before running.")
+    migrate_parser.add_argument("--access-stopped",action="store_true",help="Confirm all ACP client and Cortex MCP access has been stopped; back up project task directories before running.")
 
-    rollback_parser=sub.add_parser("rollback",help="Restore one verified backup byte-for-byte. Never recreates a second storage root.")
+    rollback_parser=sub.add_parser("rollback",help="Restore one verified backup exactly. Never recreates a second storage root.")
     rollback_parser.add_argument("--storage-dir",required=True)
     rollback_parser.add_argument("--backup",required=True,help="An existing, previously verified backup file (e.g. from a prior migrate --backup).")
-    rollback_parser.add_argument("--access-stopped",action="store_true",help="Confirm all CLI/Desktop/MCP/hook access has been stopped.")
+    rollback_parser.add_argument("--access-stopped",action="store_true",help="Confirm all ACP client and Cortex MCP access has been stopped.")
     rollback_parser.add_argument("--confirm",action="store_true",help="Required explicit confirmation; refused without it.")
 
     args=parser.parse_args(argv)

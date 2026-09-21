@@ -41,6 +41,19 @@ Two real append sites exist today:
 `observability.events.list_events(store, task_id, category=..., after=...)`
 is the cursor-paginated read.
 
+Worker-panel history uses the existing durable `task_events` stream rather
+than a second transcript store. Each redacted `progress` row carrying
+`kind=worker_activity` is bound to the task and worker attempt, and the panel
+reads it in event-id order with an `after` cursor and bounded page size.
+While a worker is active, the host panel refreshes that cursor incrementally
+about every 750 ms. Exact lifecycle updates for one logical tool coalesce in
+the panel, while adjacent worker message chunks remain ordered and render as
+one stream segment. Paseo hides Cortex MCP and private `.cortex` operations
+from coordinator and worker feeds, including replay, while ordinary project
+and external MCP operations remain visible. The underlying task events remain
+durable. Missing, malformed or unavailable rows are not replaced with an
+inferred success state.
+
 ## 2. Usage/cost attribution (`observability.usage`)
 
 `usage_records` (also additive) holds one immutable row per completed

@@ -287,7 +287,7 @@ def test_coalesce_suppresses_recovery_worker_lost_when_result_in_same_batch():
     text = _coalesce(events)
     assert "Assignment a1 result" in text
     assert "recovery_worker_lost" not in text
-    assert "Assignment a2 failed: engine_turn_failed" in text
+    assert 'Assignment a2 failed: "engine_turn_failed"' in text
 
 
 def test_worker_lost_without_result_is_marked_failed_not_relaunched(tmp_path):
@@ -311,6 +311,24 @@ def test_worker_lost_without_result_is_marked_failed_not_relaunched(tmp_path):
     payload = _json.loads(row["payload_json"])
     assert payload["error"] == "recovery_worker_lost"
     assert attempt_id in engine.terminate_calls
+
+    # The recovery event and the executable graph attempt are one durable
+    # decision.  A restart must not leave the graph claiming that the lost
+    # worker is still running, which would wedge planning and make a later
+    # retry look like a duplicate live attempt.
+    with store.connection() as db:
+        graph = db.execute(
+            "SELECT a.status, a.failure_reason "
+            "FROM work_assignment_attempts a "
+            "JOIN task_events e ON e.task_id=a.task_id "
+            "WHERE e.task_id=? AND e.assignment_ref=? "
+            "AND e.event_type='delegation_requested' "
+            "AND json_extract(e.payload_json, '$.work_attempt_ref')=a.attempt_id",
+            (task_id, assignment_ref),
+        ).fetchone()
+    assert graph is not None
+    assert graph["status"] == "failed"
+    assert graph["failure_reason"] == "recovery_worker_lost"
 
 
 def test_unauthorized_route_change_is_refused(tmp_path):
@@ -540,7 +558,7 @@ def test_coalesce_shows_the_coordinators_own_assignment_ref_not_the_attempt_id()
     ]
     text = _coalesce(events, {}, {"xa_attempt_one": "assign_one", "xa_attempt_two": "assign_two"})
 
-    assert "Assignment assign_one question: Which file?" in text
+    assert 'Assignment assign_one question [worker data]: "Which file?"' in text
     assert "Assignment assign_two result" in text
     assert "xa_attempt" not in text
     assert "Assignment assign_three is now running." in text

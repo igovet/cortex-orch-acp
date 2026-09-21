@@ -4,6 +4,8 @@ Mirrors tests/test_engine_codex_evidence.py."""
 from __future__ import annotations
 
 import pytest
+import json
+from pathlib import Path
 
 from cortex_runtime.engine.claude_adapter_acp import (
     EXECUTION_VERIFICATION_UNAVAILABLE,
@@ -65,12 +67,36 @@ def test_build_first_prompt_blocks_never_writes_a_file_or_returns_env_vars(tmp_p
     assert blocks == [{"type": "text", "text": "instructions"}]
 
 
-def test_build_claude_session_new_meta_returns_plain_string_override():
+def test_build_claude_session_new_meta_preserves_preset_with_append():
     meta = build_claude_session_new_meta("You are operating under Cortex orchestration.")
-    assert meta == {"systemPrompt": "You are operating under Cortex orchestration."}
+    assert meta == {
+        "systemPrompt": {"append": "You are operating under Cortex orchestration."},
+        "claudeCode": {"options": {"disallowedTools": ["Agent", "Task"], "strictMcpConfig": True}},
+    }
 
 
 def test_build_claude_session_new_meta_rejects_empty_instructions():
     with pytest.raises(PortableError) as excinfo:
         build_claude_session_new_meta("   ")
     assert excinfo.value.code == "invalid_field"
+
+
+def test_installed_claude_acp_0_78_forwards_strict_mcp_to_sdk_cli():
+    """No engine call: verify this host's exact pinned adapter and SDK path."""
+    root = Path.home() / ".local/share/zed/external_agents/registry/npx/claude-acp/node_modules"
+    adapter = root / "@agentclientprotocol/claude-agent-acp"
+    sdk = root / "@anthropic-ai/claude-agent-sdk"
+    if not (adapter / "package.json").exists() or not (sdk / "sdk.mjs").exists():
+        pytest.skip("Installed Claude ACP/SDK copy is unavailable on this host")
+    version = json.loads((adapter / "package.json").read_text(encoding="utf-8"))["version"]
+    if version != "0.78.0":
+        pytest.skip(f"Installed Claude ACP is {version}, not pinned 0.78.0")
+    adapter_source = (adapter / "dist/acp-agent.js").read_text(encoding="utf-8")
+    sdk_source = (sdk / "sdk.mjs").read_text(encoding="utf-8")
+    sdk_types = (sdk / "sdk.d.ts").read_text(encoding="utf-8")
+    assert "...userProvidedOptions," in adapter_source
+    assert "...(userProvidedOptions?.mcpServers || {})," in adapter_source
+    assert "...mcpServers," in adapter_source
+    assert "strictMcpConfig?: boolean;" in sdk_types
+    assert "Only use MCP servers passed via the `mcpServers` option" in sdk_types
+    assert 'if(ee)W.push("--strict-mcp-config")' in sdk_source

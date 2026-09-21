@@ -136,7 +136,7 @@ def test_existing_pre_t017_database_gains_the_additive_columns_on_open(tmp_path)
          updated_at TEXT NOT NULL
         );
         '''
-        db.executescript("BEGIN;\n" + SCHEMA + pre_t017_task_events_schema + f"PRAGMA application_id={APPLICATION_ID};\nPRAGMA user_version=11;\nCOMMIT;")
+        db.executescript("BEGIN;\n" + SCHEMA + pre_t017_task_events_schema + f"PRAGMA application_id={APPLICATION_ID};\nPRAGMA user_version=12;\nCOMMIT;")
         db.execute("INSERT INTO tasks VALUES (?,?,?)", ("t_legacy0000", str(tmp_path), "2020-01-01T00:00:00.000000"))
         db.execute("INSERT INTO task_orchestration VALUES (?,?,?,?)", ("t_legacy0000", "running", "co_x", "2020-01-01T00:00:00.000000"))
         db.commit()

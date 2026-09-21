@@ -92,9 +92,13 @@ COORDINATOR_MODE_FLOOR: Mapping[str, str] = {
 #
 # - codex-acp 1.12.0 (``dist/index.js`` ``_AgentMode`` table): "agent"
 #   ("Approve for me") has ``approvalPolicy: "on-request"`` with
-#   ``approvalsReviewer: "auto_review"`` -- Codex still asks for "actions
-#   detected as potentially unsafe" (which is where a delete/destructive
-#   shell command lands); only "agent-full-access" sets
+#   ``approvalsReviewer: "auto_review"`` in the upstream bundle. In a real
+#   Paseo run this reviewer approved an exact `rm -- <sentinel>` internally,
+#   without any ACP permission request. Cortex therefore starts a private,
+#   version-verified copy of the adapter that changes only this reviewer to
+#   `user`; a requested approval can then reach PermissionBridge. This does
+#   not guarantee that every native command requests approval. Only
+#   "agent-full-access" sets
 #   ``approvalPolicy: "never"`` (never asks, ever -- the mode this floor
 #   must never pick); "read-only" cannot edit at all, but never issues
 #   ``session/request_permission`` for the edits it silently allows either

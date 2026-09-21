@@ -8,17 +8,23 @@ from __future__ import annotations
 
 import threading
 import uuid
+import json
+from pathlib import Path
 
 import pytest
 
 from cortex_runtime.acp import commands as acp_commands
 from cortex_runtime.acp import messages as acp_messages
 from cortex_runtime.acp import questions_store
+from cortex_runtime.acp import replay_store as acp_replay_store
+from cortex_runtime.acp import sessions as acp_sessions
 from cortex_runtime.acp import steering as acp_steering
-from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime, PromptOutcome
+from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime, PromptOutcome, _question_answer_value
+from cortex_runtime.acp import pipeline_bootstrap
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation import events as delegation_events
 from cortex_runtime.delegation import mcp_tools
+from cortex_runtime.delegation.workspace_isolation import IsolatedSnapshotWorkspaceProvisioner
 from cortex_runtime.portable.engine_contract import StopReason
 from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.store import Store
@@ -35,11 +41,23 @@ def _task(tmp_path, text="Build a page."):
 def _make_runtime(store, router, **kwargs):
     engine = FakeSessionRuntime(store, router)
     runtime = OrchestratingRuntime(
-        store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
+        store, engine, IsolatedSnapshotWorkspaceProvisioner(store, str(store.project_root)), FakeConfigSnapshotSource(),
         allow_unqualified_delivery=True, wait_timeout_seconds=kwargs.pop("wait_timeout_seconds", 15.0),
         **kwargs,
     )
+    # Acceptance tests need the real snapshot evidence available until the
+    # gate runs; dedicated cleanup tests cover deletion separately.
+    runtime._cleanup_isolated_workspace_if_integrated = lambda task_id, attempt_id: None
     return runtime, engine
+
+
+def _host_session_for_card(store, task_id, session_id):
+    acp_sessions.create_session(store, session_id, str(store.project_root), {}, {}, [])
+    acp_sessions.bind_task(store, session_id, task_id)
+    acp_replay_store.append_host_update(
+        store, session_id,
+        dict(sessionUpdate="tool_call", toolCallId="worker:card-a", status="in_progress"),
+    )
 
 
 def _publish(store, channel, label, call_index):
@@ -60,6 +78,27 @@ def _publish(store, channel, label, call_index):
         )
         db.commit()
     mcp_tools.dispatch(store, channel, "publish_result", dict(report_ref=report_id, summary=f"{label} finished", request_key=f"pub-{label}-{call_index}"))
+
+
+def _publish_current_pipeline(store, channel):
+    """Publish the coordinator's current plan before a task-level accept."""
+    draft = store.call(
+        "create_draft", dict(template="pipeline"),
+        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True,
+    )
+    body = pipeline_bootstrap._fill_template(
+        draft["markdown"], channel.task_id, "Test task", None,
+    )
+    Path(draft["draft_path"]).write_text(body, encoding="utf-8")
+    return store.call(
+        "write_report",
+        dict(
+            draft_id=draft["draft_id"], title="Current pipeline",
+            summary="Coordinator-authored current pipeline edition",
+            author="coordinator", request_key="test-current-pipeline-" + uuid.uuid4().hex,
+        ),
+        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True,
+    )
 
 
 class FakeElicitor:
@@ -102,6 +141,23 @@ def test_language_auto_defaults_english_for_latin_text():
 
 def test_language_explicit_override_wins_over_heuristic():
     assert acp_messages.select_language("en", ["Привет, помоги мне с задачей"]) == "en"
+
+
+def test_question_options_label_is_localized():
+    assert acp_messages.render("question_options_label", "en") == "Options:"
+    assert acp_messages.render("question_options_label", "ru") == "Варианты ответа:"
+
+
+def test_numeric_question_answer_resolves_only_valid_choice_index():
+    question = questions_store.PendingQuestion(
+        id="pq_test", task_id="task", assignment_ref=None, text="Pick?",
+        options=["staging", "production"], status="open", answer_text=None,
+        answer_source=None, created_at="now", answered_at=None,
+    )
+    assert _question_answer_value(question, "1") == "staging"
+    assert _question_answer_value(question, "2") == "production"
+    assert _question_answer_value(question, "0") == "0"
+    assert _question_answer_value(question, "other") == "other"
 
 
 def test_message_dedup_suppresses_identical_consecutive_signature():
@@ -164,6 +220,43 @@ def test_mark_stopped_is_idempotent(tmp_path):
 
 
 # -- OrchestratingRuntime integration ---------------------------------------
+
+def test_stop_terminates_terminal_worker_still_owned_by_task(tmp_path):
+    """A terminal event can be recorded before its engine exits."""
+    store, task_id = _task(tmp_path)
+    other = bootstrap_task(
+        store, SourceEvent(origin="cli", event_id=str(uuid.uuid4())),
+        "Other task.", "owner-1",
+    ).task_id
+    runtime, engine = _make_runtime(store, lambda *_args: None)
+    attempts = ((task_id, "assignment-1", "xa_still_running"),
+                (other, "assignment-2", "xa_other_task"))
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        for owner, assignment_ref, attempt_id in attempts:
+            db.execute(
+                "INSERT INTO delegation_provisioning "
+                "(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (assignment_ref, owner, attempt_id, "backend-dev", "complete", "complete", 1, "now", "now"),
+            )
+            engine._owned[attempt_id] = object()
+        db.commit()
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", "request-1", {},
+        origin="coordinator", assignment_ref="assignment-1",
+    )
+    delegation_events.append_event(
+        store, task_id, "assignment_cancelled", "cancel-1", {},
+        origin="runtime", assignment_ref="assignment-1",
+    )
+
+    assert runtime.stop_task(task_id, "s1", lambda _text: True) is True
+    assert engine.lookup_owned("xa_still_running") == "absent"
+    assert "xa_still_running" in engine.terminate_calls
+    assert engine.lookup_owned("xa_other_task") == "alive"
+    assert "xa_other_task" not in engine.terminate_calls
+
 
 def test_steering_persists_before_delivery_and_targets_same_task(tmp_path):
     store, task_id = _task(tmp_path)
@@ -285,6 +378,7 @@ def test_no_concurrent_engine_prompts_per_session(tmp_path):
                     seen.add(name)
             if len(seen) >= 2 and not decided["done"]:
                 decided["done"] = True
+                _publish_current_pipeline(store, channel)
                 mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="both done", request_key="acc1"))
                 return PromptOutcome(StopReason.END_TURN, "accepted")
             return PromptOutcome(StopReason.END_TURN, "waiting")
@@ -356,6 +450,10 @@ def test_two_workers_steering_cancels_one_other_finishes(tmp_path):
             # trigger a premature (gate-refusing) accept attempt.
             from cortex_runtime.delegation import completion as delegation_completion
 
+            # The gate checks the coordinator's current pipeline as well
+            # as assignment terminality, so publish it before probing the
+            # gate.  This remains a real gate exercise, not a bypass.
+            _publish_current_pipeline(store, channel)
             ok, _reasons = delegation_completion.gate(store, task_id)
             if ok:
                 phase["accepted"] = True
@@ -444,6 +542,7 @@ def test_cortex_answer_resolves_the_chosen_question(tmp_path):
             phase["provisioned"] = True
             return PromptOutcome(StopReason.END_TURN, "")
         if "Question 2" in message and "Chosen answer" in message:
+            _publish_current_pipeline(store, channel)
             mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="answered", request_key="acc1"))
             return PromptOutcome(StopReason.END_TURN, "accepted")
         return PromptOutcome(StopReason.END_TURN, "")
@@ -483,6 +582,7 @@ def test_elicitation_accept_resolves_without_ending_turn(tmp_path):
             ))
             return PromptOutcome(StopReason.END_TURN, "")
         if "staging" in message.lower():
+            _publish_current_pipeline(store, channel)
             mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="answered via elicitation", request_key="acc1"))
             return PromptOutcome(StopReason.END_TURN, "accepted")
         return PromptOutcome(StopReason.END_TURN, "")
@@ -511,7 +611,7 @@ def test_elicitation_unsupported_falls_back_to_text(tmp_path):
         if call_index == 0:
             mcp_tools.dispatch(store, channel, "decide", dict(
                 assignment_ref="task", decision="ask_user", rationale="need env",
-                question="Which environment?", request_key="ask1",
+                question="Which environment?", options=["staging", "production"], request_key="ask1",
             ))
             return PromptOutcome(StopReason.END_TURN, "")
         return PromptOutcome(StopReason.END_TURN, "")
@@ -525,10 +625,73 @@ def test_elicitation_unsupported_falls_back_to_text(tmp_path):
     result = runtime.start_prompt(task_id, "s1", "Deploy it.", updates.append, threading.Event())
     assert result == StopReason.END_TURN
     assert any("Which environment?" in u for u in updates)
+    fallback = next(u for u in updates if "Which environment?" in u)
+    assert "1. staging" in fallback
+    assert "2. production" in fallback
     with store.connection() as db:
         state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
     assert state == "waiting_for_user"
     assert len(questions_store.list_open(store, task_id)) == 1
+
+
+def test_answered_question_race_continues_but_cancelled_question_does_not(tmp_path):
+    store, task_id = _task(tmp_path)
+    runtime, _engine = _make_runtime(store, lambda *_args: None)
+
+    answered = questions_store.create_if_absent(store, task_id, "ask_user:answered", "Answered?")
+    assert questions_store.answer(store, answered.id, "yes", "text") is True
+    decision = {"decision_id": "answered", "question": "Answered?"}
+    assert runtime._handle_ask_user(task_id, "s1", lambda _text: True, "en", decision, None) is True
+
+    cancelled = questions_store.create_if_absent(store, task_id, "ask_user:cancelled", "Cancelled?")
+    questions_store.supersede_open(store, task_id, "test")
+    decision = {"decision_id": "cancelled", "question": "Cancelled?"}
+    assert runtime._handle_ask_user(task_id, "s1", lambda _text: True, "en", decision, None) is False
+
+    callback_question = questions_store.create_if_absent(store, task_id, "ask_user:callback", "Callback?")
+    callback_decision = {"decision_id": "callback", "question": "Callback?"}
+
+    def answer_during_emit(_text):
+        assert questions_store.answer(store, callback_question.id, "during emit", "text") is True
+        return True
+
+    assert runtime._handle_ask_user(task_id, "s1", answer_during_emit, "en", callback_decision, None) is True
+
+
+def test_losing_single_question_answer_is_recorded_late_and_not_delivered(tmp_path):
+    store, task_id = _task(tmp_path)
+    question = questions_store.create_if_absent(store, task_id, "ask_user:race", "Which environment?", options=["staging", "production"])
+    from cortex_runtime.acp import replay_store
+    first, won = replay_store.record_user_message_answer_event(
+        store, task_id, "user:first", "s1", {"content": "1"},
+        question_id=question.id, answer_text="staging",
+    )
+    assert won is True
+    retry, retry_won = replay_store.record_user_message_answer_event(
+        store, task_id, "user:first", "s1", {"content": "1"},
+        question_id=question.id, answer_text="staging",
+    )
+    assert retry.id == first.id
+    assert retry_won is True
+    second, won = replay_store.record_user_message_answer_event(
+        store, task_id, "user:second", "s2", {"content": "1"},
+        question_id=question.id, answer_text="staging",
+    )
+    assert won is False
+    losing_retry, losing_retry_won = replay_store.record_user_message_answer_event(
+        store, task_id, "user:second", "s2", {"content": "1"},
+        question_id=question.id, answer_text="staging",
+    )
+    assert losing_retry.id == second.id
+    assert losing_retry_won is False
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT consumed_by, superseded FROM task_events "
+            "WHERE task_id=? AND event_type='user_message' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    assert row["consumed_by"] is None
+    assert row["superseded"] == 1
 
 
 def test_stop_cancels_everything_and_supersedes_queued_steering(tmp_path):
@@ -582,10 +745,13 @@ def test_stop_cancels_everything_and_supersedes_queued_steering(tmp_path):
     assert runtime.stop_task(task_id, "s1", lambda t: True) is False  # idempotent
 
     with store.connection() as db:
-        row = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
+        row = db.execute("SELECT state, coordinator_attempt_ref FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
     assert row["state"] == "stopped"
+    # Stopping the task must terminate the coordinator engine process too;
+    # cancelling queued work alone leaves a live coordinator bwrap behind.
+    assert row["coordinator_attempt_ref"] in engine.terminate_calls
     assert acp_steering.is_stopped(store, task_id) is True
-    assert assignment_ref in engine.terminate_calls or True  # terminate_owned best-effort; presence of cancel event asserted below
+    assert assignment_ref in engine.terminate_calls or True  # worker may still be unwinding; cancel event asserted below
     with store.connection() as db:
         cancel_row = db.execute(
             "SELECT 1 FROM task_events WHERE task_id=? AND event_type='assignment_cancelled' AND assignment_ref=?",
@@ -612,6 +778,39 @@ def test_stop_cancels_everything_and_supersedes_queued_steering(tmp_path):
     assert result == StopReason.END_TURN
     assert len(engine.prompt_calls) == calls_before
     assert any("stopped" in u.lower() for u in updates)
+
+
+def test_stale_continuation_state_write_cannot_resurrect_stopped_task(tmp_path):
+    """A continuation that passed its cancel check must not overwrite stop.
+
+    This is the deterministic form of the race where the loop has already
+    decided to publish a transient ``blocked`` state while ``/cortex-stop``
+    commits.  The state guard belongs to the same SQLite transaction as the
+    write, so the late continuation write is inert.
+    """
+    store, task_id = _task(tmp_path)
+
+    def router(store, channel, session_ref, launch, instructions):
+        return lambda *args: PromptOutcome(StopReason.END_TURN, "")
+
+    runtime, _engine = _make_runtime(store, router)
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "INSERT INTO task_orchestration (task_id, state, updated_at) VALUES (?,?,?)",
+            (task_id, "running", "now"),
+        )
+        db.commit()
+    assert runtime.stop_task(task_id, "s1", lambda _text: True) is True
+
+    # Simulate the stale continuation after the stop transaction has won.
+    runtime._set_state(task_id, "blocked", wait_reason="workers_running")
+
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT state FROM task_orchestration WHERE task_id=?", (task_id,),
+        ).fetchone()
+    assert row["state"] == "stopped"
 
 
 def test_late_answer_after_stop_is_recorded_and_inert(tmp_path):
@@ -778,13 +977,74 @@ def test_stop_takes_precedence_over_an_in_flight_coordinator_loop(tmp_path):
             "SELECT 1 FROM task_events WHERE task_id=? AND event_type='assignment_cancelled' AND assignment_ref=?",
             (task_id, coordinator_ref),
         ).fetchone()
+        requested = db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='delegation_requested' "
+            "AND assignment_ref=? ORDER BY id LIMIT 1", (task_id, coordinator_ref),
+        ).fetchone()
+        work_attempt_ref = json.loads(requested["payload_json"])["work_attempt_ref"]
+        work_attempt = db.execute(
+            "SELECT status, failure_reason FROM work_assignment_attempts WHERE attempt_id=?",
+            (work_attempt_ref,),
+        ).fetchone()
         steering_row = db.execute(
             "SELECT superseded FROM task_events WHERE task_id=? AND dedup_key='user_steering:s2:queued-steer-race'", (task_id,),
         ).fetchone()
     assert row["state"] == "stopped"
     assert acp_steering.is_stopped(store, task_id) is True
     assert cancel_row is not None
+    assert work_attempt["status"] == "failed"
+    assert "urgent stop" in work_attempt["failure_reason"]
     assert steering_row["superseded"] == 1
+
+
+def test_reconnected_same_session_gets_immediate_terminal_worker_card(tmp_path):
+    store, task_id = _task(tmp_path)
+    runtime, _engine = _make_runtime(store, lambda *args: None)
+    _host_session_for_card(store, task_id, "same")
+    updates = []
+
+    def emit(update):
+        updates.append(update)
+        acp_replay_store.append_host_update(
+            store, "same",
+            dict(sessionUpdate="tool_call_update", toolCallId=update["tool_call_id"], status=update["status"]),
+        )
+        return True
+
+    runtime._cancel_assignment(
+        task_id, "card-a", "reconnected stop", session_id="same", emit_tool_call=emit,
+    )
+
+    assert updates and updates[-1]["status"] == "failed"
+    with store.connection() as db:
+        rows = db.execute(
+            "SELECT update_json FROM host_updates WHERE session_id=? ORDER BY seq", ("same",),
+        ).fetchall()
+    assert '"status":"failed"' in rows[-1]["update_json"]
+
+
+def test_reconnected_different_session_does_not_receive_worker_card_update(tmp_path):
+    store, task_id = _task(tmp_path)
+    runtime, _engine = _make_runtime(store, lambda *args: None)
+    _host_session_for_card(store, task_id, "original")
+    acp_sessions.create_session(store, "current", str(store.project_root), {}, {}, [])
+    acp_sessions.bind_task(store, "current", task_id)
+    leaked = []
+
+    runtime._cancel_assignment(
+        task_id, "card-a", "reconnected stop", session_id="current", emit_tool_call=leaked.append,
+    )
+
+    assert leaked == []
+    with store.connection() as db:
+        original = db.execute(
+            "SELECT update_json FROM host_updates WHERE session_id=? ORDER BY seq DESC LIMIT 1", ("original",),
+        ).fetchone()
+        current = db.execute(
+            "SELECT COUNT(*) FROM host_updates WHERE session_id=?", ("current",),
+        ).fetchone()[0]
+    assert '"status":"failed"' in original["update_json"]
+    assert current == 0
 
 
 # -- language config option / /cortex-language command (agent-level) ------
@@ -965,6 +1225,32 @@ def test_stop_unknown_task_id_is_an_error_never_a_false_confirmation(tmp_path):
         runtime.stop_task("t_does_not_exist", "s1", lambda t: True)
     assert excinfo.value.code == "unknown_task"
     assert acp_steering.is_stopped(store, "t_does_not_exist") is False
+
+
+def test_terminal_client_cancellation_releases_coordinator_engine(tmp_path):
+    """A client stop that returns a terminal CANCELLED outcome must not
+    leave the coordinator process/reservation alive after the task state is
+    persisted as cancelled."""
+    store, task_id = _task(tmp_path)
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        return PromptOutcome(StopReason.CANCELLED, "cancelled")
+
+    def router(store, channel, session_ref, launch, instructions):
+        return coordinator_behavior if channel and channel.role == "coordinator" else None
+
+    runtime, engine = _make_runtime(store, router)
+    result = runtime.start_prompt(task_id, "s1", "Stop this.", lambda _text: True, threading.Event())
+    assert result == StopReason.CANCELLED
+
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT state, coordinator_attempt_ref FROM task_orchestration WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+    assert row["state"] == "cancelled"
+    assert row["coordinator_attempt_ref"] in engine.terminate_calls
+    assert row["coordinator_attempt_ref"] not in engine._owned
 
 
 def test_stop_races_the_first_start_prompt_between_bootstrap_and_provisioning(tmp_path, monkeypatch):

@@ -1,44 +1,23 @@
 # Project overview
 
-Cortex stores tasks, advisory governance and Markdown documents. The model owns
-execution and semantic judgment. The complete runtime is packaged below
-`.`; repository tooling is development support only.
+Cortex is an ACP v1 stdio agent. The runtime stores task state, reports and
+advisory governance in the project-local `.cortex` store; the model owns
+planning, delegation, evidence interpretation and acceptance. The current ACP
+architecture and client qualification procedure live under [`docs/acp/`](../acp/index.md).
 
-- [Report storage and reliability](storage.md)
-- [Development conventions](conventions.md)
-- [Verification](verification.md)
-- [Outcome-driven incident coordination](incident-outcomes.md)
-- [Marketplace skills and native agent capacity](host-compatibility.md)
-- [Comparative outcome evaluation](quality-evaluation.md)
-- [Phase 5 adaptive selection (offline)](phase5-adaptive-selection.md)
-- [MCP contract review](mcp-contract-review.md)
-- [Markdown coordination feature](../features/markdown-reports/index.md)
-- [Optional Advisory Lane](../features/advisory-lane/index.md)
-- [ACP client integration](../acp/index.md)
-- [Release evidence](../release-readiness.md)
+- [Conventions](conventions.md)
+- [Decisions](decisions.md)
+- [Gotchas](gotchas.md)
+- [Storage](storage.md)
+- [Markdown reports](../features/markdown-reports/index.md)
+- [Knowledge routing](../features/knowledge-routing/index.md)
+- [Advisory lane](../features/advisory-lane/index.md)
+- [Senior consultant](../features/senior-consultant/index.md)
 
-The implementation consists of the advertised [contracts](../../src/cortex_runtime/contracts.py),
-[store](../../src/cortex_runtime/store.py),
-[MCP server](../../src/cortex_runtime/server.py),
-[coordinator skill](../../skills/orchestrator/SKILL.md) and
-[shared worker protocol](../.././agent-sources/worker-protocol.md).
-The separate [control skill](../../skills/cortex-control/SKILL.md)
-is limited to retention maintenance and optional report examples.
+The source of truth for public tool contracts is [`src/cortex_runtime/contracts.py`](../../src/cortex_runtime/contracts.py).
+The ACP server entry point is [`src/cortex_acp.py`](../../src/cortex_acp.py).
+Tests and offline smoke checks are described in [`docs/acp/test-matrix-and-ci.md`](../acp/test-matrix-and-ci.md).
 
-Knowledge maintenance retains `harvest` and `harvest-refresh`, index-driven
-routing, preservation of manual docs and source-based completeness checks. Ordinary
-completion now includes a model-owned review of verified changes for documentation
-impact: supported impact assigns the appropriate documentation owner to load/apply
-`documentation-sync`, and after that owner's report the coordinator uses only Cortex
-report/public-evidence reads to compare owner-cited documentation hashes and check
-results before acceptance. Additional project inspection, file read/hash or command
-verification is delegated to an appropriate worker and returned in a task-bound report;
-the coordinator does not rerun project checks itself. Sufficient no-impact evidence is
-recorded without an unnecessary worker. Harvest remains
-explicit-only. Partial or inconclusive inspection leaves impact unresolved and
-withholds acceptance until bounded evidence, synchronization, or sufficient no-impact
-evidence resolves it.
-See [knowledge routing](../features/knowledge-routing/index.md),
-[decisions](decisions.md) and [gotchas](gotchas.md).
-
-- [Orchestration review](orchestration-review.md): primary guidance, observed faults and bounded corrections.
+Historical Codex-plugin, native-subagent, gateway and lifecycle-hook material
+was removed from this directory. It must not be used to describe current
+runtime behavior.

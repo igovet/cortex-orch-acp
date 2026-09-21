@@ -110,20 +110,21 @@ def reservation_for_attempt(store, attempt_id: str) -> str | None:
     return row["reservation_id"] if row is not None else None
 
 
-def all_active_are_kind(store, connection_id: str, kind: str) -> bool:
-    """True iff at least one reservation is active for ``connection_id``
-    and every active (``reserved``/``ambiguous``) one has the given
-    ``kind`` -- used to detect starvation (T017 fresh review, MEDIUM): a
-    worker can never succeed if every active slot on its connection is
-    permanently held by a coordinator of the same/another task."""
+def saturated_by_coordinators(store, connection_id: str, limit: int) -> bool:
+    """Observe saturation and reservation kinds in one database snapshot.
+
+    Separate count and kind reads can straddle a worker's confirmed release:
+    the first sees a full connection, then the second sees only its remaining
+    coordinator and falsely declares a queued worker unsatisfiable.
+    """
     with store.connection() as db:
-        rows = db.execute(
-            "SELECT kind FROM capacity_reservations WHERE connection_id=? AND state IN ('reserved','ambiguous')",
+        row = db.execute(
+            "SELECT COUNT(*) AS active, "
+            "COALESCE(SUM(CASE WHEN kind='coordinator' THEN 1 ELSE 0 END), 0) AS coordinators "
+            "FROM capacity_reservations WHERE connection_id=? AND state IN ('reserved','ambiguous')",
             (connection_id,),
-        ).fetchall()
-    if not rows:
-        return False
-    return all(row["kind"] == kind for row in rows)
+        ).fetchone()
+    return row["active"] >= limit and row["active"] == row["coordinators"]
 
 
 def count_active(store, connection_id: str) -> int:

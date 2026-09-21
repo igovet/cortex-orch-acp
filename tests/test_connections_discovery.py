@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from cortex_runtime.connections import discovery, onboarding, registry
+from cortex_runtime.connections import discovery, environment, onboarding, registry
 from cortex_runtime.connections.model import EngineNativeDir
 
 
@@ -65,6 +65,48 @@ def test_discovers_both_engines_and_reports_real_bin(tmp_path):
     claude = found["claude-agent-acp"]
     assert claude.version == "0.78.0"
     assert claude.native_credential_dir == str(home / ".claude")
+
+
+def test_disposable_zed_uses_existing_engine_home_with_isolated_cortex_state(tmp_path):
+    """The test editor's HOME may differ from the engine accounts' HOME."""
+    engine_home = tmp_path / "engine-home"
+    editor_home = tmp_path / "editor-home"
+    engine_home.mkdir(mode=0o700)
+    editor_home.mkdir(mode=0o700)
+    for engine_dir, marker in ((".codex", "auth.json"), (".claude", ".credentials.json")):
+        native = engine_home / engine_dir
+        native.mkdir(mode=0o700)
+        (native / marker).write_text("present", encoding="utf-8")
+
+    registry_root = engine_home / ".local/share/zed/external_agents/registry/npx"
+    for engine, package, bin_key in (
+        ("codex-acp", "@agentclientprotocol/codex-acp", "codex-acp"),
+        ("claude-agent-acp", "@agentclientprotocol/claude-agent-acp", "claude-agent-acp"),
+    ):
+        entry = registry_root / engine
+        entry.mkdir(parents=True)
+        _write_package(entry, package, bin_key=bin_key)
+
+    environ = {
+        "HOME": str(engine_home),
+        "XDG_CONFIG_HOME": str(editor_home / "config"),
+        "XDG_STATE_HOME": str(editor_home / "state"),
+        "PATH": "/usr/bin:/bin",
+    }
+    found = discovery.discover_all(registry_root=registry_root, node_binary="/usr/bin/node", environ=environ)
+    onboarding.sync_discovered_connections(found, environ=environ)
+
+    assert registry.config_root(environ).is_relative_to(editor_home)
+    assert registry.state_root(environ).is_relative_to(editor_home)
+    records = registry.read_registry(environ).connections.values()
+    assert {record.engine for record in records} == {"codex-acp", "claude-agent-acp"}
+    for record in records:
+        validated = onboarding.validate(record.id, environ=environ)
+        assert validated.state.value == "configured"
+        process_env = environment.build_process_env(validated, environ, environ=environ)
+        key = "CODEX_HOME" if record.engine == "codex-acp" else "CLAUDE_CONFIG_DIR"
+        assert process_env["HOME"] == str(engine_home)
+        assert process_env[key] == str(engine_home / (".codex" if record.engine == "codex-acp" else ".claude"))
 
 
 def test_missing_engine_yields_nothing_not_a_guessed_path(tmp_path):

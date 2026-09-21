@@ -61,7 +61,12 @@ an unrelated one:
    pre-populated permitting every role for both supported engines at a
    sensible effort range; never overwrites an existing file, here or
    anywhere else the read-precedence chain would already find one.
-7. ``print-client-recipes`` -- delegates entirely to the existing T011
+7. ``install-paseo-plugin`` -- validate and install the repository-owned
+   Paseo 0.8 provider plugin through the installed Paseo CLI. This is the
+   single explicit Cortex-on-Paseo installation command; it is idempotent,
+   preserves unrelated daemon configuration/plugins, and verifies the plugin
+   reaches ``running``. It never runs implicitly when an ACP session starts.
+8. ``print-client-recipes`` -- delegates entirely to the existing T011
    ``cortex_acp_client_config.py`` (Zed dry-run-by-default entry +
    ``--print-codeg-recipe``); this script never re-implements or
    duplicates that write path.
@@ -76,9 +81,15 @@ nothing and reports the existing state rather than erroring or duplicating.
 from __future__ import annotations
 
 import argparse
+from dataclasses import fields
 import json
 import os
+import shutil
+import subprocess
 import sys
+import stat
+import tempfile
+import time
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -94,6 +105,312 @@ from cortex_runtime.connections.model import AuthMode, EngineNativeDir  # noqa: 
 from cortex_runtime.portable.errors import PortableError  # noqa: E402
 
 import cortex_acp_client_config  # noqa: E402
+from paseo_integrity import EXCLUDED_DIRS as _PASEO_EXCLUDED_DIRS, payload_digest as _paseo_payload_digest  # noqa: E402
+
+
+PASEO_PLUGIN_DIR = _ROOT / "integrations" / "paseo"
+_PASEO_CLI_CANDIDATES = ("paseo", "/opt/Paseo/resources/bin/paseo")
+
+def _paseo_payload_sha256(root: Path) -> str:
+    return _paseo_payload_digest(root)
+
+
+def _verify_paseo_plugin_source(plugin_dir=None):
+    root = Path(plugin_dir or PASEO_PLUGIN_DIR).resolve()
+    if root != PASEO_PLUGIN_DIR.resolve() or not root.is_dir():
+        raise SystemExit(f"error: Paseo plugin source must be {PASEO_PLUGIN_DIR}.")
+    manifest_path = root / "paseo-plugin.json"
+    integrity_path = root / "plugin-integrity.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        integrity = json.loads(integrity_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SystemExit(f"error: invalid Paseo plugin source metadata: {error}") from None
+    if not isinstance(manifest, dict) or manifest.get("id") != "cortex-acp":
+        raise SystemExit("error: Paseo plugin manifest must declare id 'cortex-acp'.")
+    requirements = manifest.get("requirements")
+    if not isinstance(requirements, dict) or not str(requirements.get("paseo", "")).startswith(">=0.8"):
+        raise SystemExit("error: Paseo plugin manifest must require Paseo >=0.8.0.")
+    actual = _paseo_payload_sha256(root)
+    if not isinstance(integrity, dict) or integrity.get("payload_sha256") != actual:
+        raise SystemExit("error: Paseo plugin source hash does not match its integrity record.")
+    return root, manifest, actual
+
+
+def _resolve_paseo_cli(environ=None):
+    env = os.environ if environ is None else environ
+    candidates = (env.get("CORTEX_PASEO_CLI"),) if env.get("CORTEX_PASEO_CLI") else _PASEO_CLI_CANDIDATES
+    for candidate in candidates:
+        if candidate and (Path(candidate).is_file() or ("/" not in candidate and shutil.which(candidate))):
+            return candidate
+    raise SystemExit("error: Paseo 0.8 CLI was not found; set CORTEX_PASEO_CLI.")
+
+
+def _ensure_private_directory(path: Path, *, create=False) -> Path:
+    """Validate one user-owned, non-symlinked private directory."""
+    path = Path(path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if not create:
+            raise SystemExit(f"error: required directory does not exist: {path}") from None
+        try:
+            path.mkdir(mode=0o700)
+            info = path.lstat()
+        except OSError as error:
+            raise SystemExit(f"error: cannot create private directory {path}: {error}") from None
+    except OSError as error:
+        raise SystemExit(f"error: cannot inspect directory {path}: {error}") from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise SystemExit(f"error: refusing symlinked or non-directory private path: {path}")
+    if info.st_uid != os.geteuid():
+        raise SystemExit(f"error: private directory is not owned by the current user: {path}")
+    try:
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            os.chmod(path, 0o700)
+            info = path.lstat()
+    except OSError as error:
+        raise SystemExit(f"error: cannot secure private directory {path}: {error}") from None
+    if stat.S_IMODE(info.st_mode) != 0o700 or stat.S_ISLNK(info.st_mode):
+        raise SystemExit(f"error: private directory is not owner-only: {path}")
+    return path
+
+
+def _atomic_private_json(path: Path, body: str) -> None:
+    """Write a private JSON file with an exclusive, same-directory temp file."""
+    fd = None
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = None
+            stream.write(body)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    except OSError as error:
+        raise SystemExit(f"error: cannot securely write configuration {path}: {error}") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+def _write_paseo_launch_config(environ=None):
+    """Persist the Cortex argv and user storage roots used after restart.
+
+    Paseo daemon plugins do not inherit the shell environment that ran setup.
+    Keep only non-secret, absolute path settings here so a daemon restart
+    continues to address the same user registry/native-account state.
+    """
+    env = os.environ if environ is None else environ
+    home = Path(env.get("HOME") or str(Path.home())).expanduser()
+    if not home.is_absolute() or home.is_symlink() or not home.is_dir():
+        raise SystemExit(f"error: HOME must be an existing, non-symlink directory: {home}")
+    config_base = Path(env.get("XDG_CONFIG_HOME") or str(home / ".config")).expanduser().resolve()
+    state_base = Path(env.get("XDG_STATE_HOME") or str(home / ".local" / "state")).expanduser().resolve()
+    desired = {
+        "argv": ["python3", "-B", str((_ROOT / "src" / "cortex_acp.py").resolve())],
+        "env": {"HOME": str(home), "XDG_CONFIG_HOME": str(config_base), "XDG_STATE_HOME": str(state_base)},
+        "shim": str((_ROOT / "integrations" / "paseo" / "server" / "acp-load-shim.mjs").resolve()),
+    }
+    # The locator must not depend on XDG_CONFIG_HOME: a GUI daemon restart can
+    # start with a different XDG environment. Keep the record under the
+    # user's conventional HOME/.config path and persist custom XDG roots in
+    # its payload.
+    config_parent = _ensure_private_directory(home / ".config", create=True)
+    config_root = _ensure_private_directory(config_parent / "cortex", create=True)
+    path = config_root / "paseo-plugin-launch.json"
+    if path.is_symlink():
+        raise SystemExit(f"error: refusing symlinked Paseo launch configuration: {path}")
+    if path.exists() and (stat.S_IMODE(path.stat().st_mode) != 0o600 or not path.is_file()):
+        raise SystemExit(f"error: Paseo launch configuration must be a regular 0600 file: {path}")
+    if path.exists():
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise SystemExit(f"error: invalid existing Paseo launch configuration: {error}") from None
+        # Upgrade the old argv-only record in place. Refuse any other shape
+        # so setup cannot overwrite an unrelated owner-managed file.
+        legacy_argv_only = {"argv": desired["argv"]}
+        legacy_argv_env = {"argv": desired["argv"], "env": desired["env"]}
+        if current != desired and current not in (legacy_argv_only, legacy_argv_env):
+            raise SystemExit(f"error: refusing to overwrite unrelated launch configuration: {path}")
+        if current != desired:
+            _atomic_private_json(path, json.dumps(desired, indent=2) + "\n")
+        return dict(path=str(path), created=False, argv=desired["argv"], env=desired["env"])
+    _atomic_private_json(path, json.dumps(desired, indent=2) + "\n")
+    return dict(path=str(path), created=True, argv=desired["argv"], env=desired["env"])
+
+
+def _remove_new_paseo_launch_config(launch_config):
+    """Remove only the record created by this install attempt."""
+    if not launch_config or not launch_config.get("created"):
+        return
+    path = Path(str(launch_config.get("path", "")))
+    try:
+        info = path.lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            return
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+def _is_owned_legacy_paseo_provider(entry) -> bool:
+    """Recognize only the old generic Cortex ACP registration."""
+    if not isinstance(entry, dict) or entry.get("extends") != "acp":
+        return False
+    command = entry.get("command")
+    if not isinstance(command, list) or not command or not all(isinstance(part, str) and part for part in command):
+        return False
+    entrypoint = str((_ROOT / "src" / "cortex_acp.py").resolve())
+    if command == ["python3", "-B", entrypoint] or command == ["/usr/bin/python3", "-B", entrypoint]:
+        return True
+    if len(command) != 1:
+        return False
+    launcher = Path(command[0])
+    try:
+        # The legacy installer commonly registered a stable symlink under
+        # ~/.local/bin.  Follow it only for identity inspection; the exact
+        # resolved launcher body must still name this repository entrypoint.
+        launcher = launcher.resolve(strict=True)
+        if not launcher.is_file():
+            return False
+        body = launcher.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return entrypoint in body and "cortex_acp.py" in body
+
+
+def _migrate_legacy_paseo_provider(config: dict, config_path: Path):
+    """Remove only the exact old generic Cortex provider, with a backup."""
+    agents = config.get("agents")
+    providers = agents.get("providers") if isinstance(agents, dict) else None
+    legacy = providers.get("cortex") if isinstance(providers, dict) else None
+    if not _is_owned_legacy_paseo_provider(legacy):
+        return {"migrated": False, "reason": "no_owned_legacy_provider"}
+    backup = config_path.with_name(f"{config_path.name}.cortex-legacy-backup-{time.time_ns()}")
+    try:
+        backup.write_bytes(config_path.read_bytes())
+        os.chmod(backup, 0o600)
+        updated = json.loads(json.dumps(config))
+        del updated["agents"]["providers"]["cortex"]
+        _atomic_private_json(config_path, json.dumps(updated, indent=2, sort_keys=True) + "\n")
+    except (OSError, ValueError) as error:
+        try:
+            backup.unlink()
+        except OSError:
+            pass
+        raise SystemExit(f"error: cannot migrate the legacy Paseo Cortex provider safely: {error}") from None
+    return {"migrated": True, "removed_provider": "cortex", "backup": str(backup)}
+
+
+def install_paseo_plugin(*, plugin_dir=None, paseo_cli=None, environ=None, runner=None):
+    """Install/repair the repository-owned Paseo provider during explicit setup."""
+    root, manifest, payload_sha256 = _verify_paseo_plugin_source(plugin_dir)
+    env = dict(os.environ if environ is None else environ)
+    cli = paseo_cli or _resolve_paseo_cli(env)
+    run = runner or subprocess.run
+
+    def invoke(args, check=True):
+        result = run([cli, *args], env=env, text=True, capture_output=True, check=False)
+        if check and result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise SystemExit(f"error: Paseo command failed ({' '.join(args)}): {detail}")
+        return result
+
+    status = invoke(["daemon", "status", "--json"])
+    try:
+        daemon = json.loads(status.stdout)
+    except (TypeError, ValueError):
+        raise SystemExit("error: Paseo daemon status was not valid JSON.") from None
+    if not isinstance(daemon, dict) or daemon.get("localDaemon") not in {"running", "reachable"}:
+        raise SystemExit("error: local Paseo daemon is not reachable.")
+    home = Path(str(daemon.get("home", ""))).resolve()
+    config_path = home / "config.json"
+    if config_path.is_symlink() or not config_path.is_file():
+        raise SystemExit(f"error: refusing symlinked or non-regular Paseo daemon config: {config_path}")
+    try:
+        config_info = config_path.lstat()
+        if config_info.st_uid != os.geteuid():
+            raise SystemExit(f"error: Paseo daemon config is not owned by the current user: {config_path}")
+        mode = stat.S_IMODE(config_info.st_mode)
+        if not mode & 0o400:
+            raise SystemExit(f"error: Paseo daemon config is not readable by its owner: {config_path}")
+        if mode & 0o077:
+            os.chmod(config_path, mode & 0o700)
+            mode = stat.S_IMODE(config_path.lstat().st_mode)
+            if mode & 0o077:
+                raise SystemExit(f"error: refusing overly-readable Paseo daemon config: {config_path}")
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except SystemExit:
+        raise
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"error: cannot read Paseo daemon config: {error}") from None
+    if not isinstance(config, dict):
+        raise SystemExit("error: Paseo daemon config is not a JSON object.")
+    if config.get("pluginsEnabled") is not True:
+        updated = dict(config); updated["pluginsEnabled"] = True
+        _atomic_private_json(config_path, json.dumps(updated, indent=2, sort_keys=True) + "\n")
+        invoke(["reload", "--json"])
+    # The plugin is evaluated as part of `plugin install`.  Persist the
+    # daemon-safe launch command before that evaluation: the provider's
+    # bundled server module cannot rely on import.meta.url after Paseo's
+    # esbuild CommonJS compilation, and therefore needs this record on its
+    # first load (before a successful install can be verified).
+    launch_config = _write_paseo_launch_config(env)
+    try:
+        listed = invoke(["plugin", "ls", "--json"])
+        try:
+            plugins = json.loads(listed.stdout)
+        except (TypeError, ValueError):
+            raise SystemExit("error: Paseo plugin list was not valid JSON.") from None
+        plugins = plugins if isinstance(plugins, list) else []
+        existing = next((p for p in plugins if isinstance(p, dict) and p.get("id") == manifest["id"]), None)
+        if existing is None:
+            invoke(["plugin", "install", str(root)])
+        else:
+            if Path(str(existing.get("path", ""))).resolve() != root:
+                raise SystemExit("error: Paseo plugin id 'cortex-acp' is bound to another source path.")
+            if existing.get("status") != "running":
+                invoke(["plugin", "enable", manifest["id"]], check=False)
+        verified = invoke(["plugin", "ls", manifest["id"], "--json"])
+        try:
+            rows = json.loads(verified.stdout)
+        except (TypeError, ValueError):
+            raise SystemExit("error: Paseo plugin verification was not valid JSON.") from None
+        row = rows[0] if isinstance(rows, list) and rows else rows if isinstance(rows, dict) else None
+        if not isinstance(row, dict) or row.get("id") != manifest["id"] or row.get("status") != "running":
+            raise SystemExit("error: Cortex Paseo plugin did not reach running status.")
+        # The native plugin registers provider identity ``cortex`` for new
+        # chats. Remove only our exact owned generic registration after the
+        # plugin is verified; old generic chats may become inaccessible. Keep
+        # an owner-only backup for rollback/audit.
+        migration = _migrate_legacy_paseo_provider(config, config_path)
+        # The daemon keeps provider registrations in memory.  Reload after
+        # removing the old direct ACP alias so existing Paseo sessions resolve
+        # through the native provider without a duplicate entry.
+        if migration.get("migrated"):
+            invoke(["reload", "--json"])
+        return {"plugin_id": manifest["id"], "source": str(root), "status": "running", "payload_sha256": payload_sha256,
+                "launch_config": launch_config, "legacy_provider_migration": migration}
+    except BaseException:
+        _remove_new_paseo_launch_config(launch_config)
+        raise
 
 
 def init_storage(environ=None):
@@ -139,6 +456,61 @@ def add_connection(*, name, engine, provider, auth_mode, key_kind=None, api_key_
         auth_mode=record.auth_mode.value, state=record.state.value, qualified=record.qualified,
         login_instructions=login_instructions,
     )
+
+
+def _verified_install_launch_command(*, engine, install_record, environ=None):
+    """Load and verify one operator-pinned engine install before onboarding.
+
+    The install record is deliberately a file input rather than an argv JSON
+    value: it contains absolute paths and integrity digests, but never a
+    credential.  Verification is completed before ``create_connection`` is
+    called, so a bad or drifted record cannot leave a half-created connection.
+    """
+    if engine == "codex-acp":
+        from cortex_runtime.engine import codex_install
+
+        install_type = codex_install.CodexAcpInstall
+    elif engine == "claude-agent-acp":
+        from cortex_runtime.engine import claude_install
+
+        install_type = claude_install.ClaudeAcpInstall
+    else:  # argparse normally prevents this; keep the helper closed for API callers.
+        raise SystemExit(f"error: unsupported engine {engine!r}.")
+
+    try:
+        raw = json.loads(Path(install_record).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SystemExit(f"error: could not read --install-record: {error}") from None
+    if not isinstance(raw, dict):
+        raise SystemExit("error: --install-record must contain one JSON object.")
+
+    expected = {field.name for field in fields(install_type)}
+    actual = set(raw)
+    missing = sorted(expected - actual)
+    unknown = sorted(actual - expected)
+    if missing or unknown:
+        details = []
+        if missing:
+            details.append("missing fields: " + ", ".join(missing))
+        if unknown:
+            details.append("unknown fields: " + ", ".join(unknown))
+        raise SystemExit("error: invalid --install-record (" + "; ".join(details) + ").")
+    try:
+        install = install_type(**raw)
+        verified = (
+            codex_install.verify_install(install, environ)
+            if engine == "codex-acp"
+            else claude_install.verify_install(install, environ)
+        )
+        return (
+            codex_install.launch_command_for(verified)
+            if engine == "codex-acp"
+            else claude_install.launch_command_for(verified)
+        )
+    except PortableError as error:
+        raise SystemExit(f"error: --install-record is not trusted: {error.code}: {error.remediation}") from None
+    except (TypeError, ValueError) as error:
+        raise SystemExit(f"error: invalid --install-record: {error}") from None
 
 
 def pin_route(*, connection_id, model, environ=None):
@@ -359,6 +731,20 @@ def status(environ=None):
     return result
 
 
+def validate_connection(*, connection_id, environ=None):
+    """Recompute one connection's state and return only safe public fields."""
+    try:
+        record = onboarding.validate(connection_id, environ=environ)
+    except PortableError as error:
+        raise SystemExit(f"error: {error.code}: {error.remediation}") from None
+    return dict(
+        connection_id=record.id,
+        engine=record.engine,
+        state=record.state.value,
+        qualified=record.qualified,
+    )
+
+
 def _read_secret(args):
     if args.api_key_file:
         return lambda: Path(args.api_key_file).read_bytes()
@@ -374,6 +760,12 @@ def main(argv=None):
     sub.add_parser("status", help="Report current setup state (read-only, default).")
     sub.add_parser("init-storage", help="Create/verify owner-private config/state roots.")
     sub.add_parser("init-route-policy", help="Write a default, hand-editable ~/.config/cortex/route-policy.json (never overwrites an existing one).")
+    sub.add_parser("install-paseo-plugin", help="Install and verify the Cortex provider plugin in Paseo (explicit setup only).")
+
+    p_validate = sub.add_parser(
+        "validate-connection", help="Recompute one connection's authorization state (no credentials shown).",
+    )
+    p_validate.add_argument("--connection", required=True, dest="connection_id")
 
     p_conn = sub.add_parser("add-connection", help="Register (or reuse) one authorized connection.")
     p_conn.add_argument("--name", required=True)
@@ -385,6 +777,11 @@ def main(argv=None):
                          help="Path to a file containing the API key bytes (never inline on argv).")
     p_conn.add_argument("--api-key-stdin", action="store_true",
                          help="Read the API key bytes from stdin instead of a file.")
+    p_conn.add_argument(
+        "--install-record", required=True, type=Path,
+        help=("Path to the exact JSON install record for the selected engine. "
+              "It is verified before the connection is written; credentials never belong in this file."),
+    )
     p_conn.add_argument("--no-reuse", dest="reuse", action="store_false", default=True)
 
     p_route = sub.add_parser("pin-route", help="Pin one declared model as the default route.")
@@ -427,12 +824,21 @@ def main(argv=None):
     if step == "init-route-policy":
         print(_json(init_route_policy()))
         return 0
+    if step == "install-paseo-plugin":
+        print(_json(install_paseo_plugin()))
+        return 0
+    if step == "validate-connection":
+        print(_json(validate_connection(connection_id=args.connection_id)))
+        return 0
     if step == "add-connection":
         reader = _read_secret(args)
+        launch_command = _verified_install_launch_command(
+            engine=args.engine, install_record=args.install_record,
+        )
         result = add_connection(
             name=args.name, engine=args.engine, provider=args.provider,
             auth_mode=AuthMode(args.auth_mode), key_kind=args.key_kind, api_key_reader=reader,
-            reuse=args.reuse,
+            launch_command=launch_command, reuse=args.reuse,
         )
         print(_json(result))
         return 0

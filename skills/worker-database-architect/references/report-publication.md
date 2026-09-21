@@ -15,16 +15,16 @@ metadata, not a guidance marker. Any marker check must target the actual returne
 guidance markers and preserve that line. Retained patch content and a successful
 patch receipt normally establish replacement without another shell read.
 
-Before every draft or publication call, read its complete live declaration and
-supply every required field, including on the initial call. Never probe required
-fields with an empty argument object or infer defaults from another operation.
+Before every draft or publication call, read its complete live declaration.
+Do not probe with speculative calls or infer one operation's contract from another.
 
 Pass the exact patch intact to the native patch tool, directly or through a safe host
 wrapper. An inert JavaScript string or `String.raw` template without substitutions
 is valid. Never construct draft content through executable interpolation, command
 substitution or shell evaluation, and never send the Markdown body through a Cortex
-writer. Do not rename, move or delete the draft: fill the file at the path the server gave you,
-with whatever tool writes it -- a replacement written over that same path is followed. Build the patch from the
+writer. Keep the server-issued path: a native patch may edit its file in place or
+atomically replace that exact file at the same path. The server validates the resulting
+regular file there before publication. Do not move the draft to another path. Build the patch from the
 authoritative current marker text; on a context conflict, reread and correct once.
 
 
@@ -33,17 +33,16 @@ atomic publication and draft cleanup. Keep an acknowledged report identifier and
 never replay its mutation to confirm success. If delivery is uncertain, follow the
 writer's live retry contract.
 
-When the live schema calls for a delivery key, pass a literal UUID in the tool arguments.
-Do not construct it with `crypto.randomUUID()` or another assumed JavaScript global
-inside a `functions.exec` wrapper. Use the selected operation's initial-call and
-retry contract; draft creation and report publication can require different keys.
+Do not assume JavaScript globals inside a `functions.exec` wrapper. Follow the
+selected operation's advertised retry contract and retain acknowledged receipts.
 
 Use the draft reader only after compaction, restart, an interrupted edit or a conflict
 that makes retained content uncertain. Follow its bounded cursor until the affected
 fragment is recovered. Correct deterministic edit or argument errors once from
 observed state and the live declaration; do not create a competing draft.
 
-A successful publication is the final tool action for the assignment. Return the new
-report identifier and concise handoff through the native final response. Later
+After successful publication, call `publish_result` for the published report.
+Confirm its receipt.
+This is the worker handoff; the coordinator then decides acceptance. A later
 authorized continuation publishes a new immutable report that points to its
 predecessor.

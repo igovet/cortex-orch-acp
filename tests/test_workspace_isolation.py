@@ -5,10 +5,13 @@ import stat
 import threading
 import time
 import uuid
+from pathlib import Path
+import pytest
 
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.contracts import StoreError
 from cortex_runtime.delegation import workspace_isolation
+from cortex_runtime.delegation import candidates
 from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.store import Store
 
@@ -90,7 +93,7 @@ def test_two_workers_isolated_workspaces_cannot_observe_each_other(tmp_path):
     assert open(project / "shared.txt").read() == "original\n"
 
 
-def test_fallback_to_serialized_when_snapshot_unavailable(tmp_path, monkeypatch):
+def test_snapshot_unavailable_fails_closed_without_shared_root_binding(tmp_path, monkeypatch):
     project = _project(tmp_path)
     (project / "a.txt").write_text("a\n")
     (project / "b.txt").write_text("b\n")
@@ -100,12 +103,10 @@ def test_fallback_to_serialized_when_snapshot_unavailable(tmp_path, monkeypatch)
 
     monkeypatch.setattr(workspace_isolation, "_MAX_ENTRIES", 1)
     provisioner = workspace_isolation.IsolatedSnapshotWorkspaceProvisioner(store, str(project))
-    binding_id = provisioner.create("xa_big")
-    row = provisioner.row_for_binding(binding_id)
-    assert row["mode"] == "serialized_shared_root"
-    assert row["base_kind"] == "unavailable"
-    assert provisioner.lookup("xa_big") == "present"
-    assert provisioner.root_for(binding_id) == str(project)
+    with pytest.raises(StoreError, match="^workspace_snapshot_unavailable:workspace_too_large$"):
+        provisioner.create("xa_big")
+    assert provisioner.lookup("xa_big") == "absent"
+    assert (project / "a.txt").read_text() == "a\n"
 
 
 def test_serialized_writer_lock_serializes_concurrent_writers(tmp_path):
@@ -185,6 +186,21 @@ def test_cleanup_binding_removes_only_owned_snapshot_dirs(tmp_path):
     assert provisioner.cleanup_binding(binding_id, reason="test-again") is False
 
 
+def test_cleanup_preserves_unintegrated_worker_changes(tmp_path):
+    project = _project(tmp_path)
+    (project / "a.txt").write_text("a\n")
+    store = Store(project / ".cortex", project_root=str(project))
+    task_id = _task(store)
+    _bind_attempt(store, task_id, "xa_pending_cleanup")
+    provisioner = workspace_isolation.IsolatedSnapshotWorkspaceProvisioner(store, str(project))
+    binding_id = provisioner.create("xa_pending_cleanup")
+    root = provisioner.root_for(binding_id)
+    (Path(root) / "a.txt").write_text("worker change\n")
+
+    assert provisioner.cleanup_binding(binding_id, reason="terminal") is False
+    assert (Path(root) / "a.txt").read_text() == "worker change\n"
+
+
 def test_resolve_assignment_root_maps_through_provisioning_row(tmp_path):
     project = _project(tmp_path)
     (project / "a.txt").write_text("a\n")
@@ -196,3 +212,33 @@ def test_resolve_assignment_root_maps_through_provisioning_row(tmp_path):
     resolved = workspace_isolation.resolve_assignment_root(store, task_id, assignment_ref)
     assert resolved == provisioner.root_for(binding_id)
     assert workspace_isolation.resolve_assignment_root(store, task_id, "no-such-assignment") is None
+
+
+def test_candidate_seed_is_bound_by_assignment_and_copied_without_arbitrary_path(tmp_path):
+    project = _project(tmp_path)
+    (project / "base.txt").write_text("base\n")
+    store = Store(project / ".cortex", project_root=str(project))
+    task_id = _task(store)
+    _bind_attempt(store, task_id, "xa_source")
+    provisioner = workspace_isolation.IsolatedSnapshotWorkspaceProvisioner(store, str(project))
+    source_binding = provisioner.create("xa_source")
+    (Path(provisioner.root_for(source_binding)) / "candidate.txt").write_text("from candidate\n")
+    candidate = candidates.prepare_candidate(store, task_id, ["xa_source"])
+    candidate2 = candidates.prepare_candidate(store, task_id, ["xa_source"], candidate_id="candidate-second")
+
+    assignment_ref = _bind_attempt(store, task_id, "xa_seeded")
+    provisioner.register_candidate_seed(assignment_ref, candidate["candidate_id"], task_id=task_id)
+    # Replaying the exact binding is idempotent; changing the candidate is a
+    # durable dependency conflict and must never overwrite the original.
+    provisioner.register_candidate_seed(assignment_ref, candidate["candidate_id"], task_id=task_id)
+    with pytest.raises(StoreError, match="^candidate_seed_binding_conflict$"):
+        provisioner.register_candidate_seed(assignment_ref, candidate2["candidate_id"], task_id=task_id)
+    binding = provisioner.create("xa_seeded")
+    seeded_root = Path(provisioner.root_for(binding))
+    assert (seeded_root / "candidate.txt").read_text() == "from candidate\n"
+    with store.connection() as db:
+        lineage = db.execute(
+            "SELECT candidate_id FROM workspace_snapshot_lineage WHERE workspace_binding_id=?",
+            (binding,),
+        ).fetchone()
+    assert lineage["candidate_id"] == candidate["candidate_id"]

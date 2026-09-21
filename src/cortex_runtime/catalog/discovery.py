@@ -114,6 +114,7 @@ class Observation:
 
     options: tuple[_ParsedOption, ...]
     model_thought_levels: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    model_descriptions: Mapping[str, str] = field(default_factory=dict)
 
     def model_options(self) -> tuple[tuple[str, str], ...]:
         for option in self.options:
@@ -129,7 +130,11 @@ class Observation:
         never a fallback shape."""
         merged = dict(self.model_thought_levels)
         merged.update({model: tuple(levels) for model, levels in overrides.items() if levels})
-        return Observation(options=self.options, model_thought_levels=MappingProxyType(merged))
+        return Observation(
+            options=self.options,
+            model_thought_levels=MappingProxyType(merged),
+            model_descriptions=self.model_descriptions,
+        )
 
     def parameter_pairs_for(self, model: str) -> tuple[tuple[str, str], ...]:
         """The ``(name, value)`` pairs to fold into ``model``'s own
@@ -200,7 +205,20 @@ def parse_observation(raw: object) -> Observation:
             parsed.append(_ParsedOption(option_id, category, "boolean", current_value, ()))
         else:
             raise _invalid_observation(f"'type' must be 'select' or 'boolean', got {option_type!r}")
-    observation = Observation(options=tuple(parsed))
+    model_descriptions: dict[str, str] = {}
+    for item in raw:
+        if not isinstance(item, dict) or item.get("category") != "model" or item.get("type") != "select":
+            continue
+        for choice in item.get("options", []):
+            choices = choice.get("options", []) if isinstance(choice, dict) and "group" in choice else [choice]
+            for nested in choices:
+                if not isinstance(nested, dict):
+                    continue
+                value = nested.get("value")
+                description = nested.get("description")
+                if isinstance(value, str) and isinstance(description, str) and description:
+                    model_descriptions[value] = description
+    observation = Observation(options=tuple(parsed), model_descriptions=MappingProxyType(model_descriptions))
     # T035 follow-up (user decision 2026-09-18): a live session's own
     # thought_level select is always copied into every model's own entry
     # in model_thought_levels at parse time -- never left as one implicit
@@ -307,7 +325,7 @@ def build_catalog(
             reason = "authorization_required" if record.state == ConnectionState.AUTHORIZATION_REQUIRED else "discovery_unavailable"
             unavailable[connection_id] = reason
             continue
-        for model, _model_name in observation.model_options():
+        for model, model_name in observation.model_options():
             # T035 follow-up: per-model override when the caller attached
             # one (see Observation.with_model_thought_levels); an unchanged
             # flat parameter_pairs() for every model with none (the
@@ -328,7 +346,7 @@ def build_catalog(
             label = build_label(record.engine, record.name, model)
             raw_labels[route.id] = label
             label_pairs.append((route.id, label))
-            entries.append((route, connection_id, label, evidence))
+            entries.append((route, connection_id, label, evidence, model_name, observation.model_descriptions.get(model)))
 
     for declaration in manual_declarations:
         record = connections.get(declaration.connection_id)
@@ -375,7 +393,7 @@ def build_catalog(
         label = build_label(record.engine, record.name, declaration.model)
         raw_labels[route.id] = label
         label_pairs.append((route.id, label))
-        entries.append((route, declaration.connection_id, label, evidence))
+        entries.append((route, declaration.connection_id, label, evidence, declaration.model, None))
 
     disambiguated = disambiguate_labels(label_pairs)
     catalog_entries = tuple(
@@ -386,8 +404,10 @@ def build_catalog(
             disambiguated_label=disambiguated[route.id],
             evidence=evidence,
             catalog_snapshot_id=snapshot_id,
+            model_name=model_name,
+            model_description=model_description,
         )
-        for route, connection_id, label, evidence in entries
+        for route, connection_id, label, evidence, model_name, model_description in entries
     )
     return CatalogSnapshot(
         id=snapshot_id,

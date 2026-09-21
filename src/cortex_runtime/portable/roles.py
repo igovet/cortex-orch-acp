@@ -246,29 +246,53 @@ def _extract_critical_rules(text: str) -> tuple[str, ...]:
     return tuple(rules)
 
 
-#: References this runtime ships beside every worker role. A worker cannot
-#: reach them as files -- its working directory is a copy of the user's
-#: project -- so they are readable by id through ``read_skill``.
+#: Bounded, role-scoped reference inventory. These are package files, never
+#: paths supplied by a model. Adding a reference requires an explicit entry.
 WORKER_REFERENCE_IDS = frozenset({
     "report-publication", "code-and-evidence", "interactive-resources",
 })
+COORDINATOR_REFERENCE_IDS = frozenset({
+    "cortex-release", "governance", "host-compatibility", "incident",
+    "live-qualification", "pipeline-publication", "recovery",
+    "senior-consultation", "worker-routing",
+})
+EXAMPLE_REFERENCE_IDS = frozenset({
+    "index", "documentation-example", "implementation-example",
+    "investigation-example", "plan-example", "report-example",
+    "verification-example",
+})
 
 
-def read_reference(reference_id: str) -> str:
-    """One shipped reference document by id, for ``read_skill``."""
-    if reference_id not in WORKER_REFERENCE_IDS:
+def read_reference(reference_id: str, *, role_kind: str = "worker") -> str:
+    """Read one known package reference with caller-role authorization.
+
+    ``read_skill`` is the public dispatch surface; it must pass the verified
+    channel role. The default preserves older worker callers only.
+    """
+    if role_kind == "coordinator":
+        allowed = COORDINATOR_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS
+    elif role_kind == "worker":
+        allowed = WORKER_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS
+    else:
+        allowed = frozenset()
+    if not isinstance(reference_id, str) or reference_id not in allowed:
         raise PortableError(
             category=PortableErrorCategory.VALIDATION,
             code="unknown_reference",
-            remediation=f"Unknown reference {reference_id!r}; known: {', '.join(sorted(WORKER_REFERENCE_IDS))}.",
+            remediation=f"Reference {reference_id!r} is unavailable for {role_kind}; known: {', '.join(sorted(allowed))}.",
             retry_eligible=False,
             field="skill",
         )
-    for candidate in sorted(SKILLS_ROOT.glob(f"*/references/{reference_id}.md")):
-        try:
-            return candidate.read_text(encoding="utf-8")
-        except OSError:
-            continue
+    if reference_id in COORDINATOR_REFERENCE_IDS:
+        source = SKILLS_ROOT / "orchestrator" / "references" / f"{reference_id}.md"
+    elif reference_id in WORKER_REFERENCE_IDS:
+        source = SKILLS_ROOT / "worker-general" / "references" / f"{reference_id}.md"
+    else:
+        source = SKILLS_ROOT / "cortex-control" / "references" / f"{reference_id}.md"
+    try:
+        return source.read_text(encoding="utf-8")
+    except OSError:
+        pass
     raise PortableError(
         category=PortableErrorCategory.VALIDATION,
         code="reference_source_unavailable",
@@ -374,7 +398,8 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
         # the skills are one call away, by the names given here.
         parts.append(
             "## Shared skills, and when to read one\n\n"
-            "`read_skill(\"<name>\")` returns one of this runtime's shared skills. Read one "
+            "The `read_skill` tool on the `cortex` MCP server returns one of this runtime's "
+            "shared skills. Use that Cortex tool rather than an engine-native skill loader. Read one "
             "when its own case arises, never as a ritual -- reading text you do not need "
             "costs you the room to do the work:\n"
             + "\n".join(f"- `{skill_id}` -- {_SKILL_TRIGGERS[skill_id]}"

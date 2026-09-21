@@ -212,11 +212,8 @@ def test_clear_tasks_end_to_end_removes_every_group_row_with_integrity_ok(tmp_pa
                 "INSERT INTO configuration_revisions (id,task_id,revision,route_id,route_engine,route_connection_id,parameters,ceiling_snapshot,state,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 ('cr_1', task, 1, 'rt_1', 'codex-acp', 'cn_1', '{}', '{}', 'selected', now, now))
-            # governance + hook_command_sessions
+            # governance
             db.execute("INSERT INTO governance (id,task_id,mode,report_id) VALUES (?,?,?,?)", ('gov_1', task, 'normal', report_id))
-            db.execute(
-                "INSERT INTO hook_command_sessions (task_id,worker_thread_id,parent_thread_id,command_session_id,cwd,created_at) "
-                "VALUES (?,?,?,?,?,?)", (task, 'wt_1', 'pt_1', 'cs_1', str(project), now))
             # T022 context_generations/compaction_owners/compaction_events_seen/capsule_deliveries
             db.execute(
                 "INSERT INTO context_generations (id,engine_session_ref,task_id,assignment_ref,recipient,sequence,cause,evidence_source,evidence_id,created_at) "
@@ -258,7 +255,6 @@ def test_clear_tasks_end_to_end_removes_every_group_row_with_integrity_ok(tmp_pa
         ('task_route_selections', 'task_id=?', (task,)),
         ('configuration_revisions', 'task_id=?', (task,)),
         ('governance', 'task_id=?', (task,)),
-        ('hook_command_sessions', 'task_id=?', (task,)),
         ('pending_questions', 'task_id=?', (task,)),
         ('pending_question_late_answers', 'task_id=?', (task,)),
         ('task_language', 'task_id=?', (task,)),

@@ -40,6 +40,9 @@ from __future__ import annotations
 
 import threading
 import time
+import os
+import stat
+from pathlib import Path
 from typing import Callable, Mapping
 
 # No real installed-version discovery is wired into ``ConnectionRecord``
@@ -94,15 +97,16 @@ def _session_new_meta_for(engine: str, version: str, instructions: str | None):
 
     Only ever non-``None`` for an engine+version whose
     ``engine.instruction_delivery_registry`` mechanism is QUALIFIED via a
-    session/new-level ``_meta`` channel (today: claude-agent-acp 0.78.0's
-    real, code-confirmed ``_meta.systemPrompt`` -- see
-    ``engine.instruction_delivery_registry.ClaudeAgentAcp0_78Delivery``'s
-    own docstring for the full evidence chain). codex-acp's own mechanism
-    delivers via a leading ``session/prompt`` block instead (a different
-    channel, applied at prompt time, not here), so this is always ``None``
-    for codex-acp.
+    session/new-level ``_meta`` channel: Claude's native systemPrompt or
+    Cortex's exact-source-verified private codex-acp extension.  For both
+    pinned adapters the role text is absent from ordinary user prompt blocks;
+    recovery adds only the task capsule through the conversation channel.
     """
     if not instructions:
+        if engine == "claude-agent-acp" and version == "0.78.0":
+            from ..engine.claude_adapter_acp import claude_native_subagent_restriction_meta
+
+            return claude_native_subagent_restriction_meta()
         return None
     from ..engine.instruction_delivery_registry import delivery_for
     from ..portable.instruction_delivery import DeliveryQualification
@@ -338,6 +342,8 @@ class EngineSessionManagerAdapter:
         capacity_queue_timeout_seconds: float = 600.0,
         workspace_resolver: Callable[[str, Mapping[str, object]], str] | None = None,
         project_root_factory: Callable[[str], str] | None = None,
+        workspace_lock_factory: Callable[[], object] | None = None,
+        workspace_lock_timeout_seconds: float = 600.0,
         **manager_kwargs,
     ) -> None:
         self._connection_record_factory = connection_record_factory
@@ -367,6 +373,8 @@ class EngineSessionManagerAdapter:
         # task-wide shared root, so two attempts of the same task can
         # actually run against two different, non-overlapping directories.
         self._workspace_resolver = workspace_resolver
+        self._workspace_lock_factory = workspace_lock_factory
+        self._workspace_lock_timeout_seconds = workspace_lock_timeout_seconds
         self._environ = environ
         self._manager_kwargs = manager_kwargs
         self._store = store
@@ -378,6 +386,7 @@ class EngineSessionManagerAdapter:
         self._session_to_attempt: dict[str, str] = {}
         self._reservations: dict[str, str] = {}
         self._attempt_task: dict[str, str] = {}
+        self._workspace_locks: dict[str, object] = {}
         # T017 (fresh review, MEDIUM): a queued open must observe
         # cancellation promptly instead of polling forever.
         self._cancelled_attempts: set[str] = set()
@@ -468,6 +477,24 @@ class EngineSessionManagerAdapter:
         if requester is None:
             return None
         return requester(engine_session_id, params, timeout)
+
+    def _permission_receipt_sink(self, binding, action_ref, command, host_outcome):
+        """Persist only an actual, post-binding-check ACP host response.
+
+        A missing or mismatched session/attempt/task rejects the permission
+        at the bridge; the worker's report text has no way to create this
+        evidence. The row says `host_selected`, not that an unseen human
+        clicked a button in the client.
+        """
+        with self._lock:
+            attempt_id = self._session_to_attempt.get(binding.engine_session_id)
+            task_id = self._attempt_task.get(attempt_id) if attempt_id is not None else None
+        if not task_id or attempt_id != binding.attempt_id:
+            raise ValueError("permission response has no current task/attempt owner")
+        from . import evidence as delegation_evidence
+        delegation_evidence.record_permission_response(
+            self._store, task_id, attempt_id, action_ref, command, host_outcome,
+        )
 
     def _resolve_launch_install(self, record):
         """T035 follow-up ("a connection's launch command is trusted
@@ -606,7 +633,16 @@ class EngineSessionManagerAdapter:
         # confirmed-vs-ambiguous distinction this reuses verbatim from
         # ``terminate_owned``.
         manager = None
+        workspace_lock = None
         try:
+            # A direct project worker owns the project writer lock for the
+            # complete engine lifetime.  Taking it only around launch would
+            # allow two workers to edit the same ACP project concurrently.
+            if launch.get("assignment_id") and self._workspace_lock_factory is not None:
+                workspace_lock = self._workspace_lock_factory(
+                    timeout=self._workspace_lock_timeout_seconds
+                )
+                workspace_lock.__enter__()
             # T035 FINDING-13 #3: a cancellation that lands while this
             # attempt was only queued for capacity is already handled inside
             # _reserve_capacity_blocking (never reaches here at all); this
@@ -649,6 +685,12 @@ class EngineSessionManagerAdapter:
             # this fix -- until :meth:`set_runtime` has actually been called).
             if "host_permission_requester" not in manager_kwargs:
                 manager_kwargs["host_permission_requester"] = self._host_permission_requester
+            if "permission_receipt_sink" not in manager_kwargs:
+                manager_kwargs["permission_receipt_sink"] = self._permission_receipt_sink
+            if "coordinator_draft_write_authorizer" not in manager_kwargs:
+                manager_kwargs["coordinator_draft_write_authorizer"] = self._coordinator_draft_write_authorizer
+            if "worker_draft_write_authorizer" not in manager_kwargs:
+                manager_kwargs["worker_draft_write_authorizer"] = self._worker_draft_write_authorizer
             if "host_mcp_servers" not in manager_kwargs:
                 # The client's own MCP servers, so a coordinator and every
                 # worker see the same tools the user configured in their
@@ -658,6 +700,8 @@ class EngineSessionManagerAdapter:
                 getter = getattr(runtime, "host_mcp_servers_for_task", None)
                 if getter is not None:
                     manager_kwargs["host_mcp_servers"] = getter(task_id)
+            if "mcp_role" not in manager_kwargs:
+                manager_kwargs["mcp_role"] = "worker" if launch.get("assignment_id") else "coordinator"
             manager = EngineSessionManager(
                 record, workspace_root, environ=self._environ,
                 channel_credentials=channel_credentials,
@@ -666,11 +710,8 @@ class EngineSessionManagerAdapter:
             )
             manager.negotiate(_requested_capabilities())
             self._check_not_cancelled(attempt_id, task_id)
-            # T026: this engine's own qualified session/new _meta delivery
-            # channel (today: claude-agent-acp only -- see
-            # _session_new_meta_for's own docstring). codex-acp's own leading-
-            # block channel is applied at prompt time, not session/new, so this
-            # is always None for it.
+            # Both pinned adapters now receive their qualified session/new
+            # metadata. Codex also receives its tagged generation prompt.
             session_new_meta = _session_new_meta_for(record.engine, _pinned_version_for(record.engine), instructions)
             session_id = manager.create_session(
                 task_id, launch.get("assignment_id") or attempt_id, session_new_meta=session_new_meta,
@@ -683,6 +724,8 @@ class EngineSessionManagerAdapter:
             # session itself on a capture problem.
             self._capture_catalog_observation(manager, record, session_id)
         except BaseException:
+            if workspace_lock is not None:
+                workspace_lock.__exit__(None, None, None)
             self._cleanup_failed_open(manager, reservation_id)
             raise
         with self._lock:
@@ -692,6 +735,8 @@ class EngineSessionManagerAdapter:
             self._attempt_task[attempt_id] = task_id
             if reservation_id is not None:
                 self._reservations[attempt_id] = reservation_id
+            if workspace_lock is not None:
+                self._workspace_locks[attempt_id] = workspace_lock
             replacement = attempt_id in self._ever_opened_attempts or bool(launch.get("recovery"))
             self._ever_opened_attempts.add(attempt_id)
         if self._store is not None:
@@ -700,6 +745,7 @@ class EngineSessionManagerAdapter:
             self._record_route_audit(record, task_id, attempt_id, launch)
             self._open_generation(
                 manager, record, session_id, task_id, attempt_id, launch,
+                instructions=instructions,
                 cause="session_replacement" if replacement else "session_open",
             )
             self._bind_resource(manager, session_id, task_id, attempt_id, workspace_binding_id, workspace_root, launch)
@@ -799,6 +845,26 @@ class EngineSessionManagerAdapter:
             from ..catalog import store as catalog_store
 
             observation = catalog_discovery.parse_observation(raw)
+            # ACP's initial configOptions is a connection-level snapshot.  In
+            # Codex, the engine's effort selector is model-dependent, while
+            # the initial payload can contain one shared fallback set.  The
+            # prompt-free offline catalog is the only supported source that
+            # supplies the exact per-model ceilings; apply it here too (the
+            # normal refresh path already does this).  Without this merge a
+            # real worker session overwrote an enriched snapshot with the
+            # flat initial set, making Cortex's selector disagree with the
+            # native Paseo/Zed selector after every task.
+            if record.engine == "codex-acp":
+                from ..catalog import refresh as catalog_refresh
+
+                install = getattr(manager, "_install", None)
+                if install is None:
+                    install = catalog_refresh._resolve_install_for_refresh(record, self._environ)
+                ceilings = catalog_refresh._codex_effort_ceiling(
+                    record, install, self._environ, timeout=20.0,
+                )
+                if ceilings:
+                    observation = observation.with_model_thought_levels(ceilings)
             snapshot = catalog_discovery.build_catalog({record.id: record}, {record.id: observation})
             catalog_store.save_snapshot(snapshot, self._environ)
         except Exception:
@@ -1267,16 +1333,77 @@ class EngineSessionManagerAdapter:
                 return
             engine, model, effort = requested_engine, requested_model, requested_effort
         elif requested_engine is not None:
-            effort = policy.resolve_effort(role, requested_engine, requested_model, requested_effort)
-            engine, model = requested_engine, requested_model
+            model = requested_model
+            if model is None:
+                entries = policy.roles.get(role)
+                if entries is None:
+                    entries = policy.default
+                if entries is not None:
+                    first = next((entry for entry in entries if entry.engine == requested_engine), None)
+                    if first is not None and first.model != route_policy_module.WILDCARD:
+                        model = first.model
+            effort = policy.resolve_effort(role, requested_engine, model, requested_effort)
+            engine = requested_engine
         else:
             entries = policy.roles.get(role) or policy.default
             if not entries:
                 return
-            first = entries[0]
+            # Policy order is meaningful, but an unavailable engine is not a
+            # usable route.  Select the first policy entry whose engine has a
+            # configured, executable connection below.  This is deliberately
+            # only for an omitted request: an explicit engine request must
+            # still fail closed with ``engine_not_connected`` rather than
+            # silently switching engines.
+            from ..connections import registry as connection_registry
+
+            state = connection_registry.read_registry(self._environ)
+            launchable_engines = {
+                candidate.engine
+                for candidate in state.connections.values()
+                if candidate.launch_command is not None
+                and getattr(candidate.state, "value", candidate.state) == "configured"
+            }
+            # An omitted engine does not erase an explicit model or effort.
+            # In particular, a qualification policy that permits only Luna
+            # must reject a planner's requested Terra/low route before any
+            # engine is started, rather than silently replacing low with its
+            # policy default.
+            first = next(
+                (
+                    entry for entry in entries
+                    if entry.engine in launchable_engines
+                    and (requested_model is None or entry.model in (route_policy_module.WILDCARD, requested_model))
+                ),
+                None,
+            )
+            if first is None:
+                if requested_model is not None:
+                    available_entry = next(
+                        (entry for entry in entries if entry.engine in launchable_engines), None,
+                    )
+                    if available_entry is not None:
+                        # Raise the policy's precise model refusal rather
+                        # than misreporting a connected engine as absent.
+                        policy.resolve_effort(
+                            role, available_entry.engine, requested_model, requested_effort,
+                        )
+                allowed = ", ".join(entry.engine for entry in entries)
+                raise PortableError(
+                    category=PortableErrorCategory.VALIDATION,
+                    code="engine_not_connected",
+                    remediation=(
+                        f"role {role!r} has no configured, launchable connection for any "
+                        f"policy route ({allowed}); connect one of those engines before "
+                        "delegating this role."
+                    ),
+                    retry_eligible=False,
+                    field="engine",
+                )
             engine = first.engine
-            model = None if first.model == route_policy_module.WILDCARD else first.model
-            effort = first.default_effort
+            model = requested_model if requested_model is not None else (
+                None if first.model == route_policy_module.WILDCARD else first.model
+            )
+            effort = policy.resolve_effort(role, engine, model, requested_effort)
         from ..connections import registry as connection_registry
         from ..portable.errors import PortableError, PortableErrorCategory
 
@@ -1290,10 +1417,33 @@ class EngineSessionManagerAdapter:
         # fallback). This only ever needs to know whether the requested
         # engine has *a* connection at all.
         state = connection_registry.read_registry(self._environ)
-        connection_id = next(
-            (candidate_id for candidate_id, candidate in state.connections.items() if candidate.engine == engine),
-            None,
-        )
+        # A registry may contain more than one connection for an engine.  In
+        # particular, a client-discovered API-key placeholder can precede the
+        # operator-pinned native connection and have ``launch_command=None``.
+        # Selecting the first engine match made a worker inherit that
+        # unusable record even when a valid ACP install was registered later.
+        # Resolve the route to a launchable record here; ``EngineProcess``
+        # remains the final fail-closed check for the exact command.
+        coordinator_connection_id = launch.get("coordinator_route_connection_id")
+        exact = state.connections.get(coordinator_connection_id) if coordinator_connection_id else None
+        if exact is not None and exact.engine == engine and exact.launch_command is not None:
+            # Preserve the task's selected account whenever the policy keeps
+            # the worker on that engine.  A policy entry names an engine/model,
+            # not permission to silently switch the account behind the task.
+            connection_id = exact.id
+        else:
+            # An explicitly policy-selected alternate engine has no exact
+            # task route identity to inherit, so resolve it to a launchable
+            # connection.  Never choose a discovery placeholder lacking an
+            # executable command.
+            connection_id = next(
+                (
+                    candidate_id
+                    for candidate_id, candidate in state.connections.items()
+                    if candidate.engine == engine and candidate.launch_command is not None
+                ),
+                None,
+            )
         if connection_id is None:
             raise PortableError(
                 category=PortableErrorCategory.VALIDATION,
@@ -1400,6 +1550,12 @@ class EngineSessionManagerAdapter:
             # this attempt is actually recorded as having used -- never a
             # silent substitution the audit trail would miss.
             launch["parameters"] = dict(parameters, effort=resolved_effort)
+            # Keep the provenance explicit.  A policy default is an effective
+            # launch value, but it must never be presented as if the user had
+            # selected it in the task configuration revision.
+            launch["effort_source"] = "route_policy_default"
+        elif requested_effort is not None:
+            launch["effort_source"] = "configuration_or_request"
 
     def _record_malformed_route_policy(self, task_id, detail) -> None:
         """D-T035-03: a route policy file that exists but cannot be read or
@@ -1459,6 +1615,7 @@ class EngineSessionManagerAdapter:
         effort = attempt_parameters.get("effort") or attempt_parameters.get("thought_level")
         if effort:
             detail["effort"] = effort
+            detail["effort_source"] = launch.get("effort_source") or "launch_parameters"
         if is_fallback:
             detail["failure_class"] = launch.get("fallback_failure_class")
         routing_store.record_attempt_audit(
@@ -1468,7 +1625,7 @@ class EngineSessionManagerAdapter:
             detail=detail, predecessor_attempt_id=launch.get("fallback_of"),
         )
 
-    def _open_generation(self, manager, record, session_id, task_id, attempt_id, launch, *, cause: str) -> None:
+    def _open_generation(self, manager, record, session_id, task_id, attempt_id, launch, *, instructions: str, cause: str) -> None:
         from . import generations as delegation_generations
 
         recipient = "worker" if launch.get("assignment_id") else "coordinator"
@@ -1506,10 +1663,46 @@ class EngineSessionManagerAdapter:
             self._store, task_id=task_id, engine_session_ref=session_id, recipient=recipient,
             cause=cause, evidence_source=f"engine_session_manager:{cause}", assignment_ref=assignment_ref,
         )
+        from ..portable.instruction_bundle import (
+            InstructionBundleLedger, InstructionSource, capture_instruction_bundle,
+        )
+
+        role_id = str(launch.get("role_id") or ("orchestrator" if recipient == "coordinator" else "worker-general"))
+        from ..portable.roles import load_role
+
+        # The canonical role is an independently versioned source.  The
+        # assembled text below records exactly what this adapter selected;
+        # engine- or client-loaded instructions outside Cortex are not
+        # observable through this ledger.
+        role = load_role(role_id)
+        bundle = capture_instruction_bundle(
+            task_id=task_id, assignment_ref=assignment_ref or "task", attempt_id=attempt_id,
+            role_id=role_id, role_kind=recipient, engine=record.engine, engine_version=version,
+            assembled_text=instructions,
+            sources=(
+                InstructionSource.from_content(f"role:{role.role_id}", "canonical_role",
+                                               role.body_portable, version=role.sha256,
+                                               provenance=role.source_path),
+                InstructionSource.from_content("assembled_role_instructions", "adapter_assembly",
+                                               instructions, provenance="runtime_role_assembly"),
+                InstructionSource.from_content("context_generation", "runtime_generation", generation["id"],
+                                               version=generation["id"], provenance="context_generations"),
+            ),
+        )
+        ledger = InstructionBundleLedger(self._store)
+        ledger.save_intended(bundle)
+        meta = _session_new_meta_for(record.engine, version, instructions)
+        if meta is not None:
+            import json
+
+            ledger.record_sent(bundle, json.dumps(meta, sort_keys=True, ensure_ascii=False),
+                               engine=record.engine, engine_version=version,
+                               attempt_id=attempt_id, session_ref=session_id)
         with self._lock:
             self._session_meta[session_id] = dict(
                 task_id=task_id, attempt_id=attempt_id, engine=record.engine, version=version,
                 recipient=recipient, assignment_ref=assignment_ref, tier=tier.tier,
+                instructions=instructions, connection_id=record.id, instruction_bundle_id=bundle.bundle_id,
             )
             self._pending_generation[session_id] = generation
 
@@ -1602,6 +1795,132 @@ class EngineSessionManagerAdapter:
         )
         return record["id"]
 
+    def _coordinator_draft_write_authorizer(self, engine_session_id, binding, params) -> bool:
+        """Authorize one declared edit of this coordinator's active pipeline draft.
+
+        Claude's native Write asks permission with kind=edit, an absolute
+        rawInput.file_path and the same locations path. The ordinary
+        coordinator edit refusal remains in force for every other target.
+        The database, not a path prefix or tool title, supplies ownership.
+        """
+        if self._store is None or binding.role != "coordinator":
+            return False
+        tool_call = params.get("toolCall") if isinstance(params, dict) else None
+        if not isinstance(tool_call, dict) or tool_call.get("kind") != "edit":
+            return False
+        raw = tool_call.get("rawInput")
+        if not isinstance(raw, dict) or not isinstance(raw.get("file_path"), str):
+            return False
+        target = raw["file_path"]
+        # Reject alternate path declarations, including a second location.
+        # The observed Claude Write uses precisely file_path and locations.
+        for key in ("path", "filePath", "abs_path", "absolutePath", "target", "destination"):
+            if key in raw:
+                return False
+        locations = tool_call.get("locations")
+        if not isinstance(locations, list) or len(locations) != 1 or not isinstance(locations[0], dict):
+            return False
+        if locations[0].get("path") != target:
+            return False
+        with self._lock:
+            meta = self._session_meta.get(engine_session_id)
+        if meta is None or meta.get("recipient") != "coordinator" or meta.get("attempt_id") != binding.attempt_id:
+            return False
+        task_id = meta.get("task_id")
+        if not task_id:
+            return False
+        with self._store.connection() as db:
+            row = db.execute(
+                "SELECT d.path, t.project_root FROM drafts d "
+                "JOIN tasks t ON t.id=d.task_id "
+                "JOIN thread_bindings b ON b.task_id=d.task_id AND b.thread_id=d.owner_thread_id "
+                "WHERE d.task_id=? AND d.path=? AND d.kind='pipeline' "
+                "AND d.published_report_id IS NULL AND b.parent_thread_id IS NULL",
+                (task_id, target),
+            ).fetchone()
+        if row is None:
+            return False
+        project = Path(row["project_root"])
+        expected = project / ".cortex" / "pipeline-drafts" / Path(target).name
+        if target != str(expected) or not project.is_absolute() or str(project.resolve()) != str(project):
+            return False
+        try:
+            parent = expected.parent
+            if parent.is_symlink() or parent.parent.is_symlink():
+                return False
+            for directory in (parent.parent, parent):
+                directory_info = directory.lstat()
+                if (not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid()
+                        or stat.S_IMODE(directory_info.st_mode) & 0o077):
+                    return False
+            info = expected.lstat()
+        except OSError:
+            return False
+        return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+
+    def _worker_draft_write_authorizer(self, engine_session_id, binding, params) -> bool:
+        """Authorize one exact edit of this worker's active report draft.
+
+        Claude's native Write declares an absolute ``rawInput.file_path`` and
+        matching ``locations`` entry.  The draft must be unpublished, owned by
+        the trusted worker channel for this assignment, and an owner-owned
+        regular file in the project store.  Other private-store access stays
+        denied and deletion/move requests never enter this exception.
+        """
+        if self._store is None or binding.role != "worker":
+            return False
+        tool_call = params.get("toolCall") if isinstance(params, dict) else None
+        if not isinstance(tool_call, dict) or tool_call.get("kind") != "edit":
+            return False
+        raw = tool_call.get("rawInput")
+        if not isinstance(raw, dict) or not isinstance(raw.get("file_path"), str):
+            return False
+        target = raw["file_path"]
+        for key in ("path", "filePath", "abs_path", "absolutePath", "target", "destination"):
+            if key in raw:
+                return False
+        locations = tool_call.get("locations")
+        if not isinstance(locations, list) or len(locations) != 1 or not isinstance(locations[0], dict):
+            return False
+        if locations[0].get("path") != target:
+            return False
+        with self._lock:
+            meta = self._session_meta.get(engine_session_id)
+        if meta is None or meta.get("recipient") != "worker" or meta.get("attempt_id") != binding.attempt_id:
+            return False
+        task_id = meta.get("task_id")
+        if not task_id:
+            return False
+        with self._store.connection() as db:
+            row = db.execute(
+                "SELECT d.path, t.project_root FROM drafts d "
+                "JOIN tasks t ON t.id=d.task_id "
+                "JOIN trusted_channels c ON c.task_id=d.task_id "
+                "AND c.principal_thread_id=d.owner_thread_id "
+                "WHERE d.task_id=? AND d.path=? AND d.kind='report' "
+                "AND d.published_report_id IS NULL AND c.role='worker' "
+                "AND c.assignment_id=? AND c.attempt_id=?",
+                (task_id, target, binding.assignment_id, binding.attempt_id),
+            ).fetchone()
+        if row is None:
+            return False
+        project = Path(row["project_root"])
+        expected = project / ".cortex" / "draft-reports" / Path(target).name
+        if target != str(expected) or not project.is_absolute() or str(project.resolve()) != str(project):
+            return False
+        try:
+            parent = expected.parent
+            if parent.is_symlink() or parent.parent.is_symlink():
+                return False
+            for directory in (parent.parent, parent):
+                info = directory.lstat()
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+                    return False
+            info = expected.lstat()
+        except OSError:
+            return False
+        return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+
     def _notify_coordinator_refusal(self, engine_session_id: str, reason: str) -> None:
         """T035 FINDING-12 closure: ``engine.permissions.PermissionBridge``'s
         ``coordinator_refusal_notifier`` seam. ACP's ``RequestPermissionResponse``
@@ -1612,9 +1931,11 @@ class EngineSessionManagerAdapter:
         ._emit_localized`` already uses for every other runtime-authored
         status line), which ``_render_continuation_text`` renders as
         ``"Progress: <note>"`` the next time this task's coordinator session
-        is prompted. Never delivered synchronously inside the
-        already-in-flight turn the refusal happened on -- ACP has no
-        channel for that either. Best-effort, same as
+        is prompted. Role refusals carry a meaningful kind so the
+        orchestration loop starts that continuation in the same host turn;
+        other informational refusal notices remain non-meaningful. Nothing
+        is injected synchronously into the in-flight ACP permission reply.
+        Best-effort, same as
         :meth:`_persist_terminal_output`: a session with no recorded meta
         (or no store at all) is silently a no-op rather than raising into
         the permission bridge, which must never let a notifier failure
@@ -1627,10 +1948,24 @@ class EngineSessionManagerAdapter:
             return
         from . import events as delegation_events
         from ..portable.identity import new_id
+        from ..engine.permissions import (
+            COORDINATOR_EDIT_REFUSAL_REASON,
+            COORDINATOR_PRIVATE_OR_CHECK_REFUSAL_REASON,
+        )
 
         delegation_events.append_event(
             self._store, meta["task_id"], "progress", f"progress:{new_id('p_')}",
-            dict(note=reason, message_key="coordinator_mutation_refused", message_params={}),
+            dict(
+                note=reason,
+                kind=(
+                    "coordinator_role_refusal"
+                    if reason in (
+                        COORDINATOR_EDIT_REFUSAL_REASON,
+                        COORDINATOR_PRIVATE_OR_CHECK_REFUSAL_REASON,
+                    ) else None
+                ),
+                message_key="coordinator_mutation_refused", message_params={},
+            ),
             origin="runtime",
         )
 
@@ -1670,13 +2005,15 @@ class EngineSessionManagerAdapter:
                     origin="runtime",
                 )
                 queued_note_recorded = True
-            if delegation_capacity.count_active(self._store, connection_id) >= limit and kind == "worker":
+            if kind == "worker":
                 # T017 (fresh review, MEDIUM starvation): if every active
                 # reservation on this connection is a *coordinator*'s own
                 # (permanent-for-task-lifetime) reservation, this worker can
                 # never succeed no matter how long it waits -- fail fast and
-                # explicitly instead of queueing forever.
-                if delegation_capacity.all_active_are_kind(self._store, connection_id, "coordinator"):
+                # explicitly instead of queueing forever. Count and kinds
+                # must come from one snapshot: a release between separate
+                # reads could otherwise produce a false unsatisfiable result.
+                if delegation_capacity.saturated_by_coordinators(self._store, connection_id, limit):
                     raise QueuedOpenCancelled("capacity_unsatisfiable")
             if time.monotonic() > deadline:
                 raise QueuedOpenCancelled("capacity_timeout")
@@ -1813,6 +2150,17 @@ class EngineSessionManagerAdapter:
             self._session_meta.pop(session_id, None) if session_id is not None else None
             self._pending_generation.pop(session_id, None) if session_id is not None else None
             self._session_configured_revision.pop(session_id, None) if session_id is not None else None
+            # Keep the lock associated with the attempt until shutdown has
+            # been positively observed.  An ambiguous/timeout termination
+            # must quarantine the project against a new writer in this
+            # adapter; releasing here would let a still-running engine edit
+            # concurrently with the next worker.
+            # A few recovery-only test/compatibility adapters are built via
+            # ``__new__`` and predate direct-project locking. Missing state
+            # means there is no lock to retain, never an error during
+            # termination reconciliation.
+            workspace_locks = getattr(self, "_workspace_locks", None)
+            workspace_lock = workspace_locks.get(attempt_id) if workspace_locks is not None else None
         if manager is not None:
             manager.shutdown(grace=2.0)
             exited = None
@@ -1851,6 +2199,20 @@ class EngineSessionManagerAdapter:
                 reservation_id = delegation_capacity.reservation_for_attempt(self._store, attempt_id)
         else:
             exited = None
+        if workspace_lock is not None:
+            if exited:
+                workspace_lock.__exit__(None, None, None)
+                if workspace_locks is not None:
+                    with self._lock:
+                        workspace_locks.pop(attempt_id, None)
+            else:
+                # Deliberately retain the open advisory lock as a local
+                # quarantine.  A later open will fail closed at the bounded
+                # acquisition timeout until the ambiguous process is
+                # reconciled and this attempt is explicitly released.
+                if workspace_locks is not None:
+                    with self._lock:
+                        workspace_locks[attempt_id] = workspace_lock
         if self._store is not None and session_id is not None:
             from . import deliveries as delegation_deliveries
 
@@ -1969,7 +2331,9 @@ class EngineSessionManagerAdapter:
             return None
         return dict(
             generation=generation, recipient=meta["recipient"], task_id=meta["task_id"],
-            attempt_id=meta.get("attempt_id"),
+            attempt_id=meta.get("attempt_id"), engine=meta.get("engine"),
+            version=meta.get("version"), instructions=meta.get("instructions"),
+            connection_id=meta.get("connection_id"),
         )
 
     def begin_delivery(self, session_ref: str, capsule_revision: str) -> dict | None:
@@ -2044,6 +2408,7 @@ class EngineSessionManagerAdapter:
         on_delta: Callable[[str], bool] | None = None,
         on_tool_call: Callable[..., None] | None = None,
         on_display_update: Callable[[dict], None] | None = None,
+        prompt_blocks=None,
     ):
         """T035 visibility fix: ``on_delta``, when given, is called with each
         ``TURN_DELTA`` chunk's text the moment it is yielded by
@@ -2116,7 +2481,23 @@ class EngineSessionManagerAdapter:
         watcher = threading.Thread(target=_watch_for_cancel, name="engine-cancel-watch", daemon=True)
         watcher.start()
         try:
-            for event in manager.prompt_turn(session_ref, message):
+            instruction_delivery_observed = False
+            for event in manager.prompt_turn(session_ref, message, prompt_blocks=prompt_blocks):
+                if not instruction_delivery_observed and self._store is not None:
+                    instruction_delivery_observed = True
+                    with self._lock:
+                        bundle_id = (getattr(self, "_session_meta", {}).get(session_ref) or {}).get(
+                            "instruction_bundle_id"
+                        )
+                    if bundle_id:
+                        from ..portable.instruction_bundle import InstructionBundleLedger
+
+                        ledger = InstructionBundleLedger(self._store)
+                        bundle = ledger.get(bundle_id)
+                        if bundle is not None and not bundle.delivery_bound:
+                            ledger.record_sent(bundle, message, engine=bundle.engine,
+                                               engine_version=bundle.engine_version,
+                                               attempt_id=bundle.attempt_id, session_ref=session_ref)
                 if cancel_event.is_set() and not _cancel_sent.is_set():
                     from .. import _fault_injection
 
@@ -2176,6 +2557,7 @@ class EngineSessionManagerAdapter:
                                 event.tool_call_ref, event.tool_call_kind,
                                 event.tool_call_title, event.tool_call_status,
                                 event.tool_call_locations, event.tool_call_content,
+                                event.tool_call_raw_input, event.tool_call_raw_output,
                             )
                         except Exception:  # noqa: BLE001 - best-effort, never fails the turn
                             pass

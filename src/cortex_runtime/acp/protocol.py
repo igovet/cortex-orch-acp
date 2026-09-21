@@ -3,13 +3,13 @@
 Only ``protocolVersion`` 1 is supported. Advertised capabilities are
 intentionally minimal and accurate: (T018) ``loadSession`` true --
 ``session/load`` is implemented, *display-only* (see
-``acp.replay_store.replay_session``/``acp.agent.Agent._session_load``); no
-image/audio prompt content (still unadvertised, still rejected -32602);
+``acp.replay_store.replay_session``/``acp.agent.Agent._session_load``);
+image prompt content is supported; audio remains unadvertised and rejected;
 ``embeddedContext`` true -- an ``EmbeddedResource`` (``resource``) prompt
 content block is now accepted and durably stored/rejected with truthful
 availability metadata (see ``acp.replay_store.resolve_prompt_blocks``); no
 HTTP/SSE MCP transport; no other session lifecycle features
-(resume/fork/close/list/set_mode -- see ``docs/acp/input-history-and-replay.md``
+(resume/fork/close/list -- see ``docs/acp/input-history-and-replay.md``
 for why ``session/resume`` stays unsupported); and no client-request code
 path (no ``fs/*``, ``terminal/*``, or ``request_permission`` is ever emitted
 -- see ``agent.Agent``, which never constructs one).
@@ -21,16 +21,20 @@ deliberately absent from ``UNSUPPORTED_METHODS`` below -- see
 ``agent.Agent._session_set_config_option`` and ``acp.config_options``/
 ``acp.commands`` for the truthful configuration-option/selector logic
 itself (this module only shapes/validates the wire messages).
+``session/set_mode`` is supported for Paseo's coordinator-language selector;
+Zed keeps the ordinary ``language`` config option.
 """
 from __future__ import annotations
 
 PROTOCOL_VERSION = 1
+MAX_IMAGE_BYTES = 1 * 1024 * 1024
+MAX_IMAGE_ENCODED_BYTES = ((MAX_IMAGE_BYTES + 2) // 3) * 4
 
 # Methods this agent recognizes as valid ACP method names but does not
 # support in T009 (no invented "standard" methods; every one of these is a
 # real ACP v1 method this agent simply doesn't advertise/implement yet).
 UNSUPPORTED_METHODS = frozenset({
-    "session/resume", "session/set_mode",
+    "session/resume",
     "session/list", "session/fork", "session/close",
     "authenticate",
 })
@@ -69,13 +73,13 @@ def initialize_result(agent_version):
 
     T018: ``loadSession``/``embeddedContext`` are now true, matching the
     implemented (display-only) ``session/load`` and ``resource`` content
-    block support; ``image``/``audio`` stay false (still unimplemented,
-    still rejected -32602)."""
+    block support. Image content is forwarded as opaque bytes; audio remains
+    unsupported."""
     return dict(
         protocolVersion=PROTOCOL_VERSION,
         agentCapabilities=dict(
             loadSession=True,
-            promptCapabilities=dict(image=False, audio=False, embeddedContext=True),
+            promptCapabilities=dict(image=True, audio=False, embeddedContext=True),
             mcpCapabilities=dict(http=False, sse=False),
         ),
         authMethods=[],
@@ -160,6 +164,14 @@ def validate_set_config_option_params(params):
     return params["sessionId"], params["configId"], "value_id", value
 
 
+def validate_set_mode_params(params):
+    if not isinstance(params, dict) or not isinstance(params.get("sessionId"), str) or not params["sessionId"]:
+        raise RpcError(-32602, "session/set_mode requires a non-empty string sessionId.")
+    if not isinstance(params.get("modeId"), str) or not params["modeId"]:
+        raise RpcError(-32602, "session/set_mode requires a non-empty string modeId.")
+    return params["sessionId"], params["modeId"]
+
+
 def set_config_option_response(config_options):
     return dict(configOptions=list(config_options))
 
@@ -189,8 +201,8 @@ def content_blocks_to_text(blocks):
     ``text`` (never the resource body itself, which is a stored/rejected
     *attachment*, not user-typed text; see
     ``acp.replay_store.resolve_prompt_blocks``, invoked separately over the
-    same raw ``blocks`` by ``acp.agent``). ``image``/``audio`` remain
-    rejected with ``-32602`` (still unadvertised).
+    same raw ``blocks`` by ``acp.agent``). Image blocks contribute a marker
+    here while their exact bytes are handled separately; audio is rejected.
     """
     if not isinstance(blocks, list) or not blocks:
         raise RpcError(-32602, "prompt must be a non-empty array of content blocks.")
@@ -216,27 +228,51 @@ def content_blocks_to_text(blocks):
             if not isinstance(resource.get("text"), str) and not isinstance(resource.get("blob"), str):
                 raise RpcError(-32602, "A resource content block needs an embedded 'text' or 'blob' field.")
             parts.append(f"[resource: {resource['uri']}]")
+        elif kind == "image":
+            import base64
+            if not isinstance(block.get("data"), str) or not block["data"]:
+                raise RpcError(-32602, "An image content block needs a non-empty base64 data string.")
+            if not isinstance(block.get("mimeType"), str) or not block["mimeType"].startswith("image/"):
+                raise RpcError(-32602, "An image content block needs an image/* mimeType.")
+            if len(block["data"]) > MAX_IMAGE_ENCODED_BYTES:
+                raise RpcError(-32602, "An image content block exceeds Cortex's 1 MiB limit.")
+            try:
+                base64.b64decode(block["data"], validate=True)
+            except Exception:
+                raise RpcError(-32602, "An image content block data field must be standard base64.")
+            parts.append(f"[image: {block['mimeType']}]")
         else:
             raise RpcError(
                 -32602,
                 f"Content block type '{kind}' is not accepted; only text, "
-                "resource_link, and resource are supported (no image/audio "
-                "prompt capability is advertised).",
+                "resource_link, resource, and image are supported; audio is "
+                "not supported.",
             )
     return "\n".join(parts)
 
 
-def agent_message_chunk(session_id, text):
+def agent_message_chunk(session_id, text, message_id=None):
+    content = dict(type="text", text=text)
+    update = dict(sessionUpdate="agent_message_chunk", content=content)
+    # ACP clients use update.messageId to coalesce streamed content into one
+    # timeline message. Keep it optional for compatibility with isolated
+    # notifications.
+    if message_id is not None:
+        update["messageId"] = message_id
     return notification("session/update", dict(
         sessionId=session_id,
-        update=dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text=text)),
+        update=update,
     ))
 
 
-def user_message_chunk(session_id, text):
+def user_message_chunk(session_id, text, message_id=None):
+    content = dict(type="text", text=text)
+    update = dict(sessionUpdate="user_message_chunk", content=content)
+    if message_id is not None:
+        update["messageId"] = message_id
     return notification("session/update", dict(
         sessionId=session_id,
-        update=dict(sessionUpdate="user_message_chunk", content=dict(type="text", text=text)),
+        update=update,
     ))
 
 
@@ -244,7 +280,8 @@ def _tool_call_text_content(text):
     return [dict(type="content", content=dict(type="text", text=text))]
 
 
-def tool_call(session_id, tool_call_id, title, kind, status, *, text=None, locations=None, content=None):
+def tool_call(session_id, tool_call_id, title, kind, status, *, text=None, locations=None, content=None,
+              raw_input=None, raw_output=None):
     """A brand-new ``ToolCall`` (T035 worker-assignment cards): one per
     delegated assignment, keyed by a caller-chosen stable ``tool_call_id``
     (see ``acp.orchestrating_runtime``'s per-assignment id derivation) so
@@ -265,10 +302,15 @@ def tool_call(session_id, tool_call_id, title, kind, status, *, text=None, locat
         update["content"] = _tool_call_text_content(text)
     if locations:
         update["locations"] = list(locations)
+    if raw_input is not None:
+        update["rawInput"] = raw_input
+    if raw_output is not None:
+        update["rawOutput"] = raw_output
     return notification("session/update", dict(sessionId=session_id, update=update))
 
 
-def tool_call_update(session_id, tool_call_id, *, status=None, title=None, text=None, locations=None, content=None):
+def tool_call_update(session_id, tool_call_id, *, status=None, title=None, text=None, locations=None,
+                     content=None, raw_input=None, raw_output=None):
     """A ``ToolCallUpdate`` for an already-created card (see :func:`tool_call`
     above) -- only the fields actually changing are included, per the pinned
     schema's own "all fields except the tool call ID are optional" contract."""
@@ -283,6 +325,10 @@ def tool_call_update(session_id, tool_call_id, *, status=None, title=None, text=
         update["content"] = _tool_call_text_content(text)
     if locations:
         update["locations"] = list(locations)
+    if raw_input is not None:
+        update["rawInput"] = raw_input
+    if raw_output is not None:
+        update["rawOutput"] = raw_output
     return notification("session/update", dict(sessionId=session_id, update=update))
 
 

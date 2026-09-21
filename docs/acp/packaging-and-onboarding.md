@@ -47,21 +47,11 @@ plugin): `cortex-dev` (the isolated-candidate CLI-before-Desktop preparer;
 already non-functional — it imported the deleted `cortex_runtime.runtime.state`
 and ran a `prepare_codex.py` that no longer exists), `cortex-live-capture-sink`
 (its only caller), and `cortex_dev_config.py` (its `mcp_servers`/isolated-profile
-opt-in was reachable only through `cortex-dev`). `cortex-desktop-dev` and
-`cortex-live-smoke` are kept, unrun: their `start`/`send`/`stop` launch paths
-are equally non-functional against the removed harness, but their pure
-policy/audit-classification functions (`worker_model_policy`,
-`call_policy_violations`, `current_host_audit_exit_code`, decision-coordination
-checks, including the `phase2-cli-*` receipt schema names referenced from
-SECURITY.md and `tests/test_package.py`) remain the only existing reference
-implementation and regression-tested specification this project holds for
-those rules, exercised by `tests/test_model_policy.py`,
-`tests/test_decision_coordination.py`, `tests/test_observer_evaluation_v2.py`,
-`tests/test_senior_consultant.py`, `tests/test_native_worker_result_fallback.py`,
-`tests/test_diagnostic_boundary.py` and `tests/test_advisory_lane.py`. Neither
-file is a current procedure; see AGENTS.md's "Historical: Codex-plugin/
-native-subagent CLI-before-Desktop qualification procedure" for the retired
-instructions that used to name them.
+opt-in was reachable only through `cortex-dev`). The old `cortex-desktop-dev`
+and `cortex-live-smoke` launchers and their observer-only tests were removed in
+the ACP cleanup. Real-client
+qualification is defined by the ACP runbook and retains real client
+observations; no retired native CLI/Desktop harness is a current reference.
 
 ### Launch-time environment variables
 
@@ -70,14 +60,14 @@ instructions that used to name them.
 | `HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | `cortex_runtime.connections.registry` and everything built on it (connections, catalog, user defaults) | ACP path, stays |
 | `CORTEX_OBSERVATION_DIR` | `cortex_runtime.observability`/diagnostics logging sink | ACP path, stays |
 | `CODEX_HOME` | Native codex-acp/codex CLI isolation directory | ACP path (isolation) stays; the native-profile-registration use (`cortex_setup.py`) was Codex-harness-era and was removed at T033 |
-| `CORTEX_DEPENDENCY_DIR` | Was `marketplace_bootstrap.py`'s pinned pip-install target | Codex-harness-era (gateway only); removed at T033, including from `.mcp.json`'s `env_vars` |
+| `CORTEX_DEPENDENCY_DIR` | Was `marketplace_bootstrap.py`'s pinned pip-install target | Codex-harness-era (gateway only); removed at T033 |
 
 ## Pinned dependencies
 
 `./pinned-dependencies.json` is the single manifest for:
 
 - the Python version floor (currently 3.11+, matching
-  `docs/project/conventions.md`);
+  the Python version declared by the current runtime environment);
 - this package's own portable contract version
   (`cortex_runtime.portable.version.CONTRACT_VERSION`);
 - the vendored ACP schema fixture's pinned sha256
@@ -110,13 +100,17 @@ python3 -B scripts/cortex_acp_setup.py init-storage
 python3 -B scripts/cortex_acp_setup.py add-connection \
     --name work --engine codex-acp --provider openai \
     --auth-mode api_key --key-kind openai_api_key \
-    --api-key-file /path/to/key.txt      # never inline on argv
+    --api-key-file /path/to/key.txt \
+    --install-record /path/to/codex-install-record.json  # never inline secrets on argv
+python3 -B scripts/cortex_acp_setup.py validate-connection \
+    --connection cn_xxxxxxxxxxxx
 python3 -B scripts/cortex_acp_setup.py pin-route \
     --connection cn_xxxxxxxxxxxx --model gpt-5-codex
 python3 -B scripts/cortex_acp_setup.py record-observation \
     --connection cn_xxxxxxxxxxxx --model gpt-5-codex \
     --config-options-file /path/to/observed-config-options.json
 python3 -B scripts/cortex_acp_setup.py print-client-recipes
+python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
 ```
 
 - **`init-storage`** creates/verifies the owner-private
@@ -131,7 +125,13 @@ python3 -B scripts/cortex_acp_setup.py print-client-recipes
   logs or prints it. A native-account connection instead prints
   non-secret instructions (the isolated directory + env var name) for the
   user's own login flow, run entirely outside Cortex; Cortex never
-  collects or stores that credential itself.
+  collects or stores that credential itself. `--install-record` is required
+  and is verified for the selected engine before the registry is mutated;
+  it must contain the exact JSON fields for that engine and never contains
+  credentials.
+- **`validate-connection`** recomputes one connection's current state and
+  prints only its id, engine, state, and qualification flag. It never prints
+  credential paths or values.
 - **`pin-route`** declares one hand-picked, already-qualified
   `(engine, auth_mode, model)` combination (never a live engine probe —
   see `catalog.discovery.ManualDeclaration`; only a documented/qualified
@@ -225,6 +225,70 @@ See [zed-custom-agent.md](zed-custom-agent.md) and
 [codeg-custom-agent.md](codeg-custom-agent.md) (T011) for the full
 recipes; `scripts/cortex_acp_setup.py print-client-recipes` prints both
 without writing anything unless explicitly told to.
+
+### Paseo provider plugin
+
+Run one explicit setup command:
+
+```bash
+python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
+```
+
+After changing the plugin, use the repository helper while Paseo is already
+running:
+
+```bash
+scripts/update-paseo-plugin.sh
+```
+
+It restamps the package, installs/reloads the repository-owned provider, and
+checks that it is running. It does not start or stop Paseo and does not touch
+accounts, chats, or project-local `.cortex` stores. Set `CORTEX_PASEO_CLI` if
+the Paseo executable is not on `PATH`.
+
+`install-paseo-plugin` is the single explicit Cortex-on-Paseo installation
+step. It validates the repository-owned `integrations/paseo` source and its
+generated SHA-256 integrity record, enables the Paseo daemon plugin switch
+only for this explicit setup action, installs or reloads the `cortex-acp`
+provider, and verifies that the daemon reports it as `running`. It is
+idempotent and preserves unrelated Paseo plugins and configuration keys.
+Setup also writes the owner-private `HOME/.config/cortex/paseo-plugin-launch.json`
+record with the absolute Cortex entrypoint and the non-secret `HOME`,
+`XDG_CONFIG_HOME`, and `XDG_STATE_HOME` roots used by setup. The HOME-based
+locator remains stable when a daemon restarts with a different XDG
+environment. The provider applies those roots when it starts Cortex after a Paseo daemon restart, so the same connection
+registry, catalog, and native-account state remain visible even when Paseo
+was launched from a desktop environment with a different shell environment.
+The record also names the repository-owned Paseo 0.8 `session/load` stdio
+compatibility shim. Setup upgrades older argv-only records; a record without
+the shim is rejected instead of silently launching an unpatched restart path.
+The record contains no credentials and does not copy native account files.
+Older argv-only records are upgraded by rerunning setup.
+Its parent directories must be real, current-user-owned, owner-only
+directories; setup refuses symlinked ancestors and uses exclusive private
+temporary files for replacement. Setup also verifies that the daemon config is
+current-user-owned and repairs group/world-readable mode bits before reading
+it, without printing unrelated config keys.
+The command never runs implicitly during an ACP session. After installation,
+Paseo exposes the native Cortex provider; no separate generic ACP provider
+registration is required for Paseo. The source hash is regenerated by
+`python3 -B scripts/cortex_package.py stamp` and checked by package
+validation. Paseo plugin code is trusted, unsandboxed daemon code, so this
+explicit setup command is the required installation boundary.
+
+The plugin manifest is named `cortex-acp`, but its registered Paseo provider
+identity is `cortex` for new chats. The installer removes only the exact
+repository-owned generic `cortex` entry after the plugin is running and saves
+an owner-only configuration backup. Old generic chats may become inaccessible
+after this migration; legacy chat compatibility is not guaranteed.
+
+For catalog checks such as `paseo provider models cortex --json`, start or
+restart the isolated Paseo daemon from the disposable project directory. Paseo
+runs the provider's ACP `session/new` from the daemon's inherited cwd; if that
+cwd is this Cortex checkout (whose `.cortex` store belongs to another project),
+Cortex correctly fails closed with `project_storage_mismatch`. This is a
+project-identity check, not a provider fallback; use the exact disposable
+project intended for the qualification run.
 
 ## Prepared-but-not-published for the Registry
 

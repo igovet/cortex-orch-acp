@@ -1,6 +1,8 @@
-# Current Pipeline
+# Pipeline decision basis
 
-{{CURRENT_OBJECTIVE_AND_STATUS}}
+<!-- This edition records the objective and evidence for a task decision. Do not put a momentary task status or an acceptance step here; the durable task decision and state record the outcome. -->
+
+{{CURRENT_OBJECTIVE_AND_DECISION_BASIS}}
 
 ## Requirements and constraints
 
@@ -18,33 +20,10 @@
 
 {{CURRENT_EVIDENCE_AND_VERIFICATION}}
 
-## Model-owned state and evidence reuse
+## State and evidence links
 
-<!-- Record implementation_state, delivery_state, and coordinator-owned acceptance_state separately. Record selected governance depth, its rationale report and concrete effects on assignments/checks, distinguishing developer self-tests from independent verification. Optionally structure model-authored evidence as delivery_state, acceptance_boundary, causal_model_delta, predecessor_rollout, retry_discriminator, and receipt_references; map Git/CI/deploy/production claims to observed receipts and exact artifact revisions. Include review/verification reuse identity (artifact_revision, acceptance_boundary, check_identity), plus fresh evidence or a rerun reason when unchanged work repeats. Missing fields and duplicate reuse are advisory diagnostics only. -->
+<!-- Link selected reports and artifacts. Distinguish implementation and observed delivery from the evidence supporting the coordinator's task decision; the recorded decision lives in durable task state. State the chosen governance depth and its concrete effects on assignments and checks. Bind Git/CI/deploy/production claims to exact revisions and receipts; explain repeated review or verification with fresh evidence or a rerun reason. Add rollout and incident details only when relevant. -->
 
-## Decisions, alternatives, discriminating checks, and remaining work
+## Decisions, alternatives, discriminating checks, and unresolved deliverable work
 
 {{CURRENT_DECISIONS_QUESTIONS_AND_REMAINING_WORK}}
-
-## Incident decision (when handling a production incident)
-
-<!-- Keep this compact block in the current pipeline or final owner handoff when applicable. Reference existing delivery_state, acceptance_boundary, causal_model_delta, predecessor_rollout, retry_discriminator and receipt_references instead of duplicating them. Fields guide the model and quality evaluation only; missing fields never create a server gate. -->
-
-```yaml
-incident_decision:
-  outcome: null
-  safety_state: null
-  artifact_revision: null
-  deployed_revision: null
-  runtime_identity: null
-  confidence: hypothesis
-  causal_model: null
-  full_path_covered: false
-  unchecked_downstream_predicates: []
-  production_snapshot: null
-  rehearsal: null
-  rollback: null
-  predecessor_attempt: null
-  new_discriminator: null
-  next_action: null
-```

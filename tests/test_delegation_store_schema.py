@@ -1,7 +1,7 @@
 """T015: delegation_provisioning/delegation_effects as an optional schema
 group, handled by split.py/migrate.py/cleanup.py exactly like the existing
 IDENTITY_SCHEMA/CATALOG_SCHEMA/CONFIGURATION_SCHEMA/ACP_SESSION_SCHEMA
-groups. SQLite user_version stays 11.
+ groups. SQLite user_version is 12 for the ACP-only store.
 """
 from __future__ import annotations
 
@@ -24,10 +24,10 @@ def event():
     return SourceEvent(origin="cli", event_id=str(uuid.uuid4()))
 
 
-def test_fresh_store_has_delegation_tables_and_user_version_11(tmp_path):
+def test_fresh_store_has_delegation_tables_and_user_version_12(tmp_path):
     store = Store(tmp_path / ".cortex", project_root=tmp_path)
     with store.connection() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 12
         assert db.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
         tables = {row[0] for row in db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'delegation%'"
@@ -43,14 +43,13 @@ def test_a_pre_t015_v11_store_gains_delegation_tables_on_next_open(tmp_path):
     os.close(fd)
     db = sqlite3.connect(path)
     db.execute(f"PRAGMA application_id={APPLICATION_ID}")
-    db.execute("PRAGMA user_version=11")
+    db.execute("PRAGMA user_version=12")
     from cortex_runtime.acp.sessions import ACP_SESSION_SCHEMA
     from cortex_runtime.catalog.store import CATALOG_SCHEMA
     from cortex_runtime.configuration.store import CONFIGURATION_SCHEMA
-    from cortex_runtime.hook_storage import HOOK_SCHEMA
     from cortex_runtime.store import SCHEMA
     from cortex_runtime.trusted_channel import IDENTITY_SCHEMA
-    db.executescript(SCHEMA + HOOK_SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA)
+    db.executescript(SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA)
     db.commit(); db.close()
 
     store = Store(directory, project_root=tmp_path)
@@ -97,7 +96,7 @@ def test_split_project_carries_delegation_rows_for_the_selected_project(tmp_path
 
     backup = tmp_path / "backup.sqlite3"
     outcome = split_project(str(source_dir), str(project_root), str(backup), access_stopped=True)
-    assert outcome["schema_version"] == 11
+    assert outcome["schema_version"] == 12
 
     destination = Store(project_root / ".cortex", project_root=project_root)
     with destination.connection() as db:
@@ -167,10 +166,10 @@ def test_delegation_effects_phase_check_constraint(tmp_path):
 # --------------------------------------------------------------------
 
 
-def test_fresh_store_has_t022_generation_tables_and_user_version_11(tmp_path):
+def test_fresh_store_has_t022_generation_tables_and_user_version_12(tmp_path):
     store = Store(tmp_path / ".cortex", project_root=tmp_path)
     with store.connection() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 12
         tables = {
             row[0] for row in db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND "
@@ -222,7 +221,7 @@ def test_split_project_carries_context_generation_rows_for_the_selected_project(
 
     backup = tmp_path / "backup.sqlite3"
     outcome = split_project(str(source_dir), str(project_root), str(backup), access_stopped=True)
-    assert outcome["schema_version"] == 11
+    assert outcome["schema_version"] == 12
 
     destination = Store(project_root / ".cortex", project_root=project_root)
     with destination.connection() as db:

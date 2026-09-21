@@ -239,7 +239,7 @@ def build_claude_evidence_status(revision_id: str, evidence_ref: str) -> ClaudeE
 def build_first_prompt_blocks(instructions_text: str, user_blocks: list) -> list[dict]:
     """Prepend one leading ``{"type": "text", ...}`` instructions block.
 
-    Identical in shape to ``codex_adapter_acp.build_first_prompt_blocks``:
+    A legacy leading-block helper with the same prompt-block shape:
     any ACP agent implementing the base ``session/prompt`` content-blocks
     array accepts this, so it is never itself proof of a *system-level*
     instructions channel on its own. **Not** the channel this pinned
@@ -270,8 +270,33 @@ def build_first_prompt_blocks(instructions_text: str, user_blocks: list) -> list
     return [leading_block, *user_blocks]
 
 
+def claude_native_subagent_restriction_meta() -> dict:
+    """Restrict native subagents and MCP sources before a session starts.
+
+    The installed claude-agent-acp 0.78.0 forwards
+    ``_meta.claudeCode.options.disallowedTools`` into its SDK query
+    (``dist/acp-agent.js:5910-5918,6065``). The bundled SDK 0.3.270
+    sends these names as ``--disallowedTools`` to Claude Code; its type
+    contract says they are removed from the model context and denied.
+    ``TaskCreate`` and its sibling plan tools are distinct from the
+    native subagent launch tools named ``Agent`` and ``Task``.
+
+    The same installed adapter spreads ``_meta.claudeCode.options`` into
+    the SDK query (``dist/acp-agent.js:6021-6036``). Its bundled SDK 0.3.270
+    maps ``strictMcpConfig`` to ``--strict-mcp-config`` and documents that
+    only explicitly supplied ``mcpServers`` are loaded, excluding native
+    user/project/plugin MCP configuration. Keep the production
+    ``CLAUDE_CONFIG_DIR`` for native-account authentication; the restriction
+    applies to this session's MCP discovery, not its account state.
+    """
+    return {"claudeCode": {"options": {
+        "disallowedTools": ["Agent", "Task"],
+        "strictMcpConfig": True,
+    }}}
+
+
 def build_claude_session_new_meta(instructions_text: str) -> dict:
-    """``_meta`` payload for ``session/new`` carrying a system-prompt override.
+    """``_meta`` payload for ``session/new`` appending Cortex instructions.
 
     The real, statically-confirmed claude-agent-acp 0.78.0 instructions
     channel (dist ``acp-agent.js:5887-5901``, lead- and agent-verified
@@ -280,10 +305,8 @@ def build_claude_session_new_meta(instructions_text: str) -> dict:
     ``{"type": "preset", "preset": "claude_code"}`` default) or an object
     (``{"append": ..., "excludeDynamicSections": ...}``-shaped, forwarded
     verbatim except ``type``/``preset``, which the adapter always locks to
-    ``"preset"``/``"claude_code"``). This function only ever builds the
-    plain-string override form -- the simplest, most literal reading of
-    "deliver this exact role instruction text" -- never the append/object
-    form (a distinct, narrower channel this task does not qualify).
+    ``"preset"``/``"claude_code"``). Use that append/object form to retain
+    the engine's preset while adding this role's instructions.
 
     This is the real, code-confirmed, QUALIFIED channel
     ``engine.instruction_delivery_registry.ClaudeAgentAcp0_78Delivery``
@@ -306,4 +329,7 @@ def build_claude_session_new_meta(instructions_text: str) -> dict:
             remediation="'instructions_text' must be a non-empty string.",
             retry_eligible=False, field="instructions_text",
         )
-    return {"systemPrompt": instructions_text}
+    return {
+        "systemPrompt": {"append": instructions_text},
+        **claude_native_subagent_restriction_meta(),
+    }

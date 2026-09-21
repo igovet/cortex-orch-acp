@@ -40,7 +40,7 @@ def tool(name, description, properties, required, read=False):
     return dict(name=name, title=name.replace("_", " ").capitalize(), description=description,
                 inputSchema=dict(type="object", properties=properties, required=required,
                                  additionalProperties=False),
-                annotations=dict(readOnlyHint=False, destructiveHint=False,
+                annotations=dict(readOnlyHint=read, destructiveHint=False,
                                  idempotentHint=name != "create_draft", openWorldHint=False))
 
 
@@ -77,9 +77,8 @@ TOOLS = [
          "The result returns the complete initial Markdown plus the exact required_first_line, "
          "the complete ordered replaceable_markers list and count, template name, character count, and SHA-256. Use that returned Markdown as the source "
          "of truth; copy patch context verbatim from this receipt, never reconstruct placeholder names from memory. No immediate read_draft call is needed. Preserve the first line byte-for-byte, "
-         "edit the existing file in place only after its following blank line, and replace every guidance comment or exact pipeline placeholder with complete English content. Use native file tools safely and inspect the actual result; all exact placeholders must be replaced. "
-         "Use that file tool and never delete, rename, replace, recreate, or rewrite "
-         "the entire draft file. Create a separate draft for every report or pipeline "
+         "edit the server-issued file only after its following blank line, and replace every guidance comment or exact pipeline placeholder with complete English content. Before calling write_report, perform one final native-file exact search for every returned replaceable_markers entry and confirm that none remains; a write_report call with even one exact marker still present is guaranteed to fail. A safe atomic replacement at the same path is accepted after ownership and file checks. Use native file tools safely and inspect the actual result; all exact placeholders must be replaced. "
+         "Never move the draft to another path or replace it with a symlink. Create a separate draft for every report or pipeline "
          "edition; one coordinator thread may own several drafts. Never pass a path, task ID, "
          "thread ID, or Markdown body. For a new report or edition, omit request_key: "
          "the server allocates a fresh delivery identity. Each unkeyed call creates a new draft, "
@@ -110,7 +109,12 @@ TOOLS = [
     tool("write_report",
          "Publish either one immutable report or a new current pipeline edition for the task "
          "resolved from host thread metadata. First call create_draft, fill the returned file "
-         "completely in English with native file tools, then send its short draft_id and all required publication metadata. The "
+         "completely in English with native file tools. Before publishing, preserve the returned "
+         "required_first_line and replace every exact line in replaceable_markers, including guidance "
+         "comments; required_replacement_count is the number of lines to remove. Before this MCP call, "
+         "use a native file read/search to verify that every returned marker is absent; do not call while "
+         "the exact-marker count is nonzero because the server will reject the publication. Then send its short "
+         "draft_id and all required publication metadata. The "
          "draft must belong to this exact native thread and remain at its server-issued path. The server "
          "streams the complete file without a report-size limit, validates UTF-8, hashes and "
          "atomically publishes it under <project_root>/.cortex/<task>/<report>.md, "
@@ -123,7 +127,7 @@ TOOLS = [
              "source_revision": dict(type="integer",minimum=0,maximum=2**53-1,description="Requirements source revision actually used for this evidence. Omit to retain the revision recorded when this draft was created. Later sources signal reconciliation, never automatic rejection of old evidence."),
              "artifacts": dict(type="array",maxItems=100,description="Versions actually checked by this report; metadata assertions by the author, not automatic verification.",items=dict(type="object",additionalProperties=False,required=["reference","version"],properties={"reference":string("Artifact path or durable resource reference.",4096),"version":string("Checked SHA-256, commit or exact resource version.",256)})),
              "title": string("Readable English title for the report or pipeline edition.", 200),
-             "summary": string("One decision-ready English preview of at most 100 Unicode characters. This operating target leaves well over half of the enforced 320-character transport maximum unused. Include the result and the most material check, blocker, or limitation; full evidence belongs in the file.", 320),
+             "summary": string("One decision-ready English preview of at most 320 Unicode characters. Keep it concise (around 100 characters when practical) and include the result plus the most material check, blocker, or limitation; full evidence belongs in the file.", 320),
              "author": string("Short English worker/profile or coordinator label.", 120),
              "draft_id": DRAFT,
              "request_key": dict(KEY, description="Required on the initial publication as well as any retry. Choose a new unique delivery key for this logical publication; the optional create_draft retry key does not replace it. " + KEY["description"]),
@@ -140,12 +144,17 @@ TOOLS = [
              "limit": integer("Entries per page; default 25.", 100),
          }, [], read=True),
     tool("read_report",
-         "Read a stored Markdown document through bounded cursor pages. Omit report_id and cursor "
+         "Read a stored Markdown document through bounded cursor pages. This is a read-only call: "
+         "there is no request_key or other delivery key in its input schema. Omit report_id and cursor "
          "to start at the newest beginning of the current pipeline. Supply a catalogue report_id "
          "to start only the ordinary report needed for the assignment. Coordinators read the "
          "current pipeline and any source, clarification, governance or evidence pages needed to recover requirements or make a decision. The 4000-character limit is a page size, not a total context limit. Workers read selected relevant report bodies. A pipeline update "
-         "makes older pipeline cursors stale. Ordinary reports are immutable.", {
-             "report_id": dict(REPORT, description="Exact opaque report identifier copied unchanged from an acknowledged receipt or a coordinator-validated assignment. Use the exact acknowledged reference. If it is unavailable or invalid, obtain its authoritative correction; do not guess or probe nearby identifiers."),
+         "makes older pipeline cursors stale. Ordinary reports are immutable. If an argument is "
+         "rejected, use this tool's advertised input schema to correct the call; do not carry "
+         "write-only fields into a read. When a worker_result or publish_result contains "
+         "report_ref, copy that exact value into this tool's report_id argument; report_ref "
+         "is not an accepted read_report argument.", {
+             "report_id": dict(REPORT, description="Exact opaque report identifier for this read. Copy the exact report_ref value from the relevant worker_result or publish_result into this report_id field; those result events call the same identifier report_ref. Do not send report_ref to read_report: report_ref is not an accepted argument name. If the exact value is unavailable or invalid, obtain its authoritative correction; do not guess or probe nearby identifiers."),
              "cursor": string("Exact opaque next_cursor from the preceding page. Any actor may continue the selected source or evidence when needed.", 512),
              "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Normally omit this field and use the default. A document larger than one page requires its returned next_cursor, never a limit above the maximum or a renamed input field. Read only enough content to answer a concrete missing fact. Never issue a one-character or other tiny probe to test connectivity, validate an existing reference, or prepare for report publication. Previously read immutable text needs no confirmation. Continue only with the returned cursor.", 4_000),
          }, [], read=True),
@@ -266,10 +275,12 @@ ERROR_HELP = {
     "coordinator_pipeline_only": "Only the bound coordinator can create a pipeline draft. Workers must select an ordinary report template for their assigned evidence; no draft was created.",
     "coordinator_governance_only": "Only the bound coordinator can set the task's governance mode. A worker's own attempt is unaffected; no governance change was recorded.",
     "identifier_unavailable": "Short identifier allocation was exhausted. Retry the identical request later; never invent an identifier.",
-    "unsupported_storage": "This database format is unsupported. Format 10 requires the separate stopped-access, backup-required cortex_migrate.py operation to format 11. No automatic migration is performed.",
+    "unsupported_storage": "This database format is unsupported. Format 10 requires the separate stopped-access, backup-required cortex_migrate.py operation to format 12. No automatic migration is performed.",
+    "legacy_storage_migration_required": "This format-11 store contains legacy storage and must be upgraded to format 12 with the stopped-access, backup-required cortex_migrate.py operation. No automatic migration is performed.",
     "storage_busy": "Offline migration owns the storage access lock. Wait until stopped-access maintenance completes.",
     "coordinator_only": "Only the bound coordinator can change Cortex participation state.",
     "invalid_source_revision": "Use an existing requirements source revision actually used by the report.",
+    "acceptance_refused": "The task is not ready for acceptance. Read correction for the exact missing evidence or pending event; an identical retry cannot resolve it.",
     "storage_error": "Storage did not complete cleanly. Preserve the draft. Check disk space and access, then retry only the identical request and key because publication may be uncertain.",
     "channel_required": "This server process was launched without CORTEX_CHANNEL_ID/CORTEX_CHANNEL_SECRET/CORTEX_CHANNEL_PROJECT_ROOT. Every tool call requires a trusted channel; the Codex-plugin-harness-era unchanneled identity path was removed. Launch through the ACP orchestrator's engine spawn, which always supplies channel credentials.",
     "channel_unknown": "This trusted channel id and secret pair is not recognized. Use the exact channel_id and secret issued at bootstrap or worker delegation; never guess or reuse another channel's credentials.",
@@ -311,6 +322,14 @@ def validate(name, args):
     unknown=set(args)-set(schema["properties"])
     if unknown:
         fields=", ".join(sorted(unknown))
+        if name == "read_report" and unknown == {"report_ref"}:
+            raise StoreError(
+                "invalid_arguments", "report_ref", "unadvertised field(s)",
+                "report_id (optional)",
+                "Copy the exact value from worker_result.report_ref or "
+                "publish_result.report_ref into read_report.report_id and omit report_ref. "
+                "No report was read by this rejected call.",
+            )
         raise StoreError("invalid_arguments",fields,"unadvertised field(s)",", ".join(schema["properties"]),"Remove unadvertised fields and derive the call from tools/list.")
     missing=set(schema["required"])-set(args)
     if missing:
@@ -332,11 +351,11 @@ def validate(name, args):
             if "pattern" in rule and not re.fullmatch(rule["pattern"],value):
                 raise StoreError("invalid_arguments",key,_received(value),rule["pattern"],"Copy the server-issued identifier unchanged from its authoritative receipt or assignment. Never insert or remove characters to repair it. If that source is missing or itself invalid, obtain the exact reference from its owner before retrying; do not probe a different report.")
             if not rule["minLength"]<=len(value)<=rule["maxLength"]:
-                target=("within 160 characters" if key=="summary" else f"between {rule['minLength']} and {rule['maxLength']} characters")
+                target=f"between {rule['minLength']} and {rule['maxLength']} characters"
                 raise StoreError("invalid_arguments",key,f"{len(value)} Unicode characters",target,f"Rewrite {key} {target} and verify its character count.")
         elif rule["type"]=="array":
             item=rule["items"]
-            valid=isinstance(value,list) and len(value)<=rule["maxItems"]
+            valid=(isinstance(value,list) and rule.get("minItems", 0)<=len(value)<=rule["maxItems"])
             if valid and item["type"]=="object":
                 for part in value:
                     if not isinstance(part,dict) or set(part)!=set(item["required"]):valid=False;break

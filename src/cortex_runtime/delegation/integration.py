@@ -94,6 +94,16 @@ CREATE TABLE IF NOT EXISTS workspace_integrations (
  created_at TEXT NOT NULL,
  UNIQUE(assignment_ref, request_key)
 );
+CREATE TABLE IF NOT EXISTS workspace_integration_journal (
+ journal_key TEXT NOT NULL,
+ relpath TEXT NOT NULL,
+ before_json TEXT NOT NULL,
+ before_bytes BLOB,
+ desired_json TEXT NOT NULL,
+ state TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ PRIMARY KEY(journal_key, relpath)
+);
 '''
 
 _EXCLUDED_TOP_LEVEL = {".git", ".cortex"}
@@ -120,6 +130,82 @@ def _result_from_row(row) -> dict:
         integrated_head=row["integrated_head"], integrated_dirty_digest=row["integrated_dirty_digest"],
         host_buffer_state=row["host_buffer_state"],
     )
+
+
+def _journal_key(assignment_ref: str, request_key: str) -> str:
+    return f"{assignment_ref}:{request_key}"
+
+
+def _json_entry(entry):
+    if entry is None:
+        return None
+    return {key: value for key, value in entry.items() if key != "bytes"}
+
+
+def _recover_journal(store, project_root: str, assignment_ref: str, request_key: str) -> None:
+    """Roll back an interrupted multi-file apply when every touched path is
+    still exactly the value Cortex wrote. External drift is preserved and
+    surfaced as an uncertain integration instead of being overwritten."""
+    key = _journal_key(assignment_ref, request_key)
+    with store.connection() as db:
+        if db.execute(
+            "SELECT 1 FROM workspace_integrations WHERE assignment_ref=? AND request_key=?",
+            (assignment_ref, request_key),
+        ).fetchone() is not None:
+            db.execute("DELETE FROM workspace_integration_journal WHERE journal_key=?", (key,))
+            return
+        rows = db.execute(
+            "SELECT * FROM workspace_integration_journal WHERE journal_key=?",
+            (key,),
+        ).fetchall()
+    if not rows:
+        return
+    for row in rows:
+        current = _read_current_entry(project_root, row["relpath"])
+        desired = json.loads(row["desired_json"])
+        if not _entries_equal(current, desired):
+            raise StoreError("integration_recovery_external_drift")
+    for row in rows:
+        relpath = row["relpath"]
+        before = json.loads(row["before_json"])
+        full = os.path.join(project_root, relpath)
+        if before is None:
+            _delete(project_root, relpath)
+        elif before.get("kind") == "f":
+            _write_atomic(project_root, relpath, row["before_bytes"] or b"", before.get("mode", 0o600))
+        elif before.get("kind") == "l":
+            try:
+                os.remove(full)
+            except FileNotFoundError:
+                pass
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            os.symlink(before["target"], full)
+        elif before.get("kind") == "d":
+            os.makedirs(full, mode=before.get("mode", 0o700), exist_ok=True)
+            os.chmod(full, before.get("mode", 0o700))
+        else:
+            raise StoreError("integration_recovery_unrestorable_entry")
+    with store.connection() as db:
+        db.execute("DELETE FROM workspace_integration_journal WHERE journal_key=?", (key,))
+
+
+def _journal_prepare(store, key, project_root, relpath, before, desired):
+    before_bytes = before.get("bytes") if before and before.get("kind") == "f" else None
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO workspace_integration_journal "
+            "(journal_key,relpath,before_json,before_bytes,desired_json,state,created_at) VALUES (?,?,?,?,?,?,?)",
+            (key, relpath, json.dumps(_json_entry(before), sort_keys=True), before_bytes,
+             json.dumps(_json_entry(desired), sort_keys=True), "prepared", _now()),
+        )
+
+
+def _journal_applied(store, key, relpath):
+    with store.connection() as db:
+        db.execute(
+            "UPDATE workspace_integration_journal SET state='applied' WHERE journal_key=? AND relpath=?",
+            (key, relpath),
+        )
 
 
 def _record(store, *, task_id, assignment_ref, request_key, attempt_id, workspace_binding_id,
@@ -359,6 +445,29 @@ def integrate(
     existing = _existing_row(store, assignment_ref, request_key)
     if existing is not None:
         return _result_from_row(existing)
+    _recover_journal(store, project_root, assignment_ref, request_key)
+
+    # In the ACP product a worker edits the exact project root selected by
+    # Zed.  The historical isolated-snapshot path is still supported for
+    # retained tasks and migration, but a direct/shared binding has no copy
+    # to diff or apply.  Record a durable reconciliation outcome instead of
+    # rejecting it as "not isolated" (or, worse, trying to copy an old
+    # workspace over the user's current files).  The revision is captured
+    # after the worker result and is the evidence boundary used by the
+    # completion gate.  This operation remains idempotent through the same
+    # integration row as the isolated path.
+    if workspace_binding_id in {"shared_project_root", "serialized_shared_root"}:
+        integrated = delegation_revision.capture_revision(project_root)
+        return _record(
+            store, task_id=task_id, assignment_ref=assignment_ref,
+            request_key=request_key, attempt_id=attempt_id,
+            workspace_binding_id=workspace_binding_id, status="noop",
+            applied_paths=[], conflict_paths={}, integrated=integrated,
+            # There is no path delta to probe here, and therefore the
+            # callback was not invoked.  Merely having a callback available
+            # is not evidence that the host buffer was checked.
+            host_buffer_state="unknown",
+        )
 
     # T025 (lead follow-up) / EXT-01 #5 (three-state fix): a host that never
     # negotiated fs (or whose capability the caller does not have a live
@@ -380,19 +489,15 @@ def integrate(
     provisioner = workspace_isolation.IsolatedSnapshotWorkspaceProvisioner(store, project_root, task_id)
     binding_row = provisioner.row_for_binding(workspace_binding_id)
     if binding_row is None:
-        raise StoreError("workspace_binding_not_found")
+        # Shared-root adapters intentionally do not create a snapshot row;
+        # their binding is the explicit sentinel used by provisioning.
+        if workspace_binding_id not in {"shared_project_root", "serialized_shared_root"}:
+            raise StoreError("workspace_binding_not_found")
     if binding_row["mode"] != "isolated_snapshot":
-        # T025 design decision 1: a serialized shared-root attempt already
-        # wrote directly to project_root under provisioner.writer_lock() --
-        # there is no separate copy to integrate. Recorded as a no-op so a
-        # caller cannot mistake "nothing to integrate" for "nothing
-        # happened".
-        integrated = delegation_revision.capture_revision(project_root)
-        return _record(
-            store, task_id=task_id, assignment_ref=assignment_ref, request_key=request_key,
-            attempt_id=attempt_id, workspace_binding_id=workspace_binding_id, status="noop",
-            applied_paths=[], conflict_paths={}, integrated=integrated, host_buffer_state=host_buffer_state,
-        )
+        # A legacy shared-root row has no trustworthy base/work pair. Treating
+        # it as a no-op would allow acceptance to hide an unverified direct
+        # write, so integration is refused explicitly.
+        raise StoreError("workspace_not_isolated")
 
     workspace_root = binding_row["root_path"]
     base_root = binding_row["base_path"]
@@ -417,6 +522,11 @@ def integrate(
     plan_writes: dict[str, tuple] = {}
     plan_deletes: set[str] = set()
     conflicts: dict[str, dict] = {}
+    # Keep the exact main entries inspected during planning. The short
+    # recheck immediately before mutation catches another Cortex integration
+    # racing with this one; it cannot claim to serialize arbitrary external
+    # editors, which remains an observable conflict/uncertain outcome.
+    planned_main: dict[str, object] = {}
 
     for relpath, (base_entry, worker_entry) in changed.items():
         if _is_technical(relpath):
@@ -426,6 +536,7 @@ def integrate(
             conflicts[relpath] = dict(reason="technical_path_refused")
             continue
         main_entry = _read_current_entry(project_root, relpath)
+        planned_main[relpath] = main_entry
         if host_fs_checker is not None:
             try:
                 host_content = host_fs_checker(relpath)
@@ -495,33 +606,193 @@ def integrate(
             applied_paths=[], conflict_paths=conflicts, integrated=None, host_buffer_state=host_buffer_state,
         )
 
-    applied = []
-    for relpath, (kind, payload) in plan_writes.items():
-        if payload["kind"] == "f":
-            data = payload["data"] if kind == "merged" else _read_bytes(workspace_root, relpath)
-            _write_atomic(project_root, relpath, data, payload["mode"])
-        elif payload["kind"] == "l":
-            full = os.path.join(project_root, relpath)
-            os.makedirs(os.path.dirname(full), exist_ok=True)
-            try:
-                os.remove(full)
-            except FileNotFoundError:
-                pass
-            os.symlink(payload["target"], full)
-        elif payload["kind"] == "d":
-            os.makedirs(os.path.join(project_root, relpath), exist_ok=True)
-        applied.append(relpath)
-    for relpath in plan_deletes:
-        _delete(project_root, relpath)
-        applied.append(relpath)
+    # Serialize Cortex integrations for a project and revalidate the exact
+    # precondition under the lock. This closes the check-then-write race
+    # between two runtime processes without pretending to control an editor
+    # that changes the filesystem after this final check.
+    lock_owner = workspace_isolation.SerializedSharedRootWorkspaceProvisioner(project_root)
+    with lock_owner.writer_lock(timeout=30):
+        race_conflicts = {}
+        for relpath, expected in planned_main.items():
+            current = _read_current_entry(project_root, relpath)
+            if not _entries_equal(current, expected):
+                race_conflicts[relpath] = dict(reason="project_changed_during_integration")
+        if race_conflicts:
+            return _record(
+                store, task_id=task_id, assignment_ref=assignment_ref, request_key=request_key,
+                attempt_id=attempt_id, workspace_binding_id=workspace_binding_id, status="conflict",
+                applied_paths=[], conflict_paths=race_conflicts, integrated=None,
+                host_buffer_state=host_buffer_state,
+            )
+        applied = []
+        for relpath, (kind, payload) in plan_writes.items():
+            desired = dict(payload)
+            if kind == "merged" and desired.get("kind") == "f":
+                import hashlib
+                desired["sha256"] = hashlib.sha256(desired.pop("data")).hexdigest()
+            else:
+                desired.pop("data", None)
+            journal_key = _journal_key(assignment_ref, request_key)
+            _journal_prepare(store, journal_key, project_root, relpath,
+                             planned_main.get(relpath), desired)
+            if payload["kind"] == "f":
+                data = payload["data"] if kind == "merged" else _read_bytes(workspace_root, relpath)
+                _write_atomic(project_root, relpath, data, payload["mode"])
+            elif payload["kind"] == "l":
+                full = os.path.join(project_root, relpath)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                try:
+                    os.remove(full)
+                except FileNotFoundError:
+                    pass
+                os.symlink(payload["target"], full)
+            elif payload["kind"] == "d":
+                os.makedirs(os.path.join(project_root, relpath), exist_ok=True)
+            from .. import _fault_injection
+            _fault_injection.checkpoint("integration_after_write_before_journal_mark")
+            _journal_applied(store, journal_key, relpath)
+            applied.append(relpath)
+        for relpath in plan_deletes:
+            journal_key = _journal_key(assignment_ref, request_key)
+            _journal_prepare(store, journal_key, project_root, relpath,
+                             planned_main.get(relpath), None)
+            _delete(project_root, relpath)
+            from .. import _fault_injection
+            _fault_injection.checkpoint("integration_after_write_before_journal_mark")
+            _journal_applied(store, journal_key, relpath)
+            applied.append(relpath)
 
     integrated = delegation_revision.capture_revision(project_root)
-    return _record(
+    result = _record(
         store, task_id=task_id, assignment_ref=assignment_ref, request_key=request_key,
         attempt_id=attempt_id, workspace_binding_id=workspace_binding_id,
         status="applied" if applied else "noop",
         applied_paths=applied, conflict_paths={}, integrated=integrated, host_buffer_state=host_buffer_state,
     )
+    with store.connection() as db:
+        db.execute("DELETE FROM workspace_integration_journal WHERE journal_key=?",
+                   (_journal_key(assignment_ref, request_key),))
+    return result
+
+
+def integrate_candidate(
+    store, *, task_id: str, project_root: str, candidate_id: str, request_key: str,
+    expected_base_digest: str, host_fs_checker=None,
+) -> dict:
+    """Apply a ready, runtime-owned candidate after an exact base check.
+
+    The candidate is a complete staged tree, so this operation derives a
+    direct delta from the recorded base digest to the staged content. It never
+    performs a three-way merge: any project drift is a conflict and leaves the
+    candidate available for inspection or a new candidate revision.
+    """
+    from . import candidates
+
+    candidate = candidates.get_candidate(store, candidate_id)
+    if candidate is None or candidate.get("task_id") != task_id:
+        raise StoreError("candidate_not_found")
+    if candidate.get("status") != "ready" or candidate.get("cleaned_up_at"):
+        raise StoreError("candidate_not_ready")
+    root = Path(candidate["stage_path"])
+    store_candidates = Path(workspace_isolation.StorageLocator(project_root).store_dir()) / "candidates"
+    try:
+        if root.resolve(strict=True).parent.parent != store_candidates.resolve(strict=True):
+            raise StoreError("unsafe_candidate_path")
+    except FileNotFoundError as error:
+        raise StoreError("candidate_stage_missing") from error
+    assignment_ref = f"candidate:{candidate_id}"
+    existing = _existing_row(store, assignment_ref, request_key)
+    if existing is not None:
+        return _result_from_row(existing)
+    _recover_journal(store, project_root, assignment_ref, request_key)
+    staged = candidates._manifest(str(root))
+    if candidates._digest_manifest(staged) != candidate.get("content_digest"):
+        raise StoreError("candidate_content_changed")
+    current = candidates._manifest(project_root)
+    current_digest = candidates._digest_manifest(current)
+    if current_digest != expected_base_digest:
+        return {"status": "conflict", "candidate_id": candidate_id,
+                "conflict_paths": ["<project-root>"], "reason": "candidate_base_drift"}
+    changed = {path for path in set(current) | set(staged)
+               if candidates._comparable(current.get(path)) != candidates._comparable(staged.get(path))}
+    lock_owner = workspace_isolation.SerializedSharedRootWorkspaceProvisioner(project_root)
+    with lock_owner.writer_lock(timeout=30):
+        # Recheck under the writer lock immediately before mutation.
+        if candidates._digest_manifest(candidates._manifest(project_root)) != expected_base_digest:
+            return {"status": "conflict", "candidate_id": candidate_id,
+                    "conflict_paths": ["<project-root>"], "reason": "candidate_base_drift"}
+        journal_key = _journal_key(assignment_ref, request_key)
+        applied = []
+        # Create directories before their children and remove children before
+        # their parent directories.
+        ordered = sorted(changed, key=lambda path: (
+            staged.get(path) is None,
+            -len(Path(path).parts) if staged.get(path) is None else len(Path(path).parts),
+            path,
+        ))
+
+        # Host buffers are an external source of truth.  Probe every affected
+        # path while the Cortex writer lock is held, before preparing or
+        # writing even the first journal entry.  Checking inside the write
+        # loop could leave an earlier path applied when a later path reports
+        # an unsaved buffer; returning ``conflict`` must therefore be a
+        # genuinely non-mutating outcome.  The lock cannot prevent an editor
+        # changing its buffer after this preflight, so such a later race is
+        # still recorded as an external/uncertain condition by the caller's
+        # host integration contract rather than being silently overwritten.
+        preflight_conflicts = {}
+        before_by_path = {}
+        if host_fs_checker is not None:
+            for relpath in ordered:
+                before = _read_current_entry(project_root, relpath)
+                before_by_path[relpath] = before
+                try:
+                    host = host_fs_checker(relpath)
+                except Exception as error:
+                    raise StoreError("candidate_host_buffer_check_failed") from error
+                if host is not None and (before is None or before.get("bytes") != host):
+                    preflight_conflicts[relpath] = {"reason": "unsaved_host_buffer"}
+            if preflight_conflicts:
+                return {"status": "conflict", "candidate_id": candidate_id,
+                        "conflict_paths": sorted(preflight_conflicts),
+                        "reason": "unsaved_host_buffer"}
+        for relpath in ordered:
+            before = before_by_path.get(relpath)
+            if before is None and relpath not in before_by_path:
+                before = _read_current_entry(project_root, relpath)
+            desired = staged.get(relpath)
+            _journal_prepare(store, journal_key, project_root, relpath, before, desired)
+            full = os.path.join(project_root, relpath)
+            if desired is None:
+                _delete(project_root, relpath)
+            elif desired["kind"] == "f":
+                data = _read_bytes(str(root), relpath)
+                _write_atomic(project_root, relpath, data, desired.get("mode", 0o600))
+            elif desired["kind"] == "d":
+                os.makedirs(full, mode=desired.get("mode", 0o700), exist_ok=True)
+            elif desired["kind"] == "l":
+                _delete(project_root, relpath)
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                os.symlink(desired["target"], full)
+            from .. import _fault_injection
+            _fault_injection.checkpoint("integration_after_write_before_journal_mark")
+            applied.append(relpath)
+        # Verify the complete staged tree before converting prepared journal
+        # entries into applied entries. A crash or external edit during the
+        # loop therefore remains recoverable on retry.
+        if candidates._digest_manifest(candidates._manifest(project_root)) != candidate.get("content_digest"):
+            raise StoreError("candidate_apply_verification_failed")
+        for relpath in applied:
+            _journal_applied(store, journal_key, relpath)
+        integrated = delegation_revision.capture_revision(project_root)
+    result = _record(store, task_id=task_id, assignment_ref=assignment_ref,
+                     request_key=request_key, attempt_id=candidate_id,
+                     workspace_binding_id=None, status="applied" if applied else "noop",
+                     applied_paths=applied, conflict_paths={}, integrated=integrated,
+                     host_buffer_state="checked" if host_fs_checker else "unknown")
+    with store.connection() as db:
+        db.execute("DELETE FROM workspace_integration_journal WHERE journal_key=?", (journal_key,))
+    return result
 
 
 def _rescan_workspace(root: str) -> dict:

@@ -103,8 +103,8 @@ def test_stale_epoch_read_operations_still_see_only_their_own_data(tmp_path):
     store, result = bootstrap(tmp_path)
     acquire_task_owner(store, result.task_id, "owner-2", 1)
     server = server_for(tmp_path, result.channel_id, result.secret)
-    ok(call(server, "read_capsule", dict(request_key="rk1")))
-    ok(call(server, "list_events", dict(request_key="rk2")))
+    ok(call(server, "read_capsule", {}))
+    ok(call(server, "list_events", {}))
 
 
 def test_worker_channel_migrated_forward_by_recovery_still_delegates(tmp_path):
@@ -159,63 +159,6 @@ def test_worker_channel_cannot_set_task_governance(tmp_path):
     coordinator = server_for(tmp_path, result.channel_id, result.secret)
     published = ok(call(coordinator, "set_governance", dict(mode="full", rationale="ok", request_key="cg1")))
     assert published["governance"]["mode"] == "full"
-
-
-# ---------------------------------------------------------------------------
-# Attack 1: credentials/recipients -- a hook-recorded internal principal
-# thread id leaking to another role/worker via a normal read tool.
-# ---------------------------------------------------------------------------
-
-def test_hook_actor_thread_id_never_leaks_a_principal_to_a_channel_peer(tmp_path):
-    """``trusted_channel.resolve_channel``'s own principal thread id is
-    deliberately never disclosed to a channel-managed caller elsewhere
-    (``Store._binding`` masks it to ``"channel-managed"``) because it is a
-    usable impersonation credential on the unfenced legacy Codex ``_meta``
-    path (see ``test_trusted_channel
-    .test_leaked_principal_thread_id_cannot_be_used_on_the_legacy_path``).
-    ``list_reports``' discovery feed independently recorded the *same*
-    principal id as a hook's ``actor_thread_id`` and returned it verbatim to
-    any channel on the task -- undermining that exact mitigation."""
-    store, result = bootstrap(tmp_path)
-    with store.connection() as db:
-        epoch = db.execute(
-            "SELECT epoch FROM task_owners WHERE task_id=?", (result.task_id,)
-        ).fetchone()[0]
-    worker_channel_id, worker_secret = issue_channel(
-        store, result.task_id, "worker", epoch, parent_channel_id=result.channel_id)
-    with store.connection() as db:
-        worker_principal = db.execute(
-            "SELECT principal_thread_id FROM trusted_channels WHERE channel_id=?", (worker_channel_id,)
-        ).fetchone()[0]
-
-    with store.connection() as db:
-        db.execute("BEGIN IMMEDIATE")
-        key = "evt-" + uuid.uuid4().hex
-        metadata = json.dumps(dict(actor_scope="actor", actor_thread_id=worker_principal,
-                                    parent_session_id=None, binding_origin="test", tool_name="Bash",
-                                    exit_code=0, status="completed"))
-        db.execute("INSERT INTO hook_events VALUES (?,?,?,?,?,?)",
-                   (result.task_id, worker_principal, key, "PostToolUse", metadata, store._now()))
-        db.execute("INSERT INTO task_changes(task_id,kind,reference,created_at) VALUES (?,?,?,?)",
-                   (result.task_id, "hook", key, store._now()))
-        db.commit()
-
-    coordinator = server_for(tmp_path, result.channel_id, result.secret)
-    reply = call(coordinator, "list_reports")
-    text = json.dumps(reply)
-    assert worker_principal not in text
-    body = ok(reply)
-    observation = next(c["observation"] for c in body["changes"] if c["observation"])
-    assert observation["actor_thread_id"] is None
-    assert observation["actor_is_self"] is False
-
-    # The worker's own channel is told this observation is its own action
-    # (a non-identifying boolean), still never the raw principal id.
-    worker = server_for(tmp_path, worker_channel_id, worker_secret)
-    own_reply = ok(call(worker, "list_reports"))
-    own_observation = next(c["observation"] for c in own_reply["changes"] if c["observation"])
-    assert own_observation["actor_thread_id"] is None
-    assert own_observation["actor_is_self"] is True
 
 
 # ---------------------------------------------------------------------------

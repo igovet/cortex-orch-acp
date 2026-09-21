@@ -210,7 +210,9 @@ def _register_work_connection(tmp_path, engine_dir, environ, *, session_new_para
     single-connection shape ``test_acp_setup_fresh_session.py`` uses).
 
     Scripted to send the same ``[edit, delete]`` permission-request pair on
-    every prompt turn it runs, regardless of which role opened it --
+    each normal prompt, regardless of which role opened it. The coordinator
+    continuation carrying Cortex's local role refusal skips the scripted
+    action once, so the model can react to the instruction --
     ``engine.permissions.PermissionBridge`` is what must tell a worker's
     edit (auto-approved) from a coordinator's edit (refused) apart, not
     this scenario.
@@ -230,7 +232,7 @@ def _register_work_connection(tmp_path, engine_dir, environ, *, session_new_para
         configure_behavior="accept",
         prompt_updates=[dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text="Ready."))],
         prompt_stop_reason="end_turn",
-        prompt_behavior="client_requests_sequence",
+        prompt_behavior="client_requests_sequence_skip_role_refusal",
         client_requests=[_EDIT_REQUEST, _DELETE_REQUEST],
         session_new_params_dump_path=str(session_new_params_dump_path) if session_new_params_dump_path else None,
     ))
@@ -245,9 +247,10 @@ def _register_work_connection(tmp_path, engine_dir, environ, *, session_new_para
     return conn, pinned
 
 
-def _wire_mcp_call(env, cwd, messages):
+def _wire_mcp_call(env, cwd, messages, *, command=None):
     result = subprocess.run(
-        [sys.executable, "-B", str(CORTEX_PY)], input="\n".join(json.dumps(m) for m in messages) + "\n",
+        command or [sys.executable, "-B", str(CORTEX_PY)],
+        input="\n".join(json.dumps(m) for m in messages) + "\n",
         text=True, capture_output=True, env=env, cwd=cwd, timeout=30,
     )
     assert result.returncode == 0 and result.stderr == "", result.stderr
@@ -269,14 +272,20 @@ def test_composed_production_chain(tmp_path, monkeypatch):
     project.mkdir()
     engine_dir = tmp_path / "engine"
     engine_dir.mkdir()
-    session_new_dump = engine_dir / "session_new_params.json"
-
     # -----------------------------------------------------------------
     # Phase 0: real one-time setup (cortex_acp_setup.py), real connection
     # registry, fake credential bytes.
     # -----------------------------------------------------------------
     setup.init_storage(environ=environ)
-    conn, pinned = _register_work_connection(tmp_path, engine_dir, environ, session_new_params_dump_path=session_new_dump)
+    conn, pinned = _register_work_connection(tmp_path, engine_dir, environ)
+    # The sandbox permits the connection's own engine state directory. Keep
+    # this diagnostic there instead of mounting HOME writable.
+    from cortex_runtime.connections.registry import connection_state_dir
+    session_new_dump = connection_state_dir(conn["connection_id"], "claude-agent-acp", environ) / "session_new_params.json"
+    scenario_path = next(engine_dir.glob("scenario-*.json"))
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    scenario["session_new_params_dump_path"] = str(session_new_dump)
+    scenario_path.write_text(json.dumps(scenario), encoding="utf-8")
 
     harness = _ProductionHarness(environ)
     harness.start()
@@ -290,11 +299,9 @@ def test_composed_production_chain(tmp_path, monkeypatch):
         # first-open path test_acp_setup_fresh_session.py proves in
         # isolation; the composed property under test here is that it
         # still holds when reached through the real Agent/pipe instead of
-        # a hand-built runtime) -- and the same turn's own scripted
-        # [edit, delete] permission requests are BOTH refused locally,
-        # by the real PermissionBridge, because this is a coordinator
-        # binding: no session/request_permission for either ever reaches
-        # this real incoming host side.
+        # a hand-built runtime). The scripted edit is refused locally by
+        # the coordinator policy and therefore never reaches the host;
+        # only the destructive delete is surfaced as a one-shot review.
         # -------------------------------------------------------------
         init_id = harness.send("initialize", dict(protocolVersion=1, clientCapabilities={}))
         harness.response_for(init_id)
@@ -303,11 +310,26 @@ def test_composed_production_chain(tmp_path, monkeypatch):
 
         prompt_id = harness.send("session/prompt", dict(
             sessionId=session_id, prompt=[dict(type="text", text="Ship the report.")]))
+        coordinator_permission_requests = []
+        request = harness.wait_for(
+            lambda m: (
+                m.get("method") == "session/request_permission"
+                and m.get("params", {}).get("toolCall", {}).get("toolCallId") == "tc-delete"
+            ),
+            timeout=60.0,
+        )
+        coordinator_permission_requests.append(request)
+        assert isinstance(request.get("id"), str)
+        harness.send_raw(dict(
+            jsonrpc="2.0", id=request["id"],
+            result={"outcome": {"outcome": "selected", "optionId": "deny"}},
+        ))
         final = harness.response_for(prompt_id, timeout=60.0)
         assert final["result"]["stopReason"] == "end_turn"
-        assert not any(m.get("method") == "session/request_permission" for m in harness.stdout.lines), (
-            "a coordinator's own mutating requests must never reach the real host side"
-        )
+        assert [
+            request["params"]["toolCall"]["toolCallId"]
+            for request in coordinator_permission_requests
+        ] == ["tc-delete"]
 
         store = harness.agent._store_for(str(project))
         task_id = harness.agent.sessions[session_id]["task_id"]
@@ -403,26 +425,50 @@ def test_composed_production_chain(tmp_path, monkeypatch):
             request_key=str(uuid.uuid4()),
         ))
 
+        # The coordinator and the worker deliberately use the same scripted
+        # tool-call ids.  Keep a wire cursor instead of searching the whole
+        # transcript: otherwise the old phase-1 ``tc-delete`` is mistaken
+        # for the worker's request and the coordinator's phase-2 request is
+        # left unanswered.  The latter closes the fake ACP peer while the
+        # continuation loop is still trying to provision the worker, which
+        # surfaces as a misleading ``transport_eof``.
+        with harness.stdout._lock:
+            permission_cursor = len(harness.stdout.lines)
+        seen_permission_ids = set()
+
+        def _next_new_permission():
+            def predicate(message):
+                return (
+                    message.get("method") == "session/request_permission"
+                    and message.get("id") not in seen_permission_ids
+                    and harness.stdout.lines.index(message) >= permission_cursor
+                )
+            request = harness.wait_for(predicate, timeout=60.0)
+            seen_permission_ids.add(request["id"])
+            return request
+
         prompt2_id = harness.send("session/prompt", dict(
             sessionId=session_id, prompt=[dict(type="text", text="Please continue.")]))
 
-        permission_request = harness.wait_for(
-            lambda m: m.get("method") == "session/request_permission" and
-            m.get("params", {}).get("toolCall", {}).get("toolCallId") == "tc-delete",
-            timeout=60.0,
-        )
-        assert isinstance(permission_request.get("id"), str)
-        harness.send_raw(dict(jsonrpc="2.0", id=permission_request["id"],
-                               result={"outcome": {"outcome": "selected", "optionId": "deny"}}))
+        # The second coordinator turn emits its own edit/delete pair before
+        # the runtime resumes the queued delegation. The edit is refused
+        # locally again; only the coordinator delete reaches this host wire.
+        coordinator_request = _next_new_permission()
+        assert coordinator_request["params"]["toolCall"]["toolCallId"] == "tc-delete"
+        harness.send_raw(dict(
+            jsonrpc="2.0", id=coordinator_request["id"],
+            result={"outcome": {"outcome": "selected", "optionId": "deny"}},
+        ))
 
-        final2 = harness.response_for(prompt2_id, timeout=60.0)
-        assert final2["result"]["stopReason"] == "end_turn"
+        permission_request = _next_new_permission()
+        assert permission_request["params"]["toolCall"]["toolCallId"] == "tc-delete"
+        assert isinstance(permission_request.get("id"), str)
 
         with store.connection() as db:
             provisioned = db.execute(
                 "SELECT attempt_id, workspace_binding_id, engine_session_ref FROM delegation_provisioning WHERE task_id=?", (task_id,),
             ).fetchone()
-        assert provisioned is not None, "the real continuation loop never provisioned a worker"
+            assert provisioned is not None, "the real continuation loop never provisioned a worker"
         attempt_id = provisioned["attempt_id"]
         workspace_binding_id = provisioned["workspace_binding_id"]
         # Read from the durable provisioning row, not the adapter's live
@@ -434,25 +480,29 @@ def test_composed_production_chain(tmp_path, monkeypatch):
         g1_session_ref = provisioned["engine_session_ref"]
         assert g1_session_ref
 
-        # Real isolated workspace copy actually exists, excludes .git/.cortex.
+        # Workers run in the exact project directory opened by the ACP host.
         workspace_root = Path(prod_runtime._workspace.root_for(workspace_binding_id))
-        assert workspace_root != project
-        assert not (workspace_root / ".cortex").exists()
-        assert not (workspace_root / ".git").exists()
+        assert workspace_root == project
+        assert (workspace_root / ".cortex").is_dir()
 
-        # Exactly one delete permission request ever reached this real host
-        # side -- never the auto-approved edit, never a coordinator's own.
+        # The first coordinator turn and the continuation coordinator turn
+        # each contribute their own delete review. Coordinator edits are
+        # refused locally and never reach the host. The worker contributes
+        # the final delete review; its edit is auto-approved by its role.
         delete_requests = [
             m for m in harness.stdout.lines
             if m.get("method") == "session/request_permission"
         ]
-        assert len(delete_requests) == 1
-        assert delete_requests[0]["params"]["toolCall"]["toolCallId"] == "tc-delete"
+        assert len(delete_requests) == 3
+        assert [
+            request["params"]["toolCall"]["toolCallId"]
+            for request in delete_requests
+        ] == ["tc-delete", "tc-delete", "tc-delete"]
 
         # -------------------------------------------------------------
         # Phase 4: EXT-01 #1 -- the worker's real Cortex MCP subprocess
-        # must see the project's own logical root, never its isolated
-        # workspace copy. Captured from the exact session/new params the
+        # must see the project's own logical root. Captured from the exact
+        # session/new params the
         # real adapter computed for this worker's session (dumped by the
         # fake engine itself), then driven for real over JSON-RPC, exactly
         # as test_ext01_worker_mcp_project_root.py's own regression test
@@ -462,32 +512,42 @@ def test_composed_production_chain(tmp_path, monkeypatch):
         session_new_params = json.loads(session_new_dump.read_text())
         assert session_new_params["cwd"] == str(workspace_root)
         mcp_entry = session_new_params["mcpServers"][0]
-        mcp_env = {item["name"]: item["value"] for item in mcp_entry["env"]}
-        assert mcp_env["CORTEX_CHANNEL_PROJECT_ROOT"] == str(project)
-        assert mcp_env["CORTEX_CHANNEL_PROJECT_ROOT"] != str(workspace_root)
+        # The sandboxed engine receives a relay, not store credentials. The
+        # real MCP server runs in the runtime-owned broker against the project.
+        assert mcp_entry["env"] == []
+        assert mcp_entry["args"][1].endswith("broker.py")
+        assert mcp_entry["args"][2] == "--relay"
+        relay_command = [mcp_entry["command"], *mcp_entry["args"]]
 
         wire_env = os.environ | dict(
             CODEX_HOME=str(engine_dir / "mcp_home"),
-            CORTEX_CHANNEL_ID=mcp_env["CORTEX_CHANNEL_ID"],
-            CORTEX_CHANNEL_SECRET=mcp_env["CORTEX_CHANNEL_SECRET"],
-            CORTEX_CHANNEL_PROJECT_ROOT=mcp_env["CORTEX_CHANNEL_PROJECT_ROOT"],
         )
         (Path(wire_env["CODEX_HOME"]) / "sessions").mkdir(parents=True, exist_ok=True)
 
         replies = _wire_mcp_call(wire_env, str(workspace_root), _init_and(
-            "tools/call", dict(name="list_sources", arguments=dict(request_key="list-ext01c"))))
+            "tools/call", dict(name="list_sources", arguments={})),
+            command=relay_command)
         listed = json.loads(replies[1]["result"]["content"][0]["text"])
         assert listed["entries"], "the worker's own MCP subprocess must reach the real project's own store"
         source_ref = listed["entries"][0]["source_ref"]
 
         replies = _wire_mcp_call(wire_env, str(workspace_root), _init_and(
-            "tools/call", dict(name="read_source", arguments=dict(source_ref=source_ref, request_key="read-ext01c"))))
+            "tools/call", dict(name="read_source", arguments=dict(source_ref=source_ref))),
+            command=relay_command)
         read = json.loads(replies[1]["result"]["content"][0]["text"])
         assert "Ship the report" in read.get("chunk", "") or "Please continue" in read.get("chunk", "")
 
+        # Complete the worker's pending turn only after exercising its live
+        # MCP relay. A worker that ends without publish_result is correctly
+        # terminated by Cortex, closing that attempt's broker.
+        harness.send_raw(dict(jsonrpc="2.0", id=permission_request["id"],
+                               result={"outcome": {"outcome": "selected", "optionId": "deny"}}))
+        final2 = harness.response_for(prompt2_id, timeout=60.0)
+        assert final2["result"]["stopReason"] == "end_turn"
+
         stores_found = list(tmp_path.glob("**/cortex.sqlite3"))
         assert stores_found == [project / ".cortex" / "cortex.sqlite3"], (
-            "the fix must never spin up a second store inside the isolated workspace copy"
+            "the worker must use the one project-local Cortex store"
         )
 
         # -------------------------------------------------------------
@@ -509,7 +569,21 @@ def test_composed_production_chain(tmp_path, monkeypatch):
         adapter.terminate_owned(attempt_id)
         assert attempt_id not in adapter._managers
 
-        launch2 = dict(task_id=task_id, attempt_id=attempt_id, assignment_id=provisioned["attempt_id"], recovery=True)
+        # Recovery needs a fresh, attempt-bound channel. Its secret is
+        # intentionally never recoverable from the durable store.
+        from cortex_runtime.trusted_channel import issue_channel
+
+        with store.connection() as db:
+            replacement_epoch = current_owner_epoch(db, task_id)
+        replacement_channel_id, replacement_secret = issue_channel(
+            store, task_id, "worker", replacement_epoch,
+            parent_channel_id=coordinator_channel.channel_id,
+            assignment_id=provisioned["attempt_id"], attempt_id=attempt_id,
+            workspace_binding_id=workspace_binding_id,
+        )
+        launch2 = dict(task_id=task_id, attempt_id=attempt_id,
+                       assignment_id=provisioned["attempt_id"], recovery=True,
+                       channel_id=replacement_channel_id, channel_secret=replacement_secret)
         g2_session_ref = adapter.open(workspace_binding_id, launch2, "instructions")
         try:
             assert g2_session_ref != g1_session_ref, "a replacement must be a genuinely new engine session"

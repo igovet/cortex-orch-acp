@@ -49,6 +49,27 @@ MEANINGFUL_EVENT_TYPES = frozenset({
     "worker_result", "worker_question", "assignment_failed",
     "assignment_cancelled", "user_message",
 })
+MEANINGFUL_PROGRESS_KINDS = frozenset({
+    # A native coordinator source-edit denial otherwise looks to Claude like
+    # an ordinary user rejection. Deliver Cortex's role explanation in the
+    # next prompt without waiting for another user message.
+    "coordinator_role_refusal",
+    "candidate_ready", "candidate_conflict", "candidate_failed",
+    "candidate_check_observed", "candidate_check_failed", "candidate_check_unknown",
+    "integration_applied", "integration_conflict",
+    # An assignment-level accept is deliberately not task completion.  Keep
+    # the correction durable and meaningful so the next coordinator
+    # continuation can turn the model's valid-but-nonterminal choice into an
+    # explicit task-level decision instead of parking or replaying the same
+    # choice.
+    "assignment_accept_requires_task",
+})
+
+
+def is_meaningful(event: TaskEvent) -> bool:
+    return event.event_type in MEANINGFUL_EVENT_TYPES or (
+        event.event_type == "progress" and event.payload.get("kind") in MEANINGFUL_PROGRESS_KINDS
+    )
 
 
 def _now() -> str:
@@ -227,6 +248,23 @@ def mark_superseded(store, task_id: str, assignment_ref: str) -> int:
     return count
 
 
+def mark_event_superseded(store, task_id: str, event_id: int) -> bool:
+    """Supersede one still-unconsumed event by exact id."""
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = db.execute(
+                "UPDATE task_events SET superseded=1 WHERE task_id=? AND id=? "
+                "AND consumed_by IS NULL AND superseded=0",
+                (task_id, int(event_id)),
+            )
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+    return cursor.rowcount == 1
+
+
 def mark_delivered(store, task_id: str, continuation_id: str) -> int:
     """Mark every row still claimed by ``continuation_id`` as delivered,
     once ``engine.prompt`` for that continuation has actually returned.
@@ -304,9 +342,9 @@ def has_unconsumed(store, task_id: str) -> bool:
     """
     placeholders = ",".join("?" for _ in MEANINGFUL_EVENT_TYPES)
     with store.connection() as db:
-        row = db.execute(
-            "SELECT 1 FROM task_events WHERE task_id=? AND consumed_by IS NULL AND superseded=0 "
-            f"AND event_type IN ({placeholders}) LIMIT 1",
+        rows = db.execute(
+            "SELECT * FROM task_events WHERE task_id=? AND consumed_by IS NULL AND superseded=0 "
+            f"AND (event_type IN ({placeholders}) OR event_type='progress') ORDER BY id",
             (task_id, *MEANINGFUL_EVENT_TYPES),
-        ).fetchone()
-    return row is not None
+        ).fetchall()
+    return any(is_meaningful(TaskEvent._from_row(row)) for row in rows)

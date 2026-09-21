@@ -58,6 +58,7 @@ from ..portable.roles import composed_instructions, load_role, resolve_role
 from ..store import identifier
 from ..trusted_channel import ChannelContext
 from . import contracts as delegation_contracts
+from . import revision as delegation_revision
 
 STEP_ORDER = (
     # "assignment" and "attempt" are pure local id allocation (see
@@ -612,6 +613,26 @@ class ProvisioningService:
                 _record_effect(db, idempotency_key, "workspace", "intent", dict(attempt_id=attempt_id))
                 db.commit()
             binding_ref = self._workspace.create(attempt_id)
+        # Direct/serialized workers share the client-opened project root.  A
+        # publication that later matches that tree is not actor attribution,
+        # so retain the exact pre-attempt manifest while ownership is still
+        # being provisioned.  Unavailable captures remain durable evidence of
+        # uncertainty and therefore fail closed at attribution time.
+        if binding_ref in {"shared_project_root", "serialized_shared_root"}:
+            with self._store.connection() as db:
+                project = db.execute(
+                    "SELECT project_root FROM tasks WHERE id=?", (row["task_id"],)
+                ).fetchone()
+            if project is not None:
+                with self._store.connection() as db:
+                    already_started = db.execute(
+                        "SELECT 1 FROM attempt_revisions WHERE attempt_id=? AND phase=? LIMIT 1",
+                        (attempt_id, f"worker_start:{attempt_id}"),
+                    ).fetchone()
+                if already_started is None:
+                    delegation_revision.record_attempt_revision(
+                        self._store, attempt_id, f"worker_start:{attempt_id}", project["project_root"]
+                    )
         with self._store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
@@ -810,6 +831,7 @@ class ProvisioningService:
                 # dispatch``), never here (this module has no project_root/
                 # environ of its own to resolve them with).
                 requested_engine=engine, requested_model=model, requested_effort=effort,
+                coordinator_route_connection_id=preview.get("route_connection_id"),
             )
             try:
                 session_ref = self._engine.open(row["workspace_binding_id"], launch, composed_instructions(role_set))

@@ -18,7 +18,8 @@ them (linked inline); this page does not restate their design docs.
 | Least-privilege process environments | `connections.environment.build_process_env` -- fixed base-env allowlist, per-connection isolation dir, single fresh-read secret variable, denylist defense-in-depth, no `extra_env` |
 | Filesystem containment | `engine.fs_bridge` -- fd-based, TOCTOU-safe (`O_NOFOLLOW` + `/proc/self/fd` real-path check), `.git`/`.cortex` refused, non-regular files refused |
 | Workspace isolation between workers | `delegation.workspace_isolation` -- disjoint `workspace_root`s per binding |
-| MCP server allowlist | `engine.mcp_bridge.allowed_mcp_servers` -- exactly `("cortex",)` for both roles, asserted before every `build_mcp_servers` call |
+| Cortex MCP identity | `engine.mcp_bridge.build_mcp_servers` always emits the authenticated `cortex` entry first; client and Cortex-owned stdio entries cannot shadow that name |
+| Forwarded MCP configuration | `configuration.mcp_servers.load_mcp_servers` accepts only owner-only registries, rejects malformed entries, and keeps env/header values in memory; engine forwarding preserves the role's authenticated Cortex channel |
 | Redaction choke point | `observability.redact` -- single scrub point for logs/diagnostics (`engine.logs`, `gateway.diagnostics`) |
 | Fallback/routing consent | `routing.authorization` -- deny-by-default, explicit consent required, privacy/credential scope included (not just cost) |
 
@@ -115,6 +116,13 @@ No new claim is made here. `docs/acp/permissions-and-containment.md`
 downstream engine's own native tools are not sandboxed by this project and
 the actual containment depends on that engine's own implementation --
 confirmed accurate on inspection; unchanged.
+
+The permission bridge now refuses a worker's declared native read/search/fetch
+path into `.cortex`, including a declared `cat` operand whose symlink resolves
+there. This is a request-path guard only. It does not turn native tools into
+an OS sandbox, and a direct read that the engine performs without an ACP
+permission request remains unobservable and therefore cannot be claimed
+prevented.
 
 ### 6. Main ACP route needs no MITM
 The main incoming-ACP/outgoing-delegation path (`server`, `store`,

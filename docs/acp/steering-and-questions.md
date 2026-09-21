@@ -125,7 +125,8 @@ here: the reply names the command).
 
 ## Questions: structured elicitation with a text fallback
 
-1. The coordinator calls `decide` with `decision="ask_user"`, a `question`,
+1. The coordinator's prompt explicitly routes questions to the user through
+   Cortex `decide` with `decision="ask_user"`, a `question`,
    and an optional, bounded (`maxItems=8`) `options` list of short answer
    choices (`delegation.contracts.COORDINATOR_OPERATIONS["decide"]`).
 2. `OrchestratingRuntime._handle_ask_user` persists a `pending_questions`
@@ -137,11 +138,15 @@ here: the reply names the command).
    answer is appended so the SAME session/prompt turn continues (no
    `END_TURN`) with the answer coalesced into the next continuation.
 4. Otherwise (no elicitor, or it returned `None` for decline/cancel/
-   timeout/unsupported) the plain question text is sent as a normal
-   `agent_message_chunk`, the task state becomes `waiting_for_user`, and
-   the turn ends (`END_TURN`) -- unchanged pre-T020 behavior.
+   timeout/unsupported) the question is sent as a normal
+   `agent_message_chunk`. When choices were supplied, the text includes
+   localized numbered choices. The task state becomes `waiting_for_user`,
+   and the turn ends (`END_TURN`).
 5. The next ordinary prompt, if exactly one question is open, is treated as
    its text answer (same `pending_questions` id, `answer_source="text"`).
+   For a numbered fallback, a reply of `1` through the number of stored
+   choices resolves to that choice; the durable `user_message` event still
+   keeps the user's raw reply.
    If two or more questions are open, Cortex never guesses: it lists them
    and asks for `/cortex-answer <question-number> <answer text>`
    (`acp.commands.CORTEX_ANSWER`, `acp.commands.parse_answer_argument`).
@@ -156,21 +161,34 @@ this task.
 
 ### Client capability detection (implementation status)
 
-`clientCapabilities.elicitation.form` (schema-1.4.0) is the host signal a
-real `HostElicitor` adapter must check before ever sending
-`elicitation/create`. This task implements and directly tests the
-runtime-side contract (`OrchestratingRuntime.HostElicitor` Protocol,
-persist-then-try-elicit-then-fallback, per-call injection via
-`start_prompt(..., host_elicitor=...)` so one project-scoped
-`OrchestratingRuntime` never leaks one connection's elicitor into
-another's) against a fake elicitor
-(`tests/test_acp_steering_and_questions.py`). **`acp.agent.Agent` does not
-yet construct and pass a real `HostRequester`-backed `HostElicitor`** --
-every prompt through the production agent currently uses the plain-text
-fallback unconditionally, even against a host that advertises form
-support. Wiring that adapter (an `elicitation/create` call scoped to the
-session, honoring `ElicitationSchema`'s single-field/enum form shape) is a
-documented follow-up, not fabricated as done here.
+`clientCapabilities.elicitation.form` (schema-1.4.0) is the host signal
+required before Cortex sends `elicitation/create`. `acp.agent.Agent` now
+constructs a connection-scoped `HostRequester`-backed elicitor only when
+the client advertised that capability. The runtime persists the question
+before trying the request; an accepted single-field answer resolves that
+same question and continues the turn. A declined, timed-out, malformed, or
+unavailable form falls back to an ordinary text question. The connection
+adapter is exercised in `tests/test_acp_elicitation.py`; the runtime's
+persist-and-fallback contract is covered in
+`tests/test_acp_steering_and_questions.py`.
+
+Installed Paseo 0.8.0 does not advertise `elicitation.form` or handle
+`elicitation/create` in its generic ACP provider. In the isolated generic
+provider check, the question appeared as ordinary chat text and the answer
+was recorded with `answer_source="text"`. That observation does not establish
+a structured form in the generic provider.
+
+The repository-owned native Paseo provider `cortex-acp` offers a separate
+choice path. For a question with options, Cortex sends a marked ACP
+`session/request_permission`; the provider recognizes only that marker and
+changes the Paseo event's presentation kind to `question`. The selected
+option returns to the same Cortex ACP session through the ordinary permission
+response. Free-text questions and any unavailable or declined choice request
+still use the text fallback above. This is a provider implementation, not a
+claim that Paseo's generic ACP adapter or Zed supports elicitation forms.
+Install the provider with the single explicit command
+`python3 -B scripts/cortex_acp_setup.py install-paseo-plugin`; see
+[Paseo provider plugin](packaging-and-onboarding.md#paseo-provider-plugin).
 
 ## Language policy for Cortex's own system lines
 
@@ -229,11 +247,12 @@ are not.
   a coordinator turn is mid-`engine.prompt()` (Cortex's own handling is
   covered above and tested against fakes; the host's own UX during that
   window is unverified against a real client).
-- Whether either real client currently advertises
+- Whether Zed or another real client advertises
   `clientCapabilities.elicitation.form` in practice, and how it renders
-  the `ElicitationSchema` form this task's `decide.options` maps to --
-  moot today since `acp.agent` does not yet send `elicitation/create` (see
-  above), but relevant once that adapter is wired.
+  the single-field form that `decide.options` maps to. Paseo 0.8.0's
+  generic ACP provider does not advertise or handle this request; the
+  native `cortex-acp` provider uses the separate marked-permission choice
+  path described above.
 
 ## See also
 

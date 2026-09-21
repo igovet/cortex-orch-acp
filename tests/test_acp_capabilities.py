@@ -31,7 +31,7 @@ def _initialize(proc):
     # content blocks are implemented; see
     # docs/acp/input-history-and-replay.md.
     assert caps["loadSession"] is True
-    assert caps["promptCapabilities"] == dict(image=False, audio=False, embeddedContext=True)
+    assert caps["promptCapabilities"] == dict(image=True, audio=False, embeddedContext=True)
     assert caps["mcpCapabilities"] == dict(http=False, sse=False)
     assert reply["result"]["authMethods"] == []
     return reply
@@ -42,10 +42,10 @@ def test_unsupported_session_lifecycle_methods_return_method_not_found():
     try:
         _initialize(proc)
         for index, method in enumerate((
-            # session/set_config_option (T010) and session/load (T018) are
-            # deliberately excluded here -- both are implemented, so
-            # neither is in protocol.UNSUPPORTED_METHODS.
-            "session/resume", "session/set_mode",
+            # session/set_config_option, session/set_mode (Paseo language
+            # selector), and session/load are implemented, so
+            # none is in protocol.UNSUPPORTED_METHODS.
+            "session/resume",
             "session/list", "session/fork", "session/close",
         ), start=2):
             _send(proc, dict(jsonrpc="2.0", id=index, method=method, params={}))
@@ -57,7 +57,7 @@ def test_unsupported_session_lifecycle_methods_return_method_not_found():
     assert proc.returncode == 0
 
 
-def test_image_content_block_rejected_with_invalid_params(tmp_path):
+def test_image_content_block_rejected_with_invalid_base64(tmp_path):
     proc = spawn_production_agent()
     try:
         _initialize(proc)
@@ -67,9 +67,37 @@ def test_image_content_block_rejected_with_invalid_params(tmp_path):
         _recv(proc)  # available_commands_update notification (T010)
         _send(proc, dict(jsonrpc="2.0", id=3, method="session/prompt",
                           params=dict(sessionId=session_id,
-                                      prompt=[dict(type="image", data="Zm9v", mimeType="image/png")])))
+                                      prompt=[dict(type="image", data="not-base64!", mimeType="image/png")])))
         reply = _recv(proc)
         assert reply["error"]["code"] == -32602
+    finally:
+        proc.stdin.close()
+        proc.wait(timeout=15)
+    assert proc.returncode == 0
+
+
+def test_oversized_image_is_rejected_before_capture_or_forwarding(tmp_path):
+    """An image over the attachment cap fails closed at the ACP boundary.
+
+    In particular, a too-large image must not become an uncaptured raw ACP
+    block that can reach an engine session.
+    """
+    import base64
+
+    proc = spawn_production_agent()
+    try:
+        _initialize(proc)
+        _send(proc, dict(jsonrpc="2.0", id=2, method="session/new",
+                          params=dict(cwd=str(tmp_path), mcpServers=[])))
+        session_id = _recv(proc)["result"]["sessionId"]
+        _recv(proc)
+        oversized = base64.b64encode(b"x" * (1024 * 1024 + 1)).decode("ascii")
+        _send(proc, dict(jsonrpc="2.0", id=3, method="session/prompt",
+                          params=dict(sessionId=session_id,
+                                      prompt=[dict(type="image", data=oversized, mimeType="image/png")])))
+        reply = _recv(proc)
+        assert reply["error"]["code"] == -32602
+        assert "large" in reply["error"]["message"].lower() or "cap" in reply["error"]["message"].lower()
     finally:
         proc.stdin.close()
         proc.wait(timeout=15)

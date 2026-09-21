@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -23,12 +24,15 @@ from cortex_runtime.configuration.policy import (
 )
 from cortex_runtime.configuration.resolution import ConfigurationInputs
 from cortex_runtime.configuration.service import ConfigurationService
-from cortex_runtime.delegation import mcp_tools
+from cortex_runtime.delegation import events as delegation_events, mcp_tools
+from cortex_runtime.delegation.work_graph import WorkGraph
+from cortex_runtime.delegation.workspace_isolation import IsolatedSnapshotWorkspaceProvisioner
 from cortex_runtime.delegation.live_adapters import ConfigurationServiceSnapshotSource
 from cortex_runtime.ownership import current_owner_epoch
 from cortex_runtime.portable.engine_contract import StopReason
 from cortex_runtime.portable.identity import OwnershipEpoch, SourceEvent
 from cortex_runtime.portable.roles import resolve_role
+from cortex_runtime.project_docs import build_catalog as build_project_docs_catalog
 from cortex_runtime.routing import store as routing_store
 from cortex_runtime.store import Store
 
@@ -127,10 +131,41 @@ def _make_runtime(store, router, connections, **kwargs):
     service = ConfigurationService(store)
     engine = FakeSessionRuntime(store, router, connections=connections)
     runtime = OrchestratingRuntime(
-        store, engine, FakeWorkspace(), ConfigurationServiceSnapshotSource(service),
+        store, engine, IsolatedSnapshotWorkspaceProvisioner(store, str(store.project_root)), ConfigurationServiceSnapshotSource(service),
         allow_unqualified_delivery=True, wait_timeout_seconds=30.0, **kwargs,
     )
+    runtime._cleanup_isolated_workspace_if_integrated = lambda task_id, attempt_id: None
     return runtime, engine
+
+
+def _publish_current_pipeline(store, channel):
+    """Publish a coordinator-authored current edition before accepting."""
+    draft = store.call(
+        "create_draft", {"template": "pipeline", "request_key": "pipeline-current"},
+        channel.principal_thread_id, trusted=True,
+    )
+    path = Path(draft["draft_path"])
+    body = path.read_text(encoding="utf-8")
+    values = {
+        "{{CURRENT_OBJECTIVE_AND_DECISION_BASIS}}": "Objective: build the page. Decision basis: delegated work is reviewable.",
+        "{{CURRENT_REQUIREMENTS_AND_CONSTRAINTS}}": "Requirements: delegated work is complete and reviewable.",
+        "{{CURRENT_WORK_GRAPH}}": "The delegated assignment has completed.",
+        "{{CURRENT_ASSIGNMENTS_AND_ROUTING}}": "Coordinator reviewed the backend-dev assignment.",
+        "{{CURRENT_EVIDENCE_AND_VERIFICATION}}": "The worker report is published and available for review.",
+        "{{CURRENT_DECISIONS_QUESTIONS_AND_REMAINING_WORK}}": "Decision: accept the completed work.",
+    }
+    for marker, value in values.items():
+        body = body.replace(marker, value)
+    for marker in draft["replaceable_markers"]:
+        if marker.startswith("<!--"):
+            body = body.replace(marker, "Evidence links: the worker report is the selected result.")
+    path.write_text(body, encoding="utf-8")
+    return store.call(
+        "write_report", {
+            "title": "Current pipeline", "summary": "Coordinator current plan.",
+            "author": "coordinator", "draft_id": draft["draft_id"], "request_key": "pipeline-current-publish",
+        }, channel.principal_thread_id, trusted=True,
+    )
 
 
 def test_engine_failure_triggers_authorized_fallback_and_audits_both_attempts(tmp_path):
@@ -143,6 +178,7 @@ def test_engine_failure_triggers_authorized_fallback_and_audits_both_attempts(tm
             return PromptOutcome(StopReason.END_TURN, "Delegated A.")
         if "A finished" in message and not decided["done"]:
             decided["done"] = True
+            _publish_current_pipeline(store, channel)
             mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="Delivered.", request_key="acceptall"))
             return PromptOutcome(StopReason.END_TURN, "Accepted.")
         return PromptOutcome(StopReason.END_TURN, "Waiting.")
@@ -182,6 +218,62 @@ def test_engine_failure_triggers_authorized_fallback_and_audits_both_attempts(tm
     assert fallback_rows[0]["attempt_id"] == new_attempt_id
     assert fallback_rows[0]["connection_id"] == entry_b.route.connection_id
     assert fallback_rows[0]["engine"] == "claude-agent-acp"
+
+
+def test_fallback_worker_prompt_rebuilds_project_docs_catalog(tmp_path):
+    index = tmp_path / "docs/project/index.md"
+    index.parent.mkdir(parents=True)
+    index.write_text("# Before fallback\n", encoding="utf-8")
+    store, task_id, connections, _entry_a, _entry_b = _setup_two_route_task(tmp_path)
+    prompts = []
+    versions = [build_project_docs_catalog(tmp_path)["catalog_version"]]
+    decided = {"done": False}
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="docs-fallback",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Delegated A.")
+        if "A finished" in message and not decided["done"]:
+            decided["done"] = True
+            _publish_current_pipeline(store, channel)
+            mcp_tools.dispatch(store, channel, "decide", dict(
+                assignment_ref="task", decision="accept", rationale="Delivered.", request_key="docs-accept",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Accepted.")
+        return PromptOutcome(StopReason.END_TURN, "Waiting.")
+
+    def failed_worker(store, channel, session_ref, message, call_index):
+        prompts.append(message)
+        index.write_text("# After fallback\n", encoding="utf-8")
+        versions.append(build_project_docs_catalog(tmp_path)["catalog_version"])
+        raise EngineTurnFailed("transport_eof")
+
+    def fallback_worker(store, channel, session_ref, message, call_index):
+        prompts.append(message)
+        _publish(store, channel, _assignment_title(store, channel), call_index)
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        if channel.role == "coordinator":
+            return coordinator_behavior
+        return fallback_worker if launch.get("route_override") is not None else failed_worker
+
+    runtime, engine = _make_runtime(store, router, connections)
+    try:
+        assert runtime.start_prompt(task_id, "s1", "Build A.", lambda update: None, threading.Event()) == StopReason.END_TURN
+        assert len(prompts) == 2
+        assert versions[0] != versions[1]
+        assert versions[0] in prompts[0] and versions[1] not in prompts[0]
+        assert versions[1] in prompts[1] and versions[0] not in prompts[1]
+        assert "Before fallback" in prompts[0] and "After fallback" in prompts[1]
+        assert all(prompt.count("Acceptance: A done") == 1 for prompt in prompts)
+        assert len(engine.fallback_calls) == 1
+    finally:
+        runtime.shutdown()
 
 
 def test_refusal_never_triggers_fallback_and_reports_explicitly(tmp_path):
@@ -291,6 +383,7 @@ def test_running_worker_keeps_route_when_profile_changes_mid_task(tmp_path):
             mcp_tools.dispatch(store, channel, "delegate", dict(title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="reqA"))
             return PromptOutcome(StopReason.END_TURN, "Delegated A.")
         if "A finished" in message:
+            _publish_current_pipeline(store, channel)
             mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="Delivered.", request_key="acceptall"))
             return PromptOutcome(StopReason.END_TURN, "Accepted.")
         return PromptOutcome(StopReason.END_TURN, "Waiting.")
@@ -473,3 +566,60 @@ def test_a_session_closing_after_a_published_result_is_not_a_failure(tmp_path):
     )
 
     assert runtime._assignment_already_reported(task_id, assignment_ref)
+
+
+def test_late_engine_failure_does_not_sync_reported_worker_as_failed(tmp_path):
+    """A worker result may commit just before its engine reports EOF.
+
+    The result path owns the graph transition to ``reported``. The later
+    cleanup path must leave that state intact and must not emit a
+    ``work_attempt_sync_failed`` diagnostic.
+    """
+    store, task_id, _epoch = _bootstrap(tmp_path)
+    graph = WorkGraph(store)
+    assignment = graph.add_assignment(task_id, "implementation", idempotency_key="graph-assignment")
+    attempt = graph.create_attempt(assignment["assignment_id"], idempotency_key="graph-attempt")
+    graph.transition_attempt(attempt["attempt_id"], "running", idempotency_key="graph-running")
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._store = store
+    assignment_ref = "a" * 64
+    now = "2026-09-19T00:00:00+00:00"
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO delegation_provisioning "
+            "(idempotency_key, task_id, attempt_id, role_id, step, status, owner_epoch, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (assignment_ref, task_id, "worker-attempt-1", "worker-backend-dev", "ready", "ready", 1, now, now),
+        )
+        db.commit()
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", "delegation-requested:late-eof",
+        {"work_attempt_ref": attempt["attempt_id"]}, origin="runtime", assignment_ref=assignment_ref,
+    )
+    delegation_events.append_event(
+        store, task_id, "worker_result", "worker-result:late-eof",
+        {"summary": "done", "report_ref": "report-1"}, origin="worker", assignment_ref="worker-attempt-1",
+    )
+    graph.transition_attempt(attempt["attempt_id"], "reported", idempotency_key="graph-reported")
+
+    runtime._mark_work_attempt_failed(task_id, assignment_ref, "engine_failure:transport_eof", "late-eof-sync")
+    assert runtime._append_assignment_failure_if_unreported(
+        task_id, assignment_ref,
+        {"error": "engine_failure:transport_eof", "kind": "transport_eof"},
+    ) is False
+
+    with store.connection() as db:
+        status = db.execute(
+            "SELECT status FROM work_assignment_attempts WHERE attempt_id=?", (attempt["attempt_id"],),
+        ).fetchone()["status"]
+        sync_events = db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='progress' "
+            "AND json_extract(payload_json, '$.kind')='work_attempt_sync_failed'", (task_id,),
+        ).fetchall()
+        failure_events = db.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND event_type='assignment_failed'",
+            (task_id,),
+        ).fetchall()
+    assert status == "reported"
+    assert sync_events == []
+    assert failure_events == []

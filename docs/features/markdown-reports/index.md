@@ -1,175 +1,35 @@
-# Markdown coordination
+# Markdown reports
 
-Incident work follows [outcome-driven coordination](../../project/incident-outcomes.md).
-Pipeline editions track material decisions rather than each worker completion or wait.
-The optional incident_decision block groups the causal model and next transition;
-existing evidence fields remain available. Runtime quality signals remain advisory.
+Cortex stores immutable Markdown reports under the project-local `.cortex`
+store. A caller creates a server-owned draft, edits only the returned path and
+publishes it through the current attempt. Publication is idempotent and
+retains the draft on failure for recovery.
 
-Cortex keeps one model-authored `pipeline.md` per task. Each new edition is
-prepended, retaining previous editions below. The current edition records active
-requirements, cancelled conditions, decisions, assignments, resource owners,
-unfinished actions and references to evidence. Original user messages are separate
-immutable reports; the pipeline is a working interpretation, never their replacement.
+The coordinator owns `pipeline.md`, which keeps the newest edition first and
+records requirements, assignments, candidates, checks, decisions and selected
+evidence. Before task-level acceptance, the coordinator publishes a current
+edition with its rationale, report references, artifact and check evidence,
+remaining work and decision basis. A correcting edition follows only if
+the actual decision changes. Reports are evidence; publication does not mean
+semantic acceptance.
 
-The coordinator reads the original request, later clarifications, attachment
-references and the evidence pages needed for a decision. A 4,000-character page
-is a transport bound, not a limit on accessible context. Catalogue entries and
-opening decision briefs help select relevant material. Workers receive a bounded
-assignment and selected predecessor references; they do not routinely read every
-report. Worker access to immutable reports is by exact acknowledged ID through
-bounded `mcp__cortex__read_report` pages only. They never shell or probe private
-`.cortex/` task-cache paths; missing or insufficient evidence is recorded as
-a gap. After context loss, either role can retrieve the required source pages.
+The pre-accept edition describes a lasting decision basis and actual unresolved
+deliverable or verification work, without describing acceptance as the next
+step or claiming it is pending. The task decision event and stored state give
+the recorded outcome after the edition is published.
 
-The coordinator records and restores the user's response language independently
-of English internal reports and assignments. Progress updates, questions and final
-answers follow the user's own prose or explicit response-language preference;
-forwarded agent messages and recovery summaries do not change it. Requested product
-language and exact source text remain intact. All worker reasoning and communication
-use English from the first response, including skill-loading commentary and context
-recovery; assignments state this before skill loading. Workers deliver a published report's
-compact handoff once through their native final response, without a duplicate
-cross-task message.
+Routine reports open with a decision brief, then record the result, changes,
+checks, limitations and relevant evidence links. The implementation, verification
+and pipeline templates leave incident decisions out by default. For a production
+incident, the coordinator records an incident decision in the current pipeline;
+the owner can include it in the final handoff when relevant.
 
-Draft creation defaults to a fresh server-generated delivery identity, including
-on a reused worker's later assignment. Uncertain creation is recoverable through
-the caller's unfinished drafts; explicit keys still enforce exact retries and
-reject conflicting arguments. Published evidence remains immutable.
+Report reads use bounded cursors and exact report identities. Workers receive
+selected predecessor reports through context packets; they do not inspect
+private store paths. The runtime records source revisions, candidate digests,
+requirement revisions and attempt identity so stale evidence can be invalidated
+without rewriting the original report.
 
-Reports record the source revision and checked artifact versions on which their
-findings depend. A later message or observed file change signals possible stale
-evidence. The coordinator decides what needs reconciliation or another check;
-the storage service and hooks do not decide semantic coverage or acceptance.
-
-Before ordinary acceptance, the coordinator records an evidence-backed documentation
-impact decision for verified changes. Supported impact assigns the appropriate
-documentation owner to load/apply `documentation-sync`, requires exact documentation
-ownership, updates and proportionate verification, and then uses only Cortex
-report/public-evidence reads to compare the owner's cited documentation hashes and
-check results before acceptance. The coordinator does not read another role's
-`SKILL.md`; any additional project inspection, file read/hash or command verification
-is delegated to an appropriate worker and returned in a task-bound report, and the
-coordinator does not rerun project checks itself. Sufficient no-impact evidence needs
-only a concise record. Missing inspection is not no impact, and the decision
-remains model-owned rather than a runtime stage or gate.
-Partial or inconclusive inspection leaves impact unresolved and withholds acceptance
-until bounded evidence, synchronization, or sufficient no-impact evidence resolves it.
-
-The current pipeline keeps model-owned `implementation_state`, `delivery_state`,
-and `acceptance_state` distinct. Implementation state records changed artifacts and
-evidence; delivery state records observed immutable-report, Git, CI, deployment, or
-production receipts and their exact revisions; acceptance remains the coordinator's
-judgment at the user boundary. A delivery receipt is never acceptance. External
-claims remain unverified without their observed receipt and exact artifact revision.
-Review and verification reuse the identity `(artifact_revision, acceptance_boundary,
-check_identity)`; repeating unchanged work requires new evidence or a concrete rerun
-reason, not a timeout or elapsed time.
-
-The report templates provide an optional structured evidence extension for
-`delivery_state`, `acceptance_boundary`, `causal_model_delta`, `predecessor_rollout`,
-`retry_discriminator`, and `receipt_references`. Runtime helpers emit bounded,
-null-safe missing-field warnings and an exact duplicate reuse diagnostic when there
-is no fresh evidence or rerun reason. Both are advisory metadata: they never add a
-workflow stage, route work, require approval, alter coordinator acceptance, or turn
-successful command results into failures.
-All advisory values, including the legacy `failed_canary`, `review`, and `cost`
-keys, are serialization-safe and bounded recursively: booleans are retained,
-integers stay within the JSON-safe 53-bit range, finite floats are capped at
-`1e308`, strings are capped at 512 characters, and arbitrary-magnitude or
-non-finite numbers are omitted as `null` rather than emitted as invalid JSON.
-
-Passive diagnostic serialization and observation writes use a separate bounded,
-value-free continuity helper. It may emit only a safe error class/code and
-`evidence_admissibility=unverified`; a broken logger is itself non-blocking. The
-helper is never used around storage, authorization, binding, provenance,
-replay/truncation, publication, cleanup, or audit decisions, and cannot convert an
-uncertain action into success.
-
-For a repeated consequential live attempt, the coordinator may record a cross-layer
-acceptance contract and predecessor comparison: outcome/boundary, revision, relevant
-context, rollback posture, expected receipts, and a discriminating check. Material
-scope expansion and materially distinct failures require an outcome/scope or replan
-delta when useful, including causal-model changes and bounded failed-canary evidence.
-These are adaptive model records, never server workflow stages, approval gates, or
-automatic acceptance.
-
-Bounded independent discovery may precede the first pipeline edition. Before making
-dependency, shared-resource or acceptance decisions, the coordinator records useful
-durable requirements, decisions, assignments, ownership and open actions. This does
-not impose a universal publication stage before delegation.
-
-Each of the 23 specialists loads its complete marketplace worker skill through
-native attachment or the exact advertised `SKILL.md` path. Needed declared
-references are loaded on demand. The 22 executor profiles share one protocol;
-the report-only consultant has a separate access protocol and shares publication.
-Specialization fragments generate all skills and optional TOML exports. No installation scan or personal
-agent registry is needed. See [host compatibility](../../project/host-compatibility.md).
-
-One worker may investigate, implement, verify and document a bounded result.
-Additional specialists serve a concrete independent check or useful parallel
-work. A completed context may receive an explicit continuation when appropriate;
-a fresh verifier supplies independence when the risk warrants it. Timeout alone
-does not end an assignment or transfer its files, browser, device or command
-sessions to another worker.
-
-The coordinator must not emit a terminal final while an assigned owner is active or
-a required report/check remains outstanding. A wait timeout is absence of new
-evidence only and requires another bounded wait for that same owner. Before
-acceptance or final delivery, reconcile pipeline assignments with native worker
-state and required evidence; record terminal failure or user cancellation explicitly.
-During a pending/timeout interval, status and selected evidence reads are internal
-observations; `send_message`/`followup_task` are not legal merely because the wait
-returned no evidence. The narrow exceptions are one reply to an inbound same-owner
-handoff, direct user steering/clarification, or an intentional follow-up after a
-terminal worker result and report preview have been reconciled. These remain model
-guidance and audit evidence, not server-side gates.
-
-When no evidence or model-owned state changed, the coordinator waits silently: a
-timeout, pending worker, elapsed time, or unchanged poll is not a user-facing update.
-It communicates only a new evidence/state delta, a genuine blocker, a required user
-decision, or a material next-action change.
-
-The report class follows the assignment's observed outcome. A specialist's class is
-a default and does not require reassignment when the same worker produces a suitable
-different result.
-
-When useful, optional guidance asks completion claims to map to fresh evidence and
-list unrun checks, asks nontrivial failure work to separate facts from hypotheses
-and name a discriminating check, and asks parallel dispatches to declare independence,
-mutation surface, shared resources, dependencies, and expected output. These cues
-are advisory and do not create mandatory report sections, gates, or acceptance.
-
-The server creates a thread-bound draft below project `.cortex/`. The actor edits
-that exact file in place and publishes its identifier with compact metadata.
-Deletion, recreation or replacement invalidates its original device/inode
-identity. Publication streams the complete UTF-8 file into the task directory,
-flushes and atomically renames it, commits metadata, and removes the draft. An
-exact retry returns its existing delivery receipt. An error before commit retains
-the draft; recovery is scoped to the affected task. Report bodies remain real
-Markdown under `.cortex/<task>/`, with no application-wide body-size cap.
-Their metadata is in the same project's `.cortex/cortex.sqlite3`; a different
-project has a separate store and does not contend for this database.
-
-If a project still has recognized content under the legacy
-`.codex/cortex` tree, the runtime transfers only components absent from
-`.cortex` before opening the project store, after validating private identities and
-locking both roots. Conflicts,
-unsafe identities, and ambiguous partial states fail closed; the legacy tree is
-never used as a continuing read or write fallback. Each rename is atomic, but the
-multi-entry transfer has no global transaction, so interruption can leave a partial
-state that later fails closed.
-
-Native source capture uses the explicitly validated current Codex thread and
-project. Identical text in distinct native messages remains distinct. Attachment
-metadata preserves a usable path or resource and recovery method when available;
-unavailable attachments remain gaps. Failure to fetch later host messages does
-not close the existing archive: operation results expose capture completeness.
-
-Source capture runs from the ACP agent's own request handling (T033 removed the
-Codex-plugin-harness-era lifecycle hook dispatcher entirely) and records short
-metadata and source updates only for an active Cortex task. It does not select
-agents, approve actions, accept results or enforce continuation. `normal`
-suspends Cortex capture while retaining existing documents.
-
-See [storage](../../project/storage.md) for reliability and offline migration,
-and [verification](../../project/verification.md) for source and real-host checks.
+The public operation contracts are in [`src/cortex_runtime/contracts.py`](../../../src/cortex_runtime/contracts.py).
+The focused lifecycle tests are `tests/test_source_reports.py` and
+`tests/test_pipeline_bootstrap.py`.

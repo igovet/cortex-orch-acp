@@ -2,7 +2,7 @@
 from copy import deepcopy
 import pytest
 from cortex_runtime.incident_quality import evaluate_trace
-from cortex_runtime.capability_policy import advisory_replanning_metadata
+from cortex_runtime.advisory_policy import advisory_replanning_metadata
 
 
 class Incident:

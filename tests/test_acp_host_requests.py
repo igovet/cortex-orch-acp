@@ -77,6 +77,27 @@ def test_timeout_raises_and_late_reply_is_dropped():
         transport.stop_writer()
 
 
+def test_repeated_timeouts_remove_pending_entries_and_bound_tombstones():
+    """Unavailable hosts cannot grow the request ledger forever."""
+    stdout = _RecordingStdout()
+    transport = StdioTransport(lambda *_: None, raw_stdout=stdout, raw_stdin=io.BytesIO(b""))
+    transport.start()
+    try:
+        requester = HostRequester(transport)
+        for _ in range(requester._MAX_TIMEOUT_TOMBSTONES + 25):
+            with pytest.raises(HostRequestTimeout):
+                requester.request("session/request_permission", {}, timeout=0.001)
+        assert not requester._pending
+        assert len(requester._timed_out) == requester._MAX_TIMEOUT_TOMBSTONES
+        # A retained late response is consumed as a late/duplicate response,
+        # while an evicted tombstone remains merely an unknown id.
+        retained = next(iter(requester._timed_out))
+        assert requester.handle_response({"jsonrpc": "2.0", "id": retained, "result": {}})
+        assert retained not in requester._timed_out
+    finally:
+        transport.stop_writer()
+
+
 def test_duplicate_reply_is_dropped_not_double_delivered():
     stdout = _RecordingStdout()
     transport = StdioTransport(lambda *_: None, raw_stdout=stdout, raw_stdin=io.BytesIO(b""))
@@ -134,6 +155,36 @@ def test_close_resolves_every_pending_call_as_closed():
         assert outcome.get("closed") is True
         with pytest.raises(HostRequestClosed):
             requester.request("session/request_permission", {}, timeout=1.0)
+    finally:
+        transport.stop_writer()
+
+
+def test_request_fails_immediately_when_writer_is_already_closed():
+    """A disconnected host must not consume the permission timeout."""
+    class _BrokenStdout:
+        def write(self, _data):
+            raise BrokenPipeError
+
+        def flush(self):
+            raise BrokenPipeError
+
+    stdout = _BrokenStdout()
+    transport = StdioTransport(lambda *_: None, raw_stdout=stdout, raw_stdin=io.BytesIO(b""))
+    transport.start()
+    try:
+        requester = HostRequester(transport)
+        # Force the writer's real closed path; a normal stop drains cleanly
+        # and intentionally does not mark a broken connection.
+        transport.send_response({"warmup": True})
+        deadline = time.monotonic() + 2.0
+        while not transport.writer_closed() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert transport.writer_closed()
+        started = time.monotonic()
+        with pytest.raises(HostRequestClosed):
+            requester.request("session/request_permission", {}, timeout=5.0)
+        assert time.monotonic() - started < 0.5
+        assert not requester._pending
     finally:
         transport.stop_writer()
 

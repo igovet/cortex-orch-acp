@@ -1,0 +1,21 @@
+{
+  "name": "cortex-paseo-plugin",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test:diff": "node --experimental-strip-types client/worker-panel-diff.test.ts",
+    "test:status": "node --experimental-strip-types client/worker-panel-status.test.ts"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.8.0",
+    "@getpaseo/client": "0.8.0",
+    "@getpaseo/protocol": "0.8.0",
+    "@types/node": "^20.9.0",
+    "@types/react": "~19.2.0",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3"
+  }
+}

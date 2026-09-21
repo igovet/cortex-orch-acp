@@ -116,6 +116,11 @@ CREATE TABLE IF NOT EXISTS binding_receipts (
 CREATE TABLE IF NOT EXISTS source_resets (
  thread_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), pause_turn TEXT
 );
+CREATE TABLE IF NOT EXISTS source_turns (
+ task_id TEXT NOT NULL REFERENCES tasks(id), thread_id TEXT NOT NULL,
+ turn_id TEXT NOT NULL, report_id TEXT NOT NULL REFERENCES reports(id), digest TEXT NOT NULL,
+ PRIMARY KEY(thread_id,turn_id,report_id)
+);
 CREATE TABLE IF NOT EXISTS source_revisions (
  task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL,
  thread_id TEXT NOT NULL, message_id TEXT NOT NULL, report_id TEXT NOT NULL REFERENCES reports(id),
@@ -139,7 +144,7 @@ CREATE INDEX IF NOT EXISTS changes_by_task ON task_changes(task_id,sequence);
 -- coordinator-acceptance gate check -- see delegation.revision.
 CREATE TABLE IF NOT EXISTS attempt_revisions (
  attempt_id TEXT NOT NULL, captured_at TEXT NOT NULL, phase TEXT NOT NULL,
- kind TEXT NOT NULL, head TEXT, dirty_digest TEXT, detail TEXT
+ kind TEXT NOT NULL, head TEXT, dirty_digest TEXT, detail TEXT, manifest_json TEXT
 );
 CREATE INDEX IF NOT EXISTS attempt_revisions_by_attempt ON attempt_revisions(attempt_id,captured_at);
 -- T032: durable record of every offline format migration/rollback ever
@@ -151,11 +156,11 @@ CREATE TABLE IF NOT EXISTS format_history (
  from_version INTEGER NOT NULL, to_version INTEGER NOT NULL,
  backup_path TEXT NOT NULL, backup_digest TEXT NOT NULL, at TEXT NOT NULL
 );
-PRAGMA user_version=11;
+PRAGMA user_version=12;
 '''
 
 PIPELINE_PLACEHOLDERS = (
-    b"{{CURRENT_OBJECTIVE_AND_STATUS}}",
+    b"{{CURRENT_OBJECTIVE_AND_DECISION_BASIS}}",
     b"{{CURRENT_REQUIREMENTS_AND_CONSTRAINTS}}",
     b"{{CURRENT_WORK_GRAPH}}",
     b"{{CURRENT_ASSIGNMENTS_AND_ROUTING}}",
@@ -314,12 +319,12 @@ def sync_directory(path):
 
 class Store:
     def __init__(self,directory,initialize=True,*,project_root=None):
-        from .hook_storage import HOOK_SCHEMA
         from .trusted_channel import IDENTITY_SCHEMA
         from .catalog.store import CATALOG_SCHEMA
         from .configuration.store import CONFIGURATION_SCHEMA
         from .acp.sessions import ACP_SESSION_SCHEMA
         from .delegation.store import DELEGATION_SCHEMA
+        from .delegation.work_graph import WORK_GRAPH_SCHEMA
         from .delegation.events_store import TASK_EVENTS_SCHEMA
         from .delegation.capacity_store import CAPACITY_SCHEMA
         from .delegation.evidence_store import EVIDENCE_SCHEMA
@@ -344,6 +349,13 @@ class Store:
         if initialize:
             fd=os.open(self.path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600); os.close(fd)
         regular(self.path)
+        # Format 11 is upgraded on a normal writable runtime open.  A
+        # non-initializing open is also used by inspection/maintenance paths;
+        # keep those paths read-only with respect to format migration so they
+        # retain the explicit migration-required error below.
+        if initialize:
+            from .migrate import auto_migrate_format11
+            auto_migrate_format11(self.directory)
         with self.connection() as db:
             # A rejected archive must retain its original bytes and journal
             # mode. Validate under the write lock before any persistent pragma.
@@ -352,13 +364,14 @@ class Store:
             version=db.execute("PRAGMA user_version").fetchone()[0]
             tables=db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             if app!=APPLICATION_ID and (app!=0 or tables or version!=0): raise StoreError("unsupported_storage")
-            if app==APPLICATION_ID and version!=11: raise StoreError("unsupported_storage")
-            if not initialize and (app!=APPLICATION_ID or version!=11):raise StoreError("unsupported_storage")
+            if app==APPLICATION_ID and version != 12:
+                raise StoreError("legacy_storage_migration_required" if version==11 else "unsupported_storage")
+            if not initialize and (app!=APPLICATION_ID or version!=12):raise StoreError("legacy_storage_migration_required" if version==11 else "unsupported_storage")
             if app==APPLICATION_ID:self._check_project(db)
             db.commit()
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+WORKSPACE_SCHEMA+INTEGRATION_SCHEMA+ROUTING_SCHEMA+OBSERVABILITY_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+WORK_GRAPH_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+WORKSPACE_SCHEMA+INTEGRATION_SCHEMA+ROUTING_SCHEMA+OBSERVABILITY_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
             if app==APPLICATION_ID:
                 # T017: additive columns for a pre-T017 store that already has
                 # task_events/task_orchestration (CREATE TABLE IF NOT EXISTS
@@ -377,8 +390,11 @@ class Store:
                 db.execute(
                     "CREATE TABLE IF NOT EXISTS attempt_revisions ("
                     " attempt_id TEXT NOT NULL, captured_at TEXT NOT NULL, phase TEXT NOT NULL,"
-                    " kind TEXT NOT NULL, head TEXT, dirty_digest TEXT, detail TEXT)"
+                    " kind TEXT NOT NULL, head TEXT, dirty_digest TEXT, detail TEXT, manifest_json TEXT)"
                 )
+                revision_columns = {row["name"] for row in db.execute("PRAGMA table_info(attempt_revisions)")}
+                if "manifest_json" not in revision_columns:
+                    db.execute("ALTER TABLE attempt_revisions ADD COLUMN manifest_json TEXT")
                 db.execute("CREATE INDEX IF NOT EXISTS attempt_revisions_by_attempt ON attempt_revisions(attempt_id,captured_at)")
                 # T020: additive pending_questions/pending_question_late_answers
                 # tables for a pre-T020 store (same precedent as
@@ -510,6 +526,17 @@ class Store:
                 )
                 db.execute("CREATE INDEX IF NOT EXISTS observability_events_by_task ON observability_events(task_id, created_at)")
                 db.execute("CREATE INDEX IF NOT EXISTS observability_events_by_attempt ON observability_events(attempt_id)")
+                # T036: structured host-visible ACP updates (tool cards,
+                # plans, and thoughts) need durable replay alongside the
+                # text-only host_transcript.  The table is additive so an
+                # existing project keeps its prior session history.
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS host_updates ("
+                    " session_id TEXT NOT NULL REFERENCES acp_host_sessions(session_id),"
+                    " seq INTEGER NOT NULL, update_json TEXT NOT NULL, created_at TEXT NOT NULL,"
+                    " UNIQUE(session_id, seq))"
+                )
+                db.execute("CREATE INDEX IF NOT EXISTS host_updates_by_session ON host_updates(session_id, seq)")
                 db.execute(
                     "CREATE TRIGGER IF NOT EXISTS observability_events_no_update BEFORE UPDATE ON observability_events "
                     "BEGIN SELECT RAISE(ABORT, 'immutable'); END"
@@ -668,20 +695,9 @@ class Store:
                                 except StoreError as error:
                                     if str(error)!="host_request_unavailable":raise
                             db.execute("INSERT OR REPLACE INTO source_resets VALUES (?,?,?)",(thread,task,pause_turn))
-                            skipped=db.execute("SELECT 1 FROM hook_pending_sources WHERE task_id=? AND thread_id=? LIMIT 1",(task,thread)).fetchone()
-                            if skipped:
-                                # These signals precede the accepted pause and
-                                # belong to the cursor backlog deliberately
-                                # abandoned by reset. Retire them now, not on a
-                                # later resume that may have newer active signals.
-                                reason="inactive_interval_started_pending_sources_retired"
-                                self._change(db,task,"source_gap",reason)
-                                db.execute("DELETE FROM hook_pending_sources WHERE task_id=? AND thread_id=?",(task,thread))
-                                capture=dict(status="partial",reason=reason)
                         db.execute("UPDATE binding_receipts SET state=?,updated_at=? WHERE thread_id IN (SELECT thread_id FROM thread_bindings WHERE task_id=?)",(args["state"],self._now(),task))
                     pending_thread=parent or thread
-                    pending_turns=db.execute("SELECT count(*) FROM hook_pending_sources WHERE thread_id=?",(pending_thread,)).fetchone()[0]
-                    result.update(binding=self._binding(db,thread,trusted),source_capture=dict(capture,revision=self._revision(db,task),pending_turns=pending_turns),
+                    result.update(binding=self._binding(db,thread,trusted),source_capture=dict(capture,revision=self._revision(db,task),pending_turns=0),
                                   governance=governance_snapshot(db,task))
                     if operation=="list_reports":
                         result.update(self._discovery(db,task,thread,args,trusted))
@@ -749,8 +765,6 @@ class Store:
             fingerprint=digest(message["text"].encode())
             prior=db.execute("SELECT digest FROM source_messages WHERE thread_id=? AND message_id=?",
                              (thread,message["id"])).fetchone()
-            if message.get("turn"):
-                db.execute("DELETE FROM hook_pending_sources WHERE thread_id=? AND turn_id=?",(thread,message["turn"]))
             accepted=prior[0] if prior else seen.get(message["id"])
             if accepted is not None:
                 if accepted!=fingerprint:raise StoreError("host_request_unavailable")
@@ -801,8 +815,6 @@ class Store:
         # on this exception regardless.
         if not trusted and Store._channel_managed(db,ancestor["task_id"]):
             raise StoreError("channel_managed_task")
-        lifecycle=db.execute("SELECT parent_thread_id,task_id FROM hook_agent_bindings WHERE agent_id=?",(thread,)).fetchone()
-        if lifecycle is not None and (lifecycle["parent_thread_id"]!=parent or lifecycle["task_id"]!=ancestor["task_id"]):raise StoreError("thread_conflict")
         db.execute("INSERT INTO thread_bindings VALUES (?,?,?)",(thread,parent,ancestor["task_id"]))
         return ancestor["task_id"]
 
@@ -1116,7 +1128,7 @@ class Store:
             result=dict(draft_id=draft_id,draft_path=str(path),kind=kind,
                         template=args["template"],
                         required_first_line=f"Cortex draft ID: `{draft_id}`",
-                        edit_instruction="Edit the registered file in place. Copy patch context verbatim from this receipt's Markdown and listed markers; never reconstruct placeholder names from memory. Preserve its identity and first-line marker, replace every listed placeholder, and retain complete UTF-8 Markdown. Inspect the native file tool's actual result.",
+                        edit_instruction="Edit the registered file at its server-issued path. A safe atomic replacement at that same path is accepted after ownership and file checks. Copy patch context verbatim from this receipt's Markdown and listed markers; never reconstruct placeholder names from memory. Preserve its first-line marker, replace every listed placeholder, and retain complete UTF-8 Markdown. Inspect the native file tool's actual result.",
                         replaceable_markers=replaceable_markers,
                         required_replacement_count=len(replaceable_markers),
                         markdown=markdown,total_characters=len(markdown),
@@ -1341,7 +1353,7 @@ class Store:
     def _discovery(self,db,task,thread,args,trusted=False):
         limit=args.get("limit",25)
         after=args.get("changes_after",0)
-        changes=db.execute("SELECT c.sequence,c.kind,c.reference,c.created_at,h.event_name,h.thread_id AS hook_thread_id,h.metadata AS hook_metadata FROM task_changes c LEFT JOIN hook_events h ON c.task_id=h.task_id AND c.reference=h.event_key AND c.kind IN ('hook','artifact') WHERE c.task_id=? AND c.sequence>? ORDER BY c.sequence LIMIT ?",(task,after,limit+1)).fetchall()
+        changes=db.execute("SELECT c.sequence,c.kind,c.reference,c.created_at,NULL AS event_name,NULL AS hook_thread_id,NULL AS hook_metadata FROM task_changes c WHERE c.task_id=? AND c.sequence>? ORDER BY c.sequence LIMIT ?",(task,after,limit+1)).fetchall()
         page=changes[:limit]
         drafts=db.execute("SELECT id AS draft_id,path AS draft_path,kind,template,created_at FROM drafts WHERE task_id=? AND owner_thread_id=? AND published_report_id IS NULL AND id>? ORDER BY id LIMIT ?",(task,thread,args.get("drafts_after",""),limit+1)).fetchall()
         own=drafts[:limit]

@@ -107,14 +107,10 @@ never only on the first/last chunk.
 
 ## 7. Limited-model presentation
 
-`recovery.presentation.select_presentation` picks a `"full"` or
-`"compact"` role/assignment presentation purely by whether the `"full"`
-one fits the caller's *remaining budget* — never by an assumed model
-"capability" keyed on engine/model name (a small context window is a fact
-about the resolved route, never evidence about what the model can reason
-about). The compact variant keeps every critical rule/constraint line and
-all acceptance-criteria text verbatim, dropping only narrative prose that
-states no independently checkable requirement.
+`recovery.presentation.select_presentation` preserves the full role,
+brief and acceptance text. The former line-based compact mode could
+silently remove an unmarked constraint, so budget overflow must be handled
+explicitly by the caller without shortening the assignment on its own.
 
 ## New schema
 

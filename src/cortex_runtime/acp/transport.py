@@ -209,9 +209,16 @@ class StdioTransport:
         if threading.current_thread() is not self._writer_thread:
             self._writer_thread.join()
 
-    def send_response(self, message: dict) -> None:
-        """Enqueue a response/error; blocks until there is room. Never dropped."""
-        self._enqueue(message, timeout=None)
+    def send_response(self, message: dict, *, timeout=None) -> bool:
+        """Enqueue a response/error; blocks until there is room.
+
+        The boolean reports whether the transport accepted the frame.  A
+        caller that is relaying a request to the host must be able to fail
+        immediately when the writer has already closed; waiting for its
+        request timeout would only turn a known disconnect into a misleading
+        slow denial.
+        """
+        return self._enqueue(message, timeout=timeout)
 
     def send_notification(self, message: dict, *, timeout=None) -> bool:
         """Enqueue a notification under a bounded timeout.

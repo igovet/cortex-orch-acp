@@ -165,20 +165,56 @@ env isolation defeats that. The capture now has two independent parts:
 This is intentionally *stricter* than `git status` (a git-ignored build
 artifact changing now counts as a workspace change) — a deliberate,
 documented trade-off for never executing repo-configurable code.
+
+One narrow engine-housekeeping exception is applied while building this
+manifest: a regular, non-symlink `.claude/scheduled_tasks.lock` is omitted
+because the Claude ACP runtime may create or remove that transient lock
+between worker publication and the acceptance recheck. The exception is an
+exact path and type allowlist; a directory, symlink, or other object at that
+path remains observable (and a replacement race fails closed). The rest of
+`.claude`, including project settings and any other files, remains observable
+and can invalidate a revision. It does not authorize ignoring unknown
+`.claude` drift.
+
 `capture_revision` returns `kind="observed"` (`head` possibly `None`,
 `dirty_digest` the tree digest) or `kind="unavailable"` (`head`/
 `dirty_digest` both `None`, `detail` a concrete reason). Captures are
 durably appended (never overwritten) to the additive `attempt_revisions`
-table (still schema `user_version=11`, columns reused as-is; the table is
+table (in the current format-12 store; additive migration also adds the
+manifest column to older format-12 tables; the table is
 created for both a fresh store and, via a `CREATE TABLE IF NOT EXISTS`
 migration guard, an existing pre-T019 store).
 
+Observed captures also retain their bounded sorted manifest. Same-turn
+direct-worker attribution uses it when the current digest differs from the
+worker publication: only a delta consisting entirely of Python bytecode cache
+entries (`__pycache__/`, `.pyc`, or `.pyo`) can be reconciled. Missing,
+malformed, or any other path delta remains unattributed and blocks the
+coordinator turn. The completion gate still requires an exact full digest, so
+this attribution does not weaken stale-verification checks.
+
+For direct/serialized shared-root workers, provisioning also records a durable
+`worker_start:<attempt_id>` manifest before the engine session is opened. A
+publication is accepted as a same-turn attribution only when its current tree
+matches and every concurrent shared-root attempt has complete start/publication
+manifests with disjoint changed paths. A missing baseline, an unpublished
+concurrent mutator, or overlapping A+B path deltas is refused with an explicit
+`shared_root_*` reason. This is the strongest evidence available from the
+runtime's durable observations; it does not establish which same-user process
+performed a write. Isolated snapshot workers retain their existing ownership
+and integration path.
+When a later shared-root publication is durably complete, its disjoint delta
+may explain the current tree for an earlier result; any remaining uncovered
+path is still refused as external drift.
+Acceptance also refuses duplicate retained `worker_result` events, duplicate
+start baselines, or duplicate publication captures for one attempt/report,
+even when their payloads are identical. A revision attempt has its own
+attempt and report binding, so distinct predecessor/current attempts remain
+valid independently.
+
 `OrchestratingRuntime._capture_result_revisions` captures one revision per
 `worker_result` event at the moment this runtime claims it (phase
-`worker_result:<event id>`), against the task's project root (every
-delegated attempt shares that one root — see
-`delegation.live_adapters.SharedProjectRootWorkspaceProvisioner`; T025
-owns real per-attempt isolation). The continuation text `_coalesce` builds
+`worker_result:<event id>`), against that attempt's isolated workspace. The continuation text `_coalesce` builds
 labels each `worker_result` line with that capture (`revision: <head>
 tree=<digest prefix>`, or `revision: unknown (unavailable)`).
 
@@ -188,13 +224,13 @@ assignment's `worker_result` included at least one `evidence="observed"`
 check, and compares it against that check's own captured revision (both
 `head` and tree digest — a HEAD-only difference with an unchanged tree
 still counts as stale): a mismatch refuses acceptance with reason
-`stale_verification:<assignment_ref>`; an `unavailable` capture on either
-side is never treated as stale — it is simply not compared (the check
-stays "unknown", never refused). Because the workspace root is shared,
-any worker's (or the coordinator's, or the user's) concurrent change
-invalidates every other attempt's already-captured observed checks, not
-only the attempt that made it — a known, documented limitation of the
-shared-root design.
+`stale_verification:<assignment_ref>`. The current capture must be
+`kind="observed"`; an unavailable, capped, racy, or otherwise non-observed
+current capture refuses acceptance with
+`current_revision_unavailable:<kind>:<detail>`, preserving the exact reason
+for the incomplete observation. Production worker workspaces are isolated.
+After integration, checks must be reconciled to the resulting project
+revision; a workspace check alone does not certify a different project tree.
 
 Tests: `tests/test_artifact_revision.py` (real temporary git repos and
 plain non-git directories under the isolated test sandbox — never the

@@ -10,12 +10,13 @@ waiting for, and how engine-process concurrency is accounted for.
 
 | Outcome (coordinator turn) | Runtime effect |
 | --- | --- |
-| `end_turn`, no task-level accept | keep waiting or continue the loop (see below) |
-| `end_turn` + task-level `decide(accept)` that passes the completion gate | `state=accepted`, `StopReason.END_TURN` (host success) |
+| `end_turn`, no task-level accept | keep waiting or continue the loop (see below); when the turn is ordinary dialogue with no delegated assignments and no open work, persist `state=idle_awaiting_user`, `wait_reason=idle_awaiting_user`, and wait for the next user prompt without emitting an acceptance refusal |
+| `end_turn` + task-level `decide(accept)` that passes the completion gate | emit the guarded final, persist `state=accepted` while clearing transient wait fields and reconciling durably reported assignments, terminate the owned coordinator engine attempt, `StopReason.END_TURN` (host success) |
 | `end_turn` + `decide(ask_user)` | `state=waiting_for_user`, `wait_reason=user_input_required` |
 | `max_tokens` / `max_turn_requests` | recorded as a `progress` event, counts toward the budget; loop continues only if a meaningful event or a running/pending assignment exists, else `state=blocked`, `wait_reason=limit:<kind>`, `END_TURN` (never success) |
 | `refusal` | `state=refused`, `wait_reason=refused`, `StopReason.REFUSAL` returned to the host -- never re-routed to a second engine/connection/model |
 | `cancelled` (cancel_event) | `state=cancelled`, `StopReason.CANCELLED`; already-published reports/results are untouched (cancellation is not rollback) |
+| two observed same-turn `decide(task, accept)` refusals for unconsumed meaningful events | cancel only the current downstream engine turn, then claim and deliver those events in a new coordinator continuation; the host task is not cancelled and the completion gate remains unchanged |
 | engine failure (`EngineTurnFailed`: `transport_eof`, `timeout_alive`, `poisoned`, ...) | claimed events released back to unconsumed (delivered exactly once later); `state=blocked`, `wait_reason=engine_failure:<kind>`; never silently treated as `end_turn` |
 | repeated no-progress continuations | `state=blocked`, `wait_reason=blocked`, durable `no_progress_count`, `END_TURN` |
 
@@ -24,6 +25,21 @@ or `refusal` durably records `assignment_failed` (payload `kind`) -- never a
 silently dropped assignment, never a reroute. A worker `max_tokens`/
 `max_turn_requests` is recorded as an informative `progress` event (the
 worker may still ask a question or publish a partial result later).
+An observed worker `end_turn` during a live coordination turn is reconciled immediately: an existing
+`worker_question` remains open, an existing publication/result wins, and a turn
+with neither receives exactly one bounded corrective continuation on the same
+worker session. The assignment remains `working` and the coordinator continues
+waiting for that worker; this continuation is an operational runtime message,
+not a new assignment, route, or evidence record. If the same session ends a
+second time without a durable `worker_result`, `worker_question`, or owned
+publication, the attempt is terminalized as `worker_ended_without_result`.
+Partial streamed commentary from a cancelled or failed turn is never relabelled
+as a final response. A genuine `EngineTurnFailed`, refusal, or cancellation is
+terminal under its own failure path and does not receive this same-session
+continuation. Recovery-only provisioning leaves this classification to the
+recovery reconciler, which owns the result-vs-lost race and capacity release.
+The assignment row mirrors its current attempt's execution state so a
+stopped/failed attempt cannot remain displayed as `planned`.
 
 `engine.session_manager`'s `EngineEventKind.ERROR` (`transport_eof`,
 `timeout_alive`) and a poisoned-session `engine_session_unusable` error are
@@ -49,10 +65,33 @@ already-recorded decision). It requires, purely from the durable
    per-assignment accept step is required -- an `assignment_failed`, or an
    `assignment_cancelled`.
 2. No unconsumed *meaningful* event remains (see
-   `delegation.events.MEANINGFUL_EVENT_TYPES`).
+   `delegation.events.MEANINGFUL_EVENT_TYPES`). An explicit task accept can
+   discharge the same coordinator channel's exact assignment-accept reminder
+   backed by a retained assignment decision. The reminder is superseded in
+   the same SQLite transaction as the task decision; all other pending
+   meaningful events still block it.
 3. Every `worker_result`-terminal assignment's `report_ref` resolves to a
    `reports` row for this task **and** the report file actually exists on
    disk -- a claimed success with no stored evidence never gates completion.
+4. A retained worker result cannot contain an explicit `failed` check, or a
+   check whose exact attempt observation is `contradicted`. A `not_run` or
+   `unverified` rendered/UI check remains a blocker unless a separate current
+   candidate check satisfies the exact assignment binding and has an explicit
+   assessed pass. A later candidate pass never overwrites an explicit worker
+   failure. The gate does not require checks for assignments that make no
+   explicit rendered/UI claim.
+
+An MCP `list_events` read inside a coordinator engine turn does not consume
+events for completion. When two distinct observed Cortex `decide` calls
+(`mcp.cortex.decide` from Codex ACP or `mcp__cortex__decide` from Claude ACP)
+in that turn fail specifically because meaningful events remain unconsumed,
+the runtime requests `session/cancel` for only that downstream engine turn.
+After its actual terminal response, the runtime marks the old claimed batch
+delivered, claims the new events, and sends them in another coordinator prompt.
+Only a fresh task decision after that delivery can pass the gate. An engine
+failure or unusable session stays a blocker; neither the pending events nor
+the gate are waived. This bounded transition is separate from a host
+`session/cancel` or `/cortex-stop`.
 
 Coordinator-facing events (`delegation_requested`, `assignment_failed`,
 `assignment_cancelled`, ...) key `assignment_ref` by the delegate-time
@@ -64,7 +103,7 @@ issues a fresh id, never the hash) -- `gate()` bridges the two via
 ## Evidence: claimed vs. observed vs. contradicted
 
 `delegation.contracts.WORKER_OPERATIONS["publish_result"]` gains an
-optional, bounded `checks: [{name, outcome: passed|failed|not_run,
+optional, bounded `checks: [{name, outcome: passed|failed|not_run|unverified,
 tool_call_ref?}]` (max 20 items). `delegation.evidence_store` adds a
 **separate new table**, `tool_result_observations` (its own optional
 schema group, additive on top of `TASK_EVENTS_SCHEMA` -- never an
@@ -90,6 +129,13 @@ coordinator's continuation text (`_coalesce` in
 
 A claim is never itself treated as confirmed; only the `observed`/
 `contradicted` label (grounded in a durable observation row) does.
+
+For an assignment whose durable brief explicitly requires rendered or UI
+evidence, `publish_result` rejects a missing or empty `checks` array before it
+appends `worker_result`. This fail-fast rule keeps the immutable publication
+machine-checkable and tells the worker to publish a structured criterion,
+outcome and exact tool reference. Informational/review assignments without
+that requirement retain the ordinary optional-check behavior.
 
 ## Waiting
 
@@ -149,6 +195,10 @@ see `OrchestratingRuntime._provision_and_prompt`'s docstring). No model
 prompt happens while queued (queuing is entirely inside worker-thread
 `open()`/coordinator-provisioning calls, never the coordinator's own
 `engine.prompt`).
+The fast failure for a connection filled entirely by coordinator sessions
+checks the active count and reservation kinds in one SQLite snapshot. A
+confirmed worker release between separate reads must not turn a queued worker
+into a false `capacity_unsatisfiable` failure.
 
 `connections.model.ConnectionRecord` gains an optional, validated,
 backward-compatible `max_concurrent_sessions: int = 4` field (1-64);
@@ -161,6 +211,10 @@ down a worker's owned process once its assignment reaches a terminal state
 (a retained `worker_result` or an `assignment_failed`) -- exactly once per
 attempt (`self._terminated_attempts`) -- so capacity is only reused once
 that shutdown reaches a confirmed (or ambiguous) release.
+The accepted task likewise terminates its own coordinator attempt after its
+final text reaches the ACP sink and its terminal state is durable. Confirmed
+exit frees capacity for a later task's new session; uncertain termination
+remains counted as ambiguous and requires reconciliation.
 
 ## What's deferred
 

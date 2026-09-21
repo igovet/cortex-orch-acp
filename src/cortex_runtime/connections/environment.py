@@ -29,12 +29,14 @@
 6. ``pinned_engine_vars`` is a narrow, engine-specific escape hatch used
    only by ``engine.process.EngineProcess`` when launching a verified
    codex-acp install (see ``engine.codex_install``/
-   ``engine.codex_adapter_acp.build_codex_launch``): it is accepted only
+   ``engine.codex_adapter_acp.build_codex_launch`` and the Cortex-owned
+   Codex runtime wrapper): it is accepted only
    for ``record.engine == "codex-acp"``, and only as exactly the two names
    ``{"CODEX_PATH", "NO_BROWSER"}`` -- ``CODEX_PATH`` must be an absolute
    path to an existing file (the caller is responsible for it being the
-   verified install's own ``bundled_codex_binary``; this function only
-   checks shape/existence, not install identity) and ``NO_BROWSER`` must be
+   verified install's own ``bundled_codex_binary`` or an integrity-checked
+   Cortex-owned wrapper; this function only checks shape/existence, not
+   install identity) and ``NO_BROWSER`` must be
    exactly ``"1"``. These two names are the only ones ever allowed to
    bypass ``DENYLIST_PATTERN``, and only via this explicit parameter --
    never through ``base_env``/``channel_credentials``. No other name or

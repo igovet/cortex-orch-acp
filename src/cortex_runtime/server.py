@@ -18,6 +18,7 @@ import time
 from collections import OrderedDict
 
 from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, ERROR_HELP, validate
+from .channeled_tools import channeled_base_tools
 from .delegation import contracts as delegation_contracts
 from .delegation import mcp_tools as delegation_mcp_tools
 from .store import Store, private_directory
@@ -51,7 +52,7 @@ MUTATING_TOOLS = frozenset({'create_draft', 'write_report', 'set_governance'})
 # here never needed a live epoch (same reasoning as MUTATING_TOOLS above).
 DELEGATION_READ_OPERATIONS = frozenset({
     'list_events', 'list_sources', 'read_source', 'read_capsule',
-    'read_large_output', 'read_diagnostics',
+    'read_large_output', 'read_diagnostics', 'read_plan', 'read_check', 'read_skill',
 })
 
 
@@ -175,7 +176,7 @@ class Server:
         self._resolved_channel = resolve_channel(store, channel_id, secret)
         return self._resolved_channel
 
-    def dispatch(self, method, params):
+    def dispatch(self, method, params, request_id=None):
         if method == 'initialize':
             if not isinstance(params,dict) or not isinstance(params.get('protocolVersion'),str) or not isinstance(params.get('capabilities'),dict) or not isinstance(params.get('clientInfo'),dict) or any(not isinstance(params['clientInfo'].get(k),str) for k in ('name','version')):
                 raise ProtocolError(-32602,'Invalid initialize parameters. Supply protocolVersion (string), capabilities (object), and clientInfo with name and version strings.')
@@ -190,7 +191,7 @@ class Server:
                 raise ProtocolError(-32001, ERROR_HELP.get(str(exc), ERROR_HELP['storage_error'])) from None
             if channel is None:
                 return dict(tools=TOOLS)
-            return dict(tools=TOOLS + delegation_mcp_tools.tool_definitions(channel.role))
+            return dict(tools=list(channeled_base_tools()) + delegation_mcp_tools.tool_definitions(channel.role))
         if method != 'tools/call':
             raise ProtocolError(-32601,'Unknown method. Use initialize, ping, tools/list or tools/call; discover tool names through tools/list.')
         if not isinstance(params, dict) or set(params)-{'name','arguments','_meta'} or not isinstance(params.get('name'), str) or ('arguments' in params and not isinstance(params['arguments'],dict)):
@@ -228,6 +229,14 @@ class Server:
         try:
             validate(name,params.get('arguments',{}))
             data=self._dispatch_channeled(name,params)
+            if name == 'read_report':
+                from .delegation.report_reads import record_report_read
+                channel = self._channel_context()
+                record_report_read(
+                    self.store, task_id=channel.task_id, attempt_id=channel.attempt_id,
+                    report_id=data.get('report_id') or params.get('arguments', {}).get('report_id'),
+                    request_id=request_id,
+                )
             observe(name,'success',data.get('replayed',False),None,params.get('arguments'),data)
             return dict(content=[dict(type='text',text=json.dumps(data,ensure_ascii=False))], structuredContent=data, isError=False)
         except StoreError as exc:
@@ -357,7 +366,7 @@ def main():
                 raise ProtocolError(-32600,'Request id must be a string of at most 128 characters or an integer; null and boolean ids are not valid MCP request ids.')
             if 'id' not in item:
                 continue
-            result = server.dispatch(item['method'],item.get('params',{}))
+            result = server.dispatch(item['method'],item.get('params',{}),request_id=request_id)
             reply = dict(jsonrpc='2.0',id=request_id,result=result)
         except ProtocolError as exc:
             reply = dict(jsonrpc='2.0',id=request_id,error=dict(code=exc.code,message=exc.message))

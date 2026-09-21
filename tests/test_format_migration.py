@@ -33,6 +33,13 @@ from test_markdown_store import create, write
 
 RUNTIME_ROOT = str(Path(__file__).resolve().parents[1] / "src")
 
+
+def _private_backup(tmp_path, name="backup.sqlite3"):
+    directory = tmp_path / "backup-dir"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    directory.chmod(0o700)
+    return directory / name
+
 # Same enumerated drop list the pre-existing offline-migration test in
 # test_storage_v11.py uses to build an authentic pre-T005 format-10
 # fixture (every table format 11 ever added, across every task since,
@@ -41,8 +48,7 @@ RUNTIME_ROOT = str(Path(__file__).resolve().parents[1] / "src")
 # for the tables format 10 could never have had).
 _V11_ONLY_TABLES = (
     "binding_receipts", "source_revisions", "report_provenance", "draft_revisions",
-    "task_changes", "source_turns", "hook_events", "hook_hints", "hook_agent_bindings",
-    "hook_pending_sources", "source_resets", "trusted_channels", "source_events",
+    "task_changes", "source_turns", "source_resets", "trusted_channels", "source_events",
     "task_owners", "task_route_selections", "configuration_revisions",
     "project_configuration_defaults", "format_history", "attempt_revisions",
 )
@@ -62,7 +68,7 @@ def test_plan_reports_no_op_for_current_format_without_mutating(tmp_path):
     task = create(store, tmp_path)
     before = hashlib.sha256((tmp_path / "private" / "cortex.sqlite3").read_bytes()).hexdigest()
     result = plan(tmp_path / "private")
-    assert result["action"] == "none" and result["current_version"] == 11
+    assert result["action"] == "none" and result["current_version"] == 12
     after = hashlib.sha256((tmp_path / "private" / "cortex.sqlite3").read_bytes()).hexdigest()
     assert before == after
 
@@ -73,7 +79,7 @@ def test_plan_reports_exact_migration_for_format_10_without_mutating(tmp_path):
     _downgrade_to_v10(store)
     before = hashlib.sha256((tmp_path / "private" / "cortex.sqlite3").read_bytes()).hexdigest()
     result = plan(tmp_path / "private")
-    assert result == dict(action="migrate", from_version=10, to_version=11,
+    assert result == dict(action="migrate", from_version=10, to_version=12,
                            tables_present=result["tables_present"],
                            note=result["note"])
     after = hashlib.sha256((tmp_path / "private" / "cortex.sqlite3").read_bytes()).hexdigest()
@@ -87,6 +93,185 @@ def test_plan_refuses_unknown_format(tmp_path):
         db.execute("PRAGMA user_version=999")
     with pytest.raises(StoreError, match="unsupported_storage"):
         plan(tmp_path / "private")
+
+
+def test_migrate_format11_removes_legacy_hook_tables_preserves_acp_data(tmp_path):
+    store = Store(tmp_path / "private")
+    task = create(store, tmp_path)
+    with store.connection() as db:
+        db.executescript("""
+        CREATE TABLE hook_events (
+            task_id TEXT NOT NULL, thread_id TEXT NOT NULL, event_key TEXT PRIMARY KEY,
+            event_name TEXT NOT NULL, metadata TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE TABLE hook_pending_sources (
+            task_id TEXT NOT NULL, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+            created_at TEXT NOT NULL, PRIMARY KEY(thread_id,turn_id)
+        );
+        CREATE TABLE hook_hints (
+            task_id TEXT NOT NULL, thread_id TEXT NOT NULL, event_name TEXT NOT NULL,
+            state_key TEXT NOT NULL, PRIMARY KEY(thread_id,event_name)
+        );
+        CREATE TABLE hook_agent_bindings (
+            agent_id TEXT PRIMARY KEY, parent_thread_id TEXT NOT NULL, task_id TEXT NOT NULL,
+            receipt TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL
+        );
+        CREATE TABLE hook_command_sessions (
+            task_id TEXT NOT NULL, worker_thread_id TEXT NOT NULL, parent_thread_id TEXT NOT NULL,
+            command_session_id TEXT NOT NULL, cwd TEXT NOT NULL, created_at TEXT NOT NULL,
+            PRIMARY KEY(task_id,command_session_id)
+        );
+        """)
+        db.execute("PRAGMA user_version=11")
+        db.commit()
+    backup = tmp_path / "legacy-backup.sqlite3"
+    result = migrate(store.directory, backup, access_stopped=True)
+    assert result["from_version"] == 11 and result["to_version"] == 12
+    reopened = Store(store.directory, initialize=True)
+    with reopened.connection() as db:
+        names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert not names.intersection({"hook_events", "hook_pending_sources", "hook_hints", "hook_agent_bindings", "hook_command_sessions"})
+        assert db.execute("SELECT 1 FROM tasks WHERE id=?", (task,)).fetchone()
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert backup.exists()
+
+
+def test_store_open_automatically_migrates_format11_and_keeps_verified_backup(tmp_path):
+    store = Store(tmp_path / "private")
+    with store.connection() as db:
+        db.execute("CREATE TABLE hook_events (event_key TEXT PRIMARY KEY)")
+        db.execute("PRAGMA user_version=11")
+        db.commit()
+
+    reopened = Store(store.directory, initialize=True)
+    with reopened.connection() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 12
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='hook_events'").fetchone() is None
+        assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    backups = list((store.directory / ".migration-backups").glob("cortex.sqlite3.format11-*.bak"))
+    assert len(backups) == 1
+    # A second open is a format-12 no-op and does not create another backup.
+    Store(store.directory, initialize=True)
+    assert list((store.directory / ".migration-backups").glob("cortex.sqlite3.format11-*.bak")) == backups
+
+
+def test_concurrent_auto_migration_accepts_post_probe_v12(monkeypatch, tmp_path):
+    """A peer may commit v12 after this opener's v11 probe but before migrate()."""
+    store = Store(tmp_path / "private")
+    with store.connection() as db:
+        db.execute("PRAGMA user_version=11")
+        db.commit()
+
+    import cortex_runtime.migrate as migration
+    original = migration.migrate
+
+    def peer_finished(directory, backup, *, access_stopped=False):
+        with sqlite3.connect(Path(directory) / "cortex.sqlite3") as db:
+            db.execute("PRAGMA user_version=12")
+            db.commit()
+        raise StoreError("unsupported_storage")
+
+    monkeypatch.setattr(migration, "migrate", peer_finished)
+    assert migration.auto_migrate_format11(store.directory) is None
+    monkeypatch.setattr(migration, "migrate", original)
+
+
+def test_live_format_probe_retries_transient_sqlite_lock(monkeypatch, tmp_path):
+    """A short SQLite lock during concurrent Store startup is recoverable."""
+    store = Store(tmp_path / "private")
+    import cortex_runtime.migrate as migration
+    real_connect = migration.sqlite3.connect
+    calls = 0
+
+    def flaky_connect(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(migration.sqlite3, "connect", flaky_connect)
+    assert migration._read_live_header(store.directory / "cortex.sqlite3") == (APPLICATION_ID, 12)
+    assert calls == 3
+
+
+def test_live_format_probe_fails_closed_on_persistent_sqlite_lock(monkeypatch, tmp_path):
+    store = Store(tmp_path / "private")
+    import cortex_runtime.migrate as migration
+
+    def always_locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(migration.sqlite3, "connect", always_locked)
+    with pytest.raises(StoreError, match="storage_busy"):
+        migration._read_live_header(store.directory / "cortex.sqlite3")
+
+
+def test_migration_backup_includes_committed_wal_rows(monkeypatch, tmp_path):
+    """The logical backup must include committed rows still held in a WAL."""
+    store = Store(tmp_path / "private")
+    with store.connection() as db:
+        db.execute("CREATE TABLE hook_events (event_key TEXT PRIMARY KEY, payload TEXT)")
+        db.execute("PRAGMA user_version=11")
+        db.commit()
+    source = store.directory / "cortex.sqlite3"
+    keeper = sqlite3.connect(source, isolation_level=None)
+    keeper.execute("PRAGMA journal_mode=WAL")
+    keeper.execute("INSERT INTO hook_events VALUES ('wal-row', 'committed')")
+    backup = tmp_path / "wal-backup.sqlite3"
+    from cortex_runtime import _fault_injection
+    original_checkpoint = _fault_injection.checkpoint
+
+    def after_backup(name):
+        if name == "migrate_after_backup_before_schema":
+            with sqlite3.connect(backup) as check:
+                assert check.execute("SELECT payload FROM hook_events WHERE event_key='wal-row'").fetchone() == ("committed",)
+            keeper.close()
+            raise RuntimeError("stop-after-backup")
+        return original_checkpoint(name)
+
+    monkeypatch.setattr(_fault_injection, "checkpoint", after_backup)
+    with pytest.raises(RuntimeError, match="stop-after-backup"):
+        migrate(store.directory, backup, access_stopped=True)
+
+
+def test_automatic_migration_failure_leaves_format11_for_retry(tmp_path, monkeypatch):
+    store = Store(tmp_path / "private")
+    with store.connection() as db:
+        db.execute("CREATE TABLE hook_events (event_key TEXT PRIMARY KEY)")
+        db.execute("PRAGMA user_version=11")
+        db.commit()
+
+    from cortex_runtime import _fault_injection
+    original = _fault_injection.checkpoint
+    monkeypatch.setattr(_fault_injection, "checkpoint",
+                        lambda name: (_ for _ in ()).throw(RuntimeError("injected"))
+                        if name == "migrate_after_backup_before_schema" else original(name))
+    with pytest.raises(RuntimeError, match="injected"):
+        Store(store.directory, initialize=True)
+    check = sqlite3.connect(store.directory / "cortex.sqlite3")
+    try:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 11
+    finally:
+        check.close()
+    assert list((store.directory / ".migration-backups").glob("cortex.sqlite3.format11-*.bak"))
+    monkeypatch.setattr(_fault_injection, "checkpoint", original)
+    Store(store.directory, initialize=True)
+    check = sqlite3.connect(store.directory / "cortex.sqlite3")
+    try:
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 12
+    finally:
+        check.close()
+
+
+def test_non_initializing_open_refuses_format11_without_mutating(tmp_path):
+    store = Store(tmp_path / "private")
+    with store.connection() as db:
+        db.execute("PRAGMA user_version=11")
+        db.commit()
+    with pytest.raises(StoreError, match="legacy_storage_migration_required"):
+        Store(store.directory, initialize=False)
+    assert not (store.directory / ".migration-backups").exists()
 
 
 def test_plan_no_store_yet_is_a_no_op(tmp_path):
@@ -161,7 +346,7 @@ def test_migrate_records_format_history_and_backup_digest(tmp_path):
     store = Store(tmp_path / "private")
     create(store, tmp_path)
     _downgrade_to_v10(store)
-    backup = tmp_path / "backup.sqlite3"
+    backup = _private_backup(tmp_path)
     result = migrate(tmp_path / "private", backup, access_stopped=True)
     expected_digest = hashlib.sha256(backup.read_bytes()).hexdigest()
     assert result["backup_digest"] == expected_digest
@@ -169,7 +354,7 @@ def test_migrate_records_format_history_and_backup_digest(tmp_path):
         row = raw.execute(
             "SELECT action,from_version,to_version,backup_path,backup_digest FROM format_history"
         ).fetchone()
-    assert row == ("migrate", 10, 11, str(backup), expected_digest)
+    assert row == ("migrate", 10, 12, str(backup), expected_digest)
 
 
 # --- rollback(): verified restore only, never a second root ----------------
@@ -178,7 +363,9 @@ def test_rollback_restores_verified_backup_byte_for_byte(tmp_path):
     store = Store(tmp_path / "private")
     create(store, tmp_path)
     _downgrade_to_v10(store)
-    backup = tmp_path / "backup.sqlite3"
+    backup_dir = tmp_path / "backup-dir"
+    backup_dir.mkdir(mode=0o700)
+    backup = backup_dir / "backup.sqlite3"
     migrate(tmp_path / "private", backup, access_stopped=True)
     backup_bytes = backup.read_bytes()
     result = rollback(tmp_path / "private", backup, access_stopped=True, confirm=True)
@@ -194,7 +381,9 @@ def test_rollback_requires_access_stopped_and_explicit_confirm(tmp_path):
     store = Store(tmp_path / "private")
     create(store, tmp_path)
     _downgrade_to_v10(store)
-    backup = tmp_path / "backup.sqlite3"
+    backup_dir = tmp_path / "backup-dir"
+    backup_dir.mkdir(mode=0o700)
+    backup = backup_dir / "backup.sqlite3"
     migrate(tmp_path / "private", backup, access_stopped=True)
     with pytest.raises(StoreError, match="migration_requires_stopped_access"):
         rollback(tmp_path / "private", backup, confirm=True)
@@ -202,25 +391,40 @@ def test_rollback_requires_access_stopped_and_explicit_confirm(tmp_path):
         rollback(tmp_path / "private", backup, access_stopped=True)
     # a dry (unconfirmed) attempt never mutates the live store
     with sqlite3.connect(tmp_path / "private" / "cortex.sqlite3") as raw:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
 
 
 def test_rollback_refuses_corrupt_backup(tmp_path):
     store = Store(tmp_path / "private")
     create(store, tmp_path)
-    garbage = tmp_path / "garbage.sqlite3"
+    backup_dir = tmp_path / "backup-dir"
+    backup_dir.mkdir(mode=0o700)
+    garbage = backup_dir / "garbage.sqlite3"
     garbage.write_bytes(b"not a sqlite database")
     garbage.chmod(0o600)
     with pytest.raises((StoreError, sqlite3.DatabaseError)):
         rollback(tmp_path / "private", garbage, access_stopped=True, confirm=True)
     with sqlite3.connect(tmp_path / "private" / "cortex.sqlite3") as raw:
-        assert raw.execute("PRAGMA user_version").fetchone()[0] == 11
+        assert raw.execute("PRAGMA user_version").fetchone()[0] == 12
+
+
+def test_rollback_requires_private_backup_parent(tmp_path):
+    store = Store(tmp_path / "private")
+    create(store, tmp_path)
+    _downgrade_to_v10(store)
+    backup = tmp_path / "shared-backup" / "backup.sqlite3"
+    backup.parent.mkdir(mode=0o755)
+    migrate(tmp_path / "private", backup, access_stopped=True)
+    with pytest.raises(StoreError, match="unsafe_storage"):
+        rollback(tmp_path / "private", backup, access_stopped=True, confirm=True)
 
 
 def test_rollback_refuses_backup_from_a_foreign_application(tmp_path):
     store = Store(tmp_path / "private")
     create(store, tmp_path)
-    foreign = tmp_path / "foreign.sqlite3"
+    backup_dir = tmp_path / "backup-dir"
+    backup_dir.mkdir(mode=0o700)
+    foreign = backup_dir / "foreign.sqlite3"
     with sqlite3.connect(foreign) as raw:
         raw.execute("CREATE TABLE unrelated (id INTEGER)")
         raw.execute("PRAGMA application_id=42")
@@ -233,11 +437,13 @@ def test_rollback_refuses_backup_from_a_foreign_application(tmp_path):
 def test_rollback_refuses_an_unknown_newer_format(tmp_path):
     store = Store(tmp_path / "private")
     create(store, tmp_path)
-    newer = tmp_path / "newer.sqlite3"
+    backup_dir = tmp_path / "backup-dir"
+    backup_dir.mkdir(mode=0o700)
+    newer = backup_dir / "newer.sqlite3"
     with sqlite3.connect(store.directory / "cortex.sqlite3") as source:
         target = sqlite3.connect(newer)
         source.backup(target)
-        target.execute("PRAGMA user_version=12")
+        target.execute("PRAGMA user_version=13")
         target.commit(); target.close()
     os.chmod(newer, 0o600)
     with pytest.raises(StoreError, match="rollback_backup_incompatible"):
@@ -259,7 +465,7 @@ def test_rollback_refused_while_a_store_connection_is_open(tmp_path):
     store = Store(tmp_path / "private")
     create(store, tmp_path)
     _downgrade_to_v10(store)
-    backup = tmp_path / "backup.sqlite3"
+    backup = _private_backup(tmp_path)
     migrate(tmp_path / "private", backup, access_stopped=True)
     with store.connection():
         with pytest.raises(StoreError, match="storage_busy"):
@@ -304,7 +510,7 @@ def test_migrate_preserves_reports_drafts_and_every_row_it_does_not_touch(tmp_pa
     task_dir = tmp_path / "private" / task
     markdown_before = {p.name: p.read_bytes() for p in task_dir.glob("*.md")}
     _downgrade_to_v10(store)
-    backup = tmp_path / "backup.sqlite3"
+    backup = _private_backup(tmp_path)
     migrate(tmp_path / "private", backup, access_stopped=True)
     markdown_after = {p.name: p.read_bytes() for p in task_dir.glob("*.md")}
     assert markdown_before == markdown_after
@@ -343,7 +549,7 @@ def test_rollback_never_touches_markdown_engine_state_or_credentials(tmp_path):
     engine_digest_before = hashlib.sha256(engine_install.read_bytes()).hexdigest()
 
     _downgrade_to_v10(store)
-    backup = tmp_path / "backup.sqlite3"
+    backup = _private_backup(tmp_path)
     migrate(tmp_path / "private", backup, access_stopped=True)
     rollback(tmp_path / "private", backup, access_stopped=True, confirm=True)
 
@@ -392,7 +598,7 @@ def test_migrate_crash_at_each_checkpoint_leaves_a_reconcilable_v10_store(tmp_pa
     task = create(store, tmp_path)
     write(store, task, "Pre-migration report.")
     _downgrade_to_v10(store)
-    backup = tmp_path / "backup.sqlite3"
+    backup = _private_backup(tmp_path)
 
     result = _run_crashing(_MIGRATE_CHILD, tmp_path / "private", backup, checkpoint)
     assert result.returncode != 0 and "completed-without-crash" not in result.stdout
@@ -410,13 +616,13 @@ def test_migrate_crash_at_each_checkpoint_leaves_a_reconcilable_v10_store(tmp_pa
     raw.close()
     # Never a half-applied format: either still cleanly 10 (crash before the
     # final commit -- the whole schema+backfill transaction auto-rolled
-    # back) or already cleanly 11 with a recorded format_history row.
-    assert version in (10, 11)
+    # back) or already cleanly 12 with a recorded format_history row.
+    assert version in (10, 12)
     if version == 10:
         # A fresh attempt with a new backup path fully recovers.
         fresh_backup = tmp_path / "backup-retry.sqlite3"
         retry = migrate(tmp_path / "private", fresh_backup, access_stopped=True)
-        assert retry["to_version"] == 11
+        assert retry["to_version"] == 12
     else:
         raw = sqlite3.connect(tmp_path / "private" / "cortex.sqlite3")
         assert raw.execute("SELECT COUNT(*) FROM format_history").fetchone()[0] == 1
@@ -435,7 +641,7 @@ def test_rollback_crash_at_each_checkpoint_leaves_a_reconcilable_store(tmp_path,
     task = create(store, tmp_path)
     write(store, task, "Pre-rollback report.")
     _downgrade_to_v10(store)
-    backup = tmp_path / "backup.sqlite3"
+    backup = _private_backup(tmp_path)
     migrate(tmp_path / "private", backup, access_stopped=True)
     backup_bytes = backup.read_bytes()
 
@@ -450,7 +656,7 @@ def test_rollback_crash_at_each_checkpoint_leaves_a_reconcilable_store(tmp_path,
         fcntl.flock(probe, fcntl.LOCK_UN); os.close(probe)
 
     db_path = tmp_path / "private" / "cortex.sqlite3"
-    # Either still the pre-rollback (post-migrate, v11) content, or already
+    # Either still the pre-rollback (post-migrate, v12) content, or already
     # the fully-restored v10 backup -- never a partially-written file: a
     # stale ".rollback-*.tmp" (crash before the atomic replace) never
     # reaches the live path at all.
@@ -458,8 +664,8 @@ def test_rollback_crash_at_each_checkpoint_leaves_a_reconcilable_store(tmp_path,
     assert raw.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     version = raw.execute("PRAGMA user_version").fetchone()[0]
     raw.close()
-    assert version in (10, 11)
-    if version == 11:
+    assert version in (10, 12)
+    if version == 12:
         assert db_path.read_bytes() != backup_bytes
         retry = rollback(tmp_path / "private", backup, access_stopped=True, confirm=True)
         assert retry["restored_version"] == 10

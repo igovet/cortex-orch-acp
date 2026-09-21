@@ -30,6 +30,10 @@ would change the readiness conclusion. Avoid inheriting the implementation's ora
    Reuse an unchanged review/verification identity `(artifact_revision,
    acceptance_boundary, check_identity)` unless fresh evidence or a concrete rerun
    reason changes its applicability.
+6. For visible UI or keyboard-focus claims, exercise the rendered page with a
+   browser and keyboard when that capability is available. Source inspection
+   and test output alone do not establish visibility; if the rendered check is
+   unavailable, mark the claim unverified and name the missing surface.
 
 ## Quality criteria
 
@@ -39,6 +43,8 @@ would change the readiness conclusion. Avoid inheriting the implementation's ora
 - Product defects, test defects, flakes, environment limits, and missing coverage
   remain distinct; retries do not conceal nondeterminism.
 - **Completion:** each acceptance criterion has observed or explicitly missing evidence.
+- Name the browser, viewport, interaction, state, and inspected element for
+  rendered UI evidence; keep source-only conclusions scoped to the source.
 
 ## Report and handoff
 

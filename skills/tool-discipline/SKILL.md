@@ -11,19 +11,18 @@ Before a call, name the concrete fact, state change or acceptance condition it m
 resolve. Reuse retained results while relevant state is unchanged. A timeout, quiet
 worker or desire to reconfirm does not justify another call.
 
-Your engine offers subagent and spawn tools of its own. Never use them. Work you
-hand to one runs in your session, your workspace and your model: no isolated copy,
-no checked integration, no per-role policy, no audit, and nothing anyone can review
-afterwards. Whatever you do not hand to Cortex, you did yourself and must report as
-your own. A worker delegates nothing at all; it does the work it was given, or says
-it could not.
+Your engine offers subagent and spawn tools of its own. Never use them. Those
+sessions do not carry Cortex's assigned role, ownership, channel and report
+protocol. Whatever you do not delegate through Cortex, you did yourself and
+must report as your own. A worker delegates nothing at all; it does the work it
+was given, or says it could not.
 
 Use only tools available to this host and role. Read the complete live declaration
 before first use and reload it after context loss; a name or recovery summary is
 insufficient. Use minimal requests with declared defaults and observed identifiers.
 Check supplied keys and values before dispatch. Do not copy argument contracts into
 skills, infer synonymous fields, discover requirements by causing errors, or inspect
-plugin internals instead of advertised operations.
+runtime internals instead of advertised operations.
 
 Code-mode is not Node.js or a browser. Use only its advertised globals; do not
 assume crypto, process, require or filesystem APIs exist. Prepare literal values
@@ -34,6 +33,10 @@ mutations, approvals and retries sequential. A wrapper must expose the full nest
 result, including exit status or a running handle. Returning stdout alone is
 unverified. If a wrapper yields an active cell or command session, continue with its
 matching wait or input operation until a terminal receipt before dependent work.
+Retain and poll or resume that same handle; while it remains active, never launch the
+same or an equivalent command. Keep waits bounded. If it cannot reach a terminal
+result within the assignment constraints, cancel or close only the owned handle,
+retain the timeout or cancellation receipt, and report the check unverified.
 
 For file changes, inspect the current target fragment and patch the exact observed
 text. Re-read after user steering, another contributor's edit or a context mismatch.

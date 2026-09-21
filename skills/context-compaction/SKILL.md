@@ -13,7 +13,7 @@ are not authoritative. Prefer its declared defaults.
 
 ## Coordinator
 
-Resume the same native thread and task. Recover the current pipeline and reread the
+Resume the same ACP session and task when available. Recover the current pipeline and reread the
 original request, later user messages, attachment routes and as many bounded evidence
 pages as needed to restore exact requirements and make the next decision. Restore the user-facing language from the user's own prose and any explicit
 response-language preference before replying; an English recovery summary does not

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import threading
+import time
+from types import SimpleNamespace
 
 import jsonschema
 import pytest
@@ -16,7 +18,7 @@ from cortex_runtime.acp import commands as acp_commands
 from cortex_runtime.acp import config_options
 from cortex_runtime.acp.agent import Agent
 from cortex_runtime.catalog import discovery, store as catalog_store
-from cortex_runtime.catalog.evidence import EvidenceState
+from cortex_runtime.catalog.evidence import EvidenceState, Fact, ProvenanceSource
 from cortex_runtime.catalog.model import CatalogEntry
 from cortex_runtime.configuration import store as configuration_store
 from cortex_runtime.configuration.service import ConfigurationService
@@ -76,6 +78,62 @@ def _build_and_save_snapshot(record, *, environ, model_id="model-placeholder-1",
     return snapshot
 
 
+def test_route_policy_filters_selector_models_and_effort_values(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    _build_and_save_snapshot(record, environ=environ, model_id="gpt-5.6-luna", thought_level="high")
+    project = tmp_path / "project"
+    (project / ".cortex").mkdir(parents=True)
+    (project / ".cortex" / "route-policy.json").write_text(json.dumps({
+        "roles": {},
+        "default": [{"engine": "codex-acp", "model": "gpt-5.6-luna",
+                      "efforts": ["high"], "default_effort": "high"}],
+    }))
+    entries = config_options.selectable_entries_from_snapshots({record.id: record}, environ)
+    offered = config_options.filter_entries_by_route_policy(entries, str(project), environ)
+    assert [entry.route.model for entry in offered] == ["gpt-5.6-luna"]
+    options = config_options.build_config_options(
+        offered, {record.id: record},
+        current={"route_id": offered[0].route.id, "state": "active", "revision": 1},
+        project_root=str(project), environ=environ,
+    )
+    effort = next(option for option in options if option["id"] == config_options.THOUGHT_LEVEL_OPTION_ID)
+    assert [item["value"] for item in effort["options"]] == ["high"]
+
+
+def test_engine_default_alias_is_hidden_from_model_and_effort_pickers(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    raw = [
+        dict(id="model", name="Model", type="select", category="model",
+             currentValue="default", options=[
+                 dict(value="default", name="Default"),
+                 dict(value="gpt-5.6-luna", name="GPT-5.6-Luna"),
+             ]),
+        dict(id="thought_level", name="Thought level", type="select",
+             category="thought_level", currentValue="default", options=[
+                 dict(value="default", name="Default"),
+                 dict(value="low", name="Low"),
+                 dict(value="medium", name="Medium"),
+             ]),
+    ]
+    observation = discovery.parse_observation(raw)
+    catalog_store.save_snapshot(discovery.build_catalog({record.id: record}, {record.id: observation}), environ)
+    entries = config_options.selectable_entries_from_snapshots({record.id: record}, environ)
+    assert {entry.route.model for entry in entries} == {"default", "gpt-5.6-luna"}
+
+    for combined in (False, True):
+        options = config_options.build_config_options(
+            entries, {record.id: record}, environ=environ, combined_model_picker=combined,
+        )
+        model = next(option for option in options if option["id"] == "model")
+        effort = next(option for option in options if option["id"] == "thought_level")
+        assert len(model["options"]) == 1
+        assert all("default" not in item["name"].casefold() for item in model["options"])
+        assert [item["value"] for item in effort["options"]] == ["low", "medium"]
+        assert effort["currentValue"] == "low"
+
+
 # --- config_options.py unit tests -------------------------------------------
 
 # --- T035: seeded model list, superseded by a real observation ------------
@@ -92,8 +150,8 @@ def test_never_observed_connection_falls_back_to_seed_with_seed_provenance(tmp_p
             "cortex_runtime.catalog.model_seed", fromlist=["SEED_MODELS"]).SEED_MODELS["codex-acp"]}
     model_option = config_options.build_model_option(entries, None, None, None)
     for option in model_option["options"]:
-        assert "seeded" in option["description"]
-        assert "not yet confirmed" in option["description"]  # never claimed confirmed
+        assert option["description"] == "codex"
+    assert all(entry.evidence.get(Fact.CATALOG_OBTAINED).source == ProvenanceSource.SEED for entry in entries)
 
 
 def test_real_observation_supersedes_the_seed(tmp_path, monkeypatch):
@@ -111,8 +169,8 @@ def test_real_observation_supersedes_the_seed(tmp_path, monkeypatch):
     observed = config_options.selectable_entries_from_snapshots({record.id: record}, environ)
     assert {entry.route.model for entry in observed} == {"model-placeholder-1"}
     option = config_options.build_model_option(observed, None, None, None)
-    assert "seeded" not in option["options"][0]["description"]
-    assert "unverified" in option["options"][0]["description"]
+    assert option["options"][0]["description"] == "codex"
+    assert observed[0].evidence.get(Fact.CATALOG_OBTAINED).source == ProvenanceSource.DISCOVERY
 
 
 def test_no_connections_means_no_model_option():
@@ -312,7 +370,7 @@ def test_model_option_names_are_bare_model_ids_not_the_full_route_label():
     ]
     option = config_options.build_model_option(entries, None, None, None)
     names = {item["name"] for item in option["options"]}
-    assert names == {"default", "opus[1m]", "sonnet", "haiku"}
+    assert names == {"opus[1m]", "sonnet", "haiku"}
     for name in names:
         assert "claude-agent-acp" not in name
         assert "claude-sonnet-live" not in name
@@ -424,7 +482,7 @@ def test_thought_level_option_only_from_currently_selected_route(tmp_path, monke
     entry = entries[0]
     option = config_options.build_thought_level_option(entry, {}, None, None)
     assert option["id"] == "thought_level"
-    assert option["currentValue"] == "high"
+    assert option["currentValue"] == "low"
     assert {item["value"] for item in option["options"]} == {"high", "low"}
 
 
@@ -466,12 +524,12 @@ def test_thought_level_option_narrows_to_the_selected_models_own_set_not_an_engi
     entries = [narrow_entry, wide_entry]
 
     narrow_option = config_options.build_thought_level_option(narrow_entry, {}, None, None)
-    assert {item["value"] for item in narrow_option["options"]} == {"default", "low", "medium", "high"}
+    assert {item["value"] for item in narrow_option["options"]} == {"low", "medium", "high"}
     assert "max" not in {item["value"] for item in narrow_option["options"]}
 
     wide_option = config_options.build_thought_level_option(wide_entry, {}, None, None)
-    assert {item["value"] for item in wide_option["options"]} == {
-        "default", "low", "medium", "high", "max", "ultra"}
+    assert [item["value"] for item in wide_option["options"]] == [
+        "low", "medium", "high", "max", "ultra"]
 
     # End-to-end through build_config_options: switching the selected route
     # from one model to the other must narrow, never keep offering the
@@ -480,13 +538,46 @@ def test_thought_level_option_narrows_to_the_selected_models_own_set_not_an_engi
     options_for_narrow = config_options.build_config_options(
         entries, connections, current=dict(route_id=narrow_entry.route.id, state="active", revision=1))
     thought_option = next(o for o in options_for_narrow if o["id"] == config_options.THOUGHT_LEVEL_OPTION_ID)
-    assert {item["value"] for item in thought_option["options"]} == {"default", "low", "medium", "high"}
+    assert {item["value"] for item in thought_option["options"]} == {"low", "medium", "high"}
 
     options_for_wide = config_options.build_config_options(
         entries, connections, current=dict(route_id=wide_entry.route.id, state="active", revision=1))
     thought_option = next(o for o in options_for_wide if o["id"] == config_options.THOUGHT_LEVEL_OPTION_ID)
     assert {item["value"] for item in thought_option["options"]} == {
-        "default", "low", "medium", "high", "max", "ultra"}
+        "low", "medium", "high", "max", "ultra"}
+
+
+def test_thought_level_option_orders_every_supported_effort_weakest_first():
+    entry = _entry_with_model_thought_levels(
+        "cn_" + "e" * 12, "gpt-6-astra",
+        ("ultra", "high", "low", "max", "medium", "xhigh", "default"),
+    )
+    option = config_options.build_thought_level_option(entry, {}, None, None)
+    assert [item["value"] for item in option["options"]] == [
+        "low", "medium", "high", "xhigh", "max", "ultra",
+    ]
+
+
+def test_shipped_policy_offers_every_model_supported_coordinator_effort(tmp_path):
+    policy_dir = tmp_path / ".cortex"
+    policy_dir.mkdir()
+    policy_dir.joinpath("route-policy.json").write_bytes(
+        (Path(__file__).resolve().parents[1] / "policy" / "route-policy.default.json").read_bytes()
+    )
+    connection_id = "cn_" + "f" * 12
+    entry = _entry_with_model_thought_levels(
+        connection_id, "gpt-6-astra",
+        ("high", "low", "max", "medium", "ultra", "xhigh"),
+    )
+    options = config_options.build_config_options(
+        [entry], {connection_id: _fake_connection_record(connection_id)},
+        dict(route_id=entry.route.id, state="active", revision=1),
+        project_root=str(tmp_path), environ={"HOME": str(tmp_path.parent)},
+    )
+    effort = next(option for option in options if option["id"] == "thought_level")
+    assert [item["value"] for item in effort["options"]] == [
+        "low", "medium", "high", "xhigh", "max", "ultra",
+    ]
 
 
 def test_state_suffix_and_meta_reflect_pending_vs_active():
@@ -505,13 +596,14 @@ def test_state_suffix_and_meta_reflect_pending_vs_active():
         assert option["_meta"]["_cortex"]["state"] == state
 
 
-def test_evidence_note_marks_unverified_discovery_entries(tmp_path, monkeypatch):
+def test_model_selector_shows_provider_without_repeating_discovery_details(tmp_path, monkeypatch):
     environ = _isolate(tmp_path, monkeypatch)
     record = _configured_connection(environ=environ)
     _build_and_save_snapshot(record, environ=environ)
     entries = config_options.selectable_entries_from_snapshots({record.id: record}, environ)
     option = config_options.build_model_option(entries, None, None, None)
-    assert "unverified" in option["options"][0]["description"]
+    assert option["options"][0]["description"] == "codex"
+    assert entries[0].evidence.get(Fact.CATALOG_OBTAINED).source == ProvenanceSource.DISCOVERY
 
 
 def test_render_boolean_as_select_without_client_capability():
@@ -581,11 +673,195 @@ def test_session_new_omits_model_options_with_no_connections_but_offers_language
     environ = _isolate(tmp_path, monkeypatch)
     project = tmp_path / "project"
     project.mkdir()
-    agent, _transport = _new_agent(tmp_path, environ)
+    agent, transport = _new_agent(tmp_path, environ)
     result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
     ids = {option["id"] for option in result["configOptions"]}
     assert ids == {"language"}
     assert result["configOptions"][0]["currentValue"] == "auto"
+
+
+def test_paseo_exposes_coordinator_language_as_a_selectable_mode(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, transport = _new_agent(tmp_path, environ)
+    agent.client_info = {"name": "Paseo"}
+    result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    session_id = result["sessionId"]
+    language = next(option for option in result["configOptions"] if option["id"] == "language")
+    assert language["category"] == "mode"
+    assert [item["value"] for item in language["options"]] == ["auto", "en", "ru"]
+
+    agent._session_set_mode(41, dict(sessionId=session_id, modeId="ru"))
+    response = next(item for item in transport.responses if item.get("id") == 41)
+    assert response["result"] == {}
+    assert configuration_store.read_user_defaults(environ)["defaults"]["language"] == "ru"
+    update = transport.notifications[-1]["params"]["update"]
+    language = next(option for option in update["configOptions"] if option["id"] == "language")
+    assert language["category"] == "mode"
+    assert language["currentValue"] == "ru"
+
+    agent._session_set_mode(42, dict(sessionId=session_id, modeId="invalid"))
+    response = next(item for item in transport.responses if item.get("id") == 42)
+    assert response["error"]["code"] == -32602
+    assert configuration_store.read_user_defaults(environ)["defaults"]["language"] == "ru"
+
+
+def test_session_new_after_client_created_global_home_session(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    environ = dict(HOME=str(home))
+    agent, transport = _new_agent(tmp_path, environ)
+    global_session = agent._session_new(dict(cwd=str(home), mcpServers=[]))
+    project_session = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    assert global_session["sessionId"] != project_session["sessionId"]
+    assert (home / ".cortex" / "cortex.sqlite3").is_file()
+
+
+def test_session_new_reports_invalid_connection_storage_path(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    project = tmp_path / "project"
+    (project / "xdg").mkdir(parents=True)
+    environ = dict(HOME=str(home), XDG_CONFIG_HOME=str(project / "xdg"))
+    agent, transport = _new_agent(tmp_path, environ)
+    agent.handle_message(dict(
+        jsonrpc="2.0", id=3, method="session/new",
+        params=dict(cwd=str(project), mcpServers=[])), None)
+    response = next(message for message in transport.responses if message.get("id") == 3)
+    assert response["error"]["code"] == -32602
+    assert response["error"]["data"]["code"] == "connection_storage_under_project"
+
+
+def test_paseo_model_picker_can_switch_between_claude_and_codex(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    claude = _configured_connection(
+        name="Claude", engine="claude-agent-acp", environ=environ,
+        key_kind="anthropic_api_key",
+    )
+    codex = _configured_connection(name="Codex", engine="codex-acp", environ=environ)
+    _build_and_save_snapshot(claude, environ=environ, model_id="sonnet")
+    _build_and_save_snapshot(codex, environ=environ, model_id="gpt-5.6-luna")
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, transport = _new_agent(tmp_path, environ)
+    agent.client_info = {"name": "Paseo"}
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    initial = agent._config_options_for_session(agent.sessions[session_id], agent._store_for(str(project)))
+    assert {option["id"] for option in initial} == {"model", "thought_level", "language"}
+    assert all(option["id"] != "provider" for option in initial)
+    model = next(option for option in initial if option["id"] == "model")
+    entries = config_options.selectable_entries_from_snapshots(
+        {claude.id: claude, codex.id: codex}, environ)
+    codex_route = next(entry.route.id for entry in entries if entry.connection_id == codex.id)
+    assert {item["value"] for item in model["options"]} == {"sonnet", "gpt-5.6-luna"}
+    codex_item = next(item for item in model["options"] if item["value"] == "gpt-5.6-luna")
+    assert codex_item["name"].startswith("Placeholder Model 1")
+    assert "codex" in codex_item["description"].lower()
+
+    agent._session_set_config_option(
+        99, dict(sessionId=session_id, configId="model", value="gpt-5.6-luna"))
+    reply = next(message for message in transport.responses if message.get("id") == 99)
+    assert "result" in reply, reply
+    selected = {option["id"]: option for option in reply["result"]["configOptions"]}
+    assert "provider" not in selected
+    assert selected["model"]["currentValue"] == "gpt-5.6-luna"
+    assert configuration_store.read_user_defaults(environ)["defaults"]["route_model"] == "gpt-5.6-luna"
+    assert configuration_store.read_user_defaults(environ)["defaults"]["route_id"] == codex_route
+
+
+def test_paseo_duplicate_model_names_require_exact_route_choice(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    first = _configured_connection(name="first", environ=environ)
+    second = _configured_connection(name="second", environ=environ)
+    _build_and_save_snapshot(first, environ=environ, model_id="gpt-5.6-luna")
+    _build_and_save_snapshot(second, environ=environ, model_id="gpt-5.6-luna")
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, transport = _new_agent(tmp_path, environ)
+    agent.client_info = {"name": "Paseo"}
+    result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    session_id = result["sessionId"]
+    model = next(option for option in result["configOptions"] if option["id"] == "model")
+    route_ids = {item["value"] for item in model["options"]}
+    assert len(route_ids) == 2
+    assert all(value.startswith("xr_") for value in route_ids)
+
+    agent._session_set_config_option(
+        100, dict(sessionId=session_id, configId="model", value="gpt-5.6-luna"))
+    assert next(item for item in transport.responses if item.get("id") == 100)["error"]["code"] == -32602
+    assert configuration_store.read_user_defaults(environ)["defaults"].get("route_id") is None
+
+    chosen_route = next(iter(route_ids))
+    agent._session_set_config_option(
+        101, dict(sessionId=session_id, configId="model", value=chosen_route))
+    assert "result" in next(item for item in transport.responses if item.get("id") == 101)
+    assert configuration_store.read_user_defaults(environ)["defaults"]["route_id"] == chosen_route
+
+
+def test_paseo_cli_model_id_selection_creates_first_task_revision(tmp_path, monkeypatch):
+    """Paseo's --model value must select the route before the first prompt."""
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    _build_and_save_snapshot(record, environ=environ, model_id="gpt-5.6-luna")
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, transport = _new_agent(tmp_path, environ)
+    agent.client_info = {"name": "Paseo"}
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    agent._session_set_config_option(
+        102, dict(sessionId=session_id, configId="model", value="gpt-5.6-luna"))
+    agent._session_set_config_option(
+        103, dict(sessionId=session_id, configId="thought_level", value="high"))
+    assert all("result" in next(item for item in transport.responses if item.get("id") == request_id)
+               for request_id in (102, 103))
+
+    store, task_id = _bootstrap_task_for_session(agent, session_id, tmp_path)
+    assert agent._propose_pending_selection_for_new_task(store, agent.sessions[session_id], task_id)
+    history = ConfigurationService(store).history(task_id)
+    assert len(history) == 1
+    assert history[0]["route_connection_id"] == record.id
+    assert history[0]["parameters"]["thought_level"] == "high"
+
+
+def test_paseo_fresh_session_remaps_stale_saved_route_before_effort_picker(tmp_path, monkeypatch):
+    """A refreshed catalog route id must not make a saved Luna choice fall
+    back to the first (Sol) model in Paseo's combined picker."""
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    snapshot = _build_and_save_snapshot(
+        record, environ=environ, model_id="gpt-5.6-luna", model_name="GPT-5.6-Luna",
+        thought_level="high",
+    )
+    current_route = snapshot.entries[0].route.id
+    defaults = configuration_store.read_user_defaults(environ)
+    configuration_store.write_user_defaults(
+        {
+            "route_id": "xr_stale_route_id",
+            "route_connection_id": record.id,
+            "route_model": "gpt-5.6-luna",
+            "parameters": {},
+        },
+        defaults["ceiling"],
+        environ,
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, transport = _new_agent(tmp_path, environ)
+    agent.client_info = {"name": "Paseo"}
+    result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    options = {option["id"]: option for option in result["configOptions"]}
+    assert options["model"]["currentValue"] == "gpt-5.6-luna"
+    assert options["thought_level"]["currentValue"] == "low"
+    assert {item["value"] for item in options["thought_level"]["options"]} == {"high", "low"}
+    assert options["model"]["_meta"]["_cortex"]["state"] == "default"
+    assert current_route != "xr_stale_route_id"
+    agent._session_set_config_option(
+        104, dict(sessionId=result["sessionId"], configId="thought_level", value="high")
+    )
+    assert "result" in next(message for message in transport.responses if message.get("id") == 104)
 
 
 def test_session_new_includes_model_and_thought_level_options(tmp_path, monkeypatch):
@@ -601,6 +877,43 @@ def test_session_new_includes_model_and_thought_level_options(tmp_path, monkeypa
     validator = _schema_validator("SessionConfigOption")
     for option in result["configOptions"]:
         validator.validate(option)
+
+
+def test_paseo_session_new_waits_for_seed_catalog_to_observe_effort(tmp_path, monkeypatch):
+    """Paseo must receive real effort values in its initial discovery reply.
+
+    The seed catalog intentionally contains models only.  A prompt-free
+    refresh that completes during the bounded wait may replace it with the
+    engine observation; no effort values are fabricated by the ACP agent.
+    """
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, transport = _new_agent(tmp_path, environ)
+    agent.client_info = {"name": "Paseo"}
+
+    calls = []
+
+    def live_refresh(actual_record, workspace, *, environ):
+        calls.append(actual_record.id)
+        _build_and_save_snapshot(
+            actual_record, environ=environ, model_id="gpt-5.6-luna",
+            model_name="GPT-5.6-Luna", thought_level="high",
+        )
+        return SimpleNamespace(success=True)
+
+    monkeypatch.setattr("cortex_runtime.acp.agent.catalog_refresh.perform_refresh", live_refresh)
+    result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    options = {option["id"]: option for option in result["configOptions"]}
+    assert calls == [record.id]
+    assert [item["value"] for item in options["thought_level"]["options"]] == ["low", "high"]
+    assert record.id in agent.sessions[result["sessionId"]]["catalog_refresh_started"]
+
+    # The already-observed connection is not probed a second time by the
+    # normal post-session refresh path.
+    agent._post_session_new_notifications(result["sessionId"])
+    assert calls == [record.id]
 
 
 def test_available_commands_update_sent_after_session_new(tmp_path, monkeypatch):
@@ -623,9 +936,75 @@ def test_available_commands_update_sent_after_session_new(tmp_path, monkeypatch)
                       acp_commands.CORTEX_EFFORT, acp_commands.CORTEX_SETUP,
                       acp_commands.CORTEX_NEW_TASK, acp_commands.CORTEX_STOP,
                       acp_commands.CORTEX_ANSWER, acp_commands.CORTEX_LANGUAGE,
-                      acp_commands.HARVEST}
+                      acp_commands.HARVEST, acp_commands.HARVEST_REFRESH}
     validator = _schema_validator("AvailableCommandsUpdate")
     validator.validate(update)
+
+
+def test_session_new_refreshes_configured_catalog_asynchronously(tmp_path, monkeypatch):
+    """A live ACP connection gets a prompt-free catalog refresh after the
+    initial response, and a successful refresh produces a selector update."""
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, transport = _new_agent(tmp_path, environ)
+    finished = threading.Event()
+    calls = []
+
+    def fake_refresh(actual_record, workspace, *, environ):
+        calls.append((actual_record.id, workspace))
+        _build_and_save_snapshot(actual_record, environ=environ, model_id="fresh-model")
+        finished.set()
+        return SimpleNamespace(success=True)
+
+    monkeypatch.setattr("cortex_runtime.acp.agent.catalog_refresh.perform_refresh", fake_refresh)
+    result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    agent._post_session_new_notifications(result["sessionId"])
+    assert finished.wait(2), "background catalog refresh did not complete"
+    assert calls == [(record.id, str(project))]
+    for _ in range(200):
+        if len(transport.notifications) > 1:
+            break
+        time.sleep(0.01)
+    updates = [message["params"]["update"] for message in transport.notifications]
+    assert updates[0]["sessionUpdate"] == "available_commands_update"
+    assert updates[1]["sessionUpdate"] == "config_option_update"
+    values = {
+        item["value"]
+        for option in updates[1]["configOptions"]
+        if option["id"] == "model"
+        for item in option["options"]
+    }
+    assert values == {"fresh-model"}
+
+
+def test_failed_background_catalog_refresh_keeps_existing_selector(tmp_path, monkeypatch):
+    """A failed engine probe must not emit a replacement selector or erase a
+    previously saved snapshot."""
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    _build_and_save_snapshot(record, environ=environ, model_id="known-good")
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, transport = _new_agent(tmp_path, environ)
+    finished = threading.Event()
+
+    def failed_refresh(actual_record, workspace, *, environ):
+        assert actual_record.id == record.id
+        assert workspace == str(project)
+        finished.set()
+        return SimpleNamespace(success=False)
+
+    monkeypatch.setattr("cortex_runtime.acp.agent.catalog_refresh.perform_refresh", failed_refresh)
+    result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    agent._post_session_new_notifications(result["sessionId"])
+    assert finished.wait(2), "background catalog refresh did not complete"
+    assert len(transport.notifications) == 1
+    initial_model = next(option for option in result["configOptions"] if option["id"] == "model")
+    assert {item["value"] for item in initial_model["options"]} == {"known-good"}
+    entries = config_options.selectable_entries_from_snapshots({record.id: record}, environ)
+    assert {entry.route.model for entry in entries} == {"known-good"}
 
 
 # --- session/set_config_option (mid-task): UI-05/UI-06 -----------------------
@@ -954,6 +1333,40 @@ def test_pending_pre_task_selection_is_proposed_on_first_prompt(tmp_path, monkey
     assert session["default_selection"] is None
 
 
+def test_first_prompt_reannounces_the_route_that_was_applied(tmp_path, monkeypatch):
+    """The client selector must converge before the engine turn starts.
+
+    A persisted default is consumed only while bootstrapping the first task.
+    Re-announcing the resulting active option surface prevents a stale Zed
+    label (for example after another session changed the user default) from
+    silently describing a different coordinator route.
+    """
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    _build_and_save_snapshot(record, environ=environ, model_id="model-a")
+    project = tmp_path / "project"
+    project.mkdir()
+    agent, transport = _new_agent(tmp_path, environ)
+    result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
+    session_id = result["sessionId"]
+    agent._session_set_config_option(1, dict(sessionId=session_id, configId="model", value="model-a"))
+
+    agent._session_prompt(2, dict(sessionId=session_id, prompt=[dict(type="text", text="run")]))
+    agent._workers[-1].join(timeout=5)
+    assert not agent._workers[-1].is_alive()
+
+    updates = [
+        message["params"]["update"]
+        for message in transport.notifications
+        if message.get("method") == "session/update"
+        and message["params"]["update"].get("sessionUpdate") == "config_option_update"
+    ]
+    assert updates, "first prompt did not reannounce the applied route"
+    model = next(option for option in updates[-1]["configOptions"] if option["id"] == "model")
+    assert model["currentValue"] == "model-a"
+    assert model["_meta"]["_cortex"]["state"] == "selected"
+
+
 def test_stale_configuration_revision_is_never_silently_retried(tmp_path, monkeypatch):
     """F1 review finding: a concurrent session's change must never be
     silently clobbered by an automatic retry that re-reads/re-proposes from
@@ -1190,9 +1603,14 @@ def test_concurrent_set_config_option_race_exactly_one_wins(tmp_path, monkeypatc
 
     def _synchronized_history(self, task_id):
         call_counts.n = getattr(call_counts, "n", 0) + 1
+        history = real_history(self, task_id)
         if call_counts.n == 2:
+            # Both callers must finish the read before either can proceed to
+            # the write.  Waiting before the read allows the first caller to
+            # write after the barrier opens, leaving the second caller with a
+            # fresh expected revision and making this test nondeterministic.
             barrier.wait(timeout=5)
-        return real_history(self, task_id)
+        return history
 
     monkeypatch.setattr(ConfigurationService, "history", _synchronized_history)
 
@@ -1259,18 +1677,18 @@ def test_build_config_options_unavailable_default_marks_thought_level_too():
     thought_level value, must never present that stale value as selected:
     the thought_level option gets the substitute route's first value and
     the identical unavailable marker as the provider/model options."""
-    entry = _entry_with_thought_levels("a", ["low", "high"])  # sorted -> ["high", "low"]
+    entry = _entry_with_thought_levels("a", ["low", "high"])
     connections = {"cn_" + "a" * 12: _fake_connection_record("cn_" + "a" * 12)}
     current = dict(route_id="xr_" + "0" * 12, state="default", revision=None,
-                    parameters={"thought_level": "low"})
+                    parameters={"thought_level": "medium"})
     options = config_options.build_config_options([entry], connections, current)
     provider_option, model_option, thought_option = options
     assert provider_option["_meta"]["_cortex"]["state"] == "default_unavailable"
     assert model_option["_meta"]["_cortex"]["state"] == "default_unavailable"
     assert thought_option["_meta"]["_cortex"]["state"] == "default_unavailable"
     assert thought_option["description"] == "Depends on an unavailable route — choose a route"
-    # Never the stale saved "low" -- the substituted route's first value.
-    assert thought_option["currentValue"] == "high"
+    # Never the stale saved "medium" -- the substituted route's first value.
+    assert thought_option["currentValue"] == "low"
 
 
 def test_build_config_options_unavailable_task_selection_marks_thought_level_too():
@@ -1279,14 +1697,14 @@ def test_build_config_options_unavailable_task_selection_marks_thought_level_too
     entry = _entry_with_thought_levels("a", ["low", "high"])
     connections = {"cn_" + "a" * 12: _fake_connection_record("cn_" + "a" * 12)}
     current = dict(route_id="xr_" + "1" * 12, state="active", revision=7,
-                    parameters={"thought_level": "low"})
+                    parameters={"thought_level": "medium"})
     options = config_options.build_config_options([entry], connections, current)
     provider_option, model_option, thought_option = options
     assert provider_option["_meta"]["_cortex"]["state"] == "selection_unavailable"
     assert model_option["_meta"]["_cortex"]["state"] == "selection_unavailable"
     assert thought_option["_meta"]["_cortex"]["state"] == "selection_unavailable"
     assert thought_option["description"] == "Depends on an unavailable route — choose a route"
-    assert thought_option["currentValue"] == "high"
+    assert thought_option["currentValue"] == "low"
     assert thought_option["_meta"]["_cortex"]["revision"] == 7
 
 

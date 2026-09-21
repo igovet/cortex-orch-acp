@@ -102,18 +102,13 @@ def test_delivery_for_unknown_codex_acp_version_is_unsupported_not_guessed():
 
 
 def test_codex_acp_plan_is_qualified():
-    """T035: promoted from UNQUALIFIED to QUALIFIED on live evidence -- see
-    ``engine.instruction_delivery_registry.CodexAcp1_12Delivery``'s own
-    docstring and
-    ``.cortex/acp-migration/evidence/T035/
-    RUN-03-codex-luna-tagged-instructions.md``."""
+    """The verified private adapter sends role text through developerInstructions."""
     role = roles.load_role("worker-backend-dev")
     plan = delivery_for("codex-acp", "1.12.0").plan(role, [])
     assert plan.qualification == DeliveryQualification.QUALIFIED
-    assert plan.blocks
-    assert plan.blocks[0]["type"] == "text"
-    assert role.body_portable in plan.blocks[0]["text"]
-    assert plan.session_new_meta is None
+    assert plan.channel == "session/new _meta.systemPrompt to thread/start.developerInstructions"
+    assert plan.blocks == ()
+    assert plan.session_new_meta == {"systemPrompt": role.body_portable}
 
 
 def test_claude_agent_acp_pinned_plan_is_qualified_via_session_new_meta():
@@ -124,7 +119,10 @@ def test_claude_agent_acp_pinned_plan_is_qualified_via_session_new_meta():
     # Never delivered via a leading prompt block for this pinned version --
     # a distinct, session/new-level channel instead.
     assert plan.blocks == ()
-    assert plan.session_new_meta == {"systemPrompt": role.body_portable}
+    assert plan.session_new_meta == {
+        "systemPrompt": {"append": role.body_portable},
+        "claudeCode": {"options": {"disallowedTools": ["Agent", "Task"], "strictMcpConfig": True}},
+    }
 
 
 def test_claude_agent_acp_unrecognized_version_plan_is_unsupported():

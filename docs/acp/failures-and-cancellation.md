@@ -71,13 +71,29 @@ a reply that arrives *after* this call (`ResourceBinding.is_current`
 re-checks at relay time). Scope: this task's own coordinator session only;
 an independent task's authorized work is never touched (scope isolation).
 Task-wide cancellation (`/cortex-stop`, `OrchestratingRuntime.stop_task`)
-already cancels every non-terminal assignment, invalidates every open
-pending question, cancels capacity-queued opens, and marks steering
-superseded — unchanged by this task, documented here for contrast. A late
+cancels every non-terminal assignment, invalidates every open pending
+question, cancels capacity-queued opens, and marks steering superseded.
+It also terminates every worker attempt durably bound to that task: a
+terminal assignment event can precede process exit, so event state alone
+does not release engine ownership. A worker open completing concurrently
+with stop closes its exact new attempt before prompting. Other tasks'
+attempts are outside this cleanup. A late
 success arriving after cancel is durably recorded but never revives the
 turn (`acp.agent.Agent._run_prompt_body` always forces
 `StopReason.CANCELLED` once `cancel_event` is set, regardless of what the
 runtime itself returns).
+
+Paseo's Workers control uses an explicit `session/cancel` notification as a
+task-wide stop. The ACP agent routes that notification to the task's owning
+runtime, which performs the same owned-resource cancellation as
+`/cortex-stop` without attempting to write a response to the notification
+transport. Other ACP hosts use `session/cancel` for the current coordinator
+turn/session only; it does not cancel that task's other worker assignments.
+Each `assignment_cancelled` event also closes its linked work-graph attempt, so
+a worker cannot remain durably `running` after its engine attempt has been
+terminated. If the transport is already gone, the terminal card update is
+retained in the host transcript and `session/load` replays the durable terminal
+status for the existing card.
 
 ## 4. Disconnect
 

@@ -146,12 +146,12 @@ def _assert_not_nested_in_project_workspace(path: Path, environ: dict[str, str] 
     Every ancestor directory of ``path`` (excluding ``path`` itself) is
     checked.
 
-    One narrow, explicit exception: a ``.git`` marker directly inside the
+    One narrow, explicit exception: a ``.git`` or ``.cortex`` marker directly inside the
     caller's *effective* ``$HOME`` (``_effective_home(environ)`` -- the
     exact same ``HOME`` this module's own ``config_root``/``state_root``
-    fall back to) never rejects on its own. This is the ordinary "my
-    dotfiles are a Git repository" pattern; a ``.cortex`` marker anywhere,
-    or a ``.git`` marker in any *other* enclosing directory (a real project
+    fall back to) never rejects on its own. This covers dotfiles in Git and
+    ACP clients that create a global session with ``cwd=$HOME``. A marker in
+    any *other* enclosing directory (a real project
     checkout/worktree that happens to contain ``$XDG_CONFIG_HOME``/
     ``$XDG_STATE_HOME``), still rejects. Every caller that can reach this
     exception (``config_root``/``state_root``) always additionally ensures
@@ -176,7 +176,7 @@ def _assert_not_nested_in_project_workspace(path: Path, environ: dict[str, str] 
                 marker_path.lstat()
             except OSError:
                 continue
-            if marker == ".git" and current == home:
+            if current == home:
                 continue
             raise _fail_closed(
                 "connection_storage_under_project",

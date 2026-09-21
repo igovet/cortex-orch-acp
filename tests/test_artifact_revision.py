@@ -207,6 +207,95 @@ def test_capture_revision_does_not_follow_a_symlinked_directory(tmp_path):
         shutil.rmtree(outside, ignore_errors=True)
 
 
+def test_capture_revision_fails_closed_when_directory_is_swapped_for_symlink(tmp_path, monkeypatch):
+    """The directory entry is opened relative to its already-open parent.
+    Replacing it after scandir classification must therefore fail closed,
+    rather than allowing traversal through the symlink target."""
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "inside.txt").write_text("inside\n")
+    outside = tmp_path.parent / f"revision-swap-outside-{uuid.uuid4().hex}"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret\n")
+    real_open = os.open
+    swapped = False
+
+    def swapping_open(path, flags, *args, dir_fd=None, **kwargs):
+        nonlocal swapped
+        if not swapped and dir_fd is not None and path == "sub":
+            swapped = True
+            backup = tmp_path / "sub-original"
+            sub.rename(backup)
+            sub.symlink_to(outside, target_is_directory=True)
+        return real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+    try:
+        captured = delegation_revision.capture_revision(tmp_path)
+        assert swapped
+        assert captured["kind"] == "unavailable"
+        assert captured["detail"].startswith("unreadable_entry:")
+    finally:
+        if sub.is_symlink():
+            sub.unlink()
+        if (tmp_path / "sub-original").exists():
+            (tmp_path / "sub-original").rename(sub)
+        import shutil
+        shutil.rmtree(outside, ignore_errors=True)
+
+
+def test_capture_revision_fails_closed_when_file_changes_while_hashing(tmp_path, monkeypatch):
+    path = tmp_path / "changing.txt"
+    path.write_text("before\n")
+    real_read = os.read
+    changed = False
+
+    def append_after_read(fd, size):
+        nonlocal changed
+        data = real_read(fd, size)
+        if not changed and data:
+            changed = True
+            with path.open("a") as stream:
+                stream.write("appended\n")
+        return data
+
+    monkeypatch.setattr(os, "read", append_after_read)
+    captured = delegation_revision.capture_revision(tmp_path)
+    assert changed
+    assert captured["kind"] == "unavailable"
+    assert captured["detail"] == f"changed_while_reading:{path}"
+
+
+def test_capture_revision_fails_closed_when_directory_changes_during_scan(tmp_path, monkeypatch):
+    (tmp_path / "stable.txt").write_text("stable\n")
+    real_open = os.open
+    real_fstat = os.fstat
+    root_fd = None
+    root_fstat_count = 0
+
+    def remember_root(path, flags, *args, **kwargs):
+        nonlocal root_fd
+        fd = real_open(path, flags, *args, **kwargs)
+        if os.fspath(path) == str(tmp_path):
+            root_fd = fd
+        return fd
+
+    def mutate_before_final_fstat(fd):
+        nonlocal root_fstat_count
+        if fd == root_fd:
+            root_fstat_count += 1
+            if root_fstat_count == 3:
+                (tmp_path / "added-during-scan.txt").write_text("race\n")
+        return real_fstat(fd)
+
+    monkeypatch.setattr(os, "open", remember_root)
+    monkeypatch.setattr(os, "fstat", mutate_before_final_fstat)
+    captured = delegation_revision.capture_revision(tmp_path)
+    assert root_fstat_count >= 3
+    assert captured["kind"] == "unavailable"
+    assert captured["detail"] == f"changed_while_scanning:{tmp_path}"
+
+
 def test_capture_revision_detached_head_sha(tmp_path):
     _init_repo(tmp_path)
     head = _git(["rev-parse", "HEAD"], tmp_path).stdout.strip()
@@ -382,6 +471,229 @@ def test_gate_accepts_when_workspace_unchanged_since_observed_capture(tmp_path):
     assert ok, reasons
 
 
+@pytest.mark.parametrize("outcome,evidence,needle", [
+    ("failed", "observed", "is failed"),
+    ("not_run", "claimed", "is not_run"),
+    ("unverified", "claimed", "is unverified"),
+    ("passed", "contradicted", "is contradicted"),
+])
+def test_gate_rejects_failed_incomplete_or_contradicted_worker_check(
+    tmp_path, outcome, evidence, needle,
+):
+    """Explicit negative verification evidence cannot be accepted as done."""
+    _init_repo(tmp_path)
+    store, task_id = _task(tmp_path)
+    assignment_ref = f"check-{outcome}"
+    report_ref = "r_" + uuid.uuid4().hex[:12]
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "INSERT INTO reports VALUES (?,?,?,?,?)",
+            (report_ref, task_id, "report", f"{report_ref}.md", store._now()),
+        )
+        db.commit()
+        row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
+    from cortex_runtime.store import project_task_directory, private_directory
+    task_dir = private_directory(project_task_directory(row["project_root"]) / task_id)
+    (task_dir / f"{report_ref}.md").write_text("# result\n", encoding="utf-8")
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", f"delreq-{assignment_ref}",
+        dict(title="Implement", brief="Fix the seeded defect", role="backend-dev", acceptance="Tests pass"),
+        origin="coordinator", assignment_ref=assignment_ref,
+    )
+    delegation_events.append_event(
+        store, task_id, "worker_result", f"pub-{assignment_ref}",
+        dict(
+            report_ref=report_ref,
+            summary="result",
+            checks=[dict(name="regression test", outcome=outcome, evidence=evidence)],
+        ),
+        origin="worker", assignment_ref=assignment_ref,
+    )
+    delegation_events.claim_unconsumed(store, task_id, f"cont-{assignment_ref}")
+
+    ok, reasons = delegation_completion.gate(store, task_id)
+
+    assert not ok
+    assert any(needle in reason for reason in reasons), reasons
+
+
+def test_gate_validates_retained_result_after_cancellation(tmp_path):
+    """Cancellation cannot hide a retained result's failed verification."""
+    _init_repo(tmp_path)
+    store, task_id = _task(tmp_path)
+    assignment_ref = "cancelled-with-result"
+    report_ref = "r_" + uuid.uuid4().hex[:12]
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "INSERT INTO reports VALUES (?,?,?,?,?)",
+            (report_ref, task_id, "report", f"{report_ref}.md", store._now()),
+        )
+        db.commit()
+        row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
+    from cortex_runtime.store import project_task_directory, private_directory
+    task_dir = private_directory(project_task_directory(row["project_root"]) / task_id)
+    (task_dir / f"{report_ref}.md").write_text("# result\n", encoding="utf-8")
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", f"delreq-{assignment_ref}",
+        dict(title="Implement", brief="Fix the seeded defect", role="backend-dev", acceptance="Tests pass"),
+        origin="coordinator", assignment_ref=assignment_ref,
+    )
+    delegation_events.append_event(
+        store, task_id, "assignment_cancelled", f"cancel-{assignment_ref}",
+        dict(reason="user cancelled"), origin="runtime", assignment_ref=assignment_ref,
+    )
+    delegation_events.append_event(
+        store, task_id, "worker_result", f"pub-{assignment_ref}",
+        dict(
+            report_ref=report_ref,
+            summary="result retained after cancellation",
+            checks=[dict(name="regression test", outcome="failed", evidence="observed")],
+        ),
+        origin="worker", assignment_ref=assignment_ref,
+    )
+    delegation_events.claim_unconsumed(store, task_id, f"cont-{assignment_ref}")
+
+    ok, reasons = delegation_completion.gate(store, task_id)
+
+    assert not ok
+    assert any("is failed" in reason for reason in reasons), reasons
+
+
+def test_gate_retires_cancelled_result_only_for_valid_explicit_successor(tmp_path):
+    """A canceled historical result is retired only by its exact successor."""
+    _init_repo(tmp_path)
+    store, task_id = _task(tmp_path)
+    old_ref = "cancelled-old"
+    new_ref = "successor-new"
+    report_refs = {ref: "r_" + uuid.uuid4().hex[:12] for ref in (old_ref, new_ref)}
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        for report_ref in report_refs.values():
+            db.execute(
+                "INSERT INTO reports VALUES (?,?,?,?,?)",
+                (report_ref, task_id, "report", f"{report_ref}.md", store._now()),
+            )
+        db.commit()
+        row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
+    from cortex_runtime.store import project_task_directory, private_directory
+    task_dir = private_directory(project_task_directory(row["project_root"]) / task_id)
+    for report_ref in report_refs.values():
+        (task_dir / f"{report_ref}.md").write_text("# result\n", encoding="utf-8")
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", f"delreq-{old_ref}",
+        dict(title="Initial implementation", brief="Fix the seeded defect", role="backend-dev", acceptance="Tests pass"),
+        origin="coordinator", assignment_ref=old_ref,
+    )
+    delegation_events.append_event(
+        store, task_id, "assignment_cancelled", f"cancel-{old_ref}",
+        dict(reason="Superseded by a corrective successor"), origin="runtime", assignment_ref=old_ref,
+    )
+    delegation_events.append_event(
+        store, task_id, "worker_result", f"pub-{old_ref}",
+        dict(
+            report_ref=report_refs[old_ref], summary="historical result",
+            checks=[dict(name="independent review", outcome="not_run", evidence="claimed")],
+        ),
+        origin="worker", assignment_ref=old_ref,
+    )
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", f"delreq-{new_ref}",
+        dict(
+            title="Corrective implementation", brief="Fix and verify the defect", role="backend-dev",
+            acceptance="Observed regression test passes", supersedes_assignment_ref=old_ref,
+        ),
+        origin="coordinator", assignment_ref=new_ref,
+    )
+    delegation_events.append_event(
+        store, task_id, "worker_result", f"pub-{new_ref}",
+        dict(
+            report_ref=report_refs[new_ref], summary="corrective result",
+            checks=[dict(name="regression test", outcome="passed", evidence="observed")],
+        ),
+        origin="worker", assignment_ref=new_ref,
+    )
+    delegation_events.claim_unconsumed(store, task_id, "cont-successor")
+
+    ok, reasons = delegation_completion.gate(store, task_id)
+
+    assert ok, reasons
+
+
+def test_failed_assignment_self_successor_does_not_retire_failure(tmp_path):
+    _init_repo(tmp_path)
+    store, task_id = _task(tmp_path)
+    ref = "failed-self"
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", f"request-{ref}",
+        dict(title="Failed", brief="Fix defect", role="backend-dev", acceptance="Pass"),
+        origin="coordinator", assignment_ref=ref,
+    )
+    delegation_events.append_event(
+        store, task_id, "assignment_failed", f"failed-{ref}",
+        dict(error="engine_failed"), origin="runtime", assignment_ref=ref,
+    )
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", f"replacement-{ref}",
+        dict(title="Self replacement", brief="Retry", role="backend-dev", acceptance="Pass",
+             supersedes_assignment_ref=ref),
+        origin="coordinator", assignment_ref=ref,
+    )
+    delegation_events.claim_unconsumed(store, task_id, "cont-self")
+
+    ok, reasons = delegation_completion.gate(store, task_id)
+
+    assert not ok
+    assert any("assignment_failed" in reason for reason in reasons), reasons
+
+
+def test_failed_assignment_two_node_successor_cycle_does_not_retire_failures(tmp_path):
+    _init_repo(tmp_path)
+    store, task_id = _task(tmp_path)
+    refs = ("failed-cycle-a", "failed-cycle-b")
+    for ref in refs:
+        delegation_events.append_event(
+            store, task_id, "delegation_requested", f"request-{ref}",
+            dict(title=ref, brief="Fix defect", role="backend-dev", acceptance="Pass"),
+            origin="coordinator", assignment_ref=ref,
+        )
+        delegation_events.append_event(
+            store, task_id, "assignment_failed", f"failed-{ref}",
+            dict(error="engine_failed"), origin="runtime", assignment_ref=ref,
+        )
+    for ref, predecessor in ((refs[1], refs[0]), (refs[0], refs[1])):
+        delegation_events.append_event(
+            store, task_id, "delegation_requested", f"replacement-{ref}",
+            dict(title=f"Replacement {ref}", brief="Retry", role="backend-dev", acceptance="Pass",
+                 supersedes_assignment_ref=predecessor),
+            origin="coordinator", assignment_ref=ref,
+        )
+    delegation_events.claim_unconsumed(store, task_id, "cont-cycle")
+
+    ok, reasons = delegation_completion.gate(store, task_id)
+
+    assert not ok
+    assert sum("assignment_failed" in reason for reason in reasons) >= 2, reasons
+
+
+def test_gate_accepts_when_claude_scheduler_lock_disappears_after_publication(tmp_path):
+    """The exact Claude scheduler lock is engine-owned and may vanish
+    between worker publication and the acceptance recheck. Project files
+    still use the normal stale-verification boundary."""
+    _init_repo(tmp_path)
+    store, task_id = _task(tmp_path)
+    assignment_ref = "req-claude-lock"
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    event = _record_result_with_observed_check(store, task_id, assignment_ref, "r_" + "l" * 12)
+    (claude / "scheduled_tasks.lock").write_bytes(b"engine lock")
+    delegation_revision.record_attempt_revision(store, assignment_ref, f"worker_result:{event.id}", tmp_path)
+    (claude / "scheduled_tasks.lock").unlink()
+    ok, reasons = delegation_completion.gate(store, task_id)
+    assert ok, reasons
+
+
 def test_gate_refuses_stale_verification_when_workspace_changed(tmp_path):
     _init_repo(tmp_path)
     store, task_id = _task(tmp_path)
@@ -397,9 +709,228 @@ def test_gate_refuses_stale_verification_when_workspace_changed(tmp_path):
     assert any(reason == f"stale_verification:{assignment_ref}" for reason in reasons)
 
 
-def test_gate_refuses_stale_verification_on_head_change_alone(tmp_path):
-    """Even with an unchanged tree digest, a differing HEAD (e.g. a commit
-    landed on top of the exact same working tree) is treated as stale."""
+def test_gate_refuses_between_turn_shared_root_drift_without_observed_checks(tmp_path):
+    """A same-path edit after publication must not become the next turn's
+    baseline merely because the report carried no observed check."""
+    _init_repo(tmp_path)
+    store, task_id = _task(tmp_path)
+    attempt_id = "attempt-between-turns"
+    assignment_ref = "assignment-between-turns"
+    report_ref = "r_" + "f" * 12
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO delegation_provisioning "
+            "(idempotency_key,task_id,assignment_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at,workspace_binding_id) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (assignment_ref, task_id, assignment_ref, attempt_id, "backend-dev", "ready", "ready", 1,
+             store._now(), store._now(), "shared_project_root"),
+        )
+        db.execute("INSERT INTO reports VALUES (?,?,?,?,?)", (report_ref, task_id, "report", f"{report_ref}.md", store._now()))
+        db.commit()
+        row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
+    from cortex_runtime.store import project_task_directory, private_directory
+    task_dir = private_directory(project_task_directory(row["project_root"]) / task_id)
+    (task_dir / f"{report_ref}.md").write_text("# done\n", encoding="utf-8")
+    delegation_events.append_event(store, task_id, "delegation_requested", "delreq-between",
+                                   dict(title="T", brief="B", role="backend-dev", acceptance="A"),
+                                   origin="coordinator", assignment_ref=assignment_ref)
+    delegation_revision.record_attempt_revision(store, attempt_id, f"worker_start:{attempt_id}", tmp_path)
+    (tmp_path / "a.txt").write_text("worker publication\n")
+    delegation_revision.record_attempt_revision(store, attempt_id, f"worker_publish:{report_ref}", tmp_path)
+    delegation_events.append_event(store, task_id, "worker_result", "pub-between",
+                                   dict(report_ref=report_ref, summary="done", checks=[]),
+                                   origin="worker", assignment_ref=attempt_id)
+    delegation_events.claim_unconsumed(store, task_id, "cont-between")
+    (tmp_path / "a.txt").write_text("external same-path drift\n")
+    ok, reasons = delegation_completion.gate(store, task_id)
+    assert not ok
+    assert any("shared_root_revision_drift_unattributed" in reason for reason in reasons)
+    # A replayed capture is ambiguous even when its bytes are identical; the
+    # acceptance gate must not silently select the latest row.
+    delegation_revision.record_attempt_revision(store, attempt_id, f"worker_publish:{report_ref}", tmp_path)
+    ok, reasons = delegation_completion.gate(store, task_id)
+    assert not ok
+    assert f"shared_root_publication_ambiguous:{assignment_ref}" in reasons
+
+
+def test_shared_publication_allows_disjoint_later_worker_but_not_external_file(tmp_path):
+    _init_repo(tmp_path)
+    store, task_id = _task(tmp_path)
+    from cortex_runtime.store import project_task_directory, private_directory
+    with store.connection() as db:
+        task_row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
+        for suffix in ("a", "b"):
+            assignment, attempt = f"assignment-{suffix}", f"attempt-{suffix}"
+            report = f"r_{suffix}" + "0" * 11
+            db.execute(
+                "INSERT INTO delegation_provisioning "
+                "(idempotency_key,task_id,assignment_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at,workspace_binding_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (assignment, task_id, assignment, attempt, "backend-dev", "ready", "ready", 1,
+                 store._now(), store._now(), "shared_project_root"),
+            )
+            db.execute("INSERT INTO reports VALUES (?,?,?,?,?)", (report, task_id, "report", f"{report}.md", store._now()))
+        db.commit()
+    task_dir = private_directory(project_task_directory(task_row["project_root"]) / task_id)
+    for suffix in ("a", "b"):
+        report = f"r_{suffix}" + "0" * 11
+        (task_dir / f"{report}.md").write_text("# done\n", encoding="utf-8")
+        assignment = f"assignment-{suffix}"
+        delegation_events.append_event(store, task_id, "delegation_requested", f"req-{suffix}",
+                                       dict(title=suffix, brief=suffix, role="backend-dev", acceptance="A"),
+                                       origin="coordinator", assignment_ref=assignment)
+    delegation_revision.record_attempt_revision(store, "attempt-a", "worker_start:attempt-a", tmp_path)
+    (tmp_path / "planner.txt").write_text("planner\n")
+    pub_a = delegation_revision.record_attempt_revision(store, "attempt-a", "worker_publish:r_a" + "0" * 11, tmp_path)
+    delegation_events.append_event(store, task_id, "worker_result", "pub-a", dict(report_ref="r_a" + "0" * 11, summary="a", checks=[]), origin="worker", assignment_ref="attempt-a")
+    delegation_revision.record_attempt_revision(store, "attempt-b", "worker_start:attempt-b", tmp_path)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "writer.md").write_text("writer\n")
+    pub_b = delegation_revision.record_attempt_revision(store, "attempt-b", "worker_publish:r_b" + "0" * 11, tmp_path)
+    delegation_events.append_event(store, task_id, "worker_result", "pub-b", dict(report_ref="r_b" + "0" * 11, summary="b", checks=[]), origin="worker", assignment_ref="attempt-b")
+    assert delegation_revision.shared_publication_attribution(store, task_id, "attempt-a", pub_a,
+                                                              pub_b)[0]
+    (tmp_path / "docs" / "writer.md").write_text("external same-path drift\n")
+    drifted = delegation_revision.capture_revision(tmp_path)
+    allowed, reason = delegation_revision.shared_publication_attribution(
+        store, task_id, "attempt-a", pub_a, drifted,
+    )
+    assert not allowed and reason == "shared_root_revision_drift_unattributed"
+    (tmp_path / "unrelated.txt").write_text("external\n")
+    current = delegation_revision.capture_revision(tmp_path)
+    allowed, reason = delegation_revision.shared_publication_attribution(store, task_id, "attempt-a", pub_a, current)
+    assert not allowed and reason == "shared_root_revision_drift_unattributed"
+
+
+def test_superseded_historical_overlap_is_accepted_only_when_replaced(tmp_path):
+    """A corrective publication may replace a canceled same-file publication.
+
+    The old publication remains immutable evidence, but its overlap must not
+    block acceptance once the later retained publication covers that path.
+    A canceled publication that changed an uncovered path remains fail-closed.
+    """
+    _init_repo(tmp_path)
+    store, task_id = _task(tmp_path)
+    from cortex_runtime.store import project_task_directory, private_directory
+
+    def setup(assignment, attempt, report):
+        with store.connection() as db:
+            db.execute(
+                "INSERT INTO delegation_provisioning "
+                "(idempotency_key,task_id,assignment_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at,workspace_binding_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (assignment, task_id, assignment, attempt, "backend-dev", "ready", "ready", 1,
+                 store._now(), store._now(), "shared_project_root"),
+            )
+            db.execute("INSERT INTO reports VALUES (?,?,?,?,?)",
+                       (report, task_id, "report", f"{report}.md", store._now()))
+            db.commit()
+        task_dir = private_directory(project_task_directory(tmp_path) / task_id)
+        (task_dir / f"{report}.md").write_text("# done\n", encoding="utf-8")
+        delegation_events.append_event(
+            store, task_id, "delegation_requested", f"request-{attempt}",
+            dict(title=attempt, brief=attempt, role="backend-dev", acceptance="A",
+                 **({"supersedes_assignment_ref": "assignment-old"} if assignment == "assignment-new" else {})),
+            origin="coordinator", assignment_ref=assignment,
+        )
+
+    setup("assignment-old", "attempt-old", "r_old" + "0" * 12)
+    delegation_revision.record_attempt_revision(store, "attempt-old", "worker_start:attempt-old", tmp_path)
+    (tmp_path / "a.txt").write_text("old publication\n")
+    old_pub = delegation_revision.record_attempt_revision(
+        store, "attempt-old", "worker_publish:r_old" + "0" * 12, tmp_path,
+    )
+    delegation_events.append_event(
+        store, task_id, "worker_result", "result-old",
+        dict(report_ref="r_old" + "0" * 12, summary="old", checks=[]),
+        origin="worker", assignment_ref="attempt-old",
+    )
+    delegation_events.append_event(
+        store, task_id, "assignment_cancelled", "cancel-old",
+        dict(reason="Supersede the same-file publication; retain it as historical evidence; the corrective artifact replaces it."),
+        origin="coordinator", assignment_ref="assignment-old",
+    )
+
+    setup("assignment-new", "attempt-new", "r_new" + "0" * 12)
+    delegation_revision.record_attempt_revision(store, "attempt-new", "worker_start:attempt-new", tmp_path)
+    (tmp_path / "a.txt").write_text("corrective publication\n")
+    new_pub = delegation_revision.record_attempt_revision(
+        store, "attempt-new", "worker_publish:r_new" + "0" * 12, tmp_path,
+    )
+    delegation_events.append_event(
+        store, task_id, "worker_result", "result-new",
+        dict(report_ref="r_new" + "0" * 12, summary="new", checks=[]),
+        origin="worker", assignment_ref="attempt-new",
+    )
+    allowed, reason = delegation_revision.shared_publication_attribution(
+        store, task_id, "attempt-new", new_pub, new_pub,
+    )
+    assert allowed, reason
+
+
+
+def test_superseded_historical_uncovered_edit_still_blocks(tmp_path):
+    """A replacement marker cannot hide an old path with no replacement."""
+    _init_repo(tmp_path)
+    store, task_id = _task(tmp_path)
+    from cortex_runtime.store import project_task_directory, private_directory
+
+    def setup(assignment, attempt, report):
+        with store.connection() as db:
+            db.execute(
+                "INSERT INTO delegation_provisioning "
+                "(idempotency_key,task_id,assignment_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at,workspace_binding_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (assignment, task_id, assignment, attempt, "backend-dev", "ready", "ready", 1,
+                 store._now(), store._now(), "shared_project_root"),
+            )
+            db.execute("INSERT INTO reports VALUES (?,?,?,?,?)",
+                       (report, task_id, "report", f"{report}.md", store._now()))
+            db.commit()
+        task_dir = private_directory(project_task_directory(tmp_path) / task_id)
+        (task_dir / f"{report}.md").write_text("# done\n", encoding="utf-8")
+        delegation_events.append_event(
+            store, task_id, "delegation_requested", f"request-{attempt}",
+            dict(title=attempt, brief=attempt, role="backend-dev", acceptance="A",
+                 **({"supersedes_assignment_ref": "assignment-old"} if assignment == "assignment-new" else {})),
+            origin="coordinator", assignment_ref=assignment,
+        )
+
+    setup("assignment-old", "attempt-old", "r_old" + "0" * 12)
+    delegation_revision.record_attempt_revision(store, "attempt-old", "worker_start:attempt-old", tmp_path)
+    (tmp_path / "uncovered.txt").write_text("old edit\n")
+    old_pub = delegation_revision.record_attempt_revision(
+        store, "attempt-old", "worker_publish:r_old" + "0" * 12, tmp_path,
+    )
+    delegation_events.append_event(
+        store, task_id, "worker_result", "result-old",
+        dict(report_ref="r_old" + "0" * 12, summary="old", checks=[]),
+        origin="worker", assignment_ref="attempt-old",
+    )
+    delegation_events.append_event(
+        store, task_id, "assignment_cancelled", "cancel-old",
+        dict(reason="Supersede the same-file publication; retain it as historical evidence; the corrective artifact replaces it."),
+        origin="coordinator", assignment_ref="assignment-old",
+    )
+    setup("assignment-new", "attempt-new", "r_new" + "0" * 12)
+    delegation_revision.record_attempt_revision(store, "attempt-new", "worker_start:attempt-new", tmp_path)
+    (tmp_path / "a.txt").write_text("corrective publication\n")
+    new_pub = delegation_revision.record_attempt_revision(
+        store, "attempt-new", "worker_publish:r_new" + "0" * 12, tmp_path,
+    )
+    delegation_events.append_event(
+        store, task_id, "worker_result", "result-new",
+        dict(report_ref="r_new" + "0" * 12, summary="new", checks=[]),
+        origin="worker", assignment_ref="attempt-new",
+    )
+    allowed, reason = delegation_revision.shared_publication_attribution(
+        store, task_id, "attempt-new", new_pub, new_pub,
+    )
+    assert not allowed and reason == "shared_root_superseded_uncovered:attempt-old"
+
+
+def test_gate_accepts_head_change_when_content_is_unchanged(tmp_path):
+    """Git provenance changes do not invalidate a check over identical bytes."""
     _init_repo(tmp_path)
     store, task_id = _task(tmp_path)
     assignment_ref = "req-head-only"
@@ -408,20 +939,21 @@ def test_gate_refuses_stale_verification_on_head_change_alone(tmp_path):
     (tmp_path / "a.txt").write_text("one\n")  # restore original content exactly
     _git(["commit", "-q", "--allow-empty", "-m", "empty"], tmp_path)
     ok, reasons = delegation_completion.gate(store, task_id)
-    assert not ok
-    assert any(reason == f"stale_verification:{assignment_ref}" for reason in reasons)
+    assert ok, reasons
 
 
-def test_gate_labels_unavailable_revision_unknown_never_refuses(tmp_path, monkeypatch):
+def test_gate_refuses_when_current_revision_is_unavailable(tmp_path, monkeypatch):
     store, task_id = _task(tmp_path)
     assignment_ref = "req3"
     event = _record_result_with_observed_check(store, task_id, assignment_ref, "r_" + "c" * 12)
+    delegation_revision.record_attempt_revision(store, assignment_ref, f"worker_result:{event.id}", tmp_path)
     (tmp_path / "some-file.txt").write_text("content\n")
     monkeypatch.setattr(delegation_revision, "_MAX_FILES", 0)
-    captured = delegation_revision.record_attempt_revision(store, assignment_ref, f"worker_result:{event.id}", tmp_path)
+    captured = delegation_revision.record_attempt_revision(store, assignment_ref, "unavailable_probe", tmp_path)
     assert captured["kind"] == "unavailable"
     ok, reasons = delegation_completion.gate(store, task_id)
-    assert ok, reasons  # never refused for an inconclusive (unavailable) comparison
+    assert not ok
+    assert "current_revision_unavailable:unavailable:workspace_too_large" in reasons
 
 
 def test_label_formats_observed_and_unavailable():
@@ -480,6 +1012,98 @@ def test_workspace_changed_real_capture_before_and_after_a_write(tmp_path):
     (tmp_path / "a.txt").write_text("two\n")
     after = delegation_revision.capture_revision(tmp_path)
     assert delegation_revision.workspace_changed(before, after) is True
+
+
+def test_publication_attribution_accepts_only_benign_generated_manifest_drift(tmp_path):
+    (tmp_path / "worker.txt").write_text("worker\n")
+    publication = delegation_revision.capture_revision(tmp_path)
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "test.cpython-313.pyc").write_bytes(b"cache")
+    current = delegation_revision.capture_revision(tmp_path)
+    assert delegation_revision.publication_attribution(publication, current) == "benign_generated_only"
+
+    (tmp_path / "unrelated.txt").write_text("external\n")
+    current = delegation_revision.capture_revision(tmp_path)
+    assert delegation_revision.publication_attribution(publication, current) == "unknown"
+
+
+def test_engine_owned_claude_schedule_lock_is_volatile_but_other_claude_files_are_observed(tmp_path):
+    """The Claude scheduler lock may disappear during acceptance without
+    making a worker result stale, while ordinary project ``.claude`` content
+    remains part of the revision boundary."""
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    (claude / "settings.json").write_text('{"project": true}\n')
+    publication = delegation_revision.capture_revision(tmp_path)
+
+    (claude / "scheduled_tasks.lock").write_bytes(b"115 bytes of transient lock state")
+    with_lock = delegation_revision.capture_revision(tmp_path)
+    assert with_lock["dirty_digest"] == publication["dirty_digest"]
+    assert all("scheduled_tasks.lock" not in item for item in with_lock["manifest"])
+    assert delegation_revision.publication_attribution(publication, with_lock) == "exact"
+
+    (claude / "scheduled_tasks.lock").unlink()
+    after_lock_disappears = delegation_revision.capture_revision(tmp_path)
+    assert after_lock_disappears["dirty_digest"] == publication["dirty_digest"]
+    assert delegation_revision.publication_attribution(with_lock, after_lock_disappears) == "exact"
+
+    (claude / "settings.json").write_text('{"project": false}\n')
+    changed_project_config = delegation_revision.capture_revision(tmp_path)
+    assert changed_project_config["dirty_digest"] != publication["dirty_digest"]
+    assert delegation_revision.publication_attribution(publication, changed_project_config) == "unknown"
+
+
+def test_claude_scheduler_lock_exemption_does_not_hide_directory(tmp_path):
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    publication = delegation_revision.capture_revision(tmp_path)
+    lock = claude / "scheduled_tasks.lock"
+    lock.mkdir()
+    (lock / "secret.txt").write_text("project content\n")
+    current = delegation_revision.capture_revision(tmp_path)
+    assert current["kind"] == "observed"
+    assert any(".claude/scheduled_tasks.lock" in item for item in current["manifest"])
+    assert any(".claude/scheduled_tasks.lock/secret.txt" in item for item in current["manifest"])
+    assert current["dirty_digest"] != publication["dirty_digest"]
+
+
+def test_claude_scheduler_lock_exemption_does_not_hide_symlink(tmp_path):
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("do not follow\n")
+    publication = delegation_revision.capture_revision(tmp_path)
+    (claude / "scheduled_tasks.lock").symlink_to(outside)
+    current = delegation_revision.capture_revision(tmp_path)
+    assert current["kind"] == "observed"
+    assert any(
+        item.startswith("l\t.claude/scheduled_tasks.lock\t")
+        for item in current["manifest"]
+    )
+    assert current["dirty_digest"] != publication["dirty_digest"]
+
+
+def test_publication_attribution_requires_manifest_for_changed_digest():
+    publication = _observed("a" * 64)
+    current = _observed("b" * 64)
+    assert delegation_revision.publication_attribution(publication, current) == "unknown"
+
+
+def _manifest_capture(entries):
+    return dict(kind="observed", dirty_digest="digest", head=None,
+                manifest=[f"f\t{path}\t{digest}\t0" for path, digest in entries.items()])
+
+
+def test_shared_workers_overlapping_manifest_deltas_are_ambiguous():
+    """A+B both editing the same path cannot be attributed from a matching
+    shared-root tree; independent path deltas remain observable."""
+    base = _manifest_capture({"src/a.py": "old", "src/b.py": "old"})
+    a = _manifest_capture({"src/a.py": "A", "src/b.py": "old"})
+    b_overlap = _manifest_capture({"src/a.py": "B", "src/b.py": "old"})
+    b_base = _manifest_capture({"src/a.py": "A", "src/b.py": "old"})
+    b_independent = _manifest_capture({"src/a.py": "A", "src/b.py": "B"})
+    assert delegation_revision.overlapping_manifest_deltas(base, a, base, b_overlap) == {"src/a.py"}
+    assert delegation_revision.overlapping_manifest_deltas(base, a, b_base, b_independent) == set()
 
 
 def test_a_report_written_but_never_published_never_gates_acceptance(tmp_path):

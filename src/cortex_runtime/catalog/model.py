@@ -23,6 +23,10 @@ class CatalogEntry:
     disambiguated_label: str
     evidence: EvidenceState
     catalog_snapshot_id: str
+    # Friendly display name supplied by the engine catalog. Older snapshots
+    # and manual declarations may omit it and fall back to route.model.
+    model_name: str | None = None
+    model_description: str | None = None
     # T024: optional, backward-compatible route-level context-window budget
     # hint (in tokens). Absent for every existing caller (no discovery path
     # observes this from any pinned adapter/route today -- see
@@ -59,6 +63,24 @@ class CatalogEntry:
                     retry_eligible=False,
                     field=field_name,
                 )
+        if self.model_name is not None and (not isinstance(self.model_name, str) or not self.model_name):
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION,
+                code="invalid_field",
+                remediation="'model_name' must be a non-empty string or None.",
+                retry_eligible=False,
+                field="model_name",
+            )
+        if self.model_description is not None and (
+            not isinstance(self.model_description, str) or not self.model_description
+        ):
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION,
+                code="invalid_field",
+                remediation="'model_description' must be a non-empty string or None.",
+                retry_eligible=False,
+                field="model_description",
+            )
         if not isinstance(self.evidence, EvidenceState):
             raise PortableError(
                 category=PortableErrorCategory.VALIDATION,

@@ -68,22 +68,6 @@ def test_own_drafts_bindings_revision_and_artifact_metadata(tmp_path):
     assert store.call('list_reports',{},thread,steering_source=forbidden)['source_capture']['status']=='not_attempted'
 
 
-def test_deferred_hooks_preserve_distinct_native_messages(tmp_path):
-    from cortex_runtime.hook_storage import HookStorage
-    store=Store(tmp_path/'private');task=create(store,tmp_path);thread=thread_for(store,task)
-    hooks=HookStorage(store);context=hooks.context(thread,str(tmp_path))
-    hooks.note_prompt(context,'turn-1')
-    def native(*_):
-        return NativeSource('Same exact text',cursor={'test':1},messages=[
-            dict(id='native-1',turn='turn-1',text='Same exact text',attachments=[]),
-            dict(id='native-2',turn='turn-1',text='Same exact text',attachments=[])])
-    first=store.call('list_reports',{},thread,steering_source=native)
-    assert first['source_capture']['revision']==3
-    with store.connection() as db:
-        assert not db.execute('SELECT 1 FROM hook_pending_sources').fetchall()
-    assert store.call('list_reports',{},thread,steering_source=native)['source_capture']['revision']==3
-
-
 def test_offline_migration_needs_new_backup_and_never_changes_markdown(tmp_path):
     store=Store(tmp_path/'private');task=create(store,tmp_path)
     write(store,task,request_key='accepted-v10')
@@ -99,14 +83,14 @@ def test_offline_migration_needs_new_backup_and_never_changes_markdown(tmp_path)
         # An authentic pre-T005 format-10 layout also predates the trusted-
         # channel/ownership identity tables; drop those too so migrate() must
         # genuinely create them from nothing.
-        for table in ('binding_receipts','source_revisions','report_provenance','draft_revisions','task_changes','source_turns','hook_events','hook_hints','hook_agent_bindings','hook_pending_sources','source_resets','trusted_channels','source_events','task_owners','task_route_selections','configuration_revisions','project_configuration_defaults'):
+        for table in ('binding_receipts','source_revisions','report_provenance','draft_revisions','task_changes','source_turns','source_resets','trusted_channels','source_events','task_owners','task_route_selections','configuration_revisions','project_configuration_defaults'):
             db.execute('DROP TABLE '+table)
         db.execute('PRAGMA user_version=10')
     with pytest.raises(StoreError,match='unsupported_storage'):Store(store.directory)
     backup=tmp_path/'backup.sqlite3'
     with pytest.raises(StoreError,match='migration_requires_stopped_access'):migrate(store.directory,backup)
     result=migrate(store.directory,backup,access_stopped=True)
-    assert result['to_version']==11 and backup.is_file()
+    assert result['to_version']==12 and backup.is_file()
     assert sqlite3.connect(backup).execute('PRAGMA user_version').fetchone()[0]==10
     assert before=={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in path.iterdir()}
     with sqlite3.connect(store.directory/'cortex.sqlite3') as raw:
@@ -262,78 +246,6 @@ def test_pending_deletion_commits_metadata_before_rejecting_task(tmp_path):
     with store.connection() as db:
         assert not db.execute('SELECT 1 FROM tasks WHERE id=?',(task,)).fetchone()
         assert not db.execute('SELECT 1 FROM pending_deletions WHERE task_id=?',(task,)).fetchone()
-
-
-def test_bounded_changes_expose_only_compact_hook_receipts_after_restart(tmp_path):
-    from cortex_runtime.hook_storage import HookStorage
-    from cortex_runtime.contracts import OUTPUTS
-    import jsonschema
-    store=Store(tmp_path/'private');task=create(store,tmp_path);thread=thread_for(store,task)
-    hooks=HookStorage(store);context=hooks.context(thread,str(tmp_path))
-    paths=[str(tmp_path/('artifact-'+str(index))) for index in range(20)]
-    hooks.record(context,'PostToolUse','command-running',dict(
-        tool_name='exec_command',command_session_id='42',status='running',truncated=True,
-        changed_paths=paths,actor_scope='actor',actor_thread_id=thread,parent_session_id=thread,
-        binding_origin='native_mcp',output='PRIVATE RAW OUTPUT',command='SECRET COMMAND',prompt='SECRET SOURCE'))
-    hooks.record(context,'PostToolUse','command-exit',dict(
-        tool_name='write_stdin',command_session_id='42',status='exited',exit_code=0,
-        actor_scope='session',actor_thread_id=None,parent_session_id=thread,binding_origin='native_mcp'))
-    restarted=Store(store.directory)
-    result=call_store(restarted,'list_reports',dict(task_id=task,limit=100))
-    jsonschema.validate(result,OUTPUTS['list_reports'])
-    observations=[change['observation'] for change in result['changes'] if change['observation']]
-    running=next(item for item in observations if item['status']=='running')
-    exited=next(item for item in observations if item['status']=='exited')
-    assert running['source']=='hook' and running['actor_thread_id']==thread
-    assert running['command_session_id']=='42' and running['truncated'] is True and running['exit_code'] is None
-    assert running['changed_paths']==paths[:16] and running['changed_paths_total']==20
-    assert running['changed_paths_complete'] is False
-    assert exited['exit_code']==0 and exited['actor_scope']=='session' and exited['actor_thread_id'] is None
-    assert 'PRIVATE RAW OUTPUT' not in json.dumps(result) and 'SECRET' not in json.dumps(result)
-    page=call_store(restarted,'list_reports',dict(task_id=task,limit=1))
-    assert len(page['changes'])==1 and page['changes_next'] is not None
-    next_page=call_store(restarted,'list_reports',dict(task_id=task,limit=1,changes_after=page['changes_next']))
-    assert next_page['changes'][0]['sequence']>page['changes'][0]['sequence']
-
-
-def test_normal_transition_retires_only_accepted_skipped_pending_signals(tmp_path,monkeypatch):
-    from cortex_runtime.hook_storage import HookStorage
-    store=Store(tmp_path/'private');task=create(store,tmp_path);thread=thread_for(store,task)
-    hooks=HookStorage(store);context=hooks.context(thread,str(tmp_path))
-    hooks.note_prompt(context,'turn-normal')
-    other=create(store,tmp_path);other_thread=thread_for(store,other)
-    hooks.note_prompt(hooks.context(other_thread,str(tmp_path)),'turn-other')
-    def current(message_id,turn,text):
-        return lambda *_:NativeSource(text,{'offset':message_id},[dict(id=message_id,turn=turn,text=text,attachments=[])])
-    pause=dict(mode='minimal',rationale='Pause capture.',state='normal',request_key=key())
-    paused=store.call('set_governance',pause,thread,steering_source=current('normal','turn-normal','Use normal mode'))
-    assert paused['source_capture']['pending_turns']==0
-    assert paused['source_capture']['status']=='partial'
-    assert paused['source_capture']['reason']=='inactive_interval_started_pending_sources_retired'
-    assert paused['source_capture']['revision']==1
-    restarted=Store(store.directory)
-    with restarted.connection() as db:
-        assert not db.execute('SELECT 1 FROM hook_pending_sources WHERE thread_id=?',(thread,)).fetchone()
-        assert db.execute('SELECT 1 FROM hook_pending_sources WHERE thread_id=?',(other_thread,)).fetchone()
-    resumed=restarted.call('set_governance',dict(mode='minimal',rationale='Resume.',state='cortex',request_key=key()),thread,
-        steering_source=current('resume','turn-resume','Resume Cortex'))
-    assert resumed['source_capture']['revision']==2 and resumed['source_capture']['pending_turns']==0
-    hooks=HookStorage(restarted);context=hooks.context(thread,str(tmp_path));hooks.note_prompt(context,'turn-new')
-    replay=restarted.call('set_governance',pause,thread)
-    assert replay['replayed'] and replay['binding']['state']=='cortex'
-    assert replay['source_capture']['pending_turns']==1
-    original_change=restarted._change
-    def fail_gap(db,task_id,kind,reference=None):
-        if kind=='source_gap':raise StoreError('storage_error')
-        return original_change(db,task_id,kind,reference)
-    monkeypatch.setattr(restarted,'_change',fail_gap)
-    with pytest.raises(StoreError,match='storage_error'):
-        restarted.call('set_governance',dict(pause,request_key=key()),thread,
-            steering_source=current('new','turn-new','Pause again'))
-    listing=restarted.call('list_reports',{},thread)
-    assert listing['binding']['state']=='cortex' and listing['source_capture']['pending_turns']==1
-    gaps=[change for change in listing['changes'] if change['kind']=='source_gap']
-    assert len(gaps)==1 and gaps[0]['reference']=='inactive_interval_started_pending_sources_retired'
 
 
 def test_accepted_write_replay_does_not_apply_old_redactions_to_new_source(tmp_path):

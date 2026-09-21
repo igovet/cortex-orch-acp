@@ -1,8 +1,5 @@
 """Fail-open coverage for passive diagnostics and fail-closed boundaries."""
 from io import StringIO
-import importlib.util
-from importlib.machinery import SourceFileLoader
-from pathlib import Path
 
 import pytest
 
@@ -16,25 +13,15 @@ from cortex_runtime.diagnostic_boundary import (
 from cortex_runtime import server
 
 
-ROOT = Path(__file__).resolve().parents[1]
-AUDIT_SPEC = importlib.util.spec_from_loader(
-    "cortex_live_smoke_for_diagnostic_tests",
-    SourceFileLoader("cortex_live_smoke_for_diagnostic_tests", str(ROOT / "scripts/cortex-live-smoke")),
-)
-AUDIT = importlib.util.module_from_spec(AUDIT_SPEC)
-AUDIT_SPEC.loader.exec_module(AUDIT)
-
-
 def test_created_draft_observation_retains_exact_public_identity():
     fields = server.safe_observation_fields('create_draft', {'template': 'pipeline'},
                                            {'draft_id': 'd_0123456789ab', 'draft_path': '/private/draft'})
     assert fields['draft_id'] == 'd_0123456789ab'
     assert fields['template'] == 'pipeline'
     assert '/private' not in repr(fields)
-    observer = AUDIT._observer_namespace('draft_identity_test')
-    base = {'thread_id': 'coordinator', 'tool': 'mcp__cortex__create_draft'}
-    assert observer['canonical_mcp_call_key']({**base, **fields}) == observer['canonical_mcp_call_key'](
-        {**base, 'draft_id': 'd_0123456789ab', 'template': 'pipeline'})
+    assert fields['draft_id'] == 'd_0123456789ab'
+    assert fields['template'] == 'pipeline'
+    assert set(fields) == {'draft_id', 'template', 'source_revision', 'source_capture_status'}
 
 
 def test_passive_failure_continues_with_bounded_value_free_diagnostic():
@@ -126,16 +113,3 @@ def test_diagnostic_failure_record_is_value_free_for_unusual_exception_type():
     finding = diagnostic_failure("logging", PrivateException("secret value"))
     assert finding["error_type"] == "PrivateException"
     assert "secret value" not in repr(finding)
-
-
-def test_class_b_integrity_finding_keeps_current_host_audit_exit_one():
-    classification = {
-        "evidence_valid": True,
-        "score_eligible": True,
-        "evidence_integrity_invalidators": [{"code": "replay"}],
-    }
-    observational = {"status": "observational_accept"}
-    assert AUDIT.current_host_audit_exit_code(
-        classification, observational, failures=[], host_failures=[],
-        audit_policy=[], observational_diagnostics=[],
-    ) == 1

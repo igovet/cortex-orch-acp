@@ -47,9 +47,13 @@ def test_pipeline_draft_rejects_unfilled_server_placeholder(store,tmp_path):
     path=Path(draft['draft_path'])
     assert '{{CURRENT_WORK_GRAPH}}' in draft['markdown']==path.read_text()
     assert draft['required_replacement_count']==len(draft['replaceable_markers'])
-    assert draft['replaceable_markers'][0]=='{{CURRENT_OBJECTIVE_AND_STATUS}}'
-    assert draft['replaceable_markers'][5].startswith('<!-- Record implementation_state')
-    assert "Preserve its identity and first-line marker" in draft['edit_instruction']
+    assert '{{CURRENT_OBJECTIVE_AND_DECISION_BASIS}}' in draft['replaceable_markers']
+    assert any(marker.startswith('<!-- Link selected reports and artifacts.')
+               for marker in draft['replaceable_markers'])
+    assert any('incident details only when relevant' in marker
+               for marker in draft['replaceable_markers'])
+    assert "safe atomic replacement at that same path is accepted" in draft['edit_instruction']
+    assert "Preserve its first-line marker" in draft['edit_instruction']
     arguments=dict(task_id=task,title='Pipeline',summary='Current work is recorded.',
                    author='coordinator',draft_id=draft['draft_id'],request_key=key())
     with pytest.raises(StoreError) as rejected:
@@ -57,7 +61,7 @@ def test_pipeline_draft_rejects_unfilled_server_placeholder(store,tmp_path):
     error=rejected.value
     assert error.args==('draft_guidance_remaining',)
     assert error.field=='draft_markdown'
-    assert error.received.startswith('{{CURRENT_')
+    assert error.received in draft['replaceable_markers']
     assert path.is_file()
     body=path.read_text()
     for marker in draft['replaceable_markers']:

@@ -16,7 +16,7 @@ import uuid
 
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter
-from cortex_runtime.engine.permissions import COORDINATOR_MUTATION_REFUSAL_REASON
+from cortex_runtime.engine.permissions import COORDINATOR_EDIT_REFUSAL_REASON
 from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.store import Store
 
@@ -42,7 +42,7 @@ def test_notify_coordinator_refusal_appends_a_progress_event(tmp_path):
     adapter = _adapter(store)
     adapter._session_meta["es_a"] = dict(task_id=task_id, attempt_id="co_1", recipient="coordinator")
 
-    adapter._notify_coordinator_refusal("es_a", COORDINATOR_MUTATION_REFUSAL_REASON)
+    adapter._notify_coordinator_refusal("es_a", COORDINATOR_EDIT_REFUSAL_REASON)
 
     with store.connection() as db:
         row = db.execute(
@@ -51,7 +51,8 @@ def test_notify_coordinator_refusal_appends_a_progress_event(tmp_path):
         ).fetchone()
     assert row is not None
     payload = json.loads(row["payload_json"])
-    assert payload["note"] == COORDINATOR_MUTATION_REFUSAL_REASON
+    assert payload["note"] == COORDINATOR_EDIT_REFUSAL_REASON
+    assert payload["kind"] == "coordinator_role_refusal"
     assert payload["message_key"] == "coordinator_mutation_refused"
 
 

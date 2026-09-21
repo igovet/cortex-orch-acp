@@ -59,7 +59,7 @@ def _placeholder_replacements(task_id: str, request_text: str | None, route_info
     )
     assignments = _route_line(route_info) + " No assignment has been delegated yet."
     return {
-        "{{CURRENT_OBJECTIVE_AND_STATUS}}": objective,
+        "{{CURRENT_OBJECTIVE_AND_DECISION_BASIS}}": objective,
         "{{CURRENT_REQUIREMENTS_AND_CONSTRAINTS}}": (
             "Not yet determined: the coordinator has not yet reviewed the request for explicit "
             "requirements or constraints. The user's own words above are the only source of truth "

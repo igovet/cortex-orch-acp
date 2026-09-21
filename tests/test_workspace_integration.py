@@ -3,11 +3,15 @@ main project root -- conflict detection, host-buffer preconditions,
 idempotency, and the revision-A-does-not-certify-revision-B gate wiring."""
 import os
 import uuid
+from pathlib import Path
+import pytest
 
 from cortex_runtime.bootstrap import bootstrap_task
+from cortex_runtime.contracts import StoreError
 from cortex_runtime.delegation import completion as delegation_completion
 from cortex_runtime.delegation import events as delegation_events
 from cortex_runtime.delegation import integration
+from cortex_runtime.delegation import candidates
 from cortex_runtime.delegation import revision as delegation_revision
 from cortex_runtime.delegation import workspace_isolation
 from cortex_runtime.portable.identity import SourceEvent
@@ -203,25 +207,126 @@ def test_integrate_is_idempotent_by_request_key(tmp_path):
     assert (project / "a.txt").read_text() == "mutated-out-of-band\n"
 
 
-def test_integrate_noop_for_serialized_fallback_binding(tmp_path, monkeypatch):
-    """Acceptance bullet 6: without suitable isolation, conflicting writes
-    are serialized (see test_workspace_isolation.py) -- integrate() is then
-    correctly a documented no-op (there is no separate copy left to
-    merge)."""
+def test_integrate_recovers_after_crash_between_file_writes(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    (project / "a.txt").write_text("a\n")
+    (project / "b.txt").write_text("b\n")
+    store = Store(project / ".cortex", project_root=str(project))
+    task_id = _task(store)
+    assignment_ref = _bind_attempt(store, task_id, "xa_journal")
+    provisioner, binding_id = _create_snapshot(store, project, task_id, "xa_journal")
+    root = provisioner.root_for(binding_id)
+    (Path(root) / "a.txt").write_text("A\n")
+    (Path(root) / "b.txt").write_text("B\n")
+
+    from cortex_runtime import _fault_injection
+    calls = {"count": 0}
+    def crash_once(name):
+        if name == "integration_after_write_before_journal_mark" and calls["count"] == 0:
+            calls["count"] += 1
+            raise RuntimeError("simulated crash")
+    monkeypatch.setattr(_fault_injection, "checkpoint", crash_once)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        integration.integrate(
+            store, task_id=task_id, project_root=str(project), assignment_ref=assignment_ref,
+            request_key="rk-journal", attempt_id="xa_journal", workspace_binding_id=binding_id,
+        )
+    # One of the two writes may have landed before the simulated crash. The
+    # retry must reconcile that partial state and then apply both files.
+    changed = sum((project / name).read_text() == value for name, value in
+                  (("a.txt", "A\n"), ("b.txt", "B\n")))
+    assert changed == 1
+    result = integration.integrate(
+        store, task_id=task_id, project_root=str(project), assignment_ref=assignment_ref,
+        request_key="rk-journal", attempt_id="xa_journal", workspace_binding_id=binding_id,
+    )
+    assert result["status"] == "applied"
+    assert (project / "a.txt").read_text() == "A\n"
+    assert (project / "b.txt").read_text() == "B\n"
+
+
+def test_snapshot_failure_is_reported_before_integration(tmp_path, monkeypatch):
+    """A failed snapshot cannot be represented as a successful no-op."""
     project = _project(tmp_path)
     (project / "a.txt").write_text("hello\n")
     store = Store(project / ".cortex", project_root=str(project))
     task_id = _task(store)
     assignment_ref = _bind_attempt(store, task_id, "xa_fallback")
     monkeypatch.setattr(workspace_isolation, "_MAX_ENTRIES", 0)
-    provisioner, binding_id = _create_snapshot(store, project, task_id, "xa_fallback")
-    assert provisioner.row_for_binding(binding_id)["mode"] == "serialized_shared_root"
+    with pytest.raises(StoreError, match="^workspace_snapshot_unavailable:workspace_too_large$"):
+        _create_snapshot(store, project, task_id, "xa_fallback")
 
-    result = integration.integrate(
-        store, task_id=task_id, project_root=str(project), assignment_ref=assignment_ref,
-        request_key="rk-fallback", attempt_id="xa_fallback", workspace_binding_id=binding_id,
+
+def test_integrate_ready_candidate_requires_exact_base_and_applies_stage(tmp_path):
+    project = _project(tmp_path)
+    (project / "base.txt").write_text("base\n")
+    store = Store(project / ".cortex", project_root=str(project))
+    task_id = _task(store)
+    assignment_ref = _bind_attempt(store, task_id, "xa_candidate")
+    provisioner, binding_id = _create_snapshot(store, project, task_id, "xa_candidate")
+    (Path(provisioner.root_for(binding_id)) / "new.txt").write_text("candidate\n")
+    candidate = candidates.prepare_candidate(store, task_id, ["xa_candidate"])
+    expected = candidates._digest_manifest(candidates._manifest(str(project)))
+
+    result = integration.integrate_candidate(
+        store, task_id=task_id, project_root=str(project), candidate_id=candidate["candidate_id"],
+        request_key="candidate-rk", expected_base_digest=expected,
     )
-    assert result["status"] == "noop"
+    assert result["status"] == "applied"
+    assert (project / "new.txt").read_text() == "candidate\n"
+
+
+def test_integrate_candidate_preserves_user_drift(tmp_path):
+    project = _project(tmp_path)
+    (project / "base.txt").write_text("base\n")
+    store = Store(project / ".cortex", project_root=str(project))
+    task_id = _task(store)
+    _bind_attempt(store, task_id, "xa_candidate_drift")
+    provisioner, binding_id = _create_snapshot(store, project, task_id, "xa_candidate_drift")
+    (Path(provisioner.root_for(binding_id)) / "new.txt").write_text("candidate\n")
+    candidate = candidates.prepare_candidate(store, task_id, ["xa_candidate_drift"])
+    expected = candidates._digest_manifest(candidates._manifest(str(project)))
+    (project / "base.txt").write_text("user\n")
+
+    result = integration.integrate_candidate(
+        store, task_id=task_id, project_root=str(project), candidate_id=candidate["candidate_id"],
+        request_key="candidate-drift", expected_base_digest=expected,
+    )
+    assert result["status"] == "conflict"
+    assert (project / "base.txt").read_text() == "user\n"
+    assert (project / ".cortex" / "candidates" / candidate["candidate_id"] / "stage").is_dir()
+
+
+def test_integrate_candidate_preflights_all_host_buffers_before_writing(tmp_path):
+    """A later host-buffer conflict must not leave an earlier candidate path applied."""
+    project = _project(tmp_path)
+    (project / "a.txt").write_text("a-base\n")
+    (project / "b.txt").write_text("b-base\n")
+    store = Store(project / ".cortex", project_root=str(project))
+    task_id = _task(store)
+    _bind_attempt(store, task_id, "xa_candidate_host_preflight")
+    provisioner, binding_id = _create_snapshot(store, project, task_id, "xa_candidate_host_preflight")
+    snapshot = Path(provisioner.root_for(binding_id))
+    (snapshot / "a.txt").write_text("a-candidate\n")
+    (snapshot / "b.txt").write_text("b-candidate\n")
+    candidate = candidates.prepare_candidate(store, task_id, ["xa_candidate_host_preflight"])
+    expected = candidates._digest_manifest(candidates._manifest(str(project)))
+    checked = []
+
+    def host_buffer(relpath):
+        checked.append(relpath)
+        return b"b-user-unsaved\n" if relpath == "b.txt" else None
+
+    result = integration.integrate_candidate(
+        store, task_id=task_id, project_root=str(project), candidate_id=candidate["candidate_id"],
+        request_key="candidate-host-preflight", expected_base_digest=expected,
+        host_fs_checker=host_buffer,
+    )
+    assert result["status"] == "conflict"
+    assert result["conflict_paths"] == ["b.txt"]
+    assert set(checked) == {"a.txt", "b.txt"}
+    assert (project / "a.txt").read_text() == "a-base\n"
+    assert (project / "b.txt").read_text() == "b-base\n"
 
 
 def test_worker_report_lands_in_main_project_store_not_the_snapshot(tmp_path):

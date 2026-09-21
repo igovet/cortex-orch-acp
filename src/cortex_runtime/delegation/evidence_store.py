@@ -32,4 +32,25 @@ CREATE TABLE IF NOT EXISTS tool_result_observations (
 );
 CREATE INDEX IF NOT EXISTS tool_result_observations_by_attempt ON tool_result_observations(attempt_id, tool_call_ref, id);
 CREATE INDEX IF NOT EXISTS tool_result_observations_by_task ON tool_result_observations(task_id);
+CREATE TABLE IF NOT EXISTS report_read_observations (
+ task_id TEXT NOT NULL REFERENCES tasks(id),
+ attempt_id TEXT NOT NULL,
+ report_id TEXT NOT NULL REFERENCES reports(id),
+ request_id TEXT NOT NULL,
+ outcome TEXT NOT NULL CHECK (outcome IN ('success')),
+ created_at TEXT NOT NULL,
+ PRIMARY KEY (task_id, attempt_id, report_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS report_read_observations_by_attempt ON report_read_observations(task_id, attempt_id, report_id);
+CREATE TABLE IF NOT EXISTS permission_receipts (
+ task_id TEXT NOT NULL REFERENCES tasks(id),
+ attempt_id TEXT NOT NULL,
+ tool_call_ref TEXT NOT NULL,
+ command_sha256 TEXT NOT NULL,
+ command_text TEXT NOT NULL,
+ host_outcome TEXT NOT NULL CHECK (host_outcome IN ('allow_once','reject_once','cancelled')),
+ created_at TEXT NOT NULL,
+ PRIMARY KEY (task_id, attempt_id, tool_call_ref)
+);
+CREATE INDEX IF NOT EXISTS permission_receipts_by_attempt ON permission_receipts(task_id, attempt_id);
 '''

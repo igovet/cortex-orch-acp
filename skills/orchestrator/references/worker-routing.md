@@ -64,35 +64,44 @@ the report; it does not finish omitted project-file edits itself.
 Before delegation, use the project instruction's named documentation entrypoint
 and follow only relevant links. A repository-wide file inventory is discovery,
 not prerequisite instruction loading; leave it to the assigned specialist.
+The new task context's compact project-document catalog identifies the project
+root, index paths, revision and provenance. When a project has harvested
+knowledge, `docs/project/index.md` and `docs/features/index.md` are its durable
+entry points. Select only the relevant linked pages and give their paths to
+the assigned worker; the catalog does not preload every page. Treat page claims
+as source-backed leads requiring confirmation where material. Missing or stale
+pages justify bounded discovery, not an automatic harvest.
 
 The coordinator retains the causal model across roles. An investigator answers a
 specific uncertainty; an implementer owns changes and self-tests; an independent
-reviewer/verifier examines the result against requirements and risks. Do not call
-the implementer's own checks independent acceptance. Use separate reviewers for
-nontrivial changes; combine work only when low risk and no independent check is
-required. Research before implementation is useful for unknown causes, not a
-mandatory stage for an already-understood edit. Select model/effort independently
-for each assignment; governance changes depth, not the model policy.
+reviewer/verifier examines the result against requirements and risks. A user-visible
+UI implementation is nontrivial unless the pipeline records a concrete low-risk
+rationale tied to its acceptance boundary; normally use a separate reviewer or
+verifier. Implementer and coordinator checks are never independent review. Combine
+work only for that justified low-risk boundary. Research before implementation is
+useful for unknown causes, not a mandatory stage for an already-understood edit.
+Select model/effort independently for each assignment; governance changes depth,
+not the model policy.
 
-Start new workers without inherited context and continue existing owners in retained
-context. Write the assignment and every steering/follow-up message in English.
-Start the assignment with the worker role and English-only reasoning, visible
-summaries, commentary, questions, reports and final handoff requirement, effective
-before the first skill/tool call. Do not paste the coordinator's language rule.
+Write the assignment and every `clarify` message in English. The outgoing
+engine receives its registered worker role at session creation. State English
+communication, questions, reports and handoff in the brief. Do not paste the
+coordinator's language rule.
 Quoted source and explicitly localized deliverables retain their required language;
 they do not change the worker's own communication language. After context recovery,
 repeat the role/language boundary. Correct observed drift in the next native message
 without restarting, blocking, translating stored evidence or hiding original text.
-Each concise assignment states the exact `$cortex:worker-...` skill,
-complete loading before discovery/project work,
-model/effort, policy class (`research`, `exploration`, `analysis`, `ordinary`,
+Each concise assignment states the role, model/effort, policy class (`research`, `exploration`, `analysis`, `ordinary`,
 `complex`, `security-analysis-microtask`, `consultation`, `consultation-narrow`,
 `consultation-hard`, `decision`, `decision-hard` or `review`), evidence, bounded outcome,
 requirements/acceptance checks, owned files/resources/dependencies, source/report/
 attachment references and handoff. Reviews retain implementation model/effort and
 do not derive a route; include `Policy class: <value>`, review model/effort and
-`User-requested override: yes|no` labels. Include the complete command result for
-every code-mode call, including the initial skill read.
+`User-requested override: yes|no` labels. Inspect complete command results.
+For a verifier or reviewer dependent on a worker's result, include the exact
+published predecessor `report_ref` from its `worker_result` event in the brief
+and ask the worker to read it with `read_report` before checking the result.
+A summary or report title does not identify that evidence.
 
 A worker's updates, questions and blockers reach you as events on this task, and
 you read them with `list_events`. Nothing about a handoff is automatic, for you or
@@ -100,23 +109,25 @@ for a worker: an assignment ends when its worker publishes a report and calls
 `publish_result`, and you learn of it as a `worker_result` event carrying that
 report's id.
 
+The route requested in `delegate` or repeated in its brief is a plan, not execution
+evidence. Before a pipeline or final response names a worker engine, model or effort,
+read the current capsule and copy that assignment's exact `observed_worker_route`.
+Copy assignment, report, artifact and check identifiers from current durable
+receipts. Omit an unavailable value instead of reconstructing it from prose or a
+planned route.
+
 You do not wait for a worker yourself and you cannot poll one. The runtime holds
 the turn while workers run and brings you their results as they arrive; a turn you
 end while work is still running simply leaves that work running. Answer the user
 when the task is decided, not when you have run out of things to say.
 
-If worker Cortex MCP is unavailable, use only shared closed
-`cortex-native-worker-result-v1`. Require one native spawn, terminal wait, parent/task,
-registered profile, and assignment digest. The coordinator publishes
-`Delegation evidence: native_worker_result` with `evidence_source=native_worker_result`,
-`worker_mcp_unavailable=true`, `host_enforcement_state=unverified`, correlation IDs,
-asserted hashes, and limits: coordinator evidence, never a worker report or host proof.
-Missing, duplicate, truncated, replayed, or competing evidence blocks; never invent a
-receipt or use generic shell work.
+If the worker's Cortex MCP channel is unavailable, keep the assignment
+incomplete and report the concrete failure. Do not substitute an engine-native
+subagent result for the required report and `publish_result` receipt.
 
-Include only the short loading requirement, not pasted protocols, schemas or
-checklists. Workers load the selected complete skill normally and progressively load
-applicable artifact skills.
+Include only the bounded assignment and needed references, not pasted protocols,
+schemas or checklists. Workers receive the role instructions at engine-session
+creation and can read situational skills through `read_skill`.
 
 Use these 23 profiles:
 

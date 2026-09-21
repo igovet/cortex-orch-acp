@@ -222,7 +222,7 @@ def build_claude_npm_install(
 
 def build_codex_npm_install(
     root: Path, scenario_path: Path, *, package_version: str = "1.12.0", bundled_codex_version: str = "0.154.0-fixture",
-    codex_debug_models_body: str | None = None,
+    codex_debug_models_body: str | None = None, private_adapter_shape: bool = False,
 ) -> tuple[tuple[str, str], Path]:
     """A realistic codex-acp npm install under ``root`` (package.json +
     dist/index.js adapter entry, plus a bundled ``@openai/codex`` package
@@ -237,11 +237,48 @@ def build_codex_npm_install(
     always prints the same JSON is sufficient."""
     from cortex_runtime.engine import install_resolution
 
+    if private_adapter_shape:
+        # The private adapter is deliberately limited to the pinned npm
+        # layout and two exact upstream call sites. Keep the fake ACP process
+        # executable as Python while embedding those source bytes inertly.
+        root = root / "node_modules" / "@agentclientprotocol" / "codex-acp"
     root.mkdir(parents=True, exist_ok=True)
     dist = root / "dist"
     dist.mkdir()
     adapter_entry = dist / "index.js"
     write_wrapper_adapter_entry(adapter_entry, scenario_path)
+    if private_adapter_shape:
+        from cortex_runtime.engine.process import (
+            _CODEX_AGENT_REVIEWER_SOURCE, _CODEX_NEW_SESSION_SOURCE,
+            _CODEX_SESSION_CONFIG_SOURCE,
+            _CODEX_MCP_DEDUP_SOURCE, _CODEX_MCP_ENTRY_SOURCE,
+            _CODEX_SEND_PROMPT_SOURCE,
+            _CODEX_RAW_RESPONSE_CASE_SOURCE,
+            _CODEX_RESPONSE_ITEM_TYPES_SOURCE,
+            _CODEX_HISTORY_CASE_BLOCK_SOURCE,
+            _CODEX_UPDATE_EVENT_SOURCE,
+            _CODEX_TURN_STARTED_SOURCE,
+            _CODEX_ITEM_EVENT_SWITCH_SOURCE,
+            _CODEX_COMPLETE_ITEM_EVENT_SWITCH_SOURCE,
+            _CODEX_FUNCTION_CALL_SOURCE,
+        )
+
+        with adapter_entry.open("ab") as entry:
+            entry.write(b'\n_PINNED_BUNDLE_SHAPE = """\n')
+            entry.write(_CODEX_AGENT_REVIEWER_SOURCE + b"\n" + _CODEX_NEW_SESSION_SOURCE
+                        + b"\n" + _CODEX_SESSION_CONFIG_SOURCE
+                        + b"\n" + _CODEX_MCP_DEDUP_SOURCE
+                        + b"\n" + _CODEX_MCP_ENTRY_SOURCE
+                        + b"\n" + _CODEX_SEND_PROMPT_SOURCE
+                        + b"\n" + _CODEX_RAW_RESPONSE_CASE_SOURCE
+                        + b"\n" + _CODEX_RESPONSE_ITEM_TYPES_SOURCE
+                        + b"\n" + _CODEX_HISTORY_CASE_BLOCK_SOURCE
+                        + b"\n" + _CODEX_UPDATE_EVENT_SOURCE
+                        + b"\n" + _CODEX_TURN_STARTED_SOURCE
+                        + b"\n" + _CODEX_ITEM_EVENT_SWITCH_SOURCE
+                        + b"\n" + _CODEX_COMPLETE_ITEM_EVENT_SWITCH_SOURCE
+                        + b"\n" + _CODEX_FUNCTION_CALL_SOURCE)
+            entry.write(b'\n"""\n')
     (root / "package.json").write_text(json.dumps({
         "name": "@agentclientprotocol/codex-acp",
         "version": package_version,

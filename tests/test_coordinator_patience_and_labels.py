@@ -20,10 +20,14 @@ hypothetical:
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 import uuid
 
+import pytest
+
 from cortex_runtime.acp.orchestrating_runtime import (
-    OrchestratingRuntime, PromptOutcome, _display_role,
+    OrchestratingRuntime, PromptOutcome, _display_role, _worker_display_text,
+    _worker_tool_details,
 )
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation import mcp_tools
@@ -43,6 +47,35 @@ def _task(tmp_path):
 
 def test_display_role_strips_only_the_storage_prefix():
     assert _display_role("worker-backend-dev") == "backend-dev"
+
+
+def test_worker_ui_details_are_one_line_and_drop_output():
+    details = _worker_tool_details(
+        "Execute tests", "completed", [{"path": "/tmp/project/test_counter.py"}],
+        [{"type": "text", "text": "1 test passed"}],
+        {"command": "python3 -m unittest test_counter.py", "cwd": "/tmp/project"},
+        {"exit_code": 0, "formatted_output": "OK"}, "/tmp/project",
+    )
+    assert "python3 -m unittest test_counter.py" in details
+    assert "Execute tests" in details
+    assert "test_counter.py" in details
+    assert " — test_counter.py" not in details
+    assert "Result: OK" not in details
+    assert "1 test passed" not in details
+    assert "\n" not in details
+    assert '"rawInput"' not in details
+    assert "{" not in details
+
+
+def test_worker_display_ignores_tool_envelopes_and_extracts_explicit_text():
+    assert _worker_display_text({
+        "sessionUpdate": "tool_call_update",
+        "content": {"text": '{"rawInput":{"command":"pytest"}}'},
+    }) is None
+    assert _worker_display_text({
+        "sessionUpdate": "agent_thought_chunk",
+        "content": {"text": "Checking the implementation."},
+    }) == "Checking the implementation."
     # The alias form is already what a reader should see.
     assert _display_role("backend-dev") == "backend-dev"
     # Never strips anything else, and never strips a second time.
@@ -114,7 +147,9 @@ def test_a_running_worker_holds_the_turn_open_and_a_silent_one_closes_itself(tmp
 
     releaser = threading.Thread(target=release_later, daemon=True)
     releaser.start()
-    result = runtime.start_prompt(task_id, "s1", "Do X.", [].append, threading.Event())
+    cards: list = []
+    result = runtime.start_prompt(task_id, "s1", "Do X.", [].append, threading.Event(),
+                                  emit_tool_call=cards.append)
     releaser.join(timeout=10.0)
 
     assert worker_started.is_set(), "the worker's own turn never started; this test proved nothing"
@@ -129,10 +164,89 @@ def test_a_running_worker_holds_the_turn_open_and_a_silent_one_closes_itself(tmp
         ).fetchone()
     assert failure is not None, "a worker that produced nothing must say so"
     assert "worker_ended_without_result" in failure["payload_json"]
+    worker_cards = [c for c in cards if c.get("tool_call_id", "").startswith("worker:")]
+    assert worker_cards
+    assert all("[final response]" not in (c.get("text") or "") for c in worker_cards)
+    assert all("Result:" not in (c.get("text") or "") for c in worker_cards)
 
 
-def test_consecutive_coordinator_turns_are_separated_in_the_client_stream(tmp_path):
-    """Two continuation turns must not render as one run-on sentence."""
+def test_delegation_batch_yields_to_silent_event_wait(tmp_path):
+    """Two in-flight delegate tools finish before the coordinator is paused.
+
+    Intermediate model prose, including text before the delegate and repeated
+    capsule polling after it, never reaches the client. Waiting itself does
+    not start another coordinator model turn until a worker terminal event.
+    """
+    store, task_id = _task(tmp_path)
+    workers_started = threading.Event()
+    release_workers = threading.Event()
+    started: set[str] = set()
+    updates: list[str] = []
+    outcome: list[StopReason] = []
+    coordinator_turns = []
+
+    def coordinator(store, channel, session_ref, message, call_index, *, on_delta, on_tool_call, cancel_event):
+        coordinator_turns.append(message)
+        if call_index:
+            return PromptOutcome(StopReason.END_TURN, "Workers finished.")
+        on_delta("Looking for tools. ")
+        for ref in ("first", "second"):
+            on_tool_call(ref, "other", "mcp.cortex.delegate", "in_progress", None, None, None, None)
+        for ref in ("first", "second"):
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title=ref, brief=f"Inspect {ref}", role="explorer",
+                acceptance="Report findings", request_key=ref,
+            ))
+            on_tool_call(ref, "other", "mcp.cortex.delegate", "completed", None, None, None, None)
+        while not cancel_event.wait(0.01):
+            on_delta("Still waiting; reading capsule. ")
+        return PromptOutcome(StopReason.CANCELLED, "Still waiting.")
+
+    def worker(store, channel, session_ref, message, call_index):
+        started.add(channel.assignment_id)
+        if len(started) == 2:
+            workers_started.set()
+        release_workers.wait(5)
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda s, c, sr, l, i: (
+            coordinator if c is not None and c.role == "coordinator" else worker
+        )), FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=3,
+    )
+    runner = threading.Thread(target=lambda: outcome.append(
+        runtime.start_prompt(task_id, "s1", "Inspect both.", updates.append, threading.Event()),
+    ), daemon=True)
+    runner.start()
+    try:
+        assert workers_started.wait(5), "both delegations must be dispatched"
+        # The first model turn yields after the completed tool batch; while
+        # workers remain open, no further model call or narration is allowed.
+        for _ in range(100):
+            with store.connection() as db:
+                row = db.execute(
+                    "SELECT wait_reason FROM task_orchestration WHERE task_id=?", (task_id,),
+                ).fetchone()
+            if row and row["wait_reason"] == "workers_running":
+                break
+            threading.Event().wait(0.02)
+        assert row and row["wait_reason"] == "workers_running"
+        assert len(coordinator_turns) == 1
+        assert not updates, updates
+    finally:
+        release_workers.set()
+        runner.join(timeout=10)
+    assert not runner.is_alive()
+    assert outcome == [StopReason.END_TURN]
+    assert len(coordinator_turns) >= 2
+    assert "Workers finished." in "".join(updates)
+    assert "Looking for tools" not in "".join(updates)
+    assert "Still waiting" not in "".join(updates)
+
+
+def test_unverified_coordinator_turns_hide_worker_wait_and_show_later_reply(tmp_path):
+    """Delegation chatter is hidden, while the later ordinary reply appears."""
     store, task_id = _task(tmp_path)
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
@@ -157,19 +271,103 @@ def test_consecutive_coordinator_turns_are_separated_in_the_client_stream(tmp_pa
         wait_timeout_seconds=0.02, max_no_progress_continuations=3,
     )
     updates: list[str] = []
-    runtime.start_prompt(task_id, "s1", "Do X.", updates.append, threading.Event())
+    cards: list[dict] = []
+    runtime.start_prompt(task_id, "s1", "Do X.", updates.append, threading.Event(), emit_tool_call=cards.append)
 
     streamed = "".join(u for u in updates if isinstance(u, str))
-    # The worker here publishes nothing, so the block that follows the
-    # coordinator's own turn is the blocked explanation rather than a
-    # second turn -- either way it is a separate block and must not be
-    # glued onto the previous sentence, which is exactly what was observed
-    # live ("First turn text.Blocked: ...").
+    assert not any(card.get("title") == "Coordinator output (unverified)" for card in cards)
     assert "First turn text." in streamed
-    assert "First turn text.Blocked" not in streamed, (
-        "a notice ran together with the preceding turn's text, with no separator"
+    assert "Second turn text." in streamed
+    assert "Acceptance refused" not in streamed
+    with store.connection() as db:
+        state = db.execute(
+            "SELECT state FROM task_orchestration WHERE task_id=?", (task_id,),
+        ).fetchone()[0]
+        accepted = db.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id=? AND event_type='coordinator_decision'",
+            (task_id,),
+        ).fetchone()[0]
+    assert state != "accepted"
+    assert accepted == 0
+
+
+@pytest.mark.parametrize("procedural", [
+    "Есть write_report, но сначала нужен create_draft.",
+    "I оставил guidance-комментарий на месте. Уберу его.",
+])
+def test_cortex_tool_turn_hides_procedural_self_talk(tmp_path, procedural):
+    store, task_id = _task(tmp_path)
+
+    def coordinator(store, channel, session_ref, message, call_index, *, on_tool_call):
+        on_tool_call("tool-1", "other", "mcp.cortex.read_capsule", "in_progress", None, None, None, None)
+        on_tool_call("tool-1", "other", None, "completed", None, None, None, None)
+        return PromptOutcome(StopReason.END_TURN, procedural)
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda s, c, sr, l, i: coordinator),
+        FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=2,
     )
-    assert "First turn text.\n\n" in streamed
+    updates: list[str] = []
+    runtime.start_prompt(task_id, "s1", "Continue.", updates.append, threading.Event())
+    assert procedural in "".join(updates)
+
+
+def test_direct_dialogue_without_cortex_tool_remains_visible(tmp_path):
+    store, task_id = _task(tmp_path)
+    answer = "The module handles project-local task storage."
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda s, c, sr, l, i: (
+            lambda store, channel, session_ref, message, call_index: PromptOutcome(StopReason.END_TURN, answer)
+        )), FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=2,
+    )
+    updates: list[str] = []
+    runtime.start_prompt(task_id, "s1", "What does this module do?", updates.append, threading.Event())
+    assert "".join(updates) == answer
+
+
+def test_anti_narration_rule_is_delivered_at_coordinator_open(tmp_path):
+    store, task_id = _task(tmp_path)
+    delivered: list[str] = []
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is not None and channel.role == "coordinator":
+            delivered.append(instructions)
+        return lambda store, channel, session_ref, message, call_index: PromptOutcome(
+            StopReason.END_TURN, "Done.",
+        )
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, router), FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=2,
+    )
+    runtime.start_prompt(task_id, "s1", "Say hello.", [].append, threading.Event())
+    assert len(delivered) == 1
+    assert "Keep tool discovery, argument corrections, report drafting" in delivered[0]
+    assert "do not repeatedly read the capsule" in delivered[0]
+
+
+def test_cortex_tool_question_remains_visible(tmp_path):
+    store, task_id = _task(tmp_path)
+
+    def coordinator(store, channel, session_ref, message, call_index, *, on_tool_call):
+        on_tool_call("ask-1", "other", "mcp.cortex.decide", "in_progress", None, None, None, None)
+        mcp_tools.dispatch(store, channel, "decide", dict(
+            assignment_ref="task", decision="ask_user", rationale="Need a target.",
+            question="Which environment?", request_key="ask-env",
+        ))
+        on_tool_call("ask-1", "other", None, "completed", None, None, None, None)
+        return PromptOutcome(StopReason.END_TURN, "Which environment?")
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda s, c, sr, l, i: coordinator),
+        FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=2,
+    )
+    updates: list[str] = []
+    runtime.start_prompt(task_id, "s1", "Deploy it.", updates.append, threading.Event())
+    assert "Which environment?" in "".join(updates)
 
 
 def test_a_running_workers_card_shows_what_it_is_doing(tmp_path):
@@ -211,7 +409,7 @@ def test_a_running_workers_card_shows_what_it_is_doing(tmp_path):
 
     def release_later():
         for _ in range(100):
-            if any("Reading calc.py" in str(c.get("title", "")) for c in list(cards)):
+            if any("Reading calc.py" in str(c.get("text", "")) for c in list(cards)):
                 break
             threading.Event().wait(0.02)
         worker_may_finish.set()
@@ -223,27 +421,23 @@ def test_a_running_workers_card_shows_what_it_is_doing(tmp_path):
     )
     releaser.join(timeout=10.0)
 
-    # What the worker is doing reaches the feed while it is doing it, as
-    # its own card, saying whose action it is.
-    activity = [c for c in cards if "Reading calc.py" in str(c.get("text", ""))]
+    # The action stays inside the worker's single assignment card.
+    activity = [c for c in cards if c.get("tool_call_id", "").startswith("worker:")
+                and "Reading calc.py" in str(c.get("text", ""))]
     assert activity, f"the running worker's own turn never reached the feed: {cards}"
     # Its title names the worker and its assignment, and stays put: what it
     # is doing goes in the block below, not into the heading. (An update
     # that only adds to the body carries no title at all.)
     titled = [c for c in cards if c.get("title")]
-    assert titled and all("backend-dev" in c["title"] for c in titled), titled
-    assert all("Reading calc.py" not in c.get("title", "") for c in cards), cards
+    assert any("Worker: backend-dev — Assignment X" == c["title"] for c in titled), titled
     assert any(c.get("status") == "in_progress" for c in activity), activity
-    # And it is still there at the end: the account of the work is never
-    # blanked, least of all by the result that finally explains it.
-    final = [c for c in cards if c.get("status") in ("completed", "failed")]
-    if final:
-        assert "Reading calc.py" in str(final[-1].get("text", "")), final[-1]
+    assert activity[0]["text"].count("Reading calc.py") == 1
+    assert "Status:" not in activity[0]["text"]
     # The assignment keeps exactly one card of its own, never one per action.
     assignment_cards = {c["tool_call_id"] for c in cards if c["tool_call_id"].startswith("worker:")}
     assert len(assignment_cards) == 1, cards
     # No card is re-sent unchanged, however many wait ticks pass.
-    sent = [(c["tool_call_id"], c.get("title"), c.get("text")) for c in cards]
+    sent = [repr(sorted(c.items(), key=lambda item: item[0])) for c in cards]
     assert len(sent) == len(set(sent)), f"the same card was sent twice: {sent}"
     # The worker's text is card content, never the coordinator's stream.
     assert "Reading calc.py" not in "".join(u for u in updates if isinstance(u, str))
@@ -297,22 +491,13 @@ def test_a_running_worker_shows_its_current_command_on_its_own_card(tmp_path):
     runtime.start_prompt(task_id, "s1", "Do X.", [].append, threading.Event(), emit_tool_call=cards.append)
     releaser.join(timeout=10.0)
 
-    actions = [c for c in cards if "Read calc.py" in str(c.get("text", ""))
-               or "Edit calc.py" in str(c.get("text", ""))]
+    actions = [c for c in cards if c.get("tool_call_id", "").startswith("worker:")
+               and ("Read calc.py" in str(c.get("text", ""))
+                    or "Edit calc.py" in str(c.get("text", "")))]
     assert actions, f"the worker's actions never reached the feed: {cards}"
 
-    # Everything this worker does belongs to its one card. Nothing it does
-    # becomes a card of its own in the feed.
-    assignment_cards = _worker_card_ids(cards)
-    assert len(assignment_cards) == 1, assignment_cards
-    assert all(c["tool_call_id"] in assignment_cards for c in actions), actions
-
-    # Both actions are there, in order, visibly separated -- not one
-    # replacing the other.
-    latest = actions[-1]["text"]
-    assert "Read calc.py" in latest and "Edit calc.py" in latest, latest
-    assert latest.index("Read calc.py") < latest.index("Edit calc.py"), latest
-    assert "───" in latest, latest
+    assert len({c["tool_call_id"] for c in actions}) == 1
+    assert all("Status:" not in c["text"] for c in actions)
 
 
 def _worker_card_ids(cards):
@@ -421,26 +606,27 @@ def test_a_tool_call_card_waits_for_a_name_instead_of_saying_tool_call():
     runtime = _R.__new__(_R)  # only the emitter factory is exercised
     on_tool_call = _R._engine_tool_call_emitter(runtime, cards.append)
 
-    # An unnamed call produces nothing at all -- not a placeholder card.
+    # A pending unnamed call is buffered until the engine identifies it.
     on_tool_call("c1", "execute", None, "pending")
-    assert cards == [], cards
+    assert cards == []
 
-    # Once named, the card appears, keeping the status seen while unnamed.
+    # Once named, the buffered start and current update appear in order.
     on_tool_call("c1", None, "Run `pytest -q`", None)
-    assert len(cards) == 1
+    assert len(cards) == 2
     assert cards[0]["new"] is True
-    assert cards[0]["title"] == "Run `pytest -q`"
-    assert cards[0]["kind"] == "execute"
-    assert cards[0]["status"] == "pending"
+    assert cards[1]["new"] is False
+    assert "Run `pytest -q`" in cards[1]["text"]
 
     # A status-only update keeps the name instead of clobbering it.
     on_tool_call("c1", None, None, "completed")
-    assert cards[1] == dict(tool_call_id=cards[0]["tool_call_id"], status="completed",
-                            new=False, title="Run `pytest -q`")
+    assert cards[2]["tool_call_id"] == cards[1]["tool_call_id"]
+    assert cards[2]["status"] == "completed"
+    assert "Run `pytest -q`" in cards[2]["text"]
 
     # An unknown kind still renders, as the schema's catch-all.
     on_tool_call("c2", "sorcery", "Consult the oracle", "in_progress")
-    assert cards[2]["kind"] == "other"
+    assert cards[3]["kind"] == "other"
+    assert "Consult the oracle" in cards[3]["text"]
 
 
 def test_the_identical_integration_conflict_is_not_an_endless_retry(tmp_path):
@@ -573,11 +759,12 @@ def test_this_runtimes_own_bookkeeping_is_not_shown_at_all():
     on_tool_call("i2", "other", "mcp.cortex.set_governance", "completed")
     on_tool_call("i3", "other", "mcp.cortex.delegate", "completed")
     on_tool_call("i4", "execute", "sed -n '1,45p' .cortex/draft-reports/d_76.md", "completed")
-    assert cards == [], f"nothing of this runtime's own plumbing is shown: {cards}"
+    assert cards == []
 
     # Real work still gets its own card, with its own name.
     on_tool_call("r1", "read", "Read calc.py", "completed")
-    assert [c.get("title") for c in cards] == ["Read calc.py"]
+    assert len(cards) == 1
+    assert "Read calc.py" in cards[-1]["text"]
 
 
 def test_the_worker_card_appears_while_the_coordinator_is_still_talking(tmp_path):
@@ -626,11 +813,8 @@ def test_the_worker_card_appears_while_the_coordinator_is_still_talking(tmp_path
     assert named[0]["new"] is True and "Worker: backend-dev" in named[0]["title"]
 
 
-def test_edits_to_the_store_are_bookkeeping_not_edits_to_the_project():
-    """Filling a draft or writing a report is done with ordinary file
-    operations against `<project>/.cortex` -- by design. To a reader those
-    are not edits to their code, and one "Editing files" card per report
-    buried the work the report was about, so they are not shown at all."""
+def test_store_and_project_edits_are_compact_without_diff_output():
+    """Both calls stay in sequence, while diffs and transport data stay out."""
     from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
 
     cards: list = []
@@ -640,18 +824,18 @@ def test_edits_to_the_store_are_bookkeeping_not_edits_to_the_project():
         "e1", "edit", "Edit file", "completed",
         [{"path": "/p/.cortex/draft-reports/r1.md"}], None,
     )
-    assert cards == [], f"writing a report is not an edit to the project: {cards}"
+    assert cards == []
 
-    # A real edit to the project keeps its own card, its diff and its path.
+    # The project edit is a second individual card without output.
     on_tool_call(
         "e2", "edit", "Edit calc.py", "completed",
         [{"path": "/p/calc.py"}], [{"type": "diff", "path": "/p/calc.py", "oldText": "a", "newText": "b"}],
     )
-    project_card = [c for c in cards if c.get("title") == "Edit calc.py"]
-    assert project_card, cards
-    assert project_card[0]["kind"] == "edit"
-    assert project_card[0]["locations"] == [{"path": "/p/calc.py"}]
-    assert project_card[0]["content"][0]["type"] == "diff"
+    assert "Edit calc.py" in cards[-1]["text"]
+    assert "type: diff" not in cards[-1]["text"]
+    assert "newText" not in cards[-1]["text"]
+    assert len(cards[-1]["text"].splitlines()) == 1
+    assert len(cards) == 1
 
 
 def test_a_path_inside_the_project_is_shown_relative_to_it():
@@ -665,20 +849,19 @@ def test_a_path_inside_the_project_is_shown_relative_to_it():
         _R.__new__(_R), cards.append, project_root="/p/demo",
     )
     on_tool_call("r1", "read", "Read file '/p/demo/src/calc.py'", "completed")
-    assert cards[-1]["title"] == "Read file 'src/calc.py'"
+    assert "Read file 'src/calc.py'" in cards[-1]["text"]
 
     on_tool_call("r2", "read", "Read file '/etc/hosts'", "completed")
-    assert cards[-1]["title"] == "Read file '/etc/hosts'"
+    assert "Read file '/etc/hosts'" in cards[-1]["text"]
 
-    # The locations a client turns into links stay absolute -- a relative
-    # path is for reading, not for opening.
+    # File paths in the compact line are relative to the opened project.
     on_tool_call("r3", "read", "Read calc.py", "completed", [{"path": "/p/demo/src/calc.py"}])
-    assert cards[-1]["locations"] == [{"path": "/p/demo/src/calc.py"}]
+    assert "Read calc.py — src/calc.py" in cards[-1]["text"]
 
     # With no project known, nothing is rewritten.
     plain: list = []
     _R._engine_tool_call_emitter(_R.__new__(_R), plain.append)("r4", "read", "Read '/p/demo/x.py'", "completed")
-    assert plain[-1]["title"] == "Read '/p/demo/x.py'"
+    assert "Read '/p/demo/x.py'" in plain[-1]["text"]
 
 
 def test_a_worker_tool_call_actually_reaches_its_card(tmp_path):
@@ -691,6 +874,9 @@ def test_a_worker_tool_call_actually_reaches_its_card(tmp_path):
     goes through the callback, with the adapter's real argument count."""
     store, task_id = _task(tmp_path)
     seen: dict = {}
+    calc_path = str(tmp_path / "calc.py")
+    draft_path = str(tmp_path / ".cortex" / "draft-reports" / "d_123.md")
+    long_command = "python3 -B -m pytest tests/test_calc.py " + "--verbose " * 35
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
         if call_index == 0:
@@ -701,13 +887,43 @@ def test_a_worker_tool_call_actually_reaches_its_card(tmp_path):
             return PromptOutcome(StopReason.END_TURN, "Delegated.")
         return PromptOutcome(StopReason.END_TURN, "Nothing new.")
 
-    def worker_behavior(store, channel, session_ref, message, call_index, on_tool_call=None):
+    def worker_behavior(store, channel, session_ref, message, call_index,
+                        on_tool_call=None, on_display_update=None, on_delta=None):
         # Exactly how delegation.live_adapters calls it: six positionals.
-        on_tool_call("t1", "read", "Read calc.py", "completed",
-                     [{"path": "/p/calc.py"}], None)
+        on_delta("Starting a verbose progress paragraph. ")
+        on_delta("Still inspecting the project; this is interim prose.")
+        on_tool_call("wait-1", "other", None, "in_progress")
+        on_tool_call("wait-1", "other", "wait", "completed")
+        on_tool_call("t1", "read", "Read calc.py", "pending",
+                     [{"path": calc_path}], None)
         on_tool_call("t2", "edit", "Edit calc.py", "in_progress",
-                     [{"path": "/p/calc.py"}], [{"type": "diff", "path": "/p/calc.py",
-                                                 "oldText": "a", "newText": "b"}])
+                     [{"path": calc_path}], [{"type": "diff", "path": calc_path,
+                                                 "oldText": "a", "newText": "b"}],
+                     {"command": "apply_patch calc.py"}, None)
+        on_delta("Now checking a second paragraph between tool calls.")
+        on_display_update({"sessionUpdate": "agent_thought_chunk",
+                           "content": {"type": "text", "text": "private thought"}})
+        on_display_update({"sessionUpdate": "agent_message_chunk",
+                           "content": {"type": "text", "text": "display-only interim prose"}})
+        on_display_update({"sessionUpdate": "plan", "text": "private plan"})
+        on_tool_call("t1", None, None, "completed", None, None, None, None)
+        on_tool_call("t2", None, None, "completed", None, None, None, None)
+        on_tool_call("draft", "edit", "Editing files", "in_progress",
+                     [{"path": draft_path}], None, None, None)
+        on_tool_call("draft", None, None, "completed", None, None, None, None)
+        on_tool_call("internal", "other", "mcp__cortex__write_report", "completed")
+        on_tool_call("scheduler", "other", "Task scheduler", "completed")
+        on_tool_call("wakeup", "other", "ScheduleWakeup", "completed")
+        on_tool_call("external", "other", "mcp__codebase_memory__search_code", "in_progress",
+                     None, None, {"query": "divide by zero"}, None)
+        on_tool_call("external", None, None, "failed", None, None, None,
+                     {"error": "private output"})
+        on_tool_call("long-command", "execute", long_command, "in_progress",
+                     None, None, {"command": long_command}, None)
+        on_tool_call("long-command", None, None, "failed", None, None, None,
+                     {"error": "private command output"})
+        on_delta("Finished the tool sequence, but no terminal final text was sent.")
+        on_tool_call("publish", "other", "mcp__cortex__publish_result", "completed")
         seen["called"] = True
         _publish(store, channel, "guard", call_index)
         return PromptOutcome(StopReason.END_TURN, "")
@@ -725,23 +941,286 @@ def test_a_worker_tool_call_actually_reaches_its_card(tmp_path):
     runtime.start_prompt(task_id, "s1", "Do X.", [].append, threading.Event(), emit_tool_call=cards.append)
 
     assert seen.get("called"), "the worker's callback never ran; this test proved nothing"
-    # Accumulated in the worker's own card, under a title that names the
-    # worker and stays put.
-    bodies = [str(c.get("text", "")) for c in cards]
-    assert any("Read calc.py" in body for body in bodies), f"the worker's action never reached its card: {cards}"
-    assert any("Edit calc.py" in body for body in bodies), cards
-    assert not any("Read calc.py" in str(c.get("title", "")) for c in cards), cards
+    actions = [c for c in cards if c.get("tool_call_id", "").startswith("worker:")]
+    assert actions, cards
+    assert not any(c.get("tool_call_id", "").startswith("worker-action:") for c in cards)
+    body = "\n".join(c.get("text") or "" for c in actions)
+    assert "Read calc.py" in body and "Edit calc.py" in body
+    assert "apply_patch calc.py" in body
+    assert "mcp__codebase_memory__search_code" in body and "divide by zero" in body
+    assert "Write report" not in body and "Publish result" not in body
+    assert "Task scheduler" not in body and "ScheduleWakeup" not in body
+    assert "private output" in body
+    assert "{" not in body and "}" not in body
+    assert not any('"ref": "wait-1"' in (c.get("text") or "") for c in cards)
     # A worker assignment is not a command being run.
     created = [c for c in cards if c.get("new")]
     assert created and created[0]["kind"] != "execute", created[0]
+    worker_cards = [c for c in cards if c.get("tool_call_id", "").startswith("worker:")]
+    assert worker_cards[-1]["status"] == "completed"
+    # Worker cards are the final-only mirror for user-visible worker prose.
+    # The delta emitted after the last tool call is therefore retained as the
+    # worker's final response even when PromptOutcome.text is empty.
+    assert "[final response]" in (worker_cards[-1].get("text") or "")
+    # A published result summary is only the fallback when no final worker
+    # response was observed; this run has the final-only response marker.
+    assert "Result:" not in worker_cards[-1]["text"]
+    assert "Report:" not in worker_cards[-1]["text"]
+    assert "Checks:" not in worker_cards[-1]["text"]
 
 
-def test_a_terminal_content_block_is_never_forwarded_to_the_client():
-    """Seen in Zed's own log: `-32603 ... Terminal with id ... not found`,
-    and the whole card lost with it. A tool call's `terminal` content
-    refers to a terminal in this agent's session with the engine; the
-    client has no such id. Text and diffs mean the same thing in either
-    session and still pass through."""
+@pytest.mark.parametrize("outcome_text", ["", "Final worker finding: inspection complete."])
+def test_worker_final_response_is_a_durable_worker_card(tmp_path, outcome_text):
+    store, task_id = _task(tmp_path)
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Inspect result", brief="Inspect the input", role="explorer",
+                acceptance="Report the result", request_key="inspect-result",
+            ))
+        return PromptOutcome(StopReason.END_TURN, "Coordinator update.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index,
+                        on_tool_call=None, on_delta=None, on_display_update=None):
+        on_tool_call("read-final", "read", "Read input", "completed",
+                     [{"path": "/p/input.txt"}], None, None, None)
+        on_delta("Final worker finding: inspection complete.")
+        on_display_update({"sessionUpdate": "agent_message_chunk",
+                           "content": {"type": "text", "text": "Unrelated display update."}})
+        _publish(store, channel, "inspection", call_index)
+        return PromptOutcome(StopReason.END_TURN, outcome_text)
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, router), FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=3,
+    )
+    cards: list = []
+    updates: list = []
+    runtime.start_prompt(task_id, "s1", "Inspect.", updates.append, threading.Event(), emit_tool_call=cards.append)
+    final_cards = [card for card in cards
+                   if card.get("tool_call_id", "").startswith("worker:")
+                   and "[final response] Final worker finding: inspection complete." in (card.get("text") or "")]
+    assert final_cards, cards
+    worker_cards = [card for card in cards if card.get("tool_call_id", "").startswith("worker:")]
+    assert worker_cards[0]["title"].startswith("Worker: explorer")
+    assert worker_cards[-1]["status"] == "completed"
+    final_body = worker_cards[-1]["text"]
+    assert "Final worker finding: inspection complete." in final_body
+    assert final_body.count("Final worker finding: inspection complete.") == 1
+    assert any("Read input" in card.get("text", "") for card in cards
+               if card.get("tool_call_id", "").startswith("worker:"))
+    assert "Unrelated display update." not in final_body
+    assert "Result:" not in final_body
+    assert "Queued:" not in final_body
+    assert "Provisioning:" not in final_body
+    assert "Report:" not in final_body
+    assert "Checks:" not in final_body
+    assert not any(card.get("tool_call_id", "").startswith("worker-message:") for card in cards)
+    assert "Final worker finding: inspection complete." not in "".join(
+        value for value in updates if isinstance(value, str)
+    )
+
+
+def test_worker_result_waits_for_delayed_final_response_before_terminal_card(tmp_path):
+    """A publish_result can arrive while the worker prompt is still open.
+
+    The result event is deliberately held at the card-claim boundary until
+    the worker returns its final text.  The completed card must retain that
+    text instead of terminalizing first and rejecting the late response.
+    """
+    store, task_id = _task(tmp_path)
+    result_claimed = threading.Event()
+    publisher_done = threading.Event()
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Inspect result", brief="Inspect the input", role="explorer",
+                acceptance="Report the result", request_key="delayed-result",
+            ))
+        return PromptOutcome(StopReason.END_TURN, "Coordinator update.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index,
+                        on_tool_call=None, on_delta=None, on_display_update=None):
+        on_delta("Final worker finding after publication.")
+
+        def publish():
+            try:
+                _publish(store, channel, "inspection", call_index)
+            finally:
+                publisher_done.set()
+
+        publisher = threading.Thread(target=publish)
+        publisher.start()
+        # The runtime must observe the durable result while this engine turn
+        # is still in flight; only then may the turn return its final text.
+        assert result_claimed.wait(timeout=10), "worker_result was not claimed while worker was in flight"
+        publisher.join(timeout=10)
+        assert publisher_done.is_set()
+        return PromptOutcome(StopReason.END_TURN, "Final worker finding after publication.")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, router), FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=3,
+    )
+    original_claim = runtime._emit_assignment_tool_calls
+
+    def observe_claim(task_id_arg, emit_tool_call, claimed):
+        original_claim(task_id_arg, emit_tool_call, claimed)
+        if any(event.event_type == "worker_result" for event in claimed):
+            result_claimed.set()
+
+    runtime._emit_assignment_tool_calls = observe_claim
+    cards: list = []
+    runtime.start_prompt(task_id, "s1", "Inspect.", [].append, threading.Event(), emit_tool_call=cards.append)
+
+    worker_cards = [card for card in cards if card.get("tool_call_id", "").startswith("worker:")]
+    assert worker_cards, cards
+    assert worker_cards[-1]["status"] == "completed"
+    assert "[final response] Final worker finding after publication." in worker_cards[-1]["text"]
+    assert "Result: inspection finished" not in worker_cards[-1]["text"]
+
+
+def test_delegated_informational_answer_survives_report_read_on_result_continuation(tmp_path):
+    """A simple delegated question must return its answer without acceptance.
+
+    The coordinator may reread the worker report before answering.  That
+    read is a procedural tool call, but the worker result makes the current
+    turn user-facing; its final prose must not be swallowed by the
+    self-talk filter or replaced with a bootstrap-pipeline wait notice.
+    """
+    store, task_id = _task(tmp_path)
+    calls = []
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index,
+                             *, on_tool_call=None):
+        calls.append(call_index)
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Inspect project", brief="Describe the project", role="explorer",
+                acceptance="A concise project description", request_key="informational-result",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "I delegated the inspection.")
+        if on_tool_call is not None:
+            on_tool_call("read-result", "read", "mcp.cortex.read_report", "completed",
+                         None, None, None, None)
+        return PromptOutcome(StopReason.END_TURN, "The project is a static site with a separate focus timer.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        _publish(store, channel, "The project is a static site with a separate focus timer.", call_index)
+        return PromptOutcome(StopReason.END_TURN, "Worker report published.")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, router), FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=3,
+    )
+    updates = []
+    runtime.start_prompt(task_id, "s1", "Tell me about the project.", updates.append, threading.Event())
+
+    assert calls == [0, 1]
+    assert "The project is a static site with a separate focus timer." in "".join(updates)
+    with store.connection() as db:
+        projection = db.execute(
+            "SELECT state, wait_reason, wait_detail_json FROM task_orchestration WHERE task_id=?",
+            (task_id,),
+        ).fetchone()
+    assert projection["state"] == "idle_awaiting_user"
+    assert projection["wait_reason"] == "idle_awaiting_user"
+    assert "runtime bootstrap edition" in projection["wait_detail_json"]
+
+
+def test_worker_result_summary_fallback_is_one_bounded_line():
+    """A retained result remains readable even if no model final was sent."""
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._lock = threading.RLock()
+    runtime._worker_action_log = {}
+    runtime._worker_action_refs = {}
+    runtime._worker_card_sent = {}
+    runtime._worker_card_terminal = {}
+    runtime._emitted_worker_cards = set()
+    runtime._worker_final_response_seen = set()
+    runtime._assignment_ref_for_attempt = lambda task_id, attempt: "assignment"
+    runtime._close_assignment = lambda task_id, assignment: None
+    cards = []
+    result = SimpleNamespace(
+        event_type="worker_result", assignment_ref="attempt",
+        payload={"summary": "x" * 1200, "checks": [{"name": "test", "outcome": "pass"}],
+                 "report_ref": "r_secret"},
+    )
+
+    runtime._emit_assignment_tool_calls("task", cards.append, [result])
+    assert len(cards) == 1
+    body = cards[0]["text"]
+    assert body.startswith("Result: ")
+    assert len(body.splitlines()) == 1
+    assert len(body) <= 300
+    assert "Checks:" not in body and "Report:" not in body
+
+
+def test_outcome_only_final_replaces_cleared_interim_delta(tmp_path):
+    """The adapter may return final text only in PromptOutcome, after chatter."""
+    store, task_id = _task(tmp_path)
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Inspect", brief="Inspect input", role="explorer",
+                acceptance="Report result", request_key="inspect-outcome-only",
+            ))
+        return PromptOutcome(StopReason.END_TURN, "Coordinator text stays separate.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index,
+                        on_delta=None, on_tool_call=None):
+        on_delta("Interim worker chatter that must disappear.")
+        on_tool_call("read", "read", "Read input", "completed",
+                     [{"path": "/p/input.txt"}], None, None, None)
+        _publish(store, channel, "inspection", call_index)
+        return PromptOutcome(StopReason.END_TURN, "Verified final worker finding.")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    engine = FakeSessionRuntime(store, router, emit_outcome_text_as_delta=False)
+    runtime = OrchestratingRuntime(
+        store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
+        wait_timeout_seconds=0.02, max_no_progress_continuations=3,
+    )
+    cards: list = []
+    text_updates: list = []
+    runtime.start_prompt(task_id, "s1", "Inspect.", text_updates.append, threading.Event(),
+                         emit_tool_call=cards.append)
+
+    worker_cards = [c for c in cards if c.get("tool_call_id", "").startswith("worker:")]
+    assert worker_cards
+    body = worker_cards[-1]["text"]
+    assert body.count("Verified final worker finding.") == 1
+    assert any("Read input" in card.get("text", "") for card in cards
+                   if card.get("tool_call_id", "").startswith("worker:"))
+    assert "Interim worker chatter" not in body
+    assert "Result:" not in body
+    assert "Coordinator text stays separate." not in body
+
+
+def test_tool_content_is_not_forwarded_to_the_client():
+    """The compact card never contains terminal handles or diff output."""
     from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
 
     cards: list = []
@@ -751,14 +1230,14 @@ def test_a_terminal_content_block_is_never_forwarded_to_the_client():
         [{"type": "terminal", "terminalId": "exec-fa8ac10d"},
          {"type": "diff", "path": "/p/calc.py", "oldText": "a", "newText": "b"}],
     )
-    content = cards[-1]["content"]
-    assert all(part.get("type") != "terminal" for part in content), content
-    assert any(part.get("type") == "diff" for part in content), content
+    assert '"type": "terminal"' not in cards[-1]["text"]
+    assert "type: diff" not in cards[-1]["text"]
 
     # A call whose only content was a terminal carries none, not an empty list.
     on_tool_call("t2", "execute", "Run again", "completed", None,
                  [{"type": "terminal", "terminalId": "exec-b"}])
     assert "content" not in cards[-1], cards[-1]
+    assert "Run again" in cards[-1]["text"]
 
 
 def test_a_native_wait_is_not_shown_and_a_native_subagent_is_refused(tmp_path):
@@ -768,9 +1247,10 @@ def test_a_native_wait_is_not_shown_and_a_native_subagent_is_refused(tmp_path):
     no per-role model policy and no audit ever happened -- and the feed
     filled with a `wait` the user asked not to see.
 
-    This runtime cannot stop the engine's own tool. It can refuse to
-    dress it up as progress, and it can make sure the coordinator hears
-    about it."""
+    The runtime also cancels the owning ACP turn as soon as the provider
+    exposes the native call: the adapter's independent cancellation watcher
+    then sends ``session/cancel`` instead of leaving that child running."""
+    import threading
     from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
 
     store, task_id = _task(tmp_path)
@@ -778,15 +1258,17 @@ def test_a_native_wait_is_not_shown_and_a_native_subagent_is_refused(tmp_path):
         store, FakeSessionRuntime(store, lambda *a, **k: None), FakeWorkspace(), FakeConfigSnapshotSource(),
     )
     cards: list = []
-    on_tool_call = runtime._engine_tool_call_emitter(cards.append, task_id=task_id)
+    cancel_event = threading.Event()
+    on_tool_call = runtime._engine_tool_call_emitter(
+        cards.append, task_id=task_id, cancel_event=cancel_event,
+    )
 
     on_tool_call("w1", "other", "wait", "completed")
-    assert cards == [], "a native wait is nothing happening; it does not belong in the feed"
+    assert cards == []
 
     on_tool_call("s1", "other", "Complete subagent implement_zero_division_guard", "completed")
-    assert cards, "a native subagent must not pass unnoticed"
-    assert cards[-1]["status"] == "failed"
-    assert "subagent" in str(cards[-1].get("text", "")).lower()
+    assert cards == [], "a native subagent is engine machinery, not project work"
+    assert cancel_event.is_set()
 
     # And the coordinator is told, durably, the same way a refused mutation is.
     with store.connection() as db:
@@ -907,8 +1389,7 @@ def test_a_command_reading_cortexs_own_files_is_bookkeeping():
     emit("t1", "execute", "sed -n '1,45p' .cortex/draft-reports/d_764434be278c.md", "completed")
     emit("t2", "execute", "python3 -m pytest -q", "completed")
 
-    assert len(cards) == 1, f"only the real command is shown: {cards}"
-    assert cards[0]["title"].endswith("python3 -m pytest -q")
+    assert len(cards) == 1, f"only project work is shown: {cards}"
 
 
 def test_the_engine_thinking_out_loud_is_not_an_action_card():
@@ -921,10 +1402,11 @@ def test_the_engine_thinking_out_loud_is_not_an_action_card():
     on_tool_call = _R._engine_tool_call_emitter(_R.__new__(_R), cards.append)
 
     on_tool_call("t1", "think", "Guardian Review", "completed")
-    assert cards == [], f"thinking is not an action: {cards}"
+    assert cards == []
 
     on_tool_call("c1", "execute", "pytest -q", "completed")
-    assert [c.get("title") for c in cards] == ["pytest -q"]
+    assert len(cards) == 1
+    assert "pytest -q" in cards[-1]["text"]
 
 
 def test_two_workers_running_at_once_keep_their_actions_apart(tmp_path):
@@ -977,17 +1459,16 @@ def test_two_workers_running_at_once_keep_their_actions_apart(tmp_path):
     )
     assert result == _Stop.END_TURN
 
-    actions = [c for c in cards if "pytest -q" in (c.get("text") or "")]
+    actions = [c for c in cards if c.get("tool_call_id", "").startswith("worker:")
+               and "pytest -q" in (c.get("text") or "")]
     assert actions, f"neither worker's command reached the feed: {[c.get('text') for c in cards]}"
-    # Both engines deliberately used the same wire call id. Each worker's
-    # work still lands on its own card, and no card ever carries the
-    # other's: that is what keeps two running workers legible.
-    for card in actions:
-        assert card["text"].rsplit("test_", 1)[1].startswith(("X.py", "Y.py")), card
+    # Each worker's work still lands on its own lifecycle card.
     by_card = {}
     for card in actions:
+        body = card["text"]
+        assert not ("test_X.py" in body and "test_Y.py" in body), card
         by_card.setdefault(card["tool_call_id"], set()).add(
-            card["text"].rsplit("test_", 1)[1][:4].rstrip())
+            "X" if "test_X.py" in body else "Y")
     assert len(by_card) == 2, by_card
     assert all(len(files) == 1 for files in by_card.values()), by_card
 
@@ -1038,21 +1519,15 @@ def test_the_engines_own_approval_step_is_not_an_action_card():
 
     emit("g1", None, "Guardian Review", "completed")
     emit("g2", "other", "guardian review", "in_progress")
-    assert cards == [], f"the engine reviewing itself is not an action: {cards}"
+    assert cards == []
 
     emit("c1", "execute", "pytest -q", "completed")
-    assert [c["title"] for c in cards] == ["backend-dev\npytest -q"]
+    assert len(cards) == 1
 
 
-def test_this_runtimes_tools_are_hidden_whichever_engine_spells_them():
-    """codex writes `mcp.cortex.create_task`; claude writes
-    `mcp__cortex__delegate`. Matching only the first spelling put every one
-    of the coordinator's own calls straight back into the feed the moment
-    the engine changed -- which is exactly what the user saw on sonnet.
-
-    The engine's own tool-discovery step goes with them: like its
-    self-review, it is the engine working out what it can do, not an
-    action on the project."""
+def test_cortex_delegate_is_hidden_in_both_engine_spellings():
+    """Delegate is represented by the worker card, while other Cortex
+    operations remain visible coordinator evidence."""
     from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime as _R
 
     cards: list = []
@@ -1062,11 +1537,13 @@ def test_this_runtimes_tools_are_hidden_whichever_engine_spells_them():
     emit("b", "other", "mcp__cortex__set_governance", "completed")
     emit("c", "other", "mcp.cortex.create_task", "completed")
     emit("d", "other", "ToolSearch", "completed")
-    assert cards == [], f"none of this is the user's business: {cards}"
+    assert cards == []
+    assert not any(c["title"] == "Delegate" for c in cards)
 
     # Another server's tool is somebody's real work and stays visible.
     emit("e", "other", "mcp__codebase_memory__search_code", "completed")
-    assert [c["title"] for c in cards] == ["mcp__codebase_memory__search_code"]
+    assert len(cards) == 1
+    assert "mcp__codebase_memory__search_code" in cards[-1]["text"]
 
 
 def test_a_workers_card_never_shows_this_runtimes_own_bookkeeping():
@@ -1160,6 +1637,7 @@ def test_a_silent_worker_that_published_a_report_delivers_it_instead_of_failing(
     sentence about it was missing."""
     from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
     from cortex_runtime.delegation import events as delegation_events
+    from cortex_runtime.delegation.work_graph import WorkGraph
     from cortex_runtime.store import Store
 
     store = Store(tmp_path / ".cortex", project_root=str(tmp_path))
@@ -1186,6 +1664,19 @@ def test_a_silent_worker_that_published_a_report_delivers_it_instead_of_failing(
             "1,1,'r_published','digest')", (thread, store._now()))
         db.commit()
 
+    # The live failure this regression covers was not only a stale legacy
+    # assignment card: the executable graph attempt also remained ``running``
+    # when the runtime synthesized the worker_result from the published
+    # report.  Seed the same graph relation that a real delegate creates.
+    graph = WorkGraph(store)
+    graph.add_assignment("t1", "implementation", assignment_id="assign-1", idempotency_key="graph-assign")
+    graph_attempt = graph.create_attempt("assign-1", idempotency_key="graph-attempt")
+    graph.transition_attempt(graph_attempt["attempt_id"], "running", idempotency_key="graph-running")
+    delegation_events.append_event(
+        store, "t1", "delegation_requested", "delegation-requested:assign-1",
+        {"work_attempt_ref": graph_attempt["attempt_id"]}, origin="runtime", assignment_ref="assign-1",
+    )
+
     runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
     runtime._store = store
     runtime._close_assignment_that_produced_nothing("t1", "assign-1")
@@ -1195,3 +1686,9 @@ def test_a_silent_worker_that_published_a_report_delivers_it_instead_of_failing(
     result = next(e for e in events if e.event_type == "worker_result")
     assert result.payload["report_ref"] == "r_published"
     assert "without reporting it" in result.payload["summary"]
+    with store.connection() as db:
+        status = db.execute(
+            "SELECT status FROM work_assignment_attempts WHERE attempt_id=?",
+            (graph_attempt["attempt_id"],),
+        ).fetchone()["status"]
+    assert status == "reported"

@@ -43,6 +43,45 @@ from __future__ import annotations
 from ..delegation import events as delegation_events
 
 
+def _mark_graph_attempt_failed_tx(db, task_id: str, assignment_ref: str, reason: str) -> None:
+    """Close the graph attempt together with the recovery failure event.
+
+    Recovery deliberately never retries an uncertain worker.  The event log
+    already records that decision, but leaving the graph attempt in ``running``
+    makes the durable work graph claim that the worker is still active after a
+    restart.  Resolve the graph row in the same transaction as the event so a
+    crash cannot commit one terminal signal without the other.  Older stores
+    may not have the additive graph tables yet; in that case the event remains
+    the authoritative recovery record.
+    """
+    try:
+        row = db.execute(
+            "SELECT payload_json FROM task_events "
+            "WHERE task_id=? AND assignment_ref=? AND event_type='delegation_requested' "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id, assignment_ref),
+        ).fetchone()
+        if row is None:
+            return
+        import json
+
+        work_attempt_ref = json.loads(row["payload_json"]).get("work_attempt_ref")
+        if not isinstance(work_attempt_ref, str) or not work_attempt_ref:
+            return
+        db.execute(
+            "UPDATE work_assignment_attempts SET status='failed', failure_reason=? "
+            "WHERE attempt_id=? AND task_id=? AND status IN ('planned','running')",
+            (reason, work_attempt_ref, task_id),
+        )
+    except Exception as error:  # noqa: BLE001 - graph is additive to recovery
+        # A pre-graph store, or malformed historical payload, must not prevent
+        # the recovery failure event from being committed.  Do not catch the
+        # surrounding transaction's errors; this helper only protects the
+        # optional graph reconciliation.
+        if getattr(error, "sqlite_errorname", None) not in {"SQLITE_ERROR", "SQLITE_MISUSE"}:
+            return
+
+
 def _open_assignment_refs(store, task_id: str) -> list[str]:
     with store.connection() as db:
         requested = db.execute(
@@ -166,6 +205,7 @@ def _write_recovery_failure_if_still_lost(
             if result_row is not None:
                 db.commit()
                 return "already_published_late"
+            _mark_graph_attempt_failed_tx(db, task_id, assignment_ref, "recovery_worker_lost")
             delegation_events.append_event_tx(
                 db, task_id, "assignment_failed", f"recovery_worker_lost:{assignment_ref}",
                 dict(error="recovery_worker_lost", assignment_ref=assignment_ref, attempt_id=attempt_id,

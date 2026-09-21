@@ -1,7 +1,7 @@
 {{Profile title}}
 
 Think and communicate only in English as a worker, including the first response,
-reports and the native final handoff. Keep the coordinator's requested product
+reports and the `publish_result` handoff. Keep the coordinator's requested product
 language in quoted evidence without inheriting it for your own communication.
 Use English for visible thinking summaries, tool explanations and questions too,
 including after compaction. Correct language drift without discarding the work.
@@ -36,10 +36,9 @@ indexes, databases, host state, environment, network services or other agents.
 Do not run commands, tests or project checks, create subagents, modify product
 files/configuration, edit the pipeline, accept the task or change its plan.
 
-The coordinator supplies this complete skill and its report-publication reference
-as native attached instructions or verbatim instruction bodies. If either is
-missing, request it through the native parent channel. Do not use a terminal to
-load instructions or expand instruction loading into installation discovery.
+This role is delivered when the ACP engine session opens. Read the
+`report-publication` reference through `read_skill` before drafting. If that
+operation is unavailable, ask the coordinator through `ask_question`.
 
 Use attached live tool declarations without rediscovering them. When a declaration
 is missing, discover the single required operation: list matching names only,
@@ -47,9 +46,7 @@ then obtain its complete declaration. Do not dump the tool catalogue or several
 full descriptions into one result. Reserve enough output for that one declaration
 and inspect it completely before constructing the call.
 
-For publication, construct one complete call from that live declaration. Include
-only declared fields whose values are available; never invent retry fields or
-leave an unfinished field in executable code. Prefer a direct tool call. If the
+For publication, follow the live declaration. Prefer a direct tool call. If the
 host requires JavaScript, use one awaited tool call and emit its full receipt;
 check that the object and wrapper are syntactically complete before dispatch.
 Copy evidence identifiers and hashes exactly from receipts, or omit an optional
@@ -62,8 +59,8 @@ in the publication tool. Read
 `read_skill("report-publication")` before creating the draft;
 follow the shared protocol and live tool schemas. Do not read generated agent TOML.
 
-If instructions, required reports or tools are unavailable, tell the coordinator
-through the native parent channel. Do not investigate or invent a workaround.
+If instructions, required reports or tools are unavailable, use `ask_question`
+to tell the coordinator. Do not investigate or invent a workaround.
 The coordinator assigns evidence collection to an appropriate executor.
 
 ## When to use this profile
@@ -89,10 +86,9 @@ conclusion, decisive selected evidence, unresolved assumptions and next action.
 Distinguish observations in reports from your inferences; do not turn a proposed
 check into a claimed result. Keep credentials and raw host logs out of the report.
 
-Return the successful publication identifier and a concise handoff through your
-native final response. It is delivered to the assigning coordinator automatically.
-Do not discover or call app task-messaging tools. A publication is advisory evidence;
-the coordinator owns decisions, pipeline updates, implementation and verification.
+After publishing the report, call `publish_result` for the resulting report.
+The coordinator receives a `worker_result` event through
+`list_events` and owns `decide`, pipeline updates, implementation and verification.
 
 ## Recovery
 

@@ -101,6 +101,66 @@ def test_missing_meta_tool_call_is_ordinary_tool_evidence_not_a_compaction_signa
         manager.shutdown(grace=2.0)
 
 
+def test_streamed_terminal_output_is_merged_into_empty_final_raw_output(tmp_path):
+    """Codex sends terminal output deltas in update metadata and may leave
+    the final ``formatted_output`` empty. Preserve the exact accumulated
+    output on the portable event so worker history and Paseo can render it."""
+    scenario = default_scenario(
+        prompt_updates=[
+            dict(sessionUpdate="tool_call", toolCallId="cmd-1", kind="execute", title="python3 check.py",
+                 status="in_progress", rawInput=dict(command="python3 check.py")),
+            dict(sessionUpdate="tool_call_update", toolCallId="cmd-1",
+                 _meta=dict(terminal_output_delta=dict(data="stdout line 1\n"))),
+            dict(sessionUpdate="tool_call_update", toolCallId="cmd-1",
+                 _meta=dict(terminal_output_delta=dict(data="stderr line 2\n"))),
+            dict(sessionUpdate="tool_call_update", toolCallId="cmd-1", status="failed",
+                 rawOutput=dict(formatted_output="", exit_code=2)),
+            dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text="done")),
+        ],
+    )
+    manager = _make_manager(tmp_path, scenario)
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        events = list(manager.prompt_turn(session_id, "hello"))
+        tool_events = [e for e in events if e.kind == EngineEventKind.TOOL_CALL_OBSERVED]
+        assert tool_events[-1].tool_call_raw_output == {
+            "formatted_output": "stdout line 1\nstderr line 2\n", "exit_code": 2,
+        }
+    finally:
+        manager.shutdown(grace=2.0)
+
+
+def test_streamed_terminal_output_isolated_between_tool_calls(tmp_path):
+    """A tool id's streamed output never leaks into a different call."""
+    scenario = default_scenario(
+        prompt_updates=[
+            dict(sessionUpdate="tool_call", toolCallId="cmd-a", kind="execute", title="first", status="in_progress"),
+            dict(sessionUpdate="tool_call_update", toolCallId="cmd-a",
+                 _meta=dict(terminal_output_delta=dict(data="first output\n"))),
+            dict(sessionUpdate="tool_call_update", toolCallId="cmd-a", status="completed",
+                 rawOutput=dict(formatted_output="", exit_code=0)),
+            dict(sessionUpdate="tool_call", toolCallId="cmd-b", kind="execute", title="second", status="in_progress"),
+            dict(sessionUpdate="tool_call_update", toolCallId="cmd-b",
+                 _meta=dict(terminal_output_delta=dict(data="second output\n"))),
+            dict(sessionUpdate="tool_call_update", toolCallId="cmd-b", status="completed",
+                 rawOutput=dict(formatted_output="", exit_code=0)),
+        ],
+    )
+    manager = _make_manager(tmp_path, scenario)
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        events = list(manager.prompt_turn(session_id, "hello"))
+        final = [e for e in events if e.kind == EngineEventKind.TOOL_CALL_OBSERVED and e.tool_call_status == "completed"]
+        assert [e.tool_call_raw_output for e in final] == [
+            {"formatted_output": "first output\n", "exit_code": 0},
+            {"formatted_output": "second output\n", "exit_code": 0},
+        ]
+    finally:
+        manager.shutdown(grace=2.0)
+
+
 # --------------------------------------------------------------------
 # 2. delegation.generations / delegation.deliveries unit coverage
 # --------------------------------------------------------------------
@@ -446,15 +506,17 @@ def _make_runtime(store, router, **kwargs):
     return runtime, engine
 
 
-def test_fresh_generation_prompt_contains_role_rules_capsule_and_tool_schema_access(tmp_path):
+def test_fresh_codex_generation_prompt_keeps_role_out_of_user_text(tmp_path):
     store, task_id = _task_with_store(tmp_path)
     seen_messages = []
+    opened_instructions = []
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
         seen_messages.append(message)
         return PromptOutcome(StopReason.END_TURN, "ok")
 
     def router(store, channel, session_ref, launch, instructions):
+        opened_instructions.append(instructions)
         return coordinator_behavior if channel is not None and channel.role == "coordinator" else None
 
     runtime, engine = _make_runtime(store, router)
@@ -464,7 +526,9 @@ def test_fresh_generation_prompt_contains_role_rules_capsule_and_tool_schema_acc
     assert len(seen_messages) == 1
     message = seen_messages[0]
     role = load_role(COORDINATOR_ROLE_ID)
-    assert role.body_portable[:80] in message
+    assert role.body_portable[:80] in opened_instructions[0]
+    assert role.body_portable[:80] not in message
+    assert "CORTEX_INSTRUCTIONS_BEGIN:" not in message
     assert "Cortex recovery capsule" in message
     assert "allowed_mcp_tools" in message  # current tool-schema access
     assert "Build a page." in message  # original content still delivered

@@ -91,7 +91,12 @@ an explicit `{"status": "unavailable"|"unknown", "reason": "..."}` marker
 4. **pipeline_and_assignments** — coordinator: the current pipeline
    report/edition ref+digest plus every assignment (title/role/
    brief/acceptance/state, computed from `task_events` + the
-   `delegation_provisioning` row); worker: only its **own** assignment
+   `delegation_provisioning` row). Each assignment also has an
+   `observed_worker_route` bound to its exact provisioned attempt and
+   `attempt_route_audit` row (engine, connection, model, effort and audit
+   identity), or an explicit unavailable marker. The coordinator's active
+   configuration revision does not establish a mixed-team worker's route;
+   worker: only its **own** assignment
    (`own_assignment`), never another assignment's brief.
 5. **publications_and_checks** — coordinator: every assignment's retained
    `worker_result`(s) (summary, checks with their claimed/observed/
@@ -113,11 +118,17 @@ an explicit `{"status": "unavailable"|"unknown", "reason": "..."}` marker
 8. **role_and_tool_access** — `role_id`, its canonical `portable.roles`
    source path + sha256 (role *text* is never persisted or duplicated here
    — see below), `instruction_delivery` qualification from
-   `delegation_provisioning`, and `allowed_mcp_tools` from
-   `delegation.contracts.schemas_for(role_kind)`.
+   `delegation_provisioning`, and `allowed_mcp_tools` matching the complete
+   channeled Cortex `tools/list` surface: base report/memory tools plus
+   `delegation.contracts.schemas_for(role_kind)`. The capsule lists names;
+   the live MCP server advertises the authoritative schemas.
 9. **continuation_intent** — `task_stopped`, and (coordinator)
    `task_orchestration.state`/`wait_reason`/`wait_detail`/
-   `requirement_revision` plus the last coordinator decision; (worker) its
+   `requirement_revision` plus the last coordinator decision and a
+   `task_acceptance` field. The latter is true only when a retained
+   task-level accept event and stored accepted task state both exist;
+   an assignment-level decision or report statement cannot set it.
+   (worker) its
    own assignment's cancel-requested/cancelled flags. No model-authored
    "continuation note" feature exists in this codebase; `continuation_note`
    is always an explicit `unavailable` marker rather than implying one was

@@ -9,29 +9,27 @@ description: Update affected project knowledge after verified changes while pres
 
 | Role | Work |
 | --- | --- |
-| Coordinator | Select scope and specialists from documentation-impact previews and the current pipeline |
-| Technical writer / assigned documentation owner | Apply this skill, confirm source-backed facts and update only affected documentation |
+| Coordinator | Assess documentation impact and assign affected paths with the implementation or as independent work |
+| Assigned implementing worker or technical writer | Apply this skill, confirm source-backed facts and update only affected documentation |
 | Independent reviewer when warranted | Check material documentation changes against source, commands and links |
 
-The coordinator may read the bounded report evidence needed for a decision, while
-workers own project indexes, files, diffs and document edits. For post-owner
-reconciliation, the coordinator reads only Cortex reports and public evidence to
-compare owner-cited artifact hashes and check results. Any additional project
-inspection, file read/hash or command verification is delegated to an appropriate
-worker and returned in a task-bound report; the coordinator must not rerun project
-checks itself. A stale or absent index does not automatically require harvest.
+The coordinator may inspect bounded project source, report evidence and public
+artifacts read-only to reconcile cited revisions and decide scope. Workers own
+project edits and checks; the coordinator does not rerun project checks. A stale
+or absent index does not automatically require harvest.
 
-The assigned documentation owner applies this skill; the coordinator assigns
-that owner and does not read another role's `SKILL.md`.
+The worker assigned the affected documentation applies this skill. The
+coordinator does not read another role's `SKILL.md`.
 
-For ordinary completion, apply this skill only after the coordinator's evidence-backed
-impact review. Positive impact selects the exact affected documentation owner(s) and
-requires their updates and proportionate verification before acceptance; a supported
-no-impact conclusion remains a coordinator record and needs no token edit or worker.
-If inspection is partial or inconclusive, gather bounded missing evidence or leave the
-impact unresolved; acceptance waits for synchronization or sufficient no-impact evidence.
+For ordinary completion, include related documentation in the implementing
+worker's assignment when practical. Use a separate technical writer when the
+documentation is independent work or needs distinct ownership. Supported impact
+requires the affected updates and proportionate verification before acceptance;
+a supported no-impact conclusion needs no token edit or extra worker. If
+inspection is incomplete, gather bounded missing evidence or leave the impact
+unresolved.
 
-## Inputs for the writer
+## Inputs for the assigned worker
 
 - Verified behavior, architecture, interface, command or ownership changes.
 - Exact affected index/page paths, requirements and preservation boundaries.
@@ -47,7 +45,7 @@ impact unresolved; acceptance waits for synchronization or sufficient no-impact 
 6. Publish an ordinary Markdown report using the live draft creator's guidance.
    Use an optional declared Markdown example only when it resolves a real content
    question. Standard skill/reference reads do not authorize reading agent TOML or
-   other plugin internals.
+   other runtime internals.
 
 ## Verification and completion
 

@@ -31,9 +31,11 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from pathlib import Path
 
 from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime, PromptOutcome
 from cortex_runtime.bootstrap import bootstrap_task
+from cortex_runtime.acp import pipeline_bootstrap
 from cortex_runtime.delegation import mcp_tools
 from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter
 from cortex_runtime.ownership import current_owner_epoch
@@ -51,6 +53,39 @@ def _task(tmp_path, text="Build a page."):
     return store, result.task_id
 
 
+def _accept_task(store, channel, request_key="acc1"):
+    """Give the synthetic coordinator a current authored pipeline before accept.
+
+    Task-level acceptance deliberately cannot use the bootstrap pipeline as its
+    evidence.  These transport visibility tests are about the subsequent ACP
+    stream, so set up that normal coordinator publication boundary explicitly
+    instead of bypassing the production completion gate.
+    """
+    draft = store.call(
+        "create_draft", {"template": "pipeline", "request_key": "stream-pipeline-" + uuid.uuid4().hex},
+        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True,
+    )
+    body = pipeline_bootstrap._fill_template(
+        draft["markdown"], channel.task_id, "Stream visibility test", None,
+    )
+    Path(draft["draft_path"]).write_text(body, encoding="utf-8")
+    store.call(
+        "write_report",
+        {
+            "draft_id": draft["draft_id"],
+            "title": "Current pipeline",
+            "summary": "Coordinator-authored current pipeline edition.",
+            "author": "coordinator",
+            "request_key": "stream-pipeline-publish-" + uuid.uuid4().hex,
+        },
+        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True,
+    )
+    return mcp_tools.dispatch(store, channel, "decide", {
+        "assignment_ref": "task", "decision": "accept",
+        "rationale": "Trivial check-in.", "request_key": request_key,
+    })
+
+
 def test_coordinator_text_chunks_stream_before_the_turn_ends(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
@@ -58,14 +93,12 @@ def test_coordinator_text_chunks_stream_before_the_turn_ends(tmp_path):
     engine_dir = tmp_path / "engine"
     engine_dir.mkdir()
     environ = isolated_environ(engine_dir)
-    # Two chunks, each delayed, followed by the final stopReason response.
-    # If streaming worked, each chunk's own arrival timestamp lands well
-    # before the call returns; if it were still buffered (the pre-fix
-    # bug), both would only ever be observed after this whole block.
+    # The fake engine delays its second chunk. Neither chunk should appear
+    # before the turn's durable result is known.
     scenario_path = write_scenario(engine_dir, default_scenario(
         prompt_updates=[
-            dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text="Checking"), delay=0.3),
-            dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text=" in now."), delay=0.3),
+            dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text="Checking "), delay=0.0),
+            dict(sessionUpdate="agent_message_chunk", content=dict(type="text", text="in now. "), delay=0.6),
         ],
         prompt_stop_reason="end_turn",
     ))
@@ -81,31 +114,42 @@ def test_coordinator_text_chunks_stream_before_the_turn_ends(tmp_path):
     )
     try:
         channel, session_ref = runtime._ensure_coordinator(task_id)
-        mcp_tools.dispatch(store, channel, "decide", dict(
-            assignment_ref="task", decision="accept", rationale="Trivial check-in.", request_key="acc1",
-        ))
+        _accept_task(store, channel)
 
         arrivals: list[tuple[float, str]] = []
         start = time.monotonic()
+
+        turn_finished = threading.Event()
 
         def on_update(chunk_text):
             arrivals.append((time.monotonic() - start, chunk_text))
             return True
 
-        result = runtime.start_prompt(task_id, "s1", "Just check in.", on_update, threading.Event())
-        finished_at = time.monotonic() - start
+        result_box = []
+
+        def run_prompt():
+            try:
+                result_box.append(runtime.start_prompt(
+                    task_id, "s1", "Just check in.", on_update, threading.Event(),
+                ))
+            finally:
+                turn_finished.set()
+
+        prompt_thread = threading.Thread(target=run_prompt)
+        prompt_thread.start()
+        threading.Event().wait(0.2)
+        assert not turn_finished.is_set()
+        assert not arrivals, "intermediate coordinator prose leaked before the turn outcome"
+        prompt_thread.join(timeout=3.0)
+        assert not prompt_thread.is_alive(), "fake engine turn did not finish"
+        result = result_box[0]
 
         assert result == StopReason.END_TURN
-        assert [text for _t, text in arrivals] == ["Checking", " in now."]
-        # First chunk arrived close to its own scripted 0.3s delay, not
-        # bunched at the very end with the response.
-        first_arrival, second_arrival = arrivals[0][0], arrivals[1][0]
-        assert first_arrival < finished_at - 0.2, (
-            f"first chunk arrived at {first_arrival:.3f}s but the turn only "
-            f"finished at {finished_at:.3f}s -- streaming did not happen "
-            "before the turn ended"
-        )
-        assert first_arrival < second_arrival < finished_at + 0.05
+        assert len(arrivals) == 1, "accepted final text should be emitted once"
+        assert "".join(text for _t, text in arrivals) == "Checking in now. "
+        assert arrivals[0][1] == "Checking in now. "
+
+        # A later host replay uses only the accepted final chunk.
     finally:
         for manager in list(adapter._managers.values()):
             manager.shutdown(grace=2.0)
@@ -138,12 +182,8 @@ def _insert_provisioning_row(store, task_id, idempotency_key, step, status="in_p
             raise
 
 
-def test_provisioning_step_reaches_the_client_while_still_in_progress(tmp_path):
-    """T035 visibility fix: ``_emit_provisioning_tool_calls`` must surface a
-    still-``in_progress`` provisioning row's current step on the client
-    *while it is still running*, not only after it eventually finishes --
-    otherwise this is no better than the pre-fix silence the real Zed
-    session hit."""
+def test_running_worker_card_hides_provisioning_step(tmp_path):
+    """The worker card shows that it is running without exposing Cortex setup."""
     store, task_id = _task(tmp_path)
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
@@ -200,7 +240,8 @@ def test_provisioning_step_reaches_the_client_while_still_in_progress(tmp_path):
         "expected at least one tool-call update for the still-provisioning "
         "worker while it was in progress -- got none"
     )
-    assert any("Provisioning: workspace" in (u.get("text") or "") for u in provisioning_updates)
+    assert any(u.get("status") == "in_progress" for u in provisioning_updates)
+    assert all("Provisioning:" not in (u.get("text") or "") for u in provisioning_updates)
 
 
 def test_streamed_coordinator_chunk_is_redacted(tmp_path):
@@ -223,7 +264,7 @@ def test_streamed_coordinator_chunk_is_redacted(tmp_path):
     updates = []
     runtime.start_prompt(task_id, "s1", "Do a thing.", updates.append, threading.Event())
 
-    assert updates, "expected the coordinator's own turn text to have been streamed"
+    assert updates, "expected the coordinator text to reach the client"
     assert not any("sk-liveFAKESECRETVALUE1234567890abcdef" in u for u in updates)
     assert any("[REDACTED_TOKEN]" in u for u in updates)
 
@@ -260,9 +301,7 @@ def test_a_tool_call_between_two_spoken_messages_separates_them(tmp_path):
     )
     try:
         channel, _session_ref = runtime._ensure_coordinator(task_id)
-        mcp_tools.dispatch(store, channel, "decide", dict(
-            assignment_ref="task", decision="accept", rationale="Trivial check-in.", request_key="acc1",
-        ))
+        _accept_task(store, channel)
         chunks: list[str] = []
         runtime.start_prompt(task_id, "s1", "Just check in.", chunks.append, threading.Event())
         streamed = "".join(chunks)
@@ -275,13 +314,8 @@ def test_a_tool_call_between_two_spoken_messages_separates_them(tmp_path):
             manager.shutdown(grace=1.0)
 
 
-def test_a_tool_call_carries_its_file_locations_and_diff_to_the_client(tmp_path):
-    """Reported looking at a live feed: a read should read like a read --
-    the file, as a link -- and an edit should show what changed, the way
-    any normal client shows it. ACP already defines both (``locations``,
-    and ``content`` carrying a ``diff``); the engine sends them and they
-    were being dropped in translation, so a card could only say that
-    *something* happened."""
+def test_tool_calls_show_compact_project_activity_without_diff_output(tmp_path):
+    """A read and edit stay visible, each as one line, without tool output."""
     project = tmp_path / "project"
     project.mkdir()
     store, task_id = _task(project, "Check in.")
@@ -313,27 +347,26 @@ def test_a_tool_call_carries_its_file_locations_and_diff_to_the_client(tmp_path)
     )
     try:
         channel, _ = runtime._ensure_coordinator(task_id)
-        mcp_tools.dispatch(store, channel, "decide", dict(
-            assignment_ref="task", decision="accept", rationale="Trivial check-in.", request_key="acc1",
-        ))
+        _accept_task(store, channel)
         cards: list = []
         runtime.start_prompt(
             task_id, "s1", "Just check in.", lambda t: True, threading.Event(), emit_tool_call=cards.append,
         )
 
-        read_cards = [c for c in cards if c.get("title") == "Read calc.py"]
-        assert read_cards, f"the read never reached the client: {cards}"
-        assert read_cards[0]["kind"] == "read"
-        assert read_cards[0]["locations"] == [dict(path="/project/calc.py", line=4)], read_cards[0]
-        # A status-only update keeps the card, and the name it already had.
-        assert [c["status"] for c in read_cards] == ["in_progress", "completed"]
-
-        edit_cards = [c for c in cards if c.get("title") == "Edit calc.py"]
-        assert edit_cards, f"the edit never reached the client: {cards}"
-        diff = [part for part in edit_cards[0]["content"] if part.get("type") == "diff"]
-        assert diff, edit_cards[0]
-        assert "raise ValueError" in diff[0]["newText"]
-        assert diff[0]["path"] == "/project/calc.py"
+        assert cards, f"no coordinator cards reached the client: {cards}"
+        visible = [card for card in cards if "Read calc.py" in card.get("text", "")
+                   or "Edit calc.py" in card.get("text", "")]
+        assert len({card["tool_call_id"] for card in visible}) == 2
+        assert all(card["tool_call_id"].startswith("call:coordinator:") for card in visible)
+        assert all(card["text"].count("\n") == 0 for card in visible)
+        # These fixture updates carry no ACP rawInput.  The collapsed line is
+        # still visible, while expanded input/output fields are emitted only
+        # when the engine actually supplied them (see the structured I/O
+        # regression in test_tool_visibility_full_transcript.py).
+        assert all("raw_input" not in card for card in visible)
+        assert all("raw_output" not in card for card in visible)
+        assert all("raise ValueError" not in card["text"] for card in visible)
+        assert all("type: diff" not in card["text"] for card in visible)
     finally:
         for manager in list(adapter._managers.values()):
             manager.shutdown(grace=1.0)
@@ -376,9 +409,7 @@ def test_the_models_reasoning_and_plan_reach_the_client(tmp_path):
     )
     try:
         channel, _ = runtime._ensure_coordinator(task_id)
-        mcp_tools.dispatch(store, channel, "decide", dict(
-            assignment_ref="task", decision="accept", rationale="Trivial check-in.", request_key="acc1",
-        ))
+        _accept_task(store, channel)
         shown: list = []
         runtime.start_prompt(
             task_id, "s1", "Just check in.", lambda t: True, threading.Event(),

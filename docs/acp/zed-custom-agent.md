@@ -1,7 +1,9 @@
-# Zed 1.20.1 Custom Agent setup for Cortex
+# Zed Custom Agent setup for Cortex
 
-Applies to the qualified client version **Zed 1.20.1** (see
-`.cortex/acp-migration/T002/ADR-001-integration-selection.md`). Zed's
+The original qualification notes were written against **Zed 1.20.1** (see
+`.cortex/acp-migration/T002/ADR-001-integration-selection.md`). The current
+live observation used **Zed 1.20.2**; the registration and ACP capability
+details below apply to that observed client as well. Zed's
 Custom Agent mechanism (`zed.dev/docs/ai/external-agents`) launches an
 arbitrary local command speaking ACP over stdio and lists it as a
 separate agent in the Agent panel — no Registry approval is required.
@@ -82,10 +84,12 @@ anything.
 
 - Zed's Agent panel lists **Cortex** as its own agent, distinct from any
   built-in provider or other custom agent.
-- Opening a new Cortex session negotiates ACP v1 capabilities: text-only
-  prompts (no image/audio/embedded-context), `loadSession: false` (no
-  session resume/fork/list/close in this release — see
-  `cortex_runtime/acp/protocol.py`).
+- Opening a new Cortex session negotiates ACP v1 capabilities: text, image,
+  and embedded-resource prompt content (audio remains unsupported), and
+  `loadSession: true`. `session/load` is implemented as a display-only replay;
+  `session/resume`, `session/fork`, `session/list`, and `session/close`
+  remain unsupported (see
+  `cortex_runtime/acp/protocol.py` and `cortex_runtime/acp/replay_store.py`).
 - With at least one configured Cortex connection, Zed's session config UI
   shows a **Model** selector and, when the selected route reports one, a
   **Thought level** selector (see `session/new`'s `configOptions` and
@@ -94,12 +98,52 @@ anything.
 - `/cortex-status`, `/cortex-model`, `/cortex-effort`, `/cortex-setup` are
   available as slash commands (Zed's `available_commands_update`
   fallback path) regardless of whether Zed's own config-option UI renders.
+  `/cortex-status` reports direct native engine execution without making a
+  model call. No host-policy repair
+  is required for normal operation.
 - Sending any ordinary prompt before a connection is configured returns
   the agent's real current state: `orchestration_unavailable`
   (`-32001`, `retryable: false`) — Cortex reports this truthfully rather
   than pretending to have completed a turn. This is not a bug to hide; it
   reflects that the production entry point runs no orchestration engine
   until a real one is wired in a later task.
+
+## Isolated Zed runs
+
+For a throwaway live run, pass Zed an isolated `--user-data-dir`. Zed then
+reads its settings from `<user-data-dir>/config/settings.json`; that path
+takes precedence over `XDG_CONFIG_HOME/zed/settings.json`. Apply the Cortex
+entry to the settings file under the selected user-data directory, and keep
+the Zed process's user-data directory, `HOME`, and XDG state/cache directories
+disposable. Set `agent_servers.Cortex.env` in that **test-only** settings file
+to `{"HOME": "<REAL_USER_HOME>"}`. Only the Cortex child receives this override:
+it discovers the existing Codex and Claude ACP installs and uses their normal
+`~/.codex` and `~/.claude` accounts. Keep Cortex's inherited
+`XDG_CONFIG_HOME` and `XDG_STATE_HOME` pointing at the disposable profile so
+the connection registry and other Cortex configuration remain separate.
+Do not run a separate Codex or Claude login under the disposable home.
+
+## Tool confirmations
+
+Cortex's downstream ACP permission bridge auto-approves recognized ordinary
+worker actions and asks about deletion or unclassifiable actions. Zed has its
+**own** tool-permission layer; Cortex's decision does not change Zed's setting.
+The isolated live run on 2026-09-20 showed Zed prompting for ordinary
+`Run Command` actions until the disposable Zed profile was configured with
+`agent.tool_permissions`. With that test setting, ordinary read/test/edit
+actions in the next run did not prompt. See [the observation](evidence/zed-2026-09-20/live-acp-regressions.md)
+and [Zed's tool-permission documentation](https://zed.dev/docs/ai/tool-permissions).
+
+Zed can use `"agent": {"tool_permissions": {"default": "allow"}}` to
+auto-approve its own ordinary tool actions, with tool-specific confirmation
+rules for `delete_path`, `move_path`, and destructive terminal commands.
+These are **Zed-wide** settings, not a Cortex-only option, so the Cortex
+registration helper does not silently change them. Regex checks for terminal
+commands cannot prove that an arbitrary script will not delete a file; native
+engine tools can also act without an ACP permission request. The exact
+“everything except deletion” boundary is therefore not guaranteed by this
+setting alone. Review a Zed-wide permission change explicitly for the
+installed client version before using it outside an isolated profile.
 
 ## Uninstall
 

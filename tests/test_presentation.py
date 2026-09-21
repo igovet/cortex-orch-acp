@@ -28,26 +28,28 @@ def test_full_presentation_used_when_it_fits_budget():
     assert presentation.role_text == ROLE_TEXT
 
 
-def test_compact_presentation_selected_purely_by_budget_never_by_model_name():
+def test_budget_deficit_does_not_drop_an_unmarked_requirement():
     presentation = select_presentation(
         role_text=ROLE_TEXT, brief_text=BRIEF_TEXT, acceptance_text=ACCEPTANCE_TEXT,
         remaining_budget_tokens=5,
     )
-    assert presentation.mode == "compact"
+    assert presentation.mode == "full"
+    assert presentation.role_text == ROLE_TEXT
+    assert presentation.brief_text == BRIEF_TEXT
 
 
-def test_compact_presentation_preserves_critical_rules_verbatim():
+def test_presentation_preserves_rules_verbatim():
     presentation = select_presentation(
         role_text=ROLE_TEXT, brief_text=BRIEF_TEXT, acceptance_text=ACCEPTANCE_TEXT,
         remaining_budget_tokens=5,
     )
     assert "You must never delete another assignment's files." in presentation.role_text
     assert "Always run the test suite before finishing." in presentation.role_text
-    assert "flowery prose" not in presentation.role_text
-    assert "unrelated narrative filler" not in presentation.role_text
+    assert "flowery prose" in presentation.role_text
+    assert "unrelated narrative filler" in presentation.role_text
 
 
-def test_compact_presentation_never_touches_acceptance_text():
+def test_presentation_never_touches_acceptance_text():
     presentation = select_presentation(
         role_text=ROLE_TEXT, brief_text=BRIEF_TEXT, acceptance_text=ACCEPTANCE_TEXT,
         remaining_budget_tokens=5,
@@ -55,7 +57,7 @@ def test_compact_presentation_never_touches_acceptance_text():
     assert presentation.acceptance_text == ACCEPTANCE_TEXT
 
 
-def test_compact_presentation_keeps_brief_constraint_line():
+def test_presentation_keeps_brief_constraint_line():
     presentation = select_presentation(
         role_text=ROLE_TEXT, brief_text=BRIEF_TEXT, acceptance_text=ACCEPTANCE_TEXT,
         remaining_budget_tokens=5,

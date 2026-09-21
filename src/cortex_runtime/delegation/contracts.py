@@ -29,9 +29,10 @@ import copy
 from ..contracts import StoreError, integer, string
 
 REQUEST_KEY = string(
-    "Caller-chosen unique delivery key for this logical operation (a UUID is "
-    "suitable). Reuse the exact key and arguments only to retry after an "
-    "uncertain response; the same key with different arguments conflicts.",
+    "Required caller-chosen unique delivery key for this logical operation "
+    "(a UUID is suitable). Reuse the exact key and arguments only to retry "
+    "after an uncertain response; the same key with different arguments "
+    "conflicts.",
     128,
 )
 
@@ -51,7 +52,13 @@ CHECK_ITEM = dict(
     type="object",
     properties=dict(
         name=string("Short name of this checked item (for example a test or acceptance clause).", 200),
-        outcome=string("One of 'passed', 'failed', or 'not_run'.", 16, pattern=r"^(passed|failed|not_run)$"),
+        outcome=string(
+            "One of 'passed', 'failed', 'not_run', or 'unverified'. Use 'unverified' "
+            "when the check was attempted but its result cannot be established "
+            "(for example a renderer timed out or exited before producing a "
+            "trustworthy result); use 'not_run' only when it was never attempted.",
+            16, pattern=r"^(passed|failed|not_run|unverified)$",
+        ),
         tool_call_ref=string(
             "Optional: the exact tool_call_ref of a tool call this attempt's own engine "
             "session made that evidences this outcome. Copy it exactly; never guess one.",
@@ -59,11 +66,16 @@ CHECK_ITEM = dict(
         ),
     ),
     required=["name", "outcome"],
+    additionalProperties=False,
 )
 CHECKS = dict(
     type="array",
     description=(
-        "Optional, bounded list of claimed evidence-checkable items for this result. "
+        "Bounded list of claimed evidence-checkable items for this result. Include one "
+        "item for every acceptance check actually attempted; each item must name the "
+        "check, report its outcome, and copy the exact tool_call_ref from the worker's "
+        "own tool call when one produced the evidence. Use an empty array only when "
+        "the assignment has no evidence-checkable acceptance criterion. "
         "Each is stored as a claim; only a check whose tool_call_ref matches a "
         "completed engine-observed tool call from this same attempt becomes "
         "'observed', and a matching failed observation is flagged 'contradicted'."
@@ -73,13 +85,18 @@ CHECKS = dict(
 )
 
 
-def _operation(properties, required):
+def _operation(properties, required, *, delivery_key=True):
     properties = dict(properties)
-    properties.setdefault("request_key", REQUEST_KEY)
     required = list(required)
-    if "request_key" not in required:
-        required.append("request_key")
-    return dict(properties=properties, required=sorted(set(required)))
+    if delivery_key:
+        properties.setdefault("request_key", REQUEST_KEY)
+        if "request_key" not in required:
+            required.append("request_key")
+    # Keep the generated tools/list contract closed at every object level.
+    # The delegation validator rejects unknown keys, so JSON Schema clients
+    # must see the same boundary before sending a call.
+    return dict(properties=properties, required=sorted(set(required)),
+                additionalProperties=False)
 
 
 COORDINATOR_OPERATIONS = {
@@ -124,6 +141,24 @@ COORDINATOR_OPERATIONS = {
                 32,
                 minimum=0,
             ),
+            "plan_assignment_ref": string(
+                "Optional exact assignment id returned by update_plan for this unit of work. "
+                "The runtime validates its task, requirements and predecessor bindings before dispatch.",
+                128, minimum=0,
+            ),
+            "handoff_mode": string(
+                "When this task already has a published worker result, choose exactly one: "
+                "'independent' means this worker does not review that result; 'report_review' "
+                "means this worker reviews the exact published predecessor report named by "
+                "predecessor_report_ref. Omit only before this task has any worker result.",
+                16, enum=["independent", "report_review"],
+            ),
+            "predecessor_report_ref": string(
+                "Required with handoff_mode='report_review': exact report_ref copied unchanged "
+                "from the predecessor worker_result event. It must be a published worker report "
+                "from this task. Do not guess, reconstruct, or use a title or summary.",
+                14, minimum=14, pattern=r"^r_[0-9a-f]{12}$",
+            ),
         },
         ["title", "brief", "role", "acceptance"],
     ),
@@ -135,9 +170,14 @@ COORDINATOR_OPERATIONS = {
                 128,
                 minimum=0,
             ),
-            "limit": integer("Maximum number of events to return in one page.", 200),
+            "limit": integer(
+                "Optional event count per page, from 1 through 200; omit for the default 50. "
+                "For more events, continue with the returned cursor in after rather than "
+                "requesting a larger page. A rejected value must be corrected to the advertised bound.",
+                200,
+            ),
         },
-        [],
+        [], delivery_key=False,
     ),
     "clarify": _operation(
         {
@@ -156,9 +196,16 @@ COORDINATOR_OPERATIONS = {
     "decide": _operation(
         {
             "assignment_ref": string(
-                "Opaque assignment reference from a prior 'delegate' result, or the "
-                "literal 'task' for an overall task-level acceptance decision that "
-                "covers every retained assignment result.",
+                "Required target for this decision: copy the exact assignment_ref from the "
+                "prior delegate result for an assignment decision, or use the literal 'task' "
+                "for an overall task-level decision covering every retained assignment result. "
+                "Accepting an assignment "
+                "does not complete the task; successful completion requires a "
+                "separate accept decision with assignment_ref='task'. Before task-level "
+                "acceptance, publish a coordinator-authored current pipeline edition "
+                "with the decision basis and reconcile all pending meaningful events. "
+                "If acceptance_refused says to finish this turn, do so and wait for "
+                "the next continuation instead of retrying in the same turn.",
                 128,
             ),
             "decision": string(
@@ -166,6 +213,9 @@ COORDINATOR_OPERATIONS = {
                 pattern=r"^(accept|revise|ask_user)$",
             ),
             "rationale": string("Concrete rationale grounded in retained results/events.", 4_000),
+            "revision_brief": string(
+                "Concrete follow-up instructions for decision='revise'; defaults to rationale when omitted.", 4_000,
+            ),
             "question": string(
                 "Required only when decision='ask_user': the exact question for the user.",
                 4_000,
@@ -187,8 +237,132 @@ COORDINATOR_OPERATIONS = {
     "integrate": _operation(
         {
             "assignment_ref": ASSIGNMENT_REF,
+            "candidate_ref": string(
+                "Optional exact candidate id returned by prepare_candidate's ready event. "
+                "When supplied, integration applies this candidate after validating its digest and base.",
+                128,
+            ),
+            "expected_base_digest": string(
+                "Required with candidate_ref: exact base content digest returned by prepare_candidate. "
+                "A changed main project is reported as a conflict.",
+                64,
+                pattern=r"^[0-9a-f]{64}$",
+            ),
         },
         ["assignment_ref"],
+    ),
+    "update_plan": _operation(
+        {
+            "action": string(
+                "Required operation selector. For a first plan call use "
+                "create_requirement with statement (and optional criteria). "
+                "Use revise_requirement with requirement_ref and statement, "
+                "add_assignment with node_key (and optional exact requirement_bindings "
+                "and predecessors), or bind_candidate with assignment_ref and candidate_ref. "
+                "Do not use title, summary, body, or any other field name; those are not aliases "
+                "for this contract. Each action changes only this task's model-owned work graph.",
+                32, pattern=r"^(create_requirement|revise_requirement|add_assignment|bind_candidate)$",
+            ),
+            "assignment_ref": string(
+                "For bind_candidate, copy the exact assignment_id returned by the earlier "
+                "update_plan action='add_assignment' call (the plan node). Do not use the "
+                "assignment_ref returned by delegate(); that is the executable worker "
+                "assignment and is a different reference. For other actions, use the exact "
+                "reference required by that action.", 128,
+            ),
+            "candidate_ref": string(
+                "Exact ready candidate id returned by prepare_candidate; required for bind_candidate.", 128,
+            ),
+            "requirement_ref": string(
+                "Exact requirement id from an earlier update_plan result; required for revise_requirement.", 128,
+            ),
+            "statement": string(
+                "The statement field: user-visible requirement or updated criterion. Required for "
+                "create_requirement and revise_requirement; for a first plan call, put the "
+                "requirement text here (not in title, summary, or body).", 8_000,
+            ),
+            "criteria": dict(
+                type="array", maxItems=32,
+                description="Optional bounded, concrete acceptance criteria for a "
+                            "create_requirement or revise_requirement call.",
+                items=string("One concrete criterion.", 1_000),
+            ),
+            "node_key": string(
+                "Short coordinator-chosen label for this work unit; required for "
+                "add_assignment (for example 'frontend-implementation').", 200,
+            ),
+            "requirement_bindings": dict(
+                type="array", maxItems=32,
+                description="Exact requirement revisions that this assignment serves.",
+                items=dict(type="object", properties=dict(
+                    requirement_ref=string("Exact requirement id from update_plan.", 128),
+                    revision=string("Existing decimal revision number.", 10, pattern=r"^[1-9][0-9]*$"),
+                ), required=["requirement_ref", "revision"], additionalProperties=False),
+            ),
+            "predecessors": dict(
+                type="array", maxItems=16,
+                description="Exact completed predecessor plan assignments and their bound ready candidates. "
+                            "Each assignment_ref is the assignment_id returned by update_plan/add_assignment, "
+                            "never the assignment_ref returned by delegate().",
+                items=dict(type="object", properties=dict(
+                    assignment_ref=string("Exact assignment id from update_plan.", 128),
+                    candidate_ref=string("Exact candidate reference bound to that predecessor.", 128),
+                ), required=["assignment_ref", "candidate_ref"], additionalProperties=False),
+            ),
+        },
+        ["action"],
+    ),
+    "read_plan": _operation(
+        {"limit": dict(type="integer", description="Maximum graph nodes returned in this bounded read; default 100.",
+                       minimum=1, maximum=100)}, [], delivery_key=False,
+    ),
+    "prepare_candidate": _operation(
+        {"assignment_refs": dict(type="array", minItems=1, maxItems=8,
+                                 description="Exact delegation references whose isolated results form one candidate.",
+                                 items=ASSIGNMENT_REF)},
+        ["assignment_refs"],
+    ),
+    "request_check": _operation(
+        {
+            "candidate_ref": string("Exact ready candidate id returned by prepare_candidate.", 128),
+            "candidate_digest": string("Exact content digest from that candidate's ready event.", 64,
+                                       pattern=r"^[0-9a-f]{64}$"),
+            "argv": dict(type="array", minItems=1, maxItems=64,
+                         description="Direct executable and arguments for a read-only candidate check; no shell.",
+                         items=string("One literal argv element.", 4096)),
+            "requirement_bindings": dict(
+                type="array", maxItems=32,
+                description=(
+                    "Exact current requirement revisions this check evaluates. Before the first "
+                    "request_check call, read_plan and copy every applicable requirement_ref "
+                    "with its current revision here; this binds the observation at request time "
+                    "and avoids a duplicate check after adding bindings. Omit only when the "
+                    "check is intentionally unscoped or no requirement applies. Never guess a "
+                    "revision; a stale binding is rejected."
+                ),
+                items=dict(type="object", properties=dict(
+                    requirement_ref=string("Exact requirement id returned by update_plan.", 128),
+                    revision=string("Current decimal requirement revision.", 10, pattern=r"^[1-9][0-9]*$"),
+                ), required=["requirement_ref", "revision"], additionalProperties=False),
+            ),
+            "checked_files": dict(type="array", maxItems=128,
+                                  description="Project-relative files covered by this check; omit if it covers the whole candidate.",
+                                  items=string("One project-relative path.", 512)),
+        },
+        ["candidate_ref", "candidate_digest", "argv"],
+    ),
+    "read_check": _operation(
+        {"check_ref": string("Exact check id returned by request_check; read only this task's observation.", 128)},
+        ["check_ref"], delivery_key=False,
+    ),
+    "assess_check": _operation(
+        {
+            "check_ref": string("Exact completed check id returned by request_check.", 128),
+            "assessment": string("Coordinator assessment: pass, fail, or inconclusive.", 16,
+                                 pattern=r"^(pass|fail|inconclusive)$"),
+            "rationale": string("Why this observation satisfies or does not satisfy a stated criterion.", 4_000),
+        },
+        ["check_ref", "assessment", "rationale"],
     ),
 }
 
@@ -207,7 +381,7 @@ SOURCE_OPERATIONS = {
             "after": _bounded_integer("Opaque revision cursor from a prior list_sources result; omit to start from the beginning.", 1_000_000_000),
             "limit": _bounded_integer("Maximum number of source entries to return in one page.", 200, minimum=1),
         },
-        [],
+        [], delivery_key=False,
     ),
     "read_source": _operation(
         {
@@ -218,7 +392,7 @@ SOURCE_OPERATIONS = {
             "offset": _bounded_integer("Byte/character offset to resume a bounded read from.", 100_000_000),
             "limit": _bounded_integer("Maximum chunk size to return (bounded to 64 KiB server-side).", 65_536, minimum=1),
         },
-        ["source_ref"],
+        ["source_ref"], delivery_key=False,
     ),
 }
 COORDINATOR_OPERATIONS.update(SOURCE_OPERATIONS)
@@ -238,13 +412,15 @@ SKILL_OPERATIONS = {
     "read_skill": _operation(
         {
             "skill": string(
-                "Shared skill id to read, for example 'documentation-sync' or "
-                "'knowledge-harvest'. Only this runtime's own shared skills are "
-                "readable; a role's own instructions are delivered, never fetched.",
+                "The exact shared skill/reference id to read, for example "
+                "'documentation-sync' or 'knowledge-harvest'. This is the only "
+                "accepted input field: send it as `skill`; do not rename it to "
+                "`topic`, `name`, or `id`. Only this runtime's own shared skills "
+                "are readable; a role's own instructions are delivered, never fetched.",
                 80,
             ),
         },
-        ["skill"],
+        ["skill"], delivery_key=False,
     ),
 }
 
@@ -257,7 +433,7 @@ CAPSULE_OPERATIONS = {
                 1_000_000_000,
             ),
         },
-        [],
+        [], delivery_key=False,
     ),
 }
 COORDINATOR_OPERATIONS.update(CAPSULE_OPERATIONS)
@@ -280,7 +456,7 @@ LARGE_OUTPUT_OPERATIONS = {
             "offset": _bounded_integer("Byte offset to resume a bounded read from.", 1_000_000_000),
             "limit": _bounded_integer("Maximum chunk size to return (bounded to 64 KiB server-side).", 65_536, minimum=1),
         },
-        ["large_output_id"],
+        ["large_output_id"], delivery_key=False,
     ),
 }
 COORDINATOR_OPERATIONS.update(LARGE_OUTPUT_OPERATIONS)
@@ -291,7 +467,7 @@ COORDINATOR_OPERATIONS.update(LARGE_OUTPUT_OPERATIONS)
 # worker channels: resource attribution/caps are a coordinator-level
 # concern in this runtime (see observability.metrics).
 DIAGNOSTICS_OPERATIONS = {
-    "read_diagnostics": _operation({}, []),
+    "read_diagnostics": _operation({}, [], delivery_key=False),
 }
 COORDINATOR_OPERATIONS.update(DIAGNOSTICS_OPERATIONS)
 
@@ -305,8 +481,9 @@ WORKER_OPERATIONS = {
     "publish_result": _operation(
         {
             "report_ref": string(
-                "The report YOU published for this assignment, copied from your own "
-                "publication receipt (see contracts.REPORT). You publish it yourself; "
+                "The report YOU published for this assignment. The successful write_report "
+                "receipt names this same value report_id; copy that receipt's report_id "
+                "unchanged into this field as report_ref (see contracts.REPORT). You publish it yourself; "
                 "the coordinator never issues, confirms or hands one over -- asking it "
                 "for one only stalls the assignment. Never a draft or governance id.",
                 14,
@@ -422,6 +599,12 @@ def validate(role_kind: str, operation: str, args: dict) -> dict:
         elif rule["type"] == "array":
             if not isinstance(value, list):
                 raise StoreError("invalid_arguments", key, _received(value), "JSON array", f"Use a JSON array for {key}.")
+            if len(value) < rule.get("minItems", 0):
+                raise StoreError(
+                    "invalid_arguments", key, f"{len(value)} items",
+                    f"at least {rule['minItems']} items",
+                    f"Add at least {rule['minItems']} item(s) to {key}.",
+                )
             if len(value) > rule["maxItems"]:
                 raise StoreError(
                     "invalid_arguments", key, f"{len(value)} items", f"at most {rule['maxItems']} items",

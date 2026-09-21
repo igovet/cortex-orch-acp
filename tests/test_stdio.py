@@ -6,10 +6,12 @@ import sys
 import copy
 import uuid
 import pytest
+from types import SimpleNamespace
 
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.store import Store
+from cortex_runtime.trusted_channel import issue_channel_tx
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -84,6 +86,47 @@ def test_markdown_code_and_quotes_survive_wire_storage_and_restart(tmp_path):
     assert json.loads(read['content'][0]['text']) == read['structuredContent']
 
 
+def test_worker_channel_read_report_persists_exact_execution_receipt(tmp_path):
+    store, coordinator = bootstrap(tmp_path, text='Receipt binding.')
+    with store.connection() as db:
+        owner = db.execute("SELECT epoch FROM task_owners WHERE task_id=?", (coordinator.task_id,)).fetchone()
+        db.execute("BEGIN IMMEDIATE")
+        worker_id, worker_secret = issue_channel_tx(
+            db, coordinator.task_id, 'worker', owner['epoch'],
+            parent_channel_id=coordinator.channel_id, attempt_id='xa_receipt123456',
+        )
+        db.commit()
+        report_id = coordinator.report_id
+    worker = SimpleNamespace(channel_id=worker_id, secret=worker_secret)
+    read = exchange(
+        tmp_path,
+        [dict(jsonrpc='2.0', id='read-1', method='tools/call',
+              params=dict(name='read_report', arguments=dict(report_id=report_id)))],
+        channel=worker,
+    )[0]['result']
+    assert not read['isError']
+    replay = exchange(
+        tmp_path,
+        [dict(jsonrpc='2.0', id='read-1', method='tools/call',
+              params=dict(name='read_report', arguments=dict(report_id=report_id)))],
+        channel=worker,
+    )[0]['result']
+    assert not replay['isError']
+    with store.connection() as db:
+        receipt = db.execute(
+            "SELECT task_id,attempt_id,report_id,request_id,outcome "
+            "FROM report_read_observations WHERE task_id=?",
+            (coordinator.task_id,),
+        ).fetchone()
+        count = db.execute(
+            "SELECT COUNT(*) FROM report_read_observations "
+            "WHERE task_id=? AND attempt_id=? AND report_id=? AND request_id=?",
+            (coordinator.task_id, 'xa_receipt123456', report_id, 'read-1'),
+        ).fetchone()[0]
+    assert tuple(receipt) == (coordinator.task_id, 'xa_receipt123456', report_id, 'read-1', 'success')
+    assert count == 1
+
+
 def test_raw_invalid_and_oversize_frames(tmp_path):
     raw='{"jsonrpc":"2.0","id":1,"method":"ping","method":"PRIVATE"}\n'+'x'*2_000_001+'\n'+json.dumps(dict(jsonrpc='2.0',id=3,method='ping'))+'\n'
     home=storage_only_home(tmp_path/'host')
@@ -114,7 +157,7 @@ def test_preview_budget_has_headroom_and_exact_length_correction(tmp_path):
     from cortex_runtime.server import Server
     from cortex_runtime.contracts import BY_NAME
     schema=BY_NAME['write_report']['inputSchema']['properties']['summary']
-    assert schema['maxLength']==320 and '100' in schema['description']
+    assert schema['maxLength']==320 and '320' in schema['description']
     store, channel = bootstrap(tmp_path)
     server=Server(channel_credentials=(channel.channel_id, channel.secret, str(tmp_path)))
     args=dict(title='Review',summary='x'*321,
@@ -122,7 +165,7 @@ def test_preview_budget_has_headroom_and_exact_length_correction(tmp_path):
     result=server.dispatch('tools/call',dict(name='write_report',arguments=args))
     error=json.loads(result['content'][0]['text'])
     assert result['isError'] and error['field']=='summary'
-    assert '321' in error['received'] and '160' in error['correction']
+    assert '321' in error['received'] and '320' in error['correction']
     assert 'x'*321 not in result['content'][0]['text']
 
 

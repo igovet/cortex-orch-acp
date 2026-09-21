@@ -3,6 +3,8 @@ cancel/release, cross-engine isolation with identical wire ids, and the
 distinct cancel/EOF/timeout/process-exit outcomes."""
 from __future__ import annotations
 
+import base64
+import json
 import time
 
 import pytest
@@ -44,6 +46,34 @@ def test_negotiate_create_session_and_prompt(tmp_path):
         assert events[-1].stop_reason == StopReason.END_TURN
     finally:
         manager.shutdown(grace=2.0)
+
+
+def test_image_blocks_forward_unchanged_on_initial_and_followup_turns(tmp_path):
+    """The outgoing ACP client preserves image bytes and MIME on every turn.
+
+    This exercises the same wire seam used by both the Codex and Claude ACP
+    adapters, with the no-paid fake engine recording exact ``session/prompt``
+    params.
+    """
+    prompt_log = tmp_path / "prompt-log.jsonl"
+    scenario = default_scenario(prompt_log_path=str(prompt_log), prompt_updates=[])
+    manager = _make_manager(tmp_path, scenario)
+    image_bytes = b"\x00\x01opaque-image"
+    image = dict(type="image", data=base64.b64encode(image_bytes).decode("ascii"), mimeType="image/jpeg")
+    first_blocks = [dict(type="text", text="first A"), image, dict(type="text", text="first B")]
+    followup_blocks = [dict(type="text", text="follow-up A"), image, dict(type="text", text="follow-up B")]
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        list(manager.prompt_turn(session_id, "first", first_blocks))
+        list(manager.prompt_turn(session_id, "follow-up", followup_blocks))
+    finally:
+        manager.shutdown(grace=2.0)
+
+    calls = [json.loads(line) for line in prompt_log.read_text().splitlines()]
+    assert len(calls) == 2
+    assert calls[0]["prompt"] == first_blocks
+    assert calls[1]["prompt"] == followup_blocks
 
 
 def test_usage_update_with_real_token_counts_is_engine_reported(tmp_path):
@@ -151,6 +181,27 @@ def test_cancel_outcome_is_distinct_from_normal_completion(tmp_path):
         worker.join(timeout=5.0)
         assert results[-1].kind == EngineEventKind.TURN_END
         assert results[-1].stop_reason == StopReason.CANCELLED
+    finally:
+        manager.shutdown(grace=2.0)
+
+
+def test_prompt_classifies_observed_broker_close_before_tools(tmp_path):
+    scenario = default_scenario(prompt_updates=[
+        dict(delay=0.3, sessionUpdate="agent_message_chunk", content=dict(type="text", text="late")),
+    ])
+    manager = _make_manager(tmp_path, scenario)
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        class ClosedBroker:
+            def readiness(self, timeout):
+                return "mcp_server_exited"
+            def close(self):
+                pass
+        manager._process.mcp_broker = ClosedBroker()
+        events = list(manager.prompt_turn(session_id, "hi"))
+        assert events[-1].kind == EngineEventKind.ERROR
+        assert events[-1].error_message == "cortex_mcp_connection_failed:mcp_server_exited"
     finally:
         manager.shutdown(grace=2.0)
 

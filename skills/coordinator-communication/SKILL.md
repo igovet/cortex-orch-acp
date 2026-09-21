@@ -35,5 +35,7 @@ current requirements, pipeline, steering and active worker state before replying
 Do not rely on a summary where exact wording or evidence matters.
 
 Finish with the verified outcome, material changes, checks performed and real limits.
+Copy identifiers and observed worker routes exactly from current durable receipts or
+the current capsule; omit unavailable facts instead of reconstructing planned values.
 Check the final answer's language against the user's own prose and explicit preference.
 Do not claim completion while a required check or accepted requirement remains open.

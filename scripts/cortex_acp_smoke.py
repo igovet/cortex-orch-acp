@@ -10,11 +10,9 @@ so no host credential or unrelated variable is ever inherited by the agent
 subprocess.
 
 By default no connection exists, so the agent must advertise no ``model``
-config option and no real orchestration is reachable at all (the production
-entry point always runs with ``runtime.UnavailableRuntime``, which raises
-``OrchestrationUnavailable`` for any real prompt -- see
-``cortex_runtime.acp.runtime`` and ``cortex_runtime.acp.agent.main``). This
-harness never sends a prompt that could reach a paid model and never
+config option. The production entry point uses
+``ProductionOrchestratingRuntime``; without a connection it refuses engine
+work at route resolution. This harness never sends a prompt that could reach a paid model and never
 constructs or reads any real user connection/catalog state
 (``~/.config/cortex``, ``~/.local/state/cortex`` are never touched -- only
 the fresh temporary directories created here).
@@ -101,7 +99,7 @@ class Report:
         return all(check["status"] in ("pass", "skip") for check in self.checks)
 
 
-def _plugin_version():
+def _cortex_version():
     try:
         return json.loads(PLUGIN_JSON.read_text())["version"]
     except (OSError, ValueError, KeyError):
@@ -343,12 +341,13 @@ def run_smoke(*, fixture_connection, report):
         # T018: loadSession/embeddedContext are now true (session/load is
         # implemented, display-only; EmbeddedResource prompt blocks are
         # accepted with truthful availability metadata) -- see
-        # docs/acp/input-history-and-replay.md. image/audio stay false.
+        # docs/acp/input-history-and-replay.md. Image prompt blocks are
+        # accepted and forwarded opaquely; audio remains unsupported.
         report.record("initialize:loadSession_true", caps.get("loadSession") is True, detail=caps)
         prompt_caps = caps.get("promptCapabilities", {})
         report.record(
-            "initialize:no_image_audio_prompt_capabilities",
-            prompt_caps == dict(image=False, audio=False, embeddedContext=True),
+            "initialize:image_prompt_capability",
+            prompt_caps == dict(image=True, audio=False, embeddedContext=True),
             detail=prompt_caps)
 
         # -- session/new --------------------------------------------------
@@ -423,7 +422,7 @@ def run_smoke(*, fixture_connection, report):
         returncode = session.close()
         report.record("process:clean_exit_0", returncode == 0, detail=returncode)
 
-    return dict(python_version=platform.python_version(), cortex_plugin_version=_plugin_version(),
+    return dict(python_version=platform.python_version(), cortex_version=_cortex_version(),
                 protocol_version=protocol_version_seen)
 
 
@@ -437,7 +436,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     report = Report()
-    versions = dict(python_version=platform.python_version(), cortex_plugin_version=_plugin_version(),
+    versions = dict(python_version=platform.python_version(), cortex_version=_cortex_version(),
                      protocol_version=None)
     try:
         versions = run_smoke(fixture_connection=args.fixture_connection, report=report)

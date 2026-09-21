@@ -25,7 +25,7 @@ def test_coordinator_reads_its_own_persisted_output(tmp_path):
         store, task_id=task_id, owner_scope="coordinator", source_kind="terminal",
         data=b"coordinator terminal output", exit_code=0, signal=None, failure=None, truncated=False,
     )
-    result = mcp_tools.dispatch(store, coordinator, "read_large_output", dict(large_output_id=record["id"], request_key="rq1"))
+    result = mcp_tools.dispatch(store, coordinator, "read_large_output", dict(large_output_id=record["id"]))
     assert result["chunk"] == "coordinator terminal output"
     assert result["exit_status"] == dict(exit_code=0, signal=None)
 
@@ -41,19 +41,19 @@ def test_worker_reads_its_own_assignment_scoped_output_never_coordinators(tmp_pa
     worker_record = persist_output(
         store, task_id=task_id, owner_scope=assignment_ref, source_kind="terminal", data=b"worker own output",
     )
-    result = mcp_tools.dispatch(store, worker_channel, "read_large_output", dict(large_output_id=worker_record["id"], request_key="rq1"))
+    result = mcp_tools.dispatch(store, worker_channel, "read_large_output", dict(large_output_id=worker_record["id"]))
     assert result["chunk"] == "worker own output"
     coordinator_record = persist_output(
         store, task_id=task_id, owner_scope="coordinator", source_kind="terminal", data=b"still coordinator-only",
     )
     with pytest.raises(StoreError, match="unknown_large_output_ref"):
-        mcp_tools.dispatch(store, worker_channel, "read_large_output", dict(large_output_id=coordinator_record["id"], request_key="rq1"))
+        mcp_tools.dispatch(store, worker_channel, "read_large_output", dict(large_output_id=coordinator_record["id"]))
 
 
 def test_unknown_large_output_id_is_refused_not_leaked(tmp_path):
     store, task_id, coordinator = _task(tmp_path)
     with pytest.raises(StoreError, match="unknown_large_output_ref"):
-        mcp_tools.dispatch(store, coordinator, "read_large_output", dict(large_output_id="lo_" + "0" * 12, request_key="rq1"))
+        mcp_tools.dispatch(store, coordinator, "read_large_output", dict(large_output_id="lo_" + "0" * 12))
 
 
 # --- EngineSessionManagerAdapter real persist-sink binding ------------------

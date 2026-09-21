@@ -64,6 +64,46 @@ def test_launch_env_is_isolated_and_dumped(tmp_path):
         process.release(grace=2.0)
 
 
+def test_launch_env_disables_python_bytecode_writes(tmp_path):
+    """Every real engine child gets the setting needed for terminal tools."""
+    environ = isolated_environ(tmp_path)
+    values_path = tmp_path / "env-values.json"
+    scenario = default_scenario(env_dump_values_path=str(values_path), prompt_behavior="crash")
+    scenario_path = write_scenario(tmp_path, scenario)
+    record = make_connection_record(new_connection_id(), launch_command=fake_launch_command(scenario_path), environ=environ)
+
+    process = EngineProcess(record, str(tmp_path), environ=environ)
+    try:
+        deadline = time.monotonic() + 5.0
+        while not values_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert values_path.exists()
+        assert json.loads(values_path.read_text())["PYTHONDONTWRITEBYTECODE"] == "1"
+    finally:
+        process.release(grace=2.0)
+
+
+def test_brokered_engine_launch_uses_exact_command_without_linux_sandbox(tmp_path):
+    environ = isolated_environ(tmp_path)
+    project = tmp_path / "project"
+    (project / ".cortex").mkdir(parents=True)
+    scenario_path = write_scenario(tmp_path, default_scenario(prompt_behavior="hang"))
+    record = make_connection_record(new_connection_id(),
+                                    launch_command=fake_launch_command(scenario_path), environ=environ)
+
+    process = EngineProcess(
+        record, str(project), environ=environ, broker_mcp=True,
+        project_root=str(project),
+        channel_credentials=("ch_0123456789ab", "secret-token-123456", str(project)),
+    )
+    try:
+        assert process.process.args == list(record.launch_command)
+        assert process.mcp_broker is not None
+        assert process.alive()
+    finally:
+        process.release(grace=2.0)
+
+
 def test_terminate_reaps_and_frees_capacity_only_after_exit(tmp_path):
     environ = isolated_environ(tmp_path)
     connection_id = new_connection_id()

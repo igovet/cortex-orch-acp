@@ -7,17 +7,21 @@ import json
 import threading
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 
 from cortex_runtime.acp.orchestrating_runtime import EngineTurnFailed, OrchestratingRuntime, PromptOutcome
 from cortex_runtime.bootstrap import bootstrap_task
+from cortex_runtime.acp import pipeline_bootstrap
 from cortex_runtime.contracts import StoreError
 from cortex_runtime.delegation import completion as delegation_completion
 from cortex_runtime.delegation import events as delegation_events
 from cortex_runtime.delegation import mcp_tools
+from cortex_runtime.delegation.workspace_isolation import IsolatedSnapshotWorkspaceProvisioner
 from cortex_runtime.portable.engine_contract import StopReason
 from cortex_runtime.portable.identity import SourceEvent
+from cortex_runtime.project_docs import build_catalog
 from cortex_runtime.store import Store
 
 from orchestration_fakes import FakeConfigSnapshotSource, FakeSessionRuntime, FakeWorkspace
@@ -54,12 +58,16 @@ def _shutdown_created_runtimes():
 
 
 def _make_capacity_runtime(store, router, *, connection_id, capacity_limit, **kwargs):
-    engine = FakeSessionRuntime(store, router, connection_id=connection_id, capacity_limit=capacity_limit)
+    engine = FakeSessionRuntime(
+        store, router, connection_id=connection_id, capacity_limit=capacity_limit,
+        capacity_queue_timeout_seconds=kwargs.pop("capacity_queue_timeout_seconds", 30.0),
+    )
     runtime = OrchestratingRuntime(
-        store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
+        store, engine, IsolatedSnapshotWorkspaceProvisioner(store, str(store.project_root)), FakeConfigSnapshotSource(),
         allow_unqualified_delivery=True, wait_timeout_seconds=kwargs.pop("wait_timeout_seconds", 0.1),
         **kwargs,
     )
+    runtime._cleanup_isolated_workspace_if_integrated = lambda task_id, attempt_id: None
     _created_runtimes.append(runtime)
     return runtime, engine
 
@@ -74,10 +82,11 @@ def _make_runtime(store, router, **kwargs):
     # here is a real-thread-scheduling race under CPU contention, not a
     # deterministic bound.
     runtime = OrchestratingRuntime(
-        store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
+        store, engine, IsolatedSnapshotWorkspaceProvisioner(store, str(store.project_root)), FakeConfigSnapshotSource(),
         allow_unqualified_delivery=True, wait_timeout_seconds=kwargs.pop("wait_timeout_seconds", 30.0),
         **kwargs,
     )
+    runtime._cleanup_isolated_workspace_if_integrated = lambda task_id, attempt_id: None
     _created_runtimes.append(runtime)
     return runtime, engine
 
@@ -110,6 +119,36 @@ def _publish(store, channel, label, call_index):
     return report_id
 
 
+def _publish_current_pipeline(store, channel, suffix=""):
+    """Publish the coordinator's current plan before task-level acceptance."""
+    draft = store.call(
+        "create_draft", {"template": "pipeline", "request_key": f"pipeline-current{suffix}"},
+        channel.principal_thread_id, trusted=True,
+    )
+    path = Path(draft["draft_path"])
+    body = path.read_text(encoding="utf-8")
+    values = {
+        "{{CURRENT_OBJECTIVE_AND_DECISION_BASIS}}": "Objective: build the page. Decision basis: delegated work is reviewable.",
+        "{{CURRENT_REQUIREMENTS_AND_CONSTRAINTS}}": "Requirements: delegated work is complete and reviewable.",
+        "{{CURRENT_WORK_GRAPH}}": "All delegated assignments have completed.",
+        "{{CURRENT_ASSIGNMENTS_AND_ROUTING}}": "Coordinator reviewed the assigned workers.",
+        "{{CURRENT_EVIDENCE_AND_VERIFICATION}}": "Published worker reports provide the current evidence.",
+        "{{CURRENT_DECISIONS_QUESTIONS_AND_REMAINING_WORK}}": "Decision: accept the completed work.",
+    }
+    for marker, value in values.items():
+        body = body.replace(marker, value)
+    for marker in draft["replaceable_markers"]:
+        if marker.startswith("<!--"):
+            body = body.replace(marker, "Evidence links: the published worker reports are the selected results.")
+    path.write_text(body, encoding="utf-8")
+    return store.call(
+        "write_report", {
+            "title": "Current pipeline", "summary": "Coordinator current plan.",
+            "author": "coordinator", "draft_id": draft["draft_id"], "request_key": f"pipeline-current-publish{suffix}",
+        }, channel.principal_thread_id, trusted=True,
+    )
+
+
 # -- completion gating -----------------------------------------------------
 
 def test_task_level_accept_refused_with_a_still_running_assignment(tmp_path):
@@ -137,6 +176,101 @@ def test_task_level_accept_refused_with_a_still_running_assignment(tmp_path):
         ))
     assert str(excinfo.value) == "acceptance_refused"
     assert "not terminal" in str(excinfo.value.correction)
+
+
+def test_task_level_accept_refuses_runtime_bootstrap_pipeline(tmp_path):
+    """The runtime's opening receipt cannot stand in for the coordinator's
+    current plan and acceptance rationale.
+
+    This reproduces the live failure where a task reached ``accepted`` while
+    ``pipeline.md`` still said that no coordinator turn had run.  The runtime
+    must leave the task undecided and give the model a concrete next step;
+    it must not invent or mutate a pipeline on the model's behalf.
+    """
+    store, task_id = _task(tmp_path)
+    from cortex_runtime.trusted_channel import issue_channel_tx
+
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        owner = db.execute("SELECT epoch FROM task_owners WHERE task_id=?", (task_id,)).fetchone()
+        channel_id, secret = issue_channel_tx(db, task_id, "coordinator", owner["epoch"])
+        db.commit()
+    from orchestration_fakes import channel_context_by_id
+
+    channel = channel_context_by_id(store, channel_id)
+    pipeline_bootstrap.publish_initial_pipeline(store, task_id, channel, "Build a page.", None)
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, channel, "decide", dict(
+            assignment_ref="task", decision="accept", rationale="done", request_key="acc-bootstrap",
+        ))
+    assert str(excinfo.value) == "acceptance_refused"
+    assert "publish a coordinator-authored current pipeline edition" in str(excinfo.value.correction)
+    with store.connection() as db:
+        assert db.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND event_type='coordinator_decision'",
+            (task_id,),
+        ).fetchone() is None
+
+
+def test_task_accept_binds_to_unchanged_current_pipeline(tmp_path):
+    store, task_id = _task(tmp_path)
+    from cortex_runtime.trusted_channel import issue_channel_tx
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        owner = db.execute("SELECT epoch FROM task_owners WHERE task_id=?", (task_id,)).fetchone()
+        channel_id, _ = issue_channel_tx(db, task_id, "coordinator", owner["epoch"])
+        db.commit()
+    from orchestration_fakes import channel_context_by_id
+    channel = channel_context_by_id(store, channel_id)
+    _publish_current_pipeline(store, channel, "-binding")
+    decision = mcp_tools.dispatch(store, channel, "decide", dict(
+        assignment_ref="task", decision="accept", rationale="complete", request_key="accept-binding",
+    ))
+    assert decision["recorded"] is True
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='coordinator_decision'",
+            (task_id,),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        binding = payload["pipeline_binding"]
+        assert set(binding) == {"report_id", "sequence", "digest"}
+        assert delegation_completion.pipeline_binding_matches(db, task_id, binding)
+
+
+def test_task_accept_is_refused_when_current_pipeline_changes_after_decision(tmp_path):
+    store, task_id = _task(tmp_path)
+    from cortex_runtime.trusted_channel import issue_channel_tx
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        owner = db.execute("SELECT epoch FROM task_owners WHERE task_id=?", (task_id,)).fetchone()
+        channel_id, _ = issue_channel_tx(db, task_id, "coordinator", owner["epoch"])
+        db.commit()
+    from orchestration_fakes import channel_context_by_id
+    channel = channel_context_by_id(store, channel_id)
+    _publish_current_pipeline(store, channel, "-binding-old")
+    mcp_tools.dispatch(store, channel, "decide", dict(
+        assignment_ref="task", decision="accept", rationale="complete", request_key="accept-stale-binding",
+    ))
+    _publish_current_pipeline(store, channel, "-binding-new")
+
+    runtime, _ = _make_runtime(store, lambda *args: None)
+    assert runtime._recheck_accept(task_id, _latest_decision_id(store, task_id)) is None
+    with store.connection() as db:
+        refusal = db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? AND dedup_key=?",
+            (task_id, f"acceptance_refused:{_latest_decision_id(store, task_id)}"),
+        ).fetchone()
+    assert refusal is not None
+    assert "pipeline edition" in json.loads(refusal["payload_json"])["note"]
+
+
+def _latest_decision_id(store, task_id):
+    with store.connection() as db:
+        return db.execute(
+            "SELECT id FROM task_events WHERE task_id=? AND event_type='coordinator_decision' ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()["id"]
 
 
 def test_task_level_accept_refused_when_report_file_is_missing(tmp_path):
@@ -208,6 +342,66 @@ def test_task_level_accept_refused_when_report_file_is_missing(tmp_path):
 
 # -- refusal / cancellation / engine failures -------------------------------
 
+def test_task_stop_does_not_promote_partial_worker_commentary_to_final_response(tmp_path):
+    store, task_id = _task(tmp_path)
+    worker_started = threading.Event()
+    refs = {}
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            delegated = mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Assignment A", brief="do A", role="backend-dev",
+                acceptance="A done", request_key="reqA",
+            ))
+            refs["assignment"] = delegated["assignment_ref"]
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def worker_behavior(
+        store, channel, session_ref, message, call_index, *, on_delta, cancel_event,
+    ):
+        on_delta("I am still inspecting the project; this is not a final answer.")
+        worker_started.set()
+        cancel_event.wait(timeout=30)
+        return PromptOutcome(StopReason.CANCELLED, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        if channel is None:
+            return None
+        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
+
+    runtime, _engine = _make_runtime(store, router, wait_timeout_seconds=0.05)
+    cards = []
+    result = {}
+    turn = threading.Thread(target=lambda: result.setdefault(
+        "stop_reason",
+        runtime.start_prompt(
+            task_id, "s1", "Do A.", lambda _text: True, threading.Event(),
+            emit_tool_call=cards.append,
+        ),
+    ))
+    turn.start()
+    assert worker_started.wait(timeout=30)
+    assert runtime.stop_task(task_id, "s1", lambda _text: True, emit_tool_call=cards.append)
+    turn.join(timeout=30)
+    assert not turn.is_alive()
+    assert result["stop_reason"] == StopReason.CANCELLED
+
+    with store.connection() as db:
+        false_final = db.execute(
+            "SELECT 1 FROM task_events WHERE task_id=? AND event_type='progress' "
+            "AND json_extract(payload_json, '$.kind')='worker_activity' "
+            "AND json_extract(payload_json, '$.text') LIKE '[final response]%' LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        assignment = db.execute(
+            "SELECT status FROM work_assignments WHERE task_id=? ORDER BY created_at LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    assert false_final is None
+    assert assignment is not None and assignment["status"] == "failed"
+    assert refs["assignment"]
+
+
 def test_coordinator_refusal_returns_stop_reason_refusal_and_opens_only_one_session(tmp_path):
     store, task_id = _task(tmp_path)
 
@@ -256,6 +450,108 @@ def test_worker_refusal_records_assignment_failed_refusal_without_reroute(tmp_pa
     # Exactly one worker session ever opened for this assignment (no reroute).
     worker_opens = [s for s in engine.sessions.values() if s["channel"] and s["channel"].role == "worker"]
     assert len(worker_opens) == 1
+
+
+@pytest.mark.parametrize("with_indexes", [False, True])
+def test_worker_engine_prompt_carries_current_project_docs_catalog(tmp_path, with_indexes):
+    """Assert the actual delegated prompt, including a first task without docs."""
+    if with_indexes:
+        project_index = tmp_path / "docs/project/index.md"
+        feature_index = tmp_path / "docs/features/index.md"
+        project_index.parent.mkdir(parents=True)
+        feature_index.parent.mkdir(parents=True)
+        project_index.write_text("# Project map\n", encoding="utf-8")
+        feature_index.write_text("# Feature map\n", encoding="utf-8")
+    store, task_id = _task(tmp_path)
+    worker_prompts = []
+    worker_prompt_seen = threading.Event()
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Repair arithmetic", brief="Fix multiplication", role="backend-dev",
+                acceptance="Tests pass", request_key="docs-worker",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Delegated.")
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        worker_prompts.append(message)
+        worker_prompt_seen.set()
+        return PromptOutcome(StopReason.END_TURN, "")
+
+    def router(store, channel, session_ref, launch, instructions):
+        return coordinator_behavior if channel and channel.role == "coordinator" else worker_behavior
+
+    runtime, _ = _make_runtime(store, router, max_no_progress_continuations=1)
+    runtime.start_prompt(task_id, "s1", "Repair arithmetic", lambda t: True, threading.Event())
+    if not worker_prompt_seen.wait(10):
+        with store.connection() as db:
+            events = [(row["event_type"], row["payload_json"]) for row in db.execute(
+                "SELECT event_type, payload_json FROM task_events WHERE task_id=?", (task_id,),
+            ).fetchall()]
+        pytest.fail(f"delegated engine was never prompted: {events}")
+    assert 1 <= len(worker_prompts) <= 2
+    prompt = worker_prompts[0]
+    assert build_catalog(tmp_path)["catalog_version"] in prompt
+    assert "BEGIN UNTRUSTED PROJECT DOCUMENTATION DATA" in prompt
+    assert "END UNTRUSTED PROJECT DOCUMENTATION DATA" in prompt
+    assert "scope=new worker attempt" in prompt
+    assert "Fix multiplication" in prompt
+    assert "Acceptance: Tests pass" in prompt
+    if with_indexes:
+        assert "docs/project/index.md | Project map | sha256:" in prompt
+        assert "docs/features/index.md | Feature map | sha256:" in prompt
+        assert "read the relevant index before broad source searches" in prompt
+    else:
+        assert "entries: none observed under docs/project or docs/features" in prompt
+        assert "An absent index is not a blocker" in prompt
+
+
+def test_report_review_handoff_injects_exact_predecessor_ref_into_worker_prompt(tmp_path):
+    store, task_id = _task(tmp_path)
+    report_ref = "r_" + "c" * 12
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        task_dir = store._task_directory(db, task_id)
+        report_path = task_dir / "predecessor.md"
+        report_path.write_text("# Predecessor\n", encoding="utf-8")
+        db.execute(
+            "INSERT INTO reports VALUES (?,?,?,?,?)",
+            (report_ref, task_id, "report", report_path.name, store._now()),
+        )
+        db.commit()
+    delegation_events.append_event(
+        store, task_id, "worker_result", "worker-result-for-handoff",
+        dict(report_ref=report_ref, summary="The implementation is ready for review."),
+        origin="worker-channel", assignment_ref="predecessor-assignment",
+    )
+    prompts = []
+    seen = threading.Event()
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        if call_index == 0:
+            mcp_tools.dispatch(store, channel, "delegate", dict(
+                title="Review implementation", brief="Review the predecessor result.", role="qa-engineer",
+                acceptance="Publish independent review findings.", handoff_mode="report_review",
+                predecessor_report_ref=report_ref, request_key="review-handoff",
+            ))
+        return PromptOutcome(StopReason.END_TURN, "Delegated review.")
+
+    def worker_behavior(store, channel, session_ref, message, call_index):
+        prompts.append(message)
+        seen.set()
+        return PromptOutcome(StopReason.END_TURN, "Reviewed.")
+
+    def router(store, channel, session_ref, launch, instructions):
+        return coordinator_behavior if channel and channel.role == "coordinator" else worker_behavior
+
+    runtime, _ = _make_runtime(store, router, max_no_progress_continuations=1)
+    runtime.start_prompt(task_id, "s1", "Review the implementation.", lambda update: None, threading.Event())
+    assert seen.wait(10)
+    assert 1 <= len(prompts) <= 2
+    assert '"handoff_mode": "report_review"' in prompts[0]
+    assert f'"predecessor_report_ref": "{report_ref}"' in prompts[0]
 
 
 def test_coordinator_engine_failure_blocks_without_silent_end_turn(tmp_path):
@@ -399,6 +695,7 @@ def test_idle_wait_emits_no_updates_and_does_not_reprompt_a_running_worker(tmp_p
         if call_index == 0:
             mcp_tools.dispatch(store, channel, "delegate", dict(title="Y", brief="do Y", role="backend-dev", acceptance="Y done", request_key="reqY"))
             return PromptOutcome(StopReason.END_TURN, "Delegated Y.")
+        _publish_current_pipeline(store, channel)
         mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="ok", request_key="accY"))
         return PromptOutcome(StopReason.END_TURN, "Accepted.")
 
@@ -456,6 +753,57 @@ def test_idle_wait_emits_no_updates_and_does_not_reprompt_a_running_worker(tmp_p
 
 # -- capacity queuing through OrchestratingRuntime (lead follow-up) --------
 
+def test_accept_releases_coordinator_capacity_after_final_and_next_task_opens(tmp_path):
+    """An accepted task must not retain an idle engine or monopolize capacity."""
+    from cortex_runtime.delegation import capacity as delegation_capacity
+
+    store, first_task = _task(tmp_path)
+    second_task = bootstrap_task(
+        store, SourceEvent(origin="cli", event_id=str(uuid.uuid4())), "Build another page.", "owner-1",
+    ).task_id
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        _publish_current_pipeline(store, channel, "-" + channel.task_id)
+        mcp_tools.dispatch(store, channel, "decide", dict(
+            assignment_ref="task", decision="accept", rationale="verified", request_key="accept-" + channel.task_id,
+        ))
+        return PromptOutcome(StopReason.END_TURN, "Accepted task " + channel.task_id)
+
+    def router(store, channel, session_ref, launch, instructions):
+        return coordinator_behavior
+
+    runtime, engine = _make_capacity_runtime(
+        store, router, connection_id="cn_terminal_accept", capacity_limit=1,
+    )
+    first_updates = []
+
+    def emit_first(text, **kwargs):
+        # The terminal text is delivered while the process is still owned;
+        # termination follows only after the accepted state is committed.
+        first_updates.append(text)
+        assert len(engine._owned) == 1
+        return True
+
+    assert runtime.start_prompt(first_task, "s1", "First.", emit_first, threading.Event()) == StopReason.END_TURN
+    assert "Accepted task " + first_task in "".join(first_updates)
+    first_attempt = engine.sessions[engine.prompt_calls[0]]["attempt_id"]
+    assert engine.terminate_calls == [first_attempt]
+    assert engine.lookup_owned(first_attempt) == "absent"
+    assert delegation_capacity.count_active(store, "cn_terminal_accept") == 0
+    with store.connection() as db:
+        assert db.execute(
+            "SELECT state FROM task_orchestration WHERE task_id=?", (first_task,),
+        ).fetchone()["state"] == "accepted"
+
+    second_updates = []
+    assert runtime.start_prompt(
+        second_task, "s2", "Second.", second_updates.append, threading.Event(),
+    ) == StopReason.END_TURN
+    assert "Accepted task " + second_task in "".join(second_updates)
+    assert len(engine.open_calls) == 2
+    assert delegation_capacity.count_active(store, "cn_terminal_accept") == 0
+
+
 def test_capacity_full_queues_second_delegation_until_confirmed_release(tmp_path):
     store, task_id = _task(tmp_path)
     seen, accepted = set(), {"done": False}
@@ -473,6 +821,7 @@ def test_capacity_full_queues_second_delegation_until_confirmed_release(tmp_path
                 seen.add(name)
         if len(seen) >= 2 and not accepted["done"]:
             accepted["done"] = True
+            _publish_current_pipeline(store, channel)
             mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="both done", request_key="acc1"))
             return PromptOutcome(StopReason.END_TURN, "Accepted.")
         return PromptOutcome(StopReason.END_TURN, "")
@@ -554,9 +903,9 @@ def test_ambiguous_release_keeps_second_delegation_queued(tmp_path):
             is_first = not first_opened.is_set()
             first_opened.set()
         if is_first:
-            hold_first.wait(timeout=30)
+            hold_first.wait()
         else:
-            hold_second.wait(timeout=30)
+            hold_second.wait()
         return PromptOutcome(StopReason.END_TURN, "")
 
     def router(store, channel, session_ref, launch, instructions):
@@ -564,7 +913,14 @@ def test_ambiguous_release_keeps_second_delegation_queued(tmp_path):
             return None
         return coordinator_behavior if channel.role == "coordinator" else worker_behavior
 
-    runtime, engine = _make_capacity_runtime(store, router, connection_id="cn_ambiguous", capacity_limit=2, wait_timeout_seconds=0.1, max_no_progress_continuations=5)
+    # This test controls both releases. Keep the fake worker and queue alive
+    # until those events occur, so a loaded suite cannot make their independent
+    # 30-second deadlines expire before the assertion observes the release.
+    runtime, engine = _make_capacity_runtime(
+        store, router, connection_id="cn_ambiguous", capacity_limit=2,
+        capacity_queue_timeout_seconds=None, wait_timeout_seconds=0.1,
+        max_no_progress_continuations=5,
+    )
     thread = threading.Thread(target=runtime.start_prompt, args=(task_id, "s1", "Do A and B.", lambda t: True, threading.Event()))
     thread.start()
     try:
@@ -603,13 +959,41 @@ def test_ambiguous_release_keeps_second_delegation_queued(tmp_path):
         # Now confirm the release for real -- the second must proceed.
         delegation_capacity.release_confirmed(store, reservation_id, "process_exited")
         hold_second.set()
-        assert engine.wait_until(
+        second_opened = engine.wait_until(
             lambda: len([a for a in engine.open_calls if a and a.startswith("xa_")]) >= 2, timeout=30,
         )
+        if not second_opened:
+            with store.connection() as db:
+                reservation_states = [tuple(row) for row in db.execute(
+                    "SELECT attempt_id, kind, state FROM capacity_reservations WHERE connection_id=?",
+                    ("cn_ambiguous",),
+                )]
+                assignment_failures = [row["payload_json"] for row in db.execute(
+                    "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='assignment_failed'",
+                    (task_id,),
+                )]
+            futures = [
+                (future.done(), future.cancelled(),
+                 type(future.exception()).__name__ if future.done() and not future.cancelled()
+                 and future.exception() is not None else None)
+                for future in runtime._running.get(task_id, ())
+            ]
+            pytest.fail(
+                f"queued worker did not open: reservations={reservation_states!r}, "
+                f"last_attempts={engine.reserve_attempts[-5:]!r}, opens={engine.open_calls!r}, "
+                f"cancelled={engine._cancelled_tasks!r}/{engine._cancelled_attempts!r}, "
+                f"shutdown={engine._shutdown_event.is_set()}, futures={futures!r}, "
+                f"orchestration_thread_alive={thread.is_alive()}, failures={assignment_failures!r}"
+            )
+        assert latest_attempt_id in engine.open_calls
+        assert any(attempt_id == latest_attempt_id and confirmed is not None
+                   for attempt_id, confirmed in engine.reserve_attempts)
     finally:
         hold_first.set()
         hold_second.set()
+        runtime.shutdown()
         thread.join(timeout=30)
+    assert not thread.is_alive()
     with store.connection() as db:
         queued = db.execute(
             "SELECT 1 FROM task_events WHERE task_id=? AND dedup_key LIKE 'capacity_queued:%'", (task_id,),
@@ -621,6 +1005,7 @@ def test_normal_turn_marks_delivered_at_once_engine_prompt_returns(tmp_path):
     store, task_id = _task(tmp_path)
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
+        _publish_current_pipeline(store, channel)
         mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="nothing pending", request_key="acc1"))
         return PromptOutcome(StopReason.END_TURN, "Accepted.")
 
@@ -703,6 +1088,7 @@ def test_decide_accept_then_delegate_same_turn_is_never_honored(tmp_path):
             state["phase"] = 1
             # The race: accept the task, then -- in the SAME tool-call
             # sequence -- delegate a brand new, still-unopened assignment.
+            _publish_current_pipeline(store, channel)
             mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="A is done.", request_key="acc1"))
             mcp_tools.dispatch(store, channel, "delegate", dict(title="B", brief="do B", role="backend-dev", acceptance="B done", request_key="reqB"))
             return PromptOutcome(StopReason.END_TURN, "Accepted and delegated B.")
@@ -989,12 +1375,14 @@ def test_assignment_cancel_while_worker_queued_aborts_promptly_no_leak(tmp_path)
         )
         assert _poll(lambda: queued_attempt_id in engine._cancelled_attempts)
         assert time.monotonic() - start < 30  # cancel while queued resolves promptly, not a hang
-        with store.connection() as db:
-            cancelled_rows = db.execute(
-                "SELECT COUNT(*) AS n FROM task_events WHERE task_id=? AND event_type='assignment_cancelled' AND assignment_ref=?",
-                (task_id, queued_ref),
-            ).fetchone()
-        assert cancelled_rows["n"] == 1  # exactly one
+        # cancel_attempt runs before the durable event append. Wait for the
+        # later boundary rather than racing it immediately after observing
+        # the engine's cancellation flag.
+        assert _poll(lambda: _fetch_one(
+            store,
+            "SELECT id FROM task_events WHERE task_id=? AND event_type='assignment_cancelled' AND assignment_ref=?",
+            (task_id, queued_ref),
+        ))
         with store.connection() as db:
             leaked = db.execute(
                 "SELECT COUNT(*) AS n FROM capacity_reservations WHERE connection_id='cn_assign_cancel' AND attempt_id=?",
@@ -1006,6 +1394,12 @@ def test_assignment_cancel_while_worker_queued_aborts_promptly_no_leak(tmp_path)
         hold_open.set()
         thread.join(timeout=60)
     assert turn.get("result") == StopReason.END_TURN
+    with store.connection() as db:
+        cancelled_rows = db.execute(
+            "SELECT COUNT(*) AS n FROM task_events WHERE task_id=? AND event_type='assignment_cancelled' AND assignment_ref=?",
+            (task_id, queued_ref),
+        ).fetchone()
+    assert cancelled_rows["n"] == 1  # exactly one after all worker activity settled
 
     # Other task work (the one that actually opened) is unaffected by the
     # queued sibling's cancellation.

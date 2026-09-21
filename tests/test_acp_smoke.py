@@ -38,9 +38,10 @@ def test_smoke_without_connections_exits_clean(tmp_path):
     assert proc.returncode == 0
     # No connection registered -> no model config option at all.
     checks_by_name = {check["name"]: check for check in report["checks"]}
+    assert checks_by_name["initialize:image_prompt_capability"]["status"] == "pass"
     assert checks_by_name["session/new:no_model_option_without_connections"]["status"] == "pass"
     assert report["versions"]["protocol_version"] == 1
-    assert report["versions"]["cortex_plugin_version"] != "unknown"
+    assert report["versions"]["cortex_version"] != "unknown"
 
 
 def test_smoke_with_fixture_connection_shows_model_option(tmp_path):

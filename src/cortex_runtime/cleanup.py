@@ -106,15 +106,65 @@ def finish_deletions(store,db,task):
                     if path is not None:
                         try: _remove_owned_tree(path)
                         except StoreError: pass
+        # Candidate stages live beside workspaces under the project store,
+        # rather than under the per-task directory.  Remove their owned trees
+        # only while replaying an explicit, durable task deletion.  In
+        # particular, conflict/failed candidates are never reclaimed by a
+        # background sweep merely because they are non-ready.
+        if "candidate_staging" in existing_tables:
+            from .delegation.workspace_isolation import _remove_owned_tree
+            for candidate_row in db.execute(
+                "SELECT stage_path FROM candidate_staging WHERE task_id=?", (task,)
+            ).fetchall():
+                stage_path = candidate_row["stage_path"]
+                if stage_path:
+                    _remove_owned_tree(Path(stage_path).parent)
+        _delete_if_present("candidate_staging", "task_id=?", (task,))
+        # Verification requests are immutable execution identity records for
+        # the task.  They are retained while the task exists, including
+        # unknown outcomes, and removed only with the task's explicit
+        # retention deletion.
+        _delete_if_present("check_requests", "task_id=?", (task,))
+        # T035 check evidence is bound to candidates and attempts, but its
+        # rows intentionally remain immutable until task retention. Delete
+        # the operation journal first, then the evidence rows, before the
+        # task itself is removed. The evidence files are retained only inside
+        # the task/project store and are covered by the task teardown above.
+        _delete_if_present("check_evidence_operations", "task_id=?", (task,))
+        _delete_if_present("check_evidence", "task_id=?", (task,))
+        _delete_if_present("instruction_bundles", "task_id=?", (task,))
+        # Lineage and seed bindings are auxiliary rows around T025 workspace
+        # records.  The lineage table references workspace_snapshots and must
+        # be deleted first; candidate IDs are intentionally historical strings
+        # without a foreign key to allow candidate inspection until retention.
+        _delete_if_present(
+            "workspace_snapshot_lineage",
+            "workspace_binding_id IN (SELECT workspace_binding_id FROM workspace_snapshots WHERE task_id=?)",
+            (task,),
+        )
+        _delete_if_present("workspace_candidate_seeds", "task_id=?", (task,))
         _delete_if_present("workspace_integrations","task_id=?",(task,))
         _delete_if_present("workspace_snapshots","task_id=?",(task,))
+        # T034 work graph: attempts reference assignments (and each other),
+        # predecessors reference assignments, and requirement revisions
+        # reference requirements. Delete children first so retention leaves
+        # no graph rows behind and SQLite foreign-key checks remain clean.
+        _delete_if_present("work_assignment_attempts","task_id=?",(task,))
+        _delete_if_present("work_assignment_predecessors","task_id=?",(task,))
+        _delete_if_present("work_assignments","task_id=?",(task,))
+        _delete_if_present("work_requirement_revisions","requirement_id IN (SELECT requirement_id FROM work_requirements WHERE task_id=?)",(task,))
+        _delete_if_present("work_requirements","task_id=?",(task,))
+        _delete_if_present("work_graph_operations","task_id=?",(task,))
         db.execute("DELETE FROM task_events WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_orchestration WHERE task_id=?",(task,))
         db.execute("DELETE FROM capacity_reservations WHERE task_id=?",(task,))
         db.execute("DELETE FROM tool_result_observations WHERE task_id=?",(task,))
+        _delete_if_present("report_read_observations","task_id=?",(task,))
+        _delete_if_present("permission_receipts","task_id=?",(task,))
         # host_transcript (T018) references acp_host_sessions(session_id),
         # not tasks(id) directly -- must go before acp_host_sessions.
         _delete_if_present("host_transcript","session_id IN (SELECT session_id FROM acp_host_sessions WHERE task_id=?)",(task,))
+        _delete_if_present("host_updates","session_id IN (SELECT session_id FROM acp_host_sessions WHERE task_id=?)",(task,))
         db.execute("DELETE FROM acp_host_sessions WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_route_selections WHERE task_id=?",(task,))
         # T027 configuration_route_extras references configuration_revisions(id)
@@ -127,7 +177,7 @@ def finish_deletions(store,db,task):
         db.execute("DELETE FROM source_events WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_owners WHERE task_id=?",(task,))
         db.execute("DELETE FROM report_provenance WHERE edition_sequence IN (SELECT e.sequence FROM editions e JOIN reports r ON r.id=e.report_id WHERE r.task_id=?)",(task,))
-        for table in ("source_turns","source_resets","hook_events","hook_hints","hook_agent_bindings","hook_pending_sources","hook_command_sessions"):
+        for table in ("source_turns","source_resets"):
             db.execute(f"DELETE FROM {table} WHERE task_id=?",(task,))
         db.execute("DELETE FROM source_revisions WHERE task_id=?",(task,))
         db.execute("DELETE FROM task_changes WHERE task_id=?",(task,))

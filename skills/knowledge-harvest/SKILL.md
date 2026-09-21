@@ -1,23 +1,30 @@
 ---
 name: knowledge-harvest
-description: Source-backed project knowledge maintenance. Load only after the user explicitly activates cortex:orchestrator with harvest or harvest-refresh; never infer this route from repository state.
+description: Build or refresh durable, source-backed project documentation on an explicit /harvest or /harvest-refresh request, including the first request in a new Cortex session.
 ---
 
 # Knowledge Harvest
 
-Apply this skill only to an explicitly selected harvest or harvest-refresh
-route. Ordinary product work does not implicitly authorize a census or broad
-documentation rewrite.
+Apply this skill only to an explicit harvest or harvest-refresh request. Bare
+`/harvest`, including as the first prompt in a new project session, asks Cortex
+to build durable documentation of the current project for future orchestration.
+Optional command text narrows or clarifies its scope; it is not required to
+start a task. `/harvest-refresh` asks Cortex to update an existing knowledge
+base against current source. Neither route summarizes prior chat work or
+requires a previous task. Ordinary product work does not implicitly authorize
+a census or broad documentation rewrite.
 
 Build a durable functional map of the repository, not a task journal or recent
-commit summary. Documentation should let a new engineer discover each in-scope
-capability, its owning code, runtime behavior, and verification or operating
-path.
+commit summary. Documentation should let future Cortex tasks and a new engineer
+discover each in-scope capability, its owning code, runtime behavior, and
+verification or operating path. Publish it in the target project's canonical
+`docs/project/` and `docs/features/` entry points below; these remain visible
+across sessions through the project files, not through a prior task's chat.
 
 Harvest workers read this complete skill with `read_skill`,
 including its feature-census guidance below. Its inventory, coverage, page-content
 and validation rules apply before census/planning work. Exact advertised SKILL.md
-and needed declared Markdown reference reads are allowed; plugin implementation
+and needed declared Markdown reference reads are allowed; runtime implementation
 and TOML inspection are not. The coordinator receives concise report previews;
 it does not open project indexes.
 
@@ -40,10 +47,14 @@ harvest scope.
   coverage manifest establishes that the feature registry covers the
   repository, perform a full census. With a credible baseline, inspect changed
   and impacted surfaces and reconcile them against the complete inventory.
-- **Harvest refresh:** Rebuild the inventory from current source without
-  trusting prior coverage claims, audit every project and feature document, and
-  run an independent post-write completeness review. Finish only when a second
-  planning comparison proposes no factual changes or new feature page.
+- **Harvest refresh:** Update existing project documentation by rebuilding the
+  inventory from current source without trusting prior coverage claims. Audit
+  existing project and feature documents against that inventory, correct stale
+  facts, and reconcile coverage. Prior chat or report summaries are leads, not
+  the refresh source. Finish with a source-backed post-write comparison. A
+  correction to documented behavior, defaults, or output is a concrete
+  correctness risk even when implementation source did not change; obtain
+  independent review by a separate worker before recommending acceptance.
 
 ## Shared skills and reporting
 
@@ -52,60 +63,61 @@ profile supply the report requirements. Load a declared example only for an assi
 content question; do not read `cortex-control` with `read_skill` merely for ordinary reporting.
 After context loss, load skill `cortex:context-compaction` and follow its rereading procedure.
 
-## Evidence topology
+## Scale the assignment to the repository
 
-This topology is a recommendation, not backend phase ordering. The coordinator
-may merge, omit, reorder, repeat, or add delegations when task evidence supports
-that decision.
+Choose the fewest assignments that can establish complete, source-backed
+coverage. A small repository with a bounded source tree, one runtime, and few
+feature-bearing surfaces can use one `technical_writer` worker for the whole
+harvest or refresh. Assign that worker to enumerate the current tree, inspect
+source, tests and configuration, map every in-scope surface, write or update the
+canonical documents, run relevant deterministic checks, and report exact gaps
+and outcomes. This is one cohesive assignment, not a sequence of planner,
+explorer, architect, writer, reviewer and verifier handoffs. Its self-checks
+are evidence of what ran, not independent review.
 
-1. **Scope:** For a broad repository, create a read-only `planner` delegation
-   to identify applications, services, packages, runtime processes, deployment
-   surfaces, integrations, likely functional domains, and non-overlapping
-   discovery ownership. Scope partitions evidence; it does not choose the
-   solution.
-2. **Domain census:** Create one `explorer` delegation per bounded domain,
-   normally 2–8 in parallel for a large repository. Each inventories routes,
-   commands, jobs, screens, handlers, policies, state, persistence,
-   integrations, configuration, deployment paths, failure paths, and
-   behavior-revealing tests. Give each the relevant finalized evidence reference
-   when applicable.
-3. **Architecture synthesis:** Create an `architect` delegation with the
-   relevant census evidence references. It deduplicates features, defines stable
-   boundaries, maps cross-domain flows and shared infrastructure, identifies
-   ADR-worthy decisions, and proposes the documentation taxonomy.
-4. **Planning:** When ownership, dependencies, acceptance, or verification
-   would benefit, create a read-only `planner` delegation with the available
-   synthesis reports. Its work breakdown remains advisory.
-5. **Documentation:** Create one or more `technical_writer` delegations. Use
-   one writer for a small repository. For a large repository, parallelize only
-   across non-overlapping feature paths and give exactly one writer ownership
-   of `docs/project/` plus `docs/features/index.md`. Writers verify
-   consequential facts in current source or tests.
-6. **Completeness review:** Create an independent `code_reviewer` delegation
-   to compare the fresh source inventory with the coverage matrix and written
-   pages. Unmapped surfaces, placeholders, thin pages, broken source links,
-   undocumented failure paths, and unsupported coverage claims become
-   actionable report findings and may justify corrective writer delegations.
-7. **Verification:** Create a non-mutating `build_verification` delegation for
-   links, paths, generated blocks, formatting, repository-native documentation
-   checks, and the final coverage statement.
+For a broad or coupled repository, partition only when the source tree or
+ownership makes one assignment impractical. Delegate bounded `explorer`
+domains where independent discovery reduces uncertainty; use `planner` for a
+real scope or dependency problem and `architect` for a consequential boundary
+decision. Give exactly one writer ownership of shared `docs/project/` and
+`docs/features/index.md`; other writers may own disjoint feature pages. A
+worker needing earlier evidence receives only the relevant finalized reports.
 
-Independent delegations may run concurrently. A delegation that genuinely
-needs earlier evidence receives the relevant finalized evidence references after
-those publications
-exist. The model owns every adaptation and completion decision.
+After writing, compare the current source inventory with the coverage matrix,
+feature pages, links and checks. For each correction to a documented behavior,
+default, or output (including one found against unchanged source), inventory
+every relevant occurrence across the target repository's documentation,
+including otherwise unchanged pages, commands, flags, example inputs and
+expected output. Confirm each claim in current source and correct stale examples.
+Inventory every affected executable example across those pages;
+run safe examples against the current source and compare exact exit status and
+stdout with their documented expectations. Mark examples that cannot safely
+run or whose output cannot be verified as unresolved, naming the reason.
+The writing worker may perform this comparison and repair bounded gaps. Assign
+a separate `code_reviewer` for these changed documentation claims. The reviewer checks
+current source and post-write documentation, including the complete relevant example inventory
+and observed results, without relying on the writer's claim that a search was
+clean. Add an independent
+`code_reviewer` or `build_verification` worker when a concrete unresolved risk warrants it, such
+as ambiguous feature boundaries, conflicting source evidence, unexplained
+surfaces, consequential safety behavior, or checks the writer cannot run or
+interpret. Do not assign both by default or repeat a check on an unchanged
+revision without a reason. A purely factual, low-risk refresh may stay with one
+writer. Report unresolved gaps honestly. The model owns
+every adaptation and completion decision; this is not backend phase ordering.
 
 ## Relationship to the final documentation stage
 
 A harvest or harvest-refresh is documentation-impacting by definition. Its
 documentation delegations serve as the dedicated documentation-sync worker or
 workers for `docs/project/`, `docs/features/`, and any affected public
-documentation. After the final writing or corrective delegation, a separate
-worker verifies documentation through the completeness-review and verification
-evidence above. The coordinator decides readiness from meaningful worker evidence
+documentation. After the final writing or corrective delegation, the
+coordinator assesses the worker's source comparison and checks, and adds a
+separate verifier only for a concrete unresolved risk. It decides readiness
+from meaningful worker evidence
 and the current pipeline. It may follow bounded report cursors for facts needed by
 that decision, while documentation indexes and project files remain worker-owned.
-Missing specialist interpretation requires another worker check.
+Missing specialist interpretation requires a bounded worker check.
 
 Do not use a task-level `documentation not required` outcome for a completed
 harvest, because documentation is the requested artifact. Public documents
@@ -158,8 +170,8 @@ parallel progress elsewhere, or an honest residual-risk statement.
 
 A material user decision is reported clearly to the coordinator, who presents
 it through the normal user interaction boundary. Internal storage and worker coordination conditions alone are not user questions.
-For a genuine question, load skill `cortex:coordinator-communication` through
-Codex and follow it: detailed chat context and
+For a genuine question, load skill `cortex:coordinator-communication` with
+`read_skill` and follow it: detailed chat context and
 answer alternatives and their consequences as ordinary chat text.
 
 ## Evidence and preservation
@@ -331,12 +343,24 @@ page without repeating repository-wide discovery.
 ### Harvest refresh
 
 1. Rebuild the complete inventory without trusting current feature pages.
-2. Map the fresh inventory to the existing registry and audit every page.
+2. Map the fresh inventory to the existing registry and audit every project and
+   feature page against current source. Correct stale facts, links and coverage;
+   preserve supported manual content. Do not substitute chat or report summaries.
 3. Rewrite generated sections and add/split pages until the matrix has no
    unexplained gaps.
-4. Run a separate read-only completeness review from the source inventory.
-5. Repeat the documentation planning comparison. Pass only when it proposes no
-   factual changes and no new feature page.
+4. Compare the post-write pages and manifest with the fresh source inventory,
+   including every relevant occurrence across the target repository's
+   documentation and otherwise unchanged pages whenever a documented behavior,
+   default or output is corrected, even if source is unchanged. Inventory all
+   affected executable
+   examples, compare safe executions' exact exit status and stdout with the
+   documented results, and retain unexecutable examples as unresolved. Run
+   relevant deterministic documentation checks. The writer can do this;
+   assign a separate reviewer to inspect current source and post-write docs
+   independently for those corrected claims. Otherwise escalate only
+   for a concrete uncertainty, without a routine reviewer stage.
+5. Finish when the comparison finds no further factual change or feature page
+   to add; record any check that could not run and any unresolved gap.
 
 ## Failure conditions
 
@@ -361,6 +385,10 @@ claiming completion when:
 - feature pages omit consequential behavior, state, configuration, failure,
   integration, operations, or verification details;
 - documentation claims were copied from delegation reports without source/test checks;
-- refresh lacks an independent post-write census and no-change second pass.
+- refresh lacks a source-backed post-write comparison, leaves stale facts in
+  existing pages or examples, or claims completion despite an unexplained gap;
+- documented behavior, defaults or output were corrected without a targeted search
+  of existing examples, safe example-result comparison, and a separate worker's
+  source-backed review.
 
 <!-- END HOST-ATTACHED FEATURE CENSUS -->

@@ -30,6 +30,9 @@ from .terminal_bridge import TerminalBridge, TerminalBridgeError
 
 DEFAULT_INITIALIZE_TIMEOUT = 15.0
 DEFAULT_CALL_TIMEOUT = 30.0
+# A person needs time to inspect a destructive-command card. This applies
+# only to downstream approval requests, not the short control RPCs above.
+DEFAULT_MANUAL_PERMISSION_TIMEOUT = 180.0
 # T035 FINDING-06: ``session/prompt`` (the actual model turn) is issued with
 # NO wall-clock timeout at all -- explicit product decision, not an
 # oversight: at the `high`/`xhigh`/`max`/`ultra` reasoning efforts this
@@ -55,6 +58,12 @@ DEFAULT_ABANDON_WAIT_SECONDS = 5.0
 # instead.
 DEFAULT_MAX_CONCURRENT_CLIENT_REQUESTS = 16
 DEFAULT_CLIENT_REQUEST_JOIN_TIMEOUT = 5.0
+# Codex ACP may stream terminal output through ``_meta.terminal_output_delta``
+# instead of putting it in the final ``rawOutput.formatted_output``. Keep a
+# bounded per-call buffer while the turn is live. The marker and the explicit
+# flag make the bound observable if an engine emits more than this amount.
+MAX_STREAMED_TERMINAL_OUTPUT_BYTES = 4 * 1024 * 1024
+_STREAMED_OUTPUT_TRUNCATION_MARKER = "\n[terminal output truncated by Cortex]\n"
 
 _STOP_REASON_FROM_WIRE = {
     "end_turn": StopReason.END_TURN,
@@ -194,10 +203,15 @@ class EngineSessionManager:
         abandon_wait_seconds: float = DEFAULT_ABANDON_WAIT_SECONDS,
         policy: ResourcePolicy | None = None,
         host_permission_requester=None,
+        permission_receipt_sink=None,
         max_concurrent_client_requests: int = DEFAULT_MAX_CONCURRENT_CLIENT_REQUESTS,
         terminal_output_persist=None,
         coordinator_refusal_notifier=None,
+        coordinator_draft_write_authorizer=None,
+        worker_draft_write_authorizer=None,
         host_mcp_servers=None,
+        mcp_role: str | None = None,
+        broker_mcp=False,
     ):
         """``install`` -- a
         :class:`~.codex_install.CodexAcpInstall`, or ``None`` -- is passed
@@ -225,6 +239,7 @@ class EngineSessionManager:
         self._workspace_root = workspace_root
         self._environ = environ
         self._channel_credentials = channel_credentials
+        self._broker_mcp = bool(broker_mcp)
         self._option_mapping = option_mapping or _default_option_mapping
         self._install = install
         self._initialize_timeout = initialize_timeout
@@ -233,12 +248,18 @@ class EngineSessionManager:
         self._abandon_wait_seconds = abandon_wait_seconds
         self._policy = policy if policy is not None else ResourcePolicy()
         self._host_permission_requester = host_permission_requester
+        self._permission_receipt_sink = permission_receipt_sink
         self._coordinator_refusal_notifier = coordinator_refusal_notifier
+        self._coordinator_draft_write_authorizer = coordinator_draft_write_authorizer
+        self._worker_draft_write_authorizer = worker_draft_write_authorizer
         # The client's own MCP servers, to be offered to this engine
         # alongside Cortex's own. Held in memory only: a client's env and
         # header values are its secrets (see engine.mcp_bridge
         # .host_mcp_servers).
         self._host_mcp_servers = list(host_mcp_servers or ())
+        if mcp_role not in (None, "coordinator", "worker"):
+            raise ValueError("mcp_role must be coordinator or worker.")
+        self._mcp_role = mcp_role
         # T024: optional sink -- see ``engine.terminal_bridge.TerminalBridge``
         # and ``delegation.live_adapters``'s real binding of this to
         # ``recovery.large_output_store``; ``None`` (default) never persists.
@@ -262,6 +283,7 @@ class EngineSessionManager:
         self._agent_capabilities: dict = {}
         self._negotiated: tuple = ()
         self._session_config_options: dict[str, list] = {}
+        self._session_external_mcp_inventory: dict[str, dict] = {}
         self._session_locks: dict[str, threading.Lock] = {}
         self._update_queues: dict[str, tuple[queue.Queue, threading.Event, object]] = {}
         # F1 (T012 review): per-wire-session turn identity/serialization
@@ -275,6 +297,70 @@ class EngineSessionManager:
         # prompt_turn actively streaming, so release() can deliver a
         # distinct terminal marker to it.
         self._in_flight_prompt: dict[str, bool] = {}
+        # Keyed by the exact ACP wire session/tool pair. Tool ids can be
+        # reused by an engine across sessions, so neither part may be omitted.
+        self._streamed_terminal_output: dict[tuple[str, str], tuple[str, bool]] = {}
+
+    def _clear_streamed_terminal_output(self, wire_session_id: str | None) -> None:
+        if wire_session_id is None:
+            return
+        with self._lock:
+            stale = [key for key in self._streamed_terminal_output if key[0] == wire_session_id]
+            for key in stale:
+                self._streamed_terminal_output.pop(key, None)
+
+    def _terminal_output_from_meta(self, wire_session_id: str, wire_tool_call_id: str,
+                                   meta: object) -> tuple[str | None, bool]:
+        """Accumulate Codex terminal-output metadata for one exact tool call.
+
+        Codex 1.12 emits output chunks in ``terminal_output_delta`` and keeps
+        the final raw output envelope for the exit code. ACP's portable event
+        model has no separate terminal-output event, so the accumulated text
+        is carried as ``rawOutput.formatted_output`` for the normal tool
+        observation path.
+        """
+        if not isinstance(meta, dict):
+            return None, False
+        output_meta = meta.get("terminal_output_delta") or meta.get("terminal_output")
+        if not isinstance(output_meta, dict) or not isinstance(output_meta.get("data"), str):
+            return None, False
+        key = (wire_session_id, wire_tool_call_id)
+        with self._lock:
+            prior, truncated = self._streamed_terminal_output.get(key, ("", False))
+            data = output_meta["data"]
+            available = MAX_STREAMED_TERMINAL_OUTPUT_BYTES - len(prior.encode("utf-8"))
+            if available <= 0:
+                truncated = True
+            else:
+                encoded = data.encode("utf-8")
+                if len(encoded) <= available:
+                    prior += data
+                else:
+                    # Decode only complete UTF-8 prefixes, then make the
+                    # loss explicit in both text and structured metadata.
+                    keep = max(0, available - len(_STREAMED_OUTPUT_TRUNCATION_MARKER.encode("utf-8")))
+                    prior += encoded[:keep].decode("utf-8", errors="ignore")
+                    prior += _STREAMED_OUTPUT_TRUNCATION_MARKER
+                    truncated = True
+                self._streamed_terminal_output[key] = (prior, truncated)
+            return prior, truncated
+
+    def _merge_streamed_terminal_output(self, wire_session_id: str, wire_tool_call_id: str,
+                                        raw_output: object, *, terminal: bool) -> object:
+        with self._lock:
+            buffered = self._streamed_terminal_output.get((wire_session_id, wire_tool_call_id))
+        if buffered is None:
+            return raw_output
+        text, truncated = buffered
+        merged = dict(raw_output) if isinstance(raw_output, dict) else {}
+        if not isinstance(merged.get("formatted_output"), str) or not merged.get("formatted_output"):
+            merged["formatted_output"] = text
+        if truncated:
+            merged["output_truncated"] = True
+        if terminal:
+            with self._lock:
+                self._streamed_terminal_output.pop((wire_session_id, wire_tool_call_id), None)
+        return merged
 
     # -- lifecycle -------------------------------------------------------
 
@@ -319,11 +405,20 @@ class EngineSessionManager:
         with self._lock:
             if self._process is not None:
                 return
-            self._process = EngineProcess(self._record, self._workspace_root, environ=self._environ, install=self._install)
+            project_root = self._channel_credentials[2] if self._channel_credentials is not None else None
+            self._process = EngineProcess(
+                self._record, self._workspace_root, environ=self._environ, install=self._install,
+                broker_mcp=self._broker_mcp, project_root=project_root,
+                channel_credentials=self._channel_credentials,
+            )
             self._permission_bridge = PermissionBridge(
                 correlation=self.correlation, bindings=self.bindings, logs=self._process.logs,
-                host_permission_requester=self._host_permission_requester, call_timeout=self._call_timeout,
+                host_permission_requester=self._host_permission_requester,
+                call_timeout=max(self._call_timeout, DEFAULT_MANUAL_PERMISSION_TIMEOUT),
                 coordinator_refusal_notifier=self._coordinator_refusal_notifier,
+                permission_receipt_sink=self._permission_receipt_sink,
+                coordinator_draft_write_authorizer=self._coordinator_draft_write_authorizer,
+                worker_draft_write_authorizer=self._worker_draft_write_authorizer,
             )
             self._fs_bridge = FsBridge()
             self._terminal_bridge = TerminalBridge(persist_sink=self._terminal_output_persist)
@@ -552,8 +647,9 @@ class EngineSessionManager:
         ``delegation.live_adapters._session_new_meta_for``, which never
         builds one for an engine/version whose
         ``engine.instruction_delivery_registry`` mechanism is not
-        QUALIFIED via exactly this channel (today: claude-agent-acp 0.78.0
-        only, its real ``_meta.systemPrompt`` channel -- see that
+        QUALIFIED via exactly this channel (Claude 0.78.0 and Cortex's
+        verified private codex-acp 1.12.0 adapter support
+        ``_meta.systemPrompt`` -- see that
         registry's own docstring for the dist evidence). Never validated
         here beyond "is a dict" -- the producer is solely responsible for
         its shape.
@@ -562,14 +658,22 @@ class EngineSessionManager:
         params: dict = dict(cwd=self._workspace_root)
         if self._channel_credentials is not None:
             channel_id, secret, project_root = self._channel_credentials
-            params["mcpServers"] = build_mcp_servers(channel_id, secret, project_root)
+            broker = self._process.mcp_broker if self._process is not None else None
+            params["mcpServers"] = build_mcp_servers(
+                channel_id, secret, project_root,
+                relay_endpoint=broker.endpoint if broker is not None else None,
+                relay_token=broker.relay_token if broker is not None else None,
+            )
         else:
             params["mcpServers"] = []
         # Cortex's own server first, then the client's -- an engine that
         # stops at the first name still finds the one this runtime depends
         # on, and a client entry can never displace it (host_mcp_servers
         # refuses one called "cortex").
-        params["mcpServers"] = list(params["mcpServers"]) + host_mcp_servers(self._host_mcp_servers)
+        # Use the verified connection record's engine identity; model labels
+        # and host display provider names are not admission authorities.
+        external_servers = host_mcp_servers(self._host_mcp_servers, role=self._mcp_role, engine=self._record.engine)
+        params["mcpServers"] = list(params["mcpServers"]) + external_servers
         if session_new_meta is not None:
             if not isinstance(session_new_meta, dict):
                 raise _fail("invalid_field", "session_new_meta must be a dict.", field="session_new_meta")
@@ -582,8 +686,23 @@ class EngineSessionManager:
             portable_session_id = new_id("es_")
             self.correlation.register_session(portable_session_id, wire_session_id)
             self._session_config_options[portable_session_id] = result.get("configOptions") or []
+            names = sorted({str(server["name"]) for server in external_servers})
+            self._session_external_mcp_inventory[portable_session_id] = {
+                "role": self._mcp_role,
+                "engine": self._record.engine,
+                "server_count": len(external_servers),
+                "server_names": names[:64],
+                "names_truncated": len(names) > 64,
+                "tool_count": None,
+                "tool_schemas_observed": False,
+            }
             self._session_locks[portable_session_id] = threading.Lock()
         self._process.logs.observe("session_created", portable_session_id=portable_session_id)
+        self._process.logs.observe("external_mcp_inventory", **self.external_mcp_inventory(portable_session_id))
+        # The broker owns the actual child ``tools/list`` observation.  Record
+        # only its bounded receipt here, never the response body or schemas.
+        receipt = self.mcp_tools_receipt(portable_session_id)
+        self._process.logs.observe("mcp_tools_receipt", **receipt)
         return portable_session_id
 
     def observed_config_options(self, engine_session_id: str) -> list | None:
@@ -597,6 +716,48 @@ class EngineSessionManager:
         ``cortex_acp_setup.py record-observation`` manual fallback. Never
         itself sends anything to the engine."""
         return self._session_config_options.get(engine_session_id)
+
+    def external_mcp_inventory(self, engine_session_id: str) -> dict:
+        """Bounded metadata for external servers offered at session/new.
+
+        This proves only forwarding, never engine tool discovery or model use.
+        Credentials, command arguments and tool schemas are never retained.
+        """
+        receipt = self._session_external_mcp_inventory.get(engine_session_id)
+        if receipt is None:
+            raise _fail("unknown_engine_session", "No external MCP inventory for this session.")
+        return dict(receipt, server_names=list(receipt["server_names"]))
+
+    def mcp_tools_receipt(self, engine_session_id: str) -> dict:
+        """Return metadata-only MCP tools/list evidence for one live session.
+
+        The child relay is one trusted Cortex server per engine process, so the
+        broker receipt is scoped to this session by the returned session id but
+        is not reconstructed from a synthetic tools/list call.  Engines that
+        defer discovery remain explicitly ``not_observed``.  An observed
+        incomplete base report list is represented as ``incomplete`` and is
+        also surfaced by :meth:`prompt_turn` as a fail-closed MCP error.
+        """
+        if engine_session_id not in self._session_config_options:
+            raise _fail(
+                "unknown_engine_session",
+                "engine_session_id is not a live session on this engine instance.",
+            )
+        broker = self._process.mcp_broker if self._process is not None else None
+        if broker is None:
+            receipt = {
+                "state": "not_observed",
+                "tool_count": None,
+                "tool_names": [],
+                "schema_digests": {},
+                "required_tools": ["create_draft", "write_report"],
+                "missing_required_tools": ["create_draft", "write_report"],
+                "worker_publish_result_present": None,
+            }
+        else:
+            receipt = broker.tools_receipt
+        receipt["engine_session_id"] = engine_session_id
+        return receipt
 
     def configure(self, engine_session_id: str, revision) -> str:
         wire_session_id = self.correlation.wire_session_id(engine_session_id)
@@ -678,7 +839,7 @@ class EngineSessionManager:
         pairs = ";".join(f"{option_id}={value}" for option_id, value in mapping)
         return f"{self._process.engine_instance_id}:{wire_session_id}:{pairs}"
 
-    def prompt_turn(self, engine_session_id: str, prompt: str):
+    def prompt_turn(self, engine_session_id: str, prompt: str, prompt_blocks=None):
         if engine_session_id in self._poisoned_sessions:
             raise _session_unusable_error()
         wire_session_id = self.correlation.wire_session_id(engine_session_id)
@@ -688,7 +849,7 @@ class EngineSessionManager:
         session_lock.acquire()
         self._in_flight_prompt[engine_session_id] = True
         lock_released = False
-        turn_gen = self._prompt_turn_locked(wire_session_id, prompt)
+        turn_gen = self._prompt_turn_locked(wire_session_id, prompt, prompt_blocks)
         try:
             for event in turn_gen:
                 yield event
@@ -704,6 +865,7 @@ class EngineSessionManager:
             lock_released = True
             raise
         finally:
+            self._clear_streamed_terminal_output(wire_session_id)
             self._in_flight_prompt.pop(engine_session_id, None)
             if not lock_released:
                 session_lock.release()
@@ -722,6 +884,7 @@ class EngineSessionManager:
         still outstanding.
         """
         self._process.logs.observe("prompt_turn_abandoned", engine_session_id=engine_session_id, wire_session_id=wire_session_id)
+        self._clear_streamed_terminal_output(wire_session_id)
         self._active_turn_token.pop(wire_session_id, None)
         self._invalidate_actions_pending_for_wire_session(engine_session_id, wire_session_id)
         self.cancel_wire(wire_session_id)
@@ -744,7 +907,7 @@ class EngineSessionManager:
         except Exception:  # noqa: BLE001 - best-effort cleanup only
             pass
 
-    def _prompt_turn_locked(self, wire_session_id: str, prompt: str):
+    def _prompt_turn_locked(self, wire_session_id: str, prompt: str, prompt_blocks=None):
         update_queue: "queue.Queue" = queue.Queue(maxsize=self._update_queue_maxsize)
         overflowed = threading.Event()
         token = object()
@@ -768,7 +931,7 @@ class EngineSessionManager:
                     # the engine.
                     outcome["result"] = self._client.call(
                         "session/prompt",
-                        dict(sessionId=wire_session_id, prompt=[dict(type="text", text=prompt)]),
+                        dict(sessionId=wire_session_id, prompt=list(prompt_blocks) if prompt_blocks is not None else [dict(type="text", text=prompt)]),
                         timeout=None,
                     )
                 except Exception as exc:  # noqa: BLE001 - surfaced to the generator's caller below
@@ -780,8 +943,21 @@ class EngineSessionManager:
             call_thread = threading.Thread(target=run_call, name="engine-prompt-call", daemon=True)
             call_thread.start()
 
+            broker = self._process.mcp_broker if self._process is not None else None
+            mcp_failure = None
             while True:
-                item = update_queue.get()
+                try:
+                    item = update_queue.get(timeout=0.25 if broker is not None else None)
+                except queue.Empty:
+                    item = ...
+                if broker is not None and mcp_failure is None:
+                    state = broker.readiness(0)
+                    if state not in ("ready", "not_observed"):
+                        mcp_failure = state
+                        self._process.logs.observe("mcp_connection_failed", reason=state)
+                        self.cancel_wire(wire_session_id)
+                if item is ...:
+                    continue
                 if item is None:
                     break
                 yield item
@@ -790,6 +966,10 @@ class EngineSessionManager:
                     self.cancel_wire(wire_session_id)
 
             call_thread.join()
+            if mcp_failure is not None and broker.readiness(0) != "ready":
+                yield EngineEvent(kind=EngineEventKind.ERROR,
+                                  error_message=f"cortex_mcp_connection_failed:{mcp_failure}")
+                return
             if "error" in outcome:
                 error = outcome["error"]
                 if isinstance(error, EngineTransportClosed):
@@ -832,6 +1012,7 @@ class EngineSessionManager:
 
     def cancel_wire(self, wire_session_id: str) -> None:
         self._process.logs.observe("cancel_requested", wire_session_id=wire_session_id)
+        self._clear_streamed_terminal_output(wire_session_id)
         try:
             self._client.notify("session/cancel", dict(sessionId=wire_session_id))
         except Exception:  # noqa: BLE001 - cancellation is always best-effort
@@ -869,9 +1050,11 @@ class EngineSessionManager:
             self.cancel_wire(wire_session_id)
         self.correlation.release_session(engine_session_id)
         self._session_config_options.pop(engine_session_id, None)
+        self._session_external_mcp_inventory.pop(engine_session_id, None)
         self._session_locks.pop(engine_session_id, None)
         self._poisoned_sessions.discard(engine_session_id)
         if wire_session_id is not None:
+            self._clear_streamed_terminal_output(wire_session_id)
             self._update_queues.pop(wire_session_id, None)
             self._active_turn_token.pop(wire_session_id, None)
         # T014: a released session's resource binding is invalidated
@@ -967,11 +1150,22 @@ class EngineSessionManager:
             if isinstance(meta, dict) and isinstance(meta.get("contextCompaction"), dict) and ref is not None:
                 status = update.get("status") if isinstance(update.get("status"), str) else "unknown"
                 return EngineEvent(kind=EngineEventKind.COMPACTION_SIGNAL, tool_call_ref=ref, compaction_reason=status)
+            wire_tool_call_id = update.get("toolCallId")
+            if isinstance(wire_tool_call_id, str) and isinstance(meta, dict):
+                self._terminal_output_from_meta(
+                    str(wire_session_id), wire_tool_call_id, meta,
+                )
             title = update.get("title")
             if isinstance(title, str) and len(title) > 200:
                 title = title[:200]
             locations = update.get("locations")
             content = update.get("content")
+            raw_output = update.get("rawOutput")
+            if isinstance(wire_tool_call_id, str):
+                raw_output = self._merge_streamed_terminal_output(
+                    str(wire_session_id), wire_tool_call_id, raw_output,
+                    terminal=update.get("status") in {"completed", "failed"},
+                )
             return EngineEvent(
                 kind=EngineEventKind.TOOL_CALL_OBSERVED, tool_call_ref=ref,
                 tool_call_kind=update.get("kind") if isinstance(update.get("kind"), str) else None,
@@ -979,6 +1173,8 @@ class EngineSessionManager:
                 tool_call_status=update.get("status") if isinstance(update.get("status"), str) else None,
                 tool_call_locations=tuple(locations) if isinstance(locations, list) else None,
                 tool_call_content=tuple(content) if isinstance(content, list) else None,
+                tool_call_raw_input=update.get("rawInput"),
+                tool_call_raw_output=raw_output,
             )
         if kind == "usage_update":
             usage = update.get("usage") or {}

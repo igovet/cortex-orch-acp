@@ -20,6 +20,7 @@ matching row from this attempt's own observations.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 
 
 def _now() -> str:
@@ -77,3 +78,40 @@ def resolve_check(store, attempt_id: str, tool_call_ref: str | None) -> str:
     if status == "failed":
         return "contradicted"
     return "claimed"
+
+
+def record_permission_response(
+    store, task_id: str, attempt_id: str, tool_call_ref: str,
+    command: str, host_outcome: str,
+) -> None:
+    """Persist an actual ACP host response for one exact bound action.
+
+    The caller must have checked the engine binding after the host returned.
+    A repeated action identity with different command/outcome is a conflict,
+    never a fresh approval. No model-authored report can create this row.
+    """
+    if not tool_call_ref or not command or host_outcome not in {"allow_once", "reject_once", "cancelled"}:
+        raise ValueError("incomplete permission response")
+    digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            row = db.execute(
+                "SELECT command_sha256,host_outcome FROM permission_receipts "
+                "WHERE task_id=? AND attempt_id=? AND tool_call_ref=?",
+                (task_id, attempt_id, tool_call_ref),
+            ).fetchone()
+            if row is not None:
+                if row["command_sha256"] != digest or row["host_outcome"] != host_outcome:
+                    raise ValueError("permission response identity conflict")
+            else:
+                db.execute(
+                    "INSERT INTO permission_receipts "
+                    "(task_id,attempt_id,tool_call_ref,command_sha256,command_text,host_outcome,created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (task_id, attempt_id, tool_call_ref, digest, command, host_outcome, _now()),
+                )
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise

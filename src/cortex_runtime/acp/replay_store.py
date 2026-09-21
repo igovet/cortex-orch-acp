@@ -1,7 +1,7 @@
 """T018 durable source/content preservation, bounded reads, and host replay.
 
 A **tenth**, independent, all-or-nothing optional schema group on top of
-``SCHEMA+HOOK_SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
+``SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+
 ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+
 EVIDENCE_SCHEMA`` (see ``split.py``'s comments on the existing groups and
 ``store.py``'s ``Store.__init__``): a pre-T018 v11 store has none of these
@@ -94,13 +94,26 @@ CREATE TABLE IF NOT EXISTS host_transcript (
  kind TEXT NOT NULL CHECK(kind IN ('user_message','agent_message')),
  text TEXT NOT NULL,
  attachments_json TEXT,
+ message_id TEXT,
  created_at TEXT NOT NULL,
  UNIQUE(session_id, seq)
 );
 CREATE INDEX IF NOT EXISTS host_transcript_by_session ON host_transcript(session_id, seq);
+-- ACP session/load must be able to restore structured host-visible updates
+-- (tool cards, plans, and thoughts), not just text chunks.  This separate
+-- table keeps the original transcript schema/check constraints intact while
+-- sharing its monotonically ordered sequence namespace.
+CREATE TABLE IF NOT EXISTS host_updates (
+ session_id TEXT NOT NULL REFERENCES acp_host_sessions(session_id),
+ seq INTEGER NOT NULL,
+ update_json TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ UNIQUE(session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS host_updates_by_session ON host_updates(session_id, seq);
 '''
 
-REPLAY_TABLES = frozenset({"source_blocks", "source_block_reads", "host_transcript"})
+REPLAY_TABLES = frozenset({"source_blocks", "source_block_reads", "host_transcript", "host_updates"})
 
 TRUST_LABELS = frozenset({"user_direct", "file_content", "worker_report", "derived_summary"})
 
@@ -147,7 +160,7 @@ class BlockCapture:
     :func:`record_blocks` alongside its source event's published report."""
 
     block_index: int
-    kind: str  # 'resource' | 'resource_link'
+    kind: str  # 'resource' | 'resource_link' | 'image'
     mime: str | None
     name: str | None
     uri: str | None
@@ -318,7 +331,7 @@ def resolve_prompt_blocks(blocks: Sequence[Mapping[str, Any]], project_root: str
     ``append_source_event`` and ``acp.agent``).
 
     Only called for blocks that already passed ``protocol``'s type/shape
-    validation (``resource``/``resource_link``); text blocks contribute
+    validation (``resource``/``resource_link``/``image``); text blocks contribute
     nothing here (their exact text is already the report body).
 
     Never raises: any unexpected per-block failure (anything not already
@@ -333,7 +346,30 @@ def resolve_prompt_blocks(blocks: Sequence[Mapping[str, Any]], project_root: str
     for index, block in enumerate(blocks):
         kind = block.get("type") if isinstance(block, dict) else None
         try:
-            if kind == "resource":
+            if kind == "image":
+                import base64
+                data = block.get("data")
+                mime = block.get("mimeType")
+                if not isinstance(data, str) or not isinstance(mime, str) or not mime.startswith("image/"):
+                    capture = BlockCapture(index, "image", mime if isinstance(mime, str) else None, None, None,
+                                           "inaccessible", "invalid_image", None)
+                else:
+                    encoded_block_cap = ((MAX_BLOCK_BYTES + 2) // 3) * 4
+                    if len(data) > encoded_block_cap:
+                        capture = BlockCapture(index, "image", mime, None, None, "too_large", "block_exceeds_1mib_cap", None)
+                    else:
+                        try:
+                            body = base64.b64decode(data, validate=True)
+                        except Exception:
+                            capture = BlockCapture(index, "image", mime, None, None, "inaccessible", "invalid_blob_encoding", None)
+                        else:
+                            if len(body) > MAX_BLOCK_BYTES or total + len(body) > MAX_PROMPT_ATTACHMENT_BYTES:
+                                reason = "block_exceeds_1mib_cap" if len(body) > MAX_BLOCK_BYTES else "prompt_attachment_total_exceeds_4mib_cap"
+                                capture = BlockCapture(index, "image", mime, None, None, "too_large", reason, None)
+                            else:
+                                capture = BlockCapture(index, "image", mime, None, None, "stored", None, body, False)
+                                total += len(body)
+            elif kind == "resource":
                 capture, total = _resolve_resource_block(index, block, total)
             elif kind == "resource_link":
                 capture, total = _resolve_resource_link_block(index, block, project_root, total)
@@ -703,7 +739,7 @@ def read_source(store, task_id: str, source_ref: str, offset: int = 0, limit: in
 # -- host transcript (session/load display-only replay) --------------------
 
 
-def append_host_transcript(store, session_id: str, kind: str, text: str, attachments: Sequence[Mapping[str, Any]] | None = None) -> int:
+def append_host_transcript(store, session_id: str, kind: str, text: str, attachments: Sequence[Mapping[str, Any]] | None = None, message_id: str | None = None) -> int:
     """Append one host-visible chunk for ``session_id``; returns its ``seq``.
 
     Never called from anywhere but ``acp.agent`` (capture-time for
@@ -716,11 +752,48 @@ def append_host_transcript(store, session_id: str, kind: str, text: str, attachm
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
-            row = db.execute("SELECT COALESCE(MAX(seq),-1) FROM host_transcript WHERE session_id=?", (session_id,)).fetchone()
-            seq = row[0] + 1
+            row = db.execute(
+                "SELECT MAX(seq) FROM (SELECT seq FROM host_transcript WHERE session_id=? "
+                "UNION ALL SELECT seq FROM host_updates WHERE session_id=?)", (session_id, session_id),
+            ).fetchone()
+            seq = (row[0] if row[0] is not None else -1) + 1
+            # Older project stores predate message_id. Upgrade this additive
+            # display-only column lazily while the write lock is already held.
+            columns = {row[1] for row in db.execute("PRAGMA table_info(host_transcript)")}
+            if "message_id" not in columns:
+                db.execute("ALTER TABLE host_transcript ADD COLUMN message_id TEXT")
             db.execute(
-                "INSERT INTO host_transcript(session_id,seq,kind,text,attachments_json,created_at) VALUES (?,?,?,?,?,?)",
-                (session_id, seq, kind, text, json.dumps(list(attachments or []), sort_keys=True, ensure_ascii=False), _now()),
+                "INSERT INTO host_transcript(session_id,seq,kind,text,attachments_json,message_id,created_at) VALUES (?,?,?,?,?,?,?)",
+                (session_id, seq, kind, text, json.dumps(list(attachments or []), sort_keys=True, ensure_ascii=False), message_id, _now()),
+            )
+            db.commit()
+        except BaseException:
+            db.rollback(); raise
+    return seq
+
+
+def append_host_update(store, session_id: str, update: Mapping[str, Any]) -> int:
+    """Persist one structured ``session/update`` before transport enqueue.
+
+    The record contains the exact runtime-produced ACP payload offered to the
+    host. It does not prove transport receipt or rendering. It is display
+    history, never engine input. Keeping a shared sequence with
+    ``host_transcript`` lets ``session/load`` reproduce the outbound order.
+    """
+    if not isinstance(update, Mapping) or not isinstance(update.get("sessionUpdate"), str):
+        raise ValueError("update must contain sessionUpdate")
+    encoded = json.dumps(dict(update), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            row = db.execute(
+                "SELECT MAX(seq) FROM (SELECT seq FROM host_transcript WHERE session_id=? "
+                "UNION ALL SELECT seq FROM host_updates WHERE session_id=?)", (session_id, session_id),
+            ).fetchone()
+            seq = (row[0] if row[0] is not None else -1) + 1
+            db.execute(
+                "INSERT INTO host_updates(session_id,seq,update_json,created_at) VALUES (?,?,?,?)",
+                (session_id, seq, encoded, _now()),
             )
             db.commit()
         except BaseException:
@@ -739,10 +812,132 @@ def replay_session(store, session_id: str) -> list[dict]:
     assertions around the call).
     """
     with store.connection() as db:
+        try:
+            rows = db.execute(
+                "SELECT seq, kind, text, attachments_json, message_id, NULL AS update_json "
+                "FROM host_transcript WHERE session_id=? "
+                "UNION ALL SELECT seq, 'update' AS kind, NULL AS text, '[]' AS attachments_json, NULL AS message_id, update_json "
+                "FROM host_updates WHERE session_id=? ORDER BY seq", (session_id, session_id),
+            ).fetchall()
+        except Exception as exc:
+            # A pre-messageId store can still be loaded read-only.  Its old
+            # rows have no exact grouping evidence, so the caller assigns a
+            # distinct fallback id per replayed row rather than merging it.
+            if "no such column" not in str(exc).lower():
+                raise
+            rows = db.execute(
+                "SELECT seq, kind, text, attachments_json, NULL AS message_id, NULL AS update_json "
+                "FROM host_transcript WHERE session_id=? "
+                "UNION ALL SELECT seq, 'update' AS kind, NULL AS text, '[]' AS attachments_json, NULL AS message_id, update_json "
+                "FROM host_updates WHERE session_id=? ORDER BY seq", (session_id, session_id),
+            ).fetchall()
+    result = []
+    for row in rows:
+        if row["kind"] == "update":
+            try:
+                update = json.loads(row["update_json"])
+            except (TypeError, ValueError):
+                # Never fabricate a malformed host event during replay.
+                continue
+            if isinstance(update, dict) and isinstance(update.get("sessionUpdate"), str):
+                result.append(dict(kind="update", update=update))
+            continue
+        try:
+            attachments = json.loads(row["attachments_json"] or "[]")
+        except (TypeError, ValueError):
+            # A damaged legacy transcript row must never make session/load
+            # fail after it has already replayed earlier entries.  Dropping
+            # this one row is the only honest outcome: inventing an empty
+            # attachment list would claim evidence that is not available.
+            continue
+        if not isinstance(attachments, list):
+            continue
+        result.append(dict(kind=row["kind"], text=row["text"], attachments=attachments, message_id=row["message_id"]))
+    return result
+
+
+def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[Mapping[str, Any]]) -> list[dict]:
+    """Return terminal card updates justified by durable assignment events.
+
+    A worker result can be recorded immediately before ``/cortex-stop`` and
+    before the worker card's in-flight turn emits its final update.  The
+    historical host stream then contains a real worker card stuck in
+    ``in_progress`` even though the durable assignment is terminal.  This
+    read-only reconciliation supplies one ACP update for that existing card
+    during ``session/load``; it never creates a card absent from history and
+    never infers a terminal state from task status alone.
+    """
+    latest: dict[str, str] = {}
+    seen_cards: set[str] = set()
+    for entry in history:
+        if entry.get("kind") != "update":
+            continue
+        update = entry.get("update")
+        if not isinstance(update, Mapping):
+            continue
+        card_id = update.get("toolCallId")
+        if not isinstance(card_id, str) or not card_id.startswith("worker:"):
+            continue
+        seen_cards.add(card_id)
+        status = update.get("status")
+        if isinstance(status, str):
+            latest[card_id] = status
+    if not seen_cards:
+        return []
+    with store.connection() as db:
+        attempts = {
+            row["attempt_id"]: row["idempotency_key"]
+            for row in db.execute(
+                "SELECT attempt_id, idempotency_key FROM delegation_provisioning "
+                "WHERE task_id=? AND attempt_id IS NOT NULL", (task_id,),
+            ).fetchall()
+        }
         rows = db.execute(
-            "SELECT kind,text,attachments_json FROM host_transcript WHERE session_id=? ORDER BY seq", (session_id,),
+            "SELECT assignment_ref, event_type, payload_json FROM task_events "
+            "WHERE task_id=? AND event_type IN ('worker_result','assignment_failed','assignment_cancelled') "
+            "AND superseded=0 ORDER BY id", (task_id,),
         ).fetchall()
-    return [dict(kind=row["kind"], text=row["text"], attachments=json.loads(row["attachments_json"] or "[]")) for row in rows]
+    # A task-wide cancellation can be recorded after a worker has already
+    # published its result.  Group terminal evidence by assignment and let a
+    # real worker_result win over cancellation/failure regardless of insert
+    # order; the task's stopped state remains separate from the attempt's
+    # observed result.
+    terminal_by_card: dict[str, Any] = {}
+    priority = {"worker_result": 2, "assignment_failed": 1, "assignment_cancelled": 1}
+    for row in rows:
+        assignment_ref = attempts.get(row["assignment_ref"], row["assignment_ref"])
+        card_id = f"worker:{assignment_ref}" if assignment_ref else ""
+        if card_id not in seen_cards:
+            continue
+        prior = terminal_by_card.get(card_id)
+        if prior is None or priority.get(row["event_type"], 0) > priority.get(prior["event_type"], 0):
+            terminal_by_card[card_id] = row
+    corrections: list[dict] = []
+    for card_id, row in terminal_by_card.items():
+        if latest.get(card_id) in {"completed", "failed"}:
+            continue
+        event_type = row["event_type"]
+        status = "completed" if event_type == "worker_result" else "failed"
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, Mapping):
+            payload = {}
+        if event_type == "worker_result":
+            summary = payload.get("summary")
+            text = f"Result: {summary}" if isinstance(summary, str) and summary else None
+        elif event_type == "assignment_cancelled":
+            reason = payload.get("reason")
+            text = f"Cancelled: {reason}" if isinstance(reason, str) and reason else None
+        else:
+            error = payload.get("error")
+            text = f"Not delegated/failed: {error}" if isinstance(error, str) and error else None
+        update = {"sessionUpdate": "tool_call_update", "toolCallId": card_id, "status": status}
+        if text:
+            update["content"] = [{"type": "text", "text": text[:300]}]
+        corrections.append(update)
+    return corrections
 
 
 # -- crash recovery: source_events captured but never recorded as a
@@ -793,6 +988,53 @@ def record_user_message_event(
             db.rollback()
             raise
     return event
+
+
+def record_user_message_answer_event(
+    store, task_id: str, dedup_key: str, origin: str, payload: Mapping[str, Any],
+    *, question_id: str, answer_text: str, answer_source: str = "text",
+    ledger_origin: str | None = None, ledger_event_id: str | None = None,
+):
+    """Append a user message and CAS-answer its question atomically."""
+    from ..delegation import events as delegation_events
+
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            existing = db.execute(
+                "SELECT * FROM task_events WHERE task_id=? AND dedup_key=?",
+                (task_id, dedup_key),
+            ).fetchone()
+            if existing is not None:
+                event = delegation_events.TaskEvent._from_row(existing)
+                db.commit()
+                return event, not event.superseded
+            event = delegation_events.append_event_tx(db, task_id, "user_message", dedup_key, payload, origin=origin)
+            if ledger_origin is not None and ledger_event_id is not None:
+                db.execute(
+                    "UPDATE source_events SET ledger_state='recorded' WHERE origin=? AND event_id=? AND ledger_state IS NULL",
+                    (ledger_origin, ledger_event_id),
+                )
+            cursor = db.execute(
+                "UPDATE pending_questions SET status='answered', answer_text=?, answer_source=?, answered_at=datetime('now') "
+                "WHERE id=? AND task_id=? AND status='open'",
+                (answer_text, answer_source, question_id, task_id),
+            )
+            if cursor.rowcount == 0:
+                db.execute(
+                    "INSERT INTO pending_question_late_answers (question_id, task_id, answer_text, answer_source, received_at) "
+                    "VALUES (?,?,?,?,datetime('now'))",
+                    (question_id, task_id, answer_text, answer_source),
+                )
+                db.execute(
+                    "UPDATE task_events SET superseded=1 WHERE task_id=? AND id=? AND consumed_by IS NULL AND superseded=0",
+                    (task_id, event.id),
+                )
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+    return event, cursor.rowcount == 1
 
 
 def find_unrecorded_source_events(store, task_id: str) -> list[dict]:

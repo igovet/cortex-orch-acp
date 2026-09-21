@@ -4,7 +4,15 @@ import subprocess
 import tomllib
 import pytest
 
-from cortex_package import PLUGIN, ROOT, payload_digest, validate
+from cortex_package import (
+    PAYLOAD_ENTRIES,
+    PLUGIN,
+    ROOT,
+    paseo_plugin_payload_digest,
+    payload_digest,
+    payload_paths,
+    validate,
+)
 from generate_agent_profiles import (
     check as check_agent_profiles,
     expected_agent_references,
@@ -25,27 +33,49 @@ def test_stamped_package_and_profiles():
     assert {p.name for p in (PLUGIN/'src/cortex_runtime').glob('*.py')}==expected_runtime
 
 
-
-def test_release_readiness_keeps_retained_host_runs_historical_and_superseded():
-    readiness = (ROOT/'docs/release-readiness.md').read_text()
-    historical = (
-        'Both retained final host runs belong to superseded payload `e4f332d43bf38024`,\n'
-        'used its unchanged isolated candidate with Luna coordination/workers and no stable\n'
-        'installation or configuration change, and are historical-only.'
-    )
-    assert historical in readiness
-    assert ('they do not qualify current payload\n'
-            '`07c3aeae551a990e`.') in readiness
-    assert 'Both final host runs used the unchanged current candidate' not in readiness
+def test_paseo_provider_is_part_of_release_payload_and_has_integrity_stamp():
+    assert 'integrations' in PAYLOAD_ENTRIES
+    provider = PLUGIN / 'integrations' / 'paseo'
+    assert provider.is_dir()
+    assert (provider / 'plugin-integrity.json').is_file()
+    names = {relative for relative, _path in payload_paths(PLUGIN)}
+    assert 'integrations/paseo/plugin-integrity.json' in names
 
 
+def test_paseo_provider_waits_for_initial_acp_commands():
+    """The native bridge must not cache an empty slash-command list."""
+    source = (PLUGIN / 'integrations' / 'paseo' / 'server' / 'provider.ts').read_text()
+    assert 'waitForInitialCommands: true' in source
+    assert 'initialCommandsTimeoutMs: 2000' in source
 
-def test_mcp_advertises_only_the_observation_environment():
-    mcp = json.loads((PLUGIN/'.mcp.json').read_text())['mcpServers']['cortex']
-    assert set(mcp['env_vars']) == {'CORTEX_OBSERVATION_DIR'}
+
+def test_paseo_provider_repairs_only_null_failed_timeline_errors():
+    """Paseo 0.8 must be able to reload canceled failed tool cards."""
+    source = (PLUGIN / 'integrations' / 'paseo' / 'server' / 'provider.ts').read_text()
+    assert 'event.item.status === "failed"' in source
+    assert 'event.item.error === null' in source
+    assert 'error: `Tool call failed: ${event.item.name}`' in source
+    # The fallback must remain plain text for the compact Paseo card, and the
+    # source must preserve already supplied provider errors.
+    assert 'return event;' in source
 
 
-def test_native_profiles_keep_roles_and_use_mcp_task_documents():
+def test_paseo_provider_replays_history_after_session_opened():
+    """Historical timeline events must not be dropped before session.opened."""
+    source = (PLUGIN / 'integrations' / 'paseo' / 'server' / 'provider.ts').read_text()
+    assert 'MAX_BUFFERED_TIMELINE_ITEMS = 4096' in source
+    assert 'MAX_BUFFERED_TIMELINE_BYTES = 16 * 1024 * 1024' in source
+    assert 'const bufferedTimeline = new Map<string, ProviderEvent[]>()' in source
+    assert 'event.type === "timeline.item" && !openedSessions.has(event.sessionId)' in source
+    assert 'for (const historical of pending ?? [])' in source
+    assert 'listener(event);' in source
+    assert 'bufferedTimeline.clear();' in source
+    assert 'bufferedTimelineBytes.clear();' in source
+    assert 'event.type === "session.closed" || event.type === "session.runtime_failed"' in source
+
+
+
+def test_acp_profiles_keep_roles_and_use_mcp_task_documents():
     check_agent_profiles()
     assert all(path.read_bytes() == body for path, body in expected_profiles().items())
     assert len(expected_agent_references())==3
@@ -72,27 +102,17 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
             'Quality criteria',
             'Recovery',
         } <= headings
-        # Raised once, for the one rule that makes a worker's isolation
-        # something it understands rather than something it discovers by
-        # being refused: work in your own copy, the project's real paths
-        # are not yours. Live, a worker edited the project directly and
-        # its change reached the coordinator with no integration and no
-        # check at all. This guard exists to stop drift, not to price out
-        # a rule the product needs.
+        # Keep the complete role within the package's instruction budget.
         assert len(instructions) < 12_900
-        assert 'page of at most\n4,000 characters' in instructions
-        assert 'not a total context limit' in instructions
-        # Named for `read_skill`, never as a path: a worker's working
-        # directory is a copy of the user's project, so the relative link
-        # these profiles used to carry resolved to nothing there -- and
-        # the step report-publication explains is the one three workers
-        # failed at in a single day (2026-09-19).
+        assert 'Read assigned published reports through bounded' in instructions
+        assert 'page of at most 4,000 characters' not in instructions
+        # References are named for read_skill, not resolved as project paths.
         assert 'read_skill("report-publication")' in instructions
         assert 'read_skill("code-and-evidence")' in instructions
         assert 'read_skill("interactive-resources")' in instructions
         assert '](references/' not in instructions
         assert 'Private Cortex evidence has a strict boundary:' in instructions
-        assert 'mcp__cortex__read_report' in instructions
+        assert '`read_report`' in instructions
         assert 'Missing evidence is a stated gap/impact' in instructions
         assert 'first and only general catalogue query' not in instructions
         assert 'final `__`-delimited segment' not in instructions
@@ -100,20 +120,20 @@ def test_native_profiles_keep_roles_and_use_mcp_task_documents():
     control=(PLUGIN/'skills/cortex-control/SKILL.md').read_text()
     assert '[report example catalogue](references/index.md)' in control
     publication=(PLUGIN/'agent-sources/references/report-publication.md').read_text()
-    assert 'crypto.randomUUID()' in publication
-    assert 'pass a literal UUID in the tool arguments' in publication
-    assert 'supply every required field, including on the initial call' in publication
-    assert 'Never probe required\nfields with an empty argument object' in publication
-    assert 'Omit `request_key` for' not in publication
+    assert 'read its complete live declaration' in publication
+    assert 'Do not probe with speculative calls' in publication
+    assert 'request_key' not in publication
+    assert 'UUID' not in publication
     orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
     assert 'Delegate discovery AND requested files (notes included)' in orchestrator
     assert 'missing output to that worker; never create it yourself' in orchestrator
     pipeline_publication=(PLUGIN/'skills/orchestrator/references/pipeline-publication.md').read_text()
-    assert 'When a pipeline mutation schema requires `request_key`' in pipeline_publication
+    assert 'Follow each operation\'s advertised\nretry contract' in pipeline_publication
+    assert 'request_key' not in pipeline_publication
     assert 'ordered `replaceable_markers` list as authoritative' in pipeline_publication
     assert 'replace every exact\nlisted marker in place' in pipeline_publication
     assert 'coordinator publishes a current\n`pipeline` edition, while a worker publishes its own non-pipeline report' in pipeline_publication
-    assert 'same draft and the original request key\nand metadata' in pipeline_publication
+    assert 'keep this same draft, correct every exact remaining\nmarker in place' in pipeline_publication
     assert 'draft or replay an acknowledged publication' in pipeline_publication
 
 
@@ -126,11 +146,65 @@ def test_coordinator_publication_guidance_closes_observed_draft_failure():
     assert 'verify that no listed marker (or other exact template\nplaceholder) remains' in reference
 
 
+def test_pre_accept_pipeline_guidance_describes_durable_decision_basis():
+    orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
+    reference=(PLUGIN/'skills/orchestrator/references/pipeline-publication.md').read_text()
+    for guidance in (orchestrator, reference):
+        normalized=' '.join(guidance.split())
+        assert 'factual basis' in normalized
+        assert 'durable task decision and state' in normalized.lower()
+        assert 'Do not claim acceptance before the `decide` receipt' in normalized or (
+            'Do not say acceptance was already recorded before the `decide` receipt' in normalized
+        )
+        assert 'anticipated acceptance' not in normalized
+
+
 
 def test_source_check_is_read_only():
     before=payload_digest(PLUGIN)
     result=subprocess.run([str(ROOT/'scripts/sync-cortex.sh'),'--check'],capture_output=True,text=True)
     assert result.returncode==0 and payload_digest(PLUGIN)==before
+
+
+def test_payload_enumeration_excludes_local_python_bytecode():
+    paths = [relative for relative, _path in payload_paths(PLUGIN)]
+    assert all('__pycache__' not in path for path in paths)
+    assert all(not path.endswith(('.pyc', '.pyo')) for path in paths)
+
+
+def test_payload_enumeration_prunes_dependencies_and_build_output_but_keeps_sources(tmp_path):
+    paseo = tmp_path / 'integrations' / 'paseo'
+    (paseo / 'client').mkdir(parents=True)
+    (paseo / 'node_modules' / '.bin').mkdir(parents=True)
+    (paseo / 'dist').mkdir()
+    (paseo / 'build').mkdir()
+    (paseo / 'client' / 'worker.ts').write_text('export {}\n')
+    (paseo / 'node_modules' / 'sdk.js').write_text('dependency\n')
+    (paseo / 'dist' / 'bundle.js').write_text('generated\n')
+    (paseo / 'build' / 'bundle.js').write_text('generated\n')
+    # The actual checkout has npm bin symlinks; an excluded dependency tree
+    # must not make release enumeration fail on them.
+    (paseo / 'node_modules' / '.bin' / 'sdk').symlink_to('../sdk.js')
+
+    names = {relative for relative, _path in payload_paths(tmp_path)}
+    assert 'integrations/paseo/client/worker.ts' in names
+    assert not any('/node_modules/' in name for name in names)
+    assert not any('/dist/' in name or '/build/' in name for name in names)
+
+
+def test_paseo_integrity_digest_ignores_local_dependency_tree(tmp_path):
+    paseo = tmp_path / 'paseo'
+    (paseo / 'server').mkdir(parents=True)
+    (paseo / 'node_modules').mkdir()
+    source = paseo / 'server' / 'provider.ts'
+    dependency = paseo / 'node_modules' / 'sdk.js'
+    source.write_text('export const provider = true;\n')
+    dependency.write_text('dependency-v1\n')
+    first = paseo_plugin_payload_digest(paseo)
+    dependency.write_text('dependency-v2\n')
+    assert paseo_plugin_payload_digest(paseo) == first
+    source.write_text('export const provider = false;\n')
+    assert paseo_plugin_payload_digest(paseo) != first
 
 
 
@@ -141,18 +215,19 @@ def test_worker_safety_and_post_wait_rules_are_payload_guidance():
     for rule in ('rm -rf', 'find ... -delete', 'git clean', 'reset/checkout', 'recursive cleanup'):
         assert rule in worker
     assert 'Checks `PYTHONDONTWRITEBYTECODE=1`' in worker
-    assert 'Before project action' in worker
+    assert 'These role instructions are delivered' in worker
     assert 'most specific native tool' in worker
     assert 'avoid Python/ad-hoc parsing' in ' '.join(worker.split())
     consultant = (PLUGIN/'agent-sources/consultant-protocol.md').read_text()
     assert 'most specific suitable native tool' in consultant
     assert 'fallback is valid otherwise' in consultant
-    assert 'a coordinator read never satisfies it' in worker
+    assert 'read_skill` for the named situational guidance' in worker
     assert 'one bounded command per wrapper' in worker
-    assert "`publish_result` names exactly one ID: this worker's own current assignment" in worker
-    assert 'other-worker\nreport ID only in the saved report' in worker
+    assert "`publish_result` hands off only this worker's own current assignment report" in worker
+    assert 'other-worker report evidence\nonly in the saved report' in worker
+    assert 'request_key' not in worker
     assert 'Timeout alone never replaces its active owner' in orchestrator
-    assert 'Reconcile actual outcomes' in orchestrator
+    assert 'Reconcile outcomes against published reports and public evidence' in orchestrator
 
 
 
@@ -169,11 +244,11 @@ def test_p0_p1_evidence_protocol_remains_model_owned_and_receipt_bound():
     assert 'basis, uncertainty, and\ndisconfirmation' in worker
     assert 'receipt-backed' in worker
     assert 'rollout/review/recheck/' in worker
-    assert 'implementation_state, delivery_state, and coordinator-owned acceptance_state' in pipeline
+    assert "Distinguish implementation and observed delivery from the evidence supporting the coordinator's task decision" in pipeline
 
 
 
-def test_coordinator_native_worker_tracking_is_distinct_from_app_task_management():
+def test_coordinator_reads_worker_handoffs_through_acp_events():
     orchestrator = (PLUGIN/'skills/orchestrator/references/worker-routing.md').read_text()
     payload = json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
     # What this used to require was the plugin harness's own vocabulary --
@@ -219,14 +294,8 @@ def test_sync_cannot_install_without_isolated_entrypoint():
 
 def test_markdown_local_links():
     import re
-    # T033: docs/project/verification.md is a frozen historical evidence
-    # record (out of scope for this task -- see INVARIANTS.md) that cites
-    # test files by their exact name at the time of that verification pass,
-    # including several Codex-plugin-harness-era test files removed at
-    # T033. Its links are expected to go stale as history accumulates; it
-    # is intentionally excluded here rather than edited.
     paths=[ROOT/'README.md',ROOT/'SECURITY.md',ROOT/'PRIVACY.md',
-           *(p for p in (ROOT/'docs').rglob('*.md') if p!=ROOT/'docs/project/verification.md'),
+           *(ROOT/'docs').rglob('*.md'),
            *list((PLUGIN/'skills').rglob('*.md')),*list((PLUGIN/'agents').glob('*.toml'))]
     for path in paths:
         for link in re.findall(r'\]\(([^)]+)\)',path.read_text()):
@@ -269,52 +338,30 @@ def test_orchestrator_routes_conditional_procedures_with_valid_links():
 
 
 def test_ordinary_completion_documentation_branches_are_semantic_and_conditional():
-    import re
-
     def completion_text(source):
         start = source.index('5. Before ordinary acceptance')
         end = source.index('\n\nFor production', start)
         return ' '.join(source[start:end].split())
 
     def assert_contract(completion):
-        positive = re.search(
-            r'If impact is supported.*?assign the appropriate documentation owner to apply '
-            r'`documentation-sync` \(readable with `read_skill`\); give that owner exact affected documentation '
-            r'ownership and require its updates plus proportionate verification before acceptance',
-            completion)
-        insufficient = re.search(
-            r'If inspection is partial or inconclusive, gather bounded missing evidence '
-            r'or leave impact unresolved and withhold acceptance until either supported '
-            r'`documentation-sync` synchronization completes or sufficient no-impact '
-            r'evidence exists', completion)
-        no_impact = re.search(
-            r'If sufficient evidence supports no impact, record a concise no-impact '
-            r'conclusion without token edits or an unnecessary worker', completion)
-        owner = re.search(
-            r'assign the appropriate documentation owner to apply '
-            r'`documentation-sync`', completion)
-        reconcile = re.search(
-            r'After the owner.s published documentation report, only Cortex '
-            r'report/public-evidence reads may compare its cited documentation hashes'
-            r'/check results before acceptance', completion)
-        delegated = re.search(
-            r'delegate any additional project inspection, file read/hash or command '
-            r'verification to an appropriate worker; return evidence in a task-bound '
-            r'report; the coordinator must not rerun project checks', completion)
-        accept = completion.index('Then accept the observed outcome')
-        assert positive and owner and reconcile and delegated and insufficient and no_impact
-        assert positive.start() < owner.start() < reconcile.start() < delegated.start() < insufficient.start() < no_impact.start() < accept
+        related = "Include related tests and affected documentation in the implementing worker's assignment when practical"
+        sync = 'that worker applies `documentation-sync` (readable with `read_skill`) and reports its changes and proportionate verification'
+        separate = 'Assign a separate technical writer when documentation is independent work or needs distinct ownership'
+        read_only = 'It may inspect bounded project source and public evidence read-only to reconcile the worker\'s report and cited revisions'
+        uncertain = 'If impact or verification remains uncertain, gather the missing evidence or keep acceptance open'
+        no_impact = 'A supported no-impact conclusion needs no token edit or extra worker'
+        acceptance = 'Accepting is `decide`, and only `decide`'
+        clauses = (related, sync, separate, read_only, uncertain, no_impact,
+                   'Then accept the observed outcome', acceptance)
+        assert all(clause in completion for clause in clauses)
+        assert [completion.index(clause) for clause in clauses] == sorted(
+            completion.index(clause) for clause in clauses)
         assert 'missing inspection is not evidence of no impact' in completion
         assert "The coordinator does not read another role's `SKILL.md`" in completion
-        assert re.search(
-            r'Keep `cortex:knowledge-harvest` explicit-only: this review is not a broad census',
-            completion)
+        assert 'coordinator does not read another role\'s `SKILL.md`, edit project files or rerun project checks' in completion
+        assert 'Keep `cortex:knowledge-harvest` explicit-only: this review is not a broad census' in completion
         assert 'model-owned/advisory decisions are not runtime gates' in completion
-        assert not re.search(
-            r'\b(?:for every ordinary task|regardless of impact|without regard to impact|always)\b'
-            r'.*?`documentation-sync`',
-            completion,
-            re.IGNORECASE)
+        assert 'For every ordinary task, apply `documentation-sync`' not in completion
 
     source = (PLUGIN/'skills/orchestrator/SKILL.md').read_text()
     completion = completion_text(source)
@@ -322,31 +369,31 @@ def test_ordinary_completion_documentation_branches_are_semantic_and_conditional
 
     # Branch polarity fixtures: these mutations must be rejected by the contract.
     unconditional = completion.replace(
-        'If impact is supported, assign the appropriate documentation owner to apply',
-        'For every ordinary task, apply `documentation-sync`. '
-        'If impact is supported, assign the appropriate documentation owner to apply',
+        'Include related tests and affected documentation',
+        'For every ordinary task, apply `documentation-sync`. Include related tests and affected documentation',
         1)
     with pytest.raises(AssertionError):
         assert_contract(unconditional)
     weakened_hold = completion.replace(
-        'withhold acceptance until either supported `documentation-sync` '
-        'synchronization completes or sufficient no-impact evidence exists',
+        'gather the missing evidence or keep acceptance open',
         'continue to acceptance without documentation evidence', 1)
     with pytest.raises(AssertionError):
         assert_contract(weakened_hold)
-    direct_reconciliation = completion.replace(
-        'only Cortex report/public-evidence reads may compare its cited documentation hashes'
-        '/check results',
-        'read project files and rerun project checks', 1)
+    mandatory_writer = completion.replace(
+        'Assign a separate technical writer when documentation is independent work or needs distinct ownership',
+        'Assign a separate technical writer for every documentation change', 1)
     with pytest.raises(AssertionError):
-        assert_contract(direct_reconciliation)
-    direct_verification = completion.replace(
-        'delegate any additional project inspection, file read/hash or command verification '
-        'to an appropriate worker; return evidence in a task-bound report; the coordinator '
-        'must not rerun project checks',
-        'may inspect files and rerun project checks directly', 1)
+        assert_contract(mandatory_writer)
+    coordinator_writes = completion.replace(
+        'edit project files or rerun project checks',
+        'edit project files and rerun project checks', 1)
     with pytest.raises(AssertionError):
-        assert_contract(direct_verification)
+        assert_contract(coordinator_writes)
+    no_read = completion.replace(
+        'It may inspect bounded project source and public evidence read-only',
+        'It may inspect only report summaries', 1)
+    with pytest.raises(AssertionError):
+        assert_contract(no_read)
     automatic_harvest = completion.replace(
         'Keep `cortex:knowledge-harvest` explicit-only: this review is not a broad census',
         '`cortex:knowledge-harvest` runs after every ordinary task', 1)
@@ -354,19 +401,18 @@ def test_ordinary_completion_documentation_branches_are_semantic_and_conditional
         assert_contract(automatic_harvest)
 
     documentation_sync = ' '.join((PLUGIN/'skills/documentation-sync/SKILL.md').read_text().split())
-    assert 'evidence-backed impact review' in documentation_sync
-    assert 'If inspection is partial or inconclusive' in documentation_sync
-    assert 'acceptance waits for synchronization or sufficient no-impact evidence' in documentation_sync
-    assert 'post-owner reconciliation' in documentation_sync
-    assert 'the coordinator must not rerun project checks itself' in documentation_sync
+    assert "include related documentation in the implementing worker's assignment when practical" in documentation_sync
+    assert 'Use a separate technical writer when the documentation is independent work or needs distinct ownership' in documentation_sync
+    assert 'requires the affected updates and proportionate verification before acceptance' in documentation_sync
+    assert 'The coordinator may inspect bounded project source, report evidence and public artifacts read-only' in documentation_sync
+    assert 'the coordinator does not rerun project checks' in documentation_sync
 
 
 
 def test_shared_worker_protocol_routes_rare_interactive_procedure():
     protocol=(PLUGIN/'agent-sources/worker-protocol.md').read_text()
     reference=(PLUGIN/'agent-sources/references/interactive-resources.md').read_text()
-    # By name, not by path: a worker's working directory is a copy of the
-    # user's project, so a relative link here resolves to nothing for it.
+    # By name, not by path: references are delivered by the Cortex skill reader.
     assert 'read_skill("interactive-resources")' in protocol
     assert 'Never inspect\nglobal processes, ports, tabs or devices' in reference
     assert 'select, create or reuse only owned resources' in reference
@@ -375,7 +421,7 @@ def test_shared_worker_protocol_routes_rare_interactive_procedure():
 
 
 
-def test_native_instruction_boundaries_cover_observed_live_failures():
+def test_acp_instruction_boundaries_cover_observed_failures():
     coordinator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
     communication=(PLUGIN/'skills/coordinator-communication/SKILL.md').read_text()
     discipline=(PLUGIN/'skills/tool-discipline/SKILL.md').read_text()
@@ -386,20 +432,28 @@ def test_native_instruction_boundaries_cover_observed_live_failures():
     assert 'Re-read after user steering' in discipline
     assert 'A wrapper must expose the full nested' in discipline
     assert 'never replay a mutation for reassurance' in discipline
-    # Found live: the coordinator was told not to use its engine's own
-    # subagents, workers never were, and the runtime can only report such
-    # a call after the fact -- it cannot prevent it. Every role gets the
-    # rule, which is why it lives in the skill both roles always load.
+    # The coordinator rule was delivered in the observed live run. Workers
+    # received only a catalog pointer to tool-discipline, so the same rule
+    # must also appear in each worker's first-turn role instructions.
+    assert "Never use your engine's own\n   subagent or wait tools" in coordinator
     assert 'Your engine offers subagent and spawn tools of its own. Never use them.' in discipline
     assert 'A worker delegates nothing at all' in discipline
+    worker_rule = "Do not use your engine's native subagent or spawn tools. A worker delegates nothing"
+    assert worker_rule in ' '.join((PLUGIN / 'agent-sources/worker-protocol.md').read_text().split())
+    for path in sorted((PLUGIN / 'skills').glob('worker-*/SKILL.md')):
+        body = ' '.join(path.read_text().split())
+        if path.name == 'SKILL.md' and path.parent.name == 'worker-senior-consultant':
+            assert 'create subagents' in body, path
+        else:
+            assert worker_rule in body, path
     assert 'Use the draft reader only after compaction, restart' in publication
     assert 'Correct deterministic edit or argument errors once' in publication
-    assert 'successful publication is the final tool action' in publication
+    assert 'After successful publication, call `publish_result`' in publication
     assert len(discipline) < 4_000
 
 
 
-def test_marketplace_skills_deliver_profiles_and_progressive_references():
+def test_packaged_skills_deliver_profiles_and_progressive_references():
     from generate_agent_profiles import (
         expected_agent_references,
         expected_skills,
@@ -425,11 +479,11 @@ def test_marketplace_skills_deliver_profiles_and_progressive_references():
 
 def test_prompt_and_skill_editing_subagents_use_the_explicit_sol_medium_override():
     instructions = (ROOT / 'AGENTS.md').read_text()
-    assert 'Any subagent assigned to edit prompts or skills must use only `gpt-5.6-sol` with' in instructions
-    assert '`medium` reasoning effort' in instructions
+    assert 'Any subagent assigned to edit prompts or skills must still use only `gpt-5.6-sol` at' in ' '.join(instructions.split())
+    assert '`medium` reasoning effort' in ' '.join(instructions.split())
     protocol = (PLUGIN / 'agent-sources/worker-protocol.md').read_text()
-    assert 'directly declared Markdown reference leaves may then be read' in protocol
-    assert 'never count as the initial\nworker-skill receipt' in protocol
+    assert 'These role instructions are delivered' in protocol
+    assert 'read_skill` for the named situational guidance' in protocol
 
 
 

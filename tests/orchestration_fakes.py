@@ -74,9 +74,12 @@ class FakeSessionRuntime:
     "model" does on each turn, including calling ``mcp_tools.dispatch``.
     """
 
-    def __init__(self, store, router, *, connection_id=None, capacity_limit=None, capacity_queue_timeout_seconds=30.0, connections=None):
+    def __init__(self, store, router, *, connection_id=None, capacity_limit=None,
+                 capacity_queue_timeout_seconds=30.0, connections=None,
+                 emit_outcome_text_as_delta=True):
         self._store = store
         self._router = router
+        self._emit_outcome_text_as_delta = emit_outcome_text_as_delta
         # T027: optional {connection_id: object-with-.provider/.engine/.id}
         # map, used only by attempt_fallback below to run the SAME real
         # routing.authorization.authorize_fallback check a production
@@ -104,6 +107,10 @@ class FakeSessionRuntime:
         # confirmed/ambiguous outcome (default confirmed).
         self._connection_id = connection_id
         self._capacity_limit = capacity_limit
+        # A few queue-state tests control the release themselves and need
+        # their fake waiter to remain queued until that explicit release (or
+        # cancel/shutdown), regardless of unrelated suite scheduling load.
+        # Production's bounded queue timeout is unchanged.
         self._queue_timeout_seconds = capacity_queue_timeout_seconds
         self._reservations = {}
         self._release_kind = {}
@@ -174,7 +181,8 @@ class FakeSessionRuntime:
             queued_note_recorded = False
             backoff = 0.05
             reservation_id = None
-            deadline = time.monotonic() + self._queue_timeout_seconds
+            deadline = (time.monotonic() + self._queue_timeout_seconds
+                        if self._queue_timeout_seconds is not None else None)
             while reservation_id is None:
                 if self._shutdown_event.is_set():
                     raise QueuedOpenCancelled("shutdown")
@@ -195,10 +203,10 @@ class FakeSessionRuntime:
                         dict(note=f"Attempt {attempt_id} is queued: capacity is full."), origin="runtime",
                     )
                     queued_note_recorded = True
-                if kind == "worker" and delegation_capacity.count_active(self._store, self._connection_id) >= limit:
-                    if delegation_capacity.all_active_are_kind(self._store, self._connection_id, "coordinator"):
+                if kind == "worker":
+                    if delegation_capacity.saturated_by_coordinators(self._store, self._connection_id, limit):
                         raise QueuedOpenCancelled("capacity_unsatisfiable")
-                if time.monotonic() > deadline:
+                if deadline is not None and time.monotonic() > deadline:
                     raise QueuedOpenCancelled("capacity_timeout")
                 with self._activity_cond:
                     self._activity_cond.wait(timeout=backoff)
@@ -278,6 +286,10 @@ class FakeSessionRuntime:
                 extra["on_delta"] = on_delta
             if "on_tool_call" in declared:
                 extra["on_tool_call"] = on_tool_call
+            if "on_display_update" in declared:
+                extra["on_display_update"] = on_display_update
+            if "cancel_event" in declared:
+                extra["cancel_event"] = cancel_event
             outcome = behavior(
                 self._store, info["channel"], session_ref, message, call_index, **extra,
             )
@@ -286,7 +298,7 @@ class FakeSessionRuntime:
         # own whole outcome text) -- enough for a caller asserting
         # ``on_delta`` was exercised without needing the full
         # fake_engine_process JSON-RPC harness for that.
-        if on_delta is not None and outcome.text:
+        if on_delta is not None and outcome.text and self._emit_outcome_text_as_delta:
             on_delta(outcome.text)
         return outcome
 

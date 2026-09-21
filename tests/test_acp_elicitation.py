@@ -16,9 +16,10 @@ from pathlib import Path
 
 import pytest
 
-from cortex_runtime.acp.agent import Agent
+from cortex_runtime.acp.agent import Agent, _PaseoQuestionElicitor
 from cortex_runtime.acp import questions_store
 from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime, PromptOutcome
+from cortex_runtime.acp import pipeline_bootstrap
 from cortex_runtime.acp.transport import StdioTransport
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation import mcp_tools
@@ -29,6 +30,37 @@ from cortex_runtime.store import Store
 from orchestration_fakes import FakeConfigSnapshotSource, FakeSessionRuntime, FakeWorkspace
 
 jsonschema = pytest.importorskip("jsonschema")
+
+
+def test_paseo_question_bridge_uses_core_permission_choice_schema():
+    seen = {}
+
+    class Requester:
+        def request(self, method, params, timeout):
+            seen.update(method=method, params=params, timeout=timeout)
+            option_id = "cortex-question-2" if len(params["options"]) > 1 else "cortex-question-1"
+            return {"outcome": {"outcome": "selected", "optionId": option_id}}
+
+    elicitor = _PaseoQuestionElicitor(Requester(), session_id="sess-1", timeout=2.0)
+    assert elicitor.elicit("ignored", "Pick", ["one", "two"]) == "two"
+    assert seen["method"] == "session/request_permission"
+    assert seen["params"]["_meta"] == {"cortexQuestion": True}
+    assert seen["params"]["toolCall"]["title"] == "Pick"
+    assert [item["name"] for item in seen["params"]["options"]] == ["one", "two"]
+    elicitor.set_question_id("pq-durable")
+    assert elicitor.elicit("ignored", "Pick", ["one"]) == "one"
+    assert seen["params"]["toolCall"]["rawInput"] == {
+        "__cortex_question": True, "questionId": "pq-durable", "question": "Pick",
+    }
+    _schema_validator("RequestPermissionRequest").validate(seen["params"])
+
+
+def test_paseo_env_enables_bridge_without_elicitation_capability():
+    from acp_fakes import FakeRuntime
+
+    agent = Agent(FakeRuntime(), environ={"CORTEX_PASEO_QUESTION_UI": "1"})
+    agent.host_requester = object()
+    assert agent._make_elicitor("sess-1").__class__.__name__ == "_PaseoQuestionElicitor"
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "fixtures" / "acp" / "schema-1.4.0.json"
 
@@ -65,7 +97,15 @@ class _Harness:
             self.store, self.engine, FakeWorkspace(), FakeConfigSnapshotSource(),
             allow_unqualified_delivery=True, wait_timeout_seconds=15.0,
         )
-        self.agent = Agent(self.runtime, environ=environ or {}, elicitation_timeout_seconds=elicitation_timeout_seconds)
+        # A pipe-backed test transport is live enough to trigger prompt-free
+        # catalog refresh. Give it an empty private connection registry so
+        # tests never launch the user's configured production engines.
+        if environ is None:
+            home = tmp_path.parent / f"{tmp_path.name}-home"
+            home.mkdir(exist_ok=True)
+            environ = {"HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
+                       "XDG_STATE_HOME": str(home / ".local" / "state")}
+        self.agent = Agent(self.runtime, environ=environ, elicitation_timeout_seconds=elicitation_timeout_seconds)
         self.stdout = _RecordingStdout()
         self.read_fd, self.write_fd = os.pipe()
         self.stdin = os.fdopen(self.read_fd, "rb")
@@ -135,7 +175,7 @@ def _initialize_and_new_session(harness, project, *, elicitation_form):
     return session_id
 
 
-def _ask_user_then_accept_router(question="Which environment?", options=None):
+def _ask_user_then_accept_router(question="Which environment?", options=None, observed=None):
     phase = {"asked": False, "accepted": False}
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
@@ -149,6 +189,9 @@ def _ask_user_then_accept_router(question="Which environment?", options=None):
             return PromptOutcome(StopReason.END_TURN, "")
         if not phase["accepted"]:
             phase["accepted"] = True
+            if observed is not None:
+                observed["continuation"] = message
+            _publish_current_pipeline(store, channel)
             mcp_tools.dispatch(store, channel, "decide", dict(
                 assignment_ref="task", decision="accept", rationale="answered", request_key="acc1",
             ))
@@ -161,8 +204,35 @@ def _ask_user_then_accept_router(question="Which environment?", options=None):
     return router
 
 
+def _publish_current_pipeline(store, channel):
+    """Give task-level acceptance the same coordinator-owned plan as a model.
+
+    Runtime bootstrap creates the opening pipeline edition, but acceptance
+    requires a current coordinator-authored edition.  The fake coordinator
+    therefore performs the normal draft/write publication before accepting.
+    """
+    draft = store.call(
+        "create_draft", dict(template="pipeline"),
+        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True,
+    )
+    body = pipeline_bootstrap._fill_template(
+        draft["markdown"], channel.task_id, "Test task", None,
+    )
+    Path(draft["draft_path"]).write_text(body, encoding="utf-8")
+    return store.call(
+        "write_report",
+        dict(
+            draft_id=draft["draft_id"], title="Current pipeline",
+            summary="Coordinator-authored current pipeline edition",
+            author="coordinator", request_key="test-current-pipeline-" + uuid.uuid4().hex,
+        ),
+        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True,
+    )
+
+
 def test_elicitation_form_advertised_and_accepted_resolves_same_pq_id_without_ending_turn(tmp_path):
-    router = _ask_user_then_accept_router()
+    observed = {}
+    router = _ask_user_then_accept_router(observed=observed)
     harness = _Harness(tmp_path, router)
     harness.start()
     try:
@@ -187,14 +257,25 @@ def test_elicitation_form_advertised_and_accepted_resolves_same_pq_id_without_en
         with harness.store.connection() as db:
             row = db.execute("SELECT state FROM task_orchestration").fetchone()
         assert row["state"] == "accepted"
-        questions = questions_store.list_open(harness.store, next(iter(harness.agent.sessions.values()))["task_id"])
+        task_id = next(iter(harness.agent.sessions.values()))["task_id"]
+        questions = questions_store.list_open(harness.store, task_id)
         assert questions == []
+        with harness.store.connection() as db:
+            answered = db.execute(
+                "SELECT id, status, answer_text, answer_source FROM pending_questions WHERE task_id=?", (task_id,),
+            ).fetchall()
+        assert len(answered) == 1
+        assert answered[0]["status"] == "answered"
+        assert answered[0]["answer_text"] == "staging"
+        assert answered[0]["answer_source"] == "elicitation"
+        assert "staging" in observed["continuation"]
     finally:
         harness.stop()
 
 
 def test_elicitation_not_advertised_uses_text_fallback(tmp_path):
-    router = _ask_user_then_accept_router()
+    observed = {}
+    router = _ask_user_then_accept_router(observed=observed)
     harness = _Harness(tmp_path, router)
     harness.start()
     try:
@@ -219,6 +300,16 @@ def test_elicitation_not_advertised_uses_text_fallback(tmp_path):
         with harness.store.connection() as db:
             row = db.execute("SELECT state FROM task_orchestration").fetchone()
         assert row["state"] == "accepted"
+        task_id = next(iter(harness.agent.sessions.values()))["task_id"]
+        with harness.store.connection() as db:
+            answered = db.execute(
+                "SELECT status, answer_text, answer_source FROM pending_questions WHERE task_id=?", (task_id,),
+            ).fetchall()
+        assert len(answered) == 1
+        assert answered[0]["status"] == "answered"
+        assert answered[0]["answer_text"] == "Use staging."
+        assert answered[0]["answer_source"] == "text"
+        assert "Use staging." in observed["continuation"]
     finally:
         harness.stop()
 

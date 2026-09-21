@@ -36,15 +36,17 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+from pathlib import Path
 
 from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime, PromptOutcome
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation import mcp_tools
+from cortex_runtime.delegation.workspace_isolation import IsolatedSnapshotWorkspaceProvisioner
 from cortex_runtime.portable.engine_contract import StopReason
 from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.store import Store
 
-from orchestration_fakes import FakeConfigSnapshotSource, FakeSessionRuntime, FakeWorkspace
+from orchestration_fakes import FakeConfigSnapshotSource, FakeSessionRuntime
 
 
 def _task(tmp_path):
@@ -86,6 +88,36 @@ def _publish(store, channel, label):
     mcp_tools.dispatch(store, channel, "publish_result", dict(report_ref=report_id, summary=f"{label} finished", request_key=f"pub-{label}"))
 
 
+def _publish_current_pipeline(store, channel):
+    """Give task-level acceptance a real coordinator-authored edition."""
+    draft = store.call(
+        "create_draft", {"template": "pipeline", "request_key": "pipeline-current"},
+        channel.principal_thread_id, trusted=True,
+    )
+    path = Path(draft["draft_path"])
+    body = path.read_text(encoding="utf-8")
+    values = {
+        "{{CURRENT_OBJECTIVE_AND_DECISION_BASIS}}": "Objective: ship the report. Decision basis: delegated work is reviewable.",
+        "{{CURRENT_REQUIREMENTS_AND_CONSTRAINTS}}": "Requirements: assignment result is complete and reviewable.",
+        "{{CURRENT_WORK_GRAPH}}": "The delegated assignment has completed.",
+        "{{CURRENT_ASSIGNMENTS_AND_ROUTING}}": "Coordinator reviewed the backend-dev assignment.",
+        "{{CURRENT_EVIDENCE_AND_VERIFICATION}}": "The worker report is published and available for review.",
+        "{{CURRENT_DECISIONS_QUESTIONS_AND_REMAINING_WORK}}": "Decision: accept the completed work.",
+    }
+    for marker, value in values.items():
+        body = body.replace(marker, value)
+    for marker in draft["replaceable_markers"]:
+        if marker.startswith("<!--"):
+            body = body.replace(marker, "Evidence links: the worker report is the selected result.")
+    path.write_text(body, encoding="utf-8")
+    return store.call(
+        "write_report", {
+            "title": "Current pipeline", "summary": "Coordinator current plan.",
+            "author": "coordinator", "draft_id": draft["draft_id"], "request_key": "pipeline-current-publish",
+        }, channel.principal_thread_id, trusted=True,
+    )
+
+
 def test_claude_agent_acp_coordinator_delegates_and_accepts_one_assignment(tmp_path):
     store, task_id = _task(tmp_path)
     decided = {"done": False}
@@ -99,6 +131,7 @@ def test_claude_agent_acp_coordinator_delegates_and_accepts_one_assignment(tmp_p
             return PromptOutcome(StopReason.END_TURN, "Delegated A.")
         if "Assignment A finished" in message and not decided["done"]:
             decided["done"] = True
+            _publish_current_pipeline(store, channel)
             mcp_tools.dispatch(store, channel, "decide", dict(
                 assignment_ref="task", decision="accept",
                 rationale="Assignment A delivered an acceptable result.", request_key="acceptall",
@@ -121,7 +154,7 @@ def test_claude_agent_acp_coordinator_delegates_and_accepts_one_assignment(tmp_p
 
     engine = FakeSessionRuntime(store, router)
     runtime = OrchestratingRuntime(
-        store, engine, FakeWorkspace(),
+        store, engine, IsolatedSnapshotWorkspaceProvisioner(store, str(tmp_path)),
         FakeConfigSnapshotSource(engine="claude-agent-acp", version="0.78.0"),
         wait_timeout_seconds=30.0,
     )
@@ -157,7 +190,10 @@ def test_claude_agent_acp_pinned_delivery_mechanism_is_the_documented_qualified_
 
     plan = mechanism.plan(_Role(), [])
     assert plan.qualification == DeliveryQualification.QUALIFIED
-    assert plan.session_new_meta == {"systemPrompt": "You are a backend developer."}
+    assert plan.session_new_meta == {
+        "systemPrompt": {"append": "You are a backend developer."},
+        "claudeCode": {"options": {"disallowedTools": ["Agent", "Task"], "strictMcpConfig": True}},
+    }
 
 
 def test_the_result_reaches_the_coordinator_under_the_ref_delegate_gave_it(tmp_path):
@@ -179,6 +215,7 @@ def test_the_result_reaches_the_coordinator_under_the_ref_delegate_gave_it(tmp_p
             return PromptOutcome(StopReason.END_TURN, "Delegated A.")
         seen_messages.append(message)
         if "Assignment A finished" in message:
+            _publish_current_pipeline(store, channel)
             mcp_tools.dispatch(store, channel, "decide", dict(
                 assignment_ref="task", decision="accept", rationale="Delivered.", request_key="acceptall",
             ))
@@ -196,7 +233,7 @@ def test_the_result_reaches_the_coordinator_under_the_ref_delegate_gave_it(tmp_p
 
     engine = FakeSessionRuntime(store, router)
     runtime = OrchestratingRuntime(
-        store, engine, FakeWorkspace(),
+        store, engine, IsolatedSnapshotWorkspaceProvisioner(store, str(tmp_path)),
         FakeConfigSnapshotSource(engine="claude-agent-acp", version="0.78.0"),
         wait_timeout_seconds=30.0,
     )

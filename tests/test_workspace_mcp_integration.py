@@ -90,6 +90,30 @@ def _integration_events(store, task_id):
     return [(payload["kind"], payload) for payload in payloads]
 
 
+def test_direct_project_root_integration_reconciles_without_copy(tmp_path):
+    """The integration lifecycle must accept the Zed project-root binding."""
+    store, task_id = _task(tmp_path)
+    project = store.project_root
+    from cortex_runtime.delegation.integration import integrate
+
+    result = integrate(
+        store, task_id=task_id, project_root=str(project), assignment_ref="direct-a",
+        request_key="direct-integrate", attempt_id="attempt-direct",
+        workspace_binding_id="shared_project_root", host_fs_checker=lambda path: (_ for _ in ()).throw(
+            AssertionError("direct reconciliation must not claim an unperformed buffer check")
+        ),
+    )
+    assert result["status"] == "noop"
+    assert result["integrated_dirty_digest"] is not None
+    assert result["host_buffer_state"] == "unknown"
+    replay = integrate(
+        store, task_id=task_id, project_root=str(project), assignment_ref="direct-a",
+        request_key="direct-integrate", attempt_id="attempt-direct",
+        workspace_binding_id="shared_project_root",
+    )
+    assert replay == result
+
+
 def _wait_for_both_snapshots(store, task_id, *, timeout):
     import time
 
