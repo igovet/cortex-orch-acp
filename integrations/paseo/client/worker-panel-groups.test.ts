@@ -35,3 +35,10 @@ assert.equal(chatToolIcon(read(1, "a.md")), "Eye");
 assert.equal(chatToolIcon(shell(2)), "SquareTerminal");
 assert.equal(chatToolIcon(event(3, { title: "mcp.cortex.project_write", raw_input: { server: "cortex", tool: "project_write", arguments: { path: "x" } } })), "Pencil");
 assert.equal(chatToolIcon(event(4, { title: "mcp.cortex.plan_submit" })), "Wrench");
+
+// External MCP calls arrive as `execute` but are ordinary tools, as in the chat.
+const mcpSearch = event(10, { activity_ref: "tool:10", title: "mcp.codebase_memory.search_code", tool_kind: "execute",
+  raw_input: { server: "codebase_memory", tool: "search_code", arguments: { pattern: "x" } } });
+assert.equal(nativeRow(mcpSearch).label, "Search Code");
+assert.equal(chatToolIcon(mcpSearch), "Wrench");
+assert.equal(summarizeToolRun([mcpSearch]), "Used 1 other tool");

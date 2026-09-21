@@ -29,3 +29,8 @@ assert.equal(gatewayCommand.command, "python3 -B -m unittest -q");
 
 const claudeCommand = presentTool(event({ title: "mcp__cortex__command_run", raw_input: { argv: ["python3", "-B"] }, raw_output: JSON.stringify({ exit_code: 0, output: "actual stdout" }) }));
 assert.equal(claudeCommand.output, "actual stdout");
+
+const mcpTool = presentTool(event({ tool_kind: "execute", title: "mcp.codebase_memory.get_code_snippet",
+  raw_input: { server: "codebase_memory", tool: "get_code_snippet", arguments: { qualified_name: "a.b" } },
+  raw_output: { error: null, result: { content: [{ type: "text", text: "def b(): pass" }] } } }));
+assert.equal(mcpTool.kind, "generic");

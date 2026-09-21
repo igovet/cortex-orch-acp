@@ -45,7 +45,9 @@ export function presentTool(event: WorkerEvent): ToolPresentation {
   const kind = gateway?.kind === "shell" ? "execute" : gateway?.kind ?? event.tool_kind?.toLowerCase();
   const title = event.title ?? "";
   const read = kind === "read" || (kind == null && path !== null && /^Read(?:\s|$)/i.test(title));
-  const shell = kind === "execute" || kind === "terminal" || (kind == null && command !== null);
+  // As in the chat, a row is a shell only with a command: external MCP tools
+  // also arrive as `execute`, and they are ordinary tools.
+  const shell = command !== null && (kind === "execute" || kind === "terminal" || kind == null);
   const edit = kind === "edit" || (kind == null && path !== null && oldText !== null && newText !== null);
   if (read) return { kind: "read", label: /^Read(?:\s|$)/i.test(title) ? title : `Read ${basename(path) ?? "file"}`, path, command, output, oldText, newText };
   if (shell) return { kind: "shell", label: command ? `Shell  ${command}` : title || "Shell", path, command, output, oldText, newText };

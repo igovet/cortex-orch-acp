@@ -12,9 +12,16 @@ export function isToolEvent(event: WorkerEvent): boolean {
     || /^(?:Read|Edit|Shell|Terminal|Skill)(?:\s|$)|^mcp(?:__|\.)/i.test(event.title ?? "");
 }
 
+/** An MCP call from a server other than Cortex, e.g. `mcp.codebase_memory.search_code`. */
+function externalMcp(event: WorkerEvent): boolean {
+  return /^mcp(?:__|\.)/.test(event.title ?? "") && !/^(?:mcp\.cortex\.|mcp__cortex__)/.test(event.title ?? "");
+}
+
 export function toolSemantics(event: WorkerEvent) {
   return presentToolSemantics({
-    name: event.title ?? event.tool_kind, title: event.title, toolKind: event.tool_kind,
+    // The gateway reports external MCP calls as `execute`; the chat names them
+    // by their tool instead of calling them Shell, and so does the panel.
+    name: event.title ?? event.tool_kind, title: event.title, toolKind: externalMcp(event) ? undefined : event.tool_kind,
     input: { ...(event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {}), content: event.content, locations: event.locations },
     rawInput: event.raw_input,
   });
@@ -28,6 +35,8 @@ function nativeKind(event: WorkerEvent): "read" | "edit" | "shell" | "search" | 
   const envelope = event.raw_input && typeof event.raw_input === "object" ? event.raw_input as Record<string, unknown> : {};
   const cortex = envelope.server === "cortex" || /^(?:mcp\.cortex\.|mcp__cortex__)/.test(title);
   if (cortex) return gatewayPresentation(title, event.raw_input, event.raw_output)?.kind ?? "other";
+  // The chat has no read/edit/shell/search detail for them: an "other tool".
+  if (externalMcp(event)) return "other";
   if (/search|grep|glob|web_search/i.test(`${title} ${event.tool_kind ?? ""}`)) return "search";
   const kind = toolSemantics(event).kind;
   return kind === "read" || kind === "edit" || kind === "shell" ? kind : "other";
