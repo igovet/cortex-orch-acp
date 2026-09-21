@@ -163,9 +163,11 @@ def _write(root,args):
 
 
 def _command(store,channel,root,scopes,args,ref,owner,effects):
-    from .sandbox import gateway_command
+    from .sandbox import as_owner, gateway_command
     with tempfile.TemporaryDirectory(prefix='cortex-command-') as scratch, tempfile.TemporaryFile() as output:
         with gateway_command(root,scratch,args['argv'],scopes) as (command,fds):
+            # A worker's shell is the owner's shell, still scope-confined.
+            as_owner(command,os.environ)
             with store.connection() as db:
                 db.execute('BEGIN IMMEDIATE')
                 _authority(db,channel)

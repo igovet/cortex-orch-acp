@@ -19,7 +19,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from cortex_runtime.store import Store
 from cortex_runtime.trusted_channel import resolve_channel
 from cortex_runtime.orchestration.gateway import _authority, PRIVATE, READ_ONLY
-from cortex_runtime.orchestration.sandbox import gateway_command
+from cortex_runtime.orchestration.sandbox import allow_network, gateway_command
 from cortex_runtime.orchestration.state import event, encoded
 from cortex_runtime.contracts import StoreError
 
@@ -109,17 +109,7 @@ def main():
                 grants+=['--setenv',item['name'],item['value']]
             command[index:index]=grants
             if config.get('network') is True:
-                command.remove('--unshare-net')
-                # Sharing the network namespace alone leaves DNS and TLS broken
-                # in the otherwise empty /etc. These are public system files,
-                # never a mount of the user's home or the entire /etc tree.
-                network_files=[]
-                for name in ('/etc/resolv.conf','/etc/hosts','/etc/nsswitch.conf',
-                             '/etc/gai.conf','/etc/ssl/certs/ca-certificates.crt'):
-                    path=Path(name)
-                    if path.is_file():
-                        network_files+=['--ro-bind',str(path.resolve(strict=True)),name]
-                command[command.index('--chdir'):command.index('--chdir')]=network_files
+                allow_network(command)
             child=subprocess.Popen(command,pass_fds=fds,stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL,bufsize=0,env={'PATH':'/usr/bin:/bin'})
             stopped=threading.Event()

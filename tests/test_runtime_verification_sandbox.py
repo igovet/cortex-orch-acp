@@ -43,3 +43,27 @@ def test_plan_verification_cannot_be_used_as_a_write_bypass(tmp_path):
     result=subprocess.run(command,capture_output=True,text=True)
     assert result.returncode!=0
     assert target.read_text()=='original'
+
+
+def test_a_worker_shell_runs_as_the_owner_but_stays_scope_confined(tmp_path):
+    """The shell a worker uses is the owner's: their name, real HOME and
+    environment, network; never runtime credentials, never writes to HOME."""
+    import os, pwd
+    from cortex_runtime.orchestration.sandbox import as_owner, gateway_command
+    home = tmp_path / 'home'
+    home.mkdir()
+    project = home / 'project'
+    (project / 'src').mkdir(parents=True)
+    scratch = tmp_path / 'scratch'
+    scratch.mkdir()
+    script = ('id -un; echo "$HOME"; echo "$OWNER_SETTING"; env | grep -c -E "CORTEX_|TOKEN" || true; '
+              'touch "$HOME/escape" 2>/dev/null && echo home-writable; touch src/ok && echo scope-writable')
+    environ = {'HOME': str(home), 'PATH': '/usr/bin:/bin', 'OWNER_SETTING': 'kept',
+               'CORTEX_CHANNEL_SECRET': 'never', 'GITHUB_TOKEN': 'never'}
+    with gateway_command(project, scratch, ['sh', '-c', script], ['src/**']) as (command, fds):
+        as_owner(command, environ)
+        assert '--unshare-net' not in command
+        result = subprocess.run(command, capture_output=True, text=True, pass_fds=fds, env={'PATH': '/usr/bin:/bin'})
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split('\n')[:5] == [pwd.getpwuid(os.getuid()).pw_name, str(home), 'kept', '0', 'scope-writable']
+    assert not (home / 'escape').exists() and (project / 'src' / 'ok').exists()

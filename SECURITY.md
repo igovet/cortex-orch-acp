@@ -39,8 +39,16 @@ MCP entries are disabled. Server-initiated sampling/elicitation is refused.
 
 File writes use scope checks, no-follow descriptors, expected-content hashes and
 atomic replacement. Commands run under Linux `bwrap`: project read-only by default,
-only granted files/directories writable, no user home/network/inherited environment,
-and private `.cortex`, `.git`, `.codex` and `.claude` paths masked. Hardlinked writable
+only granted files/directories writable, and private `.cortex`, `.git`, `.codex` and
+`.claude` paths masked. A worker's `command_run` runs as the owner: their user and
+group names resolve, their real HOME is mounted read-only (so its dotfiles and
+credentials are readable by the command), the runtime's environment is passed on
+except `CORTEX_*` and credential-like variables (token, secret, password, API key,
+auth, cookie, session), and the host network is shared. Supplementary groups show
+as `nogroup` inside the user namespace, `/run` (and so the Docker socket) is not
+mounted, and `sudo` does not work. External MCP
+servers and automatic verification get no HOME, network or inherited environment
+unless explicitly granted. Hardlinked writable
 files are rejected. Draft writes require the exact owned unpublished draft ID.
 File actions and command starts recheck authority at the transaction boundary;
 running commands and external servers are terminated on observed revocation.

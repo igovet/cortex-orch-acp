@@ -2,8 +2,12 @@
 
 This contains runtime-launched verification commands. It does not claim to
 intercept engine-native actions; engines have a different process boundary.
+A worker's own shell additionally runs as the owner (`as_owner`): their name,
+groups, read-only HOME, secret-free environment and network, while writes
+stay confined to the granted scope.
 """
 from pathlib import Path, PurePath
+import re
 import shutil
 import os
 import stat
@@ -48,6 +52,54 @@ def verification_command(root, scratch, argv):
             elif name in dirs and path.is_symlink():
                 dirs.remove(name)
     return command + ['--chdir', str(root), '--', *argv]
+
+
+# Sharing the network namespace alone leaves DNS and TLS broken in the
+# otherwise empty /etc; these are public system files.
+_NETWORK_FILES = ('/etc/resolv.conf', '/etc/hosts', '/etc/nsswitch.conf',
+                  '/etc/gai.conf', '/etc/ssl/certs/ca-certificates.crt')
+# Runtime channel credentials and anything that looks like a credential never
+# reach a command, even the owner's own shell.
+_SECRET_ENV = re.compile(r'(?i)^CORTEX_|TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|PRIVATE_?KEY|AUTH|COOKIE|SESSION')
+
+
+def allow_network(command):
+    """Share the host network in a sandbox command, in place."""
+    command.remove('--unshare-net')
+    files = []
+    for name in _NETWORK_FILES:
+        if Path(name).is_file():
+            files += ['--ro-bind', str(Path(name).resolve(strict=True)), name]
+    at = command.index('--chdir')
+    command[at:at] = files
+
+
+def as_owner(command, environ):
+    """Run a sandbox command as the owner would in their terminal, in place.
+
+    Their name and groups resolve, HOME is their real one (read-only, mounted
+    beneath the project so project grants still apply on top), the environment
+    is theirs without credentials, and the network is shared. Writes remain
+    limited to the granted scope and private runtime paths stay masked.
+    """
+    home = environ.get('HOME', '')
+    mounts = [arg for name in ('/etc/passwd', '/etc/group') if Path(name).is_file()
+              for arg in ('--ro-bind', name, name)]
+    has_home = home.startswith('/') and Path(home).is_dir()
+    if has_home:
+        mounts += ['--ro-bind', home, home]
+    # After the scratch /tmp mount (a HOME under /tmp must stay read-only),
+    # before the project mounts (project grants stay writable on top).
+    at = command.index('--ro-bind', command.index('--dev') + 1)
+    command[at:at] = mounts
+    env = [arg for name, value in environ.items()
+           if name not in {'HOME', 'TMPDIR', 'PWD', 'OLDPWD'} and not _SECRET_ENV.search(name)
+           for arg in ('--setenv', name, value)]
+    # HOME is read-only; caches go to the command's writable scratch /tmp.
+    env += ['--setenv', 'HOME', home if has_home else '/tmp', '--setenv', 'XDG_CACHE_HOME', '/tmp/.cache']
+    at = command.index('--chdir')
+    command[at:at] = env
+    allow_network(command)
 
 
 @contextmanager
