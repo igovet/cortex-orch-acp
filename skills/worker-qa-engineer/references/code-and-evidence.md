@@ -3,9 +3,12 @@
 Read this reference only for structural repository discovery or when saved report
 detail is needed.
 
-Use a code index for structural discovery only when one is available in the
-current host. Discover the needed operation names and read their complete
-advertised schemas. Otherwise use bounded repository-native source search.
+When a code index (such as Codebase Memory) is available in the current host, use
+it first for every code discovery question: definitions, callers, dependencies,
+impact and implementation reads. Use repository-native search or file reads only
+for literal text, configuration and non-code files, for paths the index does not
+cover, or when no matching healthy index exists. Discover the needed operation
+names and read their complete advertised schemas.
 
 When a code index is available, match it to the exact project directory opened in
 the ACP client using the full root returned by `list_projects`, not a similar name
