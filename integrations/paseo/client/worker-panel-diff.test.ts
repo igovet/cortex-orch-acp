@@ -22,3 +22,8 @@ assert.equal(rawText({}), null);
 assert.equal(rawText([]), null);
 
 console.log("worker-panel diff tests passed");
+
+const pair = diffLines("const total = a + b;", "const total = a - b;");
+assert.deepEqual(pair[0].segments, [{ text: "const total = a", changed: false }, { text: " + ", changed: true }, { text: "b;", changed: false }]);
+assert.deepEqual(pair[1].segments, [{ text: "const total = a", changed: false }, { text: " - ", changed: true }, { text: "b;", changed: false }]);
+assert.equal(diffLines(null, "only added").every((row) => row.segments === undefined), true);

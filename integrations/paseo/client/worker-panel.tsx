@@ -1,4 +1,4 @@
-import { readableToolText } from "./tool-details.ts";
+import { readableToolText, toolArguments, toolDetailText } from "./tool-details.ts";
 import { useRpc, type PluginAgentPanelProps } from "@getpaseo/plugin/client";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { Pressable, Text, View } from "react-native";
@@ -9,7 +9,7 @@ import { workerSection, workerStatus } from "./worker-panel-status.js";
 import { historyCursor, mergeWorkerHistory, shouldPollWorkerHistory, shouldShowWorkerHistoryLoader, WORKER_HISTORY_POLL_MS } from "./worker-panel-refresh.js";
 import { groupWorkerEvents, type WorkerEvent } from "./worker-panel-events.js";
 import { presentTool } from "./worker-panel-tool.js";
-import { diffBlocks, diffLines, rawText, type DiffBlock, type DiffRow } from "./worker-panel-diff.js";
+import { diffBlocks, diffLines, type DiffRow } from "./worker-panel-diff.js";
 import { chatToolIcon, groupToolRuns, isToolEvent, nativeRow, toolSemantics, type TranscriptItem } from "./worker-panel-groups.ts";
 import { workerAssignmentLine, workerDisplayName } from "./worker-display.js";
 import { workerPopoverStatus } from "./worker-popover-status.js";
@@ -25,37 +25,45 @@ const styles = {
   mono: { fontFamily: "monospace" as const, fontSize: 12, lineHeight: 18 },
 };
 
-type NumberedDiffRow = DiffRow & { oldLine: number | null; newLine: number | null };
-
-function numberDiffRows(rows: DiffRow[]): NumberedDiffRow[] {
-  let oldLine = 1;
-  let newLine = 1;
-  return rows.map((row) => {
-    if (row.kind === "context") return { ...row, oldLine: oldLine++, newLine: newLine++ };
-    if (row.kind === "delete") return { ...row, oldLine: oldLine++, newLine: null };
-    return { ...row, oldLine: null, newLine: newLine++ };
-  });
-}
 
 export { diffBlocks, diffLines, rawText } from "./worker-panel-diff.js";
-
 type Theme = PluginAgentPanelProps["theme"];
 
-function tint(color: string, fallback: string): string {
-  return /^#[0-9a-fA-F]{6}$/.test(color) ? `${color}1c` : fallback;
+/** Paseo's DiffViewer: no line numbers or file header, a +/-/space prefix,
+ * the chat's add/remove/context backgrounds, changed words highlighted, and
+ * horizontal scrolling instead of wrapping. */
+const DIFF_BACKGROUND = { add: "rgba(46, 160, 67, 0.15)", delete: "rgba(248, 81, 73, 0.1)" } as const;
+const DIFF_HIGHLIGHT = { add: "rgba(46, 160, 67, 0.4)", delete: "rgba(248, 81, 73, 0.35)" } as const;
+const DIFF_TEXT = { fontFamily: "monospace", fontSize: 12, whiteSpace: "pre" } as const;
+
+function DiffView({ rows, theme }: { rows: DiffRow[]; theme: Theme }) {
+  return <ScrollView horizontal nestedScrollEnabled showsHorizontalScrollIndicator>
+    <View style={{ alignSelf: "flex-start", padding: 12, minWidth: "100%" }}>
+      {rows.map((row, index) => {
+        const prefix = row.kind === "add" ? "+" : row.kind === "delete" ? "-" : " ";
+        const color = row.kind === "context" ? theme.colors.foregroundMuted : theme.colors.foreground;
+        return <View key={`${index}-${row.kind}`} style={{ minWidth: "100%", paddingVertical: 4,
+          backgroundColor: row.kind === "context" ? theme.colors.surface1 : DIFF_BACKGROUND[row.kind] }}>
+          <Text selectable style={[DIFF_TEXT as object, { color }]}>
+            {prefix}
+            {row.segments && row.kind !== "context"
+              ? row.segments.map((segment, i) => <Text key={i} style={segment.changed ? { backgroundColor: DIFF_HIGHLIGHT[row.kind as "add" | "delete"] } : undefined}>{segment.text}</Text>)
+              : row.text}
+          </Text>
+        </View>;
+      })}
+    </View>
+  </ScrollView>;
 }
 
-function FileDiff({ path, rows, theme, showPath = true }: { path: string; rows: DiffRow[]; theme: Theme; showPath?: boolean }) {
-  const numberedRows = numberDiffRows(rows);
-  return <View style={{ borderWidth: 1, borderColor: theme.colors.border, borderRadius: 6, overflow: "hidden", marginTop: 5 }}>
-    {showPath && <Text selectable style={[styles.mono, { paddingHorizontal: 10, paddingVertical: 7, color: theme.colors.foregroundMuted, backgroundColor: theme.colors.surface2 }]}>{path}</Text>}
-    <View style={{ paddingVertical: 5, backgroundColor: theme.colors.surface0 }}>
-      {numberedRows.map((row, index) => <Text key={`${row.kind}-${index}`} selectable accessibilityLabel={`${row.kind} line`} style={[styles.mono, {
-        paddingHorizontal: 10,
-        color: row.kind === "context" ? theme.colors.foregroundMuted : theme.colors.foreground,
-        backgroundColor: row.kind === "add" ? tint(theme.colors.statusSuccess, theme.colors.surface1) : row.kind === "delete" ? tint(theme.colors.statusDanger, theme.colors.surface1) : theme.colors.surface0,
-      }]}>{`${row.oldLine ?? ""}`.padStart(4)} ${`${row.newLine ?? ""}`.padStart(4)} ${row.kind === "delete" ? "−" : row.kind === "add" ? "+" : " "} {row.text || " "}</Text>)}
-    </View>
+/** The chat's Input/Output section of an unknown tool: a muted title, then
+ * the value in monospace, scrolling sideways instead of wrapping. */
+function DetailSection({ title, text, theme }: { title: string; text: string; theme: Theme }) {
+  return <View>
+    <Text style={{ paddingHorizontal: 12, paddingTop: 8, paddingBottom: 4, color: theme.colors.foregroundMuted, fontSize: 12, fontWeight: "600" }}>{title}</Text>
+    <ScrollView horizontal nestedScrollEnabled showsHorizontalScrollIndicator contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 8 }}>
+      <Text selectable style={[DIFF_TEXT as object, { color: theme.colors.foreground }]}>{text}</Text>
+    </ScrollView>
   </View>;
 }
 
@@ -120,18 +128,32 @@ export function TranscriptEvent({ event, expanded, onToggle, onOpenFile, theme }
   const output = readableToolText(presentation.kind === "shell" ? presentation.output : event.raw_output ?? event.output ?? event.content);
   const error = failure ? readableToolText(event.error) : null;
   const hasEdit = presentation.kind === "edit" && (diffs.length > 0 || presentation.newText !== null);
-  const canExpand = semantics.expandable && Boolean(output || error || hasEdit || diffs.length);
+  // Any other tool shows the chat's Input/Output sections, whatever shape
+  // its server gives the result, so a row never hides what it returned.
+  const generic = presentation.kind === "generic";
+  const inputText = generic ? toolDetailText(toolArguments(event.raw_input ?? event.input)) : null;
+  const outputText = generic ? toolDetailText(event.raw_output ?? event.output ?? event.content) : null;
+  const shellCommand = presentation.kind === "shell" ? presentation.command : null;
+  const shownError = error && error !== output ? error : null;
+  const canExpand = semantics.expandable && Boolean(output || error || hasEdit || diffs.length || inputText || outputText);
   const running = event.status === "in_progress" || event.status === "pending" || event.status === "running";
   return <Badge theme={theme} icon={chatToolIcon(event)} label={row.label} summary={row.summary} expanded={expanded && canExpand}
     onToggle={canExpand ? onToggle : undefined} loading={running} failed={failure}
     onOpenFile={onOpenFile && row.summary && (row.label === "Read" || row.label === "Edit") ? () => onOpenFile(row.summary!) : undefined}>
-    <View style={{ paddingHorizontal: 10, paddingVertical: 9, gap: 8 }}>
-      {presentation.kind === "shell" && presentation.command && <Text selectable style={[styles.mono, { color: theme.colors.foreground }]}>{`$ ${presentation.command}`}</Text>}
-      {output && !hasEdit && <Text selectable style={[styles.mono, { color: theme.colors.foreground }]}>{output}</Text>}
-      {diffs.map((diff, i) => <FileDiff key={`${diff.path}-${i}`} path={diff.path} rows={diffLines(diff.oldText, diff.newText)} theme={theme} showPath />)}
-      {hasEdit && diffs.length === 0 && <FileDiff path={presentation.path ?? "File changes"} rows={diffLines(presentation.oldText, presentation.newText)} theme={theme} showPath />}
-      {error && error !== output && <Text selectable style={[styles.muted, { color: theme.colors.statusDanger }]}>{error}</Text>}
-    </View>
+    {/* As in the chat, an edit's diff fills the detail edge to edge; the
+        path is already the row's summary. */}
+    {diffs.map((diff, i) => <View key={`${diff.path}-${i}`}>
+      {diffs.length > 1 && <Text selectable style={[styles.mono, { paddingHorizontal: 12, paddingTop: 8, color: theme.colors.foregroundMuted }]}>{diff.path}</Text>}
+      <DiffView rows={diffLines(diff.oldText, diff.newText)} theme={theme} />
+    </View>)}
+    {hasEdit && diffs.length === 0 && <DiffView rows={diffLines(presentation.oldText, presentation.newText)} theme={theme} />}
+    {generic && inputText && <DetailSection title="Input" text={inputText} theme={theme} />}
+    {generic && outputText && <DetailSection title="Output" text={outputText} theme={theme} />}
+    {((!generic && output && !hasEdit) || shellCommand || shownError) && <View style={{ paddingHorizontal: 10, paddingVertical: 9, gap: 8 }}>
+      {shellCommand && <Text selectable style={[styles.mono, { color: theme.colors.foreground }]}>{`$ ${shellCommand}`}</Text>}
+      {!generic && output && !hasEdit && <Text selectable style={[styles.mono, { color: theme.colors.foreground }]}>{output}</Text>}
+      {shownError && <Text selectable style={[styles.muted, { color: theme.colors.statusDanger }]}>{shownError}</Text>}
+    </View>}
   </Badge>;
 }
 
