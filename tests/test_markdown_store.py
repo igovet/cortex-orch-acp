@@ -52,8 +52,8 @@ def test_pipeline_draft_rejects_unfilled_server_placeholder(store,tmp_path):
                for marker in draft['replaceable_markers'])
     assert any('incident details only when relevant' in marker
                for marker in draft['replaceable_markers'])
-    assert "safe atomic replacement at that same path is accepted" in draft['edit_instruction']
-    assert "Preserve its first-line marker" in draft['edit_instruction']
+    assert "Fill this owned draft with draft_write" in draft['edit_instruction']
+    assert "Preserve required_first_line" in draft['edit_instruction']
     arguments=dict(task_id=task,title='Pipeline',summary='Current work is recorded.',
                    author='coordinator',draft_id=draft['draft_id'],request_key=key())
     with pytest.raises(StoreError) as rejected:

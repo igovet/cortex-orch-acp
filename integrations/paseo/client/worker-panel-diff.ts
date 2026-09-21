@@ -3,18 +3,25 @@ export type DiffRow = { kind: "context" | "add" | "delete"; text: string };
 
 export function rawText(value: unknown): string | null {
   if (value == null) return null;
+  if (Array.isArray(value) && value.length === 0) return null;
+  if (typeof value === "object" && !Array.isArray(value) && Object.keys(value as object).length === 0) return null;
   if (typeof value === "string") return value;
   try { return JSON.stringify(value, null, 2); } catch { return String(value); }
 }
 
 export function diffBlocks(value: unknown): DiffBlock[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item) => {
-    if (typeof item !== "object" || item === null) return [];
-    const block = item as Record<string, unknown>;
-    if (block.type !== "diff" || typeof block.path !== "string" || (block.oldText !== null && typeof block.oldText !== "string") || (block.newText !== null && typeof block.newText !== "string")) return [];
+  // ACP content is normally an array of diff blocks. Some adapters wrap the
+  // same retained blocks in a `content` array; unwrap that transport envelope
+  // only, and require both text fields to be present so no diff is inferred.
+  if (Array.isArray(value)) return value.flatMap((item) => diffBlocks(item));
+  if (typeof value !== "object" || value === null) return [];
+  const block = value as Record<string, unknown>;
+  if (block.type === "diff" && typeof block.path === "string"
+      && (block.oldText === null || typeof block.oldText === "string")
+      && (block.newText === null || typeof block.newText === "string")) {
     return [{ path: block.path, oldText: block.oldText, newText: block.newText }];
-  });
+  }
+  return Array.isArray(block.content) ? diffBlocks(block.content) : [];
 }
 
 export function diffLines(oldText: string | null, newText: string | null): DiffRow[] {

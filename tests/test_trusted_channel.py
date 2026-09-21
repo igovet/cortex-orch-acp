@@ -15,6 +15,8 @@ from cortex_runtime.trusted_channel import issue_channel, resolve_channel, revok
 def bootstrap(tmp_path, owner='owner-1', text='Build a page.'):
     store = Store(tmp_path/'.cortex', project_root=tmp_path)
     result = bootstrap_task(store, SourceEvent(origin='cli', event_id=str(uuid.uuid4())), text, owner)
+    from cortex_runtime.orchestration.state import TaskMachine
+    TaskMachine(store).create(result.task_id,text)
     return store, result
 
 
@@ -116,7 +118,7 @@ def test_channel_path_rejects_task_creation(tmp_path):
     store, result = bootstrap(tmp_path)
     server = server_for(tmp_path, result.channel_id, result.secret)
     error(call(server, 'create_task', dict(project_root=str(tmp_path), request_key='k')),
-          'channel_task_creation')
+          'runtime_owned_operation')
 
 
 def test_secret_is_never_present_in_responses(tmp_path):

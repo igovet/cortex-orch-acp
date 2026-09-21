@@ -386,10 +386,6 @@ class ProvisioningService:
         role: str,
         acceptance: str,
         request_key: str,
-        *,
-        engine: str | None = None,
-        model: str | None = None,
-        effort: str | None = None,
     ) -> ProvisioningResult:
         if not isinstance(channel, ChannelContext):
             raise PortableError(
@@ -407,10 +403,12 @@ class ProvisioningService:
                 retry_eligible=False,
                 field="channel",
             )
-        delegation_contracts.validate(
-            "coordinator", "delegate",
-            dict(title=title, brief=brief, role=role, acceptance=acceptance, request_key=request_key),
-        )
+        # The scheduler supplies these bounded values; none is a public spawn API.
+        for field, value, bound in (("title", title, 200), ("brief", brief, 16000),
+                                    ("role", role, 80), ("acceptance", acceptance, 4000),
+                                    ("request_key", request_key, 128)):
+            if not isinstance(value, str) or not 1 <= len(value) <= bound:
+                raise StoreError("invalid_provisioning_request", field)
         role_id = resolve_role(role)
         role_set = load_role(role_id)
         task_id = channel.task_id
@@ -474,7 +472,7 @@ class ProvisioningService:
             allow_unqualified_delivery=self._allow_unqualified_delivery,
         )
 
-        return self._run_steps(idempotency_key, channel, role_set, engine=engine, model=model, effort=effort)
+        return self._run_steps(idempotency_key, channel, role_set)
 
     def _result_from_row(self, row) -> ProvisioningResult:
         return ProvisioningResult(
@@ -520,7 +518,6 @@ class ProvisioningService:
 
     def _run_steps(
         self, idempotency_key: str, channel: ChannelContext, role_set,
-        *, engine: str | None = None, model: str | None = None, effort: str | None = None,
     ) -> ProvisioningResult:
         while True:
             with self._store.connection() as db:
@@ -552,7 +549,7 @@ class ProvisioningService:
               elif step == "context_snapshot":
                   self._step_context_snapshot(idempotency_key, row, role_set)
               elif step == "engine_session":
-                  self._step_engine_session(idempotency_key, row, channel, role_set, engine=engine, model=model, effort=effort)
+                  self._step_engine_session(idempotency_key, row, channel, role_set)
               else:  # pragma: no cover - defensive; STEP_ORDER is closed
                 raise PortableError(
                     category=PortableErrorCategory.INDETERMINATE_WRITE,
@@ -726,7 +723,6 @@ class ProvisioningService:
 
     def _step_engine_session(
         self, idempotency_key: str, row, coordinator_channel: ChannelContext, role_set,
-        *, engine: str | None = None, model: str | None = None, effort: str | None = None,
     ) -> None:
         with self._store.connection() as db:
             current_epoch = db.execute(
@@ -823,14 +819,6 @@ class ProvisioningService:
                 resolved_route_id=resolved_route.get("route_id"),
                 resolved_connection_id=resolved_route.get("connection_id"),
                 resolved_model=resolved_route.get("model"),
-                # D-T035-04: the coordinator's own explicit (or omitted)
-                # route choice for this delegation, carried unresolved --
-                # ``EngineSessionManagerAdapter.open`` is where the route
-                # policy and connections registry are actually resolved/
-                # validated (it already loads both for ``_authorize_
-                # dispatch``), never here (this module has no project_root/
-                # environ of its own to resolve them with).
-                requested_engine=engine, requested_model=model, requested_effort=effort,
                 coordinator_route_connection_id=preview.get("route_connection_id"),
             )
             try:

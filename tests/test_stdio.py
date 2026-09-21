@@ -33,6 +33,8 @@ def bootstrap(tmp_path, text='Build a greeting.', owner='owner-1'):
     wire path this file used to bootstrap ``create_task`` through)."""
     store = Store(tmp_path/'.cortex', project_root=tmp_path)
     result = bootstrap_task(store, SourceEvent(origin='cli', event_id=str(uuid.uuid4())), text, owner)
+    from cortex_runtime.orchestration.state import TaskMachine
+    TaskMachine(store).create(result.task_id,text)
     return store, result
 
 
@@ -142,12 +144,11 @@ def test_actionable_schema_errors_never_echo_private_values(tmp_path):
     server=Server(channel_credentials=(channel.channel_id, channel.secret, str(tmp_path)))
     cases=[
         ({},'required field(s)'),
-        ({'task_id':'PRIVATE_SENTINEL','mode':'light','rationale':'PRIVATE_SENTINEL','request_key':'k'},'Remove unadvertised fields'),
-        ({'mode':'wrong','rationale':'PRIVATE_SENTINEL','request_key':'k'},'minimal, light, full'),
-        ({'mode':'light','rationale':123,'request_key':'k'},'JSON string'),
+        ({'private':'PRIVATE_SENTINEL','template':'general'},'Remove unadvertised fields'),
+        ({'template':123},'JSON string'),
     ]
     for arguments,expected in cases:
-        result=server.dispatch('tools/call',dict(name='set_governance',arguments=arguments))
+        result=server.dispatch('tools/call',dict(name='create_draft',arguments=arguments))
         body=result['content'][0]['text']
         assert result['isError'] and expected in body and 'PRIVATE_SENTINEL' not in body
         assert json.loads(body)['write_state']=='rejected'
@@ -229,7 +230,6 @@ def test_wire_schemas_match_every_success(tmp_path):
         assert json.loads(result['content'][0]['text'])==data
         Draft202012Validator(by_name[name]['outputSchema']).validate(data)
         return data
-    call('set_governance',mode='full',rationale='Risk review.',request_key='gov')
     base=dict(title='Report',summary='Evidence',author='worker')
     assert not by_name['create_draft']['annotations']['idempotentHint']
     draft=call('create_draft',template='general')
@@ -238,9 +238,9 @@ def test_wire_schemas_match_every_success(tmp_path):
     call('list_reports')
     result=call('read_report',report_id=final['report_id'])
     assert result['markdown'].endswith('Part one\nPart two')
-    pipeline=call('create_draft',template='pipeline',request_key='pipeline-draft')
-    path=Path(pipeline['draft_path']);marker=path.read_text().split('\n\n',1)[0]+'\n\n';path.write_text(marker+'Current work')
-    call('write_report',**base,draft_id=pipeline['draft_id'],request_key='pipeline')
+    rejected=server.dispatch('tools/call',dict(name='create_draft',arguments=dict(template='pipeline',request_key='pipeline-draft')))
+    assert rejected['isError']
+    assert 'runtime_owned_operation' in rejected['content'][0]['text']
 
 
 def test_protocol_revision_and_error_categories(tmp_path):

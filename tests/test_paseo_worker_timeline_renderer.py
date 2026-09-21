@@ -116,7 +116,8 @@ def test_worker_card_assignment_key_is_resolved_before_attempt_selection():
     # what the history response exposes for opening an attempt.
     assert 'assignmentRef: selectedAssignmentRef ?? undefined' in panel
     assert 'const attempt = assignment?.attempts[assignment.attempts.length - 1]' in panel
-    assert 'assignment_id=? or idempotency_key=?' in server
+    assert 'a.assignment_id=? or a.idempotency_key=?' in server
+    assert "json_extract(e.payload_json, '$.plan_assignment_ref')" in server
     assert 'work_assignment_attempts where assignment_id=? and attempt_id=?' in server
 
 

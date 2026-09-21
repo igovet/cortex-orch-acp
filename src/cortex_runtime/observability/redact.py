@@ -45,6 +45,7 @@ _KEY_VALUE_SECRET = re.compile(
     r"(?i)\b([A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|authorization)[A-Za-z0-9_]*)\s*[=:]\s*\S+"
 )
 _LONG_OPAQUE_TOKEN = re.compile(r"\b(?=[A-Za-z0-9_\-]*\d)[A-Za-z0-9_\-]{24,}\b")
+_LONG_LEXICAL_FIELD = re.compile(r"\S{4097,}")
 
 
 class StreamingRedactor:
@@ -54,8 +55,9 @@ class StreamingRedactor:
     end of the stream.  This is the smallest useful holdback for the token
     and credential key/value expressions above: a chunk containing the first
     half of a credential therefore cannot be emitted before its second half
-    arrives.  All released text is scrubbed as a complete unit, and ``flush``
-    is equivalent to ``scrub_text`` over the concatenated input.
+    arrives.  All released text is scrubbed as a complete unit.  An
+    overlong lexical field is replaced by a deterministic bounded marker so
+    a transport partition cannot change the result or grow the holdback.
     """
 
     _MAX_PENDING = 4096
@@ -64,12 +66,26 @@ class StreamingRedactor:
         self.max_chars = max_chars
         self._pending = ""
         self._discarding = False
+        self._overflowing = False
+        self._overflow_hash = hashlib.sha256()
+        self._overflow_len = 0
+        self._overflow_allowed = True
+        self._overflow_has_digit = False
 
     @staticmethod
     def _hold_start(text: str) -> int:
         # Keep the entire current whitespace-delimited lexical field. A
         # secret may be split at every possible character boundary, so no
         # prefix of that field is safe to emit until its delimiter arrives.
+        # ``sha 256`` has an internal delimiter, so retain the partial label
+        # (``sha 2``/``sha 25``) as well as the already handled ``sha `` form.
+        partial_sha = re.search(
+            r"(?i)(?:^|\s)sha(?:\s+2(?:5(?:6)?)?)?$", text,
+        )
+        if partial_sha:
+            return partial_sha.start() + (
+                1 if text[partial_sha.start():].startswith(" ") else 0
+            )
         digest_prefix = re.search(
             r"(?is)(?:sha[- ]?256|hash|digest)\s*:\s*[a-f0-9]*$", text,
         )
@@ -91,6 +107,7 @@ class StreamingRedactor:
             if field:
                 token = field.group(1)
                 if (re.fullmatch(r"(?i)(?:bearer|token)", token)
+                        or re.fullmatch(r"(?i)sha", token)
                         or re.search(r"(?i)(?:api[_-]?key|token|secret|password|authorization)\s*[=:]$", stripped)
                         or re.search(r"(?i)(?:sha[- ]?256|hash|digest)\s*:$", stripped)):
                     return field.start(1)
@@ -122,29 +139,118 @@ class StreamingRedactor:
         text = value if isinstance(value, str) else str(value)
         if not text:
             return ""
-        if self._discarding:
-            boundary = re.search(r"\s", text)
-            if boundary is None:
-                return ""
-            self._discarding = False
-            text = text[boundary.end():]
-            if not text:
-                return ""
-        self._pending += text
-        if len(self._pending) > self._MAX_PENDING:
-            self._pending = ""
-            self._discarding = True
-            return "[REDACTED_STREAM]"
-        hold = self._hold_start(self._pending)
-        released, self._pending = self._pending[:hold], self._pending[hold:]
-        return self._scrub(released)
+        output: list[str] = []
+        offset = 0
+        while offset < len(text):
+            if self._overflowing:
+                boundary = re.search(r"\s", text[offset:])
+                field = text[offset:] if boundary is None else text[offset:offset + boundary.start()]
+                self._feed_overflow(field)
+                offset += len(field)
+                if boundary is None:
+                    return "".join(output)
+                output.append(self._finish_overflow())
+                output.append(boundary.group(0))
+                offset += boundary.end() - boundary.start()
+                continue
+            if self._discarding:
+                # An overlong lexical field has already been represented by
+                # one neutral marker.  Discard only through its next lexical
+                # boundary, then resume normal processing for the remainder
+                # of the same transport update.
+                boundary = re.search(r"\s", text[offset:])
+                if boundary is None:
+                    return "".join(output)
+                output.append(boundary.group(0))
+                offset += boundary.end()
+                self._discarding = False
+                continue
+
+            # Never append an entire provider update to the holdback.  A
+            # single update may be megabytes long, while the only unsafe
+            # suffix we need to retain is bounded by _MAX_PENDING.
+            room = self._MAX_PENDING - len(self._pending)
+            take = min(len(text) - offset, max(1, room + 1))
+            self._pending += text[offset:offset + take]
+            offset += take
+
+            hold = self._hold_start(self._pending)
+            if hold:
+                released, self._pending = self._pending[:hold], self._pending[hold:]
+                output.append(self._scrub_released(released))
+
+            if len(self._pending) <= self._MAX_PENDING:
+                continue
+
+            # The retained suffix is one lexical field (or a labelled digest
+            # claim) with no safe boundary yet.  Once it crosses the bound,
+            # fail closed with one deterministic marker and ignore only that
+            # field until its delimiter.  This makes a large one-shot update
+            # and the same text split over many updates observationally equal.
+            if re.search(r"\s", self._pending):
+                output.append("[REDACTED_STREAM]")
+                # A labelled digest or a compound credential expression is
+                # deliberately failed closed as one bounded marker.  It is
+                # not safe to hash a multi-field claim as if it were one
+                # opaque token.
+                trailing = re.search(r"\s+$", self._pending)
+                if trailing:
+                    output.append(trailing.group(0))
+                self._discarding = trailing is None
+                self._pending = ""
+            else:
+                self._start_overflow(self._pending)
+                self._pending = ""
+            continue
+        return "".join(output)
 
     def flush(self, *, preserve_labeled_digests: bool = False) -> str:
+        if self._overflowing:
+            result = self._finish_overflow()
+            self._overflowing = False
+            self._pending = ""
+            self._discarding = False
+            return result
         pending, self._pending = self._pending, ""
         self._discarding = False
         return self._scrub(pending, preserve_labeled_digests=preserve_labeled_digests) if pending else ""
 
-    def _scrub(self, value: str, *, preserve_labeled_digests: bool = False) -> str:
+    def _start_overflow(self, value: str) -> None:
+        self._overflowing = True
+        self._overflow_hash = hashlib.sha256()
+        self._overflow_len = 0
+        self._overflow_allowed = True
+        self._overflow_has_digit = False
+        self._feed_overflow(value)
+
+    def _feed_overflow(self, value: str) -> None:
+        if not value:
+            return
+        self._overflow_hash.update(value.encode("utf-8", errors="replace"))
+        self._overflow_len += len(value)
+        self._overflow_allowed = (
+            self._overflow_allowed
+            and bool(re.fullmatch(r"[A-Za-z0-9_-]+", value))
+        )
+        self._overflow_has_digit = self._overflow_has_digit or any(char.isdigit() for char in value)
+
+    def _finish_overflow(self) -> str:
+        digest = self._overflow_hash.hexdigest()[:16]
+        result = (
+            f"[REDACTED:{digest}]"
+            if self._overflow_len >= 24 and self._overflow_allowed and self._overflow_has_digit
+            else "[REDACTED_STREAM]"
+        )
+        self._overflowing = False
+        return result
+
+    def _scrub(
+        self,
+        value: str,
+        *,
+        preserve_labeled_digests: bool = False,
+        max_chars: int | None = None,
+    ) -> str:
         """Scrub a released field while retaining a labelled SHA-256 value.
 
         A labelled digest is evidence for the accepted-final guard, not a
@@ -158,11 +264,24 @@ class StreamingRedactor:
         )
         if labelled and preserve_labeled_digests:
             return (
-                scrub_text(labelled.group(1), max_chars=self.max_chars)
+                scrub_text(labelled.group(1), max_chars=max_chars or self.max_chars)
                 + labelled.group(2)
-                + scrub_text(labelled.group(3) or "", max_chars=self.max_chars)
+                + scrub_text(labelled.group(3) or "", max_chars=max_chars or self.max_chars)
             )
-        return scrub_text(value, max_chars=self.max_chars)
+        return scrub_text(value, max_chars=max_chars or self.max_chars)
+
+    def _scrub_released(self, value: str) -> str:
+        """Scrub text that is known to end at a lexical boundary.
+
+        A complete transport update can contain a lexical field much larger
+        than the holdback.  Normalize those fields before ordinary redaction
+        so the result does not depend on whether the provider split the same
+        field across updates.  The substitution prevents a released prefix
+        from becoming an unbounded retained object merely because its final
+        delimiter happened to arrive in this update.
+        """
+        value = _LONG_LEXICAL_FIELD.sub("[REDACTED_STREAM]", value)
+        return self._scrub(value, max_chars=max(self.max_chars, len(value) * 2 + 1000))
 
 
 def _digest(value: str) -> str:

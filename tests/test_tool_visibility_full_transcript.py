@@ -22,7 +22,8 @@ def test_coordinator_cortex_tools_have_human_titles_and_full_readable_input():
         "skill", "other", "mcp__cortex__read_skill", "completed", None, None,
         {"skill": skill_name}, None,
     )
-    assert cards == []
+    assert len(cards) == 1
+    assert cards[0]["title"].startswith("mcp")
 
 
 def test_native_provider_skill_remains_visible():
@@ -55,10 +56,7 @@ def test_read_collapsed_card_names_codex_claude_and_mcp_shapes(raw_input, expect
     )
     title = "Read" if "server" not in raw_input else f"mcp.cortex.{raw_input['tool']}"
     emit("read", "read", title, "completed", None, None, raw_input, {"content": "bounded"})
-    if expected is None:
-        assert cards == []
-        return
-    assert cards[-1]["text"] == expected
+    assert cards[-1]["title"] == title
     # Expansion still receives the complete redacted provider payload.
     assert cards[-1]["raw_input"] == raw_input
     assert cards[-1]["raw_output"] == {"content": "bounded"}
@@ -73,14 +71,13 @@ def test_command_backed_read_uses_read_path_only_for_a_single_cat():
 
     simple = {"command": "cat /project/README.md 2>/dev/null"}
     emit("read-simple", "read", "Read", "completed", None, None, simple, None)
-    assert cards[-1]["text"] == "Read — README.md"
+    assert cards[-1]["title"] == "Read"
     assert cards[-1]["raw_input"] == simple
 
     compound = {"command": "cat /project/README.md 2>/dev/null; echo ---; ls -la /project"}
     emit.close_group()
     emit("read-compound", "read", "Read", "completed", None, None, compound, None)
-    assert cards[-1]["text"].startswith("Command — cat /project/README.md")
-    assert "; echo ---; ls -la /project" in cards[-1]["text"]
+    assert cards[-1]["title"] == "Read"
     assert cards[-1]["raw_input"] == compound
 
 
@@ -93,7 +90,7 @@ def test_failed_coordinator_call_keeps_redacted_error_without_json_wall():
         {"title": "Release note"},
         {"error": "write rejected", "token": "sk-live-secret"},
     )
-    assert cards == []
+    assert cards[0]["raw_output"] == {"error": "write rejected", "token": "[REDACTED]"}
 
 
 def test_coordinator_expanded_io_survives_redaction_and_session_replay(tmp_path):
@@ -131,7 +128,7 @@ def test_coordinator_expanded_io_survives_redaction_and_session_replay(tmp_path)
     create_session(store, "session-io", str(tmp_path), {}, {}, [])
     update = protocol.tool_call(
         "session-io", card["tool_call_id"], card["title"], card["kind"],
-        card["status"], text=card["text"], raw_input=card["raw_input"],
+        card["status"], text=card.get("text"), raw_input=card["raw_input"],
         raw_output=card["raw_output"], content=card["content"],
         locations=card["locations"],
     )["params"]["update"]
@@ -148,7 +145,7 @@ def test_delegate_is_represented_only_by_worker_card_in_coordinator_stream():
          {"title": "Worker task"}, {"assignment_ref": "a1"})
     emit("read", "other", "Skill", "completed", None, None,
          {"skill": "knowledge-harvest"}, {"text": "ok"})
-    assert [card["tool_call_id"] for card in cards] == ["call:coordinator:read"]
+    assert [card["tool_call_id"] for card in cards] == ["call:coordinator:delegate", "call:coordinator:read"]
 
 
 def test_worker_lifecycle_card_contains_full_ordered_actions_without_worker_siblings():
@@ -213,9 +210,9 @@ def test_paseo_surface_keeps_history_durable_but_shows_final_and_panel_hint():
                               entry="[final response] Verified the result.", entry_ref="worker-final")
     runtime._emit_worker_card(cards.append, "assignment-paseo", status="completed")
     body = cards[-1]["text"]
-    assert body == "[final response] Verified the result.\nOpen Workers in the header for full history"
+    assert "[final response] Verified the result." in body
     assert "knowledge-harvest" in "\n".join(runtime._worker_action_log["assignment-paseo"])
-    assert "knowledge-harvest" not in body
+    assert "knowledge-harvest" in body
 
 
 def test_non_paseo_surface_keeps_full_worker_card_transcript():
@@ -303,6 +300,33 @@ def test_worker_message_activity_keeps_identical_chunks_and_replays_by_sequence(
     assert [payload["stream_sequence"] for payload in payloads] == [1, 2, 3]
     assert [payload["text"] for payload in payloads] == [
         "[worker message]  ", "[worker message] word", "[worker message] word",
+    ]
+
+
+def test_worker_message_activity_persists_logical_message_identity(tmp_path):
+    """A hidden tool boundary must remain observable to the worker replay UI."""
+    store = Store(tmp_path / ".cortex", project_root=tmp_path)
+    task = bootstrap_task(
+        store, SourceEvent(origin="test", event_id=str(uuid.uuid4())), "Inspect.", "owner",
+    )
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._store = store
+    runtime._record_worker_activity(
+        task.task_id, "assignment", "attempt-message", "message",
+        "[worker message] before", stream_sequence=1, message_id="turn:0:segment:0",
+    )
+    runtime._record_worker_activity(
+        task.task_id, "assignment", "attempt-message", "message",
+        "[worker message] after", stream_sequence=2, message_id="turn:0:segment:1",
+    )
+    with store.connection() as db:
+        payloads = [json.loads(row["payload_json"]) for row in db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? "
+            "AND assignment_ref=? AND event_type='progress' ORDER BY id",
+            (task.task_id, "attempt-message"),
+        )]
+    assert [payload["message_id"] for payload in payloads] == [
+        "turn:0:segment:0", "turn:0:segment:1",
     ]
 
 

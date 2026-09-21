@@ -213,6 +213,8 @@ def test_representative_operations_create_exactly_one_project_store(tmp_path):
     _git(project, home, 'worktree', 'add', '-q', str(worktree), '-b', 'feature')
 
     store, result = bootstrap(project)
+    from cortex_runtime.orchestration.state import TaskMachine
+    TaskMachine(store).create(result.task_id,"Storage fixture")
     server = server_for(project, result.channel_id, result.secret)
     write_a_report(server)
 

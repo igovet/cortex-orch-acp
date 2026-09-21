@@ -91,96 +91,6 @@ def test_in_progress_snapshot_reflects_real_step_transitions(tmp_path):
     assert in_progress_snapshot(store, task_id) == ()
 
 
-def test_advancing_provisioning_resets_the_no_progress_budget_but_a_real_stall_still_blocks(tmp_path):
-    store, task_id = _task(tmp_path)
-
-    def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(
-                title="Assignment X", brief="do X", role="backend-dev", acceptance="X done", request_key="reqX",
-            ))
-            return PromptOutcome(StopReason.END_TURN, "Delegated X.")
-        return PromptOutcome(StopReason.END_TURN, "Still nothing new.")
-
-    def silent_worker(store, channel, session_ref, message, call_index):
-        # Never publishes/asks. Deliberately slow (longer than this test's
-        # whole observation window): keeps the real assignment's own
-        # background future in self._running the entire time, so
-        # _wait_for_progress reliably waits out its full
-        # wait_timeout_seconds on every tick instead of returning early the
-        # instant the worker future finishes (which -- with an instant fake
-        # -- would otherwise make every tick near-zero-cost and race past
-        # this test's own watcher thread). The *synthetic* row below (not
-        # this real assignment's own provisioning row, which is already
-        # 'ready' by the time this runs) is what this test actually
-        # observes advancing.
-        time.sleep(2.0)
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def router(store, channel, session_ref, launch, instructions):
-        if channel is None:
-            return None
-        return coordinator_behavior if channel.role == "coordinator" else silent_worker
-
-    engine = FakeSessionRuntime(store, router)
-    runtime = OrchestratingRuntime(
-        store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
-        wait_timeout_seconds=0.1, max_no_progress_continuations=4,
-    )
-
-    # Seed a synthetic still-provisioning row before the turn starts, then
-    # advance its step twice (from a background thread, so the turn's own
-    # blocking start_prompt() call keeps running) before finally leaving it
-    # stalled so the ordinary no-progress budget still has to apply.
-    _insert_provisioning_row(store, task_id, "synthetic-key", "workspace")
-
-    max_no_progress_seen_while_advancing = 0
-    saw_workers_provisioning = False
-    stop_watching = threading.Event()
-
-    def watcher():
-        nonlocal max_no_progress_seen_while_advancing, saw_workers_provisioning
-        for step in ("channel", "config_snapshot", "context_snapshot"):
-            time.sleep(0.15)
-            with store.connection() as db:
-                row = db.execute(
-                    "SELECT wait_reason, no_progress_count FROM task_orchestration WHERE task_id=?", (task_id,),
-                ).fetchone()
-            if row is not None and row["wait_reason"] == "workers_provisioning":
-                saw_workers_provisioning = True
-            if row is not None and row["no_progress_count"] is not None:
-                max_no_progress_seen_while_advancing = max(max_no_progress_seen_while_advancing, row["no_progress_count"])
-            _insert_provisioning_row(store, task_id, "synthetic-key", step)
-        # Stop advancing -- from here on the row is genuinely stalled, and
-        # the ordinary no-progress budget must still end the turn blocked.
-        stop_watching.set()
-
-    watcher_thread = threading.Thread(target=watcher, daemon=True)
-    watcher_thread.start()
-    updates = []
-    result = runtime.start_prompt(task_id, "s1", "Do X.", updates.append, threading.Event())
-    watcher_thread.join(timeout=5.0)
-
-    # The turn ends -- it never hangs. It no longer ends *blocked*: the
-    # real assignment's own worker finished its turn having produced
-    # nothing, which now closes that assignment explicitly instead of
-    # leaving the coordinator to run out of patience with it (a worker may
-    # legitimately take hours, so patience with open work is unbounded).
-    assert result == StopReason.END_TURN
-    assert stop_watching.is_set(), "the watcher must have finished advancing before the turn ended"
-    assert saw_workers_provisioning, "the loop must have observed and reported active provisioning at least once"
-    # The invariant is that advancing provisioning never *exhausts* the
-    # budget -- not that the counter is pinned at zero. A tick whose
-    # snapshot is unchanged since the previous tick is charged by design
-    # (that is how a genuinely stuck row is ever detected at all), so
-    # whether the counter is seen at 0 or 1 here depends purely on whether
-    # this watcher's next advance lands before or after the loop's next
-    # wait timeout -- a race, not a contract, and the reason this assertion
-    # failed under full-suite load while passing in isolation.
-    assert max_no_progress_seen_while_advancing < 4, (
-        "advancing provisioning must never exhaust the no-progress budget "
-        f"(max_no_progress_continuations=4, saw {max_no_progress_seen_while_advancing})"
-    )
 
 
 # -- a worker that could not be started at all ------------------------------
@@ -271,6 +181,12 @@ def test_a_claimed_row_for_a_finished_assignment_is_closed(tmp_path):
             store, "t1", "assignment_failed", f"failed:{key}", dict(error="engine_refused_session"),
             origin="runtime", assignment_ref=key)
 
+    from cortex_runtime.orchestration.state import TaskMachine
+    TaskMachine(store).create('t1','Fixture')
+    with store.connection() as db:
+        for key,status in [('orphan','failed'),('ready-one','completed'),('running-one','running')]:
+            db.execute('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)',('t1',0,key,'worker-backend-dev',key,'[]','[]','execution',status,key,None))
+        db.commit()
     closed = delegation_provisioning.close_rows_for_finished_assignments(store, "t1")
 
     assert closed == 1  # only the in_progress one; a ready row is a normal end state

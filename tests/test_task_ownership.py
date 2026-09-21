@@ -136,7 +136,7 @@ def test_stale_owner_channel_is_rejected_on_a_delegation_operation(tmp_path):
         before = db.execute('SELECT COUNT(*) FROM task_events').fetchone()[0]
     server = Server(channel_credentials=(stale_channel_id, stale_secret, str(tmp_path)))
     reply = server.dispatch('tools/call', dict(
-        name='delegate', arguments=dict(
+        name='plan_submit', arguments=dict(
             title='T', brief='B', role='backend-dev', acceptance='A', request_key='stale-delegate')))
     import json
     assert reply['isError'], reply
@@ -163,7 +163,7 @@ def test_model_supplied_binding_arguments_cannot_forge_identity(tmp_path):
         title='T', brief='B', role='backend-dev', acceptance='A', request_key='forge1',
         task_id='t_' + '0' * 12, channel_id='ch_' + '0' * 12, workspace_binding_id='wb_forged',
     )
-    reply = server.dispatch('tools/call', dict(name='delegate', arguments=forged_args))
+    reply = server.dispatch('tools/call', dict(name='plan_submit', arguments=forged_args))
     import json
     assert reply['isError'], reply
     body = json.loads(reply['content'][0]['text'])

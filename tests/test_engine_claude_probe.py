@@ -65,8 +65,8 @@ def test_plan_mode_exits_0_and_never_requires_authorization(tmp_path):
     assert result.returncode == 0
     assert "--plan (no authorization, nothing executed)" in result.stdout
     for keyword in (
-        "verify_install", "EngineSessionManager", "claude_option_mapping", "delegate",
-        "publish_result", "decide", "QUALIFICATION_RUN",
+        "verify_install", "EngineSessionManager", "claude_option_mapping", "plan_submit",
+        "result_submit", "synthesis_submit", "QUALIFICATION_RUN",
         "QUALIFIED",
     ):
         assert keyword in result.stdout

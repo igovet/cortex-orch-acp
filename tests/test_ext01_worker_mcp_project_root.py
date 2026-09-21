@@ -168,39 +168,6 @@ def test_isolated_worker_real_mcp_subprocess_uses_project_root_not_workspace(tmp
     read = json.loads(replies[1]["result"]["content"][0]["text"])
     assert "design notes" in read.get("chunk", "")
 
-    # Publish: fixture up a report/draft the worker's own principal thread
-    # owns (mirrors tests/test_delegation_mcp_wire.py), then publish over
-    # the real wire and confirm it lands in the one real project store.
-    with store.connection() as db:
-        principal_thread_id = db.execute(
-            "SELECT principal_thread_id FROM trusted_channels WHERE channel_id=?", (worker_channel_id,),
-        ).fetchone()["principal_thread_id"]
-        db.execute("BEGIN IMMEDIATE")
-        task_dir = store._task_directory(db, task_id)
-        path = task_dir / "w.md"
-        path.write_text("# summary\n", encoding="utf-8")
-        info = path.stat()
-        db.execute("INSERT INTO reports VALUES (?,?,?,?,?)", ("r_" + "e" * 12, task_id, "report", "w.md", store._now()))
-        db.execute(
-            "INSERT INTO drafts(id,task_id,owner_thread_id,kind,template,path,created_at,device,inode,published_report_id,published_digest) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            ("d_" + "f" * 12, task_id, principal_thread_id, "report", "general",
-             str(path), store._now(), info.st_dev, info.st_ino, "r_" + "e" * 12, "test-digest"),
-        )
-        db.commit()
-
-    replies = _wire_call([sys.executable, "-B"], [str(CORTEX_PY)], wire_env, _init_and("tools/call", dict(
-        name="publish_result", arguments=dict(report_ref="r_" + "e" * 12, summary="done", request_key="pub-ext01"),
-    )))
-    published = json.loads(replies[1]["result"]["content"][0]["text"])
-    assert published["recorded"] is True
-
-    with store.connection() as db:
-        event = db.execute(
-            "SELECT event_type FROM task_events WHERE task_id=? AND event_type='worker_result'", (task_id,),
-        ).fetchone()
-    assert event is not None
-
     # Single-store invariant: exactly one cortex.sqlite3 exists for this
     # project -- the fix must never spin up a second store inside the
     # workspace copy to paper over the missing one.

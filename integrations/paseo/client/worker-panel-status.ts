@@ -1,12 +1,12 @@
-export type WorkerSection = "active" | "completed" | null;
+export type WorkerSection = "active" | "completed";
 
 export function workerSection(status: string | undefined, eventCount: number): WorkerSection {
   const value = (status ?? "").toLowerCase();
   if (["reported", "completed", "succeeded", "success", "failed", "cancelled", "canceled", "error"].includes(value)) return "completed";
   if (["running", "provisioning", "ready", "in_progress", "in-progress", "started"].includes(value)) return "active";
-  // A planned/pending assignment with no durable activity has not started.
-  if (eventCount > 0) return "active";
-  return null;
+  // The durable assignment is enough to show its worker immediately. The
+  // first engine event may arrive later while the worker is provisioning.
+  return "active";
 }
 
 export function workerStatus(status: string | undefined, eventCount: number): string {

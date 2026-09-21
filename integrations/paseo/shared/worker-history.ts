@@ -1,16 +1,20 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 
-const event = z.object({
+export const workerEventSchema = z.object({
   id: z.number().int().nonnegative(),
   type: z.string(),
   createdAt: z.string(),
   text: z.string(),
   activity_ref: z.string().min(1).optional(),
+  // Stable identity for one streamed worker message segment. It changes at
+  // every tool boundary, including hidden runtime tools, so replay cannot
+  // accidentally join prose from opposite sides of a tool call.
+  message_id: z.string().min(1).optional(),
   input: z.unknown().nullable().optional(),
   output: z.unknown().nullable().optional(),
   status: z.string().nullable().optional(),
-  error: z.string().nullable().optional(),
+  error: z.unknown().nullable().optional(),
   diff: z.string().nullable().optional(),
   tool_kind: z.string().nullable().optional(),
   title: z.string().nullable().optional(),
@@ -31,9 +35,10 @@ const attempt = z.object({
   attemptNo: z.number().int().nonnegative(),
   status: z.string(),
   failureReason: z.string().nullable(),
+  completedAt: z.string().nullable().optional(),
   agentId: z.string().min(1).optional(),
   route: route.optional(),
-  events: z.array(event),
+  events: z.array(workerEventSchema),
 });
 
 export const readWorkerHistory = defineRpc({

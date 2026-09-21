@@ -270,8 +270,8 @@ def build_first_prompt_blocks(instructions_text: str, user_blocks: list) -> list
     return [leading_block, *user_blocks]
 
 
-def claude_native_subagent_restriction_meta() -> dict:
-    """Restrict native subagents and MCP sources before a session starts.
+def claude_native_subagent_restriction_meta(*, role: str = "worker") -> dict:
+    """Build the pinned Claude native-tool policy for one Cortex role.
 
     The installed claude-agent-acp 0.78.0 forwards
     ``_meta.claudeCode.options.disallowedTools`` into its SDK query
@@ -287,15 +287,41 @@ def claude_native_subagent_restriction_meta() -> dict:
     only explicitly supplied ``mcpServers`` are loaded, excluding native
     user/project/plugin MCP configuration. Keep the production
     ``CLAUDE_CONFIG_DIR`` for native-account authentication; the restriction
-    applies to this session's MCP discovery, not its account state.
+    applies to this session's native tool context and MCP discovery, not its
+    account state.
+
+    The coordinator receives the SDK's documented string-tool allowlist. It
+    can read its registered pipeline draft with ``Read`` and edit it with
+    ``Edit``/``Write``. All three tools are forced through the ACP permission
+    bridge, which refuses other targets. Native project search, shell and
+    subagent tools remain explicitly disallowed.
+    ``Skill`` is deliberately omitted: the SDK supports the name, but that
+    native tool resolves user/project skill files outside Cortex's
+    authenticated ``read_skill`` surface, so it is not a safe role-scoped
+    capability here. Workers retain the preset's current built-in tools and
+    only lose native subagent launch tools.
+
+    This is a native Claude built-in-tool restriction. It is not an OS-level
+    filesystem boundary and it does not make arbitrary external MCP tools
+    read-only.
     """
-    return {"claudeCode": {"options": {
-        "disallowedTools": ["Agent", "Task"],
-        "strictMcpConfig": True,
-    }}}
+    if role not in {"coordinator", "worker"}:
+        raise PortableError(
+            category=PortableErrorCategory.VALIDATION, code="invalid_field",
+            remediation="'role' must be 'coordinator' or 'worker'.",
+            retry_eligible=False, field="role",
+        )
+
+    # Current SDK/adapter explicitly supports tools=[]: disable every native
+    # built-in, including shell, files, subagents and hosted tools. All actions
+    # now enter the channel-verified Cortex gateway.
+    options = {"strictMcpConfig": True, "tools": [], "settingSources": [],
+               "plugins": [], "managedSettings": {"disableAllHooks": True},
+               "disallowedTools": ["Agent", "Task"]}
+    return {"claudeCode": {"options": options}}
 
 
-def build_claude_session_new_meta(instructions_text: str) -> dict:
+def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker") -> dict:
     """``_meta`` payload for ``session/new`` appending Cortex instructions.
 
     The real, statically-confirmed claude-agent-acp 0.78.0 instructions
@@ -331,5 +357,5 @@ def build_claude_session_new_meta(instructions_text: str) -> dict:
         )
     return {
         "systemPrompt": {"append": instructions_text},
-        **claude_native_subagent_restriction_meta(),
+        **claude_native_subagent_restriction_meta(role=role),
     }

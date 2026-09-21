@@ -3,12 +3,12 @@ import test from "node:test";
 import { KNOWN_CORTEX_TOOL_NAMES, presentToolSemantics } from "./tool-presentation.ts";
 
 const cortexTools = [
+  "answer_submit", "replan_request", "scope_request", "escalation_request",
+  "project_read", "project_write", "project_delete", "project_mkdir", "project_git", "draft_write", "command_run",
   "create_task", "set_governance", "create_draft", "read_draft", "write_report",
-  "list_reports", "read_report", "delegate", "list_events", "clarify", "cancel",
-  "decide", "integrate", "update_plan", "read_plan", "prepare_candidate",
-  "request_check", "read_check", "assess_check", "list_sources", "read_source",
-  "read_skill", "read_capsule", "read_large_output", "read_diagnostics",
-  "ask_question", "publish_result",
+  "list_reports", "read_report", "task_get_context", "plan_submit", "synthesis_submit",
+  "user_question_request", "result_submit", "list_sources", "read_source",
+  "read_skill", "read_capsule", "read_large_output", "read_diagnostics", "ask_question",
 ];
 
 test("maps every advertised Cortex MCP operation to a human semantic row", () => {
@@ -24,49 +24,76 @@ test("maps every advertised Cortex MCP operation to a human semantic row", () =>
 
 test("uses native Read/Edit/Shell/Skill/Governance action and target", () => {
   assert.deepEqual(presentToolSemantics({ title: "Read — src/greeting.py", input: {} }), {
-    kind: "read", icon: "FileText", action: "Read", target: "src/greeting.py", label: "Read — src/greeting.py", expandable: false, systemOperation: true, visible: true,
+    kind: "read", icon: "FileText", action: "Read", target: "src/greeting.py", label: "Read — src/greeting.py", expandable: false, systemOperation: false, visible: true,
   });
   assert.deepEqual(presentToolSemantics({ title: "Edit seed.txt", input: { file_path: "/project/seed.txt" } }), {
     kind: "edit", icon: "FilePenLine", action: "Edit", target: "/project/seed.txt", label: "Edit — /project/seed.txt", expandable: true, systemOperation: false, visible: true,
   });
+  assert.equal(presentToolSemantics({ title: "Preparing file…", toolKind: "edit", input: {} }).target, null);
+  assert.equal(presentToolSemantics({ title: "Editing files", toolKind: "edit", input: {} }).label, "Edit");
   assert.deepEqual(presentToolSemantics({ title: "Terminal", input: { command: "pwd" } }), {
     kind: "shell", icon: "Terminal", action: "Shell", target: "pwd", label: "Shell — pwd", expandable: true, systemOperation: false, visible: true,
   });
   assert.equal(presentToolSemantics({ title: "Skill", input: { skill: "knowledge-harvest" } }).label, "Skill — knowledge-harvest");
-  assert.equal(presentToolSemantics({ title: "Skill", input: { skill: "knowledge-harvest" } }).expandable, false);
+  assert.equal(presentToolSemantics({ title: "Skill", input: { skill: "knowledge-harvest" } }).expandable, true);
   assert.equal(presentToolSemantics({ title: "Governance", input: { mode: "light" } }).label, "Governance — light");
   assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "r_abc", author: "worker-backend" } }).label, "Read report — by worker-backend");
-  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "r_abc" } }).systemOperation, true);
-  assert.equal(presentToolSemantics({ name: "mcp__cortex__write_report", title: "Edit report", input: { report_ref: "r_abc" } }).expandable, false);
+  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "r_abc" } }).systemOperation, false);
+  assert.equal(presentToolSemantics({ name: "mcp__cortex__write_report", title: "Edit report", input: { report_ref: "r_abc" } }).expandable, true);
   assert.equal(presentToolSemantics({ name: "mcp__cortex__set_governance", input: { mode: "light" } }).label, "Set governance — light");
   assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "r_abc" } }).label, "Read report — r_abc");
-  assert.equal(presentToolSemantics({ name: "mcp__cortex__update_plan", input: { action: "add_assignment", node_key: "frontend" } }).label, "Update plan — frontend");
 });
 
-test("hides only the coordinator's internal capsule reads", () => {
-  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_capsule", input: {} }).visible, false);
-  assert.equal(presentToolSemantics({ title: "Read — capsule", input: {} }).visible, false);
+test("retains coordinator capsule and report reads", () => {
+  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_capsule", input: {} }).visible, true);
+  assert.equal(presentToolSemantics({ title: "Read — capsule", input: {} }).visible, true);
   assert.equal(presentToolSemantics({ title: "Read — src/capsule", input: {} }).visible, true);
-  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "capsule" } }).visible, false);
+  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "capsule" } }).visible, true);
 });
 
-test("hides every Cortex MCP alias and project-local .cortex access", () => {
-  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: {} }).visible, false);
-  assert.equal(presentToolSemantics({ name: "mcp.cortex.read_report", input: {} }).visible, false);
-  assert.equal(presentToolSemantics({ name: "Read", input: { file_path: "/project/.cortex/cortex.sqlite3" } }).visible, false);
-  assert.equal(presentToolSemantics({ name: "Search", input: { query: "/project/.cortex" } }).visible, false);
+test("retains every Cortex MCP alias and project-local .cortex access", () => {
+  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: {} }).visible, true);
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.read_report", input: {} }).visible, true);
+  assert.equal(presentToolSemantics({ name: "Read", input: { file_path: "/project/.cortex/cortex.sqlite3" } }).visible, true);
+  assert.equal(presentToolSemantics({ name: "Search", input: { query: "/project/.cortex" } }).visible, true);
   assert.equal(presentToolSemantics({ name: "Read", input: { file_path: "/project/src/cortex.ts" } }).visible, true);
-  assert.equal(presentToolSemantics({ name: "Read", input: {} }).visible, false);
-  assert.equal(presentToolSemantics({ name: "Editing files", toolKind: "edit", input: { content: [{ type: "diff", path: "/project/.cortex/draft.md", oldText: "a", newText: "b" }] } }).visible, false);
+  assert.equal(presentToolSemantics({ name: "Read", input: {} }).visible, true);
+  assert.equal(presentToolSemantics({ name: "Editing files", toolKind: "edit", input: { content: [{ type: "diff", path: "/project/.cortex/draft.md", oldText: "a", newText: "b" }] } }).visible, true);
   assert.equal(presentToolSemantics({ name: "Read", toolKind: "read", input: { locations: [{ path: "/project/src/app.py" }] } }).target, "/project/src/app.py");
   assert.equal(presentToolSemantics({ name: "Edit", toolKind: "edit", rawInput: {}, input: { content: [{ type: "diff", path: "/project/src/app.py", oldText: "a", newText: "b" }] } }).target, "/project/src/app.py");
-  assert.equal(presentToolSemantics({ name: "Edit", toolKind: "edit", rawInput: {}, input: { content: [{ type: "diff", path: "/project/.cortex/draft.md", oldText: "a", newText: "b" }] } }).visible, false);
+  assert.equal(presentToolSemantics({ name: "Edit", toolKind: "edit", rawInput: {}, input: { content: [{ type: "diff", path: "/project/.cortex/draft.md", oldText: "a", newText: "b" }] } }).visible, true);
 });
 
 test("humanizes unknown names and keeps expanded payload out of the collapsed label", () => {
   const row = presentToolSemantics({ name: "mcp__other__search_code", input: { query: "secret" } });
   assert.equal(row.label, "Search Code");
   assert.equal(row.target, null);
-  assert.equal(presentToolSemantics({ name: "mcp.cortex.publish_result", input: { report_ref: "r_abc" } }).label, "Publish result — r_abc");
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.result_submit", input: { report_ref: "r_abc" } }).label, "Submit result — r_abc");
   assert.equal(presentToolSemantics({ name: "mcp__other__search_code", input: { query: "{\"secret\":true}" } }).label, "Search Code");
+});
+
+test("gateway labels override generic adapter execution kinds", () => {
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.project_read", toolKind: "execute", rawInput: { server: "cortex", tool: "project_read", arguments: { path: "calc.py" } } }).label, "Read — calc.py");
+  assert.equal(presentToolSemantics({ name: "mcp__cortex__command_run", rawInput: { argv: ["python3", "-B", "-m", "unittest", "-q"] } }).label, "Shell — python3 -B -m unittest -q");
+});
+
+test("unwraps Codex tool envelopes and hides only protocol/wait operations", () => {
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.read_skill", rawInput: { server: "cortex", tool: "read_skill", arguments: { skill: "tool-discipline" } } }).label, "Read skill — tool-discipline");
+  for (const name of ["agent_thought_chunk", "mcp__claude__wait", "Wait", "thinking", "usage_update"]) {
+    assert.equal(presentToolSemantics({ name }).visible, false, name);
+  }
+  assert.equal(presentToolSemantics({ name: "mcp.cortex.read_report" }).visible, true);
+  assert.equal(presentToolSemantics({ name: "Shell", rawInput: { command: "wait" } }).visible, true);
+});
+
+ test("does not repeat raw MCP names as targets on title-only lifecycle updates", () => {
+  assert.equal(presentToolSemantics({ title: "mcp.cortex.project_read", toolKind: "read" }).label, "Read");
+  assert.equal(presentToolSemantics({ title: "mcp.cortex.create_draft", toolKind: "execute" }).label, "Create draft");
+  assert.equal(presentToolSemantics({ title: "mcp__cortex__draft_write", toolKind: "edit" }).label, "Write draft");
+});
+
+ test("file and skill reads are informational even with returned content", () => {
+  for (const name of ["mcp.cortex.project_read", "mcp__cortex__read_skill", "Read"]) {
+    assert.equal(presentToolSemantics({ name, rawInput: {path: "README.md"} }).expandable, false);
+  }
 });

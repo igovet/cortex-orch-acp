@@ -7,12 +7,14 @@ from cortex_runtime.contracts import BY_NAME, StoreError, TOOLS, validate as val
 from cortex_runtime.delegation import contracts as delegation_contracts
 from cortex_runtime.delegation import mcp_tools
 from cortex_runtime.server import DELEGATION_READ_OPERATIONS
+from cortex_runtime.channeled_tools import channeled_base_tools
+from cortex_runtime.orchestration import mcp,gateway
 
 
 READ_NAMES = {
-    "read_draft", "list_reports", "read_report", "list_events", "list_sources",
+    "read_draft", "list_reports", "read_report", "task_get_context", "project_read", "project_git", "list_sources",
     "read_source", "read_capsule", "read_large_output", "read_diagnostics",
-    "read_plan", "read_check", "read_skill",
+    "read_skill",
 }
 
 
@@ -42,12 +44,16 @@ def _sample(rule):
 
 @pytest.mark.parametrize("role", ["coordinator", "worker"])
 def test_every_advertised_tool_uses_its_current_validator_and_read_classification(role):
-    entries = [entry for entry in TOOLS if entry["name"] != "create_task"] + mcp_tools.tool_definitions(role)
+    entries = list(channeled_base_tools()) + mcp_tools.tool_definitions(role)
     advertised = {entry["name"]: entry for entry in entries}
-    expected_base = set(BY_NAME) - {"create_task"}
-    assert len(advertised) == len(entries) == 6 + (18 if role == "coordinator" else 7)
-    assert set(advertised) == expected_base | set(delegation_contracts.schemas_for(role))
-    assert set(mcp_tools._ROLE_HANDLERS[role]) == set(delegation_contracts.schemas_for(role))
+    expected_base = {entry["name"] for entry in channeled_base_tools()}
+    expected_delegation = set(delegation_contracts.schemas_for(role))
+    expected_names = expected_base | expected_delegation
+    # Keep this contract-derived: adding a new role operation must not leave a
+    # stale hand-count in this coverage test (for example complete_assignment).
+    assert len(advertised) == len(entries) == len(expected_names)
+    assert set(advertised) == expected_names
+    assert set(mcp_tools._ROLE_HANDLERS[role]) | set(mcp.schemas(role)) | set(gateway.SCHEMAS) == expected_delegation
     for name, entry in advertised.items():
         schema = entry["inputSchema"]
         Draft202012Validator.check_schema(schema)
@@ -61,11 +67,11 @@ def test_every_advertised_tool_uses_its_current_validator_and_read_classificatio
         assert list(Draft202012Validator(schema).iter_errors(bad)), name
         with pytest.raises(StoreError, match="invalid_arguments"):
             validator(bad)
-        if name in READ_NAMES:
+        if name in READ_NAMES - {"project_git"}:
             assert "request_key" not in schema["properties"], name
-        else:
+        elif name != "synthesis_submit":
             assert "request_key" in schema["properties"], name
 
 
 def test_every_delegation_read_bypasses_mutation_epoch_gate():
-    assert DELEGATION_READ_OPERATIONS == READ_NAMES - {"read_draft", "list_reports", "read_report"}
+    assert DELEGATION_READ_OPERATIONS == READ_NAMES - {"read_draft", "list_reports", "read_report", "project_git"}

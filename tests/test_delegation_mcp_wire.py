@@ -84,157 +84,67 @@ def _init_and(method, params, id_=2):
     ]
 
 
-def test_coordinator_tools_list_includes_role_filtered_delegation_tools(tmp_path):
-    project, store, task_id, channel_id, secret = _bootstrap(tmp_path)
-    replies = _call(project, channel_id, secret, _init_and("tools/list", {}), tmp_path)
-    names = {t["name"] for t in replies[1]["result"]["tools"]}
-    assert "create_task" not in names
-    assert {"write_report", "delegate", "list_events", "clarify", "cancel", "decide"} <= names
-    # T018: list_sources/read_source are shared read-only source-history
-    # operations, available on both coordinator and worker channels.
-    assert {"list_sources", "read_source"} <= names
-    # T021: read_capsule is a shared read-only recovery-capsule operation,
-    # available on both coordinator and worker channels.
-    assert "read_capsule" in names
-    # T024: read_large_output is a shared read-only large-output operation,
-    # available on both coordinator and worker channels.
-    assert "read_large_output" in names
-    # T025: integrate is coordinator-only technical application.
-    assert "integrate" in names
-    # T029: read_diagnostics is a coordinator-only read-only observability/
-    # usage summary operation.
-    assert "read_diagnostics" in names
-    assert "read_skill" in names, "the situational shared skills must be reachable"
-    assert "ask_question" not in names and "publish_result" not in names
-    assert len(names) == 24
 
-    # These are the schemas actually advertised over MCP to the coordinator.
-    tools = {item["name"]: item for item in replies[1]["result"]["tools"]}
-    report = tools["read_report"]
-    assert "request_key" not in report["inputSchema"]["properties"]
-    assert "no request_key" in report["description"]
-    assert "report_ref is not an accepted read_report argument" in report["description"]
-    report_id = report["inputSchema"]["properties"]["report_id"]
-    assert "Copy the exact report_ref value" in report_id["description"]
-    assert report_id["pattern"] == r"^r_[0-9a-f]{12}$"
-    assert "worker_result or publish_result" in report["description"]
-    assert "report_ref is not an accepted read_report argument" in report["description"]
-    assert "report_ref is not an accepted argument name" in report["inputSchema"]["properties"]["report_id"]["description"]
-    events = tools["list_events"]["inputSchema"]
-    assert events["required"] == []
-    assert "request_key" not in events["properties"]
-    assert events["properties"]["limit"]["maximum"] == 200
-    assert "default 50" in events["properties"]["limit"]["description"]
-    assert "returned cursor" in events["properties"]["limit"]["description"]
-    assert "skill" in tools["read_skill"]["inputSchema"]["properties"]
+def _data(replies):
+    response=replies[-1]
+    assert 'error' not in response,response
+    assert not response['result'].get('isError'),response
+    return json.loads(response['result']['content'][0]['text'])
 
 
-def test_worker_tools_list_is_worker_only(tmp_path):
-    project, store, task_id, coordinator_channel_id, _ = _bootstrap(tmp_path)
-    worker_channel_id, worker_secret, attempt_id = _worker_channel(store, task_id, coordinator_channel_id)
-    replies = _call(project, worker_channel_id, worker_secret, _init_and("tools/list", {}), tmp_path)
-    names = {t["name"] for t in replies[1]["result"]["tools"]}
-    assert {"ask_question", "publish_result"} <= names
-    assert "delegate" not in names and "decide" not in names
+def test_roles_advertise_only_the_new_protocol(tmp_path):
+    from cortex_runtime.delegation.contracts import schemas_for
+    project,store,task,coordinator,secret=_bootstrap(tmp_path)
+    worker,wsecret,_=_worker_channel(store,task,coordinator)
+    for role,ch,key in [('coordinator',coordinator,secret),('worker',worker,wsecret)]:
+        tools=_call(project,ch,key,_init_and('tools/list',{}),tmp_path)[-1]['result']['tools']
+        names={t['name'] for t in tools}
+        assert set(schemas_for(role))<=names
+        assert not {'delegate','decide','complete_assignment','integrate','set_governance','create_task'} & names
+        assert ('plan_submit' in names)==(role=='coordinator')
+        assert ('result_submit' in names)==(role=='worker')
 
 
-def test_unauthenticated_process_still_sees_exactly_the_frozen_seven(tmp_path):
-    project = tmp_path / "project2"; project.mkdir()
-    home = _storage_only_home(tmp_path / "home2"); (home / "sessions").mkdir(parents=True)
-    result = subprocess.run(
-        [sys.executable, "-B", str(CORTEX_PY)],
-        input="\n".join(json.dumps(m) for m in _init_and("tools/list", {})) + "\n",
-        text=True, capture_output=True, env=os.environ | dict(CODEX_HOME=str(home)), timeout=30,
-    )
-    assert result.returncode == 0 and result.stderr == ""
-    replies = [json.loads(line) for line in result.stdout.splitlines()]
-    assert len(replies[1]["result"]["tools"]) == 7
-
-
-def test_delegate_over_the_wire_writes_a_delegation_requested_event(tmp_path):
-    project, store, task_id, channel_id, secret = _bootstrap(tmp_path)
-    call = dict(name="delegate", arguments=dict(
-        title="Assignment W", brief="do W", role="backend-dev", acceptance="W done", request_key="reqW",
-    ))
-    replies = _call(project, channel_id, secret, _init_and("tools/call", call), tmp_path)
-    data = json.loads(replies[1]["result"]["content"][0]["text"])
-    assert data["status"] == "provisioning" and data["assignment_ref"]
+def test_plan_wire_is_idempotent_and_does_not_start_a_worker(tmp_path):
+    from cortex_runtime.orchestration.state import TaskMachine
+    project,store,task,ch,secret=_bootstrap(tmp_path)
+    machine=TaskMachine(store);machine.create(task,'Build a page.')
+    proposed=dict(tasks=[dict(id='A',role='backend-dev',objective='Implement',dependencies=[],scope=['src/**'])],verification=[['true']])
+    request=dict(name='plan_submit',arguments=dict(plan=proposed,request_key='plan'))
+    first=_data(_call(project,ch,secret,_init_and('tools/call',request),tmp_path))
+    assert first==_data(_call(project,ch,secret,_init_and('tools/call',request),tmp_path))
+    assert machine.context(task)['state']=='PLAN_READY'
     with store.connection() as db:
-        row = db.execute(
-            "SELECT * FROM task_events WHERE task_id=? AND event_type='delegation_requested'", (task_id,),
-        ).fetchone()
-    assert row is not None and row["assignment_ref"] == data["assignment_ref"]
+        assert db.execute('SELECT COUNT(*) FROM delegation_provisioning').fetchone()[0]==0
+        assert db.execute('SELECT COUNT(*) FROM runtime_nodes').fetchone()[0]==1
+    for operation in ['delegate','decide','complete_task','set_task_state','change_model']:
+        result=_call(project,ch,secret,_init_and('tools/call',dict(name=operation,arguments={})),tmp_path)[-1]
+        assert 'error' in result
+    assert machine.context(task)['state']=='PLAN_READY'
 
-    # Retrying the identical call is idempotent (same assignment_ref).
-    replies2 = _call(project, channel_id, secret, _init_and("tools/call", call), tmp_path)
-    data2 = json.loads(replies2[1]["result"]["content"][0]["text"])
-    assert data2["assignment_ref"] == data["assignment_ref"]
+
+def test_worker_gateway_publication_and_result_cross_real_mcp_process(tmp_path):
+    from cortex_runtime.trusted_channel import resolve_channel
+    from runtime_scenarios import reserve_assignment
+    from cortex_runtime.orchestration.state import TaskMachine
+    project,store,task,ch,secret=_bootstrap(tmp_path)
+    coordinator=resolve_channel(store,ch,secret)
+    reserved=reserve_assignment(store,coordinator,dict(title='Implement',brief='Implement',role='backend-dev',acceptance='Report',request_key='one'))
+    worker,wsecret,attempt=_worker_channel(store,task,ch)
     with store.connection() as db:
-        count = db.execute(
-            "SELECT COUNT(*) AS n FROM task_events WHERE task_id=? AND event_type='delegation_requested'", (task_id,),
-        ).fetchone()["n"]
-    assert count == 1
-
-
-def test_worker_publish_then_coordinator_decide_accept_over_the_wire(tmp_path):
-    project, store, task_id, coordinator_channel_id, coordinator_secret = _bootstrap(tmp_path)
-    worker_channel_id, worker_secret, attempt_id = _worker_channel(store, task_id, coordinator_channel_id)
-
-    with store.connection() as db:
-        principal_thread_id = db.execute(
-            "SELECT principal_thread_id FROM trusted_channels WHERE channel_id=?", (worker_channel_id,),
-        ).fetchone()["principal_thread_id"]
-        db.execute("BEGIN IMMEDIATE")
-        task_dir = store._task_directory(db, task_id)
-        path = task_dir / "w.md"
-        path.write_text("# done\n", encoding="utf-8")
-        info = path.stat()
-        db.execute("INSERT INTO reports VALUES (?,?,?,?,?)", ("r_" + "d" * 12, task_id, "report", "w.md", store._now()))
-        # T019: matching drafts row owned by the worker's own principal
-        # thread so publish_result's report_ref-authorship binding accepts it.
-        db.execute(
-            "INSERT INTO drafts(id,task_id,owner_thread_id,kind,template,path,created_at,device,inode,published_report_id,published_digest) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            ("d_" + "e" * 12, task_id, principal_thread_id, "report", "general",
-             str(path), store._now(), info.st_dev, info.st_ino, "r_" + "d" * 12, "test-digest"),
-        )
+        stamp=store._now()
+        db.execute('INSERT INTO delegation_provisioning VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+          (reserved['assignment_ref'],task,'a_wire1',attempt,'worker-backend-dev','ready','ready','shared_project_root',worker,None,None,None,'qualified',None,coordinator.owner_epoch,stamp,stamp))
         db.commit()
-
-    publish_call = dict(name="publish_result", arguments=dict(report_ref="r_" + "d" * 12, summary="done", request_key="pub1"))
-    replies = _call(project, worker_channel_id, worker_secret, _init_and("tools/call", publish_call), tmp_path)
-    published = json.loads(replies[1]["result"]["content"][0]["text"])
-    assert published["recorded"] is True
-
-    ask_call = dict(name="ask_question", arguments=dict(question="Ready for review?", request_key="ask1"))
-    replies = _call(project, worker_channel_id, worker_secret, _init_and("tools/call", ask_call), tmp_path)
-    asked = json.loads(replies[1]["result"]["content"][0]["text"])
-    assert asked["recorded"] is True
-
-    decide_call = dict(name="decide", arguments=dict(
-        assignment_ref=attempt_id, decision="accept", rationale="Worker result looks complete.", request_key="dec1",
-    ))
-    replies = _call(project, coordinator_channel_id, coordinator_secret, _init_and("tools/call", decide_call), tmp_path)
-    decided = json.loads(replies[1]["result"]["content"][0]["text"])
-    assert decided["recorded"] is True and decided["decision"] == "accept"
-
-    with store.connection() as db:
-        events = db.execute(
-            "SELECT event_type, payload_json FROM task_events WHERE task_id=? ORDER BY id", (task_id,),
-        ).fetchall()
-    types = [row["event_type"] for row in events]
-    assert types == ["worker_result", "worker_question", "coordinator_decision", "progress"]
-    followup = json.loads(events[-1]["payload_json"])
-    assert followup["kind"] == "assignment_accept_requires_task"
-    assert followup["assignment_ref"] == attempt_id
-
-
-def test_worker_channel_cannot_call_a_coordinator_operation_over_the_wire(tmp_path):
-    project, store, task_id, coordinator_channel_id, _ = _bootstrap(tmp_path)
-    worker_channel_id, worker_secret, attempt_id = _worker_channel(store, task_id, coordinator_channel_id)
-    call = dict(name="delegate", arguments=dict(title="X", brief="Y", role="backend-dev", acceptance="Z", request_key="r"))
-    replies = _call(project, worker_channel_id, worker_secret, _init_and("tools/call", call), tmp_path)
-    reply = replies[1]
-    # 'delegate' is not among this worker channel's own advertised tools
-    # (see tools/list), so it is refused as an unknown tool at the
-    # protocol level -- never dispatched to the coordinator-only handler.
-    assert "error" in reply and reply["error"]["code"] == -32602
+    def call(name,**args):return _data(_call(project,worker,wsecret,_init_and('tools/call',dict(name=name,arguments=args)),tmp_path))
+    draft=call('create_draft',template='general',request_key='draft')
+    call('draft_write',draft_id=draft['draft_id'],content=draft['required_first_line']+'\n\n# Report\n\nCompleted fixture.\n',request_key='body')
+    report=call('write_report',draft_id=draft['draft_id'],title='Report',summary='Observed',author='worker',request_key='publish')
+    args=dict(report_ref=report['report_id'],summary='Observed',checks=[],request_key='result')
+    result=call('result_submit',**args)
+    assert result['recorded']
+    assert call('result_submit',**args)==result
+    context=TaskMachine(store).context(task)
+    assert context['state']=='EXECUTING'
+    assert context['nodes'][0]['status']=='completed'
+    assert context['nodes'][0]['result']['report_ref']==report['report_id']

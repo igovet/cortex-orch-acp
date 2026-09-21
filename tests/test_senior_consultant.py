@@ -26,4 +26,5 @@ def test_consultant_has_no_general_worker_execution_permissions():
     skill = (PLUGIN / "skills/worker-senior-consultant/SKILL.md").read_text()
     assert "Do not run commands, tests or project checks" in skill
     assert "You may investigate, implement" not in skill
-    assert "Your only write is your own server-issued unpublished report draft" in skill
+    from cortex_runtime.orchestration.gateway import READ_ONLY
+    assert 'worker-senior-consultant' in READ_ONLY

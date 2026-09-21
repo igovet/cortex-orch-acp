@@ -42,9 +42,10 @@ always a restart). It now calls `recovery.coordinator_recovery.recover`:
    attempt is inspected via `lookup_owned` and, since a fresh process holds
    no channel secret to safely resume it, terminated best-effort and
    marked `assignment_failed` with reason `recovery_worker_lost` — an
-   honest signal for the (model) coordinator to decide whether to
-   re-delegate, never a silent second attempt under the same
-   `request_key`.
+   input to runtime reconciliation. The runtime can retry a lost node at most
+   twice, only after confirmed process absence and with no uncertain action
+   receipts. Refusal, authorization loss, provider restrictions and cancellation
+   cannot trigger an automatic retry or route bypass.
 4. **Fresh coordinator channel + session.** The old coordinator channel is
    revoked; a new one is issued at the new epoch, bound to a freshly
    allocated attempt id (never the old one), and a new engine session is

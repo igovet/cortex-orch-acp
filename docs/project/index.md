@@ -1,9 +1,9 @@
 # Project overview
 
-Cortex is an ACP v1 stdio agent. The runtime stores task state, reports and
-advisory governance in the project-local `.cortex` store; the model owns
-planning, delegation, evidence interpretation and acceptance. The current ACP
-architecture and client qualification procedure live under [`docs/acp/`](../acp/index.md).
+Cortex is an ACP v1 stdio agent. The runtime owns lifecycle, scheduling, routes,
+permissions, independent review, verification and completion. Models propose plans,
+perform bounded assignments and submit reports. The one project-local `.cortex`
+store retains task metadata, immutable reports and newest-first pipeline editions.
 
 - [Conventions](conventions.md)
 - [Decisions](decisions.md)
@@ -11,13 +11,11 @@ architecture and client qualification procedure live under [`docs/acp/`](../acp/
 - [Storage](storage.md)
 - [Markdown reports](../features/markdown-reports/index.md)
 - [Knowledge routing](../features/knowledge-routing/index.md)
-- [Advisory lane](../features/advisory-lane/index.md)
 - [Senior consultant](../features/senior-consultant/index.md)
+- [ACP architecture](../acp/index.md)
+- [Implementation and qualification status](../acp/runtime-rewrite-status.md)
 
-The source of truth for public tool contracts is [`src/cortex_runtime/contracts.py`](../../src/cortex_runtime/contracts.py).
-The ACP server entry point is [`src/cortex_acp.py`](../../src/cortex_acp.py).
-Tests and offline smoke checks are described in [`docs/acp/test-matrix-and-ci.md`](../acp/test-matrix-and-ci.md).
-
-Historical Codex-plugin, native-subagent, gateway and lifecycle-hook material
-was removed from this directory. It must not be used to describe current
-runtime behavior.
+Tool contracts live in `src/cortex_runtime/contracts.py` and
+`src/cortex_runtime/orchestration/contracts.py`; the entry point is
+`src/cortex_acp.py`. The runtime tool gateway is part of this ACP product.
+Historical Codex-plugin, MITM gateway and native-subagent harnesses are removed.

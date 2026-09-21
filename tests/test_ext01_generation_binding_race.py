@@ -44,43 +44,15 @@ def _binding(tmp_path, **overrides):
     return ResourceBinding(**fields)
 
 
-def test_generation_bump_rejects_stale_g1_reply_but_serves_a_new_g2_request(tmp_path):
-    bindings = BindingRegistry()
-    binding = _binding(tmp_path)
-    bindings.bind(binding)
-
-    # The host round-trip for this request is still outstanding when a
-    # compaction lands mid-flight and bumps the generation -- the reply
-    # that then arrives belongs to the now-superseded G1 and must be
-    # refused.
-    def late_g1_requester(engine_session_id, params, timeout):
-        bindings.invalidate_generation(binding.engine_session_id, "gen_2")
-        return {"outcome": {"outcome": "selected", "optionId": "allow"}}
-
-    stale_bridge = PermissionBridge(
-        correlation=CorrelationTables(), bindings=bindings,
-        host_permission_requester=late_g1_requester, call_timeout=1.0,
-    )
-    stale_result = stale_bridge.handle(
-        engine_session_id="es_a", wire_session_id="w1", wire_request_id=1,
-        params=dict(PARAMS, toolCall=dict(toolCallId="tc-1")),
-    )
-    assert stale_result == {"outcome": {"outcome": "cancelled"}}
-
-    # A brand new request made *after* the bump (generation is now G2)
-    # must be served normally -- it is not itself stale.
-    fresh_requester = lambda engine_session_id, params, timeout: {  # noqa: E731
-        "outcome": {"outcome": "selected", "optionId": "allow"},
-    }
-    fresh_bridge = PermissionBridge(
-        correlation=CorrelationTables(), bindings=bindings,
-        host_permission_requester=fresh_requester, call_timeout=1.0,
-    )
-    fresh_result = fresh_bridge.handle(
-        engine_session_id="es_a", wire_session_id="w1", wire_request_id=2,
-        params=dict(PARAMS, toolCall=dict(toolCallId="tc-2")),
-    )
-    assert fresh_result == {"outcome": {"outcome": "selected", "optionId": "allow"}}
+def test_generation_bump_invalidates_held_snapshot_and_allows_fresh_gateway(tmp_path):
+    bindings=BindingRegistry();original=_binding(tmp_path);bindings.bind(original)
+    bindings.invalidate_generation('es_a','gen_2')
+    assert not original.is_current(bindings.snapshot(original))
+    fresh=bindings.get('es_a')
+    assert fresh.is_current(bindings.snapshot(fresh))
+    bridge=PermissionBridge(correlation=CorrelationTables(),bindings=bindings)
+    params=dict(PARAMS,toolCall=dict(toolCallId='tc-2',name='mcp__cortex__project_read'))
+    assert bridge.handle(engine_session_id='es_a',wire_session_id='w1',wire_request_id=2,params=params)=={'outcome':{'outcome':'selected','optionId':'allow'}}
 
 
 def test_confirming_g1_delivery_does_not_clear_a_pending_g2_delivery(tmp_path):

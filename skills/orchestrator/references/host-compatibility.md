@@ -1,11 +1,7 @@
-# Current host compatibility
+# Host compatibility
 
-Use only capabilities advertised and observable in the installed ACP client and
-outgoing engine version. Check live schemas before depending on a feature. Do
-not require hypothetical APIs, synthesize receipts, or inspect private engine
-state to fill an evidence gap.
-
-The model owns decisions. A tool receipt establishes only the operation it
-actually records. Ambiguous, replayed, truncated, pending, or incomplete
-outcomes cannot support acceptance. Read private task documents only through
-the public, bounded Cortex report operations.
+Describe only observed capabilities of the installed ACP client and engines.
+A permission request mediates that request; it is not proof of universal tool
+interception. Unsupported signals remain unavailable. Do not request a hypothetical
+host API or manufacture a success receipt. Keep tool/display events visible while
+redacting credentials.

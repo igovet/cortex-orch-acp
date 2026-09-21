@@ -444,7 +444,8 @@ def test_authorize_dispatch_malformed_policy_recorded_and_does_not_crash(tmp_pat
     adapter = _adapter(store)
     launch = dict(task_id=task_id, config_revision=row["id"])
     record = type("Rec", (), {"engine": "codex-acp", "id": "cn_x"})()
-    adapter._authorize_dispatch(record, task_id, launch, project_root=project)  # must not raise
+    with pytest.raises(PortableError, match="invalid_route_policy"):
+        adapter._authorize_dispatch(record, task_id, launch, project_root=project)
     events = observability_events.list_events(store, task_id, category="route_policy")
     assert len(events) == 1
     assert events[0]["outcome"] == "malformed"

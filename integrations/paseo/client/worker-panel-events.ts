@@ -1,3 +1,4 @@
+import { isHiddenWorkerEvent } from "../shared/timeline-visibility.ts";
 import type { WorkerHistory } from "../shared/worker-history.js";
 
 export type WorkerEvent = WorkerHistory["assignments"][number]["attempts"][number]["events"][number];
@@ -5,27 +6,26 @@ export type TranscriptEntry = { event: WorkerEvent; updates: WorkerEvent[] };
 
 const MESSAGE_MARKER = "[worker message] ";
 
-function internalEvent(event: WorkerEvent): boolean {
-  const type = event.type.trim().toLowerCase();
-  if (["maturity", "state", "maturity/state", "coordinator_decision"].includes(type)) return true;
-  // `progress` is also the durable event type for worker_activity, including
-  // real worker message chunks such as "maturity/state". Keep it here; the
-  // server projection filters lifecycle rows by payload kind/origin.
-  return false;
-}
-
 function messageChunk(event: WorkerEvent): string | null {
   if (event.tool_kind != null || event.type !== "progress") return null;
   const marker = event.text.indexOf(MESSAGE_MARKER);
   return marker < 0 ? null : event.text.slice(marker + MESSAGE_MARKER.length);
 }
 
+function messageId(event: WorkerEvent): string | undefined {
+  const chunk = messageChunk(event);
+  return chunk === null ? undefined : event.message_id;
+}
+
+function entryMessageId(entry: TranscriptEntry): string | undefined {
+  return messageId(entry.updates[0] ?? entry.event);
+}
+
 function groupingRef(event: WorkerEvent): string | undefined {
   // Streamed worker prose intentionally reuses the logical `message` ref.
-  // It is a sequence of distinct durable events, so grouping it by ref would
-  // retain only the latest chunk and leave fragments such as "evidence-backed"
-  // on their own. Message chunks are grouped by their timeline position
-  // below; tool updates continue to collapse by their exact activity ref.
+  // Its durable message_id is the actual logical-message identity; grouping
+  // by activity_ref would retain only the latest chunk. Legacy rows without
+  // message_id are grouped by adjacent timeline position below.
   if (messageChunk(event) !== null) return undefined;
   const ref = event.activity_ref;
   // Runtime's tool-error observation names the same exact tool call with
@@ -36,10 +36,11 @@ function groupingRef(event: WorkerEvent): string | undefined {
 /** One visible row per exact durable activity ref, at its first occurrence.
  * Unkeyed events stay separate: a matching tool name is not an identity. */
 export function groupWorkerEvents(events: WorkerEvent[]): TranscriptEntry[] {
-  const ordered = events.filter((event) => !internalEvent(event)).sort((a, b) => a.id - b.id);
+  const ordered = [...events].sort((a, b) => a.id - b.id);
   const rows: TranscriptEntry[] = [];
   const byRef = new Map<string, TranscriptEntry>();
   for (const event of ordered) {
+    if (isHiddenWorkerEvent(event)) continue;
     const ref = groupingRef(event);
     const existing = ref ? byRef.get(ref) : undefined;
     if (existing) {
@@ -59,7 +60,12 @@ export function groupWorkerEvents(events: WorkerEvent[]): TranscriptEntry[] {
   for (const row of rows) {
     const chunk = messageChunk(row.event);
     const previous = transcript[transcript.length - 1];
-    if (chunk !== null && previous && previous.updates.every((update) => messageChunk(update) !== null)) {
+    const currentMessageId = entryMessageId(row);
+    const previousMessageId = previous && entryMessageId(previous);
+    const sameMessage = currentMessageId !== undefined && previousMessageId !== undefined
+      ? currentMessageId === previousMessageId
+      : currentMessageId === undefined && previousMessageId === undefined;
+    if (chunk !== null && previous && previous.updates.every((update) => messageChunk(update) !== null) && sameMessage) {
       previous.event = { ...previous.event, text: previous.event.text + chunk };
       previous.updates.push(...row.updates);
     } else if (chunk !== null) {
@@ -68,7 +74,5 @@ export function groupWorkerEvents(events: WorkerEvent[]): TranscriptEntry[] {
       transcript.push(row);
     }
   }
-  // The heading already carries the delegation title and current assignment
-  // state. These two bookkeeping rows contain no chat content.
-  return transcript.filter(({ event }) => event.type !== "delegation_requested" && event.type !== "assignment_ready");
+  return transcript;
 }

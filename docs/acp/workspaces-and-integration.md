@@ -1,60 +1,27 @@
-# Project-root writers and safe integration
+# Project scope and filesystem effects
 
-## Current ACP contract
+The ACP client's canonical project root is the destination for all worker changes.
+There are no hidden candidate copies or model-controlled integration operations.
+The runtime reserves dependency-ready scopes and allows at most four workers per
+project store; overlapping write scopes are serialized. A finished node continues
+to occupy its reservation until its engine session is observed absent.
 
-The project opened by the ACP client (Zed today) is the worker destination.
-Every mutating attempt is bound to that exact `project_root`; Cortex does not
-silently substitute a hidden snapshot, temporary checkout, or worker copy.
-The coordinator's working directory is also that exact current project root.
-It must see worker edits made during the same session; a startup copy can give
-it stale source and test results. This does not grant the coordinator a Cortex
-writer lease or make its native tools OS-level read-only.
-Workers acquire a serialized writer lease, and the runtime records the lease
-owner, ownership epoch, input revision, affected paths, output revision and
-write outcome in the project-local `.cortex` store.
+All project operations use the authenticated runtime gateway. Native engine action
+tools are disabled. Coordinator, consultant and review roles are read-only; other
+workers may write only within their assigned scopes. File replacement checks an
+expected hash or absence and rejects private paths, symlinks and hardlinks.
+Commands have read-only mounts except explicitly reserved existing write roots,
+no inherited credentials or network, and bounded deadlines. Ambiguous effects retain
+an unresolved receipt and cannot be replayed as though nothing happened.
 
-Immediately before mutation, Cortex rechecks the binding, current project
-revision and any negotiated unsaved editor buffers. Immediately after the
-write it captures the resulting revision and records the observed filesystem
-delta. A stale revision, overlapping Cortex writer, unavailable binding,
-partial write or uncertain process result is a durable failure/conflict. It is
-never reported as successful completion and never redirected to another
-directory. The writer lock serializes Cortex-owned workers only: it cannot
-prevent Zed, the user, or another external process from editing the project.
+External editors can still change project files. Review binds the complete observed
+project digest from dispatch to verdict, verification and completion. Drift blocks
+acceptance; a digest does not prove which OS process authored a change. Unsaved
+editor buffers are not inferred from an absent client capability.
 
-The direct integration operation is reconciliation of the already-authorized
-project root. When the recorded attempt delta is already present it returns a
-durable `noop`/reconciliation result; it does not apply a hidden candidate.
-When no host `fs` capability is negotiated, `host_buffer_state` remains
-`unknown`. That is an explicit evidence limitation, not proof that there was
-no unsaved Zed buffer and not a strict prevention guarantee. A coordinator
-must keep that limitation visible when deciding acceptance.
-
-Checks run against the exact project revision associated with the attempt and
-retain command observation separately from the coordinator's semantic
-assessment. A report, tool return, or process exit code alone is not proof that
-the user's requirement is satisfied. Native check commands use the user's OS
-permissions; the runtime does not enforce filesystem read-only or network
-isolation for them. The coordinator decides whether to
-accept, revise or stop after reading the durable report and current evidence.
-
-The Cortex writer lock coordinates Cortex processes only. It cannot prevent an
-unrelated editor or process from changing the same directory between two
-observations; such drift is recorded and blocks acceptance until reconciled.
-
-The coordinator-turn revision guard accounts for a direct-project worker that
-edits while the coordinator prompt is still running and publishes later. Cortex
-records the unresolved event boundary in the task store and waits for that
-worker's exact observed final tree before allowing acceptance. A failed worker,
-missing publication, unavailable capture or differing current tree leaves the
-task blocked; a pause or restart does not erase the pending boundary. This is
-observed revision reconciliation, not proof of which same-user OS process made
-each write. Native coordinator tools remain outside a preventive filesystem
-boundary, so their writes cannot be ruled out solely by a matching digest.
-
-The remainder of this page documents the pre-direct-write snapshot/candidate
-implementation retained for migration and audit of existing task stores. It is
-not the destination model for new ACP worker attempts.
+Fixed read-only Git status/diff commands provide retained review context, with
+external diff, text conversion, hooks and fsmonitor disabled. The diff includes
+pre-existing edits and is not an authorship claim. Model commands cannot read `.git`.
 
 # Historical snapshot and candidate implementation (migration/audit only)
 

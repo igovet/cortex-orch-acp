@@ -77,86 +77,36 @@ def test_paseo_provider_replays_history_after_session_opened():
 
 def test_acp_profiles_keep_roles_and_use_mcp_task_documents():
     check_agent_profiles()
-    assert all(path.read_bytes() == body for path, body in expected_profiles().items())
-    assert len(expected_agent_references())==3
-    assert len(expected_worker_references())==69
-    for path in (PLUGIN/'agents').glob('*.toml'):
-        profile=tomllib.loads(path.read_text())
-        instructions=profile['developer_instructions']
-        headings={
-            line[3:] for line in instructions.splitlines() if line.startswith('## ')
-        }
-        if profile['name'] == 'senior_consultant':
-            assert '## Access boundary' in instructions
-            assert 'Do not run commands, tests or project checks' in instructions
-            assert 'read_skill("report-publication")' in instructions
-            assert 'You may investigate, implement' not in instructions
-            continue
-        assert {
-            'Role and responsibility',
-            'Assignment contract',
-            'Evidence and verification',
-            'Report and handoff',
-            'Report class selection',
-            'Specialist workflow',
-            'Quality criteria',
-            'Recovery',
-        } <= headings
-        # Keep the complete role within the package's instruction budget.
-        assert len(instructions) < 12_900
-        assert 'Read assigned published reports through bounded' in instructions
-        assert 'page of at most 4,000 characters' not in instructions
-        # References are named for read_skill, not resolved as project paths.
-        assert 'read_skill("report-publication")' in instructions
-        assert 'read_skill("code-and-evidence")' in instructions
-        assert 'read_skill("interactive-resources")' in instructions
-        assert '](references/' not in instructions
-        assert 'Private Cortex evidence has a strict boundary:' in instructions
-        assert '`read_report`' in instructions
-        assert 'Missing evidence is a stated gap/impact' in instructions
-        assert 'first and only general catalogue query' not in instructions
-        assert 'final `__`-delimited segment' not in instructions
+    assert len(expected_profiles()) == 23
+    assert len(expected_agent_references()) == 3
+    assert len(expected_worker_references()) == 69
+    for path,body in expected_profiles().items():
+        assert path.read_bytes() == body
+        instructions=tomllib.loads(body.decode())['developer_instructions']
+        assert len(instructions)<12900
+        assert 'structured result' in instructions
+        assert 'bounded report' in instructions
+        assert 'runtime' in instructions.lower()
         assert '.codex/plugins/' not in instructions
-    control=(PLUGIN/'skills/cortex-control/SKILL.md').read_text()
-    assert '[report example catalogue](references/index.md)' in control
-    publication=(PLUGIN/'agent-sources/references/report-publication.md').read_text()
-    assert 'read its complete live declaration' in publication
-    assert 'Do not probe with speculative calls' in publication
-    assert 'request_key' not in publication
-    assert 'UUID' not in publication
-    orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    assert 'Delegate discovery AND requested files (notes included)' in orchestrator
-    assert 'missing output to that worker; never create it yourself' in orchestrator
-    pipeline_publication=(PLUGIN/'skills/orchestrator/references/pipeline-publication.md').read_text()
-    assert 'Follow each operation\'s advertised\nretry contract' in pipeline_publication
-    assert 'request_key' not in pipeline_publication
-    assert 'ordered `replaceable_markers` list as authoritative' in pipeline_publication
-    assert 'replace every exact\nlisted marker in place' in pipeline_publication
-    assert 'coordinator publishes a current\n`pipeline` edition, while a worker publishes its own non-pipeline report' in pipeline_publication
-    assert 'keep this same draft, correct every exact remaining\nmarker in place' in pipeline_publication
-    assert 'draft or replay an acknowledged publication' in pipeline_publication
+        if path.stem=='senior-consultant':
+            assert 'Do not run commands, tests or project checks' in instructions
+        else:
+            assert '## Specialist workflow' in instructions
 
 
 
-def test_coordinator_publication_guidance_closes_observed_draft_failure():
-    orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
+def test_pipeline_publication_is_runtime_owned():
+    source=(PLUGIN/'src/cortex_runtime/orchestration/pipeline.py').read_text()
+    assert 'create_draft' in source and 'write_report' in source
     reference=(PLUGIN/'skills/orchestrator/references/pipeline-publication.md').read_text()
-    assert '(references/pipeline-publication.md)' in orchestrator
-    assert reference.index('Before `write_report`') < reference.index('If `write_report` returns the deterministic')
-    assert 'verify that no listed marker (or other exact template\nplaceholder) remains' in reference
+    assert 'runtime' in reference.lower()
 
 
-def test_pre_accept_pipeline_guidance_describes_durable_decision_basis():
-    orchestrator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    reference=(PLUGIN/'skills/orchestrator/references/pipeline-publication.md').read_text()
-    for guidance in (orchestrator, reference):
-        normalized=' '.join(guidance.split())
-        assert 'factual basis' in normalized
-        assert 'durable task decision and state' in normalized.lower()
-        assert 'Do not claim acceptance before the `decide` receipt' in normalized or (
-            'Do not say acceptance was already recorded before the `decide` receipt' in normalized
-        )
-        assert 'anticipated acceptance' not in normalized
+def test_coordinator_cannot_accept_or_publish_pipeline_through_channel():
+    from cortex_runtime.delegation.contracts import schemas_for
+    from cortex_runtime.channeled_tools import channeled_base_tool_names
+    assert not {'decide','complete_task','delegate','set_task_state'} & set(schemas_for('coordinator'))
+    assert not {'create_task','set_governance'} & set(channeled_base_tool_names())
 
 
 
@@ -208,79 +158,34 @@ def test_paseo_integrity_digest_ignores_local_dependency_tree(tmp_path):
 
 
 
-def test_worker_safety_and_post_wait_rules_are_payload_guidance():
-    worker = (PLUGIN/'agent-sources/worker-protocol.md').read_text()
-    orchestrator = (PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    assert 'PYTHONDONTWRITEBYTECODE=1' in worker
-    for rule in ('rm -rf', 'find ... -delete', 'git clean', 'reset/checkout', 'recursive cleanup'):
-        assert rule in worker
-    assert 'Checks `PYTHONDONTWRITEBYTECODE=1`' in worker
+def test_worker_protocol_describes_evidence_without_native_authority():
+    worker=(PLUGIN/'agent-sources/worker-protocol.md').read_text()
     assert 'These role instructions are delivered' in worker
-    assert 'most specific native tool' in worker
-    assert 'avoid Python/ad-hoc parsing' in ' '.join(worker.split())
-    consultant = (PLUGIN/'agent-sources/consultant-protocol.md').read_text()
-    assert 'most specific suitable native tool' in consultant
-    assert 'fallback is valid otherwise' in consultant
-    assert 'read_skill` for the named situational guidance' in worker
-    assert 'one bounded command per wrapper' in worker
-    assert "`publish_result` hands off only this worker's own current assignment report" in worker
-    assert 'other-worker report evidence\nonly in the saved report' in worker
+    assert 'Unrun, failed, truncated and unverifiable checks remain explicit.' in worker
+    assert 'Discover tools through their live schemas' in worker
     assert 'request_key' not in worker
-    assert 'Timeout alone never replaces its active owner' in orchestrator
-    assert 'Reconcile outcomes against published reports and public evidence' in orchestrator
 
 
 
-def test_p0_p1_evidence_protocol_remains_model_owned_and_receipt_bound():
-    orchestrator = (PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    worker = (PLUGIN/'agent-sources/worker-protocol.md').read_text()
-    pipeline = (PLUGIN/'report-templates/pipeline.md').read_text()
-    assert 'implementation_state' in orchestrator
-    assert 'delivery_state' in orchestrator
-    assert 'acceptance_state' in orchestrator
-    assert ' '.join(orchestrator.split()).find(
-        'CI, reports and commands prove only their own boundary') >= 0
-    assert '(artifact_revision, acceptance_boundary, check_identity)' in orchestrator
-    assert 'basis, uncertainty, and\ndisconfirmation' in worker
-    assert 'receipt-backed' in worker
-    assert 'rollout/review/recheck/' in worker
-    assert "Distinguish implementation and observed delivery from the evidence supporting the coordinator's task decision" in pipeline
+def test_evidence_protocol_is_runtime_owned_and_receipt_bound():
+    from cortex_runtime.orchestration.contracts import RESULT
+    assert RESULT['properties']['checks']['items']['properties']['outcome']['enum']==['passed','failed','not_run','unverified']
+    assert 'report_ref' in RESULT['required']
+    assert 'checks' in RESULT['required']
+    assert 'verdict' in RESULT['properties']
 
 
 
-def test_coordinator_reads_worker_handoffs_through_acp_events():
-    orchestrator = (PLUGIN/'skills/orchestrator/references/worker-routing.md').read_text()
-    payload = json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
-    # What this used to require was the plugin harness's own vocabulary --
-    # `collaboration.spawn_agent`, Codex app threads -- none of which
-    # exists in an ACP session, checked against the shipped engines on
-    # 2026-09-19. It also told the coordinator that "native final
-    # responses deliver the handoff automatically", which is the same
-    # falsehood the worker protocol carried and the reason workers ended
-    # their turns having published a report and said nothing.
-    assert 'you read them with `list_events`' in orchestrator
-    assert 'Nothing about a handoff is automatic' in orchestrator
-    assert '`publish_result`' in orchestrator
-    assert 'collaboration.' not in orchestrator
-    assert 'create_thread' not in orchestrator
-    assert 'src/cortex_runtime/store.py' in payload
-    assert (PLUGIN/'skills/orchestrator/SKILL.md').is_file()
-    package_version = json.loads((PLUGIN/'package-identity.json').read_text())['version']
+def test_coordinator_handoffs_use_retained_runtime_results():
+    from cortex_runtime.delegation.contracts import schemas_for
+    payload=json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
+    assert 'src/cortex_runtime/orchestration/controller.py' in payload
+    assert 'task_get_context' in schemas_for('coordinator')
+    assert 'result_submit' in schemas_for('worker')
+    assert 'publish_result' not in schemas_for('worker')
+    package_version=json.loads((PLUGIN/'package-identity.json').read_text())['version']
     assert package_version.startswith('1.0.0+sha256.')
-    assert payload_digest(PLUGIN).startswith(package_version.rsplit('.', 1)[-1])
-    for path, body in expected_profiles().items():
-        if path.stem == 'senior-consultant':
-            continue
-        # The rule this replaced forbade `codex_app.send_message_to_thread`,
-        # a surface of the plugin harness T033 removed -- checked against
-        # the shipped engine on 2026-09-19, codex-acp 1.12.0 does not
-        # contain that name at all. It cost every worker profile a
-        # paragraph to forbid something that cannot happen, while what a
-        # worker actually gets wrong went unsaid: the same profiles told it
-        # "final handoffs are automatic", and workers duly ended their
-        # turns having published a report and said nothing.
-        assert 'Nothing about\nyour handoff is automatic' in body.decode()
-        assert 'publish_result' in body.decode()
+    assert payload_digest(PLUGIN).startswith(package_version.rsplit('.',1)[-1])
 
 
 
@@ -337,119 +242,34 @@ def test_orchestrator_routes_conditional_procedures_with_valid_links():
 
 
 
-def test_ordinary_completion_documentation_branches_are_semantic_and_conditional():
-    def completion_text(source):
-        start = source.index('5. Before ordinary acceptance')
-        end = source.index('\n\nFor production', start)
-        return ' '.join(source[start:end].split())
-
-    def assert_contract(completion):
-        related = "Include related tests and affected documentation in the implementing worker's assignment when practical"
-        sync = 'that worker applies `documentation-sync` (readable with `read_skill`) and reports its changes and proportionate verification'
-        separate = 'Assign a separate technical writer when documentation is independent work or needs distinct ownership'
-        read_only = 'It may inspect bounded project source and public evidence read-only to reconcile the worker\'s report and cited revisions'
-        uncertain = 'If impact or verification remains uncertain, gather the missing evidence or keep acceptance open'
-        no_impact = 'A supported no-impact conclusion needs no token edit or extra worker'
-        acceptance = 'Accepting is `decide`, and only `decide`'
-        clauses = (related, sync, separate, read_only, uncertain, no_impact,
-                   'Then accept the observed outcome', acceptance)
-        assert all(clause in completion for clause in clauses)
-        assert [completion.index(clause) for clause in clauses] == sorted(
-            completion.index(clause) for clause in clauses)
-        assert 'missing inspection is not evidence of no impact' in completion
-        assert "The coordinator does not read another role's `SKILL.md`" in completion
-        assert 'coordinator does not read another role\'s `SKILL.md`, edit project files or rerun project checks' in completion
-        assert 'Keep `cortex:knowledge-harvest` explicit-only: this review is not a broad census' in completion
-        assert 'model-owned/advisory decisions are not runtime gates' in completion
-        assert 'For every ordinary task, apply `documentation-sync`' not in completion
-
-    source = (PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    completion = completion_text(source)
-    assert_contract(completion)
-
-    # Branch polarity fixtures: these mutations must be rejected by the contract.
-    unconditional = completion.replace(
-        'Include related tests and affected documentation',
-        'For every ordinary task, apply `documentation-sync`. Include related tests and affected documentation',
-        1)
-    with pytest.raises(AssertionError):
-        assert_contract(unconditional)
-    weakened_hold = completion.replace(
-        'gather the missing evidence or keep acceptance open',
-        'continue to acceptance without documentation evidence', 1)
-    with pytest.raises(AssertionError):
-        assert_contract(weakened_hold)
-    mandatory_writer = completion.replace(
-        'Assign a separate technical writer when documentation is independent work or needs distinct ownership',
-        'Assign a separate technical writer for every documentation change', 1)
-    with pytest.raises(AssertionError):
-        assert_contract(mandatory_writer)
-    coordinator_writes = completion.replace(
-        'edit project files or rerun project checks',
-        'edit project files and rerun project checks', 1)
-    with pytest.raises(AssertionError):
-        assert_contract(coordinator_writes)
-    no_read = completion.replace(
-        'It may inspect bounded project source and public evidence read-only',
-        'It may inspect only report summaries', 1)
-    with pytest.raises(AssertionError):
-        assert_contract(no_read)
-    automatic_harvest = completion.replace(
-        'Keep `cortex:knowledge-harvest` explicit-only: this review is not a broad census',
-        '`cortex:knowledge-harvest` runs after every ordinary task', 1)
-    with pytest.raises(AssertionError):
-        assert_contract(automatic_harvest)
-
-    documentation_sync = ' '.join((PLUGIN/'skills/documentation-sync/SKILL.md').read_text().split())
-    assert "include related documentation in the implementing worker's assignment when practical" in documentation_sync
-    assert 'Use a separate technical writer when the documentation is independent work or needs distinct ownership' in documentation_sync
-    assert 'requires the affected updates and proportionate verification before acceptance' in documentation_sync
-    assert 'The coordinator may inspect bounded project source, report evidence and public artifacts read-only' in documentation_sync
-    assert 'the coordinator does not rerun project checks' in documentation_sync
+def test_completion_requires_runtime_review_and_verification():
+    from cortex_runtime.orchestration.state import TRANSITIONS
+    assert TRANSITIONS['EXECUTING']=={'REVIEWING','WAITING_USER'}
+    assert 'COMPLETED' not in TRANSITIONS['REVIEWING']
+    assert 'COMPLETED' not in TRANSITIONS['VERIFYING']
+    source=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
+    assert 'runtime' in source.lower()
+    assert 'decide' not in source
 
 
 
 def test_shared_worker_protocol_routes_rare_interactive_procedure():
     protocol=(PLUGIN/'agent-sources/worker-protocol.md').read_text()
+    assert 'interactive-resources' in protocol
     reference=(PLUGIN/'agent-sources/references/interactive-resources.md').read_text()
-    # By name, not by path: references are delivered by the Cortex skill reader.
-    assert 'read_skill("interactive-resources")' in protocol
-    assert 'Never inspect\nglobal processes, ports, tabs or devices' in reference
     assert 'select, create or reuse only owned resources' in reference
-    assert 'Stop or close only sessions created by this assignment.' in reference
-    assert 'Accessibility element numbers belong only to the snapshot' not in protocol
 
 
 
 def test_acp_instruction_boundaries_cover_observed_failures():
-    coordinator=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()
-    communication=(PLUGIN/'skills/coordinator-communication/SKILL.md').read_text()
     discipline=(PLUGIN/'skills/tool-discipline/SKILL.md').read_text()
-    publication=(PLUGIN/'agent-sources/references/report-publication.md').read_text()
-    assert "Use the user's language" in coordinator
-    assert "user's latest own prose" in communication
     assert 'Reuse retained results while relevant state is unchanged.' in discipline
-    assert 'Re-read after user steering' in discipline
-    assert 'A wrapper must expose the full nested' in discipline
     assert 'never replay a mutation for reassurance' in discipline
-    # The coordinator rule was delivered in the observed live run. Workers
-    # received only a catalog pointer to tool-discipline, so the same rule
-    # must also appear in each worker's first-turn role instructions.
-    assert "Never use your engine's own\n   subagent or wait tools" in coordinator
-    assert 'Your engine offers subagent and spawn tools of its own. Never use them.' in discipline
-    assert 'A worker delegates nothing at all' in discipline
-    worker_rule = "Do not use your engine's native subagent or spawn tools. A worker delegates nothing"
-    assert worker_rule in ' '.join((PLUGIN / 'agent-sources/worker-protocol.md').read_text().split())
-    for path in sorted((PLUGIN / 'skills').glob('worker-*/SKILL.md')):
-        body = ' '.join(path.read_text().split())
-        if path.name == 'SKILL.md' and path.parent.name == 'worker-senior-consultant':
-            assert 'create subagents' in body, path
-        else:
-            assert worker_rule in body, path
-    assert 'Use the draft reader only after compaction, restart' in publication
-    assert 'Correct deterministic edit or argument errors once' in publication
-    assert 'After successful publication, call `publish_result`' in publication
-    assert len(discipline) < 4_000
+    assert 'native tools are disabled' in discipline
+    assert len(discipline)<4000
+    publication=(PLUGIN/'agent-sources/references/report-publication.md').read_text()
+    assert 'immutable report' in publication
+    assert 'does not replace the structured result' in publication
 
 
 
@@ -483,12 +303,14 @@ def test_prompt_and_skill_editing_subagents_use_the_explicit_sol_medium_override
     assert '`medium` reasoning effort' in ' '.join(instructions.split())
     protocol = (PLUGIN / 'agent-sources/worker-protocol.md').read_text()
     assert 'These role instructions are delivered' in protocol
-    assert 'read_skill` for the named situational guidance' in protocol
+    assert 'through the advertised skill reader' in protocol
 
 
 
 def test_write_report_description_matches_artifact_schema():
-    source=(ROOT/'src/cortex_runtime/contracts.py').read_text()
-    assert 'Metadata arrays use the advertised item schemas' in source
-    assert 'Never put Markdown bodies or shell interpolation' in source
-    assert 'writer metadata, arrays, chunks' not in source
+    from cortex_runtime.contracts import BY_NAME
+    declaration=BY_NAME['write_report']
+    artifacts=declaration['inputSchema']['properties']['artifacts']['items']
+    assert set(artifacts['required'])=={'reference','version'}
+    assert 'draft_write' in declaration['description']
+    assert 'result_submit' in declaration['description']

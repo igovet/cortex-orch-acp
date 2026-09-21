@@ -63,6 +63,9 @@ MEANINGFUL_PROGRESS_KINDS = frozenset({
     # explicit task-level decision instead of parking or replaying the same
     # choice.
     "assignment_accept_requires_task",
+    # A runtime dispatcher failure is a coordinator-visible continuation,
+    # even when it happened before an executor future existed.
+    "coordinator_dispatch_failed",
 })
 
 

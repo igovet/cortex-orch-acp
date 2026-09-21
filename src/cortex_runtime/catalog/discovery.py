@@ -96,20 +96,11 @@ class Observation:
     (effort) set is stored ``{model_slug: (effort, ...)}``, always keyed by
     model -- there is no separate "flat, engine-wide" shape and no fallback
     between the two. :func:`parse_observation` itself populates this for
-    *every* model it lists, copying one shared flat set to each model when
-    that is all a live ACP session actually advertised (e.g.
-    claude-agent-acp's one flat ``default,low,medium,high,xhigh,max`` today
-    -- the duplication across models is intentional, not something to
-    optimize back into a shared value); :meth:`with_model_thought_levels`
-    lets a caller holding a genuinely *per-model* source -- today only
-    ``catalog.codex_debug_models.fetch_effort_ceiling``'s parse of codex's
-    own offline ``codex debug models`` output, e.g. ``gpt-5.5`` lacking
-    ``max``/``ultra`` that its sibling models have -- overlay real per-model
-    values on top (only ``catalog.refresh.perform_refresh`` does this in
-    production; the live session's own parsed default is never mutated in
-    place, only merged into a new ``Observation``, keeping the two
-    provenances distinct: a copied-flat entry still carries the live
-    session's own provenance, never claimed as codex's per-model one).
+    *every* model it lists from that session's selector. Production Claude
+    discovery then selects each advertised model without prompting and records
+    its actual selector, including an empty set when the selector is absent.
+    Codex uses its installed CLI's offline model catalogue. These observed
+    per-model overrides prevent one model's effort list leaking into another.
     """
 
     options: tuple[_ParsedOption, ...]
@@ -129,7 +120,7 @@ class Observation:
         ``self`` (frozen dataclass). Every value is still keyed by model,
         never a fallback shape."""
         merged = dict(self.model_thought_levels)
-        merged.update({model: tuple(levels) for model, levels in overrides.items() if levels})
+        merged.update({model: tuple(levels) for model, levels in overrides.items()})
         return Observation(
             options=self.options,
             model_thought_levels=MappingProxyType(merged),

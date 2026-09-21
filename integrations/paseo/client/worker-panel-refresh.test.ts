@@ -25,3 +25,5 @@ assert.equal(mergeWorkerHistory(merged, update).assignments[0].attempts[0].event
 const staleRunning = { ...update, assignments: [{ ...update.assignments[0], status: "running", attempts: [{ ...update.assignments[0].attempts[0], status: "running", events: [] }] }] };
 assert.equal(mergeWorkerHistory(merged, staleRunning).assignments[0].attempts[0].status, "completed");
 console.log("worker-panel refresh tests passed");
+
+assert.equal(historyCursor(first, "unloaded-worker"), 0);

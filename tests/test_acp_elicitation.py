@@ -176,58 +176,26 @@ def _initialize_and_new_session(harness, project, *, elicitation_form):
 
 
 def _ask_user_then_accept_router(question="Which environment?", options=None, observed=None):
-    phase = {"asked": False, "accepted": False}
-
+    from runtime_scenarios import propose_inspection, publish_result
+    phase = {"asked": False}
     def coordinator_behavior(store, channel, session_ref, message, call_index):
         if not phase["asked"]:
             phase["asked"] = True
-            args = dict(assignment_ref="task", decision="ask_user", rationale="need input",
-                         question=question, request_key="ask1")
-            if options is not None:
-                args["options"] = options
-            mcp_tools.dispatch(store, channel, "decide", args)
-            return PromptOutcome(StopReason.END_TURN, "")
-        if not phase["accepted"]:
-            phase["accepted"] = True
-            if observed is not None:
-                observed["continuation"] = message
-            _publish_current_pipeline(store, channel)
-            mcp_tools.dispatch(store, channel, "decide", dict(
-                assignment_ref="task", decision="accept", rationale="answered", request_key="acc1",
-            ))
-            return PromptOutcome(StopReason.END_TURN, "accepted")
+            args = dict(question=question, request_key="ask1")
+            if options is not None: args["options"] = options
+            mcp_tools.dispatch(store, channel, "user_question_request", args)
+        else:
+            context = mcp_tools.dispatch(store, channel, "task_get_context", {})
+            if observed is not None: observed["continuation"] = message
+            if context['state'] == 'PLANNING': propose_inspection(store,channel)
+            elif context['state'] == 'RECONCILING':
+                mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Answered and verified.'))
         return PromptOutcome(StopReason.END_TURN, "")
-
     def router(store, channel, session_ref, launch, instructions):
-        return coordinator_behavior if channel and channel.role == "coordinator" else None
-
+        return coordinator_behavior if channel.role == "coordinator" else (
+            lambda store,channel,*args: publish_result(store,channel))
     return router
 
-
-def _publish_current_pipeline(store, channel):
-    """Give task-level acceptance the same coordinator-owned plan as a model.
-
-    Runtime bootstrap creates the opening pipeline edition, but acceptance
-    requires a current coordinator-authored edition.  The fake coordinator
-    therefore performs the normal draft/write publication before accepting.
-    """
-    draft = store.call(
-        "create_draft", dict(template="pipeline"),
-        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True,
-    )
-    body = pipeline_bootstrap._fill_template(
-        draft["markdown"], channel.task_id, "Test task", None,
-    )
-    Path(draft["draft_path"]).write_text(body, encoding="utf-8")
-    return store.call(
-        "write_report",
-        dict(
-            draft_id=draft["draft_id"], title="Current pipeline",
-            summary="Coordinator-authored current pipeline edition",
-            author="coordinator", request_key="test-current-pipeline-" + uuid.uuid4().hex,
-        ),
-        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True,
-    )
 
 
 def test_elicitation_form_advertised_and_accepted_resolves_same_pq_id_without_ending_turn(tmp_path):

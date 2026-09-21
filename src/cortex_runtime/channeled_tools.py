@@ -13,7 +13,7 @@ from .contracts import TOOLS
 
 def channeled_base_tools() -> tuple[dict, ...]:
     """Return fresh advertised base-tool entries usable on a live channel."""
-    return tuple(entry for entry in TOOLS if entry["name"] != "create_task")
+    return tuple(entry for entry in TOOLS if entry["name"] not in {"create_task", "set_governance"})
 
 
 def channeled_base_tool_names() -> frozenset[str]:

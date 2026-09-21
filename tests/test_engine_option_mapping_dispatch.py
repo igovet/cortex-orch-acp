@@ -46,18 +46,22 @@ def test_option_mapping_for_dispatches_by_engine_name():
     assert _option_mapping_for("some-future-engine") is None
 
 
+GATEWAY_ONLY = dict(disallowedTools=['Agent','Task'],strictMcpConfig=True,tools=[],settingSources=[],plugins=[],managedSettings=dict(disableAllHooks=True))
+
+
 def test_session_new_meta_for_pinned_engines_builds_a_payload():
-    assert _session_new_meta_for("codex-acp", "1.12.0", "Be helpful.") == {"systemPrompt": "Be helpful."}
-    assert _session_new_meta_for("claude-agent-acp", "0.78.0", "Be helpful.") == {
-        "systemPrompt": {"append": "Be helpful."},
-        "claudeCode": {"options": {"disallowedTools": ["Agent", "Task"], "strictMcpConfig": True}},
-    }
-    # Unrecognized version: UNSUPPORTED plan, never a payload.
-    assert _session_new_meta_for("claude-agent-acp", "0.11.0", "Be helpful.") is None
-    # A Claude session without role text still cannot launch native subagents.
-    expected_restriction = {"claudeCode": {"options": {"disallowedTools": ["Agent", "Task"], "strictMcpConfig": True}}}
-    assert _session_new_meta_for("claude-agent-acp", "0.78.0", None) == expected_restriction
-    assert _session_new_meta_for("claude-agent-acp", "0.78.0", "") == expected_restriction
+    assert _session_new_meta_for('codex-acp','1.12.0','Be helpful.') == {'systemPrompt':'Be helpful.','cortexRole':'worker'}
+    assert _session_new_meta_for('claude-agent-acp','0.78.0','Be helpful.') == dict(systemPrompt=dict(append='Be helpful.'),claudeCode=dict(options=GATEWAY_ONLY))
+    assert _session_new_meta_for('claude-agent-acp','0.11.0','Be helpful.') is None
+    for text in [None,'']:
+        assert _session_new_meta_for('claude-agent-acp','0.78.0',text) == dict(claudeCode=dict(options=GATEWAY_ONLY))
+
+
+def test_every_claude_role_disables_native_tools_settings_plugins_and_hooks():
+    for role in ['worker','coordinator']:
+        meta=_session_new_meta_for('claude-agent-acp','0.78.0','Role instructions',role=role)
+        assert meta['claudeCode']['options']==GATEWAY_ONLY
+        assert meta['systemPrompt']==dict(append='Role instructions')
 
 
 def _open_one(tmp_path, engine, config_options):
@@ -143,10 +147,7 @@ def test_each_pinned_adapter_gets_its_own_session_new_meta(tmp_path):
         manager.shutdown(grace=2.0)
 
     dumped = json.loads(session_new_dump.read_text(encoding="utf-8"))
-    assert dumped.get("_meta") == {
-        "systemPrompt": {"append": "You are a backend developer."},
-        "claudeCode": {"options": {"disallowedTools": ["Agent", "Task"], "strictMcpConfig": True}},
-    }
+    assert dumped.get('_meta') == dict(systemPrompt=dict(append='You are a backend developer.'),claudeCode=dict(options=GATEWAY_ONLY))
 
     # The verified private Codex adapter forwards this metadata to App Server.
     # Role text is not repeated in an ordinary user prompt; recovery carries
@@ -174,4 +175,4 @@ def test_each_pinned_adapter_gets_its_own_session_new_meta(tmp_path):
         manager.shutdown(grace=2.0)
 
     dumped_codex = json.loads(session_new_dump_codex.read_text(encoding="utf-8"))
-    assert dumped_codex.get("_meta") == {"systemPrompt": "You are a backend developer."}
+    assert dumped_codex.get("_meta") == {"systemPrompt": "You are a backend developer.","cortexRole":"coordinator"}

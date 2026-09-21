@@ -20,45 +20,21 @@ Nothing here claims a main-branch/newer-release capability (see
 `ADR-001b`'s own version-drift note: the lead cited 1.11.0; the actually
 pinned/verified copy reports 1.12.0).
 
-## Per-turn Codex workspace policy
+## Current runtime gateway policy
 
-For the verified 1.12.0 App Server surface, Cortex's private adapter sends
-this `sandboxPolicy` with every `turn/start` request:
+The verified private codex-acp 1.12.0 copy and Codex CLI 0.154.0/0.155.1 wrapper disable
+native shell, patch, agents, hooks, plugins, apps, browsing and other native action
+tools. Every turn requests `readOnly` with network access disabled. A private model
+catalogue preserves configured model routes while disabling native shell/patch
+capabilities. Authenticated Cortex MCP operations provide scoped project access.
+Account configuration and credentials remain in the production native account.
 
-```json
-{
-  "type": "workspaceWrite",
-  "writableRoots": [],
-  "networkAccess": false,
-  "excludeTmpdirEnvVar": true,
-  "excludeSlashTmp": true
-}
-```
-
-`workspaceWrite` keeps the thread's `cwd` as the writable project workspace;
-the empty `writableRoots` array adds no second directory. The two temporary
-tree exclusions prevent Codex's native workspace policy from granting the
-process access to `$TMPDIR` or `/tmp`. This is a Codex App Server policy
-request, not an operating-system sandbox or a claim that arbitrary native
-code is contained. The transformation is created in an owner-only private
-adapter copy, and refuses to launch if the pinned version, install layout, or
-all exact source call sites do not match. The upstream package is never
-modified. The no-paid installed-bundle trace in
-`tests/test_codex_developer_instructions.py` checks the exact serialized
-`turn/start` object and the untouched upstream bytes.
-
-## Pinned install and automatic Cortex patching
-
-The editor or Paseo remains responsible for installing the upstream
-`@agentclientprotocol/codex-acp` package. Cortex does not replace that package
-or modify the user's native installation. On each Codex engine launch Cortex
-re-verifies the pinned install and creates an owner-only private adapter copy
-under the connection state directory. The copy is rebuilt and byte-checked
-from the verified upstream bytes, so the Cortex behavior is applied
-automatically to every engine started by the Cortex ACP plugin; no manual
-`pnpm patch`, fork, or second Codex account is required. If the package
-version, layout, hash, or expected source call sites differ, launch fails
-closed instead of running an unreviewed adapter.
+The wrapper verifies installed shapes and checks that account MCP servers are
+disabled for this child before starting App Server. Unsupported versions or changed
+patch sites fail closed. The installed no-paid dispatch test observes a successful
+MCP call and rejection of a forced native patch. It uses a local fake provider,
+so it does not qualify a real paid model or client UI. See
+[containment](permissions-and-containment.md) and [status](runtime-rewrite-status.md).
 
 An operator who has already installed codex-acp by some other means (for
 example following Zed's own npx-based Custom Agent registration, or a manual
@@ -457,3 +433,12 @@ python3 -B scripts/cortex_codex_probe.py --plan
 Live qualification against a real Codex assignment with a verified
 selected model is out of this task's scope; see T035's own live-run
 boundary and `.cortex/acp-migration/templates/QUALIFICATION_RUN.json`.
+
+Codex worker turns allow network access so local HTTP servers and browser
+verification can run. The role is bound to the exact newly created engine
+session; coordinator and unbound sessions retain disabled network access.
+This permits worker networking generally, not a loopback-only network policy.
+Workspace and temporary-directory write restrictions remain in force.
+A 2026-09-21 live worker exposed the former blanket network ban by failing
+`http.server` at socket creation; the revised worker policy needs a fresh
+live serving observation before that check can be counted as passing.

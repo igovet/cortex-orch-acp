@@ -66,6 +66,7 @@ class FakeEngine:
         self.scenario = scenario
         self._cancel_events: dict[str, threading.Event] = {}
         self._prompt_counts: dict[str, int] = {}
+        self._session_params = {}
         self._client_request_id = 1_000_000
         # T014: pending requests *this* fake engine issued to the client
         # (session/request_permission, fs/*, terminal/*), keyed by the id
@@ -232,6 +233,7 @@ class FakeEngine:
             with open(dump_path, "w", encoding="utf-8") as handle:
                 json.dump(params, handle)
         session_id = self._next_session_id()
+        self._session_params[session_id] = params
         for update in self.scenario.get("replay_updates") or []:
             _notify("session/update", dict(sessionId=session_id, update=update))
         payload = dict(sessionId=session_id)
@@ -300,6 +302,59 @@ class FakeEngine:
                 return
             written += len(chunk)
 
+    def _runtime_gateway_prompt(self, session_id, params):
+        """Scripted proposals over the real runtime MCP, never a model API."""
+        import select
+        server=next(s for s in self._session_params[session_id]['mcpServers'] if s['name']=='cortex')
+        env=dict(os.environ,**{item['name']:item['value'] for item in server.get('env',[])})
+        child=subprocess.Popen([server['command'],*server.get('args',[])],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,bufsize=0)
+        sequence=0;buffer=b''
+        def rpc(method,arguments):
+            nonlocal sequence,buffer
+            sequence+=1
+            child.stdin.write((json.dumps(dict(jsonrpc='2.0',id=sequence,method=method,params=arguments))+'\n').encode());child.stdin.flush()
+            deadline=time.monotonic()+15
+            while True:
+                while b'\n' not in buffer:
+                    left=deadline-time.monotonic()
+                    if left<=0 or not select.select([child.stdout],[],[],left)[0]:raise RuntimeError('MCP timeout')
+                    chunk=os.read(child.stdout.fileno(),65536)
+                    if not chunk:raise RuntimeError('MCP closed')
+                    buffer+=chunk
+                line,buffer=buffer.split(b'\n',1);reply=json.loads(line)
+                if reply.get('id')==sequence:return reply
+        def call(name,**args):
+            tool_id='scripted:'+str(sequence+1)
+            _notify('session/update',dict(sessionId=session_id,update=dict(sessionUpdate='tool_call',toolCallId=tool_id,title='mcp__cortex__'+name,kind='other',status='in_progress',rawInput=args)))
+            reply=rpc('tools/call',dict(name=name,arguments=args))
+            result=reply.get('result',{})
+            value=json.loads(result['content'][0]['text']) if result.get('content') else reply
+            _notify('session/update',dict(sessionId=session_id,update=dict(sessionUpdate='tool_call_update',toolCallId=tool_id,status='failed' if result.get('isError') or 'error' in reply else 'completed',rawOutput=value)))
+            return value
+        try:
+            rpc('initialize',dict(protocolVersion='2025-11-25',capabilities={},clientInfo=dict(name='scripted-test',version='1')))
+            child.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n');child.stdin.flush()
+            listed=rpc('tools/list',{})
+            names={tool['name'] for tool in listed['result']['tools']}
+            if 'plan_submit' in names:
+                context=call('task_get_context')
+                if context['state']=='PLANNING':
+                    value=call('plan_submit',plan=dict(tasks=[dict(id='inspect',role='explorer',objective='Inspect the project',dependencies=[],scope=['src/**'])],verification=[['python3','-B','-c','print("verified fixture")']]),request_key='plan-'+str(context['revision']))
+                else:value=call('synthesis_submit',text='Report independently reviewed and runtime verification passed.')
+            else:
+                draft=call('create_draft',template='general',request_key='draft')
+                call('draft_write',draft_id=draft['draft_id'],content=draft['required_first_line']+'\n\n# Report\n\nObserved disposable fixture.\n',request_key='draft-body')
+                report=call('write_report',draft_id=draft['draft_id'],title='Observed report',summary='Observed fixture',author='worker',request_key='report')
+                result_args=dict(report_ref=report['report_id'],summary='Observed fixture',checks=[],request_key='result')
+                value=call('result_submit',**result_args)
+                if value.get('error')=='review_verdict_required':value=call('result_submit',**dict(result_args,verdict='APPROVE'))
+            if value.get('error'):raise RuntimeError(json.dumps(value))
+            _notify('session/update',dict(sessionId=session_id,update=dict(sessionUpdate='agent_message_chunk',content=dict(type='text',text='Visible scripted peer response.'))))
+        finally:
+            child.stdin.close()
+            try:child.wait(timeout=3)
+            except subprocess.TimeoutExpired:child.kill();child.wait()
+
     def _handle_prompt(self, request_id, params) -> None:
         session_id = params.get("sessionId")
         prompt_number = self._prompt_counts.get(session_id, 0)
@@ -318,6 +373,14 @@ class FakeEngine:
         behavior = (self.scenario.get("prompt_behavior_by_session") or {}).get(
             session_id, self.scenario.get("prompt_behavior", "normal")
         )
+
+        if behavior == 'runtime_gateway':
+            try:
+                self._runtime_gateway_prompt(session_id,params)
+                _result(request_id,dict(stopReason='end_turn'))
+            except Exception as error:
+                _error(request_id,-32603,'Scripted MCP peer failed: '+str(error))
+            return
 
         if behavior == "hang":
             return  # never reply, never emit -- caller times out
@@ -403,14 +466,14 @@ class FakeEngine:
             # client_reply_log_path captures them before this turn ends.
             pending_ids = []
             for request in self.scenario.get("client_requests") or []:
-                request_id = request.get("id")
-                if request_id is None:
+                client_request_id = request.get("id")
+                if client_request_id is None:
                     self._client_request_id += 1
-                    request_id = self._client_request_id
+                    client_request_id = self._client_request_id
                 with self._client_pending_lock:
-                    self._client_pending[request_id] = dict(event=threading.Event(), response=None)
-                pending_ids.append(request_id)
-                _write_json(dict(jsonrpc="2.0", id=request_id, method=request["method"], params=request.get("params") or {}))
+                    self._client_pending[client_request_id] = dict(event=threading.Event(), response=None)
+                pending_ids.append(client_request_id)
+                _write_json(dict(jsonrpc="2.0", id=client_request_id, method=request["method"], params=request.get("params") or {}))
             deadline = time.time() + self.scenario.get("client_requests_fire_wait", 3.0)
             while time.time() < deadline:
                 with self._client_pending_lock:

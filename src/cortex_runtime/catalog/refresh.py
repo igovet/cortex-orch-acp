@@ -13,9 +13,9 @@ persist it as a real ``DISCOVERY``-provenance :class:`~.model.CatalogSnapshot`
 constructs an ``engine.session_manager.EngineSessionManager`` at all (its
 ``prompt_turn`` method must never even be reachable from here); it drives
 ``engine.process.EngineProcess`` + ``engine.client.EngineClient`` directly,
-and the only two JSON-RPC methods this module's code ever passes to
-``EngineClient.call`` are the two literal strings ``"initialize"`` and
-``"session/new"`` -- see :func:`_read_catalog_from_engine`. This structural
+and uses only initialization, session creation and (for Claude) model selection
+via ``session/set_config_option`` to observe each model's actual effort selector.
+The initial model is restored before the disposable session is closed. This structural
 property is asserted by
 ``tests/test_catalog_refresh.py::test_refresh_never_sends_prompt`` against a
 fake engine that fails the test outright if it ever receives a
@@ -91,21 +91,7 @@ class RefreshOutcome:
 
 
 def _read_catalog_from_engine(record, workspace_root, *, environ=None, timeout: float, install=None) -> list:
-    """Launch one engine process, call exactly ``"initialize"`` then
-    ``"session/new"`` -- and nothing else -- read the returned
-    ``configOptions``, and terminate the process. Raises on any failure
-    (the caller, :func:`perform_refresh`, is solely responsible for turning
-    that into a non-fatal :class:`RefreshOutcome`).
-
-    Deliberately does **not** construct an
-    ``engine.session_manager.EngineSessionManager``: that class exposes
-    ``prompt_turn``/``configure``, methods this refresh must never be able
-    to reach even by a future accidental call. This function drives
-    ``engine.process.EngineProcess`` + ``engine.client.EngineClient``
-    directly instead, and the only method names it ever passes to
-    ``EngineClient.call`` are the two literal strings below -- no method
-    name is ever accepted as a parameter or built dynamically.
-    """
+    """Read options and Claude's model-dependent effort selectors, without prompts."""
     from ..engine.client import EngineClient
     from ..engine.correlation import CorrelationTables
     from ..engine.process import EngineProcess
@@ -123,6 +109,10 @@ def _read_catalog_from_engine(record, workspace_root, *, environ=None, timeout: 
         client.call("initialize", dict(protocolVersion=1, clientCapabilities={}), timeout=timeout)
         result = client.call("session/new", dict(cwd=workspace_root, mcpServers=[]), timeout=timeout)
         options = result.get("configOptions") if isinstance(result, dict) else None
+        if record.engine == 'claude-agent-acp' and options:
+            from .model_efforts import observe_model_efforts
+            levels = observe_model_efforts(client.call, result['sessionId'], options, timeout=timeout)
+            return parse_observation(options).with_model_thought_levels(levels)
         return options or []
     finally:
         try:
@@ -227,7 +217,8 @@ def perform_refresh(
     if not raw_options:
         return RefreshOutcome(record.id, True, False, "no_config_options_advertised", None, at)
     try:
-        observation = parse_observation(raw_options)
+        from .discovery import Observation
+        observation = raw_options if isinstance(raw_options, Observation) else parse_observation(raw_options)
     except PortableError as error:
         return RefreshOutcome(record.id, True, False, f"invalid_observation:{error.code}", None, at)
     if not observation.model_options():

@@ -26,10 +26,10 @@ write project artifacts, rebuild routing, or invent product decisions.
    An audit of an implementation waits for that implementation to exist.
 6. After material scope expansion or a distinct failure, reconcile changed outcome,
    boundary, prior evidence, causal assumptions, and the revised discriminator.
-   Treat delivery receipts and coordinator acceptance as separate states.
+   Treat delivery receipts and runtime completion as separate states.
 7. Compare material alternatives and report genuine unresolved user decisions
    to the coordinator with enough context for an informed answer.
-8. Save the plan as an ordinary Markdown report. The coordinator decides whether
+8. Save the plan as an ordinary Markdown report. The coordinator proposes whether
    and how to use it; no server approval or special plan publication exists.
 
 ## Quality criteria

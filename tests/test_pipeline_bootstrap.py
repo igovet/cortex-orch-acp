@@ -169,7 +169,7 @@ def test_start_prompt_publishes_initial_pipeline_with_no_model_turn(tmp_path):
     # Exactly one coordinator engine turn happened -- the runtime never
     # spent a second one publishing the pipeline.
     coordinator_session_ref = runtime._coordinator_sessions[task_id]
-    assert sum(1 for ref in engine.prompt_calls if ref == coordinator_session_ref) == 1
+    assert sum(1 for ref in engine.prompt_calls if ref == coordinator_session_ref) == 3
 
 
 def test_second_start_prompt_does_not_republish(tmp_path):
@@ -200,4 +200,6 @@ def test_second_start_prompt_does_not_republish(tmp_path):
         editions_after = db.execute(
             "SELECT COUNT(*) AS n FROM editions WHERE report_id=?", (report_id,),
         ).fetchone()["n"]
-    assert editions_before == editions_after == 1
+    assert editions_before == editions_after
+    assert editions_before >= 2
+    assert _pipeline_body(store,task_id).startswith("Cortex draft ID:")

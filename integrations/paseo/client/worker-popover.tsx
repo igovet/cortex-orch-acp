@@ -2,7 +2,7 @@ import { useRpc, type PluginButtonContentProps } from "@getpaseo/plugin/client";
 import { Pressable, Text, View } from "react-native";
 import { useEffect, useState } from "react";
 import { readWorkerHistory, type WorkerHistory } from "../shared/worker-history.js";
-import { workerPopoverStatus } from "./worker-popover-status.js";
+import { workerPopoverStatus, orderPopoverWorkers } from "./worker-popover-status.js";
 import { workerDisplayName } from "./worker-display.js";
 
 type Props = PluginButtonContentProps & {
@@ -28,7 +28,7 @@ export function WorkerPopover({ theme, layout, workspaceId, agentId, close, onOp
     return () => { active = false; clearInterval(timer); };
   }, [agentId, rpc, workspaceId]);
 
-  const assignments = history?.assignments ?? [];
+  const assignments = orderPopoverWorkers(history?.assignments ?? []);
   return (
     <View accessibilityRole="menu" style={{ width: layout.compact ? undefined : 340, alignSelf: layout.compact ? "stretch" : "auto", marginHorizontal: -12, backgroundColor: theme.colors.surface1 }}>
       {!history && <Text style={{ color: theme.colors.foregroundMuted, fontSize: 13, padding: 14 }}>Loading workers…</Text>}

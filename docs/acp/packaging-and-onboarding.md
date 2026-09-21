@@ -297,3 +297,18 @@ explicitly **not submitted or published**; Custom Agent installation
 (above) works with no Registry dependency at all — see
 [real-client-runbook.md](real-client-runbook.md) for the still-NOT-RUN
 live client rows owned by T035.
+
+### Paseo update and existing MCP registries
+
+`scripts/update-paseo-plugin.sh` calls `install-paseo-plugin`, which validates the
+owner MCP registry before changing the daemon or launch record. A malformed or
+pre-gateway entry without exact `allowed_tools` fails the update preflight with
+its server name and required field. No missing grant is converted into wildcard
+access. Repair enabled entries using the installed catalogue, explicit binary and
+dependency `read_paths`, and only the required network permission.
+
+An already-running `cortex-acp` plugin is now explicitly reloaded through Paseo's
+installed `plugin reload` command. This restarts its provider process, so perform
+updates between active tasks. A plugin's `running` state alone does not certify
+MCP operations; retained startup and real gateway checks are recorded in the
+[production repair observation](evidence/paseo-2026-09-21/production-mcp-repair.md).

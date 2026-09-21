@@ -61,6 +61,8 @@ def host_mcp_servers(servers, *, role: str | None = None, engine: str | None = N
     forwarded: list[dict[str, object]] = []
     if role is not None and role not in _ROLES:
         raise ValueError(f"role must be one of {_ROLES!r}.")
+    if role == "coordinator":
+        return forwarded
     for entry in servers or ():
         if not isinstance(entry, dict):
             continue

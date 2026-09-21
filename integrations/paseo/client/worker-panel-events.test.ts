@@ -41,7 +41,26 @@ assert.deepEqual(streamedMessage.map((row) => row.event.text), [
 ]);
 assert.deepEqual(streamedMessage.map((row) => row.updates.map((update) => update.id)), [[30, 31], [32], [33], [34]]);
 
-assert.equal(groupWorkerEvents([event(1, { type: "delegation_requested" }), event(2, { type: "assignment_ready" }), event(3, { type: "worker_result" })]).length, 1);
+// Durable message identities keep same-message chunks together while
+// preventing an accidental merge when separate engine messages are adjacent.
+const identified = groupWorkerEvents([
+  event(40, { text: "in_progress · [worker message] before-", message_id: "turn:0:segment:0" }),
+  event(41, { text: "in_progress · [worker message] tool", message_id: "turn:0:segment:0" }),
+  event(42, { text: "in_progress · [worker message] after", message_id: "turn:0:segment:1" }),
+  event(43, { text: "in_progress · [worker message] -tool", message_id: "turn:0:segment:1" }),
+]);
+assert.deepEqual(identified.map((row) => row.event.text), ["before-tool", "after-tool"]);
+
+// Even if a malformed/replayed producer repeats an id across a visible tool,
+// grouping remains timeline-local and never joins opposite sides.
+const repeatedIdAroundTool = groupWorkerEvents([
+  event(50, { text: "in_progress · [worker message] before", message_id: "same" }),
+  event(51, { activity_ref: "tool:read", tool_kind: "read", text: "Read README" }),
+  event(52, { text: "in_progress · [worker message] after", message_id: "same" }),
+]);
+assert.deepEqual(repeatedIdAroundTool.map((row) => row.event.text), ["before", "Read README", "after"]);
+
+assert.equal(groupWorkerEvents([event(1, { type: "delegation_requested" }), event(2, { type: "assignment_ready" }), event(3, { type: "worker_result" })]).length, 3);
 const failedTool = groupWorkerEvents([
   event(1, { activity_ref: "tool:tc1", tool_kind: "read", status: "in_progress" }),
   event(2, { activity_ref: "tool-error:tc1", status: "failed", error: "denied" }),
@@ -58,8 +77,18 @@ const protocolRows = groupWorkerEvents([
   event(25, { type: "worker_result", text: "[final response] assessment." }),
   event(26, { type: "worker_message", text: "real worker message" }),
 ]);
-assert.deepEqual(protocolRows.map((row) => row.event.id), [24, 25, 26]);
-assert.equal(protocolRows[0].event.text, "maturity/state ");
-assert.equal(protocolRows[1].event.text, "[final response] assessment.");
-assert.equal(protocolRows[2].event.text, "real worker message");
+assert.deepEqual(protocolRows.map((row) => row.event.id), [20, 21, 22, 23, 24, 25, 26]);
+assert.equal(protocolRows[4].event.text, "maturity/state ");
+assert.equal(protocolRows[5].event.text, "[final response] assessment.");
+assert.equal(protocolRows[6].event.text, "real worker message");
 console.log("worker-panel event grouping tests passed");
+
+const filtered = groupWorkerEvents([
+  event(80, { tool_kind: "agent_thought_chunk", text: "internal thought" }),
+  event(81, { content: { sessionUpdate: "agent_thought_chunk", content: { text: "thought" } } }),
+  event(82, { title: "mcp__claude__wait" }),
+  event(83, { activity_ref: "tool:read", title: "mcp.cortex.read_skill", tool_kind: "read" }),
+  event(84, { type: "assignment_failed", text: "Real failure" }),
+  event(85, { text: "[final response] Answer" }),
+]);
+assert.deepEqual(filtered.map(row => row.event.id), [83, 84, 85]);

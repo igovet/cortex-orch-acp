@@ -15,19 +15,16 @@ was removed" for the exact list and `SECURITY.md`'s "Current ACP boundary"
 for the current security model.
 Treat `docs/acp/*` and `SECURITY.md` as the current product references.
 
-The server stores tasks, advisory governance and Markdown reports. The model
-owns the pipeline, delegated engine sessions, steering, evidence interpretation
-and completion. Keep tool argument contracts in the advertised schemas and
-property descriptions only, never in skills or profile instructions. Preserve
-all 23 role profiles (22 specialists plus the consultant) and their shared
-report protocol. Do not introduce
-compatibility routes, mandatory stages or approval machines. There is no
-lifecycle hook dispatcher in the packaged product (removed at T033): no
-`PreToolUse`/`UserPromptSubmit`/`Stop` handler and no host trust prompt for one.
-Every mutation reaches the store only through a dispatched, channel-verified
-MCP `tools/call`; local source-memory, observation and registered-file
-integrity work happens inside that same dispatch path, never through a
-separate hook, and nothing there chooses agents or decides task acceptance.
+The runtime owns the task lifecycle, dependency graph, scheduling, engine routes,
+permissions, mandatory independent review, verification and completion. Models
+propose plans, analyze evidence and submit reports/results. Keep tool argument
+contracts in advertised schemas and property descriptions, never in skills or
+profile instructions. Preserve all 23 profiles (22 specialists and the consultant)
+and their shared report protocol. Do not reintroduce model-driven delegation,
+acceptance or compatibility routes. Model-originated mutations require dispatched,
+channel-verified MCP tools/call; runtime-owned state transitions and events commit
+transactionally. The runtime rewrite is incomplete: read
+`docs/acp/runtime-rewrite-status.md` before treating this checkout as releasable.
 
 Throughout design, implementation, qualification, and live work, use only
 capabilities that are actually supported and observable in the currently installed

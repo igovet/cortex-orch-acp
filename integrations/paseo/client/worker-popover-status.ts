@@ -19,3 +19,22 @@ export function workerPopoverStatus(assignment: Assignment): string {
   if (["running", "provisioning", "ready", "in_progress", "in-progress", "started"].includes(status)) return "running";
   return (attempt?.events.length ?? 0) > 0 ? "running" : "pending";
 }
+
+/** Running first; terminal attempts use their durable completion date, newest first.
+ * This date is independent of the event page, which may contain only startup.
+ */
+export function orderPopoverWorkers(assignments: readonly Assignment[]): Assignment[] {
+  const active = (a: Assignment) => ["running", "pending"].includes(workerPopoverStatus(a));
+  const completedAt = (a: Assignment) => {
+    const latest = a.attempts[a.attempts.length - 1];
+    const value = latest?.completedAt ? Date.parse(latest.completedAt) : NaN;
+    return Number.isFinite(value) ? value : -Infinity;
+  };
+  return [...assignments].sort((a, b) => {
+    const aActive = active(a), bActive = active(b);
+    if (aActive !== bActive) return aActive ? -1 : 1;
+    if (aActive) return 0;
+    const aDate = completedAt(a), bDate = completedAt(b);
+    return aDate === bDate ? 0 : aDate > bDate ? -1 : 1;
+  });
+}

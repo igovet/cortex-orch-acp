@@ -34,6 +34,7 @@ from .contracts import StoreError
 from .delegation.store import DELEGATION_SCHEMA
 from .delegation.work_graph import WORK_GRAPH_SCHEMA
 from .delegation.events_store import TASK_EVENTS_SCHEMA
+from .orchestration.state import SCHEMA as RUNTIME_SCHEMA
 from .delegation.capacity_store import CAPACITY_SCHEMA
 from .delegation.evidence_store import EVIDENCE_SCHEMA
 from .routing.store import ROUTING_SCHEMA
@@ -224,7 +225,23 @@ def migrate(directory, backup, *, access_stopped=False):
         # Existing v10 tables and immutable Markdown are untouched. Add metadata,
         # initialize known source order and mark older authored provenance unknown (0).
         db.execute("PRAGMA foreign_keys=ON")
-        db.executescript("BEGIN EXCLUSIVE;\n"+SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+WORK_GRAPH_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+ROUTING_SCHEMA)
+        db.executescript("BEGIN EXCLUSIVE;\n"+SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+WORK_GRAPH_SCHEMA+TASK_EVENTS_SCHEMA+RUNTIME_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+ROUTING_SCHEMA)
+        # The graph schema is additive inside this explicit migration
+        # transaction.  Rows from the pre-structured layout retain an
+        # unclassified marker; they are never silently reinterpreted as
+        # ordinary/general requirements.
+        requirement_columns = {row[1] for row in db.execute("PRAGMA table_info(work_requirement_revisions)")}
+        if "requirement_type" not in requirement_columns:
+            db.execute(
+                "ALTER TABLE work_requirement_revisions ADD COLUMN requirement_type "
+                "TEXT NOT NULL DEFAULT 'legacy_unclassified'"
+            )
+        assignment_columns = {row[1] for row in db.execute("PRAGMA table_info(work_assignments)")}
+        if "requirement_state" not in assignment_columns:
+            db.execute(
+                "ALTER TABLE work_assignments ADD COLUMN requirement_state "
+                "TEXT NOT NULL DEFAULT 'legacy_unclassified'"
+            )
         if version == 10:
             rows=db.execute("SELECT thread_id FROM thread_bindings").fetchall()
             for (thread,) in rows:

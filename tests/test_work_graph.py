@@ -3,6 +3,7 @@ import json
 import pytest
 
 from cortex_runtime.store import Store
+from cortex_runtime.delegation import events as delegation_events
 from cortex_runtime.delegation.work_graph import WorkGraph, WorkGraphError
 
 
@@ -24,6 +25,63 @@ def test_requirements_are_revisioned_and_impact_is_queryable(tmp_path):
         "assignment_id": assignment["assignment_id"], "node_key": "implementation",
         "bound_revision": 1, "current_revision": 2,
     }]
+
+
+def test_revision_without_type_preserves_rendered_requirement_type(tmp_path):
+    g = graph(tmp_path)
+    first = g.create_requirement(
+        "task-1", "capture the rendered page", requirement_type="rendered_ui",
+        idempotency_key="rendered-r1",
+    )
+    revised = g.revise_requirement(
+        first["requirement_id"], "capture the rendered page at mobile width",
+        idempotency_key="rendered-r2",
+    )
+    assert revised["requirement_type"] == "rendered_ui"
+
+
+def test_legacy_assignment_state_is_visible_and_fail_closed(tmp_path):
+    g = graph(tmp_path)
+    assignment = g.add_assignment(
+        "task-1", "old-work", requirement_state="legacy_unclassified",
+        idempotency_key="legacy-assignment",
+    )
+    assert g.get_assignment(assignment["assignment_id"])["requirement_state"] == "legacy_unclassified"
+
+
+def test_legacy_backfill_runs_once_and_does_not_undo_rebind_on_reopen(tmp_path):
+    store = Store(tmp_path / ".cortex")
+    task_id = "task-1"
+    with store.connection() as db:
+        db.execute("INSERT INTO tasks VALUES (?,?,?)", (task_id, str(tmp_path), "2026-01-01T00:00:00Z"))
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", "legacy-request",
+        {"title": "Old assignment", "brief": "Historical text-only work"},
+        origin="coordinator", assignment_ref="legacy-assignment",
+    )
+    graph = WorkGraph(store)
+    graph.ensure_schema()
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT requirement_state FROM work_assignments WHERE task_id=? AND assignment_id=?",
+            (task_id, "legacy-assignment"),
+        ).fetchone()
+        assert row["requirement_state"] == "legacy_unclassified"
+        # Simulate the explicit model-owned rebind performed by the current
+        # plan path.  A later open must preserve it.
+        db.execute(
+            "UPDATE work_assignments SET requirement_state='structured' "
+            "WHERE task_id=? AND assignment_id=?",
+            (task_id, "legacy-assignment"),
+        )
+    reopened = Store(tmp_path / ".cortex")
+    WorkGraph(reopened).ensure_schema()
+    with reopened.connection() as db:
+        row = db.execute(
+            "SELECT requirement_state FROM work_assignments WHERE task_id=? AND assignment_id=?",
+            (task_id, "legacy-assignment"),
+        ).fetchone()
+        assert row["requirement_state"] == "structured"
 
 
 def test_mutations_replay_exactly_and_conflicting_keys_fail(tmp_path):

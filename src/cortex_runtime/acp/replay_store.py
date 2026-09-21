@@ -831,6 +831,8 @@ def replay_session(store, session_id: str) -> list[dict]:
                 "UNION ALL SELECT seq, 'update' AS kind, NULL AS text, '[]' AS attachments_json, NULL AS message_id, update_json "
                 "FROM host_updates WHERE session_id=? ORDER BY seq", (session_id, session_id),
             ).fetchall()
+    from .read_history import ReadHistoryFilter
+    read_filter = ReadHistoryFilter()
     result = []
     for row in rows:
         if row["kind"] == "update":
@@ -840,7 +842,7 @@ def replay_session(store, session_id: str) -> list[dict]:
                 # Never fabricate a malformed host event during replay.
                 continue
             if isinstance(update, dict) and isinstance(update.get("sessionUpdate"), str):
-                result.append(dict(kind="update", update=update))
+                result.append(dict(kind="update", update=read_filter.project(update)))
             continue
         try:
             attachments = json.loads(row["attachments_json"] or "[]")
@@ -857,15 +859,19 @@ def replay_session(store, session_id: str) -> list[dict]:
 
 
 def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[Mapping[str, Any]]) -> list[dict]:
-    """Return terminal card updates justified by durable assignment events.
+    """Return terminal card updates justified by durable assignment/process evidence.
 
     A worker result can be recorded immediately before ``/cortex-stop`` and
     before the worker card's in-flight turn emits its final update.  The
     historical host stream then contains a real worker card stuck in
     ``in_progress`` even though the durable assignment is terminal.  This
     read-only reconciliation supplies one ACP update for that existing card
-    during ``session/load``; it never creates a card absent from history and
-    never infers a terminal state from task status alone.
+    during ``session/load``.  After a host/daemon restart, a durable process
+    identity whose process is now provably absent is equally strong evidence
+    that the worker cannot still be ``in_progress``; that case is rendered as
+    a failed card without writing the transcript or starting a replacement
+    engine session.  It never creates a card absent from history and never
+    infers a terminal state from task status alone.
     """
     latest: dict[str, str] = {}
     seen_cards: set[str] = set()
@@ -892,6 +898,21 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
                 "WHERE task_id=? AND attempt_id IS NOT NULL", (task_id,),
             ).fetchall()
         }
+        # The process registry is optional on older project stores.  Keep
+        # this probe read-only and bounded: session/load must remain a
+        # history replay, never a recovery start or a model call.
+        has_process_registry = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='attempt_process_registry'"
+        ).fetchone() is not None
+        process_rows = {}
+        if has_process_registry:
+            process_rows = {
+                row["attempt_id"]: dict(row)
+                for row in db.execute(
+                    "SELECT * FROM attempt_process_registry WHERE task_id=? AND role='worker'",
+                    (task_id,),
+                ).fetchall()
+            }
         rows = db.execute(
             "SELECT assignment_ref, event_type, payload_json FROM task_events "
             "WHERE task_id=? AND event_type IN ('worker_result','assignment_failed','assignment_cancelled') "
@@ -937,6 +958,36 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
         if text:
             update["content"] = [{"type": "text", "text": text[:300]}]
         corrections.append(update)
+    # A process can disappear after the last ACP card update but before it
+    # publishes a worker_result/assignment_failed event.  The old history
+    # remains visibly ``in_progress`` forever unless load checks the durable
+    # identity.  Only a positively confirmed ``absent`` result qualifies;
+    # ``alive`` and ``unknown`` are intentionally left untouched so a
+    # permission/procfs problem can never turn into a false failure.
+    if process_rows:
+        from ..recovery import registry as recovery_registry
+
+        existing_terminal = {item["toolCallId"] for item in corrections}
+        assignment_to_attempt = {assignment: attempt for attempt, assignment in attempts.items()}
+        for card_id in sorted(seen_cards):
+            if card_id in existing_terminal or latest.get(card_id) in {"completed", "failed"}:
+                continue
+            assignment_ref = card_id.removeprefix("worker:")
+            attempt_id = assignment_to_attempt.get(assignment_ref)
+            process = process_rows.get(attempt_id) if attempt_id else None
+            if process is None:
+                continue
+            if recovery_registry.probe_liveness(process) != "absent":
+                continue
+            corrections.append({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": card_id,
+                "status": "failed",
+                "content": [{
+                    "type": "text",
+                    "text": "Worker process exited before reporting a result.",
+                }],
+            })
     return corrections
 
 

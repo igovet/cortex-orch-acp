@@ -1,6 +1,6 @@
 # ACP documentation
 
-Cortex is an incoming ACP v1 stdio agent at src/cortex_acp.py. It runs its own project-local runtime and starts pinned Codex or Claude ACP engines as outgoing sessions. The model chooses the work and interprets its result; the runtime validates durable identities, isolation, recovery and observable state. The current security contract is [SECURITY.md](../../SECURITY.md).
+Cortex is an incoming ACP v1 stdio agent at src/cortex_acp.py. It runs its own project-local runtime and starts pinned Codex or Claude ACP engines as outgoing sessions. Models propose work and interpret evidence; the runtime owns lifecycle, dependency scheduling, rights, routing, independent review, verification and completion. The current security contract is [SECURITY.md](../../SECURITY.md).
 
 ## Start and qualify
 

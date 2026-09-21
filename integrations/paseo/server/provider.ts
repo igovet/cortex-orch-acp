@@ -1,3 +1,6 @@
+import { isHiddenOperation } from "../shared/timeline-visibility.ts";
+import { presentToolSemantics } from "../shared/tool-presentation.ts";
+import { gatewayPresentation } from "../shared/gateway-presentation.ts";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -90,9 +93,12 @@ export function nativeToolDetail(event: ProviderEvent): ProviderEvent {
   if (event.type !== "timeline.item" || event.item.type !== "tool_call") return event;
   const item = event.item as ToolCallTimelineItem;
   if (item.detail.type !== "unknown") return event;
-  const input = item.detail.input;
-  const output = item.detail.output;
-  const name = item.name.trim().toLowerCase();
+  const rawInput = item.detail.input;
+  const rawOutput = item.detail.output;
+  const gateway = gatewayPresentation(item.name, rawInput, rawOutput);
+  const input = gateway?.input ?? rawInput;
+  const output = gateway?.output ?? rawOutput;
+  const name = gateway?.kind === "edit" ? "write" : gateway?.kind === "read" ? "read" : gateway?.kind === "shell" ? "shell" : item.name.trim().toLowerCase();
   const filePath = firstString(input, ["filePath", "file_path", "path", "absolutePath"]);
   const command = firstString(input, ["command", "cmd"]);
   const oldString = firstString(input, ["oldString", "old_string", "oldText", "old_text"]);
@@ -141,11 +147,28 @@ export function nativeToolDetail(event: ProviderEvent): ProviderEvent {
       detail,
       metadata: {
         ...(item.metadata ?? {}),
-        cortexRawInput: input,
-        cortexRawOutput: output,
+        cortexRawInput: rawInput,
+        cortexRawOutput: rawOutput,
       },
     },
   };
+}
+
+
+function visibleTimeline(event: ProviderEvent): boolean {
+  return !(event.type === "timeline.item" && (event.item.type === "reasoning"
+    || event.item.type === "tool_call" && isHiddenOperation(event.item.name)));
+}
+
+function presentTimeline(event: ProviderEvent): ProviderEvent {
+  const projected = nativeToolDetail(restoreReplayUserMessage(repairFailedTimelineError(event)));
+  if (projected.type !== "timeline.item" || projected.item.type !== "tool_call"
+      || projected.item.callId.startsWith("worker:")) return projected;
+  const item = projected.item;
+  const rawInput = item.metadata?.cortexRawInput ?? (item.detail.type === "unknown" ? item.detail.input : item.detail);
+  const semantics = presentToolSemantics({ name: item.name, rawInput });
+  return { ...projected, item: { ...item, name: semantics.label,
+    metadata: { ...item.metadata, cortexOriginalName: item.name } } };
 }
 
 function nonEmptyArgv(parts: string[]): CommandArgv {
@@ -391,6 +414,7 @@ export function createCortexProvider(): ProviderRegistration {
         },
         onEvent(listener) {
           return connection.onEvent((event) => {
+            if (!visibleTimeline(event)) return;
             if (event.type === "session.opened") {
               openedSessions.add(event.sessionId);
               listener(event);
@@ -398,7 +422,7 @@ export function createCortexProvider(): ProviderRegistration {
               bufferedTimeline.delete(event.sessionId);
               bufferedTimelineBytes.delete(event.sessionId);
               for (const historical of pending ?? []) {
-                listener(nativeToolDetail(restoreReplayUserMessage(repairFailedTimelineError(historical))));
+                if (visibleTimeline(historical)) listener(presentTimeline(historical));
               }
               return;
             }
@@ -472,7 +496,7 @@ export function createCortexProvider(): ProviderRegistration {
               });
               return;
             }
-            listener(nativeToolDetail(restoreReplayUserMessage(repairFailedTimelineError(event))));
+            listener(presentTimeline(event));
           });
         },
       };

@@ -4,11 +4,12 @@ Written at T034. This page states how the mandatory automated matrix is run,
 what guarantees a default run cannot spend money, and which acceptance cases
 automated evidence deliberately cannot close.
 
-Current candidate additions — isolated snapshot failure, candidate staging,
-plan-graph bindings, revise continuations and MCP broker — have
-offline tests, but no completed real Zed/Codex/Claude observation. The paid
-Codex and Claude probes remain unrun. No passing offline test changes a
-`NOT RUN` real-client row into a pass.
+Current candidate coverage includes deterministic DAG scheduling, authenticated
+file/command/external MCP gateways, mandatory review, exact revision verification,
+steering, bounded recovery and unfiltered transcript replay. Authorized real Codex Luna and Claude Haiku tasks ran through isolated Paseo;
+see the [retained observations](evidence/paseo-2026-09-21/runtime-rewrite.md).
+The standalone paid probe scripts were not used in this campaign. See [current results](runtime-rewrite-status.md).
+No passing offline test changes a NOT RUN real-client row into a pass.
 The broker suite forces a random token whose first byte is `-`, then checks
 that the actual stdio relay still connects and advertises tools. It also
 checks an MCP child that exits before `tools/list` and the prompt-level error

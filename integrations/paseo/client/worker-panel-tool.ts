@@ -1,3 +1,4 @@
+import { gatewayPresentation } from "../shared/gateway-presentation.ts";
 import type { WorkerEvent } from "./worker-panel-events.js";
 
 export type ToolPresentation = {
@@ -33,14 +34,15 @@ function contentText(content: unknown): string | null {
 
 /** A visual projection of fields actually retained in the ACP event. */
 export function presentTool(event: WorkerEvent): ToolPresentation {
-  const input = fields(event.raw_input ?? event.input);
-  const path = stringField(input, "file_path", "path");
+  const gateway = gatewayPresentation(event.title ?? "", event.raw_input ?? event.input, event.raw_output ?? event.output);
+  const input = fields(gateway?.input ?? event.raw_input ?? event.input);
+  const path = stringField(input, "file_path", "filePath", "path", "absolutePath");
   const command = stringField(input, "command");
-  const oldText = stringField(input, "old_string", "oldText");
-  const newText = stringField(input, "new_string", "newText");
-  const outputValue = event.raw_output ?? event.output;
-  const output = typeof outputValue === "string" ? outputValue : contentText(event.content);
-  const kind = event.tool_kind?.toLowerCase();
+  const oldText = stringField(input, "old_string", "oldString", "oldText");
+  const newText = stringField(input, "new_string", "newString", "newText", "content");
+  const outputValue = gateway?.output ?? event.raw_output ?? event.output;
+  const output = typeof outputValue === "string" ? outputValue : stringField(fields(outputValue), "content", "output", "text") ?? contentText(event.content);
+  const kind = gateway?.kind === "shell" ? "execute" : gateway?.kind ?? event.tool_kind?.toLowerCase();
   const title = event.title ?? "";
   const read = kind === "read" || (kind == null && path !== null && /^Read(?:\s|$)/i.test(title));
   const shell = kind === "execute" || kind === "terminal" || (kind == null && command !== null);

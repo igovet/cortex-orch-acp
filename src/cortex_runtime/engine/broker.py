@@ -15,7 +15,7 @@ import threading
 MAX_HANDSHAKE_BYTES = 128
 IO_CHUNK = 64 * 1024
 _BASE_REPORT_TOOLS = ("create_draft", "write_report")
-_WORKER_REPORT_TOOL = "publish_result"
+_WORKER_REPORT_TOOL = "result_submit"
 
 
 def _schema_digest(schema) -> str:
@@ -33,13 +33,14 @@ class McpBroker:
     """Keep task-channel credentials in the runtime's MCP child process."""
 
     def __init__(self, channel_credentials, *, python_executable: str, server_script: str,
-                 observe=None):
+                 observe=None, server_config=None):
         if not channel_credentials or len(channel_credentials) != 3:
             raise ValueError("channel_credentials are required for an MCP broker")
         self._credentials = tuple(channel_credentials)
         self._python = python_executable
         self._script = server_script
         self._observe = observe
+        self._server_config = server_config
         self._ready = threading.Event()
         self._closed = threading.Event()
         self._failure = None
@@ -108,7 +109,7 @@ class McpBroker:
                 "schema_digests": {},
                 "required_tools": list(_BASE_REPORT_TOOLS),
                 "missing_required_tools": list(_BASE_REPORT_TOOLS),
-                "worker_publish_result_present": None,
+                "worker_result_submit_present": None,
             }
         return {
             "state": receipt["state"],
@@ -117,7 +118,7 @@ class McpBroker:
             "schema_digests": dict(receipt["schema_digests"]),
             "required_tools": list(receipt["required_tools"]),
             "missing_required_tools": list(receipt["missing_required_tools"]),
-            "worker_publish_result_present": receipt["worker_publish_result_present"],
+            "worker_result_submit_present": receipt["worker_result_submit_present"],
         }
 
     def _observe_tools_list(self, reply, pid):
@@ -145,7 +146,7 @@ class McpBroker:
             "schema_digests": {name: schema_digests[name] for name in sorted(schema_digests)},
             "required_tools": list(_BASE_REPORT_TOOLS),
             "missing_required_tools": missing,
-            "worker_publish_result_present": _WORKER_REPORT_TOOL in names,
+            "worker_result_submit_present": _WORKER_REPORT_TOOL in names,
         }
         self._tools_receipt = receipt
         if missing:
@@ -154,7 +155,7 @@ class McpBroker:
                 "mcp_tools_incomplete", pid=pid, tool_count=len(tools),
                 tool_names=sorted_names, schema_digests=receipt["schema_digests"],
                 missing_required_tools=missing,
-                worker_publish_result_present=receipt["worker_publish_result_present"],
+                worker_result_submit_present=receipt["worker_result_submit_present"],
             )
             return
         self._ready.set()
@@ -162,7 +163,7 @@ class McpBroker:
             "mcp_tools_ready", pid=pid, tool_count=len(tools),
             tool_names=sorted_names, schema_digests=receipt["schema_digests"],
             required_tools=receipt["required_tools"],
-            worker_publish_result_present=receipt["worker_publish_result_present"],
+            worker_result_submit_present=receipt["worker_result_submit_present"],
         )
 
     def _serve(self):
@@ -205,6 +206,8 @@ class McpBroker:
         env = dict(os.environ)
         env.update({"CORTEX_CHANNEL_ID": channel_id, "CORTEX_CHANNEL_SECRET": secret,
                     "CORTEX_CHANNEL_PROJECT_ROOT": project_root})
+        if self._server_config is not None:
+            env['CORTEX_EXTERNAL_SERVER'] = json.dumps(self._server_config)
         child = subprocess.Popen([self._python, "-B", self._script], cwd=project_root, env=env,
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                  stderr=subprocess.DEVNULL, start_new_session=True)

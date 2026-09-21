@@ -35,14 +35,22 @@ def _delegate_and_wait_router(on_worker_prompt):
 
         if not phase["delegated"]:
             phase["delegated"] = True
-            mcp_tools.dispatch(store, channel, "delegate", dict(
-                title="Worker A", brief="do it", role="backend-dev", acceptance="done", request_key="reqA",
-            ))
+            from runtime_scenarios import propose_inspection
+            propose_inspection(store, channel)
             return PromptOutcome(StopReason.END_TURN, "Delegated.")
+        context=mcp_tools.dispatch(store,channel,'task_get_context',{})
+        if context['state']=='RECONCILING':
+            mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Worker and runtime checks observed.'))
         return PromptOutcome(StopReason.END_TURN, "Waiting.")
 
     def worker_behavior(store, channel, session_ref, message, call_index):
-        return on_worker_prompt(store, channel, session_ref, call_index)
+        from runtime_scenarios import publish_result
+        with store.connection() as db:
+            role=db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',(channel.attempt_id,)).fetchone()[0]
+        if role=='worker-code-reviewer': return publish_result(store,channel)
+        outcome=on_worker_prompt(store, channel, session_ref, call_index)
+        publish_result(store,channel)
+        return outcome
 
     def router(store, channel, session_ref, launch, instructions):
         return coordinator_behavior if channel and channel.role == "coordinator" else worker_behavior

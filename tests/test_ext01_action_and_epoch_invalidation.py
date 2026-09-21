@@ -93,186 +93,40 @@ def _closed_generator():
     yield
 
 
-def test_abandoned_turn_invalidates_only_its_own_pending_permission(tmp_path):
-    manager = _bare_manager(tmp_path)
-    session_id, wire_session_id = "es_a", "w1"
-    manager.correlation.register_session(session_id, wire_session_id)
-    _bind(manager, session_id, tmp_path)
-
-    started = threading.Event()
-    release = threading.Event()
-
-    def blocking_then_allow(engine_session_id, params, timeout):
-        started.set()
-        release.wait(timeout=5.0)
-        return dict(ALLOWED)
-
-    manager._permission_bridge = PermissionBridge(
-        correlation=manager.correlation, bindings=manager.bindings,
-        host_permission_requester=blocking_then_allow, call_timeout=5.0,
-    )
-
-    results: list = []
-
-    def run_stale_request():
-        results.append(
-            manager._permission_bridge.handle(
-                engine_session_id=session_id, wire_session_id=wire_session_id,
-                wire_request_id=1, params=_params("tc-1"),
-            )
-        )
-
-    worker = threading.Thread(target=run_stale_request)
-    worker.start()
-    assert started.wait(timeout=5.0)
-
-    # The turn this pending "tc-1" request belongs to is abandoned mid-
-    # stream (F1/T012's own generator-closed-mid-stream case) while its
-    # host round trip is still outstanding.
-    manager._abandon_turn(session_id, wire_session_id, _closed_generator())
-
-    release.set()
-    worker.join(timeout=5.0)
-    assert results == [CANCELLED]
-
-    # A brand new request for a *different* tool call (the next turn on
-    # the same wire session) must not be caught by the same invalidation.
-    manager._permission_bridge = PermissionBridge(
-        correlation=manager.correlation, bindings=manager.bindings,
-        host_permission_requester=lambda *a: dict(ALLOWED), call_timeout=5.0,
-    )
-    fresh = manager._permission_bridge.handle(
-        engine_session_id=session_id, wire_session_id=wire_session_id,
-        wire_request_id=2, params=_params("tc-2"),
-    )
-    assert fresh == ALLOWED
+import pytest
 
 
-def test_explicit_cancel_invalidates_its_sessions_pending_permission(tmp_path):
-    """Same shape as the abandonment test above, but through
-    ``EngineSessionManager.cancel`` -- the entry point EXT-01 #4's own
-    independent cancellation caller (``delegation.live_adapters
-    .EngineSessionManagerAdapter.prompt``) actually uses."""
-    manager = _bare_manager(tmp_path)
-    session_id, wire_session_id = "es_b", "w2"
-    manager.correlation.register_session(session_id, wire_session_id)
-    _bind(manager, session_id, tmp_path)
-
-    started = threading.Event()
-    release = threading.Event()
-
-    def blocking_then_allow(engine_session_id, params, timeout):
-        started.set()
-        release.wait(timeout=5.0)
-        return dict(ALLOWED)
-
-    manager._permission_bridge = PermissionBridge(
-        correlation=manager.correlation, bindings=manager.bindings,
-        host_permission_requester=blocking_then_allow, call_timeout=5.0,
-    )
-
-    results: list = []
-    worker = threading.Thread(
-        target=lambda: results.append(
-            manager._permission_bridge.handle(
-                engine_session_id=session_id, wire_session_id=wire_session_id,
-                wire_request_id=1, params=_params("tc-1"),
-            )
-        )
-    )
-    worker.start()
-    assert started.wait(timeout=5.0)
-
-    manager.cancel(session_id)
-
-    release.set()
-    worker.join(timeout=5.0)
-    assert results == [CANCELLED]
+@pytest.mark.parametrize('method',['abandon','cancel'])
+def test_manager_invalidates_pending_action_without_disabling_fresh_gateway(tmp_path,method):
+    manager=_bare_manager(tmp_path)
+    manager.correlation.register_session('es_a','w1')
+    _bind(manager,'es_a',tmp_path)
+    bridge=PermissionBridge(correlation=manager.correlation,bindings=manager.bindings)
+    manager._permission_bridge=bridge
+    action=manager.correlation.portable_tool_call_ref('w1','tc-1')
+    bridge._track_action_start('w1',action)
+    if method=='abandon':manager._abandon_turn('es_a','w1',_closed_generator())
+    else:manager.cancel('es_a')
+    def ask(ref):
+        params=_params(ref);params['toolCall']['name']='mcp__cortex__project_read'
+        return bridge.handle(engine_session_id='es_a',wire_session_id='w1',wire_request_id=ref,params=params)
+    assert ask('tc-1')==CANCELLED
+    assert ask('tc-2')==ALLOWED
+    bridge._track_action_end('w1',action)
 
 
-def test_owner_epoch_transfer_rejects_stale_reply_but_serves_a_fresh_request(tmp_path):
-    """``EngineSessionManagerAdapter.invalidate_owner_epoch`` against a
-    *real* ``ownership.acquire_task_owner_tx`` transfer (never a hand-typed
-    epoch string) -- the actual mechanism ``recovery.coordinator_recovery``
-    uses, resolved by this test through the adapter's own attempt_id ->
-    manager -> session -> binding chain exactly like production would."""
-    store = Store(tmp_path / ".cortex", project_root=tmp_path)
-    result = bootstrap_task(store, SourceEvent(origin="cli", event_id=str(uuid.uuid4())), "Build it.", "owner-1")
-    task_id = result.task_id
-    with store.connection() as db:
-        epoch_1 = current_owner_epoch(db, task_id)
-
-    manager = _bare_manager(tmp_path)
-    session_id, wire_session_id, attempt_id = "es_c", "w3", "att_owner"
-    manager.correlation.register_session(session_id, wire_session_id)
-    _bind(manager, session_id, tmp_path, attempt_id=attempt_id, ownership_epoch=str(epoch_1))
-
-    adapter = EngineSessionManagerAdapter(
-        connection_record_factory=lambda t: (_ for _ in ()).throw(AssertionError("not exercised")),
-        workspace_root_factory=lambda t: (_ for _ in ()).throw(AssertionError("not exercised")),
-        store=store,
-    )
-    adapter._managers[attempt_id] = manager
-    adapter._sessions[attempt_id] = session_id
-
-    new_owner_holder: dict = {}
-
-    def late_requester_during_real_transfer(engine_session_id, params, timeout):
-        # The host round trip for this request is still outstanding when a
-        # real ownership transfer (the same ``acquire_task_owner_tx``
-        # ``recovery.coordinator_recovery`` calls) commits underneath it.
-        with store.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            try:
-                new_owner = acquire_task_owner_tx(db, task_id, "recovery:owner2", epoch_1)
-                db.commit()
-            except BaseException:
-                db.rollback()
-                raise
-        new_owner_holder["epoch"] = new_owner.epoch
-        adapter.invalidate_owner_epoch(attempt_id, new_owner.epoch)
-        return dict(ALLOWED)
-
-    stale_bridge = PermissionBridge(
-        correlation=manager.correlation, bindings=manager.bindings,
-        host_permission_requester=late_requester_during_real_transfer, call_timeout=5.0,
-    )
-    stale_result = stale_bridge.handle(
-        engine_session_id=session_id, wire_session_id=wire_session_id, wire_request_id=1, params=_params("tc-1"),
-    )
-    assert stale_result == CANCELLED
-
-    # Unlike ``invalidate_generation`` (which atomically swaps in a fresh
-    # *current* binding for the bumped session -- T035 EXT-01 #3),
-    # ``invalidate_epoch`` never replaces the old attempt's own binding:
-    # this exact old binding is correctly refused forever now, by design
-    # (it belongs to the attempt recovery just replaced). "a fresh request
-    # under the new epoch works" is instead proven the way production
-    # actually gets a fresh, current epoch -- a *new* session/binding for
-    # the replacement attempt (``EngineSessionManagerAdapter._bind_resource``
-    # reads ``ownership.current_owner_epoch`` fresh at bind time), bound
-    # here exactly as recovery's own replacement session would be.
-    stale_again = stale_bridge.handle(
-        engine_session_id=session_id, wire_session_id=wire_session_id, wire_request_id=2, params=_params("tc-2"),
-    )
-    assert stale_again == CANCELLED
-
-    new_manager = _bare_manager(tmp_path)
-    new_session_id, new_wire_session_id = "es_c2", "w4"
-    new_manager.correlation.register_session(new_session_id, new_wire_session_id)
-    _bind(
-        new_manager, new_session_id, tmp_path, attempt_id="att_owner_2",
-        ownership_epoch=str(new_owner_holder["epoch"]),
-    )
-    fresh_bridge = PermissionBridge(
-        correlation=new_manager.correlation, bindings=new_manager.bindings,
-        host_permission_requester=lambda *a: dict(ALLOWED), call_timeout=5.0,
-    )
-    fresh_result = fresh_bridge.handle(
-        engine_session_id=new_session_id, wire_session_id=new_wire_session_id, wire_request_id=1,
-        params=_params("tc-3"),
-    )
-    assert fresh_result == ALLOWED
+def test_adapter_owner_epoch_invalidation_fences_old_binding(tmp_path):
+    manager=_bare_manager(tmp_path);manager.correlation.register_session('es_a','w1')
+    _bind(manager,'es_a',tmp_path)
+    adapter=EngineSessionManagerAdapter(lambda _:None,lambda _:str(tmp_path))
+    adapter._managers['att1']=manager
+    adapter._sessions['att1']='es_a'
+    adapter.invalidate_owner_epoch('att1','epoch_2')
+    bridge=PermissionBridge(correlation=manager.correlation,bindings=manager.bindings)
+    params=_params('tc-1');params['toolCall']['name']='mcp__cortex__project_read'
+    assert bridge.handle(engine_session_id='es_a',wire_session_id='w1',wire_request_id=1,params=params)==CANCELLED
+    _bind(manager,'es_a',tmp_path,ownership_epoch='epoch_2')
+    assert bridge.handle(engine_session_id='es_a',wire_session_id='w1',wire_request_id=2,params=params)==ALLOWED
 
 
 def test_invalidate_owner_epoch_is_a_no_op_with_no_live_manager_for_the_attempt(tmp_path):

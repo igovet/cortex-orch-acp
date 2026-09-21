@@ -87,11 +87,8 @@ def test_already_completed_delegation_future_does_not_hang(tmp_path):
     provisioned = []
     runtime._provision_and_prompt = lambda t, c, payload, cancel_event: provisioned.append(payload)
 
-    delegation_events.append_event(
-        store, task_id, "delegation_requested", "dr:1",
-        dict(title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="req1"),
-        origin="runtime", assignment_ref="assign-1",
-    )
+    from runtime_scenarios import reserve_assignment
+    reserve_assignment(store,channel,dict(title="A",brief="do A",role="backend-dev",acceptance="A done",request_key="req1"))
 
     thread, result = _run_with_timeout(
         lambda: runtime._process_new_events(task_id, channel, threading.Event())
@@ -99,40 +96,12 @@ def test_already_completed_delegation_future_does_not_hang(tmp_path):
 
     assert not thread.is_alive(), "deadlocked: _process_new_events never returned"
     assert "error" not in result, result.get("error")
-    assert provisioned == [{
-        "title": "A", "brief": "do A", "role": "backend-dev", "acceptance": "A done", "request_key": "req1",
-    }]
+    assert len(provisioned)==1 and provisioned[0]["title"]=="A"
     # The callback already ran (synchronously, since the future was done
     # before add_done_callback was ever called) -- nothing left "running".
     assert not runtime._running.get(task_id)
 
 
-def test_already_completed_clarification_future_does_not_hang(tmp_path):
-    store, task_id = _task(tmp_path)
-    runtime = _make_runtime(store)
-    channel, _session_ref = runtime._ensure_coordinator(task_id)
-
-    runtime._executor = ImmediateExecutor()
-    delivered = []
-    runtime._deliver_clarification = lambda t, key, session_ref, message, cancel_event, row_id: delivered.append(
-        (key, message)
-    )
-    runtime._worker_sessions[(task_id, "assign-1")] = "worker-session-1"
-
-    event = delegation_events.append_event(
-        store, task_id, "coordinator_clarification", "cc:1", dict(message="please clarify"),
-        origin="runtime", assignment_ref="assign-1",
-    )
-
-    thread, result = _run_with_timeout(
-        lambda: runtime._process_new_events(task_id, channel, threading.Event())
-    )
-
-    assert not thread.is_alive(), "deadlocked: _process_new_events never returned"
-    assert "error" not in result, result.get("error")
-    assert delivered == [((task_id, "assign-1"), "please clarify")]
-    assert event.id in runtime._delivered_clarification_ids
-    assert not runtime._running.get(task_id)
 
 
 def test_future_completing_later_still_accounts_correctly(tmp_path):
@@ -153,11 +122,8 @@ def test_future_completing_later_still_accounts_correctly(tmp_path):
 
     runtime._provision_and_prompt = slow_provision
 
-    delegation_events.append_event(
-        store, task_id, "delegation_requested", "dr:1",
-        dict(title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="req1"),
-        origin="runtime", assignment_ref="assign-1",
-    )
+    from runtime_scenarios import reserve_assignment
+    reserve_assignment(store,channel,dict(title="A",brief="do A",role="backend-dev",acceptance="A done",request_key="req1"))
 
     runtime._process_new_events(task_id, channel, threading.Event())
     assert started.wait(timeout=5.0)

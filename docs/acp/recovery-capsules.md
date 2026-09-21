@@ -4,10 +4,9 @@ This page documents `src/cortex_runtime/recovery/capsule.py`
 and the `read_capsule` MCP tool (`delegation/mcp_tools.py`,
 `delegation/contracts.py`). A capsule is a **derived, rebuildable view**
 over already-durable state — never a second authoritative pipeline, and
-never a place a new fact is invented. Full engine-context delivery (using
-a capsule to actually resume a coordinator/worker turn) is **T022 scope**,
-not implemented here; this task only builds, scopes, and exposes the
-capsule itself.
+never a place a new fact is invented. Context-generation delivery uses this capsule on compaction and replacement.
+Runtime task state and DAG remain authoritative; compacted model text cannot
+change routes, permissions or completion. See [qualification status](runtime-rewrite-status.md).
 
 ## Shape
 
@@ -82,7 +81,7 @@ an explicit `{"status": "unavailable"|"unknown", "reason": "..."}` marker
    descriptors (`source_blocks`: availability/reason/trust_label/digest —
    never inlined bodies). **Worker scoping note**: there is no
    per-assignment "attach this exact constraint to that worker" mechanism
-   anywhere in this codebase — `delegate`'s `brief`/`acceptance` fields are
+   anywhere in this codebase — runtime assignment `brief`/`acceptance` fields are
    the coordinator's own restatement, not a structured attachment of
    specific `source_revisions` rows. Per lead decision 4, every retained
    `user_direct` constraint is therefore included for **both** coordinator
@@ -126,7 +125,7 @@ an explicit `{"status": "unavailable"|"unknown", "reason": "..."}` marker
    `task_orchestration.state`/`wait_reason`/`wait_detail`/
    `requirement_revision` plus the last coordinator decision and a
    `task_acceptance` field. The latter is true only when a retained
-   task-level accept event and stored accepted task state both exist;
+   runtime task is in COMPLETED state;
    an assignment-level decision or report statement cannot set it.
    (worker) its
    own assignment's cancel-requested/cancelled flags. No model-authored

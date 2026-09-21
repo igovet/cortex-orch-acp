@@ -36,23 +36,11 @@ CATALOGUE_DIGEST = hashlib.sha256(json.dumps(TOOLS, sort_keys=True).encode()).he
 # (list_reports, read_report, read_draft) never require ownership.
 MUTATING_TOOLS = frozenset({'create_draft', 'write_report', 'set_governance'})
 
-# T030 (security audit): delegation MCP operations (``delegate``,
-# ``clarify``, ``cancel``, ``decide``, ``integrate``, ``ask_question``,
-# ``publish_result``) mutate durable task/assignment state exactly like
-# MUTATING_TOOLS above, but were dispatched via a separate branch
-# (``delegation_mcp_tools.dispatch``) that never checked the caller's
-# channel epoch against the task's current owner epoch -- only explicit
-# channel *revocation* stood between a stale, un-revoked channel and a live
-# mutation. Ordinary recovery normally revokes the old coordinator channel
-# in the same step it bumps the epoch (``recovery.coordinator_recovery
-# .recover``), but that revoke is a *separate* transaction from the epoch
-# bump; a crash/restart in the window between them left an un-revoked,
-# stale-epoch coordinator channel fully able to call every delegation
-# operation, silently broadening access past a completed recovery. Reads
-# here never needed a live epoch (same reasoning as MUTATING_TOOLS above).
+# Reads expose only the bound task; project_read additionally requires a live
+# assignment/epoch because it reads the current project through the gateway.
 DELEGATION_READ_OPERATIONS = frozenset({
-    'list_events', 'list_sources', 'read_source', 'read_capsule',
-    'read_large_output', 'read_diagnostics', 'read_plan', 'read_check', 'read_skill',
+    'list_sources','read_source','read_capsule','read_large_output',
+    'read_diagnostics','read_skill','task_get_context','project_read',
 })
 
 
@@ -181,7 +169,7 @@ class Server:
             if not isinstance(params,dict) or not isinstance(params.get('protocolVersion'),str) or not isinstance(params.get('capabilities'),dict) or not isinstance(params.get('clientInfo'),dict) or any(not isinstance(params['clientInfo'].get(k),str) for k in ('name','version')):
                 raise ProtocolError(-32602,'Invalid initialize parameters. Supply protocolVersion (string), capabilities (object), and clientInfo with name and version strings.')
             observe('initialize','success')
-            return dict(protocolVersion='2025-11-25', capabilities=dict(tools=dict(listChanged=False)), serverInfo=dict(name='cortex',version=VERSION), instructions='Cortex provides seven advertised tools for thread-bound Markdown task memory, drafts, reports and advisory governance; their schemas are authoritative. Published Markdown stays in the project while SQLite retains metadata, relationships, revisions and receipts. Native user source capture reports completeness explicitly, and unavailable new host input does not hide already saved reports.')
+            return dict(protocolVersion='2025-11-25', capabilities=dict(tools=dict(listChanged=False)), serverInfo=dict(name='cortex',version=VERSION), instructions='Cortex provides channel-bound reports, structured proposals and scoped project operations; advertised schemas are authoritative. The runtime owns scheduling, permissions, verification and completion. Published Markdown stays in the project while SQLite retains metadata, relationships, revisions and receipts. Native user source capture reports completeness explicitly, and unavailable new host input does not hide already saved reports.')
         if method == 'ping':
             return {}
         if method == 'tools/list':
@@ -223,6 +211,8 @@ class Server:
             except StoreError as exc:
                 observe(name, str(exc), meta=params.get('_meta'), arguments=params.get('arguments'))
                 return self.error(exc)
+        if name in {'create_task','set_governance'} or (name == 'create_draft' and params.get('arguments',{}).get('template') == 'pipeline'):
+            return self.error(StoreError('runtime_owned_operation'))
         if name not in BY_NAME:
             observe('tools/call','unknown_tool')
             raise ProtocolError(-32602,'Unknown tool. Call tools/list and use an advertised name; do not reconstruct retired names.')
@@ -277,10 +267,21 @@ class Server:
                 current=current_owner_epoch(db,context.task_id)
             if current!=context.owner_epoch:
                 raise StoreError('stale_ownership_epoch')
-        result=store.call(name, params.get('arguments',{}),
+        from .orchestration.gateway import _authority
+        arguments=dict(params.get('arguments',{}))
+        if name in MUTATING_TOOLS:
+            validate(name,arguments)
+        if name in MUTATING_TOOLS and isinstance(arguments.get('request_key'),str):
+            # Storage receipts are task-scoped. Model request identities are
+            # channel-scoped: two workers may both choose "draft" safely.
+            import hashlib
+            arguments['request_key']=hashlib.sha256(
+                (context.channel_id+'\0'+arguments['request_key']).encode()).hexdigest()
+        result=store.call(name, arguments,
                            context.principal_thread_id, context.parent_principal_thread_id,
-                           original_request=None, steering_source=None, trusted=True)
-        return _reachable_draft_path(result, project)
+                           original_request=None, steering_source=None, trusted=True,
+                           authorization=(lambda db: _authority(db,context)) if name in MUTATING_TOOLS else None)
+        return result
 
     @staticmethod
     def error(failure):
@@ -295,39 +296,6 @@ class Server:
         if failure.expected is not None:data['expected']=public(failure.expected)
         data['write_state']='uncertain' if code in ('storage_error','file_conflict','unsafe_storage') else 'rejected'
         return dict(content=[dict(type='text',text=json.dumps(data))],isError=True)
-
-
-def _reachable_draft_path(result, project_root):
-    """Express a returned ``draft_path`` through the caller's own working
-    directory when that is the same file.
-
-    A draft is "an absolute server-created project path to edit with
-    native file tools", and it lives under ``<project>/.cortex``. A
-    session whose engine runs in an isolated workspace cannot write an
-    absolute path outside that workspace -- its sandbox refuses it, and
-    the observed result was the coordinator explaining, turn after turn,
-    that the file it had just been handed was out of reach.
-
-    The workspace carries the project's real ``.cortex`` (see
-    ``delegation.workspace_isolation._link_project_store``), so the same
-    file has a second, reachable name. Rewriting to it is safe precisely
-    because it is checked, not assumed: both are resolved, and the path is
-    only rewritten when they are the same directory. ``store``'s own
-    validation resolves either spelling back to the one real draft
-    directory, so nothing downstream can tell the difference.
-    """
-    if not isinstance(result, dict) or not isinstance(result.get('draft_path'), str):
-        return result
-    try:
-        cwd_store=Path(os.getcwd())/'.cortex'
-        project_store=Path(project_root)/'.cortex'
-        if cwd_store.resolve()!=project_store.resolve() or cwd_store==project_store:
-            return result
-        draft=Path(result['draft_path']).resolve()
-        relative=draft.relative_to(project_store.resolve())
-    except (OSError, ValueError):
-        return result
-    return dict(result, draft_path=str(cwd_store/relative))
 
 
 def reject_duplicates(pairs):

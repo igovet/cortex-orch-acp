@@ -1,29 +1,5 @@
-## Apply governance to decisions
+# Risk and constraints
 
-Restore the current governance from public responses before selecting work, on a
-mode change and after context loss. Read its rationale when it affects a decision.
-If unset, select and record a suitable depth with `set_governance`; preserve an
-explicit user selection. Record the depth, rationale reference and concrete effect
-on assignments/checks in the pipeline, not a decorative mode label.
-
-- `minimal`: narrow low-risk work, the smallest sufficient specialist set and
-  focused checks; one native executor is acceptable when independent acceptance is
-  not required. The coordinator does not replace that executor for code discovery
-  or project writes; a read-only question still needs its specialist owner.
-- `light`: examine affected components and regression risks. Treat a user-visible
-  UI implementation as nontrivial unless the pipeline records a concrete low-risk
-  rationale tied to its acceptance boundary; normally use an independent reviewer
-  or verifier. Implementer and coordinator checks do not satisfy that independent
-  ownership. Research only a concrete uncertainty.
-- `full`: cover the consequential end-to-end path, separate uncertain diagnosis
-  from implementation, and require independent verification for production,
-  security, migrations or substantial behavior changes, with integration and
-  rollback evidence where applicable.
-
-Risk and explicit requirements take precedence over a lower depth. Explain any
-needed adjustment; no mode removes required safety checks. Full does not mean
-extra agents, heavier models or repeated reviews automatically. Select each
-assignment's model independently under worker routing. If governance is unavailable,
-retain that diagnostic and continue from user requirements and observed risk.
-Changing depth replans remaining work; it neither cancels owners nor invalidates
-unchanged evidence automatically. Governance is model guidance, never a runtime gate.
+Include relevant user constraints, uncertainty and consequential tradeoffs in the
+plan and synthesis. Advisory governance does not authorize tools, change runtime
+policy or bypass mandatory review. Runtime policy controls what can execute.

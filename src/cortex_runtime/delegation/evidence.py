@@ -64,20 +64,37 @@ def _latest_status(store, attempt_id: str, tool_call_ref: str) -> str | None:
     return row["status"] if row is not None else None
 
 
+def resolve_check_tx(db, attempt_id: str, tool_call_ref: str | None) -> str:
+    """Resolve a worker check against an already-open transaction.
+
+    Completion uses this variant while the draft publication and its
+    ``worker_result`` event are in the same SQLite transaction.  It avoids a
+    second connection (and therefore a second commit boundary) between the
+    evidence lookup and finalization.
+    """
+    if not tool_call_ref:
+        return "claimed"
+    row = db.execute(
+        "SELECT status FROM tool_result_observations "
+        "WHERE attempt_id=? AND tool_call_ref=? ORDER BY id DESC LIMIT 1",
+        (attempt_id, tool_call_ref),
+    ).fetchone()
+    status = row["status"] if row is not None else None
+    if status == "completed":
+        return "observed"
+    if status == "failed":
+        return "contradicted"
+    return "claimed"
+
+
 def resolve_check(store, attempt_id: str, tool_call_ref: str | None) -> str:
     """Return ``"claimed"``, ``"observed"``, or ``"contradicted"`` for one
     ``publish_result`` check's ``tool_call_ref`` -- strictly scoped to
     ``attempt_id`` (a ``tool_call_ref`` that only resolves under a
     different attempt is indistinguishable from "no match": never trusted
     cross-attempt)."""
-    if not tool_call_ref:
-        return "claimed"
-    status = _latest_status(store, attempt_id, tool_call_ref)
-    if status == "completed":
-        return "observed"
-    if status == "failed":
-        return "contradicted"
-    return "claimed"
+    with store.connection() as db:
+        return resolve_check_tx(db, attempt_id, tool_call_ref)
 
 
 def record_permission_response(

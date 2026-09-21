@@ -148,14 +148,9 @@ class ProductionOrchestratingRuntime:
         except StoreError as error:
             self.last_reconcile = str(error)
         configuration_service = ConfigurationService(store)
-        # One project-bound provisioner per project. Both worker and
-        # coordinator sessions use the exact ACP project root opened in Zed,
-        # so the coordinator observes worker edits made during the same turn.
-        # Mutation refusal and the project-change backstop remain active; this
-        # path intentionally does not claim OS-level read-only containment.
-        # Workers edit the exact project directory supplied by the ACP host.
-        # The provisioner holds a durable per-project writer lock for each
-        # live worker; there is no private-copy execution fallback.
+        # The runtime reserves disjoint scopes transactionally across this
+        # project's tasks. Native tools are disabled; the action gateway
+        # supplies the filesystem boundary for every worker.
         workspace_provisioner = DirectProjectWorkspaceProvisioner(store, str(project))
         def resolve_workspace(binding_id, launch):
             if binding_id == "shared_project_root":
@@ -186,7 +181,6 @@ class ProductionOrchestratingRuntime:
             # project-bound provisioner so the engine cwd is always the exact
             # Zed project, never a stale coordinator snapshot.
             workspace_resolver=resolve_workspace,
-            workspace_lock_factory=workspace_provisioner.writer_lock,
             broker_mcp=True,
             # The Cortex MCP server and both engine roles use the exact
             # project root opened by the ACP client.
@@ -227,7 +221,7 @@ class ProductionOrchestratingRuntime:
         self, task_id, session_id, content, emit_update, cancel_event, *,
         project_root=None, source_origin=None, source_event_id=None, host_elicitor=None,
         emit_tool_call=None, host_permission_requester=None, host_fs_requester=None,
-        host_mcp_servers=None, prompt_blocks=None, client_surface=None,
+        host_mcp_servers=None, prompt_blocks=None, client_surface=None, emit_display_update=None,
     ):
         if not project_root:
             raise RouteUnresolved("project_root_unresolved")
@@ -237,7 +231,7 @@ class ProductionOrchestratingRuntime:
                 task_id, session_id, content, emit_update, cancel_event,
                 source_origin=source_origin, source_event_id=source_event_id, host_elicitor=host_elicitor,
                 host_permission_requester=host_permission_requester, host_fs_requester=host_fs_requester,
-                emit_tool_call=emit_tool_call,
+                emit_tool_call=emit_tool_call, emit_display_update=emit_display_update,
                 host_mcp_servers=host_mcp_servers,
                 prompt_blocks=prompt_blocks,
                 client_surface=client_surface,
@@ -265,6 +259,24 @@ class ProductionOrchestratingRuntime:
         connection -- see ``OrchestratingRuntime.disconnect_session``."""
         for runtime in list(self._runtimes.values()):
             runtime.disconnect_session(session_id)
+
+    def shutdown(self):
+        """Shut down every project runtime owned by this ACP daemon.
+
+        The ACP host may close stdin or its response channel without sending
+        a task stop. ``disconnect`` cancels host-bound work, but only this
+        path terminates owned engine processes and releases their capacity
+        reservations. It never opens a replacement session or performs a
+        model call during daemon teardown.
+        """
+        for runtime in list(self._runtimes.values()):
+            try:
+                runtime.shutdown()
+            except Exception:
+                # Keep tearing down other project runtimes. The durable
+                # registry remains available to the next recovery/reaper for
+                # any process whose final state is ambiguous.
+                pass
 
     # -- T020 /cortex-stop / /cortex-answer entrypoints ------------------
 

@@ -1,0 +1,521 @@
+"""Durable, transactional task lifecycle and dependency scheduler.
+
+No transition, permission, model, or worker handle is accepted from a model.
+State and events commit together in the project's existing SQLite database.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import hashlib
+import json
+import re
+from pathlib import PurePosixPath, Path
+
+from ..contracts import StoreError
+from ..portable.roles import resolve_role
+
+SCHEMA = '''
+CREATE TABLE IF NOT EXISTS runtime_tasks (
+ task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+ state TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0,
+ goal TEXT NOT NULL, plan_json TEXT, synthesis TEXT,
+ review_cycle INTEGER NOT NULL DEFAULT 0, blocker TEXT,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS runtime_nodes (
+ task_id TEXT NOT NULL REFERENCES runtime_tasks(task_id),
+ revision INTEGER NOT NULL, node_id TEXT NOT NULL,
+ role TEXT NOT NULL, objective TEXT NOT NULL, dependencies_json TEXT NOT NULL,
+ scope_json TEXT NOT NULL, stage TEXT NOT NULL, status TEXT NOT NULL,
+ assignment_ref TEXT UNIQUE, result_json TEXT,
+ PRIMARY KEY(task_id,revision,node_id)
+);
+CREATE TABLE IF NOT EXISTS runtime_events (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ task_id TEXT NOT NULL REFERENCES runtime_tasks(task_id),
+ type TEXT NOT NULL, actor TEXT NOT NULL, payload_json TEXT NOT NULL,
+ created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS runtime_events_task ON runtime_events(task_id,id);
+CREATE TABLE IF NOT EXISTS runtime_requests (
+ task_id TEXT NOT NULL, request_key TEXT NOT NULL, actor TEXT NOT NULL,
+ operation TEXT NOT NULL, digest TEXT NOT NULL, result_json TEXT NOT NULL,
+ PRIMARY KEY(task_id,actor,request_key)
+);
+'''
+
+TRANSITIONS = {
+    'CREATED': {'PLANNING'},
+    'PLANNING': {'PLAN_READY', 'ANSWER_READY', 'WAITING_USER'},
+    'ANSWER_READY': {'COMPLETED'},
+    'PLAN_READY': {'EXECUTING'},
+    'EXECUTING': {'REVIEWING', 'WAITING_USER'},
+    'REVIEWING': {'EXECUTING', 'VERIFYING', 'WAITING_USER'},
+    'VERIFYING': {'RECONCILING'},
+    'RECONCILING': {'COMPLETED', 'WAITING_USER'},
+    'WAITING_USER': {'PLANNING', 'RECONCILING'},
+    'RECOVERING': {'PLANNING', 'EXECUTING', 'REVIEWING', 'VERIFYING', 'RECONCILING'},
+    'BLOCKED': {'RECOVERING'},
+    'FAILED': set(), 'CANCELLED': set(), 'COMPLETED': set(),
+}
+TERMINAL = {'FAILED', 'CANCELLED', 'COMPLETED'}
+MAX_NODES = 64
+MAX_WORKERS = 4
+MAX_REVIEW_CYCLES = 3
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec='microseconds')
+
+
+def encoded(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+def event(db, task_id, kind, payload, actor='runtime'):
+    db.execute('INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES(?,?,?,?,?)',
+               (task_id, kind, actor, encoded(payload), now()))
+
+
+def transition(db, task_id, target, *, blocker=None):
+    row = db.execute('SELECT state FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+    if row is None:
+        raise StoreError('runtime_task_missing')
+    source = row['state']
+    allowed = TRANSITIONS.get(source, set()) | ({'BLOCKED', 'FAILED', 'CANCELLED', 'RECOVERING'} if source not in TERMINAL else set())
+    if target not in allowed:
+        raise StoreError('invalid_state_transition', 'state', f'{source} -> {target}',
+                         ', '.join(sorted(allowed)), 'The runtime owns stage transitions.')
+    db.execute('UPDATE runtime_tasks SET state=?,blocker=?,updated_at=? WHERE task_id=?',
+               (target, blocker, now(), task_id))
+    event(db, task_id, 'TASK_STATE_CHANGED', dict(previous=source, state=target, blocker=blocker))
+
+
+def validate_scope(scope):
+    if not isinstance(scope, list) or not scope or len(scope) > 64:
+        raise StoreError('invalid_assignment_scope')
+    for value in scope:
+        if not isinstance(value, str) or not value or len(value) > 512:
+            raise StoreError('invalid_assignment_scope')
+        path = PurePosixPath(value)
+        if (path.is_absolute() or '..' in path.parts or '\\' in value
+                or any(part in {'.cortex', '.git', '.codex', '.claude'} for part in path.parts)):
+            raise StoreError('forbidden_assignment_scope')
+    return scope
+
+
+def validate_plan(plan):
+    if not isinstance(plan, dict) or set(plan) != {'tasks', 'verification'}:
+        raise StoreError('invalid_plan_fields')
+    nodes = plan['tasks']
+    if not isinstance(nodes, list) or not 1 <= len(nodes) <= MAX_NODES:
+        raise StoreError('invalid_plan_size')
+    ids = set()
+    for node in nodes:
+        if not isinstance(node, dict) or set(node) != {'id', 'role', 'objective', 'dependencies', 'scope'}:
+            raise StoreError('invalid_plan_node')
+        key = node['id']
+        if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,63}', key) or key in ids:
+            raise StoreError('duplicate_or_invalid_node')
+        ids.add(key)
+        role = resolve_role(node['role'])
+        if not role.startswith('worker-') or role in {'worker-code-reviewer', 'worker-build-verification'}:
+            raise StoreError('runtime_reserved_role')
+        if not isinstance(node['objective'], str) or not 1 <= len(node['objective']) <= 8000:
+            raise StoreError('invalid_node_objective')
+        validate_scope(node['scope'])
+        deps = node['dependencies']
+        if not isinstance(deps, list) or any(not isinstance(d, str) for d in deps) or len(set(deps)) != len(deps):
+            raise StoreError('invalid_dependencies')
+    remaining = {n['id']: set(n['dependencies']) for n in nodes}
+    if any(not deps <= ids for deps in remaining.values()):
+        raise StoreError('unknown_dependency')
+    resolved = set()
+    while remaining:
+        ready = [key for key, deps in remaining.items() if deps <= resolved]
+        if not ready:
+            raise StoreError('cyclic_plan')
+        for key in ready:
+            resolved.add(key)
+            del remaining[key]
+    checks = plan['verification']
+    if not isinstance(checks, list) or not 1 <= len(checks) <= 16:
+        raise StoreError('verification_required')
+    for argv in checks:
+        if not isinstance(argv, list) or not 1 <= len(argv) <= 64 or any(
+                not isinstance(arg, str) or not arg or len(arg) > 4096 or '\x00' in arg for arg in argv):
+            raise StoreError('invalid_verification_command')
+    return plan
+
+
+class TaskMachine:
+    def __init__(self, store):
+        self.store = store
+
+    def create(self, task_id, goal):
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+            if row is None:
+                stamp = now()
+                db.execute('INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES(?,?,?,?,?)',
+                           (task_id, 'CREATED', goal, stamp, stamp))
+                event(db, task_id, 'TASK_CREATED', dict(goal=goal))
+                transition(db, task_id, 'PLANNING')
+            db.commit()
+        return self.context(task_id)
+
+    def context(self, task_id):
+        with self.store.connection() as db:
+            task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+            if task is None:
+                raise StoreError('runtime_task_missing')
+            nodes = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid',
+                               (task_id, task['revision'])).fetchall()
+            answers = db.execute("SELECT id,text,answer_text FROM pending_questions WHERE task_id=? AND status='answered' ORDER BY created_at", (task_id,)).fetchall()
+            steering = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_STEERING' ORDER BY id DESC LIMIT 64", (task_id,)).fetchall()
+            proposals=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED' ORDER BY id DESC LIMIT 3",(task_id,)).fetchall()
+            verification=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED') ORDER BY id DESC LIMIT 1",(task_id,)).fetchone()
+            from .policy import denied_paths
+            denials = denied_paths(db,task_id)
+        value = dict(task)
+        value['runtime_proposals']=[json.loads(row[0]) for row in reversed(proposals)]
+        value['steering'] = [json.loads(row[0]) for row in reversed(steering)]
+        value['policy'] = dict(deny_write=denials, native_tools=False, max_workers=MAX_WORKERS)
+        value['verification']=json.loads(verification[0]) if verification else None
+        value['user_answers'] = [dict(answer) for answer in answers]
+        value['plan'] = json.loads(value.pop('plan_json') or 'null')
+        value['nodes'] = [{**dict(n), 'dependencies': json.loads(n['dependencies_json']),
+                           'scope': json.loads(n['scope_json']),
+                           'result': json.loads(n['result_json'] or 'null')} for n in nodes]
+        for n in value['nodes']:
+            for key in ('dependencies_json', 'scope_json', 'result_json'):
+                n.pop(key)
+        return value
+
+    def submit_plan(self, channel, plan, request_key, *, authorization=None):
+        validate_plan(plan)
+        digest = hashlib.sha256(encoded(plan).encode()).hexdigest()
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if authorization: authorization(db)
+            previous = db.execute('SELECT * FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                                  (channel.task_id, channel.channel_id, request_key)).fetchone()
+            if previous:
+                if previous['operation'] != 'plan_submit' or previous['digest'] != digest:
+                    raise StoreError('request_key_conflict')
+                return json.loads(previous['result_json'])
+            task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
+            if task is None or task['state'] != 'PLANNING':
+                raise StoreError('plan_not_expected')
+            from .policy import validate_grants
+            for node in plan['tasks']:
+                from .gateway import READ_ONLY
+                if resolve_role(node['role']) not in READ_ONLY:
+                    validate_grants(db, channel.task_id, node['scope'])
+            proposed_nodes=plan['tasks']
+            request=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED' ORDER BY id DESC LIMIT 1",(channel.task_id,)).fetchone()
+            escalation=json.loads(request[0]) if request else {}
+            if escalation.get('operation')=='escalation_request' and escalation.get('revision')==task['revision']:
+                # The runtime chooses a readonly consultant under the existing
+                # administrator route policy. The model never chooses a model.
+                proposed_nodes=[dict(id='_consultation',role='senior-consultant',
+                    objective=escalation['proposal']['reason'],dependencies=[],scope=['.'])]+[
+                    dict(node,dependencies=['_consultation',*node['dependencies']]) for node in proposed_nodes]
+                event(db,channel.task_id,'CONSULTATION_REQUIRED',dict(role='worker-senior-consultant',source_revision=task['revision']))
+            revision = task['revision'] + 1
+            db.execute('UPDATE runtime_tasks SET revision=?,plan_json=?,synthesis=NULL,review_cycle=0 WHERE task_id=?',
+                       (revision, encoded(plan), channel.task_id))
+            for node in proposed_nodes:
+                db.execute('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                           (channel.task_id, revision, node['id'], resolve_role(node['role']), node['objective'],
+                            encoded(node['dependencies']), encoded(node['scope']), 'execution', 'pending', None, None))
+            event(db, channel.task_id, 'PLAN_ACCEPTED', dict(revision=revision, plan=plan), channel.channel_id)
+            transition(db, channel.task_id, 'PLAN_READY')
+            result = dict(revision=revision, state='PLAN_READY')
+            db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
+                       (channel.task_id, request_key, channel.channel_id, 'plan_submit', digest, encoded(result)))
+            db.commit()
+        return result
+
+    def move(self, task_id, target, *, blocker=None):
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if target == 'COMPLETED':
+                self._completion_invariants(db, task_id)
+            transition(db, task_id, target, blocker=blocker)
+            db.commit()
+
+    def submit_answer(self, channel, text, request_key, *, authorization=None):
+        """Record an informational proposal; only the runtime completes it.
+
+        This cannot replace a plan, escape a review or accept a worker result.
+        """
+        digest=hashlib.sha256(encoded(dict(text=text)).encode()).hexdigest()
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if authorization: authorization(db)
+            previous=db.execute('SELECT * FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                                (channel.task_id,channel.channel_id,request_key)).fetchone()
+            if previous:
+                if previous['operation']!='answer_submit' or previous['digest']!=digest:
+                    raise StoreError('request_key_conflict')
+                return json.loads(previous['result_json'])
+            task=db.execute('SELECT * FROM runtime_tasks WHERE task_id=?',(channel.task_id,)).fetchone()
+            if (not task or task['state'] not in {'PLANNING','ANSWER_READY'}
+                or task['revision'] != 0 or task['plan_json'] is not None
+                or db.execute('SELECT 1 FROM runtime_nodes WHERE task_id=?',(channel.task_id,)).fetchone()
+                or db.execute("SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",(channel.task_id,)).fetchone()):
+                raise StoreError('direct_answer_not_available')
+            if task['state']=='ANSWER_READY':
+                if task['synthesis']!=text: raise StoreError('answer_conflict')
+            else:
+                db.execute('UPDATE runtime_tasks SET synthesis=? WHERE task_id=?',(text,channel.task_id))
+                event(db,channel.task_id,'ANSWER_SUBMITTED',dict(text=text,request_key=request_key),channel.channel_id)
+                transition(db,channel.task_id,'ANSWER_READY')
+            receipt=dict(recorded=True,state='ANSWER_READY')
+            db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
+                       (channel.task_id,request_key,channel.channel_id,'answer_submit',digest,encoded(receipt)))
+            db.commit()
+        return receipt
+
+    def cancel(self, task_id):
+        """Idempotently fence further results and completion before process cleanup."""
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT state FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+            if row and row['state'] not in TERMINAL:
+                transition(db, task_id, 'CANCELLED')
+            db.commit()
+
+    def claim_ready(self, task_id, channel_id, max_workers=MAX_WORKERS):
+        """Reserve dependency-ready nodes atomically; never exceed the runtime ceiling."""
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+            if task is None or task['state'] not in {'EXECUTING', 'REVIEWING'}:
+                return []
+            nodes = [dict(n) for n in db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid',
+                                                (task_id, task['revision']))]
+            completed = {n['node_id'] for n in nodes if n['status'] == 'completed'}
+            active_nodes = db.execute("""SELECT n.scope_json FROM runtime_nodes n WHERE n.status='running'
+                OR (n.assignment_ref IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM delegation_provisioning p WHERE p.idempotency_key=n.assignment_ref
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='WORKER_RELEASED'
+                    AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref
+                ))""").fetchall()
+            running = len(active_nodes)
+            capacity = max(0, min(max_workers, MAX_WORKERS) - running)
+            stage = 'review' if task['state'] == 'REVIEWING' else 'execution'
+            ready = [n for n in nodes if n['status'] == 'pending' and n['stage'] == stage
+                     and set(json.loads(n['dependencies_json'])) <= completed]
+            from .policy import overlaps
+            occupied = [json.loads(n['scope_json']) for n in active_nodes]
+            selected = []
+            for candidate in ready:
+                if len(selected)>=capacity: break
+                scope = json.loads(candidate['scope_json'])
+                if any(overlaps(a,b) for grant in occupied for a in grant for b in scope):
+                    continue
+                selected.append(candidate)
+                occupied.append(scope)
+            ready = selected
+            for node in ready:
+                retries=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'",(task_id,)).fetchall()
+                retry=sum(json.loads(row[0]).get('node')==node['node_id'] and json.loads(row[0]).get('revision')==task['revision'] for row in retries)
+                key = f"runtime:{task['revision']}:{node['node_id']}:{retry}"
+                assignment = hashlib.sha256(f'{task_id}|{channel_id}|{key}'.encode()).hexdigest()
+                db.execute('UPDATE runtime_nodes SET status=?,assignment_ref=? WHERE task_id=? AND revision=? AND node_id=?',
+                           ('running', assignment, task_id, task['revision'], node['node_id']))
+                node.update(assignment_ref=assignment, request_key=key)
+                event(db, task_id, 'ASSIGNMENT_CREATED', dict(node=node['node_id'], assignment_ref=assignment,
+                                                             role=node['role'], revision=task['revision']))
+            db.commit()
+        return ready
+
+    def record_result(self, task_id, assignment_ref, result):
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+            node = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
+                              (task_id, assignment_ref)).fetchone()
+            if not task or not node or node['revision'] != task['revision'] or task['state'] in TERMINAL:
+                raise StoreError('stale_assignment_result')
+            if node['result_json'] is not None:
+                retained = json.loads(node['result_json'])
+                retained.pop('report_digest', None)
+                retained.pop('project_digest', None)
+                if encoded(retained) != encoded(result):
+                    raise StoreError('conflicting_assignment_result')
+                return
+            if node['status'] != 'running':
+                raise StoreError('assignment_not_running')
+            # Durable publication identity and ownership, never final chat text.
+            report = db.execute('SELECT * FROM reports WHERE id=? AND task_id=?',
+                                (result.get('report_ref'), task_id)).fetchone()
+            provision = db.execute('SELECT attempt_id FROM delegation_provisioning WHERE idempotency_key=? AND task_id=?',
+                                   (assignment_ref, task_id)).fetchone()
+            if report is None or provision is None:
+                raise StoreError('assignment_report_missing')
+            published = db.execute("SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref IN (?,?) "
+                                   "AND event_type='worker_result' AND superseded=0",
+                                   (task_id, assignment_ref, provision['attempt_id'])).fetchall()
+            if not any(json.loads(r['payload_json']).get('report_ref') == result['report_ref'] for r in published):
+                raise StoreError('assignment_report_mismatch')
+            from .artifacts import report_digest
+            result = dict(result, report_digest=report_digest(self.store, task_id, report['filename']))
+            checks = result.get('checks', [])
+            from .gateway import verified_check
+            failed = any(c.get('outcome') != 'passed' or
+                         not verified_check(db, task_id, provision['attempt_id'], c.get('tool_call_ref'))
+                         for c in checks)
+            status = 'failed' if failed else 'completed'
+            if node['stage'] == 'review' and result.get('verdict') not in {'APPROVE', 'REQUEST_CHANGES', 'BLOCK'}:
+                raise StoreError('review_verdict_required')
+            if node['stage'] == 'review':
+                from ..delegation.revision import capture_revision
+                observed = capture_revision(str(self.store.project_root))
+                started = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED' ORDER BY id DESC", (task_id,)).fetchall()
+                binding = next((json.loads(r[0]) for r in started if json.loads(r[0]).get('assignment_ref') == assignment_ref), None)
+                if observed['kind'] != 'observed' or binding is None or binding['revision_digest'] != observed['dirty_digest']:
+                    raise StoreError('review_project_revision_changed')
+                result['project_digest'] = observed['dirty_digest']
+            db.execute('UPDATE runtime_nodes SET status=?,result_json=? WHERE task_id=? AND revision=? AND node_id=?',
+                       (status, encoded(result), task_id, task['revision'], node['node_id']))
+            event(db, task_id, 'WORKER_COMPLETED' if not failed else 'WORKER_FAILED',
+                  dict(node=node['node_id'], assignment_ref=assignment_ref, result=result))
+            db.commit()
+
+    def start_review(self, task_id, assignment_ref):
+        from ..delegation.revision import capture_revision
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            observed = capture_revision(str(self.store.project_root))
+            if observed['kind'] != 'observed':
+                raise StoreError('review_revision_unavailable')
+            event(db, task_id, 'REVIEW_STARTED', dict(assignment_ref=assignment_ref,
+                  revision_digest=observed['dirty_digest']))
+            db.commit()
+        return observed['dirty_digest']
+
+    def add_review(self, task_id):
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+            nodes = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND revision=?', (task_id, task['revision'])).fetchall()
+            if not nodes or any(n['status'] != 'completed' for n in nodes):
+                raise StoreError('execution_incomplete')
+            cycle = task['review_cycle'] + 1
+            if cycle > MAX_REVIEW_CYCLES:
+                transition(db, task_id, 'BLOCKED', blocker='review_cycle_limit')
+            else:
+                key = f'_review_{cycle}'
+                db.execute('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                           (task_id, task['revision'], key, 'worker-code-reviewer',
+                            'Independently review the original objective, implementation and retained reports. Submit an explicit review verdict.',
+                            encoded([n['node_id'] for n in nodes]), encoded(['**']), 'review', 'pending', None, None))
+                db.execute('UPDATE runtime_tasks SET review_cycle=? WHERE task_id=?', (cycle, task_id))
+                transition(db, task_id, 'REVIEWING')
+            db.commit()
+
+    def add_fix(self, task_id, review):
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+            if task['state'] != 'REVIEWING':
+                raise StoreError('review_not_expected')
+            if task['review_cycle'] >= MAX_REVIEW_CYCLES:
+                transition(db, task_id, 'BLOCKED', blocker='review_cycle_limit')
+            else:
+                original={n['id'] for n in json.loads(task['plan_json'])['tasks']}
+                implementations=db.execute("SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='execution' ORDER BY rowid",
+                                           (task_id,task['revision'])).fetchall()
+                fixes=[]
+                for implementation in implementations:
+                    if implementation['node_id'] not in original: continue
+                    key=f"_fix_{task['review_cycle']}_{implementation['node_id']}"
+                    db.execute('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                               (task_id,task['revision'],key,implementation['role'],
+                                'Address review findings within the assigned scope: '+review['result']['summary'],
+                                encoded([review['node_id']]),implementation['scope_json'],'execution','pending',None,None))
+                    fixes.append(key)
+                event(db,task_id,'REVIEW_CHANGES_REQUESTED',dict(review=review['node_id'],fixes=fixes))
+                transition(db, task_id, 'EXECUTING')
+            db.commit()
+
+    def submit_synthesis(self, channel, text, *, authorization=None):
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if authorization: authorization(db)
+            task = db.execute('SELECT state,synthesis FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
+            if not task or task['state'] != 'RECONCILING':
+                raise StoreError('synthesis_not_expected')
+            if task['synthesis'] is not None and task['synthesis'] != text:
+                raise StoreError('synthesis_conflict')
+            if task['synthesis']==text:
+                return dict(recorded=True,state='RECONCILING')
+            db.execute('UPDATE runtime_tasks SET synthesis=? WHERE task_id=?', (text, channel.task_id))
+            event(db, channel.task_id, 'SYNTHESIS_SUBMITTED', dict(text=text), channel.channel_id)
+            db.commit()
+        return dict(recorded=True)
+
+    def record_verification(self, task_id, checks, revision_digest):
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+            if not task or task['state'] != 'VERIFYING':
+                raise StoreError('verification_not_expected')
+            review = db.execute("SELECT result_json FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='review' ORDER BY rowid DESC LIMIT 1", (task_id, task['revision'])).fetchone()
+            if not review or not review[0] or json.loads(review[0]).get('project_digest') != revision_digest:
+                transition(db, task_id, 'BLOCKED', blocker='verification_review_revision_changed')
+                db.commit()
+                return False
+            commands = json.loads(task['plan_json'])['verification']
+            passed = (len(checks) == len(commands) and len(revision_digest) == 64
+                      and all(c.get('argv') == argv and c.get('exit_code') == 0 and c.get('complete') is True
+                              and c.get('revision_digest') == revision_digest for c, argv in zip(checks, commands)))
+            event(db, task_id, 'VERIFICATION_PASSED' if passed else 'VERIFICATION_FAILED',
+                  dict(revision=task['revision'], revision_digest=revision_digest, checks=checks))
+            transition(db, task_id, 'RECONCILING' if passed else 'BLOCKED',
+                       blocker=None if passed else 'verification_failed')
+            db.commit()
+        return passed
+
+    def _completion_invariants(self, db, task_id):
+        if db.execute('SELECT 1 FROM task_stopped WHERE task_id=?', (task_id,)).fetchone():
+            raise StoreError('completion_task_stopped')
+        task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+        if task['state']=='ANSWER_READY':
+            if (task['revision']!=0 or task['plan_json'] is not None or not task['synthesis'] or task['blocker']
+                or db.execute('SELECT 1 FROM runtime_nodes WHERE task_id=?',(task_id,)).fetchone()
+                or db.execute("SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",(task_id,)).fetchone()):
+                raise StoreError('completion_answer_invariant')
+            proposal=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ANSWER_SUBMITTED' ORDER BY id DESC LIMIT 1",(task_id,)).fetchone()
+            if not proposal or json.loads(proposal[0]).get('text')!=task['synthesis']:
+                raise StoreError('completion_answer_missing')
+            return
+        nodes = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid',
+                           (task_id, task['revision'])).fetchall()
+        if not nodes or any(n['status'] != 'completed' or not n['result_json'] for n in nodes):
+            raise StoreError('completion_nodes_incomplete')
+        for node in nodes:
+            result = json.loads(node['result_json'])
+            report = db.execute('SELECT filename FROM reports WHERE task_id=? AND id=?',
+                                (task_id, result.get('report_ref'))).fetchone()
+            from .artifacts import report_digest
+            if report is None or report_digest(self.store, task_id, report['filename']) != result.get('report_digest'):
+                raise StoreError('completion_artifact_changed_or_missing')
+        reviews = [n for n in nodes if n['stage'] == 'review']
+        if not reviews or json.loads(reviews[-1]['result_json']).get('verdict') != 'APPROVE':
+            raise StoreError('completion_review_missing')
+        evidence = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='VERIFICATION_PASSED' ORDER BY id DESC LIMIT 1",
+                              (task_id,)).fetchone()
+        if not evidence or json.loads(evidence['payload_json'])['revision'] != task['revision']:
+            raise StoreError('completion_verification_missing')
+        from ..delegation.revision import capture_revision
+        observed = capture_revision(str(self.store.project_root))
+        if observed['kind'] != 'observed' or observed['dirty_digest'] != json.loads(evidence['payload_json'])['revision_digest']:
+            raise StoreError('completion_project_revision_changed')
+        if task['blocker'] or not task['synthesis']:
+            raise StoreError('completion_synthesis_or_blocker')

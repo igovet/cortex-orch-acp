@@ -17,7 +17,8 @@ def test_worker_history_uses_authoritative_workspace_handle_directory():
 
 
 def test_worker_history_is_cursor_bounded_and_uri_escapes_paths():
-    assert "id>? order by id limit ?" in SOURCE
+    assert "and id>? and (event_type in" in SOURCE
+    assert "order by id limit ?" in SOURCE
     assert "limit + 1" in SOURCE
     assert "quote(db_path, safe='/')" in SOURCE
 
@@ -160,6 +161,7 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
     assert output["assignments"][0]["attempts"][0]["route"] == {
         "provider": "codex", "model": "model-fixture", "effort": "high",
     }
+    assert output["assignments"][0]["attempts"][0]["completedAt"] == "6"
     assert events[0]["input"] == {"path": "src/app.py"}
     assert events[0]["output"] == "permission denied"
     assert events[0]["status"] == "failed"
@@ -180,6 +182,7 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
     )
     bounded_output = json.loads(bounded.stdout)
     assert bounded_output["assignments"][0]["attempts"][0]["status"] == "completed"
+    assert bounded_output["assignments"][0]["attempts"][0]["completedAt"] == "6"
 
     # Simulate the live worker appending a message after the first read. A
     # cursor read returns the new durable row before another terminal result
@@ -215,3 +218,65 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
         "status": "planned",
         "attempts": [],
     }]
+
+    # Explicit plans have distinct graph, delegation and execution identities.
+    # This is the production shape: clicking the delegate receipt must resolve
+    # the exact graph attempt and its execution transcript, not an empty feed.
+    db = sqlite3.connect(db_path)
+    db.execute("update task_events set assignment_ref=?, payload_json=? where id=1", (
+        "delegate_hash", json.dumps({"title": "first", "plan_assignment_ref": "a_fixture", "work_attempt_ref": "xa_revision"}),
+    ))
+    db.execute("update delegation_provisioning set idempotency_key=?", ("delegate_hash",))
+    db.commit()
+    db.close()
+    for selected_ref in ("", "delegate_hash"):
+        explicit = subprocess.run(
+            ["python3", "-B", "-c", match.group(1), str(project), task, "", "0", "200", "", selected_ref],
+            capture_output=True, text=True, check=True,
+        )
+        resolved = json.loads(explicit.stdout)
+        assignment = next(a for a in resolved["assignments"] if a["id"] == "a_fixture")
+        assert assignment["assignmentRef"] == "delegate_hash"
+        current = next(a for a in assignment["attempts"] if a["id"] == "xa_revision")
+        assert [e["id"] for e in current["events"]] == [5, 6, 9]
+        assert current["route"]["provider"] == "codex"
+        if selected_ref:
+            assert len(assignment["attempts"]) == 1
+    mismatch = subprocess.run(
+        ["python3", "-B", "-c", match.group(1), str(project), task, "xa_first", "0", "200", "", "delegate_hash"],
+        capture_output=True, text=True, check=True,
+    )
+    assert json.loads(mismatch.stdout)["assignments"] == []
+
+    # Publication is not acceptance: runtime validation remains authoritative
+    # even when its failure falls outside the selected history page.
+    db = sqlite3.connect(db_path)
+    db.execute('create table runtime_nodes (task_id text, assignment_ref text, status text, result_json text)')
+    db.execute('insert into runtime_nodes values (?,?,?,?)',
+               (task, 'delegate_hash', 'failed', json.dumps({'checks': [{'name': 'actual check', 'outcome': 'unverified'}]})))
+    db.commit()
+    db.close()
+    failed = subprocess.run(
+        ["python3", "-B", "-c", match.group(1), str(project), task, "xa_revision", "8", "1", "", "delegate_hash"],
+        capture_output=True, text=True, check=True,
+    )
+    failed_assignment = json.loads(failed.stdout)['assignments'][0]
+    assert failed_assignment['status'] == 'failed'
+    assert failed_assignment['attempts'][0]['status'] == 'failed'
+    assert 'actual check: unverified' in failed_assignment['attempts'][0]['failureReason']
+
+    # Existing worker reads lose document bodies on projection; paths/status survive.
+    db = sqlite3.connect(db_path)
+    for i, title in [(10, 'mcp.cortex.project_read'), (11, 'mcp__cortex__read_skill')]:
+        db.execute('insert into task_events values (?,?,?,?,?,?)', (i, task, 'progress', 'exec_revision', str(i), json.dumps({
+            'kind': 'worker_activity', 'title': title, 'text': 'READ_BODY_MARKER',
+            'tool_kind': 'read', 'status': 'completed', 'activity_ref': f'tool:read-{i}',
+            'raw_input': {'path': 'README.md'}, 'raw_output': 'READ_BODY_MARKER',
+            'content': [{'type': 'text', 'text': 'READ_BODY_MARKER'}],
+        })))
+    db.commit()
+    db.close()
+    reads = subprocess.run(['python3', '-B', '-c', match.group(1), str(project), task, 'xa_revision', '9', '200', '', 'delegate_hash'], capture_output=True, text=True, check=True)
+    assert 'READ_BODY_MARKER' not in reads.stdout
+    assert 'README.md' in reads.stdout
+    assert 'completed' in reads.stdout

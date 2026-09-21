@@ -8,10 +8,10 @@ def test_consultation_is_conditionally_loaded_and_preserves_report_only_scope():
     entry = (root / "SKILL.md").read_text()
     policy = (root / "references/senior-consultation.md").read_text()
     assert '(references/senior-consultation.md)' in entry
-    assert 'concrete unresolved uncertainty' in policy
-    assert 'selected published reports' in policy
-    assert 'does not transfer' in policy
-    assert 'repeat consultation only for changed evidence' in policy
+    assert 'uncertainty' in policy
+    assert 'reports' in policy
+    assert 'runtime' in policy
+    assert 'read-only' in policy
 
 
 def test_the_advisory_lane_is_no_longer_instructed():

@@ -21,6 +21,7 @@ from .contracts import StoreError
 from .delegation.store import DELEGATION_SCHEMA
 from .delegation.work_graph import WORK_GRAPH_SCHEMA
 from .delegation.events_store import TASK_EVENTS_SCHEMA
+from .orchestration.state import SCHEMA as RUNTIME_SCHEMA
 from .delegation.capacity_store import CAPACITY_SCHEMA
 from .delegation.evidence_store import EVIDENCE_SCHEMA
 from .delegation.generations_store import CONTEXT_GENERATIONS_SCHEMA
@@ -167,8 +168,14 @@ _ROUTING_TABLES = frozenset({"configuration_route_extras", "attempt_route_audit"
 # store.py-created store always has both.
 _OBSERVABILITY_TABLES = frozenset({"observability_events", "usage_records"})
 
+_RUNTIME_TABLES = frozenset({"runtime_tasks", "runtime_nodes", "runtime_events", "runtime_requests"})
+
 _SELECTIONS = {
     "tasks": "SELECT x.* FROM tasks x WHERE x.project_root=?",
+    "runtime_tasks": "SELECT x.* FROM runtime_tasks x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "runtime_nodes": "SELECT x.* FROM runtime_nodes x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "runtime_events": "SELECT x.* FROM runtime_events x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
+    "runtime_requests": "SELECT x.* FROM runtime_requests x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "thread_bindings": "SELECT x.* FROM thread_bindings x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "task_owners": "SELECT x.* FROM task_owners x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
     "trusted_channels": "SELECT x.* FROM trusted_channels x JOIN tasks t ON t.id=x.task_id WHERE t.project_root=?",
@@ -232,7 +239,7 @@ _SELECTIONS = {
 }
 
 _COPY_ORDER = (
-    "tasks", "thread_bindings", "task_owners", "trusted_channels", "source_events",
+    "tasks", "runtime_tasks", "runtime_nodes", "runtime_events", "runtime_requests", "thread_bindings", "task_owners", "trusted_channels", "source_events",
     "task_route_selections", "configuration_revisions", "project_configuration_defaults",
     "acp_host_sessions",
     "delegation_provisioning", "delegation_effects",
@@ -445,7 +452,7 @@ def _observability_present(db):
 def _expected_layout():
     db = sqlite3.connect(":memory:")
     try:
-        db.executescript(SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA)
+        db.executescript(SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + RUNTIME_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA)
         tables = _table_names(db)
         columns = {
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA table_xinfo({_identifier(table)})"))
@@ -455,7 +462,7 @@ def _expected_layout():
             table: tuple(tuple(row) for row in db.execute(f"PRAGMA foreign_key_list({_identifier(table)})"))
             for table in tables
         }
-        core = tables - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _WORK_GRAPH_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _PERMISSION_RECEIPT_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES - _GENERATIONS_TABLES - _PROCESS_REGISTRY_TABLES - _BUDGET_TABLES - _WORKSPACE_TABLES - _ROUTING_TABLES - _OBSERVABILITY_TABLES
+        core = tables - _RUNTIME_TABLES - _IDENTITY_TABLES - _CATALOG_TABLES - _CONFIGURATION_TABLES - _ACP_TABLES - _DELEGATION_TABLES - _WORK_GRAPH_TABLES - _TASK_EVENTS_TABLES - _CAPACITY_TABLES - _EVIDENCE_TABLES - _PERMISSION_RECEIPT_TABLES - _REPLAY_TABLES - _QUESTIONS_TABLES - _LANGUAGE_TABLES - _STOPPED_TABLES - _GENERATIONS_TABLES - _PROCESS_REGISTRY_TABLES - _BUDGET_TABLES - _WORKSPACE_TABLES - _ROUTING_TABLES - _OBSERVABILITY_TABLES
         return core, columns, foreign_keys
     finally:
         db.close()
@@ -480,6 +487,9 @@ def _validate_format(db):
     if graph_names and graph_names != _WORK_GRAPH_TABLES:
         raise StoreError("unsupported_storage")
     graph_present = graph_names == _WORK_GRAPH_TABLES
+    runtime_names = _table_names(db) & _RUNTIME_TABLES
+    if runtime_names and runtime_names != _RUNTIME_TABLES:
+        raise StoreError("unsupported_storage")
     task_events_present = _task_events_present(db)
     capacity_present = _capacity_present(db)
     evidence_present = _evidence_present(db)
@@ -503,6 +513,7 @@ def _validate_format(db):
         | (_ACP_TABLES if acp_present else set())
         | (_DELEGATION_TABLES if delegation_present else set())
         | (_WORK_GRAPH_TABLES if graph_present else set())
+        | runtime_names
         | (_TASK_EVENTS_TABLES if task_events_present else set())
         | (_CAPACITY_TABLES if capacity_present else set())
         | (_EVIDENCE_TABLES if evidence_present else set())
@@ -756,7 +767,7 @@ def _create_destination(source_db, temporary, project_root):
         # a fresh store: core SCHEMA plus the identity tables,
         # regardless of whether the (possibly legacy, pre-T005) source has
         # them. A legacy source simply leaves them empty in the destination.
-        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA +
+        target.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + IDENTITY_SCHEMA + CATALOG_SCHEMA + CONFIGURATION_SCHEMA + ACP_SESSION_SCHEMA + DELEGATION_SCHEMA + WORK_GRAPH_SCHEMA + TASK_EVENTS_SCHEMA + RUNTIME_SCHEMA + CAPACITY_SCHEMA + EVIDENCE_SCHEMA + REPLAY_SCHEMA + PENDING_QUESTIONS_SCHEMA + TASK_LANGUAGE_SCHEMA + TASK_STOPPED_SCHEMA + CONTEXT_GENERATIONS_SCHEMA + PROCESS_REGISTRY_SCHEMA + LARGE_OUTPUT_SCHEMA + WORKSPACE_SCHEMA + INTEGRATION_SCHEMA + ROUTING_SCHEMA + OBSERVABILITY_SCHEMA +
                              f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
         target.execute("BEGIN IMMEDIATE")
         source_identity_present = _identity_present(source_db)
@@ -789,7 +800,9 @@ def _create_destination(source_db, temporary, project_root):
             placeholders = ",".join("?" for _ in columns)
             insert = ("INSERT INTO " + _identifier(table) + " (" +
                       ",".join(map(_identifier, columns)) + ") VALUES (" + placeholders + ")")
-            if table in _IDENTITY_TABLES and not source_identity_present:
+            if table in _RUNTIME_TABLES and table not in _table_names(source_db):
+                rows = ()
+            elif table in _IDENTITY_TABLES and not source_identity_present:
                 # No identity rows exist to carry; leave the destination's
                 # freshly-created identity tables empty rather than dropping
                 # anything (there is nothing to drop for a legacy source).

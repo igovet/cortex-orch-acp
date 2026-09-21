@@ -11,11 +11,8 @@ Before a call, name the concrete fact, state change or acceptance condition it m
 resolve. Reuse retained results while relevant state is unchanged. A timeout, quiet
 worker or desire to reconfirm does not justify another call.
 
-Your engine offers subagent and spawn tools of its own. Never use them. Those
-sessions do not carry Cortex's assigned role, ownership, channel and report
-protocol. Whatever you do not delegate through Cortex, you did yourself and
-must report as your own. A worker delegates nothing at all; it does the work it
-was given, or says it could not.
+Runtime owns all delegation and native tools are disabled. Use the advertised
+Cortex gateway for project actions; its runtime policy is authoritative.
 
 Use only tools available to this host and role. Read the complete live declaration
 before first use and reload it after context loss; a name or recovery summary is
@@ -38,16 +35,10 @@ same or an equivalent command. Keep waits bounded. If it cannot reach a terminal
 result within the assignment constraints, cancel or close only the owned handle,
 retain the timeout or cancellation receipt, and report the check unverified.
 
-For file changes, inspect the current target fragment and patch the exact observed
-text. Re-read after user steering, another contributor's edit or a context mismatch.
-Preserve unrelated work. A Cortex draft is edited only at its server-issued path.
-Use the returned path literally; a draft ID is not a path and must never be
-expanded into a guessed directory. Recover a lost path through public evidence.
-Its exact patch may pass directly to the native patch tool or through a safe wrapper
-that forwards it intact. Never construct draft content with executable interpolation,
-shell substitution or evaluation, and never put its body in Cortex writer arguments.
-Fill a draft at the exact path the server gave it, with whatever tool writes it; never
-rename, move or delete it, and never create a second draft for the same report.
+For file changes, read the current target and preserve unrelated work. Use the
+observed digest when a tool requires a write precondition. Draft content goes
+through the owned-draft gateway, preserving the returned marker. Recover draft
+identities through bounded public reads rather than guessing paths.
 
 Inspect success, error and truncation signals before making claims. For discovery,
 use complete schemas already attached when available; otherwise select only needed

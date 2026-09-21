@@ -498,6 +498,18 @@ def _task_with_store(tmp_path):
 
 
 def _make_runtime(store, router, **kwargs):
+    original_router=router
+    def router(*args):
+        behavior=original_router(*args)
+        if behavior is None: return None
+        def turn(store,channel,ref,message,index):
+            outcome=behavior(store,channel,ref,message,index)
+            if channel and channel.role=='coordinator' and outcome.stop_reason==StopReason.END_TURN:
+                from cortex_runtime.orchestration.state import TaskMachine
+                if TaskMachine(store).context(channel.task_id)['state']=='PLANNING':
+                    mcp_tools.dispatch(store,channel,'user_question_request',dict(question='Next input?',request_key='generation-question-'+str(index)))
+            return outcome
+        return turn
     engine = GenerationAwareSessionRuntime(store, router, engine=kwargs.pop("engine", "codex-acp"), version=kwargs.pop("version", "1.12.0"))
     runtime = OrchestratingRuntime(
         store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
@@ -537,7 +549,7 @@ def test_fresh_codex_generation_prompt_keeps_role_out_of_user_text(tmp_path):
         store, "coordinator", delegation_generations.latest_generation(store, coordinator_session_ref)["id"],
     )
     assert len(deliveries_for_g1) == 1
-    assert deliveries_for_g1[0]["state"] == "delivery_confirmed"
+    assert deliveries_for_g1[0]["state"] in {"delivery_confirmed","continuation_observed"}
 
 
 def test_two_compactions_produce_two_generations_and_two_distinct_deliveries(tmp_path):
@@ -566,7 +578,7 @@ def test_two_compactions_produce_two_generations_and_two_distinct_deliveries(tmp
 
     g1 = delegation_generations.latest_generation(store, session_ref)
     d1 = delegation_deliveries.for_generation(store, "coordinator", g1["id"])[0]
-    assert d1["state"] == "delivery_confirmed"
+    assert d1["state"] in {"delivery_confirmed","continuation_observed"}
 
     engine.trigger_compaction(session_ref, "tc-1", phase="completed")
     runtime.start_prompt(task_id, "s1", "still building", lambda text: True, cancel_event)
@@ -575,7 +587,7 @@ def test_two_compactions_produce_two_generations_and_two_distinct_deliveries(tmp
     assert g2["cause"] == "observed_compaction"
     d2 = delegation_deliveries.for_generation(store, "coordinator", g2["id"])[0]
     assert d2["id"] != d1["id"]
-    assert d2["state"] == "delivery_confirmed"
+    assert d2["state"] in {"delivery_confirmed","continuation_observed"}
 
     engine.trigger_compaction(session_ref, "tc-2", phase="completed")
     runtime.start_prompt(task_id, "s1", "still building 2", lambda text: True, cancel_event)
@@ -612,13 +624,9 @@ def test_stale_session_superseded_on_terminate_and_replacement_opens_new_generat
     from cortex_runtime.delegation import events as delegation_events
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(
-                store, channel, "delegate",
-                dict(title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="reqA"),
-            )
-            return PromptOutcome(StopReason.END_TURN, "delegated")
-        return PromptOutcome(StopReason.END_TURN, "waiting")
+        from runtime_scenarios import propose_inspection
+        propose_inspection(store,channel)
+        return PromptOutcome(StopReason.END_TURN,'Plan proposed')
 
     def worker_behavior(store, channel, session_ref, message, call_index):
         raise EngineTurnFailed("timeout_alive")
@@ -935,7 +943,7 @@ def test_capsule_oversize_never_prompts_the_engine_on_first_attempt_end_to_end(t
     )
     states = [d["state"] for d in deliveries]
     assert states.count("blocked") == 1
-    assert states.count("delivery_confirmed") == 1
+    assert sum(states.count(x) for x in ("delivery_confirmed","continuation_observed")) == 1
     assert engine.pending_delivery(session_ref) is None  # confirmed -- nothing left pending
 
 

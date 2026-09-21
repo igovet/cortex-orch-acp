@@ -29,7 +29,7 @@ const TERMINAL_STATUSES = new Set([
  * latest attempts have reached a durable terminal status. Unbound and empty
  * histories remain live because delegation may bind/populate them shortly. */
 export function shouldPollWorkerHistory(history: WorkerHistory | null): boolean {
-  if (!history || !history.available || history.assignments.length === 0) return true;
+  if (!history || !history.available || history.assignments.length === 0 || history.nextCursor != null) return true;
   return history.assignments.some((assignment: WorkerHistory["assignments"][number]) => {
     const attempt = assignment.attempts[assignment.attempts.length - 1];
     return !attempt || !TERMINAL_STATUSES.has(attempt.status);
@@ -88,7 +88,11 @@ export function mergeWorkerHistory(current: WorkerHistory, update: WorkerHistory
   };
 }
 
-export function historyCursor(history: WorkerHistory | null): number {
+export function historyCursor(history: WorkerHistory | null, attemptId?: string | null): number {
+  if (attemptId) {
+    const attempt = history?.assignments.flatMap(a => a.attempts).find(a => a.id === attemptId);
+    return Math.max(0, ...(attempt?.events.map(e => e.id) ?? []));
+  }
   return history?.assignments.reduce(
     (maxAssignment: number, assignment: WorkerAssignment) => Math.max(maxAssignment, ...assignment.attempts.flatMap((attempt: WorkerAttempt) => attempt.events.map((event: WorkerEvent) => event.id))),
     0,

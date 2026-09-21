@@ -12,7 +12,7 @@
 
 ## Evidence links and delivery state
 
-<!-- Link relevant reports and artifacts. Identify the checked artifact revision and observed receipts. Distinguish verification evidence from delivery and coordinator acceptance. Explain a repeated check with its new evidence or rerun reason; include incident evidence only when relevant. -->
+<!-- Link relevant reports and artifacts. Identify the checked artifact revision and observed receipts. Distinguish verification evidence from delivery and runtime completion. Explain a repeated check with its new evidence or rerun reason; include incident evidence only when relevant. -->
 
 ## Failures and gaps
 

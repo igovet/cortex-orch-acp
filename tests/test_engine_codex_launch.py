@@ -154,19 +154,14 @@ def test_build_codex_launch_returns_command_and_pinned_vars(tmp_path):
 def test_runtime_wrapper_disables_native_agents_without_changing_codex_home(tmp_path):
     capture = tmp_path / "wrapper-args.txt"
     binary = tmp_path / "codex"
-    _write_executable(binary, (
-        "#!/bin/sh\n"
-        'case "$*" in *"features list")\n'
-        '  [ "$1" = "-c" ] && [ "$2" = "agents.enabled=false" ] || exit 66\n'
-        "  printf 'multi_agent stable false\\nmulti_agent_v2 stable false\\nplugins stable false\\n'\n"
-        "  exit 0\n"
-        "  ;; *\"mcp list --json\")\n"
-        '  case "$*" in *\'mcp_servers.native.enabled=false\'*) '
-        "printf '[{\"name\":\"native\",\"enabled\":false}]';; "
-        "*) printf '[{\"name\":\"native\",\"enabled\":true}]';; esac\n"
-        "  exit 0;; esac\n"
-        f"printf '%s\\n' \"$@\" > {str(capture)!r}\n"
-    ).encode())
+    _write_executable(binary, ("#!/usr/bin/python3\n" +
+        "import json,sys\n" +
+        "a=sys.argv[1:]\n" +
+        "if a[-2:]==['features','list']: print('multi_agent stable false\\nmulti_agent_v2 stable false\\nplugins stable false')\n" +
+        "elif a==['--version']: print('codex-cli 0.155.1')\n" +
+        "elif a==['debug','models','--bundled']: print(json.dumps({'models':[{'slug':'fixture','shell_type':'default','apply_patch_tool_type':'freeform'}]}))\n" +
+        "elif a[-3:]==['mcp','list','--json']: print(json.dumps([{'name':'native','enabled':'mcp_servers.native.enabled=false' not in a}]))\n" +
+        f"else: open({str(capture)!r},'w').write('\\n'.join(a))\n").encode())
     environ = isolated_environ(tmp_path)
     connection_id = new_connection_id()
     native_home = tmp_path / "production-codex-home"
@@ -177,11 +172,16 @@ def test_runtime_wrapper_disables_native_agents_without_changing_codex_home(tmp_
         env={"CODEX_HOME": str(native_home), "PATH": "/usr/bin:/bin"},
     )
     assert result.returncode == 0
-    assert capture.read_text(encoding="utf-8").splitlines() == [
-        "-c", "agents.enabled=false", "-c", "features.multi_agent=false",
-        "-c", "features.multi_agent_v2=false", "-c", "features.plugins=false",
-        "-c", "mcp_servers.native.enabled=false", "app-server",
-    ]
+    actual=capture.read_text().splitlines()
+    assert actual[-3:]==['-c','mcp_servers.native.enabled=false','app-server']
+    for setting in ['agents.enabled=false','features.multi_agent=false','features.multi_agent_v2=false',
+                    'features.plugins=false','features.hooks=false','features.apps=false','features.shell_tool=false',
+                    'features.view_image=false','features.image_generation=false','features.browser_use=false',
+                    'features.computer_use=false','tools.update_plan.enabled=false','web_search="disabled"']:
+        assert setting in actual
+    catalogue_arg=next(a for a in actual if a.startswith('model_catalog_json='))
+    catalogue=json.loads(Path(json.loads(catalogue_arg.split('=',1)[1])).read_text())
+    assert catalogue['models']==[dict(slug='fixture',shell_type='disabled',apply_patch_tool_type=None,tool_mode='direct',experimental_supported_tools=[])]
     assert native_home.exists()
     assert Path(wrapper).is_file() and not Path(wrapper).is_symlink()
     assert stat.S_IMODE(Path(wrapper).stat().st_mode) & 0o777 == 0o700

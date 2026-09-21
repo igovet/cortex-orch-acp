@@ -24,14 +24,14 @@ REQUESTED_CAPABILITIES = (
 )
 
 
-def _make_manager(tmp_path, scenario, *, policy=None, host_permission_requester=None, call_timeout=5.0):
+def _make_manager(tmp_path, scenario, *, policy=None, host_permission_requester=None, call_timeout=5.0, coordinator_refusal_notifier=None):
     environ = isolated_environ(tmp_path)
     connection_id = new_connection_id()
     scenario_path = write_scenario(tmp_path, scenario)
     record = make_connection_record(connection_id, launch_command=fake_launch_command(scenario_path), environ=environ)
     return EngineSessionManager(
         record, str(tmp_path), environ=environ, call_timeout=call_timeout,
-        policy=policy, host_permission_requester=host_permission_requester,
+        policy=policy, host_permission_requester=host_permission_requester, coordinator_refusal_notifier=coordinator_refusal_notifier,
     )
 
 
@@ -74,7 +74,7 @@ def test_permission_request_with_binding_and_host_requester_relays_selection(tmp
         prompt_behavior="client_requests_sequence",
         client_requests=[dict(
             method="session/request_permission",
-            params=dict(sessionId="sess-1", toolCall=dict(toolCallId="tc-1"),
+            params=dict(sessionId="sess-1", toolCall=dict(toolCallId="tc-1", name="mcp__cortex__project_read"),
                         options=[dict(optionId="allow", kind="allow_once")]),
         )],
         client_reply_log_path=str(reply_log),
@@ -135,7 +135,7 @@ PY"""
         list(manager.prompt_turn(session_id, "run contrast check"))
         replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
         assert replies[0]["result"] == {
-            "outcome": {"outcome": "selected", "optionId": "allow"}
+            "outcome": {"outcome": "selected", "optionId": "deny"}
         }
         assert host_calls == []
     finally:
@@ -182,7 +182,7 @@ def test_coordinator_inline_ui_check_is_auto_approved_locally_on_fake_wire(tmp_p
         list(manager.prompt_turn(session_id, "run the UI check"))
         replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
         assert replies[0]["result"] == {
-            "outcome": {"outcome": "selected", "optionId": "allow"}
+            "outcome": {"outcome": "selected", "optionId": "deny"}
         }
         assert host_calls == []
     finally:
@@ -193,7 +193,7 @@ def test_duplicate_engine_request_id_gets_a_protocol_error(tmp_path):
     reply_log = tmp_path / "replies.jsonl"
     release_event = threading.Event()
 
-    def slow_requester(engine_session_id, params, timeout):
+    def slow_requester(*args):
         release_event.wait(3.0)
         return {"outcome": {"outcome": "selected", "optionId": "allow"}}
 
@@ -211,7 +211,7 @@ def test_duplicate_engine_request_id_gets_a_protocol_error(tmp_path):
         ],
         client_reply_log_path=str(reply_log),
     )
-    manager = _make_manager(tmp_path, scenario, host_permission_requester=slow_requester)
+    manager = _make_manager(tmp_path, scenario, coordinator_refusal_notifier=slow_requester)
     try:
         manager.negotiate(REQUESTED_CAPABILITIES)
         session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
@@ -342,44 +342,50 @@ def test_negotiate_advertises_policy_client_capabilities(tmp_path):
 
 # --- T014 review (LOW): bounded concurrent client-request handlers -----
 
-def test_excess_concurrent_client_requests_get_busy_immediately(tmp_path):
+def test_excess_concurrent_client_requests_get_busy_immediately(tmp_path, monkeypatch):
     reply_log = tmp_path / "replies.jsonl"
     release_event = threading.Event()
-
-    def slow_requester(engine_session_id, params, timeout):
-        release_event.wait(3.0)
-        return {"outcome": {"outcome": "cancelled"}}
-
-    # The first request (permission) is slow and holds the sole semaphore
-    # slot; the second (fs/read_text_file -- distinguishable via a -32000
-    # 'busy' *error* rather than a permission's ordinary cancelled result)
-    # arrives while it is still in flight and must be refused immediately.
+    entered = threading.Event()
+    refused = threading.Event()
     scenario = default_scenario(
         prompt_behavior="client_requests_fire",
         client_requests=[
-            dict(method="session/request_permission",
-                 params=dict(sessionId="sess-1", toolCall=dict(toolCallId="tc-1"), options=[])),
+            dict(method="session/request_permission", params=dict(sessionId="sess-1", toolCall=dict(toolCallId="tc-1"), options=[])),
             dict(method="fs/read_text_file", params=dict(sessionId="sess-1", path=str(tmp_path / "x.txt"))),
         ],
-        client_reply_log_path=str(reply_log),
-        client_requests_fire_wait=3.0,
+        client_reply_log_path=str(reply_log), client_requests_fire_wait=3.0,
     )
-    manager = _make_manager(tmp_path, scenario, host_permission_requester=slow_requester)
+    manager = _make_manager(tmp_path, scenario)
     manager._client_request_semaphore = threading.Semaphore(1)
+    dispatch = manager._dispatch_client_request
+    reply_busy = manager._reply_busy
+    # Capacity is independent of permission policy. Native permission requests
+    # now fail immediately; hold the handler explicitly to exercise saturation.
+    def held_dispatch(method, params, request_id):
+        entered.set()
+        assert release_event.wait(5)
+        return dispatch(method, params, request_id)
+    def observed_busy(method, request_id):
+        reply_busy(method, request_id)
+        refused.set()
+    monkeypatch.setattr(manager, '_dispatch_client_request', held_dispatch)
+    monkeypatch.setattr(manager, '_reply_busy', observed_busy)
     try:
         manager.negotiate(REQUESTED_CAPABILITIES)
         session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
         manager.bind_resource(_binding_for(manager, session_id, tmp_path))
         events_thread = threading.Thread(target=lambda: list(manager.prompt_turn(session_id, "hi")))
         events_thread.start()
-        time.sleep(0.3)
+        assert entered.wait(3)
+        assert refused.wait(3)
         release_event.set()
-        events_thread.join(timeout=5.0)
+        events_thread.join(timeout=5)
+        assert not events_thread.is_alive()
         replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
         assert len(replies) == 2
-        busy = [reply for reply in replies if "error" in reply and reply["error"].get("code") == -32000]
-        assert len(busy) == 1  # the second request was refused immediately, never queued
+        assert len([r for r in replies if r.get('error', {}).get('code') == -32000]) == 1
     finally:
+        release_event.set()
         manager.shutdown(grace=2.0)
 
 

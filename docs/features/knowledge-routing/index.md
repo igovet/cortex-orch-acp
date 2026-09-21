@@ -13,16 +13,16 @@ neither means “summarize this chat.” Workers publish the project map under
 as the entry points. Later tasks can select relevant linked pages, confirm
 material claims against current source and request a refresh explicitly when
 the broader inventory needs rebuilding. Completion still requires real worker
-reports, checks and the coordinator's task decision.
+reports, independent review, runtime verification and the completion invariants.
 
 For a refresh that changes documented behavior, defaults or output, the writer
 searches existing documentation and examples for the old semantics after
 writing, inventories affected executable examples, compares safe executions'
 exact exit status and stdout with the documentation, and records any that cannot
 be verified. A separate worker inspects current source and post-write pages
-before the coordinator recommends acceptance. Purely factual,
-low-risk updates can use one writer. This is model-owned evidence review, not
-a runtime semantic validation guarantee.
+as the mandatory independent reviewer. Even a one-writer documentation task
+receives review and runtime verification; passing checks do not prove every
+semantic claim in a document.
 
 Every later coordinator task receives a compact project-document catalog in
 its task context: canonical project root, available index paths, source revision
@@ -51,9 +51,8 @@ private store inspection or silently broaden the task. Reports cite their
 source revisions and unresolved gaps.
 
 Documentation impact is reviewed after verified changes. The coordinator may
-assign a documentation owner when the change affects public or durable project
-knowledge, then evaluates that worker's report and evidence. This is a model
-decision, not a runtime stage or acceptance gate.
+propose a documentation assignment when the change affects public or durable project
+knowledge, then evaluates that worker's report and evidence. The runtime schedules the accepted plan and enforces review and verification.
 
 The knowledge skill and current ACP documentation are the authoritative
 instructions. Historical plugin-era census and host-qualification procedures

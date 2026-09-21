@@ -1,0 +1,69 @@
+"""Installed production wrapper with a loopback fake provider; never a paid call.
+
+This validates actual native tool dispatch, not model reasoning or ACP client UI.
+Opt in with CORTEX_PINNED_CODEX_BINARY; no credentials or production HOME are used.
+"""
+import pytest
+import http.server,json,os,subprocess,tempfile,threading,pathlib,sys,time,select
+from cortex_runtime.engine.process import _prepare_codex_runtime_wrapper
+from cortex_runtime.engine.external_proxy import Frames
+class Handler(http.server.BaseHTTPRequestHandler):
+ calls=0
+ inventories=[]
+ inputs=[]
+ def log_message(self,*args): pass
+ def do_POST(self):
+  data=json.loads(self.rfile.read(int(self.headers.get('Content-Length','0'))));Handler.inventories.append(data.get('tools',[]));Handler.inputs.append(data.get('input'))
+  Handler.calls+=1
+  if Handler.calls==1: items=[{'type':'tool_search_call','call_id':'search-one','arguments':{'query':'gateway_read'},'execution':'client'}]
+  elif Handler.calls==2: items=[{'type':'function_call','name':'gateway_read','namespace':'mcp__cortex','arguments':'{}','call_id':'allowed-one'},{'type':'custom_tool_call','name':'apply_patch','input':'*** Begin Patch\n*** Add File: forbidden.txt\n+bad\n*** End Patch','call_id':'forbidden-one'}]
+  else: items=[]
+  body=''.join('event: response.output_item.done\ndata: '+json.dumps({'type':'response.output_item.done','output_index':i,'item':item})+'\n\n' for i,item in enumerate(items))
+  body+='event: response.completed\ndata: '+json.dumps({'type':'response.completed','response':{'id':'offline-'+str(Handler.calls),'object':'response','status':'completed','output':items,'usage':{'input_tokens':0,'output_tokens':0,'total_tokens':0}}})+'\n\n'
+  self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers();self.wfile.write(body.encode())
+
+def test_installed_wrapper_rejects_native_patch_and_dispatches_mcp(tmp_path):
+    binary=os.environ.get('CORTEX_PINNED_CODEX_BINARY')
+    if not binary: pytest.skip('set CORTEX_PINNED_CODEX_BINARY for installed no-paid tool dispatch check')
+    Handler.calls=0;Handler.inventories=[];Handler.inputs=[]
+    server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler);threading.Thread(target=server.serve_forever,daemon=True).start()
+    with tempfile.TemporaryDirectory(prefix='cortex-wrapper-proof-') as d:
+     root=pathlib.Path(d);home=root/'home';home.mkdir();project=root/'project';project.mkdir()
+     mcp=root/'gateway.py'
+     mcp.write_text("import json,sys\nfor line in sys.stdin:\n q=json.loads(line);m=q.get('method');i=q.get('id')\n if i is None: continue\n r={'protocolVersion':'2024-11-05','capabilities':{'tools':{}},'serverInfo':{'name':'fixture','version':'1'}} if m=='initialize' else {'tools':[{'name':'gateway_read','description':'Gateway fixture','inputSchema':{'type':'object','properties':{},'additionalProperties':False}}]} if m=='tools/list' else {'content':[{'type':'text','text':'gateway observation'}]}\n print(json.dumps({'jsonrpc':'2.0','id':i,'result':r}),flush=True)\n")
+     environ=dict(HOME=str(home),CODEX_HOME=str(home),XDG_CONFIG_HOME=str(root/'config'),XDG_STATE_HOME=str(root/'state'),PATH='/usr/bin:/bin',PYTHONDONTWRITEBYTECODE='1')
+     (home/'config.toml').write_text(f'model_provider="offline"\n[model_providers.offline]\nname="offline"\nbase_url="http://127.0.0.1:{server.server_port}/v1"\nwire_api="responses"\nrequires_openai_auth=false\n')
+     wrapper=_prepare_codex_runtime_wrapper(binary,'cn_0123456789ab',environ)
+     proc=subprocess.Popen([wrapper,'app-server'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env=environ,bufsize=0)
+     frames=Frames(proc.stdout)
+     def send(i,m,p):
+      proc.stdin.write((json.dumps(dict(jsonrpc='2.0',id=i,method=m,params=p))+'\n').encode());proc.stdin.flush()
+     def response(i):
+      while True:
+       m=json.loads(frames.read(time.monotonic()+20))
+       if m.get('id')==i:return m
+     try:
+      send(1,'initialize',dict(clientInfo=dict(name='cortex-offline',version='1'),capabilities=dict(experimentalApi=True)));assert 'result' in response(1)
+      send(2,'thread/start',dict(model='gpt-5.6-luna',modelProvider='offline',cwd=str(project),sandbox='read-only',approvalPolicy='never',ephemeral=True,config={'mcp_servers.cortex':dict(enabled=True,default_tools_approval_mode='approve',command='/usr/bin/python3',args=['-B',str(mcp)])}))
+      r=response(2);assert 'result' in r,r;tid=r['result']['thread']['id']
+      send(3,'turn/start',dict(threadId=tid,input=[dict(type='text',text='Offline fixture.')]))
+      while True:
+       m=json.loads(frames.read(time.monotonic()+30))
+       assert not ('id' in m and 'method' in m), m.get('method')
+       if m.get('method')=='turn/completed':
+        assert m['params']['turn']['status']=='completed'
+        break
+      assert Handler.calls==3
+      assert not (project/'forbidden.txt').exists()
+      outputs={item['call_id']:item['output'] for turn in Handler.inputs for item in turn if 'call_id' in item and 'output' in item}
+      assert 'gateway observation' in json.dumps(outputs['allowed-one'])
+      assert 'unsupported custom tool call: apply_patch' in outputs['forbidden-one']
+      def names(value):
+       if isinstance(value,dict):
+        yield value.get('name')
+        for child in value.values(): yield from names(child)
+       elif isinstance(value,list):
+        for child in value: yield from names(child)
+      assert not {'apply_patch','exec_command','shell','spawn_agent','browser','image_gen','web_search'} & set(names(Handler.inventories))
+     finally:
+      proc.terminate();proc.wait(5);server.shutdown()

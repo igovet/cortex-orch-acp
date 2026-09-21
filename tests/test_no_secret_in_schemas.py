@@ -20,6 +20,8 @@ def test_generated_secret_never_appears_in_responses_observation_or_db_bytes(tmp
     monkeypatch.setenv('CORTEX_OBSERVATION_DIR', str(observation_dir))
     store = Store(tmp_path/'.cortex', project_root=tmp_path)
     result = bootstrap_task(store, SourceEvent(origin='cli', event_id=str(uuid.uuid4())), 'Build a page.', 'owner-1')
+    from cortex_runtime.orchestration.state import TaskMachine
+    TaskMachine(store).create(result.task_id,"Build a page.")
     secret = result.secret
     assert secret
 

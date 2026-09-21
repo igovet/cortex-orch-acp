@@ -59,7 +59,7 @@ def test_broker_observes_actual_relay_tools_list_and_child_exit(tmp_path, monkey
         "import json, sys\n"
         "for line in sys.stdin:\n"
         " request = json.loads(line)\n"
-        " result = {'tools': [{'name': 'create_draft', 'description': 'secret description', 'inputSchema': {'type': 'object', 'x-secret': 'never-log'}}, {'name': 'write_report', 'inputSchema': {'type': 'object'}}, {'name': 'publish_result', 'inputSchema': {'type': 'object'}}]} if request['method'] == 'tools/list' else {}\n"
+        " result = {'tools': [{'name': 'create_draft', 'description': 'secret description', 'inputSchema': {'type': 'object', 'x-secret': 'never-log'}}, {'name': 'write_report', 'inputSchema': {'type': 'object'}}, {'name': 'result_submit', 'inputSchema': {'type': 'object'}}]} if request['method'] == 'tools/list' else {}\n"
         " print(json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}), flush=True)\n",
         encoding="utf-8",
     )
@@ -81,10 +81,10 @@ def test_broker_observes_actual_relay_tools_list_and_child_exit(tmp_path, monkey
         assert broker.readiness(1) == "ready"
         receipt = broker.tools_receipt
         assert receipt["state"] == "complete"
-        assert receipt["tool_names"] == ["create_draft", "publish_result", "write_report"]
+        assert receipt["tool_names"] == ["create_draft", "result_submit", "write_report"]
         assert receipt["tool_count"] == 3
         assert receipt["missing_required_tools"] == []
-        assert receipt["worker_publish_result_present"] is True
+        assert receipt["worker_result_submit_present"] is True
         assert all("secret description" not in repr(item) and "never-log" not in repr(item)
                    for item in events)
         assert any(event == "mcp_tools_ready" and fields["tool_count"] == 3
@@ -124,7 +124,7 @@ def test_broker_fails_closed_on_observed_incomplete_tools_list(tmp_path):
         receipt = broker.tools_receipt
         assert receipt["state"] == "incomplete"
         assert receipt["missing_required_tools"] == ["create_draft"]
-        assert receipt["worker_publish_result_present"] is False
+        assert receipt["worker_result_submit_present"] is False
         assert any(event == "mcp_tools_incomplete" for event, _ in events)
     finally:
         broker.close()

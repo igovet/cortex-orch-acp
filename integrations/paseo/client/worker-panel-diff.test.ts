@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { diffBlocks, diffLines } from "./worker-panel-diff.ts";
+import { diffBlocks, diffLines, rawText } from "./worker-panel-diff.ts";
 
 const kinds = (oldText: string | null, newText: string | null) => diffLines(oldText, newText).map((row) => `${row.kind}:${row.text}`);
 
@@ -16,5 +16,9 @@ const blocks = diffBlocks([
 ]);
 assert.equal(blocks.length, 2);
 assert.equal(blocks[0].path, blocks[1].path);
+const wrapped = diffBlocks({ content: [{ type: "diff", path: "wrapped.txt", oldText: "before", newText: "after" }] });
+assert.deepEqual(wrapped, [{ path: "wrapped.txt", oldText: "before", newText: "after" }]);
+assert.equal(rawText({}), null);
+assert.equal(rawText([]), null);
 
 console.log("worker-panel diff tests passed");

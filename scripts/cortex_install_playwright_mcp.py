@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Install and register the pinned official Playwright MCP for Cortex workers.
 
-The browser binary is deliberately outside this installer: an MCP handshake
-verifies server discovery, while browser navigation needs its own live check.
+An existing browser is required; this installer does not download one. An MCP
+handshake verifies discovery, while navigation needs its own live check.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ import fcntl
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from cortex_runtime.configuration.mcp_servers import load_mcp_servers  # noqa: E402
+from cortex_runtime.configuration.mcp_servers import load_mcp_servers, _normalize_entries  # noqa: E402
 from cortex_runtime.connections import registry  # noqa: E402
 
 PACKAGE = "@playwright/mcp"
@@ -96,7 +96,25 @@ def _send(process: subprocess.Popen, body: dict) -> None:
     process.stdin.flush()
 
 
-def probe(command: str, cli: Path) -> int:
+def browser_grants(prefix: Path, home: Path) -> tuple[list[str], list[str]]:
+    """Expose only the selected browser distribution, never cached user profiles."""
+    browser=Path('/opt/google/chrome/chrome')
+    if not browser.is_file():
+        manifest=prefix/'node_modules/playwright-core/browsers.json'
+        specs=json.loads(manifest.read_text())['browsers']
+        revision=next(item['revision'] for item in specs if item['name']=='chromium')
+        directory=home/'.cache/ms-playwright'/f'chromium-{revision}'
+        browser=next((directory/relative for relative in ('chrome-linux64/chrome','chrome-linux/chrome')
+                      if (directory/relative).is_file()),directory/'chrome-linux64/chrome')
+    if not browser.is_file():
+        raise RuntimeError('Install the pinned Playwright Chromium browser or Google Chrome before registering the MCP server')
+    browser=browser.resolve(strict=True)
+    paths=[str(browser.parent)]
+    if Path('/etc/fonts').is_dir(): paths.append('/etc/fonts')
+    return ['--browser','chromium','--executable-path',str(browser)],paths
+
+
+def probe(command: str, cli: Path) -> list[str]:
     with subprocess.Popen(
         [command, str(cli), "--headless", "--isolated"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -115,7 +133,7 @@ def probe(command: str, cli: Path) -> int:
             tools = listed.get("result", {}).get("tools")
             if not isinstance(tools, list) or not tools or any(not isinstance(t, dict) or not isinstance(t.get("name"), str) for t in tools):
                 raise RuntimeError("MCP tools/list returned no valid tools")
-            return len(tools)
+            return sorted({tool['name'] for tool in tools})
         finally:
             process.terminate()
             try:
@@ -136,7 +154,10 @@ def main() -> int:
     if not node:
         raise RuntimeError("node was not found")
     node = str(Path(node).resolve())
-    count = probe(node, cli)
+    allowed_tools = probe(node, cli)
+    # Arbitrary server-process JavaScript is not a browser interaction grant.
+    allowed_tools = [name for name in allowed_tools if name != 'browser_run_code_unsafe']
+    browser_args, browser_paths = browser_grants(prefix, home)
 
     config_dir = registry.config_root()
     _private_dir(config_dir)
@@ -145,22 +166,32 @@ def main() -> int:
     with open(lock_path, "a+b") as lock:
         os.fchmod(lock.fileno(), 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
-        # Use the product loader to validate all existing entries before editing.
-        load_mcp_servers(str(ROOT), environ=os.environ)
         raw = registry.read_owner_file(path)
         document = json.loads(raw) if raw is not None else {"version": 1, "servers": {}}
         servers = document.get("servers")
         if document.get("version") != 1 or not isinstance(servers, dict):
             raise RuntimeError("MCP registry has an unsupported shape")
-        desired = {"command": node, "args": [str(cli), "--headless", "--isolated"], "roles": ["worker"], "engines": ["claude-agent-acp"], "enabled": True}
+        desired = {"command": node, "args": [str(cli), "--headless", "--isolated", *browser_args], "roles": ["worker"], "enabled": True,
+                   "allowed_tools": allowed_tools, "network": True,
+                   "read_paths": [str(prefix),str(Path(node).parent.parent),*browser_paths]}
+        # Reinstallation must not broaden an owner's existing engine scope.
+        existing=servers.get(NAME,{})
+        for field in ('roles','engines'):
+            if field in existing: desired[field]=existing[field]
+        if isinstance(existing.get('env'),dict):
+            desired['env']={**existing['env'],**desired.get('env',{})}
         if servers.get(NAME) != desired:
             servers[NAME] = desired
+            # Validate the proposed document before writing, allowing repair
+            # of this entry's old missing grants without accepting other
+            # invalid entries or leaving a partially modified registry.
+            _normalize_entries(document,path)
             registry.atomic_write_private(path, (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode(), directory=config_dir)
         effective = load_mcp_servers(str(ROOT), environ=os.environ)
         actual = next((entry for entry in effective if entry["name"] == NAME), None)
-        if actual is None or actual.get("roles") != ["worker"] or actual.get("engines") != ["claude-agent-acp"] or actual.get("args") != desired["args"]:
-            raise RuntimeError("effective registry did not contain the Claude-worker Playwright entry")
-    print(f"Registered {PACKAGE}@{VERSION} for Claude workers; MCP tools/list: {count} tools.")
+        if actual is None or actual.get("roles") != desired['roles'] or actual.get("allowed_tools") != allowed_tools or actual.get("args") != desired["args"]:
+            raise RuntimeError("effective registry did not contain the worker Playwright entry")
+    print(f"Registered {PACKAGE}@{VERSION} for worker gateways; MCP tools/list: {len(allowed_tools)} tools.")
     return 0
 
 

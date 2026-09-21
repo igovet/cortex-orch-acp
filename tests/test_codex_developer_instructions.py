@@ -213,7 +213,7 @@ def test_installed_adapter_keeps_explicit_mcp_on_disabled_native_name(tmp_path):
         config = sent[0]["params"]["config"]
         assert config["features"]["plugins"] is False
         assert config["mcp_servers"]["native"] == {
-            "command": "/bin/true", "args": [], "env": {}, "enabled": True,
+            "command": "/bin/true", "args": [], "env": {}, "enabled": True, "default_tools_approval_mode": "approve",
         }
     finally:
         proc.terminate()
@@ -244,9 +244,7 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
     assert _CODEX_SESSION_CONFIG_PATCHED in copied.read_bytes()
     adapter_text = copied.read_bytes()
     assert _CODEX_SEND_PROMPT_PATCHED in adapter_text
-    assert b'excludeTmpdirEnvVar: true' in adapter_text
-    assert b'excludeSlashTmp: true' in adapter_text
-    assert b'writableRoots: []' in adapter_text
+    assert b'type: "readOnly"' in adapter_text
     assert b'networkAccess: false' in adapter_text
     assert original.read_bytes() == source
 
@@ -304,11 +302,8 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
             assert "features.multi_agent" not in config
             assert "features.multi_agent_v2" not in config
             assert config["agents"] == {"enabled": False, "max_depth": 2}
-            assert config["features"] == {
-                "multi_agent": False, "multi_agent_v2": False,
-                "js_repl": True, "cwd_relative_turn_diffs": False,
-                "plugins": False,
-            }
+            for feature in ('multi_agent','multi_agent_v2','js_repl','shell_tool','hooks','apps','plugins','view_image','image_generation','browser_use','computer_use'):
+                assert config['features'][feature] is False
             assert config["model_reasoning_effort"] == "medium"
 
         proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 4, "method": "session/prompt", "params": {
@@ -321,12 +316,9 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
         turn_starts = [entry for entry in traces_after_prompt if entry["method"] == "turn/start"]
         assert len(turn_starts) == 1
         assert turn_starts[0]["params"]["sandboxPolicy"] == {
-            "type": "workspaceWrite",
-            "writableRoots": [],
-            "networkAccess": False,
-            "excludeTmpdirEnvVar": True,
-            "excludeSlashTmp": True,
+            "type": "readOnly", "networkAccess": False,
         }
+
     finally:
         proc.terminate()
         try:

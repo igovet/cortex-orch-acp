@@ -1,7 +1,7 @@
 {
   "name": "cortex",
-  "version": "1.0.0+sha256.6c050aa4497ca65c",
-  "description": "Durable tasks, advisory governance and immutable Markdown reports for model-owned coordination.",
+  "version": "1.0.0+sha256.4801616f930d43c9",
+  "description": "Durable runtime-owned ACP orchestration with immutable reports and complete observed tool transcripts.",
   "author": {
     "name": "igovet"
   }

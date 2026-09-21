@@ -26,6 +26,8 @@ from cortex_runtime.trusted_channel import issue_channel
 def bootstrap(tmp_path, owner="owner-1", text="Build a page."):
     store = Store(tmp_path / ".cortex", project_root=tmp_path)
     result = bootstrap_task(store, SourceEvent(origin="cli", event_id=str(uuid.uuid4())), text, owner)
+    from cortex_runtime.orchestration.state import TaskMachine
+    TaskMachine(store).create(result.task_id,text)
     return store, result
 
 
@@ -72,19 +74,14 @@ def test_stale_coordinator_channel_cannot_delegate_after_ownership_transfer(tmp_
         assert current_owner_epoch(db, result.task_id) == 2
 
     server = server_for(tmp_path, stale_channel_id, stale_secret)
-    reply = call(server, "delegate", dict(
-        request_key="atk1", title="t", brief="b", role="worker", acceptance=json.dumps(["a"])))
-    body = error(reply, "stale_ownership_epoch")
-    assert body["write_state"] == "rejected"
-
-    # Every mutating delegation operation is fenced the same way.
-    for name, args in (
-        ("clarify", dict(request_key="k", assignment_ref="task", message="m")),
-        ("cancel", dict(request_key="k", assignment_ref="task", reason="r")),
-        ("decide", dict(request_key="k", assignment_ref="task", decision="revise", rationale="r")),
-        ("integrate", dict(request_key="k", assignment_ref="task")),
+    for name,args in (
+        ('plan_submit',dict(plan={'tasks':[],'verification':[]},request_key='stale')),
+        ('synthesis_submit',dict(text='forged completion')),
+        ('user_question_request',dict(question='q',request_key='stale')),
+        ('replan_request',dict(reason='r',request_key='stale')),
     ):
-        error(call(server, name, args), "stale_ownership_epoch")
+        body=error(call(server,name,args),'stale_ownership_epoch')
+        assert body['write_state']=='rejected'
 
     # No delegation_requested (or other) event was ever recorded for the
     # stale attempt.
@@ -104,7 +101,7 @@ def test_stale_epoch_read_operations_still_see_only_their_own_data(tmp_path):
     acquire_task_owner(store, result.task_id, "owner-2", 1)
     server = server_for(tmp_path, result.channel_id, result.secret)
     ok(call(server, "read_capsule", {}))
-    ok(call(server, "list_events", {}))
+    ok(call(server, "list_sources", {}))
 
 
 def test_worker_channel_migrated_forward_by_recovery_still_delegates(tmp_path):
@@ -122,6 +119,8 @@ def test_worker_channel_migrated_forward_by_recovery_still_delegates(tmp_path):
     worker_channel_id, worker_secret = issue_channel(
         store, result.task_id, "worker", epoch, parent_channel_id=result.channel_id)
 
+    from runtime_scenarios import bind_fixture_worker
+    bind_fixture_worker(store,worker_channel_id)
     acquire_task_owner(store, result.task_id, "owner-2", epoch)
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -151,14 +150,13 @@ def test_worker_channel_cannot_set_task_governance(tmp_path):
         store, result.task_id, "worker", epoch, parent_channel_id=result.channel_id)
     server = server_for(tmp_path, worker_channel_id, worker_secret)
     error(call(server, "set_governance", dict(mode="full", rationale="pwned", request_key="wg1")),
-          "coordinator_governance_only")
+          "runtime_owned_operation")
     with store.connection() as db:
         assert db.execute("SELECT COUNT(*) FROM governance WHERE task_id=?", (result.task_id,)).fetchone()[0] == 0
 
     # The legitimate coordinator path is unaffected.
     coordinator = server_for(tmp_path, result.channel_id, result.secret)
-    published = ok(call(coordinator, "set_governance", dict(mode="full", rationale="ok", request_key="cg1")))
-    assert published["governance"]["mode"] == "full"
+    error(call(coordinator, "set_governance", dict(mode="full", rationale="ok", request_key="cg1")),"runtime_owned_operation")
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +170,9 @@ def test_worker_cannot_claim_another_workers_or_tasks_report_as_its_own_result(t
     worker1_id, worker1_secret = issue_channel(store_a, result_a.task_id, "worker", epoch, parent_channel_id=result_a.channel_id)
     worker2_id, worker2_secret = issue_channel(store_a, result_a.task_id, "worker", epoch, parent_channel_id=result_a.channel_id)
 
+    from runtime_scenarios import bind_fixture_worker
+    bind_fixture_worker(store_a,worker1_id)
+    bind_fixture_worker(store_a,worker2_id)
     worker1 = server_for(tmp_path, worker1_id, worker1_secret)
     draft = ok(call(worker1, "create_draft", dict(template="general", request_key="d1")))
     from pathlib import Path
@@ -183,7 +184,7 @@ def test_worker_cannot_claim_another_workers_or_tasks_report_as_its_own_result(t
     report_id = published["report_id"]
 
     worker2 = server_for(tmp_path, worker2_id, worker2_secret)
-    error(call(worker2, "publish_result", dict(
+    error(call(worker2, "result_submit", dict(
         request_key="claim1", report_ref=report_id, summary="stolen", checks=[])), "report_not_own")
 
 

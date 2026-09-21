@@ -791,6 +791,28 @@ def shared_publication_attribution(store, task_id: str, attempt_id: str,
                 return False, f"shared_root_concurrent_baseline_unavailable:{other}"
             result = row["payload_json"]
             if result is None:
+                # A cancelled, unpublished attempt need not be a replacement
+                # to have left this tree unchanged. Require its complete
+                # retained baseline to match the current tree; cancellation
+                # by itself never authorizes an unknown edit.
+                cancelled = db.execute(
+                    "SELECT 1 FROM task_events e WHERE e.task_id=? "
+                    "AND e.event_type='assignment_cancelled' AND e.superseded=0 "
+                    "AND (e.assignment_ref=? OR e.assignment_ref IN "
+                    "(SELECT p.idempotency_key FROM delegation_provisioning p "
+                    "WHERE p.task_id=? AND p.attempt_id=?)) LIMIT 1",
+                    (task_id, other, task_id, other),
+                ).fetchone()
+                if cancelled is not None:
+                    try:
+                        cancelled_base = dict(
+                            kind=base_row["kind"], dirty_digest=base_row["dirty_digest"],
+                            manifest=json.loads(base_row["manifest_json"]) if base_row["manifest_json"] else None,
+                        )
+                    except (TypeError, ValueError):
+                        return False, f"shared_root_concurrent_evidence_malformed:{other}"
+                    if _manifest_delta(cancelled_base, current) == set():
+                        continue
                 if superseded_cancellation(other, allow_unpublished_followup=True):
                     try:
                         historical_base = dict(

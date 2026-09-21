@@ -1,15 +1,23 @@
 # Feature index
 
-| Feature | Runtime owner | Entry point | Verification |
-| --- | --- | --- | --- |
-| Markdown reports and task state | ACP runtime | MCP report and pipeline operations | `tests/test_source_reports.py`, `tests/test_pipeline_bootstrap.py` |
-| Knowledge routing | Coordinator and bundled skills | Explicit orchestration or harvest route | profile/package checks |
-| Advisory lane | Coordinator | Optional configured advisory provider | advisory unit tests |
-| Senior consultant | Coordinator and consultant profile | Risk-triggered optional assignment | consultant contract tests |
+| Feature | Owner | Mechanism |
+| --- | --- | --- |
+| Task lifecycle and scheduling | Runtime | Transactional state machine, DAG, four-worker limit |
+| Project actions | Runtime gateway | Channel authority, scoped files, contained commands and external MCP |
+| Reports and pipeline | Runtime store | Immutable reports, runtime-owned newest-first pipeline |
+| Review and verification | Runtime | Fresh reviewer, bounded fix loop, exact command evidence |
+| Knowledge routing | Models within assigned scope | Selective documents and bounded report cursors |
+| Senior consultant | Runtime | Read-only escalation assignment with configured route |
+| Informational questions | Runtime | Read-only answer before any plan/worker; exact answer receipt |
+| Chat and tool history | ACP runtime and client | Readable tool rows; thinking and bookkeeping hidden in Paseo, evidence retained |
 
-The current runtime has no plugin manifest, native Codex harness, gateway,
-lifecycle hook dispatcher or host-side profile registration. Those historical
-surfaces are excluded from this index.
+All 23 worker profiles remain available. Models have no delegation, route-selection
+or acceptance API. The optional model-owned Rubber Duck lane has been removed.
+[Implementation status](../acp/runtime-rewrite-status.md) records automated evidence;
+[real-client observations](../acp/real-client-runbook.md) remain explicitly NOT RUN
+for this rewrite until retained in an isolated client session.
 
-Real ACP client behavior is tracked in [`docs/acp/real-client-runbook.md`](../acp/real-client-runbook.md).
-Rows remain `NOT RUN` until a real isolated client observation is retained.
+Paseo uses the same tool presentation in coordinator chat and worker panels:
+Read/Read skill retain only target/status in display history, never expand, and
+never persist the returned body in new display events. Raw protocol data is hidden
+everywhere; opaque-only calls are static rows. Command output and diffs still expand.

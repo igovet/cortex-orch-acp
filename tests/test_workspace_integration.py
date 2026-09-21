@@ -8,7 +8,6 @@ import pytest
 
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.contracts import StoreError
-from cortex_runtime.delegation import completion as delegation_completion
 from cortex_runtime.delegation import events as delegation_events
 from cortex_runtime.delegation import integration
 from cortex_runtime.delegation import candidates
@@ -380,64 +379,6 @@ def _record_worker_result(store, task_id, assignment_ref, attempt_id, report_ref
     return delegation_events.list_since(store, task_id)[-1]
 
 
-def test_revision_a_does_not_certify_revision_b_after_conflicting_integration(tmp_path):
-    """Acceptance bullet 5: a report bound to the pre-integration revision
-    (the worker's own isolated workspace at worker_result time, "revision
-    A") must not certify a later, different project-root revision
-    ("revision B") -- a fresh check is required (``stale_verification``).
-
-    Before integration ever runs, the isolated worker's own tree (A) and
-    the not-yet-integrated main project root necessarily differ (the
-    worker's own edit exists only in its private copy) -- the gate
-    correctly refuses this exact situation too: an isolated worker's
-    report can never certify the unmodified main tree it has not actually
-    reached yet. Once a *clean* integration reproduces that same worker
-    tree onto an unchanged main root, the gate accepts (A actually equals
-    the newly-integrated B); a further, later drift of the main root
-    (simulating a second, independent change after integration) makes the
-    gate refuse again -- never silently certifying that newer state
-    either."""
-    project = _project(tmp_path)
-    (project / "shared.txt").write_text("line1\nline2\nline3\n")
-    store = Store(project / ".cortex", project_root=str(project))
-    task_id = _task(store)
-    assignment_ref = _bind_attempt(store, task_id, "xa_gate")
-    provisioner, binding_id = _create_snapshot(store, project, task_id, "xa_gate")
-    root = provisioner.root_for(binding_id)
-    with open(os.path.join(root, "shared.txt"), "w") as f:
-        f.write("line1-WORKER\nline2\nline3\n")
-
-    event = _record_worker_result(store, task_id, assignment_ref, "xa_gate", "r_" + "a" * 12)
-    # Revision A: captured against the worker's own isolated workspace,
-    # exactly as acp.orchestrating_runtime._capture_result_revisions now
-    # does for an isolated attempt (see workspace_isolation.resolve_attempt_root);
-    # the attempt_revisions row is keyed by the attempt id itself, matching
-    # the worker_result event's own assignment_ref.
-    delegation_revision.record_attempt_revision(store, "xa_gate", f"worker_result:{event.id}", root)
-
-    # Not yet integrated: the main project root does not contain the
-    # worker's own edit at all -- correctly refused, never silently
-    # accepted just because "nothing conflicting happened yet".
-    ok, reasons = delegation_completion.gate(store, task_id)
-    assert not ok
-    assert any(reason == f"stale_verification:{assignment_ref}" for reason in reasons)
-
-    # A clean integration (main unchanged since base) reproduces the exact
-    # same tree the worker's own check ran against.
-    result = integration.integrate(
-        store, task_id=task_id, project_root=str(project), assignment_ref=assignment_ref,
-        request_key="rk-gate", attempt_id="xa_gate", workspace_binding_id=binding_id,
-    )
-    assert result["status"] == "applied"
-    ok, reasons = delegation_completion.gate(store, task_id)
-    assert ok, reasons
-
-    # A later, independent change to the main root (revision B) must not
-    # be silently certified by the same, now-stale revision-A report.
-    (project / "shared.txt").write_text("line1-WORKER\nline2\nline3-CHANGED-LATER\n")
-    ok, reasons = delegation_completion.gate(store, task_id)
-    assert not ok
-    assert any(reason == f"stale_verification:{assignment_ref}" for reason in reasons)
 
 
 def test_what_the_project_does_not_track_is_not_part_of_a_delivery(tmp_path):

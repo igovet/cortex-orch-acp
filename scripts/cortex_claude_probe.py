@@ -1,54 +1,11 @@
 #!/usr/bin/env python3
-"""Opt-in, explicitly-authorized live claude-agent-acp coordinator probe (T026).
+"""Explicitly authorized single-turn Claude ACP transport probe.
 
-Mirrors ``scripts/cortex_codex_probe.py`` (T013) for the second, non-Codex
-engine. The real coordinator role's own instruction delivery is QUALIFIED
-at the pinned claude-agent-acp 0.78.0 (channel ``session/new
-_meta.systemPrompt`` -- see
-``engine.instruction_delivery_registry.ClaudeAgentAcp0_78Delivery``'s own
-docstring for the full dist evidence chain, and
-``docs/acp/claude-agent-acp-adapter.md``'s "Instruction delivery: QUALIFIED
-via ``session/new _meta.systemPrompt``" section), so
-``acp.orchestrating_runtime.OrchestratingRuntime._ensure_coordinator`` no
-longer refuses a critical-rules coordinator role for this pinned version --
-that is not this script's remaining blocker. The remaining blocker is
-purely the mandatory T035/T036 live-execution gate: nothing here has ever
-run a real turn confirming the spawned CLI actually *honors* the delivered
-``systemPrompt`` (as opposed to merely receiving it on the wire, which the
-automated test suite does confirm -- see
-``tests/test_engine_claude_coordinator_live_session.py``), and this script
-never runs anything paid on its own: without *both*
-``--i-authorize-paid-call`` and a non-empty ``--approval-ref``, it
-validates its other arguments (if given) and exits ``2`` before importing
-``cortex_runtime`` or touching the filesystem beyond argument parsing -- no
-install verification, no workspace, no subprocess, no network. It is never
-invoked with those flags by this task; do not run it that way outside an
-explicit, separately authorized live-qualification effort (T035/T036).
-
-``--plan`` prints, in order, the steps this script would take with
-authorization, without performing any of them.
-
-Unlike ``cortex_codex_probe.py``, this script demonstrates the
-**coordinator** role specifically (delegates one managed assignment,
-consumes the worker's published result, and issues an explicit ``decide``
-acceptance) via the real ``EngineSessionManager`` + Cortex MCP subprocess
-path, per T026's own lead decision 4 -- not a single bounded prompt.
-
-Safety notes for whoever runs this with authorization:
-
-- ``--connection-id``/``--route-id`` identify an existing, already-onboarded
-  connection/route in the real user registry; this script never onboards
-  or creates one.
-- ``--install-record`` is a JSON file with exactly the
-  ``ClaudeAcpInstall`` fields (see
-  ``engine.claude_install.ClaudeAcpInstall``); it is re-verified fresh here
-  regardless of what it claims.
-- The temporary workspace this script creates is always outside any
-  existing project/repository (a fresh ``tempfile.mkdtemp()``), never this
-  checkout or the real user's ``$HOME``.
-- The recorded output never includes a secret, a full transcript, or
-  ``os.environ``; only the fields present in the QUALIFICATION_RUN.json
-  template plus the fixed prompt/output size bound below.
+Requires both --i-authorize-paid-call and --approval-ref before runtime imports,
+registry reads or subprocesses. Uses an existing registered native account and
+route in a disposable project. It observes one configured engine turn only:
+no worker cycle, runtime completion or GUI qualification is claimed.
+Use --plan for the exact no-execution preview.
 """
 from __future__ import annotations
 
@@ -56,60 +13,14 @@ import argparse
 import sys
 
 _PLAN_STEPS = (
-    "0. STATUS (read this first): engine.instruction_delivery_registry."
-    "ClaudeAgentAcp0_78Delivery is QUALIFIED for claude-agent-acp 0.78.0 "
-    "(channel session/new _meta.systemPrompt; dist evidence "
-    "acp-agent.js:5887-5901,6019,6179-6182 plus the SDK's own query() "
-    "forwarding it into the spawned CLI's control protocol), so "
-    "acp.orchestrating_runtime.OrchestratingRuntime._ensure_coordinator "
-    "no longer refuses the real critical-rules coordinator role for this "
-    "pinned version -- that is not a blocker here. The real remaining "
-    "blocker is the mandatory T035/T036 live-execution gate: no real turn "
-    "has ever run through this channel, so nothing confirms the spawned "
-    "CLI actually honors the delivered systemPrompt (only that it reaches "
-    "the wire, which the automated suite does confirm); "
-    "native_tool_containment also stays unknown regardless of this "
-    "channel's own qualification.",
-    "1. Load and validate --install-record as a ClaudeAcpInstall; call "
-    "engine.claude_install.verify_install() against it (fresh hash/version/"
-    "trust-location re-check; never trusts the file's own claims).",
-    "2. Read the named --connection-id from the real connection registry "
-    "(read-only) and confirm its engine is 'claude-agent-acp'.",
-    "3. Resolve --route-id to a stored ExecutionRoute via "
-    "_resolve_route() -- the newest cached catalog.store snapshot for "
-    "--connection-id whose entries contain a matching route.id; refuse if "
-    "no cached snapshot has a selectable matching entry.",
-    "4. Create a fresh temporary workspace directory via tempfile.mkdtemp() "
-    "(never this checkout, never the real project this script is invoked "
-    "from).",
-    "5. Build (launch_command, pinned_engine_vars) via "
-    "engine.claude_adapter_acp.build_claude_launch() (pinned_engine_vars is "
-    "always {} for this engine) and construct one "
-    "EngineSessionManager(option_mapping=claude_option_mapping) for the "
-    "coordinator role in that workspace (no install= passed to "
-    "EngineSessionManager itself: engine.process only accepts install for "
-    "engine=='codex-acp').",
-    "6. negotiate() capabilities, create_session() for the coordinator, "
-    "then configure() the session against the route's ConfigurationRevision "
-    "(claude_option_mapping rejects an unsupported model/effort/mode before "
-    "any prompt is sent).",
-    "7. Send one coordinator prompt; on its first turn, call the "
-    "delegation.mcp_tools 'delegate' operation for exactly one managed "
-    "assignment (never more, for this bounded probe).",
-    "8. Wait (bounded, via the real completion gate -- delegation.completion "
-    "-- never a fixed sleep) for the delegated worker's own "
-    "'publish_result' MCP call, then resume the coordinator's own prompt "
-    "with that result.",
-    "9. Call the delegation.mcp_tools 'decide' operation with an explicit "
-    "'accept' (or 'reject', if the worker's result was inadequate) -- never "
-    "an implicit/auto acceptance.",
-    "10. Build a QUALIFICATION_RUN.json-shaped record (status/configuration/"
-    "execution/measurements; selected/configuration_applied/"
-    "execution_verified evidence fields from "
-    "build_claude_evidence_status(); the coordinator's own delegate/decide "
-    "outcome; no secret, no full transcript) and write it to --output.",
-    "11. shutdown() every engine session/process (coordinator and worker); "
-    "report the exit code and --output path on stdout.",
+    "0. STATUS: instruction delivery for pinned 0.78.0 is QUALIFIED from installed evidence; T035/T036 real-client observations are separate and unrun for this rewrite.",
+    "1. Read --install-record and verify_install() the exact ClaudeAcpInstall bytes.",
+    "2. Read the existing claude-agent-acp connection and cached ExecutionRoute; do not create accounts or copy credentials.",
+    "3. Create a disposable temporary workspace outside the checkout.",
+    "4. Construct EngineSessionManager with claude_option_mapping, negotiate, create and configure the session.",
+    "5. Send one bounded prompt and observe TURN_END or failure. No plan_submit/result_submit/synthesis_submit cycle is exercised by this transport-only probe.",
+    "6. Write a QUALIFICATION_RUN.json-shaped record of actual configuration and stop reason; no transcript or secrets.",
+    "7. Shut down the owned engine. This is not a full orchestration or GUI qualification.",
 )
 
 
@@ -258,16 +169,7 @@ def _run_authorized(args: argparse.Namespace) -> int:  # pragma: no cover - exer
                 exit_status=stop_reason,
                 engine_configuration_evidence=[status.selected, status.configuration_applied, status.execution_verified],
             ),
-            note=(
-                "This probe stops at a single bounded prompt turn against a "
-                "directly constructed EngineSessionManager; the full "
-                "delegate/worker-report/decide coordinator cycle (steps 7-9 "
-                "of --plan) requires going through the real "
-                "OrchestratingRuntime/ProvisioningService path instead -- "
-                "not attempted here (a scope choice, not a qualification "
-                "refusal: the pinned 0.78.0 instruction-delivery channel is "
-                "QUALIFIED and admits this role with no escape hatch)."
-            ),
+            note="Single-turn transport probe only; full runtime orchestration and GUI behavior remain unverified.",
         )
     finally:
         manager.shutdown()

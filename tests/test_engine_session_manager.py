@@ -552,3 +552,12 @@ def test_unsupported_configure_never_reaches_the_wire_per_request_log(tmp_path):
         assert "session/set_config_option" not in logged_methods
     finally:
         manager.shutdown(grace=2.0)
+
+
+def test_observed_tool_title_is_not_silently_truncated(tmp_path):
+    manager = _make_manager(tmp_path, default_scenario())
+    title = 'Actual engine tool title: ' + 'detail ' * 100
+    event = manager._translate_update('wire', {'sessionUpdate': 'tool_call', 'title': title,
+                                              'rawInput': {'path': 'calc.py'}, 'kind': 'read'})
+    assert event.tool_call_title == title
+    assert event.tool_call_raw_input == {'path': 'calc.py'}

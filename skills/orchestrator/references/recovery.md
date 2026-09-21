@@ -1,10 +1,6 @@
-# Recovery after actual context loss
+# Recovery context
 
-Read `context-compaction` through `read_skill` and resume the same ACP task. Recover current
-pipeline, user sources/attachments and the evidence necessary to restore outcome,
-causal model, ownership, revision and open checks. Inspect potentially partial edits
-before mutation. Reuse the same owner/context where possible; timeout alone does not
-justify replacement or repeat review. Preserve cancellations and user language.
-Restore the current advisory governance and its rationale from public responses;
-apply it to remaining work without treating a historical delivery receipt as the
-current mode or cancelling existing owners. Preserve specialist independence.
+Recover the original goal, active plan revision, assignment results and unresolved
+questions from runtime context. Read relevant immutable reports by exact reference.
+Do not recreate workers, retry external effects or infer completion from chat.
+Report missing or inconsistent evidence; the runtime reconciles durable identities.

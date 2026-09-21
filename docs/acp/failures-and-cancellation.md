@@ -60,40 +60,17 @@ anywhere for an external mutation whose fate cannot be observed.
 
 ## 3. Cancellation (`session/cancel`)
 
-`OrchestratingRuntime.cancel(session_id)` sets this task's `cancel_event`
-(the primary path the continuation loop observes between steps) **and**
-invalidates the coordinator engine session's `BindingRegistry` entry (via
-`SessionRuntime.invalidate_session`, forwarded by
-`delegation.live_adapters.EngineSessionManagerAdapter`) so a permission
-request already blocked in a host round trip
-(`engine.permissions.PermissionBridge`) is answered `cancelled` — including
-a reply that arrives *after* this call (`ResourceBinding.is_current`
-re-checks at relay time). Scope: this task's own coordinator session only;
-an independent task's authorized work is never touched (scope isolation).
-Task-wide cancellation (`/cortex-stop`, `OrchestratingRuntime.stop_task`)
-cancels every non-terminal assignment, invalidates every open pending
-question, cancels capacity-queued opens, and marks steering superseded.
-It also terminates every worker attempt durably bound to that task: a
-terminal assignment event can precede process exit, so event state alone
-does not release engine ownership. A worker open completing concurrently
-with stop closes its exact new attempt before prompting. Other tasks'
-attempts are outside this cleanup. A late
-success arriving after cancel is durably recorded but never revives the
-turn (`acp.agent.Agent._run_prompt_body` always forces
-`StopReason.CANCELLED` once `cancel_event` is set, regardless of what the
-runtime itself returns).
+`session/cancel` interrupts the current turn, revokes current worker channels,
+terminates owned sessions and persists RECOVERING. This includes clients that
+cancel before sending a steering message. A later user prompt can resume planning
+from durable state. It does not cancel unrelated tasks.
 
-Paseo's Workers control uses an explicit `session/cancel` notification as a
-task-wide stop. The ACP agent routes that notification to the task's owning
-runtime, which performs the same owned-resource cancellation as
-`/cortex-stop` without attempting to write a response to the notification
-transport. Other ACP hosts use `session/cancel` for the current coordinator
-turn/session only; it does not cancel that task's other worker assignments.
-Each `assignment_cancelled` event also closes its linked work-graph attempt, so
-a worker cannot remain durably `running` after its engine attempt has been
-terminated. If the transport is already gone, the terminal card update is
-retained in the host transcript and `session/load` replays the durable terminal
-status for the existing card.
+`/cortex-stop` permanently marks the task CANCELLED before cleanup. It closes
+pending questions, fences late publications and cancels capacity-queued opens.
+A worker opened concurrently with cancellation is closed before its first prompt.
+Reservations release only on observed process absence. Unknown engine liveness
+remains a blocker; a terminal event alone never proves process exit. Terminal card
+updates are retained and replayed if the client disconnected before seeing them.
 
 ## 4. Disconnect
 
@@ -109,6 +86,15 @@ the bounded owned-resource reaper (`engine.reaper.sweep`). No adapter
 currently supports a confirmed pause, so cancel is the correct default per
 the task's own "confirmed pause, else cancel" rule — never hidden
 continuing paid work.
+
+After the agent joins its prompt workers at daemon teardown, it also calls
+`ProductionOrchestratingRuntime.shutdown()` (and each cached
+`OrchestratingRuntime.shutdown()`). This closes the owned engine processes
+and releases confirmed capacity for an ordinary EOF or writer-close. A hard
+host kill can still leave an ambiguous registry row; the next
+`session/prompt` uses the existing cross-process recovery path, while
+`session/load` only applies the read-only card correction described in
+`input-history-and-replay.md`.
 
 ## 5. Owned-resource reaper
 
@@ -163,3 +149,10 @@ reachable this way — the reaper's cross-process capacity/workspace sweep is
 the durable fallback for that case, not a substitute for live
 cancellation). Live disconnect/kill-signal behavior against a real engine
 is deferred to T035–T037 per the task's own live-verification boundary.
+
+Recovery dispatch excludes superseded and terminal delegation requests,
+including results bound through the exact provisioning attempt. An old
+request must never be provisioned under a replacement coordinator channel:
+that changes its idempotency identity and creates an orphan worker. Such a
+request records `recovery_worker_lost`; the coordinator can issue a fresh
+explicit delegation.

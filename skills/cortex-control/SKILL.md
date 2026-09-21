@@ -35,9 +35,6 @@ and never replace the profile's requirements,
 live writer schema, observable evidence, or honest unrun checks.
 
 All worker reports remain complete English Markdown files first allocated by the
-live draft creator, then filled at its returned project path and published through
-the live writer. Preserve server-issued registration metadata. A safe wrapper may pass the exact patch intact to
-the native patch tool. Never construct draft content through executable interpolation,
-command substitution or shell evaluation, and never put a path or body in a Cortex
-writer request. Do not delete or move the draft yourself and never read the Cortex
-database or final task files directly.
+live draft creator, filled through the owned-draft gateway and published through
+the live writer. Preserve server-issued registration metadata and complete Markdown.
+Never edit published documents or the runtime database directly.

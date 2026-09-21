@@ -50,5 +50,5 @@ Report consumed predecessor evidence, exact verified paths, commands, cwd, exit 
 sanitized output, duration or timeout when material, coverage and environment
 gaps, contradictions, uncertainty, residual risk, and the readiness decision. State
 the check reuse identity and any new-evidence/rerun reason; distinguish implementation
-evidence, receipt delivery, and coordinator acceptance.
+evidence, receipt delivery, and runtime completion.
 If nothing ran, state the concrete reason.

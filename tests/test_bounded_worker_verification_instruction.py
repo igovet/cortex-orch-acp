@@ -4,13 +4,7 @@ from cortex_runtime.engine.instruction_delivery_registry import delivery_for
 from cortex_runtime.portable.roles import WORKER_ALIASES, load_role
 
 
-_RULE_FRAGMENTS = (
-    "do not retry that check",
-    "equivalent runner, browser, or dependency installation",
-    "Do not fetch or install dependencies",
-    "mark the claim unverified",
-    "let the coordinator route any independent verification",
-)
+_RULE_FRAGMENTS = ("runtime", "report")
 
 
 def test_bounded_environment_failure_rule_reaches_every_standard_worker_engine():

@@ -91,7 +91,9 @@ def _option_mapping_for(engine: str):
     return None
 
 
-def _session_new_meta_for(engine: str, version: str, instructions: str | None):
+def _session_new_meta_for(
+    engine: str, version: str, instructions: str | None, *, role: str = "worker",
+):
     """The ``session/new`` ``_meta`` payload this engine's own qualified
     delivery mechanism builds for ``instructions``, or ``None``.
 
@@ -102,12 +104,22 @@ def _session_new_meta_for(engine: str, version: str, instructions: str | None):
     pinned adapters the role text is absent from ordinary user prompt blocks;
     recovery adds only the task capsule through the conversation channel.
     """
+    if role not in {"coordinator", "worker"}:
+        raise ValueError("role must be 'coordinator' or 'worker'")
     if not instructions:
         if engine == "claude-agent-acp" and version == "0.78.0":
             from ..engine.claude_adapter_acp import claude_native_subagent_restriction_meta
 
-            return claude_native_subagent_restriction_meta()
+            return claude_native_subagent_restriction_meta(role=role)
         return None
+    if engine == "claude-agent-acp" and version == "0.78.0":
+        # Keep the registry's qualification and instruction channel, but add
+        # the recipient-specific native built-in policy at the runtime seam.
+        # The registry is intentionally role-agnostic; this adapter is where
+        # the launch role is already known.
+        from ..engine.claude_adapter_acp import build_claude_session_new_meta
+
+        return build_claude_session_new_meta(instructions, role=role)
     from ..engine.instruction_delivery_registry import delivery_for
     from ..portable.instruction_delivery import DeliveryQualification
 
@@ -115,7 +127,10 @@ def _session_new_meta_for(engine: str, version: str, instructions: str | None):
     plan = mechanism.plan(_InstructionsOnlyRole(instructions), [])
     if plan.qualification != DeliveryQualification.QUALIFIED:
         return None
-    return plan.session_new_meta
+    meta = plan.session_new_meta
+    if engine == "codex-acp" and version == "1.12.0" and meta is not None:
+        return {**meta, "cortexRole": role}
+    return meta
 
 
 class _InstructionsOnlyRole:
@@ -478,23 +493,6 @@ class EngineSessionManagerAdapter:
             return None
         return requester(engine_session_id, params, timeout)
 
-    def _permission_receipt_sink(self, binding, action_ref, command, host_outcome):
-        """Persist only an actual, post-binding-check ACP host response.
-
-        A missing or mismatched session/attempt/task rejects the permission
-        at the bridge; the worker's report text has no way to create this
-        evidence. The row says `host_selected`, not that an unseen human
-        clicked a button in the client.
-        """
-        with self._lock:
-            attempt_id = self._session_to_attempt.get(binding.engine_session_id)
-            task_id = self._attempt_task.get(attempt_id) if attempt_id is not None else None
-        if not task_id or attempt_id != binding.attempt_id:
-            raise ValueError("permission response has no current task/attempt owner")
-        from . import evidence as delegation_evidence
-        delegation_evidence.record_permission_response(
-            self._store, task_id, attempt_id, action_ref, command, host_outcome,
-        )
 
     def _resolve_launch_install(self, record):
         """T035 follow-up ("a connection's launch command is trusted
@@ -577,7 +575,7 @@ class EngineSessionManagerAdapter:
         # fallback ``route_override`` is already present (fallback always
         # wins, unchanged).
         if self._store is not None:
-            self._resolve_requested_route(launch, project_root)
+            self._resolve_runtime_route(launch, project_root)
         # EXT-01 carried item: exactly one resolved connection id for this
         # attempt, from exactly one of two sources, both already-authorized
         # or already-role-resolved *before* open() ever runs -- never both,
@@ -685,12 +683,6 @@ class EngineSessionManagerAdapter:
             # this fix -- until :meth:`set_runtime` has actually been called).
             if "host_permission_requester" not in manager_kwargs:
                 manager_kwargs["host_permission_requester"] = self._host_permission_requester
-            if "permission_receipt_sink" not in manager_kwargs:
-                manager_kwargs["permission_receipt_sink"] = self._permission_receipt_sink
-            if "coordinator_draft_write_authorizer" not in manager_kwargs:
-                manager_kwargs["coordinator_draft_write_authorizer"] = self._coordinator_draft_write_authorizer
-            if "worker_draft_write_authorizer" not in manager_kwargs:
-                manager_kwargs["worker_draft_write_authorizer"] = self._worker_draft_write_authorizer
             if "host_mcp_servers" not in manager_kwargs:
                 # The client's own MCP servers, so a coordinator and every
                 # worker see the same tools the user configured in their
@@ -700,8 +692,9 @@ class EngineSessionManagerAdapter:
                 getter = getattr(runtime, "host_mcp_servers_for_task", None)
                 if getter is not None:
                     manager_kwargs["host_mcp_servers"] = getter(task_id)
+            recipient = "worker" if launch.get("assignment_id") else "coordinator"
             if "mcp_role" not in manager_kwargs:
-                manager_kwargs["mcp_role"] = "worker" if launch.get("assignment_id") else "coordinator"
+                manager_kwargs["mcp_role"] = recipient
             manager = EngineSessionManager(
                 record, workspace_root, environ=self._environ,
                 channel_credentials=channel_credentials,
@@ -712,7 +705,9 @@ class EngineSessionManagerAdapter:
             self._check_not_cancelled(attempt_id, task_id)
             # Both pinned adapters now receive their qualified session/new
             # metadata. Codex also receives its tagged generation prompt.
-            session_new_meta = _session_new_meta_for(record.engine, _pinned_version_for(record.engine), instructions)
+            session_new_meta = _session_new_meta_for(
+                record.engine, _pinned_version_for(record.engine), instructions, role=recipient,
+            )
             session_id = manager.create_session(
                 task_id, launch.get("assignment_id") or attempt_id, session_new_meta=session_new_meta,
             )
@@ -865,6 +860,12 @@ class EngineSessionManagerAdapter:
                 )
                 if ceilings:
                     observation = observation.with_model_thought_levels(ceilings)
+            if record.engine == 'claude-agent-acp':
+                from ..catalog.model_efforts import observe_model_efforts
+                levels = observe_model_efforts(
+                    manager._client.call, manager.correlation.wire_session_id(session_id), raw, timeout=20.0,
+                )
+                observation = observation.with_model_thought_levels(levels)
             snapshot = catalog_discovery.build_catalog({record.id: record}, {record.id: observation})
             catalog_store.save_snapshot(snapshot, self._environ)
         except Exception:
@@ -1270,140 +1271,36 @@ class EngineSessionManagerAdapter:
             route_engine=record.engine, route_connection_id=record.id, resource_policy=policy,
         )
 
-    def _resolve_requested_route(self, launch, project_root) -> None:
-        """D-T035-04: the coordinator, not the user's own form selection,
-        decides which allowed engine/model/effort a delegated role gets --
-        resolved here from ``delegate``'s own optional ``engine``/
-        ``model``/``effort`` arguments (threaded through unresolved as
-        ``launch["requested_engine"/"requested_model"/"requested_effort"]``
-        by ``delegation.provisioning``), the one place a route policy and
-        the connections registry are both already available (see
-        :meth:`_authorize_dispatch`, called a few lines below this
-        method's own caller).
+    def _resolve_runtime_route(self, launch, project_root) -> None:
+        """Resolve the first available administrator-authorized role route.
 
-        A no-op for the coordinator's own session (no ``assignment_id``),
-        a fallback attempt (``route_override`` already present -- fallback
-        always wins, unchanged), and an ordinary T027 mixed-team delegation
-        that already resolved its own override (``resolved_connection_id``
-        already set) with no explicit ``requested_engine`` of its own to
-        take precedence over it.
-
-        When ``requested_engine`` names an engine: validates it (and
-        ``requested_model``/``requested_effort``) against the route policy
-        exactly like :meth:`_authorize_dispatch` does for an already-
-        resolved route -- ``RoutePolicy.resolve_effort`` raises the same
-        ``route_policy_not_authorized`` (naming what IS allowed) on refusal,
-        never silently substituting a different engine/model. When no
-        policy file exists at all, an explicit request is honored
-        unvalidated (nothing to narrow it against yet).
-
-        When ``requested_engine`` is absent and a policy exists for this
-        role (its own entries, or the ``default`` bucket): falls back to
-        that role's *first* allowed entry's engine/model/default_effort --
-        the coordinator's own instructions carry this exact table (see
-        ``acp.orchestrating_runtime.OrchestratingRuntime
-        ._open_coordinator_session``), so an omitted choice still dispatches
-        on an allowed route rather than silently inheriting whatever engine
-        the coordinator itself happens to be running on.
-
-        Either way, resolves the chosen engine to a real connection via
-        ``connections.registry`` -- raises ``PortableError(code=
-        "engine_not_connected")`` (never substitutes a different engine)
-        when the user has no connection for it.
+        A model has no route parameters. Configured per-role routes and runtime
+        fallback decisions are the only sources of engine/model/effort choice.
         """
-        if launch.get("route_override") is not None or not launch.get("assignment_id"):
+        from ..portable.errors import PortableError, PortableErrorCategory
+        if not launch.get('assignment_id') or launch.get('route_override') or launch.get('resolved_connection_id'):
             return
-        if launch.get("resolved_connection_id") is not None:
-            # This task carries an explicit T027 mixed-team profile that
-            # already resolved this role's route. That profile is a
-            # deliberate per-task statement and outranks a deployment-wide
-            # policy file, so the coordinator's choice never overrides it
-            # -- the policy narrows what a role may use, it does not
-            # reopen a route decision the task itself already made.
-            return
-        requested_engine = launch.get("requested_engine")
-        role = launch.get("role_id") or "worker"
+        role=launch.get('role_id')
+        if not role: return
         from ..configuration import route_policy as route_policy_module
-
-        policy, malformed = route_policy_module.load_route_policy(project_root, self._environ)
-        requested_model = launch.get("requested_model")
-        requested_effort = launch.get("requested_effort")
-        if policy is None or malformed is not None:
-            if requested_engine is None:
-                return
-            engine, model, effort = requested_engine, requested_model, requested_effort
-        elif requested_engine is not None:
-            model = requested_model
-            if model is None:
-                entries = policy.roles.get(role)
-                if entries is None:
-                    entries = policy.default
-                if entries is not None:
-                    first = next((entry for entry in entries if entry.engine == requested_engine), None)
-                    if first is not None and first.model != route_policy_module.WILDCARD:
-                        model = first.model
-            effort = policy.resolve_effort(role, requested_engine, model, requested_effort)
-            engine = requested_engine
-        else:
-            entries = policy.roles.get(role) or policy.default
-            if not entries:
-                return
-            # Policy order is meaningful, but an unavailable engine is not a
-            # usable route.  Select the first policy entry whose engine has a
-            # configured, executable connection below.  This is deliberately
-            # only for an omitted request: an explicit engine request must
-            # still fail closed with ``engine_not_connected`` rather than
-            # silently switching engines.
-            from ..connections import registry as connection_registry
-
-            state = connection_registry.read_registry(self._environ)
-            launchable_engines = {
-                candidate.engine
-                for candidate in state.connections.values()
-                if candidate.launch_command is not None
-                and getattr(candidate.state, "value", candidate.state) == "configured"
-            }
-            # An omitted engine does not erase an explicit model or effort.
-            # In particular, a qualification policy that permits only Luna
-            # must reject a planner's requested Terra/low route before any
-            # engine is started, rather than silently replacing low with its
-            # policy default.
-            first = next(
-                (
-                    entry for entry in entries
-                    if entry.engine in launchable_engines
-                    and (requested_model is None or entry.model in (route_policy_module.WILDCARD, requested_model))
-                ),
-                None,
-            )
-            if first is None:
-                if requested_model is not None:
-                    available_entry = next(
-                        (entry for entry in entries if entry.engine in launchable_engines), None,
-                    )
-                    if available_entry is not None:
-                        # Raise the policy's precise model refusal rather
-                        # than misreporting a connected engine as absent.
-                        policy.resolve_effort(
-                            role, available_entry.engine, requested_model, requested_effort,
-                        )
-                allowed = ", ".join(entry.engine for entry in entries)
-                raise PortableError(
-                    category=PortableErrorCategory.VALIDATION,
-                    code="engine_not_connected",
-                    remediation=(
-                        f"role {role!r} has no configured, launchable connection for any "
-                        f"policy route ({allowed}); connect one of those engines before "
-                        "delegating this role."
-                    ),
-                    retry_eligible=False,
-                    field="engine",
-                )
-            engine = first.engine
-            model = requested_model if requested_model is not None else (
-                None if first.model == route_policy_module.WILDCARD else first.model
-            )
-            effort = policy.resolve_effort(role, engine, model, requested_effort)
+        from ..connections import registry as connection_registry
+        policy,malformed=route_policy_module.load_route_policy(project_root,self._environ)
+        if malformed is not None:
+            raise PortableError(category=PortableErrorCategory.VALIDATION,code='invalid_route_policy',
+                                remediation='Repair the configured role route policy.',retry_eligible=False)
+        if policy is None: return
+        entries=policy.roles.get(role) or policy.default
+        if not entries: return
+        state=connection_registry.read_registry(self._environ)
+        available={c.engine for c in state.connections.values() if c.launch_command is not None
+                   and getattr(c.state,'value',c.state)=='configured'}
+        first=next((entry for entry in entries if entry.engine in available),None)
+        if first is None:
+            raise PortableError(category=PortableErrorCategory.VALIDATION,code='engine_not_connected',
+                                remediation='No configured engine satisfies this role policy.',retry_eligible=False)
+        engine=first.engine
+        model=None if first.model==route_policy_module.WILDCARD else first.model
+        effort=policy.resolve_effort(role,engine,model,None)
         from ..connections import registry as connection_registry
         from ..portable.errors import PortableError, PortableErrorCategory
 
@@ -1538,7 +1435,8 @@ class EngineSessionManagerAdapter:
         policy, malformed = route_policy_module.load_route_policy(project_root, self._environ)
         if malformed is not None:
             self._record_malformed_route_policy(task_id, malformed)
-            return
+            from ..portable.errors import PortableError,PortableErrorCategory
+            raise PortableError(category=PortableErrorCategory.VALIDATION,code='invalid_route_policy',remediation='Repair the configured role route policy.',retry_eligible=False)
         if policy is None:
             return
         resolved_effort = policy.resolve_effort(role, record.engine, model, requested_effort)
@@ -1691,7 +1589,7 @@ class EngineSessionManagerAdapter:
         )
         ledger = InstructionBundleLedger(self._store)
         ledger.save_intended(bundle)
-        meta = _session_new_meta_for(record.engine, version, instructions)
+        meta = _session_new_meta_for(record.engine, version, instructions, role=recipient)
         if meta is not None:
             import json
 
@@ -1795,131 +1693,7 @@ class EngineSessionManagerAdapter:
         )
         return record["id"]
 
-    def _coordinator_draft_write_authorizer(self, engine_session_id, binding, params) -> bool:
-        """Authorize one declared edit of this coordinator's active pipeline draft.
 
-        Claude's native Write asks permission with kind=edit, an absolute
-        rawInput.file_path and the same locations path. The ordinary
-        coordinator edit refusal remains in force for every other target.
-        The database, not a path prefix or tool title, supplies ownership.
-        """
-        if self._store is None or binding.role != "coordinator":
-            return False
-        tool_call = params.get("toolCall") if isinstance(params, dict) else None
-        if not isinstance(tool_call, dict) or tool_call.get("kind") != "edit":
-            return False
-        raw = tool_call.get("rawInput")
-        if not isinstance(raw, dict) or not isinstance(raw.get("file_path"), str):
-            return False
-        target = raw["file_path"]
-        # Reject alternate path declarations, including a second location.
-        # The observed Claude Write uses precisely file_path and locations.
-        for key in ("path", "filePath", "abs_path", "absolutePath", "target", "destination"):
-            if key in raw:
-                return False
-        locations = tool_call.get("locations")
-        if not isinstance(locations, list) or len(locations) != 1 or not isinstance(locations[0], dict):
-            return False
-        if locations[0].get("path") != target:
-            return False
-        with self._lock:
-            meta = self._session_meta.get(engine_session_id)
-        if meta is None or meta.get("recipient") != "coordinator" or meta.get("attempt_id") != binding.attempt_id:
-            return False
-        task_id = meta.get("task_id")
-        if not task_id:
-            return False
-        with self._store.connection() as db:
-            row = db.execute(
-                "SELECT d.path, t.project_root FROM drafts d "
-                "JOIN tasks t ON t.id=d.task_id "
-                "JOIN thread_bindings b ON b.task_id=d.task_id AND b.thread_id=d.owner_thread_id "
-                "WHERE d.task_id=? AND d.path=? AND d.kind='pipeline' "
-                "AND d.published_report_id IS NULL AND b.parent_thread_id IS NULL",
-                (task_id, target),
-            ).fetchone()
-        if row is None:
-            return False
-        project = Path(row["project_root"])
-        expected = project / ".cortex" / "pipeline-drafts" / Path(target).name
-        if target != str(expected) or not project.is_absolute() or str(project.resolve()) != str(project):
-            return False
-        try:
-            parent = expected.parent
-            if parent.is_symlink() or parent.parent.is_symlink():
-                return False
-            for directory in (parent.parent, parent):
-                directory_info = directory.lstat()
-                if (not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid()
-                        or stat.S_IMODE(directory_info.st_mode) & 0o077):
-                    return False
-            info = expected.lstat()
-        except OSError:
-            return False
-        return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
-
-    def _worker_draft_write_authorizer(self, engine_session_id, binding, params) -> bool:
-        """Authorize one exact edit of this worker's active report draft.
-
-        Claude's native Write declares an absolute ``rawInput.file_path`` and
-        matching ``locations`` entry.  The draft must be unpublished, owned by
-        the trusted worker channel for this assignment, and an owner-owned
-        regular file in the project store.  Other private-store access stays
-        denied and deletion/move requests never enter this exception.
-        """
-        if self._store is None or binding.role != "worker":
-            return False
-        tool_call = params.get("toolCall") if isinstance(params, dict) else None
-        if not isinstance(tool_call, dict) or tool_call.get("kind") != "edit":
-            return False
-        raw = tool_call.get("rawInput")
-        if not isinstance(raw, dict) or not isinstance(raw.get("file_path"), str):
-            return False
-        target = raw["file_path"]
-        for key in ("path", "filePath", "abs_path", "absolutePath", "target", "destination"):
-            if key in raw:
-                return False
-        locations = tool_call.get("locations")
-        if not isinstance(locations, list) or len(locations) != 1 or not isinstance(locations[0], dict):
-            return False
-        if locations[0].get("path") != target:
-            return False
-        with self._lock:
-            meta = self._session_meta.get(engine_session_id)
-        if meta is None or meta.get("recipient") != "worker" or meta.get("attempt_id") != binding.attempt_id:
-            return False
-        task_id = meta.get("task_id")
-        if not task_id:
-            return False
-        with self._store.connection() as db:
-            row = db.execute(
-                "SELECT d.path, t.project_root FROM drafts d "
-                "JOIN tasks t ON t.id=d.task_id "
-                "JOIN trusted_channels c ON c.task_id=d.task_id "
-                "AND c.principal_thread_id=d.owner_thread_id "
-                "WHERE d.task_id=? AND d.path=? AND d.kind='report' "
-                "AND d.published_report_id IS NULL AND c.role='worker' "
-                "AND c.assignment_id=? AND c.attempt_id=?",
-                (task_id, target, binding.assignment_id, binding.attempt_id),
-            ).fetchone()
-        if row is None:
-            return False
-        project = Path(row["project_root"])
-        expected = project / ".cortex" / "draft-reports" / Path(target).name
-        if target != str(expected) or not project.is_absolute() or str(project.resolve()) != str(project):
-            return False
-        try:
-            parent = expected.parent
-            if parent.is_symlink() or parent.parent.is_symlink():
-                return False
-            for directory in (parent.parent, parent):
-                info = directory.lstat()
-                if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
-                    return False
-            info = expected.lstat()
-        except OSError:
-            return False
-        return stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
 
     def _notify_coordinator_refusal(self, engine_session_id: str, reason: str) -> None:
         """T035 FINDING-12 closure: ``engine.permissions.PermissionBridge``'s
@@ -2410,17 +2184,13 @@ class EngineSessionManagerAdapter:
         on_display_update: Callable[[dict], None] | None = None,
         prompt_blocks=None,
     ):
-        """T035 visibility fix: ``on_delta``, when given, is called with each
-        ``TURN_DELTA`` chunk's text the moment it is yielded by
-        ``manager.prompt_turn()`` -- never buffered until the whole turn
-        ends. Only the coordinator's own call site
-        (``acp.orchestrating_runtime._continuation_loop``) ever passes one;
-        every delegated-worker prompt call keeps passing none, so a raw
-        worker chunk is still never streamed (see ``PromptOutcome``'s own
-        docstring). Best-effort like ``emit_update`` itself -- a callback
-        exception here must never abort an otherwise-successful engine
-        turn, so it is swallowed the same way a dropped/cancelled delivery
-        already is."""
+        """T035 visibility seam: ``on_delta``, when given, receives each
+        provider ``TURN_DELTA`` synchronously so the coordinator can assemble
+        complete message blocks at tool/display/turn boundaries. The
+        coordinator is the only caller that supplies it; delegated-worker
+        prompts pass none, so worker prose is never streamed to chat. The
+        callback is best-effort like ``emit_update`` itself: an exception
+        never aborts an otherwise successful engine turn."""
         from ..acp.orchestrating_runtime import EngineTurnFailed, PromptOutcome
         from ..portable.engine_contract import EngineEventKind, StopReason
         from ..portable.errors import PortableError

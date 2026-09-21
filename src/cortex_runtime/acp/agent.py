@@ -41,7 +41,6 @@ from . import steering as acp_steering
 from .host_requests import HostRequestClosed, HostRequester, HostRequestError, HostRequestTimeout
 from .protocol import RpcError
 from .runtime import OrchestrationUnavailable, UnavailableRuntime
-from .orchestrating_runtime import is_hidden_tool_update
 from .transport import StdioTransport, EOF
 from . import replay_store as acp_replay_store
 from ..catalog import refresh as catalog_refresh
@@ -942,6 +941,11 @@ class Agent:
         if cancel_event.is_set() or self.transport is None:
             return False
         with self._history_lock(session_id):
+            from .read_history import ReadHistoryFilter
+            filters = getattr(self, '_read_history_filters', None)
+            if filters is None:
+                filters = self._read_history_filters = {}
+            update = filters.setdefault(session_id, ReadHistoryFilter()).project(update)
             try:
                 persisted = self._record_host_update(session_id, update)
             except Exception:
@@ -2074,8 +2078,6 @@ class Agent:
         history = acp_replay_store.replay_session(store, session_id)
         for replay_index, entry in enumerate(history):
             if entry["kind"] == "update":
-                if is_hidden_tool_update(entry.get("update")):
-                    continue
                 queued = self.transport.send_notification(
                     protocol.notification("session/update", dict(sessionId=session_id, update=entry["update"]))
                 )
@@ -2169,29 +2171,11 @@ class Agent:
         if session is None:
             return
         try:
-            # Paseo's Workers control means "stop this task", including
-            # already-running workers.  The notification carries no reply
-            # channel, so the runtime records the terminal card update and
-            # session/load replays it if this transport disappears.
-            task_id = session.get("task_id")
-            is_paseo = str(self.client_info.get("name", "")).casefold() == "paseo"
-            cancel_task = getattr(self.runtime, "cancel_task", None)
-            if is_paseo and task_id and cancel_task is not None:
-                cancel_kwargs = {}
-                if self._runtime_accepts_cancel_task_project_root:
-                    cancel_kwargs["project_root"] = session["project"]
-                if self._runtime_accepts_cancel_task_emitter and self.transport is not None:
-                    # A notification has no response channel.  This emitter
-                    # still persists before enqueueing, and the runtime's
-                    # durable session-owner check prevents cross-session
-                    # updates.  If the transport is already gone, omit it so
-                    # the runtime appends the terminal update for replay.
-                    cancel_kwargs["emit_tool_call"] = self._make_emit_tool_call(
-                        session_id, threading.Event(),
-                    )
-                cancel_task(task_id, session_id, **cancel_kwargs)
-            else:
-                self.runtime.cancel(session_id)
+            # Paseo also sends session/cancel before an in-flight follow-up
+            # prompt. ACP carries no signal distinguishing that steering from
+            # a Stop click. Preserve the protocol's turn scope; the explicit
+            # /cortex-stop command remains the task-wide terminal operation.
+            self.runtime.cancel(session_id)
         except Exception:
             pass
         with session["lock"]:
@@ -2249,6 +2233,27 @@ class Agent:
             remaining = max(0.0, deadline - time.monotonic())
             worker.join(remaining)
 
+    def shutdown_runtime(self):
+        """Release engine processes owned by this ACP daemon.
+
+        EOF and writer-close are both normal host lifecycle boundaries.  The
+        prior path only disconnected the host requesters and left the live
+        engine manager to be killed externally, which left durable process
+        registry rows looking active after a clean Paseo shutdown.  Runtime
+        doubles used by protocol tests do not need a shutdown method, so this
+        remains a capability-based call and is safe for every ACP runtime.
+        """
+        shutdown = getattr(self.runtime, "shutdown", None)
+        if shutdown is None:
+            return
+        try:
+            shutdown()
+        except Exception:
+            # Teardown must not wedge the ACP process after the host pipe is
+            # already gone.  The registry/reaper will retain any ambiguous
+            # resource for the next observed recovery rather than guessing.
+            pass
+
 
 def main(argv=None, runtime=None, environ=None):
     """Production entry point. ``argv`` is accepted but currently unused."""
@@ -2272,6 +2277,7 @@ def main(argv=None, runtime=None, environ=None):
     reason = transport.wait_for_shutdown_signal()
     if reason == "writer_closed":
         agent.join_workers()
+        agent.shutdown_runtime()
         transport.stop_writer()
         # If stdin is still open, the reader thread may be permanently
         # blocked in `readline()` with no way for this process to make it
@@ -2288,6 +2294,7 @@ def main(argv=None, runtime=None, environ=None):
         # than trying to force an impossible clean join.
         os._exit(0)
     agent.join_workers()
+    agent.shutdown_runtime()
     transport.stop_writer()
     return 0
 

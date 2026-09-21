@@ -42,23 +42,22 @@ the fresh, lead- and agent-re-verified dist file:line citations below (read
 Nothing here claims a main-branch/newer-release capability, and nothing
 above was exercised live (see the T035/T036 rows at the end of this page).
 
-Claude ACP reports Cortex MCP tool titles as `mcp__cortex__decide` (and can
-omit the title on a later result update). The coordinator's pending-event
-acceptance refusal boundary correlates those updates by tool-call reference,
-so two exact refusals cancel only that engine turn and deliver the pending
-event in the next continuation. A composed fake-ACP wire test covers this
-transition; the 2026-09-20 live Sonnet run exposed the prior title mismatch,
-but the corrected transition has not yet been observed in a real client.
+## Current runtime gateway policy
 
-For external MCP scalability, the pinned adapter forwards explicit
-`session/new` servers into the Claude Agent SDK. The bundled SDK 0.3.270 types
-describe deferred MCP tools when tool search is enabled, but the ACP adapter
-does not report whether that search ran or expose a complete aggregate tool
-count to Cortex. Cortex's registry filters whole servers by role and engine;
-it does not filter individual tools or enforce a catalogue-size limit. Keep
-each route's enabled server set narrow and use a server's own tool/service
-filter for a large catalogue. A real session must retain tool-discovery and
-call evidence before deferred loading is claimed to work for that route.
+All roles receive `tools: []`, `strictMcpConfig: true`, empty settings sources and
+plugins, disabled hooks, and explicit native Agent/Task denial through the installed
+SDK options. Only runtime-brokered MCP tools are supplied. The coordinator has no
+external MCP tools; read-only specialists receive only explicit read-only grants.
+
+External MCP catalogues are filtered by exact administrator grants, role and engine.
+Each permitted call rechecks the current channel, runs in its contained server and
+retains an idempotency receipt. Partial frames, revocation and ambiguous outcomes
+fail closed. Tool titles do not establish identity or authorization. Actual tool
+and display updates are forwarded, including titleless lifecycle updates.
+
+The installed 0.78.0/SDK 0.3.270 option paths are verified locally. That inspection
+and scripted protocol tests do not establish real-model or GUI qualification for
+this rewrite; see [current status](runtime-rewrite-status.md).
 
 ## Pinned install requirements (manual recipe placeholder)
 
@@ -154,15 +153,31 @@ no-paid startup-close regression; the transient live failure's discarded
 token bytes were not retained, so that individual case cannot be proved
 byte-for-byte after the fact.
 
-Every Cortex-created session at this pinned version also sends
-`_meta.claudeCode.options.disallowedTools: ["Agent", "Task"]` and
-`strictMcpConfig: true`, including a session without role text. The installed
-adapter passes both into the Claude Agent SDK query before launch. The SDK
-passes `--disallowedTools` and `--strict-mcp-config` to the CLI. The former's
-declared contract removes those native subagent launch tools from the model
-context and denies their execution. The latter's declared contract limits
-MCP discovery to the session's explicit `mcpServers`, excluding Claude's
-user/project settings, plugins, and on-disk agent frontmatter MCP servers.
+Every Cortex-created session at this pinned version sends
+`strictMcpConfig: true` and denies native `Agent`/`Task` launch tools. Worker
+sessions retain the Claude preset's built-ins and additionally send the
+managed `Bash(*)` ask rule, which routes Bash through `canUseTool` and
+Cortex's ACP permission bridge. Coordinator sessions instead send the SDK's
+documented `tools: ["Read", "Glob", "Grep", "Edit", "Write"]` allowlist and
+explicitly deny `Bash`, `NotebookEdit`, `Agent`, and `Task`. Managed `Edit` and
+`Write` ask rules force native edits through the owner-bound pipeline draft
+permission check; ordinary source edits are refused. The installed
+adapter passes these options into the Claude Agent SDK query before launch;
+the SDK forwards `tools`, `--disallowedTools`, and
+`--strict-mcp-config` to the CLI. `Skill` is omitted even though the SDK
+recognizes the name: the pinned SDK marks it deprecated in favor of its
+`skills` option, and native skill files are outside Cortex's authenticated
+`read_skill` surface.
+
+The coordinator allowlist is a native Claude built-in-tool restriction for
+role capability shaping. It is not an OS-level filesystem boundary and does
+not make arbitrary external MCP tools read-only. The SDK's declared
+`strictMcpConfig` behavior limits MCP discovery to the session's explicit
+`mcpServers`, excluding Claude's user/project settings, plugins, and on-disk
+agent frontmatter MCP servers. Static forwarding and fake-wire tests cover
+the option path. A paid Paseo run on 2026-09-21 observed native Bash/Write
+rejection under the former read-only allowlist, blocking pipeline publication.
+The corrected draft-edit policy requires fresh live verification.
 This matters because the adapter otherwise loads user/project/local settings
 and the discovered native-account connection uses the production
 `CLAUDE_CONFIG_DIR` for authentication. This option does not disable non-MCP

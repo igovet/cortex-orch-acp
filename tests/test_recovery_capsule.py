@@ -11,6 +11,7 @@ import uuid
 
 import pytest
 
+from runtime_scenarios import reserve_assignment
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.contracts import StoreError, TOOLS
 from cortex_runtime.delegation import mcp_tools
@@ -36,8 +37,8 @@ def _task(tmp_path, text="Build a page."):
 
 
 def _delegate(store, coordinator, request_key="k1", role="worker-backend-dev"):
-    return mcp_tools.dispatch(
-        store, coordinator, "delegate",
+    return reserve_assignment(
+        store, coordinator,
         dict(title="Task title", brief="Task brief.", role=role, acceptance="Acceptance criteria.", request_key=request_key),
     )
 
@@ -78,8 +79,8 @@ def _publish_worker_result(store, worker, *, summary="A concise result.", body="
         worker.principal_thread_id, worker.parent_principal_thread_id, trusted=True,
     )
     pub = mcp_tools.dispatch(
-        store, worker, "publish_result",
-        dict(report_ref=result["report_id"], summary=summary, request_key="pub-" + uuid.uuid4().hex),
+        store, worker, "result_submit",
+        dict(report_ref=result["report_id"], summary=summary, checks=[], request_key="pub-" + uuid.uuid4().hex),
     )
     return result["report_id"], pub
 
@@ -141,10 +142,10 @@ def test_worker_capsule_allowed_tools_match_worker_tools_list_surface(tmp_path):
         dict(role="worker", assignment_ref=delegated["assignment_ref"], attempt_id="xa_test1"),
     )
 
-    expected = ({entry["name"] for entry in TOOLS} - {"create_task"}) | set(delegation_contracts.schemas_for("worker"))
+    expected = ({entry["name"] for entry in TOOLS} - {"create_task", "set_governance"}) | set(delegation_contracts.schemas_for("worker"))
     assert set(cap["sections"]["role_and_tool_access"]["allowed_mcp_tools"]) == expected
     assert "create_task" not in expected
-    assert {"create_draft", "write_report", "read_report", "publish_result"} <= expected
+    assert {"create_draft", "write_report", "read_report", "result_submit"} <= expected
 
 
 def test_unknown_task_refused(tmp_path):
@@ -167,8 +168,8 @@ def test_invalid_recipient_refused(tmp_path):
 def test_worker_capsule_excludes_other_assignments_briefs_and_results(tmp_path):
     store, task_id, coordinator = _task(tmp_path)
     d1 = _delegate(store, coordinator, request_key="k1")
-    d2 = mcp_tools.dispatch(
-        store, coordinator, "delegate",
+    d2 = reserve_assignment(
+        store, coordinator,
         dict(title="Other task", brief="Other secret brief.", role="worker-backend-dev",
              acceptance="Other acceptance.", request_key="k2"),
     )
@@ -188,8 +189,8 @@ def test_worker_capsule_excludes_other_assignments_briefs_and_results(tmp_path):
 def test_coordinator_capsule_sees_every_assignment(tmp_path):
     store, task_id, coordinator = _task(tmp_path)
     d1 = _delegate(store, coordinator, request_key="k1")
-    d2 = mcp_tools.dispatch(
-        store, coordinator, "delegate",
+    d2 = reserve_assignment(
+        store, coordinator,
         dict(title="Second", brief="Second brief.", role="worker-backend-dev",
              acceptance="Second acceptance.", request_key="k2"),
     )
@@ -232,13 +233,13 @@ def test_assignment_acceptance_does_not_become_task_acceptance_in_context(tmp_pa
     cap = build_capsule(store, task_id, dict(role="coordinator"))
     acceptance = cap["sections"]["continuation_intent"]["task_acceptance"]
     assert acceptance["accepted"] is False
-    assert acceptance["task_accept_decision_cursor"] is None
+    assert "task_accept_decision_cursor" not in acceptance
     append_event(store, task_id, "coordinator_decision", "task-accept-attempt",
                  dict(assignment_ref="task", decision="accept", rationale="Claimed complete."),
                  origin="coordinator", assignment_ref="task")
     cap = build_capsule(store, task_id, dict(role="coordinator"))
     acceptance = cap["sections"]["continuation_intent"]["task_acceptance"]
-    assert acceptance["task_accept_decision_cursor"] is not None
+    assert "task_accept_decision_cursor" not in acceptance
     assert acceptance["accepted"] is False  # durable task state has not accepted it
     with store.connection() as db:
         db.execute(
@@ -247,7 +248,7 @@ def test_assignment_acceptance_does_not_become_task_acceptance_in_context(tmp_pa
             (task_id, store._now()),
         )
     cap = build_capsule(store, task_id, dict(role="coordinator"))
-    assert cap["sections"]["continuation_intent"]["task_acceptance"]["accepted"] is True
+    assert cap["sections"]["continuation_intent"]["task_acceptance"]["accepted"] is False
 
 
 # -- malicious/inaccurate summary cannot change structural facts --------

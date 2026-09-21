@@ -1,5 +1,10 @@
 # Security boundary audit (T030)
 
+This retained audit describes the earlier implementation. Its old delegation and
+completion test outcomes do not qualify the replacement runtime. Current enforcement
+and its native-tool gaps are stated in [SECURITY.md](../../SECURITY.md) and the
+[runtime rewrite status](runtime-rewrite-status.md).
+
 This is the consolidated write-up for T030's independent adversarial pass
 across both ACP directions and recovery. It indexes the actual enforcement
 points, the real attacks attempted against them (with outcomes), and the

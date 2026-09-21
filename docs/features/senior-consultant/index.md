@@ -1,15 +1,12 @@
 # Senior consultant
 
-The senior consultant is the optional report-only specialist for one bounded
-question. The coordinator decides when a fresh view can reduce material
-uncertainty; there is no fixed consultation stage or required count.
+A structured escalation proposal can request a fresh analysis of a bounded
+question. The runtime validates the request, fences active work and inserts the
+consultant assignment into the new plan. Role configuration selects its engine,
+model and effort. The automatic replan limit also bounds escalation.
 
-The consultant receives the assignment and explicitly selected immutable
-reports. It may publish its own report and ask the coordinator for missing
-information through the parent channel. It cannot run commands, inspect the
-project, browse the full catalogue, spawn agents or mutate the pipeline.
-
-Consultation advice remains unverified evidence until the coordinator compares
-it with the current requirement revision, candidate and checks. Historical
-Codex CLI/Desktop qualification narratives were removed; real ACP client
-qualification is tracked by the ACP runbook.
+The consultant is read-only: scoped project reads and selected immutable reports
+provide evidence, and its owned report draft is the only writable document. It
+cannot execute commands, edit project files, choose routes or accept the task.
+Advice enters the normal report protocol; independent review, command verification
+and runtime completion remain mandatory. All 23 profiles are preserved.

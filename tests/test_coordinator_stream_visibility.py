@@ -53,37 +53,6 @@ def _task(tmp_path, text="Build a page."):
     return store, result.task_id
 
 
-def _accept_task(store, channel, request_key="acc1"):
-    """Give the synthetic coordinator a current authored pipeline before accept.
-
-    Task-level acceptance deliberately cannot use the bootstrap pipeline as its
-    evidence.  These transport visibility tests are about the subsequent ACP
-    stream, so set up that normal coordinator publication boundary explicitly
-    instead of bypassing the production completion gate.
-    """
-    draft = store.call(
-        "create_draft", {"template": "pipeline", "request_key": "stream-pipeline-" + uuid.uuid4().hex},
-        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True,
-    )
-    body = pipeline_bootstrap._fill_template(
-        draft["markdown"], channel.task_id, "Stream visibility test", None,
-    )
-    Path(draft["draft_path"]).write_text(body, encoding="utf-8")
-    store.call(
-        "write_report",
-        {
-            "draft_id": draft["draft_id"],
-            "title": "Current pipeline",
-            "summary": "Coordinator-authored current pipeline edition.",
-            "author": "coordinator",
-            "request_key": "stream-pipeline-publish-" + uuid.uuid4().hex,
-        },
-        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True,
-    )
-    return mcp_tools.dispatch(store, channel, "decide", {
-        "assignment_ref": "task", "decision": "accept",
-        "rationale": "Trivial check-in.", "request_key": request_key,
-    })
 
 
 def test_coordinator_text_chunks_stream_before_the_turn_ends(tmp_path):
@@ -114,7 +83,6 @@ def test_coordinator_text_chunks_stream_before_the_turn_ends(tmp_path):
     )
     try:
         channel, session_ref = runtime._ensure_coordinator(task_id)
-        _accept_task(store, channel)
 
         arrivals: list[tuple[float, str]] = []
         start = time.monotonic()
@@ -139,15 +107,15 @@ def test_coordinator_text_chunks_stream_before_the_turn_ends(tmp_path):
         prompt_thread.start()
         threading.Event().wait(0.2)
         assert not turn_finished.is_set()
-        assert not arrivals, "intermediate coordinator prose leaked before the turn outcome"
+        assert arrivals, "coordinator text was hidden until turn completion"
         prompt_thread.join(timeout=3.0)
         assert not prompt_thread.is_alive(), "fake engine turn did not finish"
         result = result_box[0]
 
         assert result == StopReason.END_TURN
-        assert len(arrivals) == 1, "accepted final text should be emitted once"
-        assert "".join(text for _t, text in arrivals) == "Checking in now. "
-        assert arrivals[0][1] == "Checking in now. "
+        assert len(arrivals) >= 6  # both chunks from each bounded proposal request
+        assert "Checking in now." in "".join(text for _t, text in arrivals)
+        assert arrivals[0][1] == "Checking "
 
         # A later host replay uses only the accepted final chunk.
     finally:
@@ -182,66 +150,6 @@ def _insert_provisioning_row(store, task_id, idempotency_key, step, status="in_p
             raise
 
 
-def test_running_worker_card_hides_provisioning_step(tmp_path):
-    """The worker card shows that it is running without exposing Cortex setup."""
-    store, task_id = _task(tmp_path)
-
-    def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(
-                title="Assignment X", brief="do X", role="backend-dev", acceptance="X done", request_key="reqX",
-            ))
-            return PromptOutcome(StopReason.END_TURN, "Delegated X.")
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def silent_worker(store, channel, session_ref, message, call_index):
-        time.sleep(2.0)
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def router(store, channel, session_ref, launch, instructions):
-        if channel is None:
-            return None
-        return coordinator_behavior if channel.role == "coordinator" else silent_worker
-
-    engine = FakeSessionRuntime(store, router)
-    runtime = OrchestratingRuntime(
-        store, engine, FakeWorkspace(), FakeConfigSnapshotSource(),
-        wait_timeout_seconds=0.1, max_no_progress_continuations=8,
-    )
-
-    # Seeded once, never advanced/finished for the rest of this test: any
-    # tool-call update this synthetic row produces necessarily happened
-    # while it was still genuinely 'in_progress' -- checked again below,
-    # after the turn, with no race to resolve since nothing else ever
-    # touches this row's status.
-    _insert_provisioning_row(store, task_id, "synthetic-key", "workspace")
-
-    tool_call_updates: list[dict] = []
-
-    def emit_tool_call(update):
-        tool_call_updates.append(dict(update))
-        return True
-
-    updates = []
-    runtime.start_prompt(
-        task_id, "s1", "Build it.", updates.append, threading.Event(), emit_tool_call=emit_tool_call,
-    )
-
-    with store.connection() as db:
-        row = db.execute(
-            "SELECT status FROM delegation_provisioning WHERE idempotency_key=?", ("synthetic-key",),
-        ).fetchone()
-    assert row is not None and row["status"] == "in_progress", (
-        "test setup bug: the synthetic row must stay in_progress for the "
-        "assertion below to actually prove 'while still in progress'"
-    )
-    provisioning_updates = [u for u in tool_call_updates if u.get("tool_call_id") == "worker:synthetic-key"]
-    assert provisioning_updates, (
-        "expected at least one tool-call update for the still-provisioning "
-        "worker while it was in progress -- got none"
-    )
-    assert any(u.get("status") == "in_progress" for u in provisioning_updates)
-    assert all("Provisioning:" not in (u.get("text") or "") for u in provisioning_updates)
 
 
 def test_streamed_coordinator_chunk_is_redacted(tmp_path):
@@ -301,7 +209,6 @@ def test_a_tool_call_between_two_spoken_messages_separates_them(tmp_path):
     )
     try:
         channel, _session_ref = runtime._ensure_coordinator(task_id)
-        _accept_task(store, channel)
         chunks: list[str] = []
         runtime.start_prompt(task_id, "s1", "Just check in.", chunks.append, threading.Event())
         streamed = "".join(chunks)
@@ -347,26 +254,25 @@ def test_tool_calls_show_compact_project_activity_without_diff_output(tmp_path):
     )
     try:
         channel, _ = runtime._ensure_coordinator(task_id)
-        _accept_task(store, channel)
         cards: list = []
         runtime.start_prompt(
             task_id, "s1", "Just check in.", lambda t: True, threading.Event(), emit_tool_call=cards.append,
         )
 
         assert cards, f"no coordinator cards reached the client: {cards}"
-        visible = [card for card in cards if "Read calc.py" in card.get("text", "")
-                   or "Edit calc.py" in card.get("text", "")]
+        visible = [card for card in cards if "Read calc.py" in card.get("title", "")
+                   or "Edit calc.py" in card.get("title", "")]
         assert len({card["tool_call_id"] for card in visible}) == 2
         assert all(card["tool_call_id"].startswith("call:coordinator:") for card in visible)
-        assert all(card["text"].count("\n") == 0 for card in visible)
+        assert all(card.get("text", "").count("\n") == 0 for card in visible)
         # These fixture updates carry no ACP rawInput.  The collapsed line is
         # still visible, while expanded input/output fields are emitted only
         # when the engine actually supplied them (see the structured I/O
         # regression in test_tool_visibility_full_transcript.py).
         assert all("raw_input" not in card for card in visible)
         assert all("raw_output" not in card for card in visible)
-        assert all("raise ValueError" not in card["text"] for card in visible)
-        assert all("type: diff" not in card["text"] for card in visible)
+        assert any("raise ValueError" in str(card.get("content")) for card in cards)
+        assert all("type: diff" not in card.get("text", "") for card in visible)
     finally:
         for manager in list(adapter._managers.values()):
             manager.shutdown(grace=1.0)
@@ -409,7 +315,6 @@ def test_the_models_reasoning_and_plan_reach_the_client(tmp_path):
     )
     try:
         channel, _ = runtime._ensure_coordinator(task_id)
-        _accept_task(store, channel)
         shown: list = []
         runtime.start_prompt(
             task_id, "s1", "Just check in.", lambda t: True, threading.Event(),

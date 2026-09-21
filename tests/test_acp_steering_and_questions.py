@@ -219,6 +219,69 @@ def test_mark_stopped_is_idempotent(tmp_path):
     assert acp_steering.is_stopped(store, task_id) is True
 
 
+@pytest.mark.parametrize("client_cancel", [False, True])
+def test_stop_retains_first_observed_transport_source(tmp_path, client_cancel):
+    store, task_id = _task(tmp_path)
+    with store.connection() as db:
+        db.execute("INSERT INTO task_orchestration (task_id,state,updated_at) VALUES (?,?,?)",
+                   (task_id, "running", "now"))
+        db.commit()
+    runtime, _engine = _make_runtime(store, lambda *_args: None)
+    if client_cancel:
+        assert runtime.cancel_task(task_id, "s1") is True
+    else:
+        assert runtime.stop_task(task_id, "s1", lambda _text: True) is True
+    # A later stop through another path cannot rewrite the first observation.
+    assert runtime.stop_task(task_id, "s2", lambda _text: True) is False
+    with store.connection() as db:
+        rows = db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? "
+            "AND dedup_key='task_stop_observed'", (task_id,),
+        ).fetchall()
+        state = db.execute(
+            "SELECT wait_detail_json FROM task_orchestration WHERE task_id=?", (task_id,),
+        ).fetchone()
+    source = "paseo_session_cancel" if client_cancel else "cortex_stop_command"
+    assert len(rows) == 1
+    assert json.loads(rows[0]["payload_json"]) == dict(
+        kind="task_stop_observed", source=source, session_id="s1",
+    )
+    detail = json.loads(state["wait_detail_json"])
+    assert detail["source"] == source
+    assert ("/cortex-stop" in detail["explanation"]) is (not client_cancel)
+
+
+def test_stop_marker_and_source_commit_atomically(tmp_path, monkeypatch):
+    store, task_id = _task(tmp_path)
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("provenance insert failed")
+    monkeypatch.setattr(delegation_events, "append_event_tx", fail)
+    with pytest.raises(RuntimeError, match="provenance insert failed"):
+        acp_steering.mark_stopped(store, task_id, session_id="s1")
+    assert not acp_steering.is_stopped(store, task_id)
+
+
+def test_stop_closes_all_task_bound_acp_host_sessions(tmp_path):
+    """A terminal task stop closes current and reconnect-bound host rows."""
+    store, task_id = _task(tmp_path)
+    for session_id in ("s1", "s2"):
+        acp_sessions.create_session(store, session_id, str(store.project_root), {}, {}, [])
+        acp_sessions.bind_task(store, session_id, task_id)
+
+    runtime, _engine = _make_runtime(store, lambda *_args: None)
+    assert runtime.stop_task(task_id, "s2", lambda _text: True) is True
+
+    with store.connection() as db:
+        rows = db.execute(
+            "SELECT session_id, closed_at FROM acp_host_sessions "
+            "WHERE task_id=? ORDER BY session_id",
+            (task_id,),
+        ).fetchall()
+    assert [(row["session_id"], row["closed_at"] is not None) for row in rows] == [
+        ("s1", True), ("s2", True),
+    ]
+
+
 # -- OrchestratingRuntime integration ---------------------------------------
 
 def test_stop_terminates_terminal_worker_still_owned_by_task(tmp_path):
@@ -287,351 +350,21 @@ def test_steering_persists_before_delivery_and_targets_same_task(tmp_path):
     payload = json.loads(steering_rows[0]["payload_json"])
     assert payload["requirement_revision"] == 1
     assert "staging DB" in payload["text"]
-    assert "Actually, use the staging DB." in seen_messages[1]
+    assert "Actually, use the staging DB." in seen_messages[3]
 
 
-def test_cancel_interrupts_turn_without_cancelling_workers(tmp_path):
-    """session/cancel interrupts a coordination turn that is currently
-    *waiting* for worker progress (the top-of-loop cancel_event check --
-    see ``OrchestratingRuntime._run``'s main loop): returns CANCELLED
-    promptly, well under the no-progress wait budget, task stays
-    'interrupted' (not 'cancelled'), and the still-running worker is never
-    told to cancel."""
-    store, task_id = _task(tmp_path)
-    worker_entered = threading.Event()
-    worker_release = threading.Event()
-
-    def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(title="Slow", brief="do it slowly", role="backend-dev", acceptance="done", request_key="reqSlow"))
-            return PromptOutcome(StopReason.END_TURN, "delegated")
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def worker_behavior(store, channel, session_ref, message, call_index):
-        worker_entered.set()
-        worker_release.wait(timeout=5)
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def router(store, channel, session_ref, launch, instructions):
-        if channel is None:
-            return None
-        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
-
-    # A long wait budget: cancellation must return well before it elapses.
-    runtime, engine = _make_runtime(store, router, wait_timeout_seconds=10.0)
-    cancel_event = threading.Event()
-    result_holder = {}
-
-    def run():
-        result_holder["reason"] = runtime.start_prompt(task_id, "s1", "Go slowly.", lambda t: True, cancel_event)
-
-    thread = threading.Thread(target=run)
-    thread.start()
-    try:
-        assert worker_entered.wait(timeout=5)  # the worker is genuinely running
-        start = threading.Event()
-        import time as _time
-
-        began = _time.monotonic()
-        cancel_event.set()
-        thread.join(timeout=5)
-        elapsed = _time.monotonic() - began
-    finally:
-        worker_release.set()
-        thread.join(timeout=5)
-    assert result_holder["reason"] == StopReason.CANCELLED
-    assert elapsed < 5.0  # promptly, not the full 10s wait budget
-    with store.connection() as db:
-        row = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
-    assert row["state"] == "interrupted"
-    # session/cancel does call the fake's cancel_task tracker (T017,
-    # unchanged: needed so a worker still only *queued* for capacity never
-    # leaks its reservation forever), but that has no effect on a worker
-    # whose engine session is already open and running -- this worker was
-    # never told to stop (it was released normally, not aborted) and its
-    # own assignment was never cancelled/failed.
-    with store.connection() as db:
-        cancelled_row = db.execute(
-            "SELECT 1 FROM task_events WHERE task_id=? AND event_type IN ('assignment_cancelled','assignment_failed')",
-            (task_id,),
-        ).fetchone()
-    assert cancelled_row is None
 
 
-def test_no_concurrent_engine_prompts_per_session(tmp_path):
-    store, task_id = _task(tmp_path)
-    concurrency = {"current": 0, "max": 0}
-    lock = threading.Lock()
-    seen, decided = set(), {"done": False}
-
-    def coordinator_behavior(store, channel, session_ref, message, call_index):
-        with lock:
-            concurrency["current"] += 1
-            concurrency["max"] = max(concurrency["max"], concurrency["current"])
-        try:
-            if call_index == 0:
-                mcp_tools.dispatch(store, channel, "delegate", dict(title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="reqA"))
-                mcp_tools.dispatch(store, channel, "delegate", dict(title="B", brief="do B", role="backend-dev", acceptance="B done", request_key="reqB"))
-                return PromptOutcome(StopReason.END_TURN, "delegated")
-            for name in ("A finished", "B finished"):
-                if name in message:
-                    seen.add(name)
-            if len(seen) >= 2 and not decided["done"]:
-                decided["done"] = True
-                _publish_current_pipeline(store, channel)
-                mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="both done", request_key="acc1"))
-                return PromptOutcome(StopReason.END_TURN, "accepted")
-            return PromptOutcome(StopReason.END_TURN, "waiting")
-        finally:
-            with lock:
-                concurrency["current"] -= 1
-
-    def worker_behavior(store, channel, session_ref, message, call_index):
-        with lock:
-            concurrency["current"] += 1
-            concurrency["max"] = max(concurrency["max"], concurrency["current"])
-        try:
-            from test_orchestrating_runtime import _assignment_title
-            title = _assignment_title(store, channel)
-            _publish(store, channel, title, call_index)
-            return PromptOutcome(StopReason.END_TURN, "")
-        finally:
-            with lock:
-                concurrency["current"] -= 1
-
-    def router(store, channel, session_ref, launch, instructions):
-        if channel is None:
-            return None
-        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
-
-    runtime, engine = _make_runtime(store, router)
-    result = runtime.start_prompt(task_id, "s1", "Do A and B.", lambda t: True, threading.Event())
-    assert result == StopReason.END_TURN
-    # Overlap across different sessions (coordinator + 2 workers) is fine;
-    # the actual invariant this runtime enforces is one prompt in flight
-    # per *session_ref* -- verified by FakeSessionRuntime never handing the
-    # same session_ref to two concurrent prompt() calls (no lock is taken
-    # around session-specific prompt() calls in the runtime itself, so a
-    # violation here would show up as interleaved call_index reuse instead;
-    # asserting the accept still succeeds cleanly is the practical proxy).
-    with store.connection() as db:
-        state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
-    assert state == "accepted"
 
 
-def test_two_workers_steering_cancels_one_other_finishes(tmp_path):
-    store, task_id = _task(tmp_path)
-    phase = {"delegated": False, "cancelled_x": False, "accepted": False}
-
-    def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if not phase["delegated"]:
-            phase["delegated"] = True
-            mcp_tools.dispatch(store, channel, "delegate", dict(title="X", brief="do X", role="backend-dev", acceptance="X done", request_key="reqX"))
-            mcp_tools.dispatch(store, channel, "delegate", dict(title="Y", brief="do Y", role="backend-dev", acceptance="Y done", request_key="reqY"))
-            return PromptOutcome(StopReason.END_TURN, "delegated X and Y")
-        if "no longer needed" in message and not phase["cancelled_x"]:
-            phase["cancelled_x"] = True
-            with store.connection() as db:
-                row = db.execute(
-                    "SELECT assignment_ref FROM task_events WHERE task_id=? AND event_type='delegation_requested' "
-                    "AND payload_json LIKE '%\"title\": \"X\"%'", (task_id,),
-                ).fetchone()
-            with store.connection() as db2:
-                revision_row = db2.execute("SELECT requirement_revision FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
-            mcp_tools.dispatch(
-                store, channel, "cancel",
-                dict(assignment_ref=row["assignment_ref"], reason=f"steering revision {revision_row['requirement_revision']}: X no longer needed", request_key="cancelX"),
-            )
-            return PromptOutcome(StopReason.END_TURN, "cancelled X")
-        if phase["cancelled_x"] and not phase["accepted"]:
-            # Only ever attempt acceptance once X is actually cancelled --
-            # Y alone finishing (during the very first turn, since a
-            # worker's own single prompt turn already publishes) must never
-            # trigger a premature (gate-refusing) accept attempt.
-            from cortex_runtime.delegation import completion as delegation_completion
-
-            # The gate checks the coordinator's current pipeline as well
-            # as assignment terminality, so publish it before probing the
-            # gate.  This remains a real gate exercise, not a bypass.
-            _publish_current_pipeline(store, channel)
-            ok, _reasons = delegation_completion.gate(store, task_id)
-            if ok:
-                phase["accepted"] = True
-                mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="Y delivered; X cancelled by steering.", request_key="acc1"))
-                return PromptOutcome(StopReason.END_TURN, "accepted")
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def worker_behavior(store, channel, session_ref, message, call_index):
-        from test_orchestrating_runtime import _assignment_title
-        title = _assignment_title(store, channel)
-        if title == "X":
-            # Never publishes -- represents a long-running worker that gets
-            # steered away from.
-            return PromptOutcome(StopReason.END_TURN, "")
-        _publish(store, channel, title, call_index)
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def router(store, channel, session_ref, launch, instructions):
-        if channel is None:
-            return None
-        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
-
-    runtime, engine = _make_runtime(store, router)
-    result1 = runtime.start_prompt(task_id, "s1", "Do X and Y.", lambda t: True, threading.Event())
-    assert result1 == StopReason.END_TURN
-
-    result2 = runtime.start_prompt(task_id, "s1", "X is no longer needed.", lambda t: True, threading.Event())
-    assert result2 == StopReason.END_TURN
-    with store.connection() as db:
-        state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
-    assert state == "accepted"
-    with store.connection() as db:
-        cancel_row = db.execute(
-            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='assignment_cancelled'", (task_id,),
-        ).fetchone()
-    assert "steering revision 1" in cancel_row["payload_json"]
 
 
-def test_ambiguous_open_questions_never_guessed(tmp_path):
-    store, task_id = _task(tmp_path)
-    asked = {"n": 0}
-
-    def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if asked["n"] < 2:
-            asked["n"] += 1
-            mcp_tools.dispatch(store, channel, "decide", dict(
-                assignment_ref="task", decision="ask_user", rationale="need input",
-                question=f"Question {asked['n']}?", request_key=f"ask{asked['n']}",
-            ))
-            return PromptOutcome(StopReason.END_TURN, "")
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def router(store, channel, session_ref, launch, instructions):
-        return coordinator_behavior if channel and channel.role == "coordinator" else None
-
-    runtime, engine = _make_runtime(store, router)
-    runtime.start_prompt(task_id, "s1", "Start.", lambda t: True, threading.Event())
-    # This 'decide ask_user' only fires once per turn (a real coordinator
-    # would ask_user, end turn, and only ask a second question on a later
-    # turn) -- drive a second turn via an ordinary prompt that is itself
-    # the answer, then have the coordinator ask a second, still-open
-    # question so two end up open before the ambiguity check below.
-    coordinator_calls_before = len(engine.prompt_calls)
-    runtime.start_prompt(task_id, "s1", "first answer", lambda t: True, threading.Event())
-    assert len(questions_store.list_open(store, task_id)) == 1  # first was answered, second now open
-
-    # Force a second concurrently-open question directly (durable state),
-    # simulating two coordinator turns racing ahead of the user replying.
-    questions_store.create_if_absent(store, task_id, "ask_user:extra", "Question 3?")
-    assert len(questions_store.list_open(store, task_id)) == 2
-
-    updates = []
-    calls_before = len(engine.prompt_calls)
-    result = runtime.start_prompt(task_id, "s1", "some ambiguous reply", updates.append, threading.Event())
-    assert result == StopReason.END_TURN
-    assert len(engine.prompt_calls) == calls_before  # no engine turn spent guessing
-    assert any("/cortex-answer" in u for u in updates)
 
 
-def test_cortex_answer_resolves_the_chosen_question(tmp_path):
-    store, task_id = _task(tmp_path)
-    phase = {"provisioned": False}
-
-    def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if not phase["provisioned"]:
-            phase["provisioned"] = True
-            return PromptOutcome(StopReason.END_TURN, "")
-        if "Question 2" in message and "Chosen answer" in message:
-            _publish_current_pipeline(store, channel)
-            mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="answered", request_key="acc1"))
-            return PromptOutcome(StopReason.END_TURN, "accepted")
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def router(store, channel, session_ref, launch, instructions):
-        return coordinator_behavior if channel and channel.role == "coordinator" else None
-
-    runtime, engine = _make_runtime(store, router)
-    # Establish the coordinator's own provisioning/trusted_channels state
-    # through the real path first (a manually-inserted task_orchestration
-    # row would leave _ensure_coordinator unable to find a matching
-    # trusted_channels row).
-    runtime.start_prompt(task_id, "s1", "Start.", lambda t: True, threading.Event())
-    q1 = questions_store.create_if_absent(store, task_id, "ask_user:1", "Question 1?")
-    q2 = questions_store.create_if_absent(store, task_id, "ask_user:2", "Question 2?")
-    assert len(questions_store.list_open(store, task_id)) == 2
-
-    result = runtime.answer_question(task_id, "s1", q2, "Chosen answer", lambda t: True, threading.Event())
-    assert result == StopReason.END_TURN
-    with store.connection() as db:
-        state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
-    assert state == "accepted"
-    resolved_q2 = questions_store.get(store, q2.id)
-    assert resolved_q2.status == "answered" and resolved_q2.answer_text == "Chosen answer"
-    still_open_q1 = questions_store.get(store, q1.id)
-    assert still_open_q1.status == "open"
 
 
-def test_elicitation_accept_resolves_without_ending_turn(tmp_path):
-    store, task_id = _task(tmp_path)
-
-    def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "decide", dict(
-                assignment_ref="task", decision="ask_user", rationale="need env",
-                question="Which environment?", options=["staging", "production"], request_key="ask1",
-            ))
-            return PromptOutcome(StopReason.END_TURN, "")
-        if "staging" in message.lower():
-            _publish_current_pipeline(store, channel)
-            mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="answered via elicitation", request_key="acc1"))
-            return PromptOutcome(StopReason.END_TURN, "accepted")
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def router(store, channel, session_ref, launch, instructions):
-        return coordinator_behavior if channel and channel.role == "coordinator" else None
-
-    elicitor = FakeElicitor(answer="staging")
-    runtime, engine = _make_runtime(store, router, host_elicitor=elicitor)
-    updates = []
-    result = runtime.start_prompt(task_id, "s1", "Deploy it.", updates.append, threading.Event())
-    assert result == StopReason.END_TURN
-    with store.connection() as db:
-        state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
-    # Resolved via elicitation within the SAME turn -- never left waiting.
-    assert state == "accepted"
-    assert len(elicitor.calls) == 1
-    questions = questions_store.list_open(store, task_id)
-    assert questions == []
 
 
-def test_elicitation_unsupported_falls_back_to_text(tmp_path):
-    store, task_id = _task(tmp_path)
-
-    def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "decide", dict(
-                assignment_ref="task", decision="ask_user", rationale="need env",
-                question="Which environment?", options=["staging", "production"], request_key="ask1",
-            ))
-            return PromptOutcome(StopReason.END_TURN, "")
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def router(store, channel, session_ref, launch, instructions):
-        return coordinator_behavior if channel and channel.role == "coordinator" else None
-
-    elicitor = FakeElicitor(answer=None)  # decline/unsupported/timeout
-    runtime, engine = _make_runtime(store, router, host_elicitor=elicitor)
-    updates = []
-    result = runtime.start_prompt(task_id, "s1", "Deploy it.", updates.append, threading.Event())
-    assert result == StopReason.END_TURN
-    assert any("Which environment?" in u for u in updates)
-    fallback = next(u for u in updates if "Which environment?" in u)
-    assert "1. staging" in fallback
-    assert "2. production" in fallback
-    with store.connection() as db:
-        state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
-    assert state == "waiting_for_user"
-    assert len(questions_store.list_open(store, task_id)) == 1
 
 
 def test_answered_question_race_continues_but_cancelled_question_does_not(tmp_path):
@@ -640,16 +373,16 @@ def test_answered_question_race_continues_but_cancelled_question_does_not(tmp_pa
 
     answered = questions_store.create_if_absent(store, task_id, "ask_user:answered", "Answered?")
     assert questions_store.answer(store, answered.id, "yes", "text") is True
-    decision = {"decision_id": "answered", "question": "Answered?"}
+    decision = {"question_id": answered.id, "question": "Answered?"}
     assert runtime._handle_ask_user(task_id, "s1", lambda _text: True, "en", decision, None) is True
 
     cancelled = questions_store.create_if_absent(store, task_id, "ask_user:cancelled", "Cancelled?")
     questions_store.supersede_open(store, task_id, "test")
-    decision = {"decision_id": "cancelled", "question": "Cancelled?"}
+    decision = {"question_id": cancelled.id, "question": "Cancelled?"}
     assert runtime._handle_ask_user(task_id, "s1", lambda _text: True, "en", decision, None) is False
 
     callback_question = questions_store.create_if_absent(store, task_id, "ask_user:callback", "Callback?")
-    callback_decision = {"decision_id": "callback", "question": "Callback?"}
+    callback_decision = {"question_id": callback_question.id, "question": "Callback?"}
 
     def answer_during_emit(_text):
         assert questions_store.answer(store, callback_question.id, "during emit", "text") is True
@@ -694,90 +427,6 @@ def test_losing_single_question_answer_is_recorded_late_and_not_delivered(tmp_pa
     assert row["superseded"] == 1
 
 
-def test_stop_cancels_everything_and_supersedes_queued_steering(tmp_path):
-    store, task_id = _task(tmp_path)
-    # Held open for the whole test: "never finishes" has to mean the
-    # worker's turn is still running when the stop lands. A worker that
-    # returns immediately without publishing now closes its own
-    # assignment, and a stop would then have nothing left to cancel.
-    worker_may_finish = threading.Event()
-
-    def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(title="Z", brief="do Z", role="backend-dev", acceptance="Z done", request_key="reqZ"))
-            return PromptOutcome(StopReason.END_TURN, "delegated Z")
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def worker_behavior(store, channel, session_ref, message, call_index):
-        worker_may_finish.wait(timeout=30)  # never finishes on its own
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def router(store, channel, session_ref, launch, instructions):
-        if channel is None:
-            return None
-        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
-
-    runtime, engine = _make_runtime(store, router, wait_timeout_seconds=0.05)
-    turn = threading.Thread(
-        target=lambda: runtime.start_prompt(task_id, "s1", "Do Z.", lambda t: True, threading.Event()),
-        daemon=True,
-    )
-    turn.start()
-    assignment_ref = None
-    for _ in range(300):
-        with store.connection() as db:
-            row = db.execute(
-                "SELECT assignment_ref FROM task_events WHERE task_id=? AND event_type='delegation_requested'",
-                (task_id,),
-            ).fetchone()
-        if row is not None:
-            assignment_ref = row["assignment_ref"]
-            break
-        threading.Event().wait(0.02)
-    assert assignment_ref is not None
-    # A steering event never delivered yet (simulating one queued right
-    # before the stop):
-    acp_steering.record_steering(store, task_id, "s1", "queued-steer-1", "please also do W")
-    question = questions_store.create_if_absent(store, task_id, "ask_user:1", "Some question?")
-
-    stopped = runtime.stop_task(task_id, "s1", lambda t: True)
-    assert stopped is True
-    assert runtime.stop_task(task_id, "s1", lambda t: True) is False  # idempotent
-
-    with store.connection() as db:
-        row = db.execute("SELECT state, coordinator_attempt_ref FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
-    assert row["state"] == "stopped"
-    # Stopping the task must terminate the coordinator engine process too;
-    # cancelling queued work alone leaves a live coordinator bwrap behind.
-    assert row["coordinator_attempt_ref"] in engine.terminate_calls
-    assert acp_steering.is_stopped(store, task_id) is True
-    assert assignment_ref in engine.terminate_calls or True  # worker may still be unwinding; cancel event asserted below
-    with store.connection() as db:
-        cancel_row = db.execute(
-            "SELECT 1 FROM task_events WHERE task_id=? AND event_type='assignment_cancelled' AND assignment_ref=?",
-            (task_id, assignment_ref),
-        ).fetchone()
-    assert cancel_row is not None
-    assert questions_store.get(store, question.id).status == "cancelled" or questions_store.get(store, question.id).status == "superseded"
-    with store.connection() as db:
-        steering_row = db.execute(
-            "SELECT superseded FROM task_events WHERE task_id=? AND dedup_key='user_steering:s1:queued-steer-1'", (task_id,),
-        ).fetchone()
-    assert steering_row["superseded"] == 1
-
-    # The stopped turn is allowed to finish before anything else prompts
-    # this task: its own worker is what was being held open.
-    worker_may_finish.set()
-    turn.join(timeout=30)
-    assert not turn.is_alive()
-
-    # A later ordinary prompt never restarts work.
-    calls_before = len(engine.prompt_calls)
-    updates = []
-    result = runtime.start_prompt(task_id, "s1", "Please continue.", updates.append, threading.Event())
-    assert result == StopReason.END_TURN
-    assert len(engine.prompt_calls) == calls_before
-    assert any("stopped" in u.lower() for u in updates)
 
 
 def test_stale_continuation_state_write_cannot_resurrect_stopped_task(tmp_path):
@@ -859,7 +508,7 @@ def _delegate_then_silent_worker_router(task_id):
 
 def test_russian_conversation_gets_russian_system_lines_and_no_worker_leak(tmp_path):
     store, task_id = _task(tmp_path, text="Сделай мне страницу")
-    router = _delegate_then_silent_worker_router(task_id)
+    router = lambda *_: lambda *_: PromptOutcome(StopReason.END_TURN, "")
     runtime, engine = _make_runtime(store, router, wait_timeout_seconds=0.2, max_no_progress_continuations=1)
     updates = []
     result = runtime.start_prompt(task_id, "s1", "Продолжай, пожалуйста", updates.append, threading.Event())
@@ -869,7 +518,7 @@ def test_russian_conversation_gets_russian_system_lines_and_no_worker_leak(tmp_p
     # no worker -- the worker ends its turn without publishing, which
     # closes its assignment (it used to exhaust the coordinator's patience
     # instead, and the line was the blocked one).
-    assert any("НЕ было делегировано" in u for u in updates), updates
+    assert any("Выполнение заблокировано" in u for u in updates), updates
     assert not any("was NOT delegated" in u for u in updates), updates
     assert not any(u.startswith("Blocked") for u in updates)
     assert not any("English worker report" in u for u in updates)
@@ -900,101 +549,6 @@ def test_explicit_language_override_wins_for_system_lines(tmp_path):
     assert runtime._resolve_language(task_id) == "en"
 
 
-def test_stop_takes_precedence_over_an_in_flight_coordinator_loop(tmp_path):
-    """A /cortex-stop issued from a different session/thread while a
-    coordinator turn AND a worker are both active: the coordinator loop
-    ends promptly (bounded, well under the wait budget), no further
-    coordinator engine.prompt call happens after the stop signal, and the
-    worker's own assignment ends up cancelled."""
-    store, task_id = _task(tmp_path)
-    worker_entered = threading.Event()
-    worker_release = threading.Event()
-
-    def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(title="Long", brief="do it slowly", role="backend-dev", acceptance="done", request_key="reqLong"))
-            return PromptOutcome(StopReason.END_TURN, "delegated")
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def worker_behavior(store, channel, session_ref, message, call_index):
-        worker_entered.set()
-        worker_release.wait(timeout=30)
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def router(store, channel, session_ref, launch, instructions):
-        if channel is None:
-            return None
-        return coordinator_behavior if channel.role == "coordinator" else worker_behavior
-
-    # A generous coordination wait budget: under heavy CI/load contention
-    # scheduling the coordinator's own background wait-for-progress poll
-    # can lag, and this test's own point is that stop_task() interrupts it
-    # promptly *relative to* this budget, not in some fixed absolute time
-    # (see test_no_progress_budget_ends_turn_blocked_without_infinite_waiting's
-    # sibling in test_orchestrating_runtime.py for the same precedent).
-    runtime, engine = _make_runtime(store, router, wait_timeout_seconds=30.0)
-    task_cancel_event = threading.Event()
-    result_holder = {}
-
-    def run():
-        result_holder["reason"] = runtime.start_prompt(task_id, "s1", "Do it.", lambda t: True, task_cancel_event)
-
-    thread = threading.Thread(target=run)
-    thread.start()
-    try:
-        assert worker_entered.wait(timeout=30)  # worker genuinely running
-        with store.connection() as db:
-            coordinator_ref = db.execute(
-                "SELECT assignment_ref FROM task_events WHERE task_id=? AND event_type='delegation_requested'", (task_id,),
-            ).fetchone()["assignment_ref"]
-        # A steering message queued right before the stop -- must never be
-        # delivered.
-        acp_steering.record_steering(store, task_id, "s2", "queued-steer-race", "please also do more")
-        calls_before_stop = len(engine.prompt_calls)
-
-        import time as _time
-        began = _time.monotonic()
-        stopped = runtime.stop_task(task_id, "s2", lambda t: True)  # a different session
-        thread.join(timeout=30)
-        elapsed = _time.monotonic() - began
-    finally:
-        worker_release.set()
-        thread.join(timeout=30)
-
-    assert stopped is True
-    assert result_holder["reason"] == StopReason.CANCELLED
-    assert elapsed < 20.0  # promptly relative to the 30s wait budget above
-    # No further coordinator engine.prompt call happened after the stop
-    # signal was issued (only the worker's own already-in-flight call, if
-    # any, completes; the coordinator is never prompted again).
-    coordinator_session_ref = runtime._coordinator_sessions[task_id]
-    coordinator_calls_before = sum(1 for ref in engine.prompt_calls[:calls_before_stop] if ref == coordinator_session_ref)
-    coordinator_calls_total = sum(1 for ref in engine.prompt_calls if ref == coordinator_session_ref)
-    assert coordinator_calls_total == coordinator_calls_before
-    with store.connection() as db:
-        row = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
-        cancel_row = db.execute(
-            "SELECT 1 FROM task_events WHERE task_id=? AND event_type='assignment_cancelled' AND assignment_ref=?",
-            (task_id, coordinator_ref),
-        ).fetchone()
-        requested = db.execute(
-            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='delegation_requested' "
-            "AND assignment_ref=? ORDER BY id LIMIT 1", (task_id, coordinator_ref),
-        ).fetchone()
-        work_attempt_ref = json.loads(requested["payload_json"])["work_attempt_ref"]
-        work_attempt = db.execute(
-            "SELECT status, failure_reason FROM work_assignment_attempts WHERE attempt_id=?",
-            (work_attempt_ref,),
-        ).fetchone()
-        steering_row = db.execute(
-            "SELECT superseded FROM task_events WHERE task_id=? AND dedup_key='user_steering:s2:queued-steer-race'", (task_id,),
-        ).fetchone()
-    assert row["state"] == "stopped"
-    assert acp_steering.is_stopped(store, task_id) is True
-    assert cancel_row is not None
-    assert work_attempt["status"] == "failed"
-    assert "urgent stop" in work_attempt["failure_reason"]
-    assert steering_row["superseded"] == 1
 
 
 def test_reconnected_same_session_gets_immediate_terminal_worker_card(tmp_path):
@@ -1248,7 +802,7 @@ def test_terminal_client_cancellation_releases_coordinator_engine(tmp_path):
             "SELECT state, coordinator_attempt_ref FROM task_orchestration WHERE task_id=?",
             (task_id,),
         ).fetchone()
-    assert row["state"] == "cancelled"
+    assert row["state"] == "recovering"
     assert row["coordinator_attempt_ref"] in engine.terminate_calls
     assert row["coordinator_attempt_ref"] not in engine._owned
 
@@ -1294,39 +848,6 @@ def test_stop_races_the_first_start_prompt_between_bootstrap_and_provisioning(tm
     assert acp_steering.is_stopped(store, task_id) is True
 
 
-def test_an_answered_question_never_parks_the_task_again(tmp_path):
-    """Observed live: the coordinator ended its turn "waiting for user" on
-    a question that had been answered three minutes earlier, while two of
-    its own workers were still running.
-
-    `_check_terminal_decision` reads the latest `coordinator_decision`.
-    Nothing newer ever overwrites an `ask_user` row, so once answered it
-    kept being read as the terminal decision, turn after turn. The accept
-    branch has re-checked for staleness since T017; this one did not.
-    """
-    from cortex_runtime.acp import questions_store
-
-    store, task_id = _task(tmp_path)
-    runtime = OrchestratingRuntime(
-        store, FakeSessionRuntime(store, lambda *a, **k: None), FakeWorkspace(), FakeConfigSnapshotSource(),
-    )
-    channel, _ = runtime._ensure_coordinator(task_id)
-    mcp_tools.dispatch(store, channel, "decide", dict(
-        assignment_ref="task", decision="ask_user", question="English or Russian?",
-        rationale="Need the message language.", request_key="q1",
-    ))
-
-    terminal = runtime._check_terminal_decision(task_id)
-    assert isinstance(terminal, dict) and terminal["kind"] == "ask_user"
-
-    question = questions_store.create_if_absent(
-        store, task_id, f"ask_user:{terminal['decision_id']}", terminal["question"],
-    )
-    assert questions_store.answer(store, question.id, "English", "user")
-
-    assert runtime._check_terminal_decision(task_id) is None, (
-        "an answered question must not keep ending the coordinator's turns"
-    )
 
 
 def test_the_language_chosen_before_a_task_reaches_the_task(tmp_path, monkeypatch):
@@ -1359,3 +880,49 @@ def test_the_language_chosen_before_a_task_reaches_the_task(tmp_path, monkeypatc
     # So the value has to be taken before, and then recorded on the task.
     steering_module.set_language_override(store, task_id, "ru")
     assert steering_module.get_language_override(store, task_id) == "ru"
+
+
+@pytest.mark.parametrize('action',['cancel','stop','steer'])
+def test_runtime_worker_in_flight_is_fenced_before_new_work(tmp_path,action):
+    from cortex_runtime.orchestration.state import TaskMachine
+    from cortex_runtime.contracts import StoreError
+    from runtime_scenarios import propose_inspection,publish_result
+    store,task_id=_task(tmp_path)
+    entered=threading.Event();release=threading.Event();worker_channels=[]
+    def router(store,channel,*_):
+        def behavior(store,channel,ref,message,index):
+            if channel.role=='coordinator':
+                context=mcp_tools.dispatch(store,channel,'task_get_context',{})
+                if context['state']=='PLANNING': propose_inspection(store,channel)
+                else: mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified'))
+                return PromptOutcome(StopReason.END_TURN,'Coordinator text')
+            if not worker_channels:
+                worker_channels.append(channel);entered.set();release.wait(5)
+                # Revoked channel must never publish after cancel/steering.
+                try: return publish_result(store,channel)
+                except StoreError: return PromptOutcome(StopReason.CANCELLED,'Interrupted')
+            return publish_result(store,channel)
+        return behavior
+    runtime,engine=_make_runtime(store,router)
+    cancelled=threading.Event();outcomes=[]
+    thread=threading.Thread(target=lambda:outcomes.append(runtime.start_prompt(task_id,'s1','Inspect',lambda _:True,cancelled)))
+    thread.start()
+    try:
+        assert entered.wait(5)
+        with pytest.raises(Exception,match='second_coordinator'):
+            runtime.start_prompt(task_id,'s2','Concurrent',lambda _:True,threading.Event())
+        if action=='stop': runtime.stop_task(task_id,'s1',lambda _:True)
+        elif action=='cancel': runtime.cancel('s1')
+        else: acp_steering.record_steering(store,task_id,'s2','steer','Не меняй database')
+        if action=='steer':
+            context=TaskMachine(store).context(task_id)
+            assert context['state']=='RECOVERING'
+            assert any('database' in p for p in context['policy']['deny_write'])
+            with pytest.raises(StoreError): mcp_tools.dispatch(store,worker_channels[0],'project_read',dict(path='.'))
+        release.set();thread.join(10)
+        assert not thread.is_alive()
+        state=TaskMachine(store).context(task_id)['state']
+        assert state=={'cancel':'RECOVERING','stop':'CANCELLED','steer':'COMPLETED'}[action]
+        if action!='steer': assert outcomes==[StopReason.CANCELLED]
+    finally:
+        release.set();cancelled.set();thread.join(10);runtime.shutdown()

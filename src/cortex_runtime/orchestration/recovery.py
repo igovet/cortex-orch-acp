@@ -1,0 +1,108 @@
+"""Reconcile exact retained publication evidence after interrupted result delivery."""
+import hashlib
+import json
+
+from ..contracts import StoreError
+from .state import TaskMachine, encoded, event
+
+MAX_ATTEMPT_RETRIES = 2
+
+
+def release_observed(runtime, task_id, attempt_id):
+    """Reuse a reservation only after its engine's absence was observed."""
+    if runtime._engine.lookup_owned(attempt_id) != 'absent':
+        return False
+    with runtime._store.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row=db.execute('SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
+                       (task_id,attempt_id)).fetchone()
+        if row and not db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND type='WORKER_RELEASED' AND json_extract(payload_json,'$.assignment_ref')=?",
+                                  (task_id,row[0])).fetchone():
+            event(db,task_id,'WORKER_RELEASED',dict(assignment_ref=row[0],attempt_id=attempt_id,observed_session='absent'))
+        db.commit()
+    return True
+
+
+def retry_lost(runtime,task_id,node):
+    """Retry only after absence is observed and ambiguous actions are ruled out.
+
+    No fabricated result, successful check or session receipt closes a node.
+    Old channels are revoked before a new assignment can be reserved.
+    """
+    from .state import now
+    store=runtime._store
+    assignment=node['assignment_ref']
+    with store.connection() as db:
+        provision=db.execute('SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?',
+                             (task_id,assignment)).fetchone()
+    if provision:
+        status=runtime._engine.lookup_owned(provision['attempt_id'])
+        if status!='absent':
+            runtime._engine.terminate_owned(provision['attempt_id'])
+            if runtime._engine.lookup_owned(provision['attempt_id'])!='absent':
+                raise StoreError('lost_worker_termination_unconfirmed')
+        release_observed(runtime,task_id,provision['attempt_id'])
+    with store.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        failure=db.execute("SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref=? AND event_type='assignment_failed' AND superseded=0 ORDER BY id DESC LIMIT 1",(task_id,assignment)).fetchone()
+        reason=json.loads(failure[0]).get('error','') if failure else ''
+        if reason in {'refusal','authorization_loss','provider_restriction','cancellation'} or reason.startswith('fallback_refused:'):
+            raise StoreError('worker_failure_not_retryable:'+reason)
+        attempts=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'",(task_id,)).fetchall()
+        count=sum(json.loads(row[0]).get('node')==node['node_id'] and json.loads(row[0]).get('revision')==node['revision'] for row in attempts)
+        if count>=MAX_ATTEMPT_RETRIES:
+            raise StoreError('worker_retry_limit')
+        if provision:
+            receipts=db.execute("SELECT r.result_json FROM runtime_requests r JOIN trusted_channels c ON c.channel_id=r.actor "
+                                "WHERE r.task_id=? AND c.attempt_id=? AND r.operation IN ('command_run','project_write','project_mkdir','project_delete','draft_write','external_call')",
+                                (task_id,provision['attempt_id'])).fetchall()
+            if any(not json.loads(row[0]).get('complete') for row in receipts):
+                raise StoreError('lost_worker_action_outcome_unknown')
+            db.execute('UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND attempt_id=? AND revoked_at IS NULL',
+                        (now(),task_id,provision['attempt_id']))
+        changed=db.execute("UPDATE runtime_nodes SET status='pending',assignment_ref=NULL WHERE task_id=? AND assignment_ref=? AND result_json IS NULL",
+                           (task_id,assignment)).rowcount
+        if changed!=1:
+            raise StoreError('lost_worker_result_changed')
+        event(db,task_id,'ASSIGNMENT_RETRIED',dict(node=node['node_id'],revision=node['revision'],retry=count+1,
+                                                 previous_assignment=assignment,observed_session='absent' if provision else 'not_provisioned'))
+        db.commit()
+
+
+def reconcile_results(store, task_id):
+    with store.connection() as db:
+        requests = db.execute("SELECT * FROM runtime_requests WHERE task_id=? AND operation='result_submit'", (task_id,)).fetchall()
+    for request in requests:
+        saved = json.loads(request['result_json'])
+        if saved.get('complete'):
+            continue
+        result = saved['result']
+        if hashlib.sha256(encoded(result).encode()).hexdigest() != request['digest']:
+            raise StoreError('result_receipt_digest_mismatch')
+        with store.connection() as db:
+            provision = db.execute('SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?',
+                                   (task_id, saved['assignment_ref'])).fetchone()
+            if not provision:
+                raise StoreError('result_provision_missing')
+            rows = db.execute("SELECT id,payload_json,origin FROM task_events WHERE task_id=? AND assignment_ref=? AND event_type='worker_result' AND superseded=0",
+                              (task_id, provision['attempt_id'])).fetchall()
+        matching = [row for row in rows if json.loads(row['payload_json']).get('report_ref') == result['report_ref']]
+        if not matching:
+            # A still-live worker may retry. A lost worker remains blocked; no
+            # publication event or success is manufactured from the receipt.
+            continue
+        if len(matching) != 1 or matching[0]['origin'] != request['actor']:
+            raise StoreError('ambiguous_result_publication')
+        observed = json.loads(matching[0]['payload_json'])
+        observed_checks = [{k: c[k] for k in ('name', 'outcome', 'tool_call_ref') if k in c and c[k] is not None}
+                           for c in observed.get('checks', [])]
+        if observed.get('summary') != result['summary'] or observed_checks != result['checks']:
+            raise StoreError('result_publication_mismatch')
+        TaskMachine(store).record_result(task_id, saved['assignment_ref'], result)
+        saved.update(complete=True, receipt=dict(recorded=True, cursor=matching[0]['id'], superseded=False))
+        with store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?',
+                       (encoded(saved), task_id, request['actor'], request['request_key']))
+            event(db, task_id, 'RESULT_DELIVERY_RECOVERED', dict(assignment_ref=saved['assignment_ref'], report_ref=result['report_ref']))
+            db.commit()

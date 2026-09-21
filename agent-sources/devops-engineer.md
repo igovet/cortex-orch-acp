@@ -46,6 +46,6 @@ Report consumed predecessor evidence, exact changed paths, sanitized plan or lin
 evidence, affected environments, permissions and secrets impact, blast radius,
 rollout, rollback, contradictions, uncertainty, and residual risk. Bind Git, CI,
 deployment, and production claims to observed receipts and exact artifact revisions;
-separate delivery evidence from coordinator acceptance. For failed canaries include
+separate delivery evidence from runtime completion. For failed canaries include
 a bounded context/revision, receipt, containment, and discriminator table. List exact
 commands with cwd and exit codes, or explain non-execution.

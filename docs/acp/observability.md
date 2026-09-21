@@ -47,12 +47,27 @@ than a second transcript store. Each redacted `progress` row carrying
 reads it in event-id order with an `after` cursor and bounded page size.
 While a worker is active, the host panel refreshes that cursor incrementally
 about every 750 ms. Exact lifecycle updates for one logical tool coalesce in
-the panel, while adjacent worker message chunks remain ordered and render as
-one stream segment. Paseo hides Cortex MCP and private `.cortex` operations
-from coordinator and worker feeds, including replay, while ordinary project
-and external MCP operations remain visible. The underlying task events remain
-durable. Missing, malformed or unavailable rows are not replaced with an
-inferred success state.
+the panel, while worker deltas are held until a tool boundary or turn end and
+persisted as complete message blocks. Each block carries a durable segment
+identity across all runtime tools, so live and replay views preserve ordering.
+Meaningful Cortex MCP, native, external MCP and private-store operations remain
+visible with readable action names. File and skill reads are static target/status
+rows; their result bodies are excluded from new display history, including worker
+activity, and projected out of old replay. The engine still receives the read result.
+Raw data is never displayed. Other calls expand only for readable output or diffs. Thinking and exact protocol
+bookkeeping operations (including wait) are hidden by a shared presentation policy
+in both the main chat and worker panels, including old replayed history. Other input/output and display updates are retained subject to
+secret redaction. Missing, malformed or unavailable evidence is never converted
+into success. The runtime rewrite and its qualification gaps are tracked in
+[implementation status](runtime-rewrite-status.md).
+
+Paseo's worker history renders a retained native edit as a line diff only when
+the durable ACP event contains an exact file path plus both `oldText` and
+`newText` values (including new-file and delete-file null sides). It shows the
+path above the numbered context/add/delete rows. A pending edit envelope with
+no retained text stays a compact `Edit · Preparing file…` row and never turns
+empty `{}`/`[]` transport placeholders into a raw JSON detail view; the panel
+does not infer a diff from the current file or from a status-only event.
 
 ## 2. Usage/cost attribution (`observability.usage`)
 
@@ -141,6 +156,16 @@ are well under the 24-character floor regardless.
 (the fixed, connection-pinned launch binary path) plus a digest and count
 of the complete argv.
 
+Coordinator and worker message deltas use `StreamingRedactor` before they are
+placed in the ACP feed. It retains only the current lexical suffix needed to
+decide whether a credential expression continues across the next update; the
+holdback is bounded. The emitted result is partition-invariant for a given
+source, so a provider sending one large update and a provider sending the same
+text in many chunks produce the same scrubbed replay. Overlong lexical fields
+are replaced by a deterministic bounded marker. Labelled SHA-256 text is kept
+pending until the turn outcome is known and is preserved only for an accepted
+final response whose digest also passes the pipeline guard.
+
 `scrub_mapping`: applied to every `observe()` field mapping — a
 `command`/`argv`/`launch_command`-shaped list value goes through
 `scrub_command`; a string value goes through `scrub_text` (or is replaced
@@ -180,3 +205,20 @@ successful outcome, and the resulting `usage_records` row is
   JSONL-only per engine instance — see `manual_interventions` above).
 - Live qualification rows (T035–T037/T038); this task requires no paid
   model invocation.
+
+Worker history resolves the exact `delegation_requested` mapping from the
+public delegation reference to its plan assignment and graph attempt, then
+to its provisioned engine attempt. Explicit plan IDs are not interchangeable
+with delegation references. Switching workers uses that attempt’s own event
+cursor; structured native tool errors remain visible as text details.
+
+Worker recovery does not replay terminal requests or provision an old request
+under a new coordinator channel. Worker history filters displayable events
+before bounding each page, and selected completed transcripts continue loading
+while a further page exists. Catalogue polling never advances all workers with
+one shared event cursor.
+
+After a successful observed Cortex delegate call, trailing coordinator prose
+is withheld until another tool starts; the worker card represents the handoff.
+The engine turn is not cancelled, so further delegations still execute. This
+presentation rule does not affect acceptance, worker evidence, or final replies.

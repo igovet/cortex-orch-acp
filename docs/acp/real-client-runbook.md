@@ -26,8 +26,11 @@ engine probes were not run; codeg remains deferred. A separate
 contains the completed read-only worker task, its incorrect final hash,
 and the subsequent source correction that still needs a fresh GUI run.
 
-The latest Paseo observations are recorded in
-[the 2026-09-20 final evidence note](evidence/paseo-2026-09-20/final-observations.md).
+The runtime rewrite’s latest isolated Paseo observations, including retained
+failures and successful Luna/Haiku completion, are recorded in the
+[2026-09-21 runtime evidence](evidence/paseo-2026-09-21/runtime-rewrite.md).
+The [2026-09-20 final evidence note](evidence/paseo-2026-09-20/final-observations.md)
+is historical and does not qualify the rewrite.
 They cover a bare `/harvest` task, a bare `/harvest-refresh` task, native
 Paseo persistence replay, and a no-paid cancellation fixture. The two
 harvest tasks were accepted by the durable runtime; the refresh run still
@@ -129,8 +132,9 @@ prose was treated as sufficient for assignment acceptance. The retained
 regression reproduction is
 [`tests/test_delegation_mcp_tools.py`](../../tests/test_delegation_mcp_tools.py);
 it records the exact acceptance invariant without copying any private live
-transcript. A report cannot certify a rendered requirement without an observed
-structured check, and this case must not be counted as a pass.
+transcript. A report cannot certify a current work-graph `rendered_ui`
+requirement without an observed structured check, and this case must not be
+counted as a pass.
 
 The twenty-first landing observation **failed hard** when the Claude worker
 read a private `.cortex` pipeline file through a native file tool instead of
@@ -264,6 +268,31 @@ stopped and archived. No QA publication, current final pipeline edition,
 coordinator decision or task acceptance occurred, so the orchestration
 remains unqualified despite partial rendered observations and zero observed
 Cortex MCP errors.
+
+A focused [Paseo permission probe 32](evidence/paseo-2026-09-21/live-permission-probe-32.md)
+is **FAIL** for out-of-project confirmation. In a fresh disposable Git
+project, native Claude Bash `pwd` returned the project cwd without a pending
+host request; the Cortex engine recorded `coordinator_read_auto_approved`.
+An exact read of a test-owned sentinel in a sibling directory returned
+`User refused permission to run tool` within 10 milliseconds, while Cortex
+recorded `coordinator_private_or_project_check_refused` with category
+`outside_project`. The permission-receipt table had zero rows and the
+Paseo CLI showed no pending request. The refusal arose locally before a
+host decision; no user denial was observed. A follow-up “Cortex role
+restriction” was delivered as a native `user` message, and the model spent
+another turn declining to treat it as authoritative. No headless or main
+chat UI confirmation was observed, so UI visibility remains **NOT RUN**.
+
+The next [Paseo permission probe 33](evidence/paseo-2026-09-21/live-permission-probe-33.md)
+observed the repaired routing for these exact commands. In a fresh Git
+project, native Claude Bash `pwd` auto-approved, while `cat` of a test-owned
+sibling sentinel produced a pending Bash request visible through Paseo's CLI.
+The outside read was never approved or executed; the owned agent was stopped
+and archived to clear the request. The available CLI and sanitized engine
+trace did not expose the engine's permission option kinds or IDs, and no
+headless or main chat confirmation card was observed. Those UI and
+user-decision cases remain **NOT RUN**; a pending CLI record alone does not
+qualify them.
 
 A further [overlapping-turn retry](evidence/zed-2026-09-19/live-direct-project-overlap-failure.md)
 launched a real Codex worker in the exact Zed project and passed the project's

@@ -76,10 +76,10 @@ def test_load_role_worker_has_critical_rules_and_no_native_leak():
     assert len(role.sha256) == 64
 
 
-def test_load_role_coordinator_has_critical_rules():
-    role = roles.load_role("orchestrator")
-    assert role.kind == "coordinator"
-    assert role.critical_rules
+def test_load_role_coordinator_describes_runtime_owned_policy():
+    role=roles.load_role('orchestrator')
+    assert role.kind=='coordinator'
+    assert 'runtime owns the task lifecycle' in role.body_portable
 
 
 def test_load_role_shared_has_no_critical_rules_by_default():

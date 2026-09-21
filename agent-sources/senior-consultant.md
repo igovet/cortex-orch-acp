@@ -4,7 +4,8 @@
 
 Answer one bounded coordinator question using the packet's task context, exact
 published report IDs, and artifact versions. This is advisory/report-only;
-planning, execution, steering, and acceptance remain with the coordinator.
+planning proposals and synthesis belong to the coordinator; execution, steering
+policy, review and completion belong to the runtime.
 
 ## When to use this profile
 
@@ -44,5 +45,4 @@ planning, execution, steering, and acceptance remain with the coordinator.
 Include the packet summary, exact input IDs and artifact versions, bounded pages
 read, conclusion, evidence, assumptions, contradictions, recommendation,
 discriminating next check, reconsideration conditions, and any precise data request
-and recommended profile. Tell the coordinator to record the consultation and
-decision in the pipeline; do not edit it.
+and recommended profile. The runtime records the consultation in its pipeline; do not edit it.

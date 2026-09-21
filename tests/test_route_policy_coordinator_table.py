@@ -59,7 +59,8 @@ def test_coordinator_instructions_carry_the_allowed_routes_table(tmp_path, monke
     runtime, engine = _make_runtime(store, router)
     runtime.start_prompt(task_id, "s1", "Do something.", lambda update: None, threading.Event())
 
-    assert "backend-dev: codex-acp/gpt-5.6-terra {high,medium} default=medium" in captured["instructions"]
+    assert "Available worker routes" not in captured["instructions"]
+    assert "pass delegate" not in captured["instructions"]
 
 
 def test_coordinator_instructions_unchanged_when_no_policy_file_exists(tmp_path, monkeypatch):

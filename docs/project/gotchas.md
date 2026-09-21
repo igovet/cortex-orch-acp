@@ -8,9 +8,9 @@ An acknowledged tool call is not proof that a command ran or that a criterion
 passed. Preserve observed output, exit status, truncation and provenance before
 the coordinator evaluates meaning.
 
-Never interpret a missing workspace copy, conflict, unreadable journal or
-unknown integration result as an empty result. Retain the copy and recovery
-state until the exact candidate outcome is known.
+Never interpret an unknown command outcome, missing publication or unknown
+engine liveness as success. Retain receipts and reservations until the exact
+outcome is observed; revocation alone does not prove process exit.
 
 Instruction compression may replace large evidence bodies with bounded links,
 but it must keep complete mandatory rules and record packet hashes. Executor

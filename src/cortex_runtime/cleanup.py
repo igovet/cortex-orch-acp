@@ -56,6 +56,10 @@ def finish_deletions(store,db,task):
         _delete_if_present("attempt_revisions","attempt_id IN (SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND attempt_id IS NOT NULL)",(task,))
         db.execute("DELETE FROM delegation_effects WHERE idempotency_key IN (SELECT idempotency_key FROM delegation_provisioning WHERE task_id=?)",(task,))
         db.execute("DELETE FROM delegation_provisioning WHERE task_id=?",(task,))
+        _delete_if_present("runtime_requests","task_id=?",(task,))
+        _delete_if_present("runtime_events","task_id=?",(task,))
+        _delete_if_present("runtime_nodes","task_id=?",(task,))
+        _delete_if_present("runtime_tasks","task_id=?",(task,))
         # pending_questions/pending_question_late_answers (T020): the late-
         # answers table has no declared FK of its own (a deliberately inert
         # audit row -- see acp.questions_store) but carries its own

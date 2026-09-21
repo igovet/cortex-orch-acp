@@ -493,3 +493,37 @@ def test_refresh_falls_back_to_flat_set_and_records_reason_when_install_is_unver
     view = catalog_store.load_connection_snapshot(record.id, outcome.snapshot_id, environ)
     by_model = {entry.route.model: entry for entry in view.entries}
     assert _thought_levels(by_model["model-a"]) == _thought_levels(by_model["model-b"])
+
+
+def test_model_efforts_observes_absent_selector_and_restores_initial_model():
+    from cortex_runtime.catalog.model_efforts import observe_model_efforts
+    options = _load_options('codex_acp_config_options.json')
+    model_option = next(o for o in options if o.get('category') == 'model')
+    calls = []
+    def call(method, params, *, timeout):
+        assert method == 'session/set_config_option'
+        calls.append(params)
+        raw = json.loads(json.dumps(options))
+        next(o for o in raw if o.get('category') == 'model')['currentValue'] = params['value']
+        if params['value'] == 'model-b':
+            raw = [o for o in raw if o.get('category') != 'thought_level']
+        return {'configOptions': raw}
+    levels = observe_model_efforts(call, 'exact-session', options, timeout=2)
+    assert levels['model-a']
+    assert levels['model-b'] == ()
+    assert calls[-1]['value'] == model_option['currentValue']
+    enriched = parse_observation(options).with_model_thought_levels(levels)
+    assert not [p for p in enriched.parameter_pairs_for('model-b') if p[0] == 'thought_level']
+    assert all(p['sessionId'] == 'exact-session' for p in calls)
+
+
+def test_model_efforts_does_not_accept_unconfirmed_selection():
+    from cortex_runtime.catalog.model_efforts import observe_model_efforts
+    options = _load_options('codex_acp_config_options.json')
+    calls = []
+    def call(method, params, *, timeout):
+        calls.append(params)
+        return {'configOptions': options}
+    with pytest.raises(ValueError, match='not confirmed'):
+        observe_model_efforts(call, 'exact-session', options, timeout=2)
+    assert calls[-1]['value'] == next(o['currentValue'] for o in options if o.get('category') == 'model')

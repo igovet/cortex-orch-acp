@@ -326,6 +326,7 @@ class Store:
         from .delegation.store import DELEGATION_SCHEMA
         from .delegation.work_graph import WORK_GRAPH_SCHEMA
         from .delegation.events_store import TASK_EVENTS_SCHEMA
+        from .orchestration.state import SCHEMA as RUNTIME_SCHEMA
         from .delegation.capacity_store import CAPACITY_SCHEMA
         from .delegation.evidence_store import EVIDENCE_SCHEMA
         from .delegation.generations_store import CONTEXT_GENERATIONS_SCHEMA
@@ -371,8 +372,15 @@ class Store:
             db.commit()
             if initialize:
                 db.execute("PRAGMA journal_mode=WAL")
-                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+WORK_GRAPH_SCHEMA+TASK_EVENTS_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+WORKSPACE_SCHEMA+INTEGRATION_SCHEMA+ROUTING_SCHEMA+OBSERVABILITY_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
+                db.executescript("BEGIN IMMEDIATE;\n"+SCHEMA+IDENTITY_SCHEMA+CATALOG_SCHEMA+CONFIGURATION_SCHEMA+ACP_SESSION_SCHEMA+DELEGATION_SCHEMA+WORK_GRAPH_SCHEMA+TASK_EVENTS_SCHEMA+RUNTIME_SCHEMA+CAPACITY_SCHEMA+EVIDENCE_SCHEMA+REPLAY_SCHEMA+PENDING_QUESTIONS_SCHEMA+TASK_LANGUAGE_SCHEMA+TASK_STOPPED_SCHEMA+CONTEXT_GENERATIONS_SCHEMA+LARGE_OUTPUT_SCHEMA+PROCESS_REGISTRY_SCHEMA+WORKSPACE_SCHEMA+INTEGRATION_SCHEMA+ROUTING_SCHEMA+OBSERVABILITY_SCHEMA+f"PRAGMA application_id={APPLICATION_ID};\nCOMMIT;")
             if app==APPLICATION_ID:
+                # T036: add the model-selected requirement type and the
+                # fail-closed legacy assignment state to pre-existing graph
+                # rows.  WorkGraph also performs this check on direct graph
+                # access, but opening a store must make the migration durable
+                # before completion reads it.
+                from .delegation.work_graph import WorkGraph
+                WorkGraph._ensure_schema(db)
                 # T017: additive columns for a pre-T017 store that already has
                 # task_events/task_orchestration (CREATE TABLE IF NOT EXISTS
                 # above never adds columns to an existing table).
@@ -599,7 +607,7 @@ class Store:
             if db is not None:db.close()
             fcntl.flock(lock_fd,fcntl.LOCK_UN); os.close(lock_fd)
 
-    def call(self,operation,args,thread_id,parent_thread_id=None,*,original_request=None,steering_source=None,trusted=False):
+    def call(self,operation,args,thread_id,parent_thread_id=None,*,original_request=None,steering_source=None,trusted=False,authorization=None):
         """``trusted`` is set only by ``server._dispatch_channeled`` (never
         from a model argument or ``_meta``) after a channel secret has been
         verified. A task once owned through ``task_owners``/``trusted_channels``
@@ -625,14 +633,16 @@ class Store:
         if operation=="create_draft" and "request_key" not in args:
             args=dict(args,request_key=str(uuid.uuid4()))
         if operation=="create_task" and parent_thread_id is not None:raise StoreError("child_creation")
-        return self._transaction(operation,args,(thread_id,parent_thread_id),original_request,steering_source,trusted)
+        return self._transaction(operation,args,(thread_id,parent_thread_id),original_request,steering_source,trusted,authorization)
 
-    def _transaction(self,operation,args,context,original_request=None,steering_source=None,trusted=False):
+    def _transaction(self,operation,args,context,original_request=None,steering_source=None,trusted=False,authorization=None):
         rollbacks=[]; staged=[]
         try:
             with self.connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 try:
+                    if authorization is not None:
+                        authorization(db)
                     bound=dict(args); thread,parent=context
                     capture=dict(status="not_attempted",reason=None)
                     if operation=="create_task":
@@ -901,6 +911,12 @@ class Store:
 
     def _recover(self,db,task,outcome=None):
         from .cleanup import finish_deletions
+        # A committed worker_result is terminal evidence even if an older
+        # process died before updating the optional work-graph projection.
+        # Repair that projection under this task's existing transaction so a
+        # subsequent list/snapshot cannot report a finished worker as running.
+        from .delegation.work_graph import WorkGraph
+        WorkGraph(self).reconcile_reported_tx(db, task)
         if db.execute("SELECT 1 FROM pending_deletions WHERE task_id=?",(task,)).fetchone():
             finish_deletions(self,db,task)
             # The committed tombstone owns this recovery independently of the
@@ -1128,7 +1144,7 @@ class Store:
             result=dict(draft_id=draft_id,draft_path=str(path),kind=kind,
                         template=args["template"],
                         required_first_line=f"Cortex draft ID: `{draft_id}`",
-                        edit_instruction="Edit the registered file at its server-issued path. A safe atomic replacement at that same path is accepted after ownership and file checks. Copy patch context verbatim from this receipt's Markdown and listed markers; never reconstruct placeholder names from memory. Preserve its first-line marker, replace every listed placeholder, and retain complete UTF-8 Markdown. Inspect the native file tool's actual result.",
+                        edit_instruction="Fill this owned draft with draft_write. Preserve required_first_line, replace every listed placeholder and retain complete UTF-8 Markdown. The runtime owns pipeline editions.",
                         replaceable_markers=replaceable_markers,
                         required_replacement_count=len(replaceable_markers),
                         markdown=markdown,total_characters=len(markdown),

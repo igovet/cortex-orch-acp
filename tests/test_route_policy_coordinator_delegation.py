@@ -118,50 +118,25 @@ def test_explicit_engine_model_effort_opens_the_requested_route(tmp_path):
     )
     result = provisioning.delegate(
         channel, "Review", "Review it.", "code-reviewer", "Approve.", "req-1",
-        engine="claude-agent-acp", model="reviewer-model", effort="medium",
     )
     assert result.status == "ready"
     assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
     assert _read_log(log_a) == []
     calls = _effort_calls(log_b)
-    assert calls and all(call["params"].get("value") == "medium" for call in calls)
+    assert calls and all(call["params"].get("value") == "high" for call in calls)
     audit = routing_store.list_audit_for_attempt(store, result.attempt_id)
     assert audit[0]["connection_id"] == connection_b.id
     adapter.terminate_owned(result.attempt_id)
 
 
-def test_explicit_engine_not_authorized_for_role_is_refused_naming_what_is_allowed(tmp_path):
-    """A refusal never silently substitutes a different engine/model --
-    and reuses ``route_policy.resolve_effort``'s own message, naming what
-    IS allowed for this role."""
-    store, task_id, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b = _setup(
-        tmp_path,
-        roles={"worker-code-reviewer": [
-            {"engine": "codex-acp", "model": "coordinator-model", "efforts": ["*"], "default_effort": None},
-        ]},
-    )
-    with pytest.raises(PortableError) as excinfo:
-        provisioning.delegate(
-            channel, "Review", "Review it.", "code-reviewer", "Approve.", "req-1",
-            engine="claude-agent-acp", model="reviewer-model", effort="medium",
-        )
-    assert excinfo.value.code == "route_policy_not_authorized"
-    assert "codex-acp" in excinfo.value.remediation
-    # Refused before any process for either connection was ever launched.
-    assert _read_log(log_a) == []
-    assert _read_log(log_b) == []
-    assert capacity.count_active(store, connection_a.id) == 0
-    assert capacity.count_active(store, connection_b.id) == 0
-
 
 def test_explicit_engine_with_no_connection_is_refused_not_substituted(tmp_path):
     store, task_id, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b = _setup(tmp_path)
-    with pytest.raises(PortableError) as excinfo:
+    with pytest.raises(TypeError, match="unexpected keyword"):
         provisioning.delegate(
             channel, "Do it", "Do the work.", "backend-dev", "Passes.", "req-1",
             engine="gpt-9000-acp",
         )
-    assert excinfo.value.code == "engine_not_connected"
     assert _read_log(log_a) == []
     assert _read_log(log_b) == []
 
@@ -194,12 +169,11 @@ def test_omitted_engine_does_not_discard_disallowed_requested_effort(tmp_path):
             {"engine": "codex-acp", "model": "coordinator-model", "efforts": ["medium", "high"], "default_effort": "high"},
         ],
     )
-    with pytest.raises(PortableError) as excinfo:
+    with pytest.raises(TypeError, match="unexpected keyword"):
         provisioning.delegate(
             channel, "Plan", "Plan the work.", "planner", "Plan is source-backed.", "req-low",
             effort="low",
         )
-    assert excinfo.value.code == "route_policy_not_authorized"
     assert _read_log(log_a) == []
     assert _read_log(log_b) == []
     result = provisioning.delegate(
@@ -220,7 +194,6 @@ def test_explicit_engine_without_model_binds_project_policy_model(tmp_path):
     )
     result = provisioning.delegate(
         channel, "Plan", "Plan the work.", "planner", "Plan is source-backed.", "req-engine-only",
-        engine="codex-acp",
     )
     assert result.status == "ready"
     assert _effort_calls(log_a)[-1]["params"]["value"] == "high"
@@ -233,12 +206,11 @@ def test_disposable_qualification_policy_rejects_observed_terra_low_worker_befor
     store, task_id, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b = _setup(tmp_path)
     fixture = Path(__file__).resolve().parents[1] / "policy" / "route-policy.qualification-luna.json"
     (tmp_path / "project" / ".cortex" / "route-policy.json").write_bytes(fixture.read_bytes())
-    with pytest.raises(PortableError) as excinfo:
+    with pytest.raises(TypeError, match="unexpected keyword"):
         provisioning.delegate(
             channel, "Plan", "Plan the work.", "planner", "Plan is source-backed.", "req-terra-low",
             engine="codex-acp", model="gpt-5.6-terra", effort="low",
         )
-    assert excinfo.value.code == "route_policy_not_authorized"
     assert _read_log(log_a) == []
     assert _read_log(log_b) == []
 
@@ -345,7 +317,7 @@ def test_an_explicit_task_route_profile_outranks_the_coordinators_choice(tmp_pat
         resolved_connection_id=connection_a.id, resolved_model="coordinator-model",
         requested_engine="claude-agent-acp", requested_model="reviewer-model", requested_effort="high",
     )
-    adapter._resolve_requested_route(launch, str(tmp_path / "project"))
+    adapter._resolve_runtime_route(launch, str(tmp_path / "project"))
 
     assert launch["resolved_connection_id"] == connection_a.id
     assert launch["resolved_model"] == "coordinator-model"
@@ -367,7 +339,6 @@ def test_the_audit_says_the_route_policy_is_what_authorized_this_route(tmp_path)
     )
     result = provisioning.delegate(
         channel, "Review", "Review it.", "code-reviewer", "Approve.", "req-basis",
-        engine="claude-agent-acp", model="reviewer-model", effort="medium",
     )
     assert result.status == "ready"
     audit = routing_store.list_audit_for_attempt(store, result.attempt_id)

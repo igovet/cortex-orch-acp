@@ -1,3 +1,5 @@
+import { isHiddenOperation } from "./timeline-visibility.ts";
+import { gatewayPresentation } from "./gateway-presentation.ts";
 /** Shared semantic projection for collapsed tool rows.
  *
  * This is presentation data only.  The original call and its complete input
@@ -23,11 +25,11 @@ export type ToolPresentation = {
   target: string | null;
   /** Collapsed row title: action plus optional target. */
   label: string;
-  /** Project actions retain their expandable native detail; Cortex rows do not. */
+  /** Every observed call retains its expandable native detail. */
   expandable: boolean;
-  /** True for Cortex/system operations, which render as compact rows. */
+  /** Reserved host hint; Cortex uses the native expandable representation. */
   systemOperation: boolean;
-  /** Internal coordinator delegation stays out of the user-facing timeline. */
+  /** Whether the operation belongs in the user-facing timeline. */
   visible: boolean;
 };
 
@@ -49,29 +51,31 @@ const ACTIONS: Record<string, { kind: ToolPresentationKind; icon: ToolPresentati
   write_report: { kind: "edit", icon: "FilePenLine", action: "Write report" },
   list_reports: { kind: "read", icon: "FileText", action: "List reports" },
   read_report: { kind: "read", icon: "FileText", action: "Read report" },
-  // Coordinator graph and evidence operations.
-  delegate: { kind: "generic", icon: "Wrench", action: "Delegate", visible: false },
-  list_events: { kind: "read", icon: "FileText", action: "List events" },
-  clarify: { kind: "generic", icon: "Wrench", action: "Clarify" },
-  cancel: { kind: "generic", icon: "Wrench", action: "Cancel" },
-  decide: { kind: "governance", icon: "Scale", action: "Decide", visible: false },
-  integrate: { kind: "edit", icon: "FilePenLine", action: "Integrate" },
-  update_plan: { kind: "edit", icon: "FilePenLine", action: "Update plan" },
-  read_plan: { kind: "read", icon: "FileText", action: "Read plan" },
-  prepare_candidate: { kind: "generic", icon: "Wrench", action: "Prepare candidate" },
-  request_check: { kind: "shell", icon: "Terminal", action: "Request check" },
-  read_check: { kind: "read", icon: "FileText", action: "Read check" },
-  assess_check: { kind: "governance", icon: "Scale", action: "Assess check" },
+  project_read: { kind: "read", icon: "FileText", action: "Read" },
+  project_write: { kind: "edit", icon: "FilePenLine", action: "Edit" },
+  project_delete: { kind: "edit", icon: "FilePenLine", action: "Delete" },
+  project_mkdir: { kind: "edit", icon: "FilePenLine", action: "Create directory" },
+  project_git: { kind: "read", icon: "FileText", action: "Read project Git" },
+  draft_write: { kind: "edit", icon: "FilePenLine", action: "Write draft" },
+  command_run: { kind: "shell", icon: "Terminal", action: "Shell" },
+  // Runtime proposal operations.
+  answer_submit: { kind: "edit", icon: "FilePenLine", action: "Submit answer" },
+  replan_request: { kind: "governance", icon: "Scale", action: "Request revised plan" },
+  scope_request: { kind: "governance", icon: "Scale", action: "Request access" },
+  escalation_request: { kind: "governance", icon: "Scale", action: "Request consultation" },
+  task_get_context: { kind: "read", icon: "FileText", action: "Read task context" },
+  plan_submit: { kind: "edit", icon: "FilePenLine", action: "Submit plan" },
+  synthesis_submit: { kind: "edit", icon: "FilePenLine", action: "Submit synthesis" },
+  user_question_request: { kind: "governance", icon: "Scale", action: "Ask user" },
+  result_submit: { kind: "edit", icon: "FilePenLine", action: "Submit result" },
   // Shared source, capsule, skill, and diagnostic operations.
   list_sources: { kind: "read", icon: "FileText", action: "List sources" },
   read_source: { kind: "read", icon: "FileText", action: "Read source" },
   read_skill: { kind: "skill", icon: "BookOpen", action: "Read skill" },
-  read_capsule: { kind: "read", icon: "FileText", action: "Read capsule", visible: false },
+  read_capsule: { kind: "read", icon: "FileText", action: "Read capsule", visible: true },
   read_large_output: { kind: "read", icon: "FileText", action: "Read output" },
   read_diagnostics: { kind: "read", icon: "FileText", action: "Read diagnostics" },
   ask_question: { kind: "governance", icon: "Scale", action: "Ask question" },
-  ask_user: { kind: "governance", icon: "Scale", action: "Ask user" },
-  publish_result: { kind: "edit", icon: "FilePenLine", action: "Publish result" },
 };
 
 const NATIVE_READ = { kind: "read" as const, icon: "FileText" as const, action: "Read" };
@@ -84,21 +88,6 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
-}
-
-function isCortexMcpName(value: unknown): boolean {
-  return typeof value === "string" && /(?:^|mcp(?:__|\.))cortex(?:__|\.)/i.test(value.trim());
-}
-
-function accessesInternalCortex(value: unknown, keyHint = ""): boolean {
-  if (typeof value === "string") {
-    const key = keyHint.toLowerCase();
-    const pathLike = /path|file|cwd|command|cmd|argv|query|pattern|location/.test(key);
-    return pathLike && /(?:^|[\\/\s"'`])\.cortex(?:$|[\\/\s"'`])/i.test(value);
-  }
-  if (Array.isArray(value)) return value.some((item) => accessesInternalCortex(item, keyHint));
-  if (!value || typeof value !== "object") return false;
-  return Object.entries(value as Record<string, unknown>).some(([key, child]) => accessesInternalCortex(child, key));
 }
 
 function stringValue(value: unknown, ...keys: string[]): string | null {
@@ -134,6 +123,10 @@ function compactTarget(value: string | null): string | null {
   return cleaned.length > 160 ? `${cleaned.slice(0, 157)}…` : cleaned;
 }
 
+function isPlaceholderTarget(value: string): boolean {
+  return /^(?:preparing\s+file|editing\s+files?|file|tool\s+call)(?:\s*(?:…|\.\.\.))?$/i.test(value.trim());
+}
+
 function humanize(value: string): string {
   return value
     .replace(/^mcp(?:__|\.)[^_.]+(?:__|\.)/i, "")
@@ -144,7 +137,9 @@ function humanize(value: string): string {
 }
 
 function operationName(input: ToolPresentationInput): string {
-  const raw = String(input.name ?? input.title ?? input.toolKind ?? "").trim();
+  const envelope = record(input.rawInput ?? input.input);
+  const raw = String(envelope.server === "cortex" && typeof envelope.tool === "string"
+    ? `mcp.cortex.${envelope.tool}` : input.name ?? input.title ?? input.toolKind ?? "").trim();
   // Claude/Codex may put an MCP namespace in either dotted or underscored form.
   const mcp = raw.match(/mcp(?:__|\.)(?:[^_.]+)(?:__|\.)([^\s(]+)/i);
   if (mcp?.[1]) return mcp[1].replace(/[^A-Za-z0-9_-].*$/, "").toLowerCase();
@@ -157,7 +152,9 @@ function operationName(input: ToolPresentationInput): string {
 }
 
 function targetFor(name: string, input: ToolPresentationInput, action: string): string | null {
-  const args = input.rawInput ?? input.input;
+  const gateway = gatewayPresentation(String(input.name ?? input.title ?? ""), input.rawInput ?? input.input, undefined);
+  const envelope = record(input.rawInput ?? input.input);
+  const args = gateway?.input ?? (envelope.server === "cortex" ? envelope.arguments : input.rawInput ?? input.input);
   const structuredArgs = input.rawInput !== undefined && input.input !== input.rawInput ? input.input : undefined;
   const path = stringValue(args, "file_path", "filePath", "path", "absolutePath")
     ?? nestedString(args, new Set(["file_path", "filePath", "path", "absolutePath"]))
@@ -186,10 +183,11 @@ function targetFor(name: string, input: ToolPresentationInput, action: string): 
 /** Return one safe semantic label for native and Cortex tool calls. */
 export function presentToolSemantics(input: ToolPresentationInput): ToolPresentation {
   const name = operationName(input);
+  if (isHiddenOperation(name) || isHiddenOperation(input.toolKind)) {
+    return { kind: "generic", icon: "Wrench", action: "", target: null, label: "", expandable: false, systemOperation: true, visible: false };
+  }
   const title = String(input.title ?? input.name ?? "").trim();
   const nativeKind = String(input.toolKind ?? "").trim().toLowerCase();
-  const cortexMcpIdentity = isCortexMcpName(input.name) || record(input.input).server === "cortex" || record(input.rawInput).server === "cortex";
-  const internalCortexPath = accessesInternalCortex(input.input) || accessesInternalCortex(input.rawInput);
   const native = title.match(/^(read|view|cat)\b/i) || nativeKind === "read" ? NATIVE_READ
     : title.match(/^(edit|patch|write|replace|modify)\b/i) ? NATIVE_EDIT
       : nativeKind === "edit" ? NATIVE_EDIT
@@ -198,29 +196,22 @@ export function presentToolSemantics(input: ToolPresentationInput): ToolPresenta
             : title.match(/^(governance|decide)\b/i) || nativeKind === "governance" ? NATIVE_GOVERNANCE
             : undefined;
   const mapped = ACTIONS[name] ?? native;
-  const cortexOperation = ACTIONS[name] !== undefined && (isCortexMcpName(input.name) || record(input.input).server === "cortex" || record(input.rawInput).server === "cortex");
   if (!mapped) {
     const action = humanize(name || title || "tool");
-    return { kind: "generic", icon: "Wrench", action, target: null, label: action, expandable: false, systemOperation: false, visible: !cortexMcpIdentity && !internalCortexPath };
+    return { kind: "generic", icon: "Wrench", action, target: null, label: action, expandable: true, systemOperation: false, visible: true };
   }
   let target = targetFor(name, input, mapped.action);
-  if (!target && native) {
+  if (!target && native && !/^mcp(?:__|\.)/i.test(title)) {
     const suffix = title.replace(/^(read|view|cat|edit|patch|write|replace|modify|shell|bash|terminal|execute|run(?:\s+command)?|skill|governance|decide)\b\s*(?:[—:-]\s*)?/i, "").trim();
-    if (suffix && suffix.toLowerCase() !== mapped.action.toLowerCase()) target = compactTarget(suffix);
+    if (suffix && suffix.toLowerCase() !== mapped.action.toLowerCase() && !isPlaceholderTarget(suffix)) target = compactTarget(suffix);
   }
-  // The coordinator's internal context is sometimes projected by the host as
-  // a native-looking `Read — capsule` card instead of `read_capsule`.
-  const internalCapsuleRead = mapped.kind === "read" && target?.toLowerCase() === "capsule"
-    && name !== "read_source" && name !== "read_report";
-  const unclassifiedNativeRead = native !== undefined && native.kind === "read" && target === null;
-  const nativeKindForPresentation = native?.kind;
   return {
     ...mapped,
     target,
     label: target ? `${mapped.action} — ${target}` : mapped.action,
-    expandable: !cortexOperation && native !== undefined && nativeKindForPresentation !== "read" && nativeKindForPresentation !== "skill",
-    systemOperation: cortexOperation || native === undefined || nativeKindForPresentation === "read" || nativeKindForPresentation === "skill",
-    visible: (mapped as { visible?: boolean }).visible !== false && !cortexMcpIdentity && !cortexOperation && !internalCapsuleRead && !internalCortexPath && !unclassifiedNativeRead,
+    expandable: !(name === "project_read" || name === "read_skill" || (!ACTIONS[name] && native === NATIVE_READ)),
+    systemOperation: false,
+    visible: true,
   };
 }
 
@@ -228,14 +219,5 @@ export function presentToolSemantics(input: ToolPresentationInput): ToolPresenta
 export const toolPresentation = presentToolSemantics;
 export const semanticToolLabel = presentToolSemantics;
 
-// Keep this catalogue tied to the two advertised contract tables.  ``ask_user``
-// remains an accepted alias for history from an older host, but is not a
-// currently advertised Cortex MCP operation.
-export const KNOWN_CORTEX_TOOL_NAMES = Object.freeze([
-  "create_task", "set_governance", "create_draft", "read_draft", "write_report",
-  "list_reports", "read_report", "delegate", "list_events", "clarify", "cancel",
-  "decide", "integrate", "update_plan", "read_plan", "prepare_candidate",
-  "request_check", "read_check", "assess_check", "list_sources", "read_source",
-  "read_skill", "read_capsule", "read_large_output", "read_diagnostics",
-  "ask_question", "publish_result",
-] as const);
+// The same operations drive both labels and the public presentation catalogue.
+export const KNOWN_CORTEX_TOOL_NAMES = Object.freeze(Object.keys(ACTIONS));

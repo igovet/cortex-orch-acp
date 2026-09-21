@@ -46,7 +46,8 @@ def _delegate_and_provision(runtime, task_id, coordinator_channel, request_key="
     ``OrchestratingRuntime._process_new_events``/``_provision_and_prompt``
     drives for a real coordinator tool call -- and return the resulting
     worker attempt id."""
-    mcp_tools.dispatch(store_for(runtime), coordinator_channel, "delegate", dict(
+    from runtime_scenarios import reserve_assignment
+    reserve_assignment(store_for(runtime), coordinator_channel, dict(
         title="Do it", brief="Do the thing.", role="backend-dev", acceptance="Done.", request_key=request_key,
     ))
     runtime._process_new_events(task_id, coordinator_channel, threading.Event())
@@ -258,36 +259,6 @@ def test_worker_result_published_exactly_during_reconciliation_race_wins(tmp_pat
     assert result is not None
 
 
-def test_coalesce_suppresses_recovery_worker_lost_when_result_in_same_batch():
-    """Unit-level defense-in-depth check on ``_coalesce`` itself (T023
-    fresh review, LOW): a ``worker_result`` and a ``recovery_worker_lost``
-    ``assignment_failed`` for the SAME assignment in one claimed batch must
-    never both render -- the result wins, silently (never a contradictory
-    failure line), while an unrelated genuine failure still renders."""
-    from cortex_runtime.acp.orchestrating_runtime import _coalesce
-    from cortex_runtime.delegation.events import TaskEvent
-
-    events = [
-        TaskEvent(
-            id=1, task_id="t1", event_type="worker_result", assignment_ref="a1",
-            dedup_key="k1", payload=dict(report_ref="rep_1", summary="Done."),
-            origin="a1", created_at="now", consumed_by=None, superseded=False,
-        ),
-        TaskEvent(
-            id=2, task_id="t1", event_type="assignment_failed", assignment_ref="a1",
-            dedup_key="k2", payload=dict(error="recovery_worker_lost"),
-            origin="runtime", created_at="now", consumed_by=None, superseded=False,
-        ),
-        TaskEvent(
-            id=3, task_id="t1", event_type="assignment_failed", assignment_ref="a2",
-            dedup_key="k3", payload=dict(error="engine_turn_failed"),
-            origin="runtime", created_at="now", consumed_by=None, superseded=False,
-        ),
-    ]
-    text = _coalesce(events)
-    assert "Assignment a1 result" in text
-    assert "recovery_worker_lost" not in text
-    assert 'Assignment a2 failed: "engine_turn_failed"' in text
 
 
 def test_worker_lost_without_result_is_marked_failed_not_relaunched(tmp_path):
@@ -533,44 +504,3 @@ def test_a_provably_gone_attempt_gives_its_capacity_slot_back(tmp_path):
         ).fetchone()
     assert row["state"] == "released"
     assert row["release_observation"] == "recovery_worker_absent"
-
-
-def test_coalesce_shows_the_coordinators_own_assignment_ref_not_the_attempt_id():
-    """Live defect (2026-09-19, two assignments at once): ``worker_result``
-    and ``worker_question`` are keyed by the worker's own attempt id, and the
-    continuation printed that raw. The coordinator answered "this does not
-    match any of my assignments" and refused a real result and a real
-    question -- and could not have answered the question anyway, since
-    ``clarify`` takes the delegation ref. Everything else stays on its own
-    ref, which is already coordinator-facing."""
-    from cortex_runtime.acp.orchestrating_runtime import _coalesce
-    from cortex_runtime.delegation.events import TaskEvent
-
-    def event(id_, kind, ref, payload):
-        return TaskEvent(id=id_, task_id="t1", event_type=kind, assignment_ref=ref,
-                         dedup_key=f"k{id_}", payload=payload, origin="w", created_at="now",
-                         consumed_by=None, superseded=False)
-
-    events = [
-        event(1, "worker_question", "xa_attempt_one", dict(question="Which file?")),
-        event(2, "worker_result", "xa_attempt_two", dict(report_ref="r_1", summary="Done.")),
-        event(3, "assignment_ready", "assign_three", {}),
-    ]
-    text = _coalesce(events, {}, {"xa_attempt_one": "assign_one", "xa_attempt_two": "assign_two"})
-
-    assert 'Assignment assign_one question [worker data]: "Which file?"' in text
-    assert "Assignment assign_two result" in text
-    assert "xa_attempt" not in text
-    assert "Assignment assign_three is now running." in text
-
-
-def test_coalesce_keeps_a_ref_it_cannot_translate_rather_than_dropping_it():
-    """An attempt whose delegation row cannot be resolved still renders with
-    the ref there is, never an empty "Assignment  result" line."""
-    from cortex_runtime.acp.orchestrating_runtime import _coalesce
-    from cortex_runtime.delegation.events import TaskEvent
-
-    events = [TaskEvent(id=1, task_id="t1", event_type="worker_result", assignment_ref="xa_orphan",
-                        dedup_key="k1", payload=dict(report_ref="r_1", summary="Done."),
-                        origin="w", created_at="now", consumed_by=None, superseded=False)]
-    assert "Assignment xa_orphan result" in _coalesce(events, {}, {})

@@ -109,21 +109,15 @@ def test_claude_agent_acp_coordinator_session_runs_through_the_real_session_mana
         manager = adapter._managers[list(adapter._managers)[0]]
         assert manager.correlation.wire_session_id(session_ref) is not None
         assert manager._record.engine == "claude-agent-acp"
-        _publish_current_pipeline(store, channel)
-        mcp_tools.dispatch(store, channel, "decide", dict(
-            assignment_ref="task", decision="accept",
-            rationale="Trivial check-in, nothing to delegate.", request_key="acc1",
-        ))
-
         updates = []
         result = runtime.start_prompt(task_id, "s1", "Just check in.", updates.append, threading.Event())
 
         assert result == StopReason.END_TURN
-        assert any("Checked in." in u for u in updates)
+        assert "Checked in." in "".join(updates)
         with store.connection() as db:
             state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
-        assert state == "accepted"
-        assert not adapter._managers  # accepted task releases its owned engine
+        assert state == "blocked"
+        assert adapter._managers  # no structured plan; never accepted
     finally:
         for manager in list(adapter._managers.values()):
             manager.shutdown(grace=2.0)

@@ -707,8 +707,10 @@ class _CountingFakeRuntime:
 
     def __init__(self):
         self.start_prompt_calls = []
+        self.cancel_calls = []
         self.cancel_task_calls = []
         self.cancel_task_emitters = []
+        self.shutdown_calls = 0
 
     def start_prompt(self, task_id, session_id, content, emit_update, cancel_event):
         self.start_prompt_calls.append((task_id, session_id, content))
@@ -716,7 +718,11 @@ class _CountingFakeRuntime:
         return StopReason.END_TURN
 
     def cancel(self, session_id):
+        self.cancel_calls.append(session_id)
         return None
+
+    def shutdown(self):
+        self.shutdown_calls += 1
 
     def cancel_task(self, task_id, session_id, emit_tool_call=None):
         self.cancel_task_calls.append((task_id, session_id))
@@ -734,6 +740,12 @@ def _isolated_environ():
     return dict(HOME=str(home), XDG_CONFIG_HOME=str(home / "config"), XDG_STATE_HOME=str(home / "state"))
 
 
+def test_agent_teardown_invokes_optional_runtime_shutdown():
+    runtime = _CountingFakeRuntime()
+    Agent(runtime, environ=_isolated_environ()).shutdown_runtime()
+    assert runtime.shutdown_calls == 1
+
+
 def _row_counts(store, task_id):
     with store.connection() as db:
         return dict(
@@ -744,7 +756,7 @@ def _row_counts(store, task_id):
         )
 
 
-def test_paseo_session_cancel_routes_to_task_wide_stop(tmp_path):
+def test_paseo_session_cancel_keeps_followup_resumable(tmp_path):
     runtime = _CountingFakeRuntime()
     agent = Agent(runtime, environ=_isolated_environ())
     agent.client_info = {"name": "Paseo"}
@@ -755,10 +767,11 @@ def test_paseo_session_cancel_routes_to_task_wide_stop(tmp_path):
 
     agent._session_cancel({"sessionId": session_id})
 
-    assert runtime.cancel_task_calls == [("task-running", session_id)]
+    assert runtime.cancel_calls == [session_id]
+    assert runtime.cancel_task_calls == []
 
 
-def test_paseo_session_cancel_emits_terminal_card_on_current_transport(tmp_path):
+def test_paseo_session_cancel_does_not_cancel_worker_card(tmp_path):
     runtime = _CountingFakeRuntime()
     agent = Agent(runtime, environ=_isolated_environ())
     agent.client_info = {"name": "Paseo"}
@@ -777,8 +790,8 @@ def test_paseo_session_cancel_emits_terminal_card_on_current_transport(tmp_path)
 
     updates = [n["params"]["update"] for n in transport.notifications]
     assert updates[-1]["toolCallId"] == "worker:cancel-live"
-    assert updates[-1]["status"] == "failed"
-    assert runtime.cancel_task_emitters[-1] is not None
+    assert updates[-1]["status"] == "in_progress"
+    assert runtime.cancel_task_emitters == []
 
 
 def test_non_paseo_session_cancel_keeps_turn_scope(tmp_path):
@@ -942,6 +955,74 @@ def test_session_load_reconciles_stale_worker_card_from_durable_result(tmp_path)
     updates = [n["params"]["update"] for n in loader_transport.notifications]
     assert updates[-1]["toolCallId"] == f"worker:{assignment_ref}"
     assert updates[-1]["status"] == "completed"
+
+
+def test_session_load_marks_worker_failed_when_recorded_process_is_absent(tmp_path):
+    """A restarted daemon must not replay a dead worker as ``working``.
+
+    The process registry is the only cross-process identity evidence used
+    here.  A confirmed-absent identity produces one ephemeral failed card
+    update; session/load still performs no store mutation and never calls the
+    runtime, so the next user prompt remains the only recovery/start point.
+    """
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    agent.bind_transport(_RecordingTransport())
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(tmp_path))
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id=str(uuid.uuid4())), "replay", "owner")
+    acp_sessions.bind_task(store, session_id, task.task_id)
+    assignment_ref = "assignment-dead-process"
+    attempt_id = "xa_dead_process"
+    emitter = agent._make_emit_tool_call(session_id, threading.Event())
+    assert emitter(dict(
+        tool_call_id=f"worker:{assignment_ref}", new=True, title="Worker",
+        kind="other", status="in_progress", text="Working",
+    ))
+    delegation_events.append_event(
+        store, task.task_id, "delegation_requested", "dead-delegation",
+        {"title": "Worker", "role": "backend-dev"}, origin="runtime", assignment_ref=assignment_ref,
+    )
+    with store.connection() as db:
+        owner_epoch = db.execute("SELECT epoch FROM task_owners WHERE task_id=?", (task.task_id,)).fetchone()["epoch"]
+        now = "2026-01-01T00:00:00+00:00"
+        db.execute(
+            "INSERT INTO delegation_provisioning "
+            "(idempotency_key, task_id, assignment_id, attempt_id, role_id, step, status, owner_epoch, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (assignment_ref, task.task_id, "a_dead_process", attempt_id, "backend-dev", "ready", "ready", owner_epoch, now, now),
+        )
+        # A mismatched boot id is a safe, deterministic ``absent`` probe.
+        db.execute(
+            "INSERT INTO attempt_process_registry "
+            "(attempt_id, task_id, role, engine_session_ref, connection_id, pid, pgid, start_ticks, boot_id, "
+            "launch_command_digest, recorded_at, terminated_at, termination_reason) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,NULL)",
+            (attempt_id, task.task_id, "worker", "es_dead", "cn_test", os.getpid(), os.getpgrp(), "0", "not-the-current-boot",
+             "digest", now),
+        )
+        db.commit()
+
+    loader = Agent(_CountingFakeRuntime(), environ=agent.environ)
+    loader_transport = _RecordingTransport()
+    loader.bind_transport(loader_transport)
+    loader.initialized = True
+    loader._session_load(22, dict(sessionId=session_id, cwd=str(tmp_path), mcpServers=[]))
+
+    updates = [n["params"]["update"] for n in loader_transport.notifications]
+    assert updates[-1]["toolCallId"] == f"worker:{assignment_ref}"
+    assert updates[-1]["status"] == "failed"
+    assert updates[-1]["content"][0]["text"] == "Worker process exited before reporting a result."
+    assert loader.runtime.start_prompt_calls == []
+    # The display-only replay must not write a terminal event or mark the
+    # process registry row; normal recovery remains the next prompt's job.
+    with store.connection() as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id=? AND event_type='assignment_failed'", (task.task_id,)
+        ).fetchone()[0] == 0
+        assert db.execute(
+            "SELECT terminated_at FROM attempt_process_registry WHERE attempt_id=?", (attempt_id,)
+        ).fetchone()[0] is None
 
 
 @pytest.mark.parametrize("result_first", [True, False])
@@ -1318,3 +1399,33 @@ def test_sweep_orphaned_staging_removes_only_old_files_never_referenced_bodies(t
     os.utime(referenced_path, (old, old))
     replay_store.sweep_orphaned_staging(str(tmp_path), max_age_seconds=1)
     assert referenced_path.exists()  # never in .source_blocks_staging/, never swept
+
+
+@pytest.mark.parametrize('title,kind', [('mcp.cortex.project_read','execute'), ('mcp__cortex__read_skill','read'), ('Read','read')])
+def test_read_body_omitted_from_wire_and_durable_display_history(tmp_path, title, kind):
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    sid = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))['sessionId']
+    emit = agent._make_emit_display_update(sid, threading.Event())
+    source = dict(sessionUpdate='tool_call', toolCallId='read-1', title=title, kind=kind,
+                  status='in_progress', rawInput={'path': 'README.md'},
+                  content=[{'type': 'content', 'content': {'type': 'text', 'text': 'READ_BODY_MARKER'}}])
+    assert emit(source)
+    assert emit(dict(sessionUpdate='tool_call_update', toolCallId='read-1', status='completed', rawOutput='READ_BODY_MARKER'))
+    # Display projection never mutates the engine's response.
+    assert 'READ_BODY_MARKER' in str(source)
+    assert 'READ_BODY_MARKER' not in str(transport.notifications)
+    store = agent._store_for(str(tmp_path))
+    with store.connection() as db:
+        rows = [r[0] for r in db.execute('select update_json from host_updates where session_id=?', (sid,))]
+    assert 'READ_BODY_MARKER' not in str(rows)
+    assert 'README.md' in str(rows)
+    assert 'completed' in str(rows)
+    # Old retained history is projected on replay without rewriting its rows.
+    replay_store.append_host_update(store, sid, dict(source, toolCallId='old-read'))
+    replay_store.append_host_update(store, sid, dict(sessionUpdate='tool_call_update', toolCallId='old-read', rawOutput='READ_BODY_MARKER'))
+    assert 'READ_BODY_MARKER' not in str(replay_store.replay_session(store, sid))
+    assert emit(dict(sessionUpdate='tool_call', toolCallId='shell-1', title='Shell', kind='execute', rawOutput='COMMAND_OUTPUT'))
+    assert 'COMMAND_OUTPUT' in str(replay_store.replay_session(store, sid))

@@ -4,7 +4,7 @@ import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { readWorkerHistory } from "../shared/worker-history.js";
 
 const PYTHON = String.raw`
-import json, sqlite3, sys
+import json, os, sqlite3, sys
 from urllib.parse import quote
 import re
 root, task_id, attempt_id, cursor, limit, assignment_cursor, assignment_ref = sys.argv[1], sys.argv[2], sys.argv[3] or None, int(sys.argv[4] or 0), min(max(int(sys.argv[5] or 200), 1), 200), sys.argv[6] or '', sys.argv[7] or None
@@ -15,6 +15,28 @@ def scrub(value):
         return re.sub(r'(?<![A-Za-z0-9])/(?:home|tmp|private|Users)/[^\s,;]+', '[private path]', value)
     except re.error:
         return '[redacted]'
+def process_identity_absent(row):
+    """Return True only when the durable worker identity is provably gone."""
+    if row['terminated_at'] is not None:
+        return True
+    try:
+        with open('/proc/sys/kernel/random/boot_id', 'r', encoding='utf-8') as handle:
+            current_boot = handle.read().strip()
+        if not current_boot or current_boot != row['boot_id']:
+            return True
+        with open('/proc/%s/stat' % row['pid'], 'r', encoding='utf-8') as handle:
+            stat = handle.read()
+        close = stat.rfind(')')
+        if close < 0:
+            return False
+        fields = stat[close + 1:].split()
+        # fields[19] is /proc stat field 22 (starttime).
+        if len(fields) < 20:
+            return False
+        return fields[19] != str(row['start_ticks'])
+    except (OSError, ValueError, TypeError):
+        # An unreadable identity is indeterminate, never a false failure.
+        return False
 try:
     db = sqlite3.connect('file:' + quote(db_path, safe='/') + '?mode=ro', uri=True)
     db.row_factory = sqlite3.Row
@@ -26,12 +48,26 @@ try:
     task_rows = db.execute('select id from tasks where id=? and project_root=? order by id', (task_id, root)).fetchall()
     has_route_audit = 'attempt_route_audit' in tables
     has_provisioning = 'delegation_provisioning' in tables
+    has_process_registry = 'attempt_process_registry' in tables
     assignments = []
     truncated = False
     more_assignments = False
     for task in task_rows:
         if assignment_ref:
-            rows = db.execute('select * from work_assignments where task_id=? and (assignment_id=? or idempotency_key=?) order by assignment_id limit 2', (task['id'], assignment_ref, assignment_ref)).fetchall()
+            rows = db.execute('''select a.* from work_assignments a where a.task_id=? and
+                (a.assignment_id=? or a.idempotency_key=? or exists (
+                    select 1 from task_events e where e.task_id=a.task_id
+                    and e.event_type='delegation_requested' and e.assignment_ref=?
+                    and (case when json_valid(e.payload_json) then
+                        json_extract(e.payload_json, '$.plan_assignment_ref')=a.assignment_id
+                        or json_extract(e.payload_json, '$.work_attempt_ref') in
+                            (select attempt_id from work_assignment_attempts where assignment_id=a.assignment_id)
+                        else 0 end)
+                )) order by a.assignment_id limit 2''',
+                (task['id'], assignment_ref, assignment_ref, assignment_ref)).fetchall()
+            if len(rows) > 1:
+                print(json.dumps({'assignments': [], 'available': False, 'truncated': False, 'nextCursor': None, 'nextAssignmentCursor': None, 'message': 'Worker assignment identity is ambiguous.'}))
+                raise SystemExit
         else:
             rows = db.execute('select * from work_assignments where task_id=? and assignment_id>? order by assignment_id limit 101', (task['id'], assignment_cursor)).fetchall()
         assignment_page_more = len(rows) > 100
@@ -42,9 +78,27 @@ try:
             title = None
             role = None
             title_rows = db.execute(
-                'select assignment_ref,payload_json from task_events where task_id=? and assignment_ref in (?,?) and event_type=? order by id',
-                (task['id'], a['assignment_id'], a['idempotency_key'], 'delegation_requested'),
+                '''select assignment_ref,payload_json from task_events where task_id=?
+                and event_type='delegation_requested' and (assignment_ref in (?,?) or
+                    (case when json_valid(payload_json) then
+                        json_extract(payload_json, '$.plan_assignment_ref')=? or
+                        json_extract(payload_json, '$.work_attempt_ref') in
+                            (select attempt_id from work_assignment_attempts where assignment_id=?)
+                        else 0 end)) order by id''',
+                (task['id'], a['assignment_id'], a['idempotency_key'], a['assignment_id'], a['assignment_id']),
             ).fetchall()
+            selected_request = next((r for r in title_rows if r['assignment_ref'] == assignment_ref), None)
+            selected_attempt_id = attempt_id
+            if selected_request is not None:
+                try:
+                    selected_payload = json.loads(selected_request['payload_json'])
+                except (ValueError, TypeError):
+                    selected_payload = {}
+                bound_attempt_id = selected_payload.get('work_attempt_ref') if isinstance(selected_payload, dict) else None
+                if bound_attempt_id:
+                    if attempt_id and attempt_id != bound_attempt_id:
+                        continue
+                    selected_attempt_id = bound_attempt_id
             for title_row in title_rows:
                 try:
                     request_payload = json.loads(title_row['payload_json'])
@@ -62,8 +116,8 @@ try:
                     role = candidate_role.strip()
                     if role.startswith('worker-'):
                         role = role[len('worker-'):]
-            if attempt_id:
-                attempts = db.execute('select * from work_assignment_attempts where assignment_id=? and attempt_id=? order by attempt_no, attempt_id', (a['assignment_id'], attempt_id)).fetchall()
+            if selected_attempt_id:
+                attempts = db.execute('select * from work_assignment_attempts where assignment_id=? and attempt_id=? order by attempt_no, attempt_id', (a['assignment_id'], selected_attempt_id)).fetchall()
             else:
                 attempts = db.execute('select * from work_assignment_attempts where assignment_id=? order by attempt_no, attempt_id', (a['assignment_id'],)).fetchall()
             attempt_out = []
@@ -89,6 +143,7 @@ try:
                             request_payload = {}
                         if request_payload.get('work_attempt_ref') != at['attempt_id']:
                             continue
+                        refs.append(request_row['assignment_ref'])
                         provisioning_row = db.execute(
                             'select attempt_id from delegation_provisioning where task_id=? and idempotency_key=?',
                             (task['id'], request_row['assignment_ref']),
@@ -99,7 +154,7 @@ try:
                 if at['attempt_no'] == 1:
                     refs.extend((a['assignment_id'], a['idempotency_key']))
                 placeholders = ','.join('?' for _ in refs)
-                evs = db.execute(f'''select id,event_type,created_at,payload_json from task_events where task_id=? and assignment_ref in ({placeholders}) and id>? order by id limit ?''', (task['id'], *refs, cursor, limit + 1)).fetchall()
+                evs = db.execute(f'''select id,event_type,created_at,payload_json from task_events where task_id=? and assignment_ref in ({placeholders}) and id>? and (event_type in ('worker_result','worker_question','assignment_failed','assignment_cancelled','worker_activity') or (json_valid(payload_json) and json_extract(payload_json,'$.kind')='worker_activity')) order by id limit ?''', (task['id'], *refs, cursor, limit + 1)).fetchall()
                 more = len(evs) > limit
                 if more: evs = evs[:limit]
                 truncated = truncated or more
@@ -122,7 +177,7 @@ try:
                     text = ' · '.join(parts) or ev['event_type']
                     if not isinstance(text, str): text = json.dumps(text, ensure_ascii=False)
                     event_result = {'id': ev['id'], 'type': ev['event_type'], 'createdAt': ev['created_at'], 'text': scrub(text)}
-                    for field in ('activity_ref', 'input', 'output', 'status', 'error', 'diff', 'tool_kind', 'title', 'locations', 'content', 'raw_input', 'raw_output'):
+                    for field in ('activity_ref', 'input', 'output', 'status', 'error', 'diff', 'tool_kind', 'title', 'locations', 'content', 'raw_input', 'raw_output', 'message_id'):
                         value = payload.get(field)
                         if value is None:
                             continue
@@ -131,22 +186,45 @@ try:
                         # only legacy/plain strings need the final display
                         # scrubber. No synthetic diff or payload is created.
                         event_result[field] = scrub(value) if isinstance(value, str) else value
+                    read_title = str(event_result.get('title') or '')
+                    match = re.match(r'^mcp(?:__|\.)([^.]+?)(?:__|\.)([\w-]+)', read_title, re.I)
+                    read_only_row = (match and match[1].lower() == 'cortex' and match[2].lower() in ('project_read','read_skill')) or (not match and (event_result.get('tool_kind') == 'read' or re.match(r'^(read|view|cat)(?:\s|$)',read_title,re.I)))
+                    if read_only_row:
+                        for key in ('output','raw_output','content','error','diff'):
+                            event_result.pop(key,None)
+                        event_result['text'] = read_title
                     event_out.append(event_result)
                 # The history page is intentionally bounded, so its visible
                 # events cannot be used to infer terminal state: a stop/result
                 # marker may be older than the first 200 rows. Read the latest
                 # terminal marker independently for these exact attempt refs.
-                terminal_rows = db.execute(f'''select id,event_type from task_events where task_id=? and assignment_ref in ({placeholders}) and event_type in ('worker_result','assignment_failed','assignment_cancelled') order by id''', (task['id'], *refs)).fetchall()
+                terminal_rows = db.execute(f'''select id,event_type,created_at from task_events where task_id=? and assignment_ref in ({placeholders}) and event_type in ('worker_result','assignment_failed','assignment_cancelled') order by id''', (task['id'], *refs)).fetchall()
                 # A late compatibility failure/cancellation must not
                 # downgrade a real worker result.  The replay path uses the
                 # same precedence: worker_result is stronger than either
                 # negative terminal marker, while the latest marker of the
                 # same kind remains authoritative.
                 terminal_type = None
+                completed_at = None
                 terminal_priority = {'worker_result': 2, 'assignment_failed': 1, 'assignment_cancelled': 1}
                 for terminal_row in terminal_rows:
                     if terminal_type is None or terminal_priority[terminal_row['event_type']] >= terminal_priority[terminal_type]:
                         terminal_type = terminal_row['event_type']
+                        completed_at = terminal_row['created_at']
+                process_absent = False
+                if has_process_registry and execution_attempt_refs:
+                    process_rows = db.execute(
+                        'select * from attempt_process_registry where task_id=? and role=? and attempt_id in (%s)' % ','.join('?' for _ in execution_attempt_refs),
+                        (task['id'], 'worker', *execution_attempt_refs),
+                    ).fetchall()
+                    # Only conclude failure when every recorded execution
+                    # identity is present and provably absent.  Missing or
+                    # unreadable identity data stays indeterminate.
+                    process_absent = (
+                        len(process_rows) == len(set(execution_attempt_refs))
+                        and bool(process_rows)
+                        and all(process_identity_absent(row) for row in process_rows)
+                    )
                 attempt_route = None
                 if has_route_audit:
                     route_row = None
@@ -185,6 +263,29 @@ try:
                     attempt_result['status'] = 'failed'
                 elif terminal_type == 'assignment_cancelled':
                     attempt_result['status'] = 'cancelled'
+                elif process_absent and str(attempt_result['status']).lower() in ('planned', 'running', 'in_progress', 'working', 'ready', 'provisioning'):
+                    attempt_result['status'] = 'failed'
+                    if not attempt_result['failureReason']:
+                        attempt_result['failureReason'] = 'Worker process exited before reporting a result.'
+                # Runtime verdict outranks report publication. A submitted
+                # report may contain failed/unverified checks; its existence
+                # must never turn that exact attempt into a displayed success.
+                if 'runtime_nodes' in tables and execution_attempt_refs:
+                    runtime_rows = db.execute(
+                        'select n.status,n.result_json from runtime_nodes n join delegation_provisioning p on p.task_id=n.task_id and p.idempotency_key=n.assignment_ref where n.task_id=? and p.attempt_id in (%s)' % ','.join('?' for _ in execution_attempt_refs),
+                        (task['id'], *execution_attempt_refs),
+                    ).fetchall()
+                    if len(runtime_rows) == 1:
+                        attempt_result['status'] = runtime_rows[0]['status']
+                        if runtime_rows[0]['status'] == 'failed':
+                            result = json.loads(runtime_rows[0]['result_json'] or '{}')
+                            unresolved = [check.get('name', 'check') + ': ' + check.get('outcome', 'unverified') for check in result.get('checks', []) if check.get('outcome') != 'passed']
+                            attempt_result['failureReason'] = scrub('Runtime did not accept worker checks. ' + '; '.join(unresolved))
+                    elif len(runtime_rows) > 1:
+                        attempt_result['status'] = 'failed'
+                        attempt_result['failureReason'] = 'Ambiguous runtime assignment identity; outcome is unverified.'
+                if completed_at is not None:
+                    attempt_result['completedAt'] = completed_at
                 if attempt_route is not None:
                     attempt_result['route'] = attempt_route
                 attempt_out.append(attempt_result)
@@ -194,7 +295,8 @@ try:
             # selection and resolve it on the next bounded poll. Broad
             # catalogue reads still omit empty assignments (no phantom rows).
             if attempt_out or assignment_ref:
-                assignment_result = {'taskId': task['id'], 'id': a['assignment_id'], 'assignmentRef': a['idempotency_key'], 'nodeKey': a['node_key'], 'status': attempt_out[-1]['status'] if attempt_out else (a['status'] or 'pending'), 'attempts': attempt_out}
+                public_ref = selected_request['assignment_ref'] if selected_request is not None else (title_rows[-1]['assignment_ref'] if title_rows else a['idempotency_key'])
+                assignment_result = {'taskId': task['id'], 'id': a['assignment_id'], 'assignmentRef': public_ref, 'nodeKey': a['node_key'], 'status': attempt_out[-1]['status'] if attempt_out else (a['status'] or 'pending'), 'attempts': attempt_out}
                 if title is not None:
                     assignment_result['title'] = title
                 if role is not None:

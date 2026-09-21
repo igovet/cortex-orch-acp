@@ -10,7 +10,9 @@ bridge::
 
     {"version": 1, "servers": {"codebase-memory-mcp": {
         "command": "/absolute/path/to/server", "args": [],
-        "env": {"TOKEN": "secret"}, "enabled": true
+        "env": {"TOKEN": "secret"}, "enabled": true,
+        "allowed_tools": ["inspect"], "read_only_tools": ["inspect"],
+        "read_paths": ["/absolute/path/to/server"], "network": false
     }}}
 
 Only the user-global registry (``$XDG_CONFIG_HOME/cortex/mcp-servers.json``)
@@ -119,6 +121,19 @@ def _normalize_entries(raw: object, path: Path) -> list[dict[str, object]]:
             args=list(args),
             env=_as_env(spec.get("env"), path=path, name=name),
         )
+        allowed_tools=spec.get('allowed_tools')
+        if not isinstance(allowed_tools,list) or not allowed_tools or any(not isinstance(tool,str) or not tool for tool in allowed_tools):
+            raise _error('external_mcp_explicit_tool_grants_required',f'{path}: {name}.allowed_tools must name the exact permitted tools.')
+        read_paths=spec.get('read_paths',[])
+        if not isinstance(read_paths,list) or any(not isinstance(value,str) or not Path(value).is_absolute() for value in read_paths):
+            raise _error('invalid_mcp_registry',f'{path}: {name}.read_paths must contain absolute paths.')
+        if type(spec.get('network',False)) is not bool:
+            raise _error('invalid_mcp_registry',f'{path}: {name}.network must be boolean.')
+        entry.update(allowed_tools=list(allowed_tools),read_paths=list(read_paths),network=spec.get('network',False))
+        readonly=spec.get('read_only_tools',[])
+        if not isinstance(readonly,list) or any(tool not in allowed_tools for tool in readonly):
+            raise _error('invalid_mcp_registry',f'{path}: {name}.read_only_tools must be a subset of allowed_tools.')
+        entry['read_only_tools']=list(readonly)
         if roles is not None:
             # Private Cortex routing metadata; never forward as an ACP field.
             entry["roles"] = list(roles)

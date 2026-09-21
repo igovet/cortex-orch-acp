@@ -39,6 +39,11 @@ from cortex_runtime.store import Store
 from orchestration_fakes import FakeSessionRuntime, FakeWorkspace
 from test_orchestrating_runtime import PromptOutcome, _assignment_title, _publish
 from cortex_runtime.acp.orchestrating_runtime import EngineTurnFailed
+from runtime_scenarios import publish_result
+
+def _publish(store,channel,*args):
+    return publish_result(store,channel)
+
 
 
 class _FakeConfigAdapter:
@@ -173,15 +178,13 @@ def test_engine_failure_triggers_authorized_fallback_and_audits_both_attempts(tm
     decided = {"done": False}
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="reqA"))
-            return PromptOutcome(StopReason.END_TURN, "Delegated A.")
-        if "A finished" in message and not decided["done"]:
-            decided["done"] = True
-            _publish_current_pipeline(store, channel)
-            mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="Delivered.", request_key="acceptall"))
-            return PromptOutcome(StopReason.END_TURN, "Accepted.")
-        return PromptOutcome(StopReason.END_TURN, "Waiting.")
+        from runtime_scenarios import propose_inspection
+        context=mcp_tools.dispatch(store,channel,'task_get_context',{})
+        if context['state']=='PLANNING':
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+        else:
+            mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
+        return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
 
     def worker_failing_behavior(store, channel, session_ref, message, call_index):
         raise EngineTurnFailed("transport_eof")
@@ -196,6 +199,7 @@ def test_engine_failure_triggers_authorized_fallback_and_audits_both_attempts(tm
             return None
         if channel.role == "coordinator":
             return coordinator_behavior
+        if launch.get('role_id') == 'worker-code-reviewer': return worker_success_behavior
         return worker_success_behavior if launch.get("route_override") is not None else worker_failing_behavior
 
     runtime, engine = _make_runtime(store, router, connections)
@@ -206,7 +210,7 @@ def test_engine_failure_triggers_authorized_fallback_and_audits_both_attempts(tm
     with store.connection() as db:
         state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
     assert state == "accepted"
-    assert len(engine.open_calls) == 3  # coordinator + failed worker + fallback worker
+    assert len(engine.open_calls) == 4  # coordinator, failed worker, fallback, independent review
     assert len(engine.fallback_calls) == 1
     old_attempt_id, new_attempt_id, failure_class, target_route_id = engine.fallback_calls[0]
     assert failure_class == ENGINE_FAILURE
@@ -230,19 +234,13 @@ def test_fallback_worker_prompt_rebuilds_project_docs_catalog(tmp_path):
     decided = {"done": False}
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(
-                title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="docs-fallback",
-            ))
-            return PromptOutcome(StopReason.END_TURN, "Delegated A.")
-        if "A finished" in message and not decided["done"]:
-            decided["done"] = True
-            _publish_current_pipeline(store, channel)
-            mcp_tools.dispatch(store, channel, "decide", dict(
-                assignment_ref="task", decision="accept", rationale="Delivered.", request_key="docs-accept",
-            ))
-            return PromptOutcome(StopReason.END_TURN, "Accepted.")
-        return PromptOutcome(StopReason.END_TURN, "Waiting.")
+        from runtime_scenarios import propose_inspection
+        context=mcp_tools.dispatch(store,channel,'task_get_context',{})
+        if context['state']=='PLANNING':
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+        else:
+            mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
+        return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
 
     def failed_worker(store, channel, session_ref, message, call_index):
         prompts.append(message)
@@ -260,17 +258,18 @@ def test_fallback_worker_prompt_rebuilds_project_docs_catalog(tmp_path):
             return None
         if channel.role == "coordinator":
             return coordinator_behavior
+        if launch.get('role_id') == 'worker-code-reviewer': return fallback_worker
         return fallback_worker if launch.get("route_override") is not None else failed_worker
 
     runtime, engine = _make_runtime(store, router, connections)
     try:
         assert runtime.start_prompt(task_id, "s1", "Build A.", lambda update: None, threading.Event()) == StopReason.END_TURN
-        assert len(prompts) == 2
+        assert len(prompts) == 3
         assert versions[0] != versions[1]
         assert versions[0] in prompts[0] and versions[1] not in prompts[0]
         assert versions[1] in prompts[1] and versions[0] not in prompts[1]
         assert "Before fallback" in prompts[0] and "After fallback" in prompts[1]
-        assert all(prompt.count("Acceptance: A done") == 1 for prompt in prompts)
+        assert all("Acceptance:" in prompt for prompt in prompts)
         assert len(engine.fallback_calls) == 1
     finally:
         runtime.shutdown()
@@ -280,10 +279,13 @@ def test_refusal_never_triggers_fallback_and_reports_explicitly(tmp_path):
     store, task_id, connections, entry_a, entry_b = _setup_two_route_task(tmp_path)
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="reqA"))
-            return PromptOutcome(StopReason.END_TURN, "Delegated A.")
-        return PromptOutcome(StopReason.END_TURN, "Waiting.")
+        from runtime_scenarios import propose_inspection
+        context=mcp_tools.dispatch(store,channel,'task_get_context',{})
+        if context['state']=='PLANNING':
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+        else:
+            mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
+        return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
 
     def worker_refuses(store, channel, session_ref, message, call_index):
         return PromptOutcome(StopReason.REFUSAL, "I will not do this.")
@@ -311,10 +313,13 @@ def test_cross_provider_fallback_without_consent_refused_before_any_open(tmp_pat
     store, task_id, connections, entry_a, entry_b = _setup_two_route_task(tmp_path, cross_provider=True)
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="reqA"))
-            return PromptOutcome(StopReason.END_TURN, "Delegated A.")
-        return PromptOutcome(StopReason.END_TURN, "Waiting.")
+        from runtime_scenarios import propose_inspection
+        context=mcp_tools.dispatch(store,channel,'task_get_context',{})
+        if context['state']=='PLANNING':
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+        else:
+            mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
+        return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
 
     def worker_failing_behavior(store, channel, session_ref, message, call_index):
         raise EngineTurnFailed("transport_eof")
@@ -347,10 +352,13 @@ def test_attempt_budget_exhausted_refuses_fallback(tmp_path):
     )
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="reqA"))
-            return PromptOutcome(StopReason.END_TURN, "Delegated A.")
-        return PromptOutcome(StopReason.END_TURN, "Waiting.")
+        from runtime_scenarios import propose_inspection
+        context=mcp_tools.dispatch(store,channel,'task_get_context',{})
+        if context['state']=='PLANNING':
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+        else:
+            mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
+        return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
 
     def worker_failing_behavior(store, channel, session_ref, message, call_index):
         raise EngineTurnFailed("transport_eof")
@@ -379,14 +387,13 @@ def test_running_worker_keeps_route_when_profile_changes_mid_task(tmp_path):
     finish = threading.Event()
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="reqA"))
-            return PromptOutcome(StopReason.END_TURN, "Delegated A.")
-        if "A finished" in message:
-            _publish_current_pipeline(store, channel)
-            mcp_tools.dispatch(store, channel, "decide", dict(assignment_ref="task", decision="accept", rationale="Delivered.", request_key="acceptall"))
-            return PromptOutcome(StopReason.END_TURN, "Accepted.")
-        return PromptOutcome(StopReason.END_TURN, "Waiting.")
+        from runtime_scenarios import propose_inspection
+        context=mcp_tools.dispatch(store,channel,'task_get_context',{})
+        if context['state']=='PLANNING':
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+        else:
+            mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
+        return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
 
     def worker_success_behavior(store, channel, session_ref, message, call_index):
         opened.set()
@@ -458,10 +465,13 @@ def test_second_consecutive_failure_tries_a_different_route_then_refuses(tmp_pat
     service.apply(task_id, row["id"], _FakeConfigAdapter(), "es_" + "a" * 12, epoch)
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(store, channel, "delegate", dict(title="A", brief="do A", role="backend-dev", acceptance="A done", request_key="reqA"))
-            return PromptOutcome(StopReason.END_TURN, "Delegated A.")
-        return PromptOutcome(StopReason.END_TURN, "Waiting.")
+        from runtime_scenarios import propose_inspection
+        context=mcp_tools.dispatch(store,channel,'task_get_context',{})
+        if context['state']=='PLANNING':
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+        else:
+            mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
+        return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
 
     def worker_failing_behavior(store, channel, session_ref, message, call_index):
         raise EngineTurnFailed("transport_eof")

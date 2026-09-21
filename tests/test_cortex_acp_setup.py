@@ -102,12 +102,15 @@ def test_install_paseo_plugin_is_idempotent_and_preserves_config(tmp_path, monke
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if argv[1:3] == ["plugin", "reload"] or argv[1:2] == ["reload"]:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if argv[1:4] == ["plugin", "reload", "cortex-acp"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if argv[1:5] == ["plugin", "ls", "cortex-acp", "--json"]:
             return SimpleNamespace(returncode=0, stdout=json.dumps({"id": "cortex-acp", "path": str(plugin), "status": "running"}), stderr="")
         raise AssertionError(argv)
 
     first = setup.install_paseo_plugin(paseo_cli="paseo", runner=run)
     second = setup.install_paseo_plugin(paseo_cli="paseo", runner=run)
+    assert ["paseo", "plugin", "reload", "cortex-acp"] in calls
     assert first["legacy_provider_migration"]["migrated"] is True
     assert second["legacy_provider_migration"] == {
         "migrated": False, "reason": "no_owned_legacy_provider"
@@ -273,6 +276,8 @@ def test_install_paseo_plugin_repairs_overly_readable_daemon_config(tmp_path, mo
             return SimpleNamespace(returncode=0, stdout=json.dumps({"localDaemon": "running", "home": str(daemon_home)}), stderr="")
         if argv[1:4] == ["plugin", "ls", "--json"]:
             return SimpleNamespace(returncode=0, stdout=json.dumps([{"id": "cortex-acp", "path": str(plugin), "status": "running"}]), stderr="")
+        if argv[1:4] == ["plugin", "reload", "cortex-acp"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
         if argv[1:5] == ["plugin", "ls", "cortex-acp", "--json"]:
             return SimpleNamespace(returncode=0, stdout=json.dumps({"id": "cortex-acp", "path": str(plugin), "status": "running"}), stderr="")
         raise AssertionError(argv)
@@ -620,3 +625,22 @@ def test_cli_status_produces_json(tmp_path, monkeypatch, capsys):
 
     data = json.loads(out)
     assert "connections" in data
+
+
+def test_paseo_update_rejects_old_mcp_grants_before_mutating_daemon(tmp_path, monkeypatch):
+    config, _state, home = _isolate(tmp_path, monkeypatch)
+    directory = config / 'cortex'
+    directory.mkdir(mode=0o700)
+    path = directory / 'mcp-servers.json'
+    path.write_text(json.dumps({'version':1,'servers':{'codebase-memory-mcp':{
+        'command':'/bin/true','env':{'TOKEN':'never-print-this'}}}}))
+    path.chmod(0o600)
+    original=path.read_bytes()
+    def forbidden(*args,**kwargs):
+        pytest.fail('Paseo must not be called before registry validation')
+    with pytest.raises(SystemExit,match='MCP configuration preflight failed') as caught:
+        setup.install_paseo_plugin(paseo_cli='paseo',runner=forbidden)
+    assert 'codebase-memory-mcp.allowed_tools' in str(caught.value)
+    assert 'never-print-this' not in str(caught.value)
+    assert path.read_bytes()==original
+    assert not (home/'.config/cortex/paseo-plugin-launch.json').exists()

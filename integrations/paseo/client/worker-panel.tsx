@@ -1,3 +1,4 @@
+import { readableToolText } from "./tool-details.ts";
 import { useRpc, type PluginAgentPanelProps } from "@getpaseo/plugin/client";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { Pressable, Text, View } from "react-native";
@@ -8,6 +9,7 @@ import { workerSection, workerStatus } from "./worker-panel-status.js";
 import { historyCursor, mergeWorkerHistory, shouldPollWorkerHistory, shouldShowWorkerHistoryLoader, WORKER_HISTORY_POLL_MS } from "./worker-panel-refresh.js";
 import { groupWorkerEvents, type WorkerEvent } from "./worker-panel-events.js";
 import { presentTool } from "./worker-panel-tool.js";
+import { diffBlocks, diffLines, rawText, type DiffBlock, type DiffRow } from "./worker-panel-diff.js";
 import { presentToolSemantics } from "../shared/tool-presentation.js";
 import { workerDisplayName } from "./worker-display.js";
 
@@ -21,8 +23,6 @@ const styles = {
   mono: { fontFamily: "monospace" as const, fontSize: 12, lineHeight: 18 },
 };
 
-type DiffBlock = { path: string; oldText: string | null; newText: string | null };
-type DiffRow = { kind: "context" | "add" | "delete"; text: string };
 type NumberedDiffRow = DiffRow & { oldLine: number | null; newLine: number | null };
 
 function numberDiffRows(rows: DiffRow[]): NumberedDiffRow[] {
@@ -35,77 +35,12 @@ function numberDiffRows(rows: DiffRow[]): NumberedDiffRow[] {
   });
 }
 
-function rawText(value: unknown): string | null {
-  if (value == null) return null;
-  if (typeof value === "string") return value;
-  try { return JSON.stringify(value, null, 2); } catch { return String(value); }
-}
-
-function diffBlocks(value: unknown): DiffBlock[] {
-  const entries = Array.isArray(value) ? value : [value];
-  return entries.flatMap((item) => {
-    if (typeof item !== "object" || item === null) return [];
-    const block = item as Record<string, unknown>;
-    if (block.type !== "diff" || typeof block.path !== "string" || (block.oldText !== null && typeof block.oldText !== "string") || (block.newText !== null && typeof block.newText !== "string")) return [];
-    return [{ path: block.path, oldText: block.oldText, newText: block.newText }];
-  });
-}
-
-export function diffLines(oldText: string | null, newText: string | null): DiffRow[] {
-  const split = (text: string | null) => {
-    if (text == null || text.length === 0) return [];
-    const normalized = text.replace(/\r\n?/g, "\n");
-    const lines = normalized.split("\n");
-    return lines[lines.length - 1] === "" ? lines.slice(0, -1) : lines;
-  };
-  const oldLines = split(oldText);
-  const newLines = split(newText);
-  if (oldLines.length === 0) return newLines.map((text) => ({ kind: "add", text }));
-  if (newLines.length === 0) return oldLines.map((text) => ({ kind: "delete", text }));
-  // Keep the exact content while avoiding an unbounded quadratic matrix.
-  if (oldLines.length * newLines.length > 200_000) {
-    return [...oldLines.map((text) => ({ kind: "delete" as const, text })), ...newLines.map((text) => ({ kind: "add" as const, text }))];
-  }
-  const table = Array.from({ length: oldLines.length + 1 }, () => new Uint32Array(newLines.length + 1));
-  for (let i = oldLines.length - 1; i >= 0; i -= 1) for (let j = newLines.length - 1; j >= 0; j -= 1) {
-    table[i][j] = oldLines[i] === newLines[j] ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
-  }
-  const rows: DiffRow[] = [];
-  let i = 0; let j = 0;
-  while (i < oldLines.length && j < newLines.length) {
-    if (oldLines[i] === newLines[j]) { rows.push({ kind: "context", text: oldLines[i] }); i += 1; j += 1; }
-    else if (table[i + 1][j] >= table[i][j + 1]) { rows.push({ kind: "delete", text: oldLines[i] }); i += 1; }
-    else { rows.push({ kind: "add", text: newLines[j] }); j += 1; }
-  }
-  while (i < oldLines.length) rows.push({ kind: "delete", text: oldLines[i++] });
-  while (j < newLines.length) rows.push({ kind: "add", text: newLines[j++] });
-  return rows;
-}
+export { diffBlocks, diffLines, rawText } from "./worker-panel-diff.js";
 
 type Theme = PluginAgentPanelProps["theme"];
 
-function Detail({ label, value, theme }: { label: string; value: string; theme: Theme }) {
-  return <View style={{ gap: 4 }}>
-    <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{label}</Text>
-    <Text selectable style={[styles.mono, { color: theme.colors.foreground, backgroundColor: theme.colors.surface0, borderRadius: 5, padding: 8 }]}>{value}</Text>
-  </View>;
-}
-
 function tint(color: string, fallback: string): string {
   return /^#[0-9a-fA-F]{6}$/.test(color) ? `${color}1c` : fallback;
-}
-
-/**
- * Paseo 0.8 does not export provider logo assets. Keep the provider cue
- * portable by using a small, accessible text mark instead of an unverified
- * host-private Icon name.
- */
-export function providerMark(provider: string): { glyph: string; label: string } {
-  const normalized = provider.trim().toLowerCase();
-  if (normalized.includes("claude")) return { glyph: "✦", label: "Claude" };
-  if (normalized.includes("codex") || normalized.includes("openai")) return { glyph: "⌘", label: "Codex" };
-  if (normalized.includes("cortex")) return { glyph: "◈", label: "Cortex" };
-  return { glyph: "◆", label: provider || "Unknown provider" };
 }
 
 function FileDiff({ path, rows, theme, showPath = true }: { path: string; rows: DiffRow[]; theme: Theme; showPath?: boolean }) {
@@ -130,79 +65,41 @@ function cleanEventText(event: WorkerEvent): string {
   return value.replace(/^\[final response\]\s*/i, "").trim();
 }
 
-function eventHasPayload(event: WorkerEvent): boolean {
-  return [event.raw_input, event.input, event.raw_output, event.output, event.content, event.diff, event.locations, event.error].some((value) => value != null);
-}
-
-function TranscriptEvent({ event, updates, expanded, onToggle, theme }: { event: WorkerEvent; updates: WorkerEvent[]; expanded: boolean; onToggle: () => void; theme: Theme }) {
-  const [rawExpanded, setRawExpanded] = useState(false);
-  const nativeToolTitle = /^(read|view|cat|edit|patch|write|replace|modify|shell|bash|terminal|execute|run|skill|governance|decide|search)\b/i.test(event.title ?? "");
-  const tool = event.tool_kind != null || event.activity_ref?.startsWith("tool:") || event.activity_ref?.startsWith("tool-error:") || event.type.toLowerCase().includes("tool") || /^mcp(?:__|\.)/.test(event.title ?? "") || nativeToolTitle;
-  const failure = event.error != null || event.status === "failed" || event.type.toLowerCase().includes("failed");
+export function TranscriptEvent({ event, expanded, onToggle, theme }: { event: WorkerEvent; updates: WorkerEvent[]; expanded: boolean; onToggle: () => void; theme: Theme }) {
+  const tool = event.tool_kind != null || event.activity_ref?.startsWith("tool:") || event.activity_ref?.startsWith("tool-error:") || event.type.toLowerCase().includes("tool") || /^(?:Read|Edit|Shell|Terminal|Skill)(?:\s|$)|^mcp(?:__|\.)/i.test(event.title ?? "");
+  const failure = event.status === "failed" || (event.status !== "completed" && event.type.toLowerCase().includes("failed"));
   const final = /result|final|complete/.test(event.type.toLowerCase());
-  const input = rawText(event.raw_input ?? event.input);
-  const output = rawText(event.raw_output ?? event.output);
-  const locations = rawText(event.locations);
-  const diffs = diffBlocks(event.content);
-  const otherContent = event.content != null && diffs.length === 0 ? rawText(event.content) : null;
   const message = cleanEventText(event);
-  const hasPayload = eventHasPayload(event);
   const presentation = presentTool(event);
   const semantics = presentToolSemantics({
-    name: event.title ?? event.tool_kind,
-    title: event.title,
-    toolKind: event.tool_kind,
+    name: event.title ?? event.tool_kind, title: event.title, toolKind: event.tool_kind,
     input: { ...(event.input && typeof event.input === "object" ? event.input as Record<string, unknown> : {}), content: event.content, locations: event.locations },
     rawInput: event.raw_input,
   });
-  const detail = <View style={{ marginLeft: 24, marginTop: 6, marginBottom: 10, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8, backgroundColor: theme.colors.surface1, padding: 11, gap: 12 }}>
-    <Text selectable style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{event.title || event.type}{event.status ? ` · ${event.status}` : ""} · {event.createdAt}</Text>
-    {input !== null && <Detail label="Input" value={input} theme={theme} />}
-    {output !== null && <Detail label="Output" value={output} theme={theme} />}
-    {event.diff != null && <Detail label="File changes" value={event.diff} theme={theme} />}
-    {diffs.map((diff, i) => <FileDiff key={`${diff.path}-${i}`} path={diff.path} rows={diffLines(diff.oldText, diff.newText)} theme={theme} />)}
-    {otherContent !== null && <Detail label="Content" value={otherContent} theme={theme} />}
-    {locations !== null && <Detail label="Locations" value={locations} theme={theme} />}
-    {event.error != null && <Text selectable style={[styles.body, { color: theme.colors.statusDanger }]}>{event.error}</Text>}
-    {updates.length > 1 && <Detail label={`Recorded updates (${updates.length})`} value={rawText(updates) ?? ""} theme={theme} />}
-    {!hasPayload && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>No additional retained payload.</Text>}
-  </View>;
-
-  if (tool && !semantics.visible) return null;
-  if (tool && !semantics.expandable && (semantics.systemOperation || semantics.kind !== "generic")) return <View style={{ flexDirection: "row", alignItems: "center", gap: 9, minHeight: 32, marginVertical: 2, paddingVertical: 5, paddingHorizontal: 1 }}>
-    <Icon name={semantics.icon} size={14} color={failure ? theme.colors.statusDanger : theme.colors.foregroundMuted} />
-    <Text numberOfLines={1} style={[styles.muted, { color: failure ? theme.colors.statusDanger : theme.colors.foregroundMuted, flex: 1 }]}>{semantics.label}</Text>
-  </View>;
+  const diffs = diffBlocks(event.content ?? (event.input && typeof event.input === "object" ? (event.input as Record<string, unknown>).content : null));
+  const output = readableToolText(presentation.kind === "shell" ? presentation.output : event.raw_output ?? event.output ?? event.content);
+  const error = failure ? readableToolText(event.error) : null;
+  const hasEdit = presentation.kind === "edit" && (diffs.length > 0 || presentation.newText !== null);
+  const canExpand = semantics.expandable && Boolean(output || error || hasEdit || diffs.length);
+  const row = <>
+    <Icon name={expanded && canExpand ? "ChevronDown" : semantics.icon} size={14} color={theme.colors.foregroundMuted} />
+    <Text numberOfLines={1} style={[styles.muted, { color: theme.colors.foregroundMuted, flex: 1 }]}>{semantics.label}</Text>
+    {failure && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>Failed</Text>}
+  </>;
+  const rowStyle = { flexDirection: "row" as const, alignItems: "center" as const, gap: 9, minHeight: 32, paddingVertical: 5, paddingHorizontal: 1 };
+  if (tool && !canExpand) return <View style={{ ...rowStyle, marginVertical: 2 }}>{row}</View>;
   if (tool) return <View style={{ marginVertical: 2, borderWidth: expanded ? 1 : 0, borderColor: theme.colors.border, borderRadius: 7, overflow: "hidden" }}>
-    <Pressable accessibilityRole="button" accessibilityLabel={`${expanded ? "Collapse" : "Expand"} ${semantics.label} details`} accessibilityState={{ expanded }} onPress={onToggle} style={{ flexDirection: "row", alignItems: "center", gap: 9, minHeight: 32, paddingVertical: 5, paddingHorizontal: expanded ? 9 : 1, borderBottomWidth: expanded ? 1 : 0, borderColor: theme.colors.border }}>
-      <Icon name={expanded ? "ChevronDown" : semantics.icon} size={14} color={failure ? theme.colors.statusDanger : theme.colors.foregroundMuted} />
-      <Text numberOfLines={1} style={[styles.muted, { color: failure ? theme.colors.statusDanger : theme.colors.foregroundMuted, flex: 1 }]}>{semantics.label}</Text>
-    </Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel={`${expanded ? "Collapse" : "Expand"} ${semantics.label} details`} accessibilityState={{ expanded }} onPress={onToggle} style={rowStyle}>{row}</Pressable>
     {expanded && <View style={{ paddingHorizontal: 10, paddingVertical: 9, gap: 8 }}>
-      {presentation.kind === "shell" && <View style={{ gap: 12 }}>
-        {presentation.command !== null && <Text selectable style={[styles.mono, { color: theme.colors.foreground }]}>{`$ ${presentation.command}`}</Text>}
-        {presentation.output !== null && <Text selectable style={[styles.mono, { color: theme.colors.foreground }]}>{presentation.output}</Text>}
-      </View>}
-      {presentation.kind === "edit" && diffs.length > 0 && diffs.map((diff, i) => <FileDiff key={`${diff.path}-${i}`} path={diff.path} rows={diffLines(diff.oldText, diff.newText)} theme={theme} showPath={false} />)}
-      {presentation.kind === "edit" && diffs.length === 0 && presentation.oldText !== null && presentation.newText !== null && <FileDiff path={presentation.path ?? "File changes"} rows={diffLines(presentation.oldText, presentation.newText)} theme={theme} showPath={false} />}
-      {presentation.kind === "generic" && <>
-        {input !== null && <Detail label="Input" value={input} theme={theme} />}
-        {output !== null && <Detail label="Output" value={output} theme={theme} />}
-        {event.diff != null && <Detail label="File changes" value={event.diff} theme={theme} />}
-        {diffs.map((diff, i) => <FileDiff key={`${diff.path}-${i}`} path={diff.path} rows={diffLines(diff.oldText, diff.newText)} theme={theme} />)}
-        {otherContent !== null && <Detail label="Content" value={otherContent} theme={theme} />}
-      </>}
-      {failure && event.error != null && <Text selectable style={[styles.muted, { color: theme.colors.statusDanger }]}>{event.error}</Text>}
-      {!hasPayload && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>No retained tool payload.</Text>}
-      <Pressable accessibilityRole="button" accessibilityLabel={`${rawExpanded ? "Hide" : "Show"} raw event data`} accessibilityState={{ expanded: rawExpanded }} onPress={() => setRawExpanded(!rawExpanded)} style={{ alignSelf: "flex-start", paddingVertical: 3 }}><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{rawExpanded ? "⌄  Hide raw data" : "›  Raw data"}</Text></Pressable>
-      {rawExpanded && <Detail label={`Recorded events (${updates.length})`} value={rawText(updates) ?? ""} theme={theme} />}
+      {presentation.kind === "shell" && presentation.command && <Text selectable style={[styles.mono, { color: theme.colors.foreground }]}>{`$ ${presentation.command}`}</Text>}
+      {output && !hasEdit && <Text selectable style={[styles.mono, { color: theme.colors.foreground }]}>{output}</Text>}
+      {diffs.map((diff, i) => <FileDiff key={`${diff.path}-${i}`} path={diff.path} rows={diffLines(diff.oldText, diff.newText)} theme={theme} showPath />)}
+      {hasEdit && diffs.length === 0 && <FileDiff path={presentation.path ?? "File changes"} rows={diffLines(presentation.oldText, presentation.newText)} theme={theme} showPath />}
+      {error && error !== output && <Text selectable style={[styles.muted, { color: theme.colors.statusDanger }]}>{error}</Text>}
     </View>}
   </View>;
-
   return <View style={{ marginVertical: final ? 13 : 9, gap: 6 }}>
-    {message && <Text selectable style={[styles.body, { color: failure ? theme.colors.statusDanger : theme.colors.foreground }]}>{message}</Text>}
-    {hasPayload && <Pressable accessibilityRole="button" accessibilityLabel={`${expanded ? "Hide" : "Show"} event details`} accessibilityState={{ expanded }} onPress={onToggle} style={{ alignSelf: "flex-start", paddingVertical: 3 }}><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{expanded ? "⌄  Hide details" : "›  Details"}</Text></Pressable>}
-    {expanded && detail}
+    {message && <Text selectable style={[styles.body, { color: theme.colors.foreground }]}>{message}</Text>}
   </View>;
 }
 
@@ -220,12 +117,17 @@ export function WorkerPanel({ theme, layout, workspaceId, agentId, navigation }:
   const [expandedEvent, setExpandedEvent] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const mountedRef = useRef(true);
-  const refreshInFlightRef = useRef(false);
+  const refreshInFlightRef = useRef<string | null>(null);
   const historyRef = useRef<WorkerHistory | null>(null);
   const contextKey = `${workspaceId}\u0000${agentId}`;
 
-  useEffect(() => () => {
-    mountedRef.current = false;
+  const selectionKey = `${contextKey}\u0000${selectedAssignmentRef ?? selected ?? "all"}`;
+  const currentRequestRef = useRef(selectionKey);
+  currentRequestRef.current = selectionKey;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
   }, []);
 
   useEffect(() => {
@@ -255,14 +157,15 @@ export function WorkerPanel({ theme, layout, workspaceId, agentId, navigation }:
 
   const refresh = useCallback(async () => {
     const requestContext = contextKey;
-    if (!mountedRef.current || refreshInFlightRef.current) return;
-    refreshInFlightRef.current = true;
+    const requestKey = selectionKey;
+    if (!mountedRef.current || refreshInFlightRef.current === requestKey) return;
+    refreshInFlightRef.current = requestKey;
     try {
       const priorHistory = historyRef.current;
       setLoading(shouldShowWorkerHistoryLoader(priorHistory));
       // A context change clears historyRef before the first request, so a
       // retained history here is necessarily for this exact panel context.
-      const incrementalCursor = priorHistory ? historyCursor(priorHistory) : 0;
+      const incrementalCursor = selectedAssignmentRef || !selected ? 0 : historyCursor(priorHistory, selected);
       const result = await rpc({
         workspaceId,
         agentId,
@@ -272,8 +175,8 @@ export function WorkerPanel({ theme, layout, workspaceId, agentId, navigation }:
         assignmentRef: selectedAssignmentRef ?? undefined,
         ...(incrementalCursor > 0 ? { cursor: incrementalCursor } : {}),
       });
-      if (!mountedRef.current || requestContext !== `${workspaceId}\u0000${agentId}`) return;
-      const displayed = incrementalCursor > 0 && priorHistory ? mergeWorkerHistory(priorHistory, result) : result;
+      if (!mountedRef.current || requestKey !== currentRequestRef.current) return;
+      const displayed = priorHistory ? mergeWorkerHistory(priorHistory, result) : result;
       historyRef.current = displayed;
       setHistory(displayed);
       setHistoryContext(requestContext);
@@ -282,45 +185,41 @@ export function WorkerPanel({ theme, layout, workspaceId, agentId, navigation }:
       if (selectedAssignmentRef) {
         const assignment = displayed.assignments.find((candidate) => candidate.id === selectedAssignmentRef || candidate.assignmentRef === selectedAssignmentRef);
         const attempt = assignment?.attempts[assignment.attempts.length - 1];
-        setSelectedAssignmentRef(null);
-        setSelected(attempt?.id ?? null);
+        if (attempt) {
+          setSelectedAssignmentRef(null);
+          setSelected(attempt.id);
+        }
       }
     }
     finally {
-      refreshInFlightRef.current = false;
-      if (mountedRef.current && requestContext === `${workspaceId}\u0000${agentId}`) setLoading(false);
+      if (refreshInFlightRef.current === requestKey) refreshInFlightRef.current = null;
+      if (mountedRef.current && requestKey === currentRequestRef.current) setLoading(false);
     }
-  }, [agentId, contextKey, rpc, selected, selectedAssignmentRef, workspaceId]);
+  }, [agentId, contextKey, selectionKey, rpc, selected, selectedAssignmentRef, workspaceId]);
 
   const loadMore = useCallback(async () => {
     if (!nextCursor || !selected) return;
     const requestContext = contextKey;
+    const requestKey = selectionKey;
     const result = await rpc({ workspaceId, agentId, attemptId: selected, cursor: nextCursor });
-    if (requestContext !== `${workspaceId}\u0000${agentId}`) return;
-    setHistory((current) => {
-      if (!current) return result;
-      return {
-        ...result,
-        assignments: result.assignments.map((assignment) => ({
-          ...assignment,
-          attempts: assignment.attempts.map((attempt) => {
-            const prior = current.assignments.flatMap((item) => item.attempts).find((item) => item.id === attempt.id);
-            return prior ? { ...attempt, events: [...prior.events, ...attempt.events] } : attempt;
-          }),
-        })),
-      };
-    });
+    if (requestKey !== currentRequestRef.current) return;
+    const displayed = historyRef.current ? mergeWorkerHistory(historyRef.current, result) : result;
+    historyRef.current = displayed;
+    setHistory(displayed);
     setNextCursor(result.nextCursor);
-  }, [agentId, contextKey, nextCursor, rpc, selected, workspaceId]);
+  }, [agentId, contextKey, selectionKey, nextCursor, rpc, selected, workspaceId]);
 
   const loadMoreWorkers = useCallback(async () => {
     if (!nextAssignmentCursor) return;
     const requestContext = contextKey;
+    const requestKey = selectionKey;
     const result = await rpc({ workspaceId, agentId, assignmentCursor: nextAssignmentCursor });
-    if (requestContext !== `${workspaceId}\u0000${agentId}`) return;
-    setHistory((current) => current ? { ...result, assignments: [...current.assignments, ...result.assignments] } : result);
+    if (requestKey !== currentRequestRef.current) return;
+    const displayed = historyRef.current ? mergeWorkerHistory(historyRef.current, result) : result;
+    historyRef.current = displayed;
+    setHistory(displayed);
     setNextAssignmentCursor(result.nextAssignmentCursor);
-  }, [agentId, contextKey, nextAssignmentCursor, rpc, workspaceId]);
+  }, [agentId, contextKey, selectionKey, nextAssignmentCursor, rpc, workspaceId]);
   useEffect(() => { void refresh(); }, [refresh]);
   useEffect(() => {
     if (!shouldPollWorkerHistory(history)) {
@@ -385,9 +284,8 @@ export function WorkerPanel({ theme, layout, workspaceId, agentId, navigation }:
       </> : <>
         <Pressable accessibilityRole="button" accessibilityLabel="Back to all workers" onPress={() => setSelected(null)} style={{ alignSelf: "flex-start", paddingVertical: 2 }}><Text style={[styles.muted, { color: theme.colors.accent }]}>‹  All workers</Text></Pressable>
         <View style={{ gap: 8, paddingBottom: 14, borderBottomWidth: 1, borderColor: theme.colors.border }}>
-          <Text style={[styles.title, { color: theme.colors.foreground }]}>{selectedAssignment ? workerDisplayName(selectedAssignment) : "Worker"}</Text>
+          <Text style={[styles.title, { color: theme.colors.foreground }]}>{selectedAssignment?.title?.trim() || "Worker"}</Text>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 7, alignItems: "center" }}>
-            {route && <Text accessibilityLabel={`${providerMark(route.provider).label} provider`} style={[styles.title, { fontSize: 17, lineHeight: 20, color: theme.colors.accent }]}>{providerMark(route.provider).glyph}</Text>}
             <Text style={[styles.muted, { color: selectedAttempt.status === "failed" ? theme.colors.statusDanger : theme.colors.foregroundMuted }]}>{selectedAssignment ? workerDisplayName(selectedAssignment) : "worker"}</Text>
             {route && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.provider}</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.model}</Text>{route.effort && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.effort} effort</Text></>}</>}
             <Text style={[styles.muted, { color: selectedAttempt.status === "failed" ? theme.colors.statusDanger : theme.colors.foregroundMuted }]}>· {workerStatus(selectedAttempt.status, selectedAttempt.events.length)}</Text>

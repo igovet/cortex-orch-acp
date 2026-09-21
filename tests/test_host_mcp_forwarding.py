@@ -25,7 +25,7 @@ from cortex_runtime.configuration.mcp_servers import load_mcp_servers  # noqa: E
 def test_a_client_server_is_forwarded_whole():
     entry = {
         "name": "codebase_memory",
-        "command": "/usr/bin/node",
+        "allowed_tools": ["inspect"], "command": "/usr/bin/node",
         "args": ["/opt/memory/index.js"],
         "env": [{"name": "MEMORY_TOKEN", "value": "s3cret"}],
     }
@@ -37,14 +37,14 @@ def test_a_client_server_is_forwarded_whole():
 
 def test_an_entry_that_could_not_be_launched_is_omitted_not_fatal():
     assert host_mcp_servers([{"name": "x"}]) == []
-    assert host_mcp_servers([{"command": "/bin/true"}]) == []
-    assert host_mcp_servers([{"name": "", "command": "/bin/true"}]) == []
+    assert host_mcp_servers([{"allowed_tools": ["inspect"], "command": "/bin/true"}]) == []
+    assert host_mcp_servers([{"name": "", "allowed_tools": ["inspect"], "command": "/bin/true"}]) == []
     assert host_mcp_servers(["not a dict"]) == []
     assert host_mcp_servers(None) == []
 
 
 def test_a_client_can_never_shadow_the_cortex_server():
-    assert host_mcp_servers([{"name": "cortex", "command": "/bin/evil"}]) == []
+    assert host_mcp_servers([{"name": "cortex", "allowed_tools": ["inspect"], "command": "/bin/evil"}]) == []
 
 
 def test_cortex_comes_first_and_the_client_follows():
@@ -54,7 +54,7 @@ def test_cortex_comes_first_and_the_client_follows():
     assert [entry["name"] for entry in cortex_only] == ["cortex"]
 
     combined = list(cortex_only) + host_mcp_servers(
-        [{"name": "codebase_memory", "command": "/usr/bin/node"}],
+        [{"name": "codebase_memory", "allowed_tools": ["inspect"], "command": "/usr/bin/node"}],
     )
     assert [entry["name"] for entry in combined] == ["cortex", "codebase_memory"]
     # The manager accepts the list and keeps its own copy.
@@ -95,7 +95,7 @@ def test_the_servers_the_client_sent_actually_reach_the_runtime(tmp_path):
 
     # The shape agent.py assembles: whatever the session carries is what
     # the runtime is handed, unchanged.
-    session = {"mcp_servers": [{"name": "codebase-memory-mcp", "command": "/usr/bin/cbm", "args": []}]}
+    session = {"mcp_servers": [{"name": "codebase-memory-mcp", "allowed_tools": ["inspect"], "command": "/usr/bin/cbm", "args": []}]}
     start_prompt_kwargs: dict = {}
     if agent._runtime_accepts_host_mcp_servers:
         start_prompt_kwargs["host_mcp_servers"] = session.get("mcp_servers") or None
@@ -134,8 +134,8 @@ def test_production_runtime_forwards_owner_registry_to_task_and_role_filters(tmp
     path = registry_dir / "mcp-servers.json"
     secret = "test-secret-never-log-or-store"
     path.write_text(json.dumps({"version": 1, "servers": {
-        "codebase-memory-mcp": {"command": "/bin/true", "env": {"MEMORY_TOKEN": secret}},
-        "playwright": {"command": "/bin/true", "roles": ["worker"], "engines": ["claude-agent-acp"]},
+        "codebase-memory-mcp": {"allowed_tools": ["inspect"], "command": "/bin/true", "env": {"MEMORY_TOKEN": secret}},
+        "playwright": {"allowed_tools": ["inspect"], "command": "/bin/true", "roles": ["worker"], "engines": ["claude-agent-acp"]},
     }}), encoding="utf-8")
     path.chmod(0o600)
     env = {"HOME": str(tmp_path), "XDG_CONFIG_HOME": str(config_root)}
@@ -166,7 +166,7 @@ def test_production_runtime_forwards_owner_registry_to_task_and_role_filters(tmp
     )
     effective = task_runtime.host_mcp_servers_for_task("task")
     assert [entry["name"] for entry in effective] == ["codebase-memory-mcp", "playwright"]
-    assert [entry["name"] for entry in host_mcp_servers(effective, role="coordinator", engine="claude-agent-acp")] == ["codebase-memory-mcp"]
+    assert [entry["name"] for entry in host_mcp_servers(effective, role="coordinator", engine="claude-agent-acp")] == []
     assert [entry["name"] for entry in host_mcp_servers(effective, role="worker", engine="claude-agent-acp")] == ["codebase-memory-mcp", "playwright"]
     assert [entry["name"] for entry in host_mcp_servers(effective, role="worker", engine="codex-acp")] == ["codebase-memory-mcp"]
     # The registry value is only held in memory for the active task.
@@ -181,7 +181,7 @@ def test_cortex_registry_supplies_servers_when_client_sends_none(tmp_path):
     project_file.parent.mkdir()
     project_file.write_text(json.dumps({"version": 1, "servers": {
         "codebase-memory-mcp": {
-            "command": "/home/user/.local/bin/codebase-memory-mcp",
+            "allowed_tools": ["inspect"], "command": "/home/user/.local/bin/codebase-memory-mcp",
             "args": [],
             "env": {"MEMORY_TOKEN": "in-memory-only"},
         },
@@ -193,7 +193,7 @@ def test_cortex_registry_supplies_servers_when_client_sends_none(tmp_path):
     global_file = config / "mcp-servers.json"
     global_file.write_text(json.dumps({"version": 1, "servers": {
         "codebase-memory-mcp": {
-            "command": "/home/user/.local/bin/codebase-memory-mcp",
+            "allowed_tools": ["inspect"], "command": "/home/user/.local/bin/codebase-memory-mcp",
             "args": [],
             "env": {"MEMORY_TOKEN": "in-memory-only"},
         },
@@ -206,9 +206,10 @@ def test_cortex_registry_supplies_servers_when_client_sends_none(tmp_path):
     })
     assert effective == [{
         "name": "codebase-memory-mcp",
-        "command": "/home/user/.local/bin/codebase-memory-mcp",
+        "allowed_tools": ["inspect"], "command": "/home/user/.local/bin/codebase-memory-mcp",
         "args": [],
         "env": [{"name": "MEMORY_TOKEN", "value": "in-memory-only"}],
+        "read_paths": [], "read_only_tools": [], "network": False,
     }]
 
 
@@ -219,7 +220,7 @@ def test_global_registry_wins_over_client_and_project_files_are_ignored(tmp_path
     config = Path(root) / "config" / "cortex"
     config.mkdir(parents=True, exist_ok=True)
     (config / "mcp-servers.json").write_text(json.dumps({"servers": {
-        "shared": {"command": "/global/server", "args": []},
+        "shared": {"allowed_tools": ["inspect"], "command": "/global/server", "args": []},
     }}), encoding="utf-8")
     (config / "mcp-servers.json").chmod(0o600)
     project_file = tmp_path / ".cortex" / "mcp-servers.json"
@@ -227,13 +228,13 @@ def test_global_registry_wins_over_client_and_project_files_are_ignored(tmp_path
     # A worker can write project files in direct-project mode.  Such a file
     # must never become a persistent executable capability for a later turn.
     project_file.write_text(json.dumps({"servers": {
-        "shared": {"command": "/project/server"},
-        "project-only": {"command": "/project/only"},
+        "shared": {"allowed_tools": ["inspect"], "command": "/project/server"},
+        "project-only": {"allowed_tools": ["inspect"], "command": "/project/only"},
     }}), encoding="utf-8")
     project_file.chmod(0o600)
     effective = load_mcp_servers(tmp_path, client_servers=[
-        {"name": "shared", "command": "/client/server"},
-        {"name": "client-only", "command": "/client/only"},
+        {"name": "shared", "allowed_tools": ["inspect"], "command": "/client/server"},
+        {"name": "client-only", "allowed_tools": ["inspect"], "command": "/client/only"},
     ], environ={"HOME": root, "XDG_CONFIG_HOME": str(Path(root) / "config"), "XDG_STATE_HOME": str(Path(root) / "state")})
     assert [entry["name"] for entry in effective] == ["shared", "client-only"]
     assert effective[0]["command"] == "/global/server"
@@ -256,11 +257,11 @@ def test_effective_servers_reach_engine_session_new_after_cortex_entry(tmp_path)
     record = make_connection_record(
         new_connection_id(), launch_command=fake_launch_command(scenario), environ=environ,
     )
-    client_tool = {"name": "codebase-memory-mcp", "command": "/usr/bin/codebase-memory-mcp", "args": [], "env": []}
+    client_tool = {"name": "codebase-memory-mcp", "allowed_tools": ["inspect"], "command": "/usr/bin/codebase-memory-mcp", "args": [], "env": []}
     manager = EngineSessionManager(
         record, str(tmp_path), environ=environ,
         channel_credentials=("ch_" + "0" * 12, "a" * 20, str(tmp_path)),
-        host_mcp_servers=[client_tool], call_timeout=5,
+        host_mcp_servers=[client_tool], mcp_role="worker", call_timeout=5,
     )
     try:
         manager.negotiate((EngineCapability.SESSION_CREATION, EngineCapability.PROMPT_STREAMING))
@@ -279,23 +280,23 @@ def test_owner_registry_roles_scope_external_servers_without_wire_metadata(tmp_p
     config.mkdir(parents=True)
     path = config / "mcp-servers.json"
     path.write_text(json.dumps({"servers": {
-        "research": {"command": "/bin/true", "roles": ["coordinator"], "engines": ["claude-agent-acp"]},
-        "code-memory": {"command": "/bin/true", "roles": ["worker"], "engines": ["codex-acp"]},
-        "shared": {"command": "/bin/true"},
+        "research": {"allowed_tools": ["inspect"], "command": "/bin/true", "roles": ["coordinator"], "engines": ["claude-agent-acp"]},
+        "code-memory": {"allowed_tools": ["inspect"], "command": "/bin/true", "roles": ["worker"], "engines": ["codex-acp"]},
+        "shared": {"allowed_tools": ["inspect"], "command": "/bin/true"},
     }}), encoding="utf-8")
     path.chmod(0o600)
     env = {"HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "config")}
     entries = load_mcp_servers(tmp_path, environ=env)
     coordinator = host_mcp_servers(entries, role="coordinator", engine="claude-agent-acp")
     worker = host_mcp_servers(entries, role="worker", engine="codex-acp")
-    assert [entry["name"] for entry in coordinator] == ["research", "shared"]
+    assert coordinator == []
     assert [entry["name"] for entry in worker] == ["code-memory", "shared"]
     assert [entry["name"] for entry in host_mcp_servers(entries, role="worker", engine="claude-agent-acp")] == ["shared"]
     assert all("roles" not in entry and "engines" not in entry for entry in coordinator + worker)
 
     for invalid in ([], ["coordinator", "coordinator"], ["other"], "worker", [1]):
         path.write_text(json.dumps({"servers": {
-            "broken": {"command": "/bin/true", "roles": invalid},
+            "broken": {"allowed_tools": ["inspect"], "command": "/bin/true", "roles": invalid},
         }}), encoding="utf-8")
         try:
             load_mcp_servers(tmp_path, environ=env)
@@ -305,7 +306,7 @@ def test_owner_registry_roles_scope_external_servers_without_wire_metadata(tmp_p
             raise AssertionError(f"invalid roles accepted: {invalid!r}")
     for invalid in ([], ["codex-acp", "codex-acp"], ["other"], "codex-acp", [1]):
         path.write_text(json.dumps({"servers": {
-            "broken": {"command": "/bin/true", "engines": invalid},
+            "broken": {"allowed_tools": ["inspect"], "command": "/bin/true", "engines": invalid},
         }}), encoding="utf-8")
         try:
             load_mcp_servers(tmp_path, environ=env)
@@ -333,9 +334,9 @@ def test_engine_session_filters_external_mcp_and_records_bounded_inventory(tmp_p
         record, str(tmp_path), environ=environ,
         channel_credentials=("ch_" + "0" * 12, "a" * 20, str(tmp_path)),
         host_mcp_servers=[
-            {"name": "research", "command": "/bin/true", "roles": ["coordinator"]},
-            {"name": "code-memory", "command": "/bin/true", "env": [{"name": "MEMORY_TOKEN", "value": secret}], "roles": ["worker"], "engines": ["codex-acp"]},
-            {"name": "playwright", "command": "/bin/true", "roles": ["worker"], "engines": ["claude-agent-acp"]},
+            {"name": "research", "allowed_tools": ["inspect"], "command": "/bin/true", "roles": ["coordinator"]},
+            {"name": "code-memory", "allowed_tools": ["inspect"], "command": "/bin/true", "env": [{"name": "MEMORY_TOKEN", "value": secret}], "roles": ["worker"], "engines": ["codex-acp"]},
+            {"name": "playwright", "allowed_tools": ["inspect"], "command": "/bin/true", "roles": ["worker"], "engines": ["claude-agent-acp"]},
         ],
         mcp_role="worker", call_timeout=5,
     )
@@ -347,7 +348,9 @@ def test_engine_session_filters_external_mcp_and_records_bounded_inventory(tmp_p
     finally:
         manager.shutdown(grace=2)
     assert [entry["name"] for entry in wire["mcpServers"]] == ["cortex", "code-memory"]
-    assert wire["mcpServers"][1]["env"] == [{"name": "MEMORY_TOKEN", "value": secret}]
+    assert wire["mcpServers"][1]["env"] == []
+    assert "--relay" in wire["mcpServers"][1]["args"]
+    assert secret not in json.dumps(wire)
     assert secret not in (manager._process.logs.directory / "observations.jsonl").read_text(encoding="utf-8")
     assert secret not in (manager._process.logs.directory / "stderr.log").read_text(encoding="utf-8")
     assert receipt == {

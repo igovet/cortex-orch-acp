@@ -323,6 +323,14 @@ def install_paseo_plugin(*, plugin_dir=None, paseo_cli=None, environ=None, runne
     """Install/repair the repository-owned Paseo provider during explicit setup."""
     root, manifest, payload_sha256 = _verify_paseo_plugin_source(plugin_dir)
     env = dict(os.environ if environ is None else environ)
+    # A running provider process does not mean it can open an ACP session.
+    # Check the same owner registry the session will read before any mutation.
+    from cortex_runtime.configuration.mcp_servers import load_mcp_servers
+    from cortex_runtime.portable.errors import PortableError
+    try:
+        load_mcp_servers(str(_ROOT), environ=env)
+    except PortableError as error:
+        raise SystemExit(f"error: MCP configuration preflight failed: {error.remediation}") from None
     cli = paseo_cli or _resolve_paseo_cli(env)
     run = runner or subprocess.run
 
@@ -388,6 +396,8 @@ def install_paseo_plugin(*, plugin_dir=None, paseo_cli=None, environ=None, runne
                 raise SystemExit("error: Paseo plugin id 'cortex-acp' is bound to another source path.")
             if existing.get("status") != "running":
                 invoke(["plugin", "enable", manifest["id"]], check=False)
+            else:
+                invoke(["plugin", "reload", manifest["id"]])
         verified = invoke(["plugin", "ls", manifest["id"], "--json"])
         try:
             rows = json.loads(verified.stdout)

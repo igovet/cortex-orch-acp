@@ -95,12 +95,12 @@ _CATALOG: dict[str, dict[str, str]] = {
               "С самой задачей всё в порядке, она продолжается там; ничего не потеряно.",
     },
     "coordinator_turn_mutated_workspace": {
-        "en": "Blocked: the coordinator's own turn changed the project workspace (or its "
-              "change could not be ruled out). The coordinator is a route, not a worker -- "
-              "delegate this work to a worker instead of doing it directly.",
-        "ru": "Заблокировано: собственный ход координатора изменил рабочую область проекта "
-              "(или изменение не удалось исключить). Координатор — это маршрут, а не "
-              "исполнитель; делегируйте эту работу исполнителю, а не выполняйте её напрямую.",
+        "en": "The project changed during this turn, but Cortex could not attribute the "
+              "change to this task's recorded work. This does not establish who wrote it. "
+              "The task remains open while its evidence is reconciled.",
+        "ru": "Во время хода проект изменился, но Cortex не смог связать изменение "
+              "с зафиксированной работой этой задачи. Автор записи не установлен. "
+              "Задача остаётся открытой до сверки свидетельств.",
     },
     "coordinator_mutation_refused": {
         "en": "This mutating action was refused: the coordinator is a route, not a worker, and "

@@ -1,11 +1,13 @@
+import { presentToolSemantics } from "./shared/tool-presentation.ts";
+import { workerEventSchema } from "./shared/worker-history.js";
+import { isHiddenOperation } from "./shared/timeline-visibility.ts";
 import { useAgent, type PluginClientContext, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Animated, Pressable, Text, View } from "react-native";
 import { z } from "zod";
-import { WorkerPanel } from "./client/worker-panel.js";
+import { WorkerPanel, TranscriptEvent } from "./client/worker-panel.js";
 import { selectWorker } from "./client/worker-selection.js";
-import { projectCoordinatorToolRow } from "./client/coordinator-tool-row.js";
 import { WorkerPopover } from "./client/worker-popover.js";
 import { isWorkerTimelineRunning } from "./client/worker-timeline-status.js";
 
@@ -21,25 +23,6 @@ const workerTimelineSchema = z.object({
 });
 
 type WorkerTimelineData = z.output<typeof workerTimelineSchema>;
-
-const compactToolTimelineSchema = z.object({
-  callId: z.string(),
-  label: z.string(),
-  icon: z.string(),
-});
-
-type CompactToolTimelineData = z.output<typeof compactToolTimelineSchema>;
-
-function CompactToolRow({ theme, layout, item }: PluginTimelineItemProps<CompactToolTimelineData>) {
-  return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 7, paddingVertical: layout.compact ? 5 : 7 }}>
-      <Icon name={item.data.icon} size={14} color={theme.colors.foregroundMuted} />
-      <Text style={{ color: theme.colors.foreground }}>
-      {item.data.label}
-      </Text>
-    </View>
-  );
-}
 
 /**
  * Worker cards use the ACP tool title as their portable metadata channel.
@@ -95,53 +78,59 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
     >
       <Animated.View style={{ opacity }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 7 }}>
-          <Icon name="Users" size={14} color={theme.colors.foregroundMuted} />
-          <Text style={{ color: theme.colors.accent, fontWeight: "600" }}>Worker: {metadata.workerName}</Text>
+          <View style={{ width: 14, flexShrink: 0 }}><Icon name="Users" size={14} color={theme.colors.foregroundMuted} /></View>
+          <Text numberOfLines={2} ellipsizeMode="tail" style={{ flex: 1, minWidth: 0, color: theme.colors.foreground, fontWeight: "600" }}>Worker: {metadata.workerName}</Text>
         </View>
-        <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12, marginLeft: 21 }}>{metadata.subtitle}</Text>
+        <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.colors.foregroundMuted, fontSize: 12, marginLeft: 21 }}>{metadata.subtitle}</Text>
       </Animated.View>
     </Pressable>
   );
 }
 
+
+const toolRowSchema = z.object({ event: workerEventSchema });
+function CortexToolRow({ theme, item }: PluginTimelineItemProps<z.output<typeof toolRowSchema>>) {
+  const [expanded, setExpanded] = useState(false);
+  return <TranscriptEvent event={item.data.event} updates={[item.data.event]} expanded={expanded}
+    onToggle={() => setExpanded(!expanded)} theme={theme} />;
+}
+
 export default function contribute(client: PluginClientContext) {
   client.addTimelineTransformer({
-    id: "cortex-compact-tool-row",
-    query: { itemType: "tool_call" },
-    transform({ item }) {
-      if (item.callId.startsWith("worker:")) return undefined;
-      const projection = projectCoordinatorToolRow(item);
-      if (!projection) return undefined;
-      if (projection.hidden || !projection.presentation) return { items: [] };
-      const presentation = projection.presentation;
-      return {
-        items: [{
-          type: "plugin",
-          kind: "cortex-compact-tool-row",
-          version: 1,
-          data: {
-            callId: item.callId,
-            label: presentation.label,
-            icon: presentation.icon,
-          },
-        }],
-      };
-    },
-  });
-  client.addTimelineRenderer({
-    kind: "cortex-compact-tool-row",
-    version: 1,
-    schema: compactToolTimelineSchema,
-    Component: CompactToolRow,
+    id: "hide-thinking", query: { itemType: "reasoning" },
+    transform: () => ({ items: [] }),
   });
   client.addTimelineTransformer({
     id: "worker-tool-call-row",
     query: { itemType: "tool_call" },
     transform({ item }) {
-      if (!item.callId.startsWith("worker:")) return undefined;
+      if (isHiddenOperation(item.name)) return { items: [] };
+      if (!item.callId.startsWith("worker:")) {
+        const original = typeof item.metadata?.cortexOriginalName === "string" ? item.metadata.cortexOriginalName : item.name;
+        const detail = item.detail;
+        const informational = !presentToolSemantics({ name: original, toolKind: detail.type,
+          rawInput: item.metadata?.cortexRawInput ?? (detail.type === "unknown" ? detail.input : detail) }).expandable;
+        if (!informational && typeof item.metadata?.cortexOriginalName !== "string" && !/^mcp(?:__|\.)cortex(?:__|\.)/.test(original)) return undefined;
+        const event = {
+          id: 0, type: "tool_call", text: "", createdAt: "", activity_ref: `tool:${item.callId}`,
+          title: original, status: item.status === "running" ? "in_progress" : item.status,
+          tool_kind: detail.type === "shell" ? "execute" : detail.type,
+          raw_input: item.metadata?.cortexRawInput ?? (detail.type === "unknown" ? detail.input : detail),
+          raw_output: informational ? undefined : item.metadata?.cortexRawOutput ?? (detail.type === "unknown" ? detail.output : detail),
+          error: item.status === "failed" ? item.error : null,
+        };
+        return { items: [{ type: "plugin", id: `cortex-tool:${item.callId}`, kind: "cortex-tool", version: 1,
+          data: JSON.parse(JSON.stringify({ event })) }] };
+      }
       return {
         items: [{
           type: "plugin",
+          // A worker lifecycle is one stable ACP tool call.  The bridge
+          // sends each lifecycle change as a new host timeline record, so
+          // the plugin item must carry the stable call ID explicitly.  If it
+          // is omitted, Paseo derives an ID from each host record and shows
+          // duplicate worker rows after a status update or cancellation.
+          id: `worker-row:${item.callId}`,
           kind: "worker-row",
           version: 1,
           data: { callId: item.callId, assignmentRef: item.callId.slice("worker:".length), title: item.name, status: item.status },
@@ -149,6 +138,7 @@ export default function contribute(client: PluginClientContext) {
       };
     },
   });
+  client.addTimelineRenderer({ kind: "cortex-tool", version: 1, schema: toolRowSchema, Component: CortexToolRow });
   client.addTimelineRenderer({
     kind: "worker-row",
     version: 1,

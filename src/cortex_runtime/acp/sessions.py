@@ -102,6 +102,27 @@ def close_session(store, session_id):
             db.rollback(); raise
 
 
+def close_task_sessions(store, task_id):
+    """Close every ACP host session bound to a terminally stopped task.
+
+    A task can have more than one bound host session after a reconnect. A
+    task-wide stop invalidates the task for all of them, so leaving an older
+    row open would make durable host-session state disagree with the terminal
+    task state. The update is idempotent and scoped to the task's bound rows.
+    """
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute(
+                "UPDATE acp_host_sessions SET closed_at=? "
+                "WHERE task_id=? AND closed_at IS NULL",
+                (_now(), task_id),
+            )
+            db.commit()
+        except BaseException:
+            db.rollback(); raise
+
+
 def get_session(store, session_id):
     with store.connection() as db:
         row = db.execute("SELECT * FROM acp_host_sessions WHERE session_id=?", (session_id,)).fetchone()

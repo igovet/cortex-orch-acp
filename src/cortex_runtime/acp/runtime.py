@@ -4,7 +4,7 @@
 capture (``bootstrap.bootstrap_task`` / ``bootstrap.append_source_event``)
 has already committed. Production wiring uses ``UnavailableRuntime``, which
 always fails closed: real orchestration provisioning is out of scope for
-T009 (see ``control_plane.NotImplementedControlPlane``, the analogous seam
+T009 (the earlier provisioning seam
 for engine delegation). A scripted, clearly test-only ``FakeRuntime`` lives
 under ``tests/acp_fakes.py`` -- never here, and never imported by production
 code -- so protocol/transport tests can exercise streaming updates and

@@ -70,20 +70,11 @@ TOOLS = [
              "request_key": KEY,
          }, ["mode", "rationale", "request_key"]),
     tool("create_draft",
-         "Create one owner-private Markdown draft for the task resolved from current host "
-         "thread metadata. The server chooses the exact project directory and filename, "
-         "binds the draft to this native thread, and pre-fills profile-neutral headings for "
-         "the selected template. The short draft_id appears in the filename and Markdown. "
-         "The result returns the complete initial Markdown plus the exact required_first_line, "
-         "the complete ordered replaceable_markers list and count, template name, character count, and SHA-256. Use that returned Markdown as the source "
-         "of truth; copy patch context verbatim from this receipt, never reconstruct placeholder names from memory. No immediate read_draft call is needed. Preserve the first line byte-for-byte, "
-         "edit the server-issued file only after its following blank line, and replace every guidance comment or exact pipeline placeholder with complete English content. Before calling write_report, perform one final native-file exact search for every returned replaceable_markers entry and confirm that none remains; a write_report call with even one exact marker still present is guaranteed to fail. A safe atomic replacement at the same path is accepted after ownership and file checks. Use native file tools safely and inspect the actual result; all exact placeholders must be replaced. "
-         "Never move the draft to another path or replace it with a symlink. Create a separate draft for every report or pipeline "
-         "edition; one coordinator thread may own several drafts. Never pass a path, task ID, "
-         "thread ID, or Markdown body. For a new report or edition, omit request_key: "
-         "the server allocates a fresh delivery identity. Each unkeyed call creates a new draft, "
-         "including on later assignments in the same worker thread. After an uncertain unkeyed "
-         "response, recover the existing draft from list_reports own_drafts before creating another.", {
+         "Create an owned Markdown draft and return its exact marker, placeholder list and complete initial Markdown. "
+         "Fill the draft using draft_write, preserving required_first_line and replacing all replaceable_markers. "
+         "Use read_draft only to recover an existing edited draft. Runtime alone publishes pipeline editions. "
+         "Omit request_key for a new draft; after an uncertain response recover it from list_reports own_drafts. "
+         "An explicit request_key supports exact retries.", {
              "template": string(
                  "Select the document headings. Only the bound coordinator may select pipeline for its current pipeline edition; a worker selecting pipeline is rejected before a draft is created. Workers select their assigned report class. Every other value creates an ordinary report; synthesis is a worker-authored artifact, not an additional coordinator completion step.",
                  14, enum=["general", "planning", "investigation", "implementation", "verification", "documentation", "synthesis", "pipeline"]),
@@ -107,23 +98,12 @@ TOOLS = [
              "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Normally omit this field and use the default. A document larger than one page requires its returned next_cursor, never a limit above the maximum or a renamed input field. Read only enough content to answer a concrete missing fact. Never issue a one-character or other tiny probe to test connectivity, validate an existing reference, or prepare for report publication. Previously read immutable text needs no confirmation. Continue only with the returned cursor.", 4_000),
          }, ["draft_id"], read=True),
     tool("write_report",
-         "Publish either one immutable report or a new current pipeline edition for the task "
-         "resolved from host thread metadata. First call create_draft, fill the returned file "
-         "completely in English with native file tools. Before publishing, preserve the returned "
-         "required_first_line and replace every exact line in replaceable_markers, including guidance "
-         "comments; required_replacement_count is the number of lines to remove. Before this MCP call, "
-         "use a native file read/search to verify that every returned marker is absent; do not call while "
-         "the exact-marker count is nonzero because the server will reject the publication. Then send its short "
-         "draft_id and all required publication metadata. The "
-         "draft must belong to this exact native thread and remain at its server-issued path. The server "
-         "streams the complete file without a report-size limit, validates UTF-8, hashes and "
-         "atomically publishes it under <project_root>/.cortex/<task>/<report>.md, "
-         "commits metadata, then deletes the source draft. Never put Markdown bodies or shell interpolation in this MCP request; native file tools carry draft content. Metadata arrays use the advertised item schemas (for artifacts, each item has exactly `reference` and `version`). A pipeline draft's bytes are "
-         "prepended to the task's single pipeline.md and earlier editions "
-         "remain below. Open authored reports with a decision brief that fits within the first 4000 Unicode characters including marker and title: conclusion, decisive observations, checked/open requirements, contradictions, limits, disconfirming evidence and next action. This is Markdown guidance, not server semantic validation. Publication ends this assignment; a later explicit native follow-up may produce another immutable report from the same thread. Before publication, stop every command session opened for this "
-         "assignment and inspect its terminal result. After success keep "
-         "the short report reference and preview. Retry an uncertain write only with its exact "
-         "key and arguments.", {
+         "Publish this channel's fully filled draft as an immutable Markdown report. "
+         "Use create_draft, then draft_write; preserve the marker and remove all placeholders before publication. "
+         "The runtime validates ownership, UTF-8, hashes and atomically publishes complete bytes in the project store. "
+         "Return its exact report_id through result_submit. Publication alone does not complete an assignment or task. "
+         "Open the report with a concise decision brief: conclusion, observed evidence, checks, contradictions, limits and next action. "
+         "Choose a unique request_key and use the same arguments for an uncertain retry.", {
              "source_revision": dict(type="integer",minimum=0,maximum=2**53-1,description="Requirements source revision actually used for this evidence. Omit to retain the revision recorded when this draft was created. Later sources signal reconciliation, never automatic rejection of old evidence."),
              "artifacts": dict(type="array",maxItems=100,description="Versions actually checked by this report; metadata assertions by the author, not automatic verification.",items=dict(type="object",additionalProperties=False,required=["reference","version"],properties={"reference":string("Artifact path or durable resource reference.",4096),"version":string("Checked SHA-256, commit or exact resource version.",256)})),
              "title": string("Readable English title for the report or pipeline edition.", 200),
@@ -151,10 +131,10 @@ TOOLS = [
          "current pipeline and any source, clarification, governance or evidence pages needed to recover requirements or make a decision. The 4000-character limit is a page size, not a total context limit. Workers read selected relevant report bodies. A pipeline update "
          "makes older pipeline cursors stale. Ordinary reports are immutable. If an argument is "
          "rejected, use this tool's advertised input schema to correct the call; do not carry "
-         "write-only fields into a read. When a worker_result or publish_result contains "
+         "write-only fields into a read. When a worker_result or result_submit contains "
          "report_ref, copy that exact value into this tool's report_id argument; report_ref "
          "is not an accepted read_report argument.", {
-             "report_id": dict(REPORT, description="Exact opaque report identifier for this read. Copy the exact report_ref value from the relevant worker_result or publish_result into this report_id field; those result events call the same identifier report_ref. Do not send report_ref to read_report: report_ref is not an accepted argument name. If the exact value is unavailable or invalid, obtain its authoritative correction; do not guess or probe nearby identifiers."),
+             "report_id": dict(REPORT, description="Exact opaque report identifier for this read. Copy the exact report_ref value from the relevant worker_result or result_submit into this report_id field; those result events call the same identifier report_ref. Do not send report_ref to read_report: report_ref is not an accepted argument name. If the exact value is unavailable or invalid, obtain its authoritative correction; do not guess or probe nearby identifiers."),
              "cursor": string("Exact opaque next_cursor from the preceding page. Any actor may continue the selected source or evidence when needed.", 512),
              "limit": integer("Optional Unicode character page size from 1 through 4000; default 4000. Normally omit this field and use the default. A document larger than one page requires its returned next_cursor, never a limit above the maximum or a renamed input field. Read only enough content to answer a concrete missing fact. Never issue a one-character or other tiny probe to test connectivity, validate an existing reference, or prepare for report publication. Previously read immutable text needs no confirmation. Continue only with the returned cursor.", 4_000),
          }, [], read=True),
@@ -188,7 +168,7 @@ OUTPUTS = {
         report_id=REPORT, replayed=REPLAY)),
     "create_draft": object_schema(dict(
         draft_id=DRAFT,
-        draft_path=output_string("Absolute server-created project path to edit with native file tools."),
+        draft_path=output_string("Absolute server-created project path to edit through draft_write."),
         kind=output_string("Document kind derived from the selected template.", enum=["report", "pipeline"]),
         template=output_string("Draft heading template selected at creation."),
         required_first_line=output_string("Exact first line that must remain byte-for-byte at the start of the completed Markdown."),
@@ -281,6 +261,10 @@ ERROR_HELP = {
     "coordinator_only": "Only the bound coordinator can change Cortex participation state.",
     "invalid_source_revision": "Use an existing requirements source revision actually used by the report.",
     "acceptance_refused": "The task is not ready for acceptance. Read correction for the exact missing evidence or pending event; an identical retry cannot resolve it.",
+    "check_evidence_required": "A passed automated check requires a complete successful command receipt from this worker attempt. Correct the evidence before submitting the result.",
+    "gateway_path_not_found": "The requested project path does not exist. No file was changed.",
+    "gateway_command_denied": "This channel cannot execute commands. Coordinators answer informational questions using project reads; execution belongs to scoped workers for requested work.",
+    "gateway_read_failure": "The requested project path could not be read. No file was changed.",
     "storage_error": "Storage did not complete cleanly. Preserve the draft. Check disk space and access, then retry only the identical request and key because publication may be uncertain.",
     "channel_required": "This server process was launched without CORTEX_CHANNEL_ID/CORTEX_CHANNEL_SECRET/CORTEX_CHANNEL_PROJECT_ROOT. Every tool call requires a trusted channel; the Codex-plugin-harness-era unchanneled identity path was removed. Launch through the ACP orchestrator's engine spawn, which always supplies channel credentials.",
     "channel_unknown": "This trusted channel id and secret pair is not recognized. Use the exact channel_id and secret issued at bootstrap or worker delegation; never guess or reuse another channel's credentials.",
@@ -327,7 +311,7 @@ def validate(name, args):
                 "invalid_arguments", "report_ref", "unadvertised field(s)",
                 "report_id (optional)",
                 "Copy the exact value from worker_result.report_ref or "
-                "publish_result.report_ref into read_report.report_id and omit report_ref. "
+                "result_submit.report_ref into read_report.report_id and omit report_ref. "
                 "No report was read by this rejected call.",
             )
         raise StoreError("invalid_arguments",fields,"unadvertised field(s)",", ".join(schema["properties"]),"Remove unadvertised fields and derive the call from tools/list.")

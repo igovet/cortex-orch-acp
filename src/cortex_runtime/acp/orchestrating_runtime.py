@@ -1,20 +1,8 @@
-"""T016 model-owned coordination: an :class:`IncomingRuntime` that runs a
-real coordinator-led multi-assignment task instead of forwarding user text
-to a single downstream agent.
+"""ACP session ownership, worker process services and unfiltered presentation.
 
-Process boundary (see ``docs/acp/orchestration.md``): this module is the
-*main* process. It never itself executes a delegation MCP tool call --
-those are handled inside the Cortex MCP subprocess an engine launches as
-its own child (``delegation.mcp_tools``). This module only (a) opens/owns
-engine sessions via the injected :class:`SessionRuntime`, (b) reacts to the
-durable ``task_events`` log those tool calls produce, and (c) performs the
-one privileged effect the MCP subprocess is forbidden from doing itself:
-calling :class:`delegation.provisioning.ProvisioningService` to actually
-provision a delegated worker and prompting its engine session.
-
-Coordinator sessions are provisioned the same way (this module opens them
-directly, not via ``ProvisioningService.delegate``, since a coordinator is
-not itself a delegation).
+Orchestration decisions are made by orchestration.controller and its durable
+state machine. This module supplies engine provisioning and observation services;
+models cannot invoke those services through the public MCP proposal interface.
 """
 from __future__ import annotations
 
@@ -34,7 +22,6 @@ from ..configuration.policy import BENIGN_CONFIGURATION_ERROR_CODES
 from ..connections.environment import DENYLIST_PATTERN
 from ..contracts import StoreError
 from ..delegation import events as delegation_events
-from ..delegation import integration as delegation_integration
 from ..delegation import revision as delegation_revision
 from ..delegation import workspace_isolation as delegation_workspace_isolation
 from ..delegation.deliveries import MAX_DELIVERY_RETRIES
@@ -52,6 +39,7 @@ from ..portable.roles import composed_instructions, load_role
 from ..recovery.capsule import build_capsule, render_capsule
 from ..trusted_channel import ChannelContext, issue_channel_tx
 from . import messages as acp_messages
+from . import sessions as acp_sessions
 from ..catalog import labels as catalog_labels
 from . import pipeline_bootstrap
 from . import questions_store
@@ -81,8 +69,6 @@ DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS = 3
 DEFAULT_MAX_TOTAL_CONTINUATIONS = None
 DEFAULT_WORKER_POOL_SIZE = 4
 DEFAULT_WAIT_TIMEOUT_SECONDS = 5.0
-_WAIT_BACKOFF_START = 0.05
-_WAIT_BACKOFF_MAX = 1.0
 _UNSET = object()
 # Bound on the actionable-error text (e.g. resolve_role's own remediation,
 # which lists every valid role id) carried in an assignment_failed event
@@ -90,12 +76,10 @@ _UNSET = object()
 # small enough to never make one event payload unbounded as that catalog
 # grows. Truncated with a marker, never silently dropped.
 _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS = 1200
-# T035 visibility fix: bound on one streamed coordinator delta chunk after
-# redaction (scrub_text's own default MAX_TEXT_CHARS=400 is sized for a
-# short logged field, not an engine's own text-generation chunk, which can
-# legitimately be a whole paragraph in one update). Generous, not
-# unbounded: still protects against a single pathological chunk.
-_COORDINATOR_DELTA_MAX_CHARS = 4000
+# T035 visibility fix: coordinator prose is redacted before it enters a
+# complete message block (scrub_text's own default MAX_TEXT_CHARS=400 is
+# sized for a short logged field, not an engine paragraph). The block path
+# remains bounded by the redaction helper without exposing token fragments.
 _SHA256_IN_PROSE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])")
 _FINGERPRINT_IN_PROSE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32,128}(?![0-9a-fA-F])")
 _RAW_SECRET_KEY = re.compile(r"api[_-]?key|token|secret|password|authorization|credential", re.I)
@@ -132,97 +116,35 @@ class _CoordinatorTurnCancel:
         return self.is_set()
 
 
-def _pending_events_acceptance_refusal(raw_output: Any) -> bool:
-    """Recognize the exact dispatch correction, not an arbitrary failed tool.
 
-    ACP's rawOutput is provider-defined: Codex currently nests the MCP
-    JSON error as text inside result.content.  Walk only this bounded tool
-    result and require both the error code and its pending-event correction.
-    """
-    try:
-        rendered = json.dumps(raw_output, ensure_ascii=False, default=str)
-    except (TypeError, ValueError):
+
+
+
+def _revision_dispatch_receipt(raw_output: Any, depth: int = 0) -> bool:
+    """Recognize an acknowledged successor, including ACP MCP wrappers."""
+    if depth > 6:
         return False
-    return ('acceptance_refused' in rendered
-            and 'unconsumed meaningful event(s)' in rendered)
+    if isinstance(raw_output, str):
+        try:
+            return _revision_dispatch_receipt(json.loads(raw_output), depth + 1)
+        except (ValueError, TypeError):
+            return False
+    if isinstance(raw_output, list):
+        return any(_revision_dispatch_receipt(item, depth + 1) for item in raw_output)
+    if not isinstance(raw_output, dict):
+        return False
+    if (raw_output.get("recorded") is True and raw_output.get("decision") == "revise"
+            and isinstance(raw_output.get("continuation_ref"), str)
+            and raw_output["continuation_ref"]):
+        return True
+    return any(_revision_dispatch_receipt(raw_output[key], depth + 1)
+               for key in ("result", "content", "structuredContent", "text") if key in raw_output)
 
 
-def _is_cortex_decide_tool(title: Any) -> bool:
-    """Recognize only the observed Cortex MCP names from both ACP engines.
-
-    Codex renders the server/tool pair with dots; Claude Agent ACP uses its
-    SDK's double-underscore MCP name.  A bare ``decide`` (or a different
-    server's ``decide``) does not identify a Cortex dispatch.
-    """
-    return title in {"mcp.cortex.decide", "mcp__cortex__decide"}
 
 
-def _guard_final_digests(text: str, accepted_pipeline: str | None, warning: str) -> str:
-    """Do not echo an exact digest absent from the accepted decision basis.
-
-    This is an integrity check for machine-verifiable identifiers, not a
-    claim to validate the coordinator's prose or interpret its evidence.
-    """
-    if not _FINGERPRINT_IN_PROSE.search(text):
-        return text
-    current_edition = (accepted_pipeline or "").split("\n\n---\n\n", 1)[0]
-    known = {value.lower() for value in _SHA256_IN_PROSE.findall(current_edition)}
-    replaced = False
-
-    def _replace(match):
-        nonlocal replaced
-        if match.group().lower() in known:
-            return match.group()
-        replaced = True
-        return "[unverified digest omitted]"
-
-    guarded = _FINGERPRINT_IN_PROSE.sub(_replace, text)
-    if replaced:
-        guarded += "\n\n" + warning
-    return guarded
 
 
-def _scrub_accepted_final(text: str, accepted_pipeline: str | None, warning: str) -> str:
-    """Redact credentials while retaining only pipeline-verified SHA-256s.
-
-    ``scrub_text`` treats every long hex run as a possible secret. Applying
-    it to streamed chunks before checking the accepted pipeline erased even
-    the correct digest and made the final-answer integrity guard ineffective.
-    Keep raw chunks only in memory until the decision boundary, reject
-    unknown digests, then scrub the spans between the allowed digests.
-    """
-    guarded = _guard_final_digests(text, accepted_pipeline, warning)
-    current_edition = (accepted_pipeline or "").split("\n\n---\n\n", 1)[0]
-    known = {value.lower() for value in _SHA256_IN_PROSE.findall(current_edition)}
-    parts: list[str] = []
-    cursor = 0
-    for match in _FINGERPRINT_IN_PROSE.finditer(guarded):
-        span = guarded[cursor:match.start()]
-        parts.append(scrub_text(span, max_chars=max(4000, len(span) * 2 + 1000)))
-        parts.append(match.group() if match.group().lower() in known else "[unverified digest omitted]")
-        cursor = match.end()
-    span = guarded[cursor:]
-    parts.append(scrub_text(span, max_chars=max(4000, len(span) * 2 + 1000)))
-    return "".join(parts)
-
-
-def _accepted_status_correction_needed(text: str) -> bool:
-    """Detect a coordinator's stale blocked-status claim after acceptance.
-
-    This is intentionally narrow and only controls whether a canonical
-    post-commit correction is appended.  It never creates an acceptance: the
-    caller invokes it only after ``_check_terminal_decision`` has returned
-    the already gate-validated terminal decision and ``_set_state`` commits
-    ``state=accepted``.
-    """
-    lowered = " ".join(str(text or "").lower().split())
-    return (
-        "workers_running" in lowered
-        or "state projection still reports blocked" in lowered
-        or "projection still reports blocked" in lowered
-        or bool(re.search(r"(?:task|state).{0,40}projection.{0,40}blocked", lowered))
-        or bool(re.search(r"проекц\w*.{0,40}(?:задач\w*|состояни\w*).{0,40}заблок", lowered))
-    )
 
 
 def _bounded_detail(text: str) -> str:
@@ -231,16 +153,6 @@ def _bounded_detail(text: str) -> str:
     return text[: _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS - 3] + "..."
 
 
-def _provisioning_progress_note(provisioning_sig: tuple[tuple[str, str, str], ...]) -> str:
-    """T035 FINDING-13 #2: a short, honest human-readable rendering of a
-    ``delegation_provisioning.in_progress_snapshot`` result -- named
-    attempts and their current step, so a host/log/human reading
-    ``wait_detail`` (and the model itself, whenever this blocked note is
-    eventually coalesced into a later continuation) can tell "still
-    provisioning, currently at step X" from a generic, undifferentiated
-    "workers_running"."""
-    parts = [f"{assignment_ref} is provisioning (step: {step})" for assignment_ref, step, _updated_at in provisioning_sig]
-    return "Still working: " + "; ".join(parts) + "."
 
 
 # T035: one ACP ToolCall card per delegated assignment (see
@@ -286,7 +198,6 @@ def _acp_tool_call_status(status: str | None) -> str:
 # A worker's card carries the one thing it is doing right now, not its
 # whole feed -- so this bounds a single line, not a transcript.
 _WORKER_ACTIVITY_MAX_CHARS = 300
-_TOOL_LINE_MAX_CHARS = 80
 
 # How many past actions a worker's expanded card keeps.
 #: Keep every worker event on a new line inside its one assignment card.
@@ -326,7 +237,6 @@ _TOOL_CALL_TITLE_MAX_CHARS = 200
 # calls from one prompt are packed into one ordinary ACP card.  The entries
 # stay newline-delimited JSON in the card body, preserving the exact
 # observable fields while giving the client one card it can collapse.
-_COORDINATOR_ACTION_LOG_MAX_CHARS = 1024 * 1024
 
 
 def _format_display_value(value: Any, *, indent: int = 0, depth: int = 0) -> list[str]:
@@ -377,7 +287,7 @@ def _worker_display_text(update: Mapping[str, Any]) -> str | None:
         return None
     if isinstance(text_value, (Mapping, list, tuple)):
         return None
-    text = scrub_display_text(str(text_value), max_chars=4000).strip()
+    text = scrub_display_text(str(text_value), max_chars=max(4000,len(str(text_value))*2+1000)).strip()
     return text or None
 
 
@@ -534,66 +444,15 @@ _GENERIC_TOOL_PLACEHOLDER_TITLES = frozenset({
 })
 
 
-def _has_concrete_tool_activity(
-    title: str | None, locations: Any, content: Any, raw_input: Any,
-) -> bool:
-    """Return whether a tool update contains something useful to show.
-
-    ACP providers sometimes create a ``Terminal`` call before they have
-    attached the command, cwd, or path.  Rendering that provisional envelope
-    creates an empty ``Terminal`` row (and a second one for its status update)
-    in Paseo.  Keep the call in the engine/evidence stream, but defer its
-    client card until a concrete command/path/MCP target or real display
-    content arrives.  A descriptive title such as ``Read README.md`` is
-    itself concrete and remains visible even when the provider omits the
-    optional fields.
-    """
-    if isinstance(locations, (list, tuple)) and any(
-        isinstance(item, Mapping) and isinstance(item.get("path"), str)
-        and item.get("path", "").strip()
-        for item in locations
-    ):
-        return True
-    if isinstance(content, (list, tuple, Mapping)) and bool(content):
-        return True
-    if isinstance(raw_input, Mapping):
-        command = raw_input.get("command")
-        if isinstance(command, str) and command.strip():
-            return True
-        for key in ("path", "file", "file_path", "cwd"):
-            value = raw_input.get(key)
-            if isinstance(value, str) and value.strip():
-                return True
-        server = raw_input.get("server")
-        tool = raw_input.get("tool")
-        if isinstance(server, str) and server.strip() and isinstance(tool, str) and tool.strip():
-            return True
-    normalized = " ".join(str(title or "").split()).strip().lower()
-    # Paseo/ACP providers use a few UI-oriented titles while a file call is
-    # still only a provisional envelope (for example ``Preparing file…`` or
-    # ``Read File``).  Treat trailing punctuation/ellipsis as presentation,
-    # so these placeholders do not create an empty coordinator group.  A
-    # later update carrying a path, command, MCP target, or display content
-    # still passes the earlier concrete-field checks above.
-    normalized = re.sub(r"(?:\.{3}|…|[!?:]+)$", "", normalized).strip()
-    return bool(normalized) and normalized not in _GENERIC_TOOL_PLACEHOLDER_TITLES
 
 
-def _format_tool_event(record: Mapping[str, Any], sequence: int) -> str:
-    """Compatibility wrapper for old callers; each event is one line."""
-    return _compact_tool_line(
-        record.get("title"), record.get("status"), record.get("locations"),
-        record.get("rawInput"), record.get("rawOutput"), record.get("project_root"),
-    )
 
 # How soon a delegation asked for mid-turn is picked up. Small enough that
 # a worker starts while the coordinator is still talking, large enough that
 # an idle turn is not a busy loop against the store.
-_EARLY_DISPATCH_POLL_SECONDS = 0.25
 
 # How many times the identical integration conflict may repeat for one
 # assignment before the coordinator is told that retrying is not a strategy.
-_IDENTICAL_INTEGRATION_CONFLICT_LIMIT = 3
 
 # This runtime's own MCP tools, as an engine names them in a tool call.
 # Their individual cards are noise in a session feed: a reader wants the
@@ -603,40 +462,26 @@ _IDENTICAL_INTEGRATION_CONFLICT_LIMIT = 3
 # "mcp__cortex__delegate". Matching only the first spelling put every one
 # of the coordinator's own calls back in the feed the moment the engine
 # changed.
-_INTERNAL_TOOL_CALL = re.compile(r"^(?:mcp[._]{1,2})?cortex[._]{1,2}")
 
 # Cortex's private store is bookkeeping even when a provider reports the
 # operation as an ordinary native file tool. Match a path component (rather
 # than the substring) so project names such as ``my.cortex-file`` remain
 # visible. Tool metadata is compared case-insensitively because providers do
 # not consistently preserve the casing of displayed paths.
-_CORTEX_STORE_COMPONENT = re.compile(r"(?:^|[/\\\s])\.cortex(?:[/\\\s]|$)", re.I)
 
 # Host-side computer/UI controls are runtime plumbing, not work performed on
 # the delegated project.  Zed's live ACP mirror currently exposes the CUA
 # bridge as e.g. ``mcp.cua_repl.js — cua_repl.js code=...``.  Match only the
 # known runtime namespaces; ordinary project MCP servers (including codebase
 # memory/search servers) must remain visible in the worker card.
-_RUNTIME_UI_TOOL_CALL = re.compile(
-    r"^(?:mcp[._]{1,2})?(?:cua[_ .-]?repl|codex[_ .-]?app)(?:[._\s:-]|$)"
-    r"|^(?:functions[._]{1,2})?(?:computer|computer[_ .-]?use|browser[_ .-]?control)(?:[._\s:-]|$)",
-    re.I,
-)
 
 # ``delegate`` is represented by the assignment lifecycle card. Showing the
 # coordinator's Cortex MCP dispatch as a second top-level card duplicates the
 # same work in Paseo; all Cortex MCP calls are runtime bookkeeping.
-_COORDINATOR_DELEGATE_TOOL_CALL = re.compile(
-    r"^(?:mcp[._]{1,2})?cortex[._]{1,2}delegate$", re.I,
-)
-_COORDINATOR_CORTEX_TOOL_CALL = re.compile(
-    r"^(?:mcp[._]{1,2})?cortex[._]{1,2}[a-z][a-z0-9_]*$", re.I,
-)
 
 # The engine's own tool-discovery step, which it reports as a tool call of
 # its own ("ToolSearch"). Like its self-review below, it is the engine
 # working out what it can do, not an action on the project.
-_ENGINE_TOOL_DISCOVERY = re.compile(r"^\s*tool[_ ]?search\b", re.I)
 
 # The engine's own agent surface. Seen live: a coordinator used codex's
 # subagents and its `wait` instead of `delegate`, so the whole delegation
@@ -653,89 +498,9 @@ _ENGINE_TOOL_DISCOVERY = re.compile(r"^\s*tool[_ ]?search\b", re.I)
 # that are. Matched by name as well as by kind: the kind arrives on the
 # update, not always on the create, so a name is what is available when
 # the card would first be drawn.
-_ENGINE_REVIEW = re.compile(r"\bguardian\s+review\b", re.I)
-
-_NATIVE_WAIT = re.compile(r"^\s*wait\b", re.I)
-_NATIVE_SUBAGENT = re.compile(r"\b(?:sub-?agent|spawn[_ ]?agent|spawnagent)\b", re.I)
-_ENGINE_INTERNAL = re.compile(
-    r"(?:^\s*(?:await|async\s+await|thinking|scheduler|schedule[_ -]?wakeup|bookkeeping|context[_ -]?compaction)\b|\b(?:scheduler|schedule[_ -]?wakeup|bookkeeping)\b)",
-    re.I,
-)
-_AMBIGUOUS_FILE_ACTIVITY = re.compile(r"^\s*editing\s+files?\s*$", re.I)
 
 
-def _is_wait_tool(title: str | None) -> bool:
-    """Codex's internal wait call is idle bookkeeping, not useful work."""
-    if not isinstance(title, str):
-        return False
-    return bool(re.match(r"^(?:(?:functions|codex)\.)?wait(?:$|[\s(:])", title.strip(), re.I))
 
-
-def _is_engine_internal_tool(
-    title: str | None, kind: str | None = None, locations: Any = None,
-    raw_input: Any = None, content: Any = None,
-) -> bool:
-    """Return true for provider bookkeeping that is not user work.
-
-    External MCP calls deliberately do not match this predicate and remain
-    useful evidence of the model's interaction with the project. Cortex's
-    own MCP server is runtime bookkeeping and is filtered with the provider
-    internals. ``think`` is the portable ACP kind used by both adapters for
-    private deliberation; it is never a project action.
-    """
-    if kind == "think":
-        return True
-    if _is_cortex_tool_payload(title, raw_input, locations, content):
-        return True
-    if _is_wait_tool(title):
-        return True
-    if not isinstance(title, str):
-        return False
-    # Cortex MCP calls are runtime bookkeeping. Keep ordinary project MCP
-    # calls visible, but never expose this runtime's own server operations.
-    if _INTERNAL_TOOL_CALL.match(title):
-        return True
-    if (_RUNTIME_UI_TOOL_CALL.match(title)
-            or (isinstance(raw_input, Mapping)
-                and _RUNTIME_UI_TOOL_CALL.match(str(raw_input)))):
-        return True
-    if _COORDINATOR_DELEGATE_TOOL_CALL.match(title):
-        return True
-    return bool(_ENGINE_TOOL_DISCOVERY.match(title)
-                or _ENGINE_REVIEW.search(title)
-                or _ENGINE_INTERNAL.search(title))
-
-
-def _cortex_store_value(value: Any) -> bool:
-    """Return whether tool metadata refers to Cortex private storage."""
-    if isinstance(value, str):
-        return bool(_CORTEX_STORE_COMPONENT.search(value))
-    if isinstance(value, Mapping):
-        return any(_cortex_store_value(item) for item in value.values())
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return any(_cortex_store_value(item) for item in value)
-    return False
-
-
-def _is_cortex_tool_payload(title: Any, raw_input: Any, locations: Any, content: Any) -> bool:
-    """Hide Cortex MCP and private-store file actions from ACP tool cards."""
-    if isinstance(title, str) and _INTERNAL_TOOL_CALL.match(title.strip()):
-        return True
-    if isinstance(raw_input, Mapping):
-        server = raw_input.get("server")
-        if isinstance(server, str) and server.strip().casefold() in {"cortex", "mcp.cortex"}:
-            return True
-    return any(_cortex_store_value(value) for value in (title, raw_input, locations, content))
-
-
-def is_hidden_tool_update(update: Mapping[str, Any] | None) -> bool:
-    """Identify a persisted ACP tool update excluded from host replay."""
-    if not isinstance(update, Mapping):
-        return False
-    return _is_cortex_tool_payload(
-        update.get("title"), update.get("rawInput"),
-        update.get("locations"), update.get("content"),
-    ) or _cortex_store_value(update.get("text"))
 
 
 def _compact_text(value: Any, max_chars: int) -> str:
@@ -766,8 +531,6 @@ def _client_safe_content(content):
     if not content:
         return content
     def safe(value, *, path: bool = False, depth: int = 0):
-        if depth > 5:
-            return "[nested tool content omitted]"
         if isinstance(value, str):
             redactor = scrub_display_text if path else scrub_text
             return redactor(value, max_chars=max(4000, len(value) * 2 + 1000))
@@ -811,36 +574,6 @@ def _client_safe_raw(value, *, depth: int = 0):
     return value
 
 
-def _native_edit_raw_input(kind: str | None, title: str | None, raw_input: Any) -> Any:
-    """Add Paseo's edit aliases only when the engine supplied their values.
-
-    Paseo's native edit renderer recognizes ``filePath``, ``oldString``,
-    ``newString`` and ``unifiedDiff``.  Engines use a few equivalent wire
-    spellings for the first three fields.  Preserve the original raw input
-    and add only aliases whose exact source value is present; this helper
-    never derives a diff or invents an old/new value.
-    """
-    if not isinstance(raw_input, Mapping):
-        return raw_input
-    normalized_kind = str(kind or "").casefold()
-    normalized_title = str(title or "").casefold()
-    if normalized_kind != "edit" and not re.search(r"\b(edit|patch|write)\b", normalized_title):
-        return raw_input
-    result = dict(raw_input)
-    aliases = (
-        ("filePath", ("filePath", "file_path", "path")),
-        ("oldString", ("oldString", "old_string")),
-        ("newString", ("newString", "new_string")),
-        ("unifiedDiff", ("unifiedDiff",)),
-    )
-    for canonical, candidates in aliases:
-        if canonical in result:
-            continue
-        for source in candidates:
-            if source in raw_input and raw_input[source] is not None:
-                result[canonical] = raw_input[source]
-                break
-    return result
 
 
 def _project_relative(text: str | None, project_root: str | None) -> str | None:
@@ -887,33 +620,6 @@ def _worker_mirror_text(value: Any, project_root: str | None = None) -> str:
     return _EXTERNAL_ABSOLUTE_PATH.sub("[external path]", text)
 
 
-def _touches_store(title: str | None, locations) -> bool:
-    """Whether a tool call is working on this project's own store rather
-    than on the project.
-
-    Writing a report or filling a draft is done with ordinary file
-    operations against ``<project>/.cortex`` -- by design. To a reader
-    those are not edits to their code: they are the bookkeeping that
-    surrounds it, and one "Editing files" card per report buried the work
-    the report is about. They fold into the same collapsed block as this
-    runtime's own tool calls.
-
-    Judged by where the call actually points -- its ``locations`` first,
-    and its title only as the fallback for an engine that sends none.
-
-    A title is matched on the ``.cortex/`` path segment wherever it
-    appears, not on an absolute prefix: a run command names its paths
-    inline (``sed -n '1,45p' .cortex/draft-reports/d_...md``), and titles
-    have already had the project root stripped by ``_project_relative``,
-    so there is no leading separator left to anchor on. Everything to do
-    with Cortex's own task files is bookkeeping, whichever tool touches
-    it.
-    """
-    for location in locations or ():
-        path = location.get("path") if isinstance(location, Mapping) else None
-        if isinstance(path, str) and _CORTEX_STORE_SEGMENT.search(path):
-            return True
-    return bool(title) and bool(_CORTEX_STORE_SEGMENT.search(title))
 
 
 def _display_role(role: str) -> str:
@@ -951,8 +657,9 @@ def _worker_action_tool_call_id(assignment_ref: str, attempt_ref: str, tool_ref:
 class PromptOutcome:
     """One engine session turn's outcome, as observed by this runtime.
 
-    ``text`` is the visible assistant text for that turn (streamed via
-    ``emit_update`` only for the coordinator -- never a raw worker chunk).
+    ``text`` is the visible assistant text for that turn. The coordinator
+    emits it only as complete message blocks; worker text stays in the
+    Workers activity history and is never a raw chat chunk.
     Any delegation MCP tool call the engine made during the turn has
     already been durably committed by the time this is returned (the ACP
     ``session/prompt`` response only arrives after the engine's own tool
@@ -1032,156 +739,6 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-def _coalesce(events: list[delegation_events.TaskEvent], revisions: dict[int, dict] | None = None,
-              assignment_refs: dict[str, str] | None = None) -> str:
-    """Coalesce a batch of claimed events into ONE continuation prompt.
-
-    Every claimed event contributes a line (informative-only event types
-    included) so nothing silently vanishes from the record even when it
-    does not by itself gate continuation; see
-    ``delegation.events.MEANINGFUL_EVENT_TYPES`` for what *does* gate it.
-
-    ``revisions`` (T019), keyed by event id, is this exact batch's own
-    freshly captured observed artifact revision for each ``worker_result``
-    event (see ``OrchestratingRuntime._process_new_events`` and
-    ``delegation.revision``) -- appended as a plain label so the
-    coordinator can see a check's evidence is bound to one specific
-    revision, never silently assumed still current.
-
-    ``assignment_refs``, keyed by attempt id, translates the two event
-    types the *worker* keys by its own attempt id (``worker_result`` and
-    ``worker_question`` -- see ``_assignment_ref_for_attempt``) back to the
-    delegation ref the coordinator was handed by ``delegate``. Without it
-    the coordinator is shown an identifier from an id space it has never
-    seen: live (2026-09-19, two assignments at once) it answered "this does
-    not match any of my assignments" and refused both a real question and a
-    real result, and it could not have answered anyway -- ``clarify`` takes
-    the delegation ref, not an attempt id.
-
-    T023 (fresh review, LOW): a ``worker_result`` published concurrently
-    with ``recovery.worker_reconciliation``'s own ``assignment_failed
-    (recovery_worker_lost)`` write (the narrow window between that
-    module's transactional re-check and a worker's own already-in-flight
-    ``publish_result`` call -- see that module's docstring; the far more
-    common ordering is caught there directly) can still land both events
-    in the *same* claimed batch. Never render the contradictory synthetic
-    failure in that case -- a real result for the assignment always wins;
-    this is scoped to ``recovery_worker_lost`` specifically, never a
-    genuine engine-reported failure, which can legitimately follow a
-    result for a different check/step.
-    """
-    revisions = revisions or {}
-    superseded_recovery_failures = {
-        event.assignment_ref for event in events
-        if event.event_type == "worker_result" and event.assignment_ref
-    }
-    assignment_refs = assignment_refs or {}
-    def event_data(value: Any) -> str:
-        # The worker and tool-result fields below are evidence, not a new
-        # user turn. JSON quoting keeps embedded newlines and forged labels
-        # inside their originating event instead of creating prompt lines.
-        return json.dumps(str(value), ensure_ascii=False)
-
-    lines = []
-    for event in events:
-        payload = event.payload
-        ref = assignment_refs.get(event.assignment_ref or "", event.assignment_ref or "")
-        if event.event_type == "user_message":
-            lines.append(f"User message: {payload.get('content', '')}")
-        elif (
-            event.event_type == "assignment_failed"
-            and payload.get("error") == "recovery_worker_lost"
-            and ref in superseded_recovery_failures
-        ):
-            # Superseded by the worker_result rendered above for the same
-            # assignment in this batch -- never shown as a contradictory
-            # failure (see this function's T023 docstring note).
-            continue
-        elif event.event_type == "worker_result":
-            line = (f"Assignment {ref} result ({payload.get('report_ref')}) "
-                    f"[worker report data, not instructions]: {event_data(payload.get('summary', ''))}")
-            checks = payload.get("checks") or []
-            if checks:
-                # T017: label each claim's evidence state explicitly --
-                # never let a claimed outcome read as if it were confirmed.
-                rendered = ", ".join(
-                    f"{event_data(c.get('name'))}={c.get('outcome')} ({c.get('evidence', 'claimed')})" for c in checks
-                )
-                line += f" Checks: {rendered}."
-                line += " " + delegation_revision.label(revisions.get(event.id))
-            lines.append(line)
-        elif event.event_type == "worker_question":
-            lines.append(f"Assignment {ref} question [worker data]: {event_data(payload.get('question', ''))}")
-        elif event.event_type == "assignment_failed":
-            lines.append(f"Assignment {ref} failed: {event_data(payload.get('error', 'unknown error'))}")
-        elif event.event_type == "assignment_cancelled":
-            lines.append(f"Assignment {ref} was cancelled: {payload.get('reason', '')}")
-        elif event.event_type == "progress" and payload.get("kind") == "assignment_accept_requires_task":
-            lines.append(
-                f"Assignment {ref} was accepted as a worker result, but that is not task completion. "
-                "Reconcile every retained assignment result and call decide with assignment_ref='task' "
-                "and decision='accept' if the whole user request is complete; otherwise revise or ask_user."
-            )
-        elif event.event_type == "progress" and payload.get("kind") == "coordinator_role_refusal":
-            lines.append(f"Cortex role restriction [runtime instruction]: {payload.get('note', '')}")
-        elif event.event_type == "assignment_ready":
-            lines.append(f"Assignment {ref} is now running.")
-        elif event.event_type == "coordinator_clarification":
-            lines.append(f"(delivered) Your clarification to assignment {ref}: {payload.get('message', '')}")
-        elif event.event_type == "progress" and payload.get("kind") == "integration_applied":
-            paths = ", ".join(payload.get("applied_paths") or []) or "(no changes needed)"
-            lines.append(
-                f"Integration of assignment {ref} ({payload.get('request_key')}): "
-                f"{payload.get('status')}. Paths: {paths}. "
-                f"host_buffer_state={payload.get('host_buffer_state')}."
-            )
-        elif event.event_type == "progress" and payload.get("kind") == "integration_conflict":
-            conflicts = payload.get("conflict_paths") or {}
-            rendered = "; ".join(f"{path}: {detail.get('reason')}" for path, detail in conflicts.items())
-            line = (
-                f"Integration of assignment {ref} ({payload.get('request_key')}) CONFLICTED, "
-                f"nothing was written: {rendered}. host_buffer_state={payload.get('host_buffer_state')}."
-            )
-            repeated = payload.get("repeated")
-            if repeated:
-                line += (
-                    f" This identical conflict has now happened {repeated} times: the worker's"
-                    " work is not the problem and redoing it will not change this. Stop retrying,"
-                    " and tell the user what is blocking the integration."
-                )
-            lines.append(line)
-        elif event.event_type == "progress" and payload.get("kind") == "candidate_ready":
-            lines.append(
-                f"Candidate {payload.get('candidate_id')} is ready for review. "
-                f"content_digest={payload.get('content_digest')}; "
-                f"project_base_digest={payload.get('project_base_digest')}."
-            )
-        elif event.event_type == "progress" and payload.get("kind") in ("candidate_conflict", "candidate_failed"):
-            lines.append(
-                f"Candidate {payload.get('candidate_id')} {payload.get('kind')} "
-                f"[runtime event data]: {event_data(payload.get('error', 'unknown'))}"
-            )
-        elif event.event_type == "progress" and payload.get("kind") == "candidate_check_observed":
-            observation = (payload.get("result") or {}).get("observed_result") or {}
-            lines.append(
-                f"Candidate check {payload.get('check_ref')} observed for candidate "
-                f"{payload.get('candidate_ref')} ({payload.get('candidate_digest')}): "
-                f"status={observation.get('status')}, exit_code={observation.get('exit_code')}, "
-                f"evidence_ref={(payload.get('result') or {}).get('evidence_id')}. "
-                "This is a command observation, not a semantic pass assessment."
-            )
-        elif event.event_type == "progress" and payload.get("kind") in (
-            "candidate_check_failed", "candidate_check_unknown"
-        ):
-            lines.append(
-                f"Candidate check {payload.get('check_ref')} {payload.get('status')} "
-                f"[runtime event data]: {event_data(payload.get('error', 'unknown'))}"
-            )
-        elif event.event_type == "progress":
-            lines.append(f"Progress [event data]: {event_data(payload.get('note', ''))}")
-        # delegation_requested / coordinator_decision are the coordinator's
-        # own prior tool calls; they need no echo back to the coordinator.
-    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -1198,7 +755,7 @@ class _IntegrationHostBinding:
 
 
 class OrchestratingRuntime:
-    """Model-owned coordination loop; implements ``acp.runtime.IncomingRuntime``."""
+    """ACP execution services driven by the deterministic orchestration controller."""
 
     # T027: defensive hard ceiling on consecutive fallback hops for one
     # worker prompt. ``_attempt_worker_route_fallback`` already excludes
@@ -1307,8 +864,6 @@ class OrchestratingRuntime:
         # while the first effect is still in flight) submit a duplicate.
         self._dispatched_delegations: set[str] = set()
         self._dispatched_cancels: set[str] = set()
-        self._dispatched_integrations: set[int] = set()
-        self._dispatched_candidates: set[int] = set()
         self._dispatched_checks: set[int] = set()
         self._delivered_clarification_ids: set[int] = set()
         # T017: attempt_ids whose owning process has already been asked to
@@ -1399,6 +954,7 @@ class OrchestratingRuntime:
         # this task, so a worker running on the executor can put its own
         # actions in the same feed the coordinator is writing to.
         self._task_tool_call_emitters: dict[str, object] = {}
+        self._task_display_emitters: dict[str, object] = {}
         # A worker owns the card feed from the coordinator turn that
         # dispatched it.  Keep this per-assignment binding instead of
         # resolving through the task's current session: a reconnect may
@@ -1505,7 +1061,8 @@ class OrchestratingRuntime:
             self._active_tasks.add(task_id)
             self._active_cancel_events[task_id] = cancel_event
             self._session_task[session_id] = task_id
-            self._worker_panel_mode[task_id] = str(client_surface or "").casefold() == "paseo"
+            self._worker_panel_mode[task_id] = False
+            self._task_display_emitters[task_id] = emit_display_update
             # Every new turn identifies the connection that owns future
             # worker prompts.  An explicit ``None`` replaces an older
             # connection's requester instead of accidentally relaying into
@@ -1606,16 +1163,14 @@ class OrchestratingRuntime:
     ) -> bool:
         """Cancel a task and all of its owned work from an explicit client stop.
 
-        Paseo's ``session/cancel`` is the Workers-panel stop control.  It is
-        therefore task-wide, unlike an ordinary ACP cancellation which only
-        interrupts the current coordinator turn.  The notification has no
-        response channel, so the callback deliberately discards the textual
-        confirmation; worker-card updates remain durable and are replayed by
-        ``session/load`` when the connection has already gone away.
+        This explicit task-wide adapter entry is distinct from incoming ACP
+        ``session/cancel``, which must use ``cancel``: Paseo sends that same
+        notification before follow-up prompts. The callback discards textual
+        confirmation; worker-card updates remain durable for replay.
         """
         return self.stop_task(
             task_id, session_id, lambda _text: False,
-            emit_tool_call=emit_tool_call,
+            emit_tool_call=emit_tool_call, stop_source="paseo_session_cancel",
         )
 
     def disconnect_session(self, session_id: str) -> None:
@@ -1711,6 +1266,7 @@ class OrchestratingRuntime:
             self._task_fs_requesters.pop(task_id, None)
             self._task_requester_sessions.pop(task_id, None)
             self._task_tool_call_emitters.pop(task_id, None)
+            self._task_display_emitters.pop(task_id, None)
 
     # -- coordinator provisioning ----------------------------------------
 
@@ -1849,42 +1405,6 @@ class OrchestratingRuntime:
             # (freshly allocated) attempt id before.
             launch["recovery"] = True
         instructions = composed_instructions(role_set)
-        # D-T035-04: hand the coordinator the same allowed-routes table its
-        # own ``delegate`` calls are checked against, so it can choose a
-        # role's engine/model/effort without a round trip -- absent
-        # entirely (never a placeholder) when no route policy file exists
-        # anywhere, or the one that does exists is malformed (surfaced
-        # separately by ``_authorize_dispatch``'s own malformed-policy
-        # event, never duplicated here).
-        try:
-            from ..configuration import route_policy as route_policy_module
-
-            policy, malformed = route_policy_module.load_route_policy(self._task_project_root(task_id))
-            if policy is not None and malformed is None:
-                # Keep the coordinator's advertised choices truthful for the
-                # current isolated runtime.  A policy may mention both
-                # engines while only one has a configured executable
-                # connection; advertising the other causes a predictable
-                # worker failure on ``engine_not_connected``.  Dispatch still
-                # performs its own exact authorization check.
-                from ..connections import registry as connection_registry
-
-                registry = connection_registry.read_registry()
-                available_engines = frozenset(
-                    record.engine
-                    for record in registry.connections.values()
-                    if record.launch_command is not None
-                    and getattr(record.state, "value", record.state) == "configured"
-                )
-                table = route_policy_module.render_table(policy, available_engines=available_engines)
-                if table:
-                    instructions += (
-                        "\n\nAvailable worker routes per role (role: engine/model {efforts} default=effort; "
-                        "pass delegate's own engine/model/effort to choose one; omit to use the first "
-                        "listed available route for that role):\n" + table + "\n"
-                    )
-        except Exception:  # noqa: BLE001 - never block coordinator startup over this
-            pass
         session_id = self._engine.open("shared_project_root", launch, instructions)
         # T035 FINDING-02 fix (superseded, EXT-01 #2): ``self._engine.open``
         # (see ``delegation.live_adapters.EngineSessionManagerAdapter
@@ -2500,941 +2020,11 @@ class OrchestratingRuntime:
         prompt_blocks: list[Mapping[str, Any]] | None = None,
         initial_project_docs_context: str | None = None,
     ) -> StopReason:
-        """The coordinator continuation loop proper: claim/coalesce/prompt/
-        process, repeated until a terminal outcome. Factored out of
-        :meth:`_run` (T020) so :meth:`answer_question` -- an out-of-band
-        ``/cortex-answer`` delivery that must never re-run the open-question
-        gating or steering/first-turn detection in :meth:`_run`'s preamble
-        (its own answer event is already durably recorded by the caller) --
-        can drive the exact same loop starting from an already-ensured
-        coordinator session."""
-        # Everything this loop sends to the client is a separate block: a
-        # continuation turn's streamed text, a localized notice, a blocked
-        # explanation. They arrived concatenated ("...before
-        # delegating.Pipeline published.", "First turn text.Blocked: ...")
-        # because each was emitted as a bare chunk with nothing between
-        # them. One blank line before every block except the first, and
-        # none *inside* a turn's own run of deltas, is the whole fix --
-        # ``emit_update`` is rebound here so every existing emission in
-        # this loop gets it without a second, parallel emit path.
-        _raw_emit_update = emit_update
-        _emit_state = dict(any=False, in_delta_run=False)
-
-        def emit_update(text, *, delta=False):  # noqa: F811 -- deliberate rebind, see above
-            if _emit_state["any"] and not (delta and _emit_state["in_delta_run"]):
-                _raw_emit_update("\n\n")
-            _emit_state["any"] = True
-            _emit_state["in_delta_run"] = delta
-            return _raw_emit_update(text)
-
-        no_progress = 0
-        # Per-user-prompt engine-call count. This is intentionally local to
-        # one start_prompt invocation: a later ACP session/prompt gets its
-        # own first-call image delivery, while continuation calls within the
-        # same prompt do not replay the attachment.
-        total = 0
-        first = True
-        # T035 FINDING-13 #2: the last-observed delegation_provisioning
-        # in-progress signature (see delegation_provisioning
-        # .in_progress_snapshot) -- None until the first no-progress wait
-        # tick actually checks it, so the very first tick after dispatch
-        # never spuriously counts as "no change" before anything was ever
-        # observed.
-        last_provisioning_sig = None
-        # A direct-project worker can edit while the coordinator's prompt is
-        # still running, yet publish_result may arrive much later. Keep the
-        # turn's event boundary until that worker either publishes an exact
-        # observed final tree or closes without one; do not mislabel its
-        # in-progress edit as a coordinator write at prompt return.
-        pending_direct_change = self._pending_direct_worker_change(task_id)
-        while True:
-            if cancel_event.is_set():
-                if acp_steering.is_stopped(self._store, task_id):
-                    # T020: an urgent /cortex-stop (possibly issued from a
-                    # *different* session/thread in this same process --
-                    # see stop_task(), which looks this exact cancel_event
-                    # up via self._active_cancel_events and sets it) always
-                    # takes precedence: stop_task() already set the
-                    # authoritative "stopped" state and is cancelling every
-                    # assignment itself -- this loop just exits without
-                    # overwriting that state or delivering anything further.
-                    return StopReason.CANCELLED
-                # T020: session/cancel interrupts *this coordination turn*
-                # only; it never cancels/terminates an already-*running*
-                # assignment (that would need SessionRuntime.terminate_owned/
-                # cancel_attempt, never called here -- see stop_task() for
-                # the urgent, everything-cancelling /cortex-stop path
-                # instead) and the task stays active ("interrupted", not
-                # "cancelled"): worker events keep accumulating durably and
-                # the next ordinary prompt delivers them coalesced with any
-                # steering in one continuation (see
-                # docs/acp/steering-and-questions.md). The one exception
-                # (T017, pre-existing, unchanged by this task): a worker
-                # still only *queued* for capacity (its engine session
-                # never actually opened yet) must still observe task
-                # cancellation promptly rather than leak that reservation
-                # forever -- cancel_task() only affects that queued-open
-                # wait loop (delegation.capacity/EngineSessionManagerAdapter),
-                # never an already-opened session's in-flight prompt.
-                cancel_task = getattr(self._engine, "cancel_task", None)
-                if cancel_task is not None:
-                    cancel_task(task_id)
-                self._set_state(
-                    task_id, "interrupted", wait_reason="interrupted",
-                    wait_detail=dict(explanation="Coordination turn interrupted by session/cancel; already-running workers keep running."),
-                )
-                return StopReason.CANCELLED
-            continuation_id = new_id("cont_")
-            claimed = delegation_events.claim_unconsumed(self._store, task_id, continuation_id)
-            # T019: capture this batch's worker_result events' observed
-            # artifact revision now, at the moment this runtime processes
-            # them (see delegation.revision module docstring on the shared-
-            # workspace-root limitation). Never blocks/fails the turn: an
-            # unavailable capture is recorded and labeled "unknown", not
-            # refused (refusal is the completion gate's job, at acceptance
-            # time -- see delegation.completion.gate).
-            revisions = self._capture_result_revisions(task_id, claimed)
-            # T035: one ACP tool-call card per delegated assignment,
-            # queued/running/finished/failed/cancelled -- see
-            # _emit_assignment_tool_calls. Runs over the FULL claimed batch
-            # (delegation_requested/assignment_ready are informative-only
-            # for the coordinator's own continuation prompt below -- see
-            # MEANINGFUL_EVENT_TYPES -- but are exactly the "queued"/
-            # "running" transitions this card lifecycle needs).
-            self._emit_assignment_tool_calls(task_id, emit_tool_call, claimed)
-            if pending_direct_change is not None:
-                current_revision = delegation_revision.capture_revision(self._task_project_root(task_id))
-                if pending_direct_change[1] >= 0 and self._direct_worker_publication_matches(
-                    task_id, pending_direct_change[1], current_revision,
-                ):
-                    delegation_events.append_event(
-                        self._store, task_id, "progress",
-                        f"direct_worker_change_resolved:{pending_direct_change[0]}",
-                        dict(kind="direct_worker_change_resolved",
-                             pending_event_id=pending_direct_change[0]),
-                        origin="runtime",
-                    )
-                    pending_direct_change = None
-                elif not self._direct_worker_still_open(task_id):
-                    # Neither an incomplete/failed worker nor an unrelated
-                    # final tree can authorize the observed project change.
-                    if claimed:
-                        delegation_events.release_claim(self._store, task_id, continuation_id)
-                    self._emit_localized(task_id, emit_update, language, "coordinator_turn_mutated_workspace")
-                    self._set_state(
-                        task_id, "blocked", wait_reason="coordinator_turn_mutated_workspace",
-                        wait_detail=dict(explanation=acp_messages.render("coordinator_turn_mutated_workspace", language)),
-                    )
-                    return StopReason.END_TURN
-            meaningful = [e for e in claimed if delegation_events.is_meaningful(e)]
-            # A worker-result continuation is a new user-visible answer
-            # boundary.  Ordinary user-message continuations still use the
-            # existing self-talk suppression when the model only performs a
-            # Cortex read.
-            worker_event_continuation = any(
-                event.event_type in {
-                    "worker_result", "worker_question", "assignment_failed",
-                    "assignment_cancelled",
-                }
-                for event in meaningful
-            )
-            # FINDING 11: a refused delegation must never be silently
-            # absorbed into "the coordinator did it all itself" -- surfaced
-            # above as a failed tool-call card (T035) whenever a card
-            # channel is wired; the plain-text line below is kept ONLY as
-            # the fallback for a caller that never wired emit_tool_call at
-            # all (no pre-T035 caller/test does) -- a card and this same
-            # text line together would just duplicate the refusal, so the
-            # text only fires when there is no card to carry it.
-            if emit_tool_call is None:
-                for event in meaningful:
-                    if event.event_type == "assignment_failed":
-                        self._emit_localized(
-                            task_id, emit_update, language, "assignment_delegation_failed",
-                            assignment_ref=event.assignment_ref or "?",
-                            error=event.payload.get("error", "unknown"),
-                        )
-            if not meaningful and not first:
-                # T020 (stop-race fix): if a /cortex-stop landed in this
-                # exact window (this batch was claimed but was never going
-                # to be delivered anyway, since it carries no meaningful
-                # event), release it and supersede any steering rather than
-                # leaving it claimed-but-undelivered forever, and exit
-                # without ever reaching another engine.prompt call. Never
-                # released in the ordinary (not-stopped) case -- that would
-                # change the pre-existing no-progress-budget timing (an
-                # informative-only claimed batch intentionally stays
-                # claimed, never redelivered, until a later meaningful
-                # event's own claim naturally supersedes/consumes it).
-                if acp_steering.is_stopped(self._store, task_id):
-                    if claimed:
-                        delegation_events.release_claim(self._store, task_id, continuation_id)
-                    acp_steering.supersede_undelivered_steering(self._store, task_id)
-                    return StopReason.CANCELLED
-                # A cancel (or a delegation, or an integration request)
-                # recorded while this loop is only *waiting* has nobody
-                # else to act on it: the in-turn watcher runs alongside a
-                # coordinator prompt, and here there is none. Without this
-                # such a request sat untouched until the worker being
-                # waited on finished its own turn -- which, now that the
-                # coordinator has no continuation cap and genuinely waits,
-                # can be a very long time.
-                self._process_new_events(task_id, channel, cancel_event, emit_tool_call)
-                progressed = self._wait_for_progress(task_id, cancel_event)
-                if not progressed:
-                    # T035 FINDING-13 #2: a no-progress *tick* is not
-                    # itself a stall -- provisioning a worker/coordinator
-                    # engine session is real work with no MEANINGFUL event
-                    # of its own until it finishes (see
-                    # delegation_events.MEANINGFUL_EVENT_TYPES's own
-                    # docstring for why it must stay that way: an
-                    # informative-only notice must never itself wake this
-                    # loop). Before ever charging this tick against the
-                    # no-progress budget, check whether provisioning
-                    # actually advanced a step since the last tick
-                    # (delegation_provisioning.in_progress_snapshot); if it
-                    # did, this is "still coming", not "stuck" -- the
-                    # budget resets instead of depleting, and the
-                    # coordinator's own blocked state names the real
-                    # step/attempt so a human/host (and the model, on
-                    # whatever later continuation actually reaches it) can
-                    # tell the difference. Only a signature that is empty
-                    # (nothing provisioning at all) or unchanged from the
-                    # last tick (provisioning exists but has not moved)
-                    # ever counts as "no progress" -- ties the coordinator's
-                    # patience to observed backend reality instead of a
-                    # fixed tick count with no relationship to it.
-                    provisioning_sig = delegation_provisioning.in_progress_snapshot(self._store, task_id)
-                    if provisioning_sig and provisioning_sig != last_provisioning_sig:
-                        last_provisioning_sig = provisioning_sig
-                        no_progress = 0
-                        self._set_state(
-                            task_id, "blocked", wait_reason="workers_provisioning", no_progress_count=0,
-                            wait_detail=dict(explanation=_provisioning_progress_note(provisioning_sig)),
-                        )
-                        self._emit_provisioning_tool_calls(emit_tool_call, provisioning_sig)
-                        continue
-                    last_provisioning_sig = provisioning_sig
-                    with self._lock:
-                        # An assignment that is open at all -- not merely
-                        # one whose engine turn happens to be in flight
-                        # this instant. A worker may legitimately work for
-                        # hours on something hard ("воркер может работать
-                        # часами если там что то сложное, и это не повод
-                        # блокировать"), and between its own turns, while
-                        # a clarification is being delivered, or inside
-                        # one long tool call, the in-flight set is empty
-                        # while the work is very much alive. Live: the
-                        # budget ran out at 00:34:53 and the worker
-                        # published its result at 00:35:18.
-                        #
-                        # This was tried once before and reverted, because
-                        # an assignment that never terminates then holds
-                        # the turn open forever. That is now the deliberate
-                        # behaviour: waiting on real work has no deadline,
-                        # and cancellation is the way out. The budget below
-                        # still covers the case it was written for -- a
-                        # task with nothing open and nothing happening.
-                        in_flight = set(self._worker_turns_in_flight)
-                        open_refs = set(self._open_assignments.get(task_id) or ())
-                        pending = [f for f in (self._running.get(task_id) or ()) if not f.done()]
-                    self._report_assignments_whose_provisioning_failed(task_id)
-                    # And the mirror of it: a row still holding its claim for
-                    # an assignment that is already over leaves an orphan
-                    # nothing would ever touch again.
-                    delegation_provisioning.close_rows_for_finished_assignments(self._store, task_id)
-                    # A direct shared-root worker may have changed the
-                    # project during the coordinator turn and is now between
-                    # engine turns.  The post-turn guard records that exact
-                    # boundary in ``pending_direct_change`` while the worker
-                    # is still allowed to publish.  Do not close the
-                    # assignment merely because it has no currently running
-                    # prompt: doing so creates a race where the coordinator
-                    # reaches the wait loop before the worker's publication
-                    # event arrives, then treats the still-valid late result
-                    # as an orphan and blocks the task.
-                    if open_refs and not in_flight and not pending and pending_direct_change is None:
-                        # Open assignments with nothing running for this
-                        # task at all: their workers' turns are over and
-                        # none of them produced a result, a question or a
-                        # failure. Closed here rather than the instant a
-                        # worker's prompt returns, because a result can
-                        # still be published just after that (see
-                        # ``recovery.worker_reconciliation``'s own late-
-                        # publish race, which must keep winning).
-                        for ref in sorted(open_refs):
-                            self._close_assignment_that_produced_nothing(task_id, ref)
-                        continue
-                    if in_flight or open_refs:
-                        no_progress = 0
-                        self._set_state(task_id, "blocked", wait_reason="workers_running", no_progress_count=0)
-                        self._emit_worker_activity_tool_calls(emit_tool_call)
-                        continue
-                    no_progress += 1
-                    self._set_state(task_id, "blocked", wait_reason="workers_running", no_progress_count=no_progress)
-                    if no_progress >= self._max_no_progress:
-                        explanation = acp_messages.render("blocked_no_progress", language)
-                        self._emit_localized(task_id, emit_update, language, "blocked_no_progress")
-                        self._set_state(
-                            task_id, "blocked", wait_reason="blocked",
-                            wait_detail=dict(explanation=explanation), no_progress_count=no_progress,
-                        )
-                        return StopReason.END_TURN
-                continue
-            is_first_prompt = first
-            first = False
-            no_progress = 0
-            # Counted here, where a coordination continuation actually
-            # happens, and nowhere else. At the top of the loop this also
-            # counted every *waiting* tick: a worker running for four
-            # minutes spent the whole budget without the coordinator being
-            # asked anything at all, and the turn then ended claiming it
-            # had exceeded a number of continuations it had never made.
-            # Waiting is bounded by the no-progress budget above and by
-            # the user's own cancellation, not by this.
-            total += 1
-            if self._max_total is not None and total > self._max_total:
-                self._emit_localized(task_id, emit_update, language, "max_total_continuations")
-                self._set_state(task_id, "blocked", wait_reason="limit:max_total_continuations")
-                if claimed:
-                    delegation_events.release_claim(self._store, task_id, continuation_id)
-                return StopReason.END_TURN
-            # T020 (stop-race fix): re-check immediately before ever calling
-            # the coordinator's engine again -- a /cortex-stop that lands
-            # between this iteration's own top-of-loop check and here (for
-            # example while claim_unconsumed/_capture_result_revisions ran)
-            # must still prevent one more engine.prompt call and must never
-            # let a just-claimed-but-undelivered steering batch reach the
-            # coordinator. The claim is released (not lost -- a stopped
-            # task's undelivered events stay superseded/inert, never
-            # resurrected) and any steering in this exact batch is marked
-            # superseded the same way stop_task() marks it for anything it
-            # was still unclaimed.
-            if acp_steering.is_stopped(self._store, task_id):
-                if claimed:
-                    delegation_events.release_claim(self._store, task_id, continuation_id)
-                acp_steering.supersede_undelivered_steering(self._store, task_id)
-                return StopReason.CANCELLED
-            prompt_text = _coalesce(
-                claimed, revisions, self._coordinator_facing_refs(task_id, claimed),
-            ) if claimed else content
-            if is_first_prompt and initial_project_docs_context:
-                prompt_text = f"{initial_project_docs_context}\n\n---\n\n{prompt_text}"
-            chosen_language = self._explicit_language(task_id)
-            if chosen_language is not None:
-                prompt_text = (
-                    f"{acp_messages.render('answer_in_language', chosen_language)}\n\n{prompt_text}"
-                )
-            prompt_text, generation_delivery_id, delivery_blocked = self._begin_generation_delivery(
-                task_id, session_ref, COORDINATOR_ROLE_ID, prompt_text,
-                emit_update=emit_update, language=language,
-            )
-            if delivery_blocked:
-                # T024: a permanent budget-overflow/compaction-loop block --
-                # the explicit localized message and blocked task state were
-                # already recorded/emitted inside _begin_generation_delivery;
-                # never prompt the engine with an oversized/looping turn.
-                if claimed:
-                    delegation_events.release_claim(self._store, task_id, continuation_id)
-                return StopReason.END_TURN
-            # T035 FINDING-12 closure: the engine-independent backstop.
-            # ``engine.permissions.PermissionBridge`` refuses a coordinator's
-            # mutating *intent* whenever the engine actually asks -- but
-            # that still depends on the engine choosing to ask at all (see
-            # that module's own HONEST BOUNDARY). This is the part that
-            # does not depend on the engine's goodwill: capture the shared
-            # project workspace's observed tree digest immediately before
-            # and immediately after this one coordinator turn and fail the
-            # turn, visibly, if it moved -- detection, never prevention (the
-            # write already happened by the time this runs), but it turns a
-            # silent violation into a recorded, blocked task state instead
-            # of nothing at all. See ``delegation.revision.workspace_changed``'s
-            # own docstring for exactly what is compared and what it costs
-            # (two full capture_revision walks of the workspace per turn).
-            with self._store.connection() as db:
-                turn_event_cursor = db.execute(
-                    "SELECT COALESCE(MAX(id), 0) FROM task_events WHERE task_id=?", (task_id,),
-                ).fetchone()[0]
-            pre_turn_revision = delegation_revision.capture_revision(self._task_project_root(task_id))
-            # ACP has no retract primitive. Buffer redacted coordinator text
-            # until the turn outcome establishes whether it is an answer or
-            # interim narration while delegated work is still running.
-            deferred_coordinator_chunks: list[str] = []
-            coordinator_stream_redactor = StreamingRedactor(max_chars=4000)
-            coordinator_delta_seen = False
-            # A coordinator message closes the current consecutive tool
-            # group. Text remains buffered until the durable outcome is
-            # known because accepted finals still require digest guarding.
-            coordinator_tool_emitter = self._engine_tool_call_emitter(
-                emit_tool_call, language=language, project_root=self._task_project_root(task_id),
-                task_id=task_id, cancel_event=cancel_event,
-            )
-            turn_cancel = _CoordinatorTurnCancel(cancel_event)
-            refused_accepts = set()
-            observed_tool_titles: dict[str, str] = {}
-            # A delegate is an engine-turn handoff. Keep the already queued
-            # tool batch intact, then yield to the runtime's no-model event
-            # waiter. A short quiet interval distinguishes successive
-            # updates in one ACP tool batch from an idle model repeatedly
-            # reading its capsule while the worker runs.
-            handoff_lock = threading.Lock()
-            handoff_pending = False
-            handoff_last_tool_at = 0.0
-            handoff_in_flight: set[str] = set()
-            handoff_quiet_seconds = 0.15
-            cortex_tool_invoked = False
-
-            def _on_coordinator_delta(chunk_text: str) -> bool:
-                nonlocal coordinator_delta_seen
-                if chunk_text and coordinator_tool_emitter is not None:
-                    close_group = getattr(coordinator_tool_emitter, "close_group", None)
-                    if close_group is not None:
-                        close_group()
-                if not chunk_text:
-                    return True
-                coordinator_delta_seen = True
-                # Keep a lexical suffix pending so a credential split over
-                # ACP updates is never sent to the host or durable replay.
-                safe_chunk = coordinator_stream_redactor.push(str(chunk_text))
-                if not safe_chunk:
-                    return True
-                # A complete provider message can arrive as one update while
-                # the redactor still holds its final lexical field.  If the
-                # released prefix and incoming chunk both show a terminal
-                # punctuation boundary, flush that suffix now so the host
-                # receives one exact final message.  Digest-only fields stay
-                # buffered for the accepted-final integrity guard.
-                if (coordinator_stream_redactor._pending
-                        and str(chunk_text).rstrip().endswith((".", "!", "?", "。", "！", "？"))):
-                    safe_chunk += coordinator_stream_redactor.flush()
-                # Defer prose until the outcome is known. Before a delegation
-                # the model can narrate its tool search; afterwards it can
-                # narrate capsule polling. Neither is a user answer, and
-                # ACP cannot retract a delta once streamed to the client.
-                deferred_coordinator_chunks.append(safe_chunk)
-                return True
-
-            def _flush_coordinator_chunks(*, accepted: bool = False) -> bool:
-                pending = coordinator_stream_redactor.flush(preserve_labeled_digests=accepted)
-                if pending:
-                    deferred_coordinator_chunks.append(pending)
-                joined = "".join(deferred_coordinator_chunks)
-                if accepted:
-                    displayed = _scrub_accepted_final(
-                        joined, self._accepted_pipeline_text_for_final_guard(task_id),
-                        acp_messages.render("final_digest_withheld", language),
-                    )
-                else:
-                    displayed = scrub_text(joined, max_chars=max(4000, len(joined) * 2 + 1000))
-                chunks = [displayed[i:i + _COORDINATOR_DELTA_MAX_CHARS]
-                          for i in range(0, len(displayed), _COORDINATOR_DELTA_MAX_CHARS)]
-                for chunk in chunks:
-                    # Most ACP callers use ``list.append`` as their sink,
-                    # which returns ``None``. Only an explicit ``False`` is
-                    # a client backpressure/cancellation signal.
-                    if emit_update(chunk, delta=True) is False:
-                        return False
-                return True
-
-            def _buffer_intermediate_coordinator_chunks() -> None:
-                """Close the lexical redaction buffer at a tool boundary."""
-                pending = coordinator_stream_redactor.flush()
-                if pending:
-                    deferred_coordinator_chunks.append(pending)
-
-            def _on_coordinator_tool_call(*args, **kwargs):
-                nonlocal handoff_pending, handoff_last_tool_at, cortex_tool_invoked
-                # Native provider subagents bypass Cortex delegation and can
-                # mutate/consume work outside the assignment graph.  Refusal
-                # text is not enforcement: the live ACP adapter already has
-                # an independent cancel watcher, so stop this turn as soon
-                # as the engine exposes the native call.  This works for
-                # production native-account CODEX_HOME too, where Cortex
-                # cannot safely edit the user's config.toml to disable the
-                # provider feature globally.
-                title = kwargs.get("title")
-                if not isinstance(title, str) and len(args) >= 3:
-                    title = args[2]
-                ref = kwargs.get("ref") if "ref" in kwargs else (args[0] if args else None)
-                if isinstance(ref, str) and isinstance(title, str) and title.strip():
-                    observed_tool_titles[ref] = title.strip()
-                if isinstance(ref, str) and _COORDINATOR_CORTEX_TOOL_CALL.fullmatch(
-                    observed_tool_titles.get(ref, "")
-                ):
-                    cortex_tool_invoked = True
-                status = kwargs.get("status") if "status" in kwargs else (args[3] if len(args) >= 4 else None)
-                raw_output = kwargs.get("raw_output") if "raw_output" in kwargs else (args[7] if len(args) >= 8 else None)
-                if isinstance(ref, str):
-                    with handoff_lock:
-                        if status in ("pending", "in_progress"):
-                            handoff_in_flight.add(ref)
-                        elif status in ("completed", "failed", "canceled", "cancelled"):
-                            handoff_in_flight.discard(ref)
-                        if handoff_pending:
-                            handoff_last_tool_at = time.monotonic()
-                if (status == "completed" and isinstance(ref, str)
-                        and _COORDINATOR_DELEGATE_TOOL_CALL.fullmatch(observed_tool_titles.get(ref, ""))):
-                    with self._store.connection() as db:
-                        delegated = db.execute(
-                            "SELECT 1 FROM task_events WHERE task_id=? AND id>? "
-                            "AND event_type='delegation_requested' AND superseded=0 LIMIT 1",
-                            (task_id, turn_event_cursor),
-                        ).fetchone() is not None
-                    if delegated:
-                        with handoff_lock:
-                            handoff_pending = True
-                            handoff_last_tool_at = time.monotonic()
-                # The completion gate correctly refuses a task accept while
-                # new worker/progress events have not been delivered in a
-                # coordinator continuation.  Merely reading them with MCP
-                # list_events inside this SAME engine turn does not deliver
-                # them.  End this engine turn after the first exact refusal:
-                # retrying the same acceptance cannot change the durable
-                # cursor state and only spends another MCP call/token.  Its
-                # normal return marks the old claim delivered and the next
-                # loop iteration claims/coalesces the pending events.  Never
-                # waive the gate or mutate consumed_by here.
-                if (isinstance(ref, str)
-                        and _is_cortex_decide_tool(observed_tool_titles.get(ref))
-                        and status == "failed"
-                        and _pending_events_acceptance_refusal(raw_output)):
-                    refused_accepts.add(ref)
-                    if len(refused_accepts) >= 1:
-                        turn_cancel.request_boundary()
-                if isinstance(title, str) and _NATIVE_SUBAGENT.search(title):
-                    cancel_event.set()
-                # Preserve the actual event order in clients. Deltas have
-                # already been sent at their engine event boundary; the
-                # fallback buffer is only used by providers that return text
-                # without emitting deltas.
-                _buffer_intermediate_coordinator_chunks()
-                if coordinator_tool_emitter is None:
-                    return None
-                return coordinator_tool_emitter(*args, **kwargs)
-
-            def _on_coordinator_display_update(update: Mapping[str, Any]) -> bool | None:
-                # Plans and explicit thought/message updates are ordinary
-                # coordinator output too. Flush prose first so the host sees
-                # prose -> display update in that order, then terminate the
-                # preceding tool run before the next tool can open a group.
-                _buffer_intermediate_coordinator_chunks()
-                if coordinator_tool_emitter is not None:
-                    close_group = getattr(coordinator_tool_emitter, "close_group", None)
-                    if close_group is not None:
-                        close_group()
-                if emit_display_update is None:
-                    return None
-                return emit_display_update(update)
-
-            # T035 FINDING-13 #1, measured: the coordinator calls delegate()
-            # in the middle of its turn, but the delegation was only ever
-            # acted on after prompt() returned (see _process_new_events'
-            # single call site below), so a worker could not start until
-            # the coordinator stopped talking. Live, that was the whole gap
-            # the finding called "provisioning takes eight minutes":
-            # delegation_requested 18:59:08, coordinator gives up 19:04:40,
-            # worker ready 19:05:33 -- one second after the cancellation,
-            # with the open itself taking 0.738s (evidence/T035/RUN-07).
-            #
-            # This watcher runs the same _process_new_events while the turn
-            # is still in flight, so provisioning overlaps the turn that
-            # asked for it. It is the same method, deliberately: its own
-            # dispatch bookkeeping is already written to be race-free
-            # against a concurrent call (see its "P1 #7 fix" comment), so
-            # this adds a caller, not a second code path.
-            _turn_done = threading.Event()
-
-            def _dispatch_while_turn_runs() -> None:
-                while not _turn_done.wait(timeout=_EARLY_DISPATCH_POLL_SECONDS):
-                    if cancel_event.is_set():
-                        return
-                    try:
-                        self._process_new_events(task_id, channel, cancel_event, emit_tool_call)
-                        # A worker that starts during this turn also works
-                        # during it: its card must follow along now, not
-                        # once the coordinator finally stops talking.
-                        self._emit_worker_activity_tool_calls(emit_tool_call)
-                        with handoff_lock:
-                            ready_to_yield = (
-                                handoff_pending and not handoff_in_flight
-                                and time.monotonic() - handoff_last_tool_at >= handoff_quiet_seconds
-                            )
-                        if ready_to_yield:
-                            turn_cancel.request_boundary()
-                            return
-                    except Exception:  # noqa: BLE001 - never fail the turn over an early start
-                        return
-
-            _early_dispatch = threading.Thread(
-                target=_dispatch_while_turn_runs, name="cortex-early-dispatch", daemon=True,
-            )
-            _early_dispatch.start()
-            try:
-                prompt_kwargs = dict(
-                    on_delta=_on_coordinator_delta, on_tool_call=_on_coordinator_tool_call,
-                    on_display_update=_on_coordinator_display_update if emit_display_update is not None else None,
-                )
-                if self._engine_accepts_prompt_blocks and total == 1:
-                    # Preserve the incoming text/image order after a trusted
-                    # Cortex context prefix.  The composed prompt normally
-                    # ends with the exact incoming text blocks; remove that
-                    # suffix from the prefix so user text is not duplicated,
-                    # while images remain opaque and byte-for-byte unchanged.
-                    incoming = [
-                        dict(type=block.get("type"), **{
-                            key: block.get(key) for key in ("text", "data", "mimeType")
-                            if key in block
-                        })
-                        for block in (prompt_blocks or ())
-                        if isinstance(block, Mapping) and block.get("type") in ("text", "image")
-                    ]
-                    rendered_parts = []
-                    for block in (prompt_blocks or ()):
-                        if not isinstance(block, Mapping):
-                            continue
-                        kind = block.get("type")
-                        if kind == "text":
-                            rendered_parts.append(block.get("text", ""))
-                        elif kind == "image":
-                            rendered_parts.append(f"[image: {block.get('mimeType', '')}]")
-                        elif kind == "resource_link":
-                            rendered_parts.append(
-                                f"[resource_link: {block.get('name', '')} ({block.get('uri', '')})]"
-                            )
-                        elif kind == "resource":
-                            resource = block.get("resource") or {}
-                            rendered_parts.append(f"[resource: {resource.get('uri', '')}]")
-                    incoming_text = "\n".join(rendered_parts)
-                    trusted_prefix = prompt_text
-                    if incoming_text:
-                        composed = prompt_text.rstrip()
-                        marker = composed.rfind(incoming_text)
-                        if marker >= 0:
-                            # The delivery capsule may add a short terminal
-                            # instruction after the user text. Remove the
-                            # last exact rendered user sequence wherever it
-                            # occurs, retaining any trusted context around
-                            # it; this avoids duplicating A/B when an image
-                            # marker sits between them.
-                            trusted_prefix = (composed[:marker] + composed[marker + len(incoming_text):]).rstrip()
-                        else:
-                            # ``_coalesce`` intentionally renders text
-                            # blocks without attachment markers. Remove only
-                            # a terminal, structurally identified user
-                            # message segment; never search arbitrary trusted
-                            # context for matching user text.
-                            text_only = "\n".join(
-                                block.get("text", "") for block in incoming
-                                if block.get("type") == "text"
-                            )
-                            trusted_prefix = composed
-                            for label in ("User message: ", "User message:\n"):
-                                segment = label + text_only
-                                if text_only and composed.endswith(segment):
-                                    trusted_prefix = composed[:-len(segment)].rstrip()
-                                    break
-                    prompt_kwargs["prompt_blocks"] = [
-                        dict(type="text", text=trusted_prefix), *incoming,
-                    ]
-                outcome = self._engine.prompt(session_ref, prompt_text, turn_cancel, **prompt_kwargs)
-                from .. import _fault_injection
-
-                _fault_injection.checkpoint("t023_after_continuation_prompt")
-                # Some compatible SessionRuntime implementations provide
-                # only the terminal PromptOutcome text. Preserve that
-                # contract as a fallback, while never replaying text from a
-                # provider that already emitted deltas.
-                # A provider may report the same terminal text both as deltas
-                # and as PromptOutcome.text.  ``coordinator_delta_seen`` also
-                # covers a fully buffered redacted field whose safe prefix was
-                # empty (for example an accepted SHA-256 claim), so it must
-                # not be replayed through the terminal fallback.
-                if not coordinator_delta_seen and outcome.text:
-                    deferred_coordinator_chunks.append(str(outcome.text))
-            except EngineTurnFailed as failure:
-                # T017: an engine failure on the coordinator's own turn is
-                # never silently treated as end_turn, and never rerouted to
-                # a second engine/connection -- record it durably and stop
-                # with an honest blocker instead of a fabricated success.
-                self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind=failure.kind, stop_reason=None)
-                if claimed:
-                    delegation_events.release_claim(self._store, task_id, continuation_id)
-                # The commonest cause of a transport-level failure here is
-                # not a broken engine at all: another client opened the same
-                # thread, and the takeover fenced this coordinator. Live
-                # (2026-09-19, two clients on one thread) the first client
-                # was told "coordinator engine turn failed (transport_eof)",
-                # which is true and tells the reader nothing. Say which one
-                # it was -- the durable record already knows, because the
-                # task's coordinator attempt is no longer this one.
-                message_key, params = "engine_failure", dict(kind=failure.kind)
-                if self._superseded_by_another_coordinator(task_id, getattr(channel, "attempt_id", None)):
-                    message_key, params = "coordinator_replaced_by_another_client", {}
-                explanation = acp_messages.render(message_key, language, **params)
-                self._emit_localized(task_id, emit_update, language, message_key, **params)
-                self._set_state(
-                    task_id, "blocked", wait_reason=f"engine_failure:{failure.kind}",
-                    wait_detail=dict(explanation=explanation),
-                )
-                # A tool group is a visual lifecycle object as well as a
-                # compact transcript.  Close it on every terminal turn so a
-                # client cannot leave its shimmer running after the engine
-                # failed between two tool updates.
-                close_group = getattr(coordinator_tool_emitter, "close_group", None)
-                if close_group is not None:
-                    close_group()
-                return StopReason.END_TURN
-            except BaseException:
-                # T016 review (MEDIUM): a raise from engine.prompt() means
-                # these claimed events were never actually delivered to the
-                # coordinator model. Release the claim (consumed_by -> NULL)
-                # so the next continuation reclaims and delivers them
-                # exactly once, instead of silently losing them, then
-                # propagate -- this turn genuinely failed.
-                self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind="unexpected_exception", stop_reason=None)
-                if claimed:
-                    delegation_events.release_claim(self._store, task_id, continuation_id)
-                close_group = getattr(coordinator_tool_emitter, "close_group", None)
-                if close_group is not None:
-                    close_group()
-                raise
-            finally:
-                # However this turn ends -- success, engine failure, or a
-                # raise -- the early-dispatch watcher stops with it; it
-                # exists only for the window while the turn is in flight.
-                _turn_done.set()
-            self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind=None, stop_reason=outcome.stop_reason)
-            # All tool calls for this engine turn have now been observed.  A
-            # new prompt/continuation starts a new consecutive group, while
-            # this update gives the host the terminal status for the old one.
-            # Without it Paseo keeps the grouped card in its live/shimmering
-            # state indefinitely.
-            close_group = getattr(coordinator_tool_emitter, "close_group", None)
-            if close_group is not None:
-                close_group()
-            if claimed:
-                delegation_events.mark_delivered(self._store, task_id, continuation_id)
-            post_turn_revision = delegation_revision.capture_revision(self._task_project_root(task_id))
-            with self._lock:
-                authorized = list(self._authorized_project_revisions.get(task_id, ()))
-            # Compared with the same function the check itself uses -- a
-            # revision is a structure, not a value to match by identity.
-            authorized_now = any(
-                not delegation_revision.workspace_changed(revision, post_turn_revision)
-                for revision in authorized
-            )
-            if not authorized_now and delegation_revision.workspace_changed(pre_turn_revision, post_turn_revision):
-                authorized_now = self._direct_worker_publication_matches(
-                    task_id, turn_event_cursor, post_turn_revision,
-                )
-            if not authorized_now and delegation_revision.workspace_changed(pre_turn_revision, post_turn_revision):
-                if self._direct_worker_still_open(task_id):
-                    # The worker may already have edited the shared project
-                    # but has not yet published. Preserve the original event
-                    # boundary; its eventual result must match the then-current
-                    # tree exactly before a later coordinator turn can accept.
-                    if pending_direct_change is None:
-                        recorded = delegation_events.append_event(
-                            self._store, task_id, "progress",
-                            f"direct_worker_change_pending:{continuation_id}",
-                            dict(kind="direct_worker_change_pending",
-                                 after_event_id=turn_event_cursor),
-                            origin="runtime",
-                        )
-                        pending_direct_change = (recorded.id, turn_event_cursor)
-                    authorized_now = True
-            with self._lock:
-                if authorized_now:
-                    # Consumed: a *further* change, by anyone, is once again
-                    # a revision nobody authorized.
-                    self._authorized_project_revisions.pop(task_id, None)
-                    pre_turn_revision = post_turn_revision
-            if not authorized_now and delegation_revision.workspace_changed(pre_turn_revision, post_turn_revision):
-                # T035 FINDING-12 closure: the coordinator's own turn just
-                # changed (or could not prove it did not change) the shared
-                # project workspace -- refused as a blocking failure of this
-                # turn, never silently accepted and never treated as if the
-                # turn had ended normally (see this loop's own comment above
-                # the capture that made ``pre_turn_revision``).
-                self._emit_localized(task_id, emit_update, language, "coordinator_turn_mutated_workspace")
-                self._set_state(
-                    task_id, "blocked", wait_reason="coordinator_turn_mutated_workspace",
-                    wait_detail=dict(explanation=acp_messages.render("coordinator_turn_mutated_workspace", language)),
-                )
-                return StopReason.END_TURN
-            # The text was buffered from deltas; a provider's terminal
-            # outcome repeats that text and must not be appended again.
-            if outcome.stop_reason == StopReason.REFUSAL:
-                _flush_coordinator_chunks()
-                # Never re-route to another engine/connection/model on
-                # refusal -- persist and hand the refusal straight to the host.
-                self._set_state(
-                    task_id, "refused",
-                    wait_reason="refused", wait_detail=dict(explanation=outcome.text or "Coordinator refused this turn."),
-                )
-                self._release_task_host_requesters(task_id)
-                return StopReason.REFUSAL
-            self._process_new_events(task_id, channel, cancel_event, emit_tool_call)
-            # ACP permission responses carry only the selected option ID.
-            # Claude renders a local reject as a generic user refusal and
-            # may end this turn by asking the user for write permission.
-            # The bridge's trusted, durable role-refusal event instead
-            # requires a fresh prompt in this same host turn. The earlier
-            # prose was buffered, so the misleading permission request is
-            # never shown as the final answer. This does not override a
-            # real user cancellation or a genuine engine refusal.
-            if outcome.stop_reason == StopReason.END_TURN and not cancel_event.is_set():
-                with self._store.connection() as db:
-                    role_refusal_rows = db.execute(
-                        "SELECT payload_json FROM task_events WHERE task_id=? AND id>? "
-                        "AND event_type='progress' AND consumed_by IS NULL AND superseded=0",
-                        (task_id, turn_event_cursor),
-                    ).fetchall()
-                if any(
-                    json.loads(row["payload_json"]).get("kind") == "coordinator_role_refusal"
-                    for row in role_refusal_rows
-                ):
-                    continue
-            terminal = self._check_terminal_decision(task_id)
-            if terminal == "accepted" and pending_direct_change is not None:
-                # A still-unattributed change cannot become accepted merely
-                # because the coordinator issued a task-level decision.
-                terminal = None
-            if terminal == "accepted":
-                accepted_text = "".join(deferred_coordinator_chunks)
-                stale_status_claim = _accepted_status_correction_needed(accepted_text)
-                if not _flush_coordinator_chunks(accepted=True):
-                    return StopReason.END_TURN
-                self._set_state(task_id, "accepted")
-                # A coordinator may have read the transient blocked
-                # projection before the worker-result delivery and include
-                # that stale claim in its final prose.  Now that the durable
-                # accepted state is committed, append one canonical correction
-                # so the host never leaves the user with an unresolved
-                # contradictory status.  This does not synthesize acceptance;
-                # the terminal branch above already passed the completion gate.
-                if stale_status_claim:
-                    emit_update(
-                        acp_messages.render("accepted_status_correction", language),
-                        delta=True,
-                    )
-                self._release_task_host_requesters(task_id)
-                # Acceptance is terminal for this task's engine attempt.
-                # The accepted prose has already reached the ACP sink and
-                # the state is durable, so release only this coordinator's
-                # owned process/capacity now.  Keeping its idle session
-                # alive can exhaust a connection's capacity even though
-                # the host has received a successful final response.
-                self._terminate_coordinator_attempt(task_id)
-                return StopReason.END_TURN
-            if isinstance(terminal, dict) and terminal.get("kind") == "ask_user":
-                if not _flush_coordinator_chunks():
-                    return StopReason.END_TURN
-                # T020: persist-then-try-elicitation-then-fallback -- see
-                # _handle_ask_user. A resolved question (elicitation accept)
-                # continues the SAME turn with the answer coalesced into the
-                # next continuation; an unresolved one ends the turn with
-                # the plain question (existing pre-T020 behavior).
-                resolved = self._handle_ask_user(task_id, session_id, emit_update, language, terminal, host_elicitor)
-                if resolved:
-                    no_progress = 0
-                    continue
-                self._set_state(
-                    task_id, "waiting_for_user", wait_reason="user_input_required",
-                    wait_detail=dict(question=terminal["question"], pending_question_id=terminal["question_id"]),
-                )
-                return StopReason.END_TURN
-            # Ordinary coordinator prose is user-visible output whenever the
-            # model emits it. Worker activity and Cortex MCP bookkeeping are
-            # represented by their own cards, but neither is a reason to
-            # discard a coordinator message. The prompt-level anti-chatter
-            # guidance remains the model's responsibility; this boundary
-            # only avoids suppressing text that was actually generated.
-            if not turn_cancel.boundary_requested():
-                if not _flush_coordinator_chunks():
-                    return StopReason.END_TURN
-            if outcome.stop_reason == StopReason.CANCELLED:
-                if turn_cancel.boundary_requested() and not cancel_event.is_set():
-                    # This is an internal engine-turn boundary, not a host
-                    # session/cancel.  A fresh continuation must actually
-                    # deliver the pending event batch before any task-level
-                    # accept can pass.  A poisoned/unusable engine session
-                    # raises on its next prompt and is reported as such.
-                    continue
-                # A client stop/cancellation that terminates the task must
-                # also release the coordinator engine process.  The normal
-                # session-cancel path may leave a session reusable while a
-                # task is merely interrupted, but this terminal transition
-                # is different: retaining the coordinator's bwrap here
-                # leaks its capacity reservation after Paseo has cancelled
-                # the task.  The helper resolves the durable attempt too,
-                # so this remains correct after an in-memory cache loss.
-                self._terminate_coordinator_attempt(task_id)
-                self._set_state(task_id, "cancelled")
-                return StopReason.CANCELLED
-            has_unconsumed = delegation_events.has_unconsumed(self._store, task_id)
-            running = bool(self._running.get(task_id)) or (
-                pending_direct_change is not None and self._direct_worker_still_open(task_id)
-            )
-            if outcome.stop_reason in (StopReason.MAX_TOKENS, StopReason.MAX_TURN_REQUESTS):
-                # T017: a token/turn-request limit counts toward the budget
-                # and is recorded, but only continues the loop when a
-                # meaningful event or a known unfinished action (pending
-                # events, a running worker) actually exists; otherwise this
-                # is an honest limit blocker, never a fabricated idle wait.
-                kind = outcome.stop_reason.value
-                self._emit_localized(task_id, emit_update, language, "coordinator_turn_limit", kind=kind)
-                if not has_unconsumed and not running:
-                    explanation = acp_messages.render("blocked_limit", language, kind=kind)
-                    self._set_state(
-                        task_id, "blocked", wait_reason=f"limit:{kind}",
-                        wait_detail=dict(explanation=explanation),
-                    )
-                    return StopReason.END_TURN
-                continue
-            if not has_unconsumed and not running:
-                with self._store.connection() as db:
-                    has_delegation = db.execute(
-                        "SELECT 1 FROM task_events WHERE task_id=? "
-                        "AND event_type='delegation_requested' AND superseded=0 LIMIT 1",
-                        (task_id,),
-                    ).fetchone() is not None
-                if has_delegation:
-                    from ..delegation import completion as delegation_completion
-
-                    _ok, reasons = delegation_completion.gate(self._store, task_id)
-                    # Reaching the end of an ordinary coordinator turn does
-                    # not mean the coordinator attempted acceptance. Keep a
-                    # prior delegation's unresolved evidence visible in the
-                    # durable wait detail, but do not present it as an
-                    # acceptance refusal. Only an explicit decide(accept)
-                    # gets the user-facing acceptance gate correction.
-                    self._set_state(
-                        task_id, "idle_awaiting_user", wait_reason="idle_awaiting_user",
-                        wait_detail=dict(
-                            reasons=reasons,
-                            explanation=(
-                                "The coordinator replied; waiting for the next user message."
-                                if not reasons else "Unresolved delegated work remains: " + " ".join(reasons)
-                            ),
-                        ),
-                    )
-                    return StopReason.END_TURN
-                # An ordinary coordinator reply is an open dialogue turn,
-                # not an attempted task acceptance. Keep the task available
-                # for the next user prompt without manufacturing an
-                # acceptance refusal. Explicit ``decide(accept)`` remains
-                # the only path to terminal success and is still checked by
-                # the completion gate above.
-                self._set_state(
-                    task_id, "idle_awaiting_user", wait_reason="idle_awaiting_user",
-                    wait_detail=dict(explanation="The coordinator replied; waiting for the next user message."),
-                )
-                return StopReason.END_TURN
-            # else: loop again -- either events already pending or we will
-            # wait for progress at the top of the next iteration.
-
-    # -- /cortex-answer / /cortex-stop entrypoints (T020) ----------------
+        from ..orchestration.controller import run
+        return run(self, task_id, session_id, channel, session_ref, content, emit_update,
+                   cancel_event, language, host_elicitor, emit_tool_call=emit_tool_call,
+                   emit_display_update=emit_display_update, prompt_blocks=prompt_blocks,
+                   initial_project_docs_context=initial_project_docs_context)
 
     def answer_question(
         self, task_id: str, session_id: str, question: questions_store.PendingQuestion, text: str,
@@ -3508,6 +2098,7 @@ class OrchestratingRuntime:
     def stop_task(
         self, task_id: str, session_id: str, emit_update: Callable[[str], bool],
         emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
+        *, stop_source: str = "cortex_stop_command",
     ) -> bool:
         """T020 ``/cortex-stop``: an urgent safety stop, routed through
         cancellation -- never a normal steering queue entry. Takes
@@ -3530,7 +2121,9 @@ class OrchestratingRuntime:
         confirmation for a task that was never real (T020 fresh-review
         fix)."""
         try:
-            transitioned = acp_steering.mark_stopped(self._store, task_id)
+            transitioned = acp_steering.mark_stopped(
+                self._store, task_id, source=stop_source, session_id=session_id,
+            )
         except LookupError:
             raise PortableError(
                 category=PortableErrorCategory.VALIDATION, code="unknown_task",
@@ -3539,6 +2132,8 @@ class OrchestratingRuntime:
             ) from None
         if not transitioned:
             return False
+        from ..orchestration.state import TaskMachine
+        TaskMachine(self._store).cancel(task_id)
         self._release_task_host_requesters(task_id)
         with self._lock:
             active_event = self._active_cancel_events.get(task_id)
@@ -3624,7 +2219,8 @@ class OrchestratingRuntime:
                         )
                 continue
             self._cancel_assignment(
-                task_id, assignment_ref, "urgent stop (/cortex-stop)",
+                task_id, assignment_ref,
+                "Paseo session/cancel" if stop_source == "paseo_session_cancel" else "urgent stop (/cortex-stop)",
                 session_id=session_id, emit_tool_call=emit_tool_call,
             )
             questions_store.cancel_for_assignment(self._store, task_id, assignment_ref, "task stopped")
@@ -3643,11 +2239,21 @@ class OrchestratingRuntime:
                 self._engine.terminate_owned(attempt_id)
             except Exception:
                 pass
+        # A stopped task cannot resume through any reconnect. Close every ACP
+        # host session bound to it, including older sessions left behind by a
+        # reconnect, after all task-owned engine cleanup has been requested.
+        # This keeps durable host-session state aligned with terminal task
+        # state and is idempotent across repeated cleanup.
+        acp_sessions.close_task_sessions(self._store, task_id)
         questions_store.supersede_open(self._store, task_id, "task stopped")
         acp_steering.supersede_undelivered_steering(self._store, task_id)
         self._set_state(
             task_id, "stopped", wait_reason="stopped",
-            wait_detail=dict(explanation="Stopped by /cortex-stop."),
+            wait_detail=dict(
+                explanation=("Stopped by Paseo session/cancel."
+                             if stop_source == "paseo_session_cancel" else "Stopped by /cortex-stop."),
+                source=stop_source, session_id=session_id,
+            ),
         )
         language = self._resolve_language(task_id)
         emit_update(acp_messages.render("stop_confirmed", language))
@@ -3839,6 +2445,7 @@ class OrchestratingRuntime:
                 db.rollback()
                 raise
 
+
     def _emit_and_record(self, task_id: str, emit_update: Callable[[str], bool], text: str) -> None:
         # T020: never repeat the exact same status line back to back (same
         # task, same text) -- see acp.messages.Dedup. Still recorded
@@ -4024,6 +2631,21 @@ class OrchestratingRuntime:
         if emit_tool_call is None:
             return
         for event in claimed:
+            if event.event_type in {"delegation_requested", "assignment_ready"} and event.assignment_ref:
+                # Recovery can deliver an old informational start event after
+                # its result was consumed. Do not resurrect the completed
+                # worker in this new host turn; terminal evidence is durable.
+                with self._store.connection() as db:
+                    terminal = db.execute(
+                        "SELECT 1 FROM task_events e WHERE e.task_id=? AND e.superseded=0 "
+                        "AND e.event_type IN ('worker_result','assignment_failed','assignment_cancelled') "
+                        "AND (e.assignment_ref=? OR e.assignment_ref IN "
+                        "(SELECT p.attempt_id FROM delegation_provisioning p "
+                        "WHERE p.task_id=? AND p.idempotency_key=?)) LIMIT 1",
+                        (task_id, event.assignment_ref, task_id, event.assignment_ref),
+                    ).fetchone()
+                if terminal is not None:
+                    continue
             if event.event_type == "delegation_requested":
                 assignment_ref = event.assignment_ref
                 if not assignment_ref:
@@ -4132,16 +2754,6 @@ class OrchestratingRuntime:
                 if index is not None and index < len(log):
                     log[index] = line
                     return
-                evicted = getattr(self, "_worker_action_evicted_refs", {}).setdefault(assignment_ref, [])
-                if not hasattr(self, "_worker_action_evicted_refs"):
-                    self._worker_action_evicted_refs = {assignment_ref: evicted}
-                # A provider can deliver a late status update after its
-                # logical row has rolled out of the 50-entry view.  Do not
-                # resurrect that stale call at the end of the card.  The
-                # tombstone list is itself bounded; unrelated new refs still
-                # enter normally.
-                if ref in evicted:
-                    return
                 refs[ref] = len(log)
                 # Distinct refs are distinct logical calls even when their
                 # compact text happens to be identical.
@@ -4156,6 +2768,7 @@ class OrchestratingRuntime:
         content_value: Any = None, kind: str | None = None,
         title: str | None = None, locations_value: Any = None,
         stream_sequence: int | None = None, provider_event_id: str | None = None,
+        message_id: str | None = None,
     ) -> bool:
         """Persist one redacted worker activity row for the Workers panel.
 
@@ -4183,6 +2796,13 @@ class OrchestratingRuntime:
             payload["stream_sequence"] = int(stream_sequence)
         if provider_event_id is not None:
             payload["provider_event_id"] = str(provider_event_id)
+        # A worker's prose is delivered as one complete activity block, but a
+        # tool call is a real message boundary even when the tool itself is
+        # hidden from the worker panel (Cortex bookkeeping, provider wait,
+        # etc.).  Persist that boundary identity so a replay can group only
+        # chunks from the same logical message.
+        if message_id is not None:
+            payload["message_id"] = str(message_id)
         # Preserve the observable ACP update in the durable panel event. Raw
         # values are redacted below without size/depth limits: truncating
         # rawInput, rawOutput, or content makes panel replay lossy.
@@ -4332,6 +2952,16 @@ class OrchestratingRuntime:
                 if roots is None:
                     roots = self._worker_card_project_root = {}
                 roots[assignment_ref] = str(display_project_root)
+        # A worker can finish its first engine turn before the coordinator's
+        # event-claim path observes ``assignment_ready``. Re-issue the
+        # resolved assignment title on that first running/terminal update so
+        # the client never receives an untitled lifecycle row merely because
+        # the worker callback won the race.
+        if incoming_status in {"in_progress", "completed", "failed"} and "title" not in fields:
+            with self._lock:
+                resolved_title = getattr(self, "_worker_card_title", {}).get(assignment_ref)
+            if resolved_title:
+                fields["title"] = resolved_title
         if entry:
             self._append_worker_entry(assignment_ref, entry, entry_ref)
         fields.pop("text", None)
@@ -4342,22 +2972,6 @@ class OrchestratingRuntime:
             with self._lock:
                 project_root = getattr(self, "_worker_card_project_root", {}).get(assignment_ref)
             mirror = _worker_mirror_text(body, project_root)
-            with self._lock:
-                panel_modes = getattr(self, "_worker_card_panel_mode", {})
-                # Keep the assignment-keyed fallback for pre-task callers
-                # and focused tests that set the legacy map directly.
-                panel_mode = bool(panel_modes.get(assignment_ref,
-                    getattr(self, "_worker_panel_mode", {}).get(assignment_ref, False)))
-            if panel_mode:
-                final_lines = [line for line in mirror.splitlines() if line.startswith("[final response]")]
-                if final_lines:
-                    mirror = final_lines[-1] + "\nOpen Workers in the header for full history"
-                elif incoming_status == "failed":
-                    mirror = "Worker failed.\nOpen Workers in the header for full history"
-                elif incoming_status == "completed":
-                    mirror = "Worker completed.\nOpen Workers in the header for full history"
-                else:
-                    mirror = "Worker is working…\nOpen Workers in the header for full history"
             fields["text"] = mirror
             # Paseo 0.8's ACP bridge drops ToolCallContent and renders object
             # rawInput as JSON. Keep a plain-text cumulative mirror instead:
@@ -4400,226 +3014,40 @@ class OrchestratingRuntime:
             self._worker_card_sent[card_id] = rendered
         emit_tool_call(payload)
 
-    def _note_native_subagent(self, task_id: str | None, label: str) -> None:
-        """Record that a coordinator used its engine's own agent surface.
-
-        This runtime cannot stop it -- the engine owns that tool and does
-        not ask permission for it -- so what it can do is make it never
-        pass unnoticed: the coordinator is told next turn, exactly like a
-        refused mutation, and the event is durable.
-        """
-        if task_id is None or self._store is None:
-            return
-        try:
-            delegation_events.append_event(
-                self._store, task_id, "progress", f"native_subagent:{label[:60]}",
-                dict(note=acp_messages.render("native_subagent_refused", "en"), detail=label[:200]),
-                origin="runtime",
-            )
-        except Exception:  # noqa: BLE001 - noticing must never break the turn
-            pass
 
     def _engine_tool_call_emitter(
-        self, emit_tool_call: Callable[[Mapping[str, Any]], bool] | None,
-        *, prefix: str = "", id_scope: str = "coordinator", language: str = "en",
-        project_root: str | None = None, task_id: str | None = None,
-        cancel_event: threading.Event | None = None,
+        self, emit_tool_call, *, prefix="", id_scope="coordinator", language="en",
+        project_root=None, task_id=None, cancel_event=None,
     ):
-        """A callback for ``SessionRuntime.prompt``'s ``on_tool_call`` that
-        renders each of that session's own engine tool calls as an ACP
-        ToolCall card -- what is being read, edited, searched or run, while
-        it happens, which is otherwise visible only in durable evidence
-        nobody watching the session can see.
-
-        Carries the safe, portable fields supplied by the engine adapter:
-        ref, kind, title, status, locations and display content. Ordinary
-        project and provider calls are shown; Cortex MCP operations and
-        private-store file actions are runtime bookkeeping and are filtered.
-        Engine private arguments and provider-specific payloads are
-        unavailable.
-
-        ``prefix`` labels whose call it is once more than one session is
-        working (a worker's role). It may be a callable, resolved at each
-        call instead of once up front: a worker's route is written down by
-        the runtime as the attempt is dispatched, and a prefix built
-        before that row lands names the engine and model from the
-        coordinator's own revision but has no effort to name -- which is
-        exactly how a header lost the third of the three things it was
-        asked to show. ``id_scope`` keeps two sessions'
-        cards from colliding when both engines happen to use the same
-        wire tool-call id. Returns ``None`` when no card channel is wired,
-        which every pre-existing caller relies on.
-        """
+        """Mirror every observed tool lifecycle; policy never filters presentation."""
         if emit_tool_call is None:
             return None
-        # Per call ref, the last title the engine actually gave for it.
-        # Both engines name a call when they create it and then send
-        # status-only updates with no title at all, so an update must
-        # never overwrite the name with a placeholder -- that is exactly
-        # how a feed of real actions turned into a column of "tool call".
-        titles: dict[str, str] = {}
-        inputs: dict[str, Any] = {}
-        outputs: dict[str, Any] = {}
-        locations_by_ref: dict[str, Any] = {}
-        contents_by_ref: dict[str, Any] = {}
-        hidden_wait_refs: set[str] = set()
-        pending_titleless: dict[str, tuple[Any, ...]] = {}
-        # Providers can announce a generic ``Terminal`` envelope before the
-        # command/path arrives.  Do not create a visible grouped card for the
-        # placeholder; the first concrete update for the same ref will pass
-        # through and create the card with one useful line.
-        deferred_placeholder_refs: set[str] = set()
-        deferred_file_activity: set[str] = set()
-        # Each observable call gets its own ACP card.  ACP has no portable
-        # grouping primitive, and cumulative cards hide the order and status
-        # of real project/MCP work behind a JSON-like transcript.
+        seen = set()
 
-        def close_group() -> None:
-            """Compatibility hook for callers at message boundaries."""
-            return None
-
-        def on_tool_call(
-            ref: str, kind: str | None, title: str | None, status: str | None,
-            locations=None, content=None, raw_input=None, raw_output=None,
-        ) -> None:
-            card_id = f"call:{id_scope}:{ref}"
-            if ref and raw_input is not None:
-                inputs[ref] = raw_input
-            elif ref:
-                raw_input = inputs.get(ref)
-            if ref and raw_output is not None:
-                outputs[ref] = raw_output
-            elif ref:
-                raw_output = outputs.get(ref)
-            if ref and locations is not None:
-                locations_by_ref[ref] = locations
-            elif ref:
-                locations = locations_by_ref.get(ref)
-            if ref and content is not None:
-                contents_by_ref[ref] = content
-            elif ref:
-                content = contents_by_ref.get(ref)
-            supplied_title = isinstance(title, str) and bool(title.strip())
-            known = titles.get(ref)
-            if supplied_title:
-                known = _human_tool_title(scrub_display_text(
-                    _project_relative(title.strip(), project_root),
-                    max_chars=max(4000, len(title) * 2 + 1000),
-                ))
-                titles[ref] = known
-            fields: dict[str, Any] = dict(
-                tool_call_id=card_id, status=_acp_tool_call_status(status),
-            )
-            # The assignment lifecycle card is the coordinator-facing
-            # representation of delegate. Filter using the provider title
-            # before humanizing it to the short ``Delegate`` label.
-            if isinstance(title, str) and _COORDINATOR_DELEGATE_TOOL_CALL.match(title.strip()):
-                hidden_wait_refs.add(ref)
-                pending_titleless.pop(ref, None)
-                return
-            label = known or title or ""
-            if (_AMBIGUOUS_FILE_ACTIVITY.match(label)
-                    and not (locations or raw_input is not None or content)):
-                # Wait for the provider's path-bearing update. This avoids
-                # leaking a generic internal report edit before its target is
-                # known, while still allowing a real project edit through.
-                deferred_file_activity.add(ref)
-                return
-            deferred_file_activity.discard(ref)
-            # Filter using the provider's original title before
-            # ``_human_tool_title`` rewrites Cortex MCP names such as
-            # ``mcp__cortex__read_skill`` to the indistinguishable ``Read
-            # skill`` label. The humanized label is retained as a fallback
-            # for status-only updates whose original title is absent.
-            if (_is_engine_internal_tool(title, kind, locations, raw_input, content)
-                    or _is_engine_internal_tool(label, kind, locations, raw_input, content)
-                    or ref in hidden_wait_refs):
-                hidden_wait_refs.add(ref)
-                pending_titleless.pop(ref, None)
-                return
-            if ref and supplied_title and ref in pending_titleless and _NATIVE_SUBAGENT.search(label):
-                # Refuse a provider subagent once; the provisional unnamed
-                # event is part of that same opaque provider call.
-                pending_titleless.pop(ref, None)
-            elif ref and supplied_title and ref in pending_titleless:
-                # A status-only create is ambiguous until the engine names
-                # it.  Replay that start now that its title is known, then
-                # continue with the named update in wire order.  A named
-                # ``wait`` took the early branch above and drops both.
-                pending = pending_titleless.pop(ref)
-                on_tool_call(ref, pending[0], title, pending[1], pending[2], pending[3], pending[4], pending[5])
-                if pending[1] == "failed":
-                    return
-            elif ref and not supplied_title and ref in pending_titleless and _acp_tool_call_status(status) == "failed":
-                prior = pending_titleless[ref]
-                pending_titleless[ref] = (prior[0], "failed", prior[2], prior[3], prior[4],
-                                          raw_output if raw_output is not None else prior[5])
-                return
-            elif ref and not supplied_title and _acp_tool_call_status(status) in {"pending", "in_progress"}:
-                prior = pending_titleless.get(ref)
-                if prior:
-                    kind = prior[0] or kind
-                    status = ("failed" if prior[1] == "failed" else status)
-                    locations = locations if locations is not None else prior[2]
-                    content = content if content is not None else prior[3]
-                    raw_input = raw_input if raw_input is not None else prior[4]
-                    raw_output = raw_output if raw_output is not None else prior[5]
-                pending_titleless[ref] = (kind, status, locations, content, raw_input, raw_output)
-                return
-            if _NATIVE_SUBAGENT.search(label):
-                # Provider-owned subagents are engine machinery. Cancel the
-                # turn as before, but keep that machinery out of the user
-                # timeline entirely.
-                if cancel_event is not None:
-                    # The ACP adapter's prompt loop watches this event and
-                    # sends the wire cancellation independently of whether
-                    # another engine update arrives.  A refusal card alone
-                    # would leave a provider-owned child running.
-                    cancel_event.set()
-                self._note_native_subagent(task_id, label)
-                return
-            if ref and not _has_concrete_tool_activity(known or title, locations, content, raw_input):
-                deferred_placeholder_refs.add(ref)
-                return
-            deferred_placeholder_refs.discard(ref)
-            if known is None:
-                # Some engines send a status before a title, or never send
-                # one. Preserve the same honest fallback in grouped text as
-                # the ordinary per-call renderer uses.
-                known = f"Tool call {ref}" if ref else "Tool call"
-            # The title fallback above also applies to the ordinary card
-            # path; a later named update replaces it on the same card.
-            if ref not in seen:
-                seen.add(ref)
-                fields["new"] = True
+        def on_tool_call(ref, kind, title, status, locations=None, content=None,
+                         raw_input=None, raw_output=None):
+            fields = dict(tool_call_id=f"call:{id_scope}:{ref}", new=ref not in seen)
+            seen.add(ref)
+            if kind is not None or fields["new"]:
                 fields["kind"] = _acp_tool_call_kind(kind)
-            else:
-                fields["new"] = False
-            resolved_prefix = prefix() if callable(prefix) else prefix
-            fields["title"] = f"{resolved_prefix}{_human_tool_title(known)}" if resolved_prefix else _human_tool_title(known)
-            # Keep the collapsed card readable while retaining the complete
-            # structured payload for Paseo's expanded input/output view. The
-            # host journal persists these fields verbatim after the normal
-            # credential redaction, so session/load replays the same detail.
-            normalized_input = _native_edit_raw_input(kind, known, raw_input)
-            line = _compact_tool_line(
-                known, status, locations, raw_input, raw_output, project_root,
-                kind=kind,
-            )
-            fields["text"] = line
-            safe_content = _client_safe_content(content)
-            if safe_content:
-                fields["content"] = safe_content
-            if normalized_input is not None:
-                fields["raw_input"] = _client_safe_raw(normalized_input)
+            if status is not None:
+                fields["status"] = _acp_tool_call_status(status)
+            if title is not None or fields["new"]:
+                label = str(title or f"Tool call {ref}")
+                resolved_prefix = prefix() if callable(prefix) else prefix
+                fields["title"] = scrub_display_text(
+                    f"{resolved_prefix}{label}", max_chars=max(4000, len(label) * 2 + 1000))
+            if content is not None:
+                fields["content"] = _client_safe_content(content)
+            if raw_input is not None:
+                fields["raw_input"] = _client_safe_raw(raw_input)
             if raw_output is not None:
                 fields["raw_output"] = _client_safe_raw(raw_output)
-            if locations:
-                fields["locations"] = list(locations)
+            if locations is not None:
+                fields["locations"] = _client_safe_raw(locations)
             emit_tool_call(fields)
 
-        seen: set[str] = set()
-        on_tool_call.close_group = close_group
+        on_tool_call.close_group = lambda: None
         return on_tool_call
 
     def _emit_worker_activity_tool_calls(
@@ -4689,10 +3117,9 @@ class OrchestratingRuntime:
         text question otherwise. Returns ``True`` iff an answer was
         captured (the caller then continues the SAME turn instead of
         ending it), ``False`` otherwise."""
-        question = questions_store.create_if_absent(
-            self._store, task_id, f"ask_user:{decision['decision_id']}", decision["question"],
-            options=decision.get("options"),
-        )
+        question = questions_store.get(self._store, decision['question_id'])
+        if question is None or question.task_id != task_id:
+            raise StoreError('runtime_question_missing')
         decision["question_id"] = question.id
         if question.status != "open":
             # The terminal decision was inspected before this row was
@@ -4749,313 +3176,83 @@ class OrchestratingRuntime:
         latest = questions_store.get(self._store, question.id)
         return latest is not None and latest.status == "answered"
 
-    def _capture_result_revisions(self, task_id: str, claimed) -> dict[int, dict]:
-        """T019: for every ``worker_result`` in ``claimed``, durably capture
-        (and return, keyed by event id) the observed artifact revision at
-        this exact instant, bound to that assignment's attempt id (see
-        ``delegation.revision``). A task with no resolvable project root
-        (should not happen for a bound task) yields no captures rather than
-        raising.
 
-        T025: when this assignment's attempt actually ran in an isolated
-        snapshot workspace (see ``delegation.workspace_isolation``), the
-        revision captured here is that workspace's own tree -- not the
-        shared project root's -- because that is the tree the worker's
-        checks actually ran against. Since the tree digest is computed over
-        *relative* paths/content (identical either way), a later successful
-        ``delegation.integration.integrate`` of that exact tree onto an
-        unchanged project root reproduces the same digest (still bound,
-        never stale); an integration that merges in a concurrent main-root
-        change, or a conflicting worker, necessarily changes the digest --
-        the existing ``stale_verification`` comparison below then correctly
-        refuses to let a revision-A report certify revision B. An
-        attempt with no isolated workspace (serialized fallback, or
-        pre-T025 data) falls back to the shared project root exactly as
-        before."""
-        worker_results = [event for event in claimed if event.event_type == "worker_result"]
-        if not worker_results:
-            return {}
-        with self._store.connection() as db:
-            row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if row is None:
-            return {}
-        shared_root = row["project_root"]
-        captures = {}
-        for event in worker_results:
-            if event.assignment_ref is None:
-                continue
-            # A worker_result event's own ``assignment_ref`` is keyed by the
-            # provisioned attempt id itself (see ``delegation.completion``'s
-            # ``gate`` docstring on the same worker-facing-vs-coordinator-
-            # facing distinction) -- resolved directly, no
-            # delegation_provisioning bridge needed here.
-            workspace_root = delegation_workspace_isolation.resolve_attempt_root(
-                self._store, task_id, event.assignment_ref,
-            ) or shared_root
-            captures[event.id] = delegation_revision.record_attempt_revision(
-                self._store, event.assignment_ref, f"worker_result:{event.id}", workspace_root,
-            )
-        return captures
 
-    def _check_terminal_decision(self, task_id: str):
-        with self._store.connection() as db:
-            row = db.execute(
-                "SELECT id, payload_json FROM task_events WHERE task_id=? AND event_type='coordinator_decision' "
-                "ORDER BY id DESC LIMIT 1",
-                (task_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        import json
-
-        payload = json.loads(row["payload_json"])
-        if payload.get("decision") == "accept" and payload.get("assignment_ref") == "task":
-            return self._recheck_accept(task_id, row["id"])
-        if payload.get("decision") == "ask_user":
-            # Only while that question is actually still open. This is the
-            # latest *decision*, not the latest state: once it was
-            # answered, nothing newer overwrote it, so every later turn
-            # read it again and parked the task on a question that had
-            # been answered minutes earlier -- ending the coordinator's
-            # turn while its workers were still running. The accept branch
-            # above has re-checked for staleness since T017; this one
-            # never did.
-            with self._store.connection() as db:
-                question_row = db.execute(
-                    "SELECT status FROM pending_questions WHERE task_id=? AND dedup_key=?",
-                    (task_id, f"ask_user:{row['id']}"),
-                ).fetchone()
-            if question_row is not None and question_row["status"] != "open":
-                return None
-            options = payload.get("options")
-            return dict(
-                kind="ask_user", decision_id=row["id"], question=payload.get("question") or "",
-                options=list(options) if isinstance(options, list) else None,
-            )
-        return None
-
-    def _recheck_accept(self, task_id: str, decision_row_id: int):
-        """T017 review (HIGH): a task-level accept decision must never be
-        honored *stale*. Re-run the same completion gate the runtime relied
-        on to allow recording it in the first place (see
-        ``delegation.completion.gate``) here too, at the point the runtime
-        is about to actually finalize a host-success response -- the
-        coordinator may have delegated (or a worker may have asked a
-        question) in the *same* turn, after its own accept tool call, and
-        that later event never gets a chance to gate a fresh decide() call.
-        A decision with any delegation_requested/meaningful event committed
-        after it is treated as superseded outright (never honored, no
-        matter what the gate would otherwise say); still-running/queued
-        futures for this task also block honoring it.
-        """
-        from ..delegation import completion as delegation_completion
-
-        with self._store.connection() as db:
-            # Deliberately excludes 'user_message': the current turn's own
-            # user_message always precedes (a lower id than) the
-            # coordinator's own decide() call that reacted to it -- checking
-            # it here would wrongly treat every normal accept as stale. A
-            # genuinely new user turn is handled by _run() starting a fresh
-            # continuation from scratch, never through this recheck.
-            newer = db.execute(
-                "SELECT event_type, id FROM task_events WHERE task_id=? AND id>? "
-                "AND event_type IN ('delegation_requested','worker_result','worker_question',"
-                "'assignment_failed','assignment_cancelled') ORDER BY id LIMIT 1",
-                (task_id, decision_row_id),
-            ).fetchone()
-        if newer is not None:
-            reason = f"a newer {newer['event_type']} event (id {newer['id']}) arrived after this accept decision (id {decision_row_id})"
-            delegation_events.append_event(
-                self._store, task_id, "progress", f"acceptance_refused:{decision_row_id}",
-                dict(note=f"Acceptance refused: {reason}."), origin="runtime",
-            )
-            return None
-        running = bool(self._running.get(task_id))
-        if running:
-            delegation_events.append_event(
-                self._store, task_id, "progress", f"acceptance_refused:{decision_row_id}",
-                dict(note="Acceptance refused: assignment(s) still running/queued for this task."), origin="runtime",
-            )
-            return None
-        with self._store.connection() as db:
-            decision_row = db.execute(
-                "SELECT payload_json FROM task_events WHERE id=? AND task_id=? "
-                "AND event_type='coordinator_decision'",
-                (decision_row_id, task_id),
-            ).fetchone()
-            try:
-                decision_payload = json.loads(decision_row["payload_json"]) if decision_row else {}
-            except (TypeError, ValueError):
-                decision_payload = {}
-            binding = decision_payload.get("pipeline_binding")
-            if not delegation_completion.pipeline_binding_matches(db, task_id, binding):
-                reason = (
-                    "the coordinator acceptance is bound to a pipeline edition that is no longer "
-                    "the current edition (or has no valid coordinator-authored pipeline binding)"
-                )
-                delegation_events.append_event(
-                    self._store, task_id, "progress", f"acceptance_refused:{decision_row_id}",
-                    dict(note=f"Acceptance refused: {reason}."), origin="runtime",
-                )
-                return None
-        ok, reasons = delegation_completion.gate(self._store, task_id)
-        if not ok:
-            delegation_events.append_event(
-                self._store, task_id, "progress", f"acceptance_refused:{decision_row_id}",
-                dict(note="Acceptance refused: " + " ".join(reasons)), origin="runtime",
-            )
-            return None
-        return "accepted"
 
     # -- waiting --------------------------------------------------------
 
-    def _wait_for_progress(self, task_id: str, cancel_event: threading.Event) -> bool:
-        """Block (bounded, no model prompt) until a meaningful event arrives.
-
-        Returns True if progress was observed (an unconsumed event now
-        exists), False if the wait timed out with nothing pending and no
-        worker running (a genuine stall to count against the no-progress
-        budget).
-        """
-        deadline = time.monotonic() + self._wait_timeout
-        backoff = _WAIT_BACKOFF_START
-        while time.monotonic() < deadline:
-            if cancel_event.is_set():
-                return True
-            if delegation_events.has_unconsumed(self._store, task_id):
-                return True
-            with self._cond:
-                running = bool(self._running.get(task_id))
-                self._cond.wait(timeout=min(backoff, deadline - time.monotonic()) if deadline > time.monotonic() else 0)
-                still_running = bool(self._running.get(task_id))
-            if delegation_events.has_unconsumed(self._store, task_id):
-                return True
-            if not running and not still_running:
-                return False
-            backoff = min(backoff * 2, _WAIT_BACKOFF_MAX)
-        return delegation_events.has_unconsumed(self._store, task_id)
 
     def _notify(self) -> None:
         with self._cond:
             self._cond.notify_all()
 
+    def _record_coordinator_dispatch_failure(
+        self, task_id: str, error: BaseException, *, phase: str,
+        assignment_ref: str | None = None,
+    ) -> dict[str, str]:
+        """Persist a dispatch failure instead of abandoning a claimed request.
+
+        The early dispatcher runs in a daemon thread, so an exception there
+        cannot reach the coordinator's call stack.  Keep both the bounded
+        diagnostic and, when an exact assignment is known, a terminal
+        ``assignment_failed`` event.  The latter closes the assignment's
+        durable contract; the former preserves the dispatch phase/type even
+        when the failure happened before an executor future existed.
+        """
+        error_type = type(error).__name__
+        detail = _bounded_detail(str(error) or error_type)
+        ref_suffix = assignment_ref or new_id("dispatch_")
+        payload = dict(
+            kind="coordinator_dispatch_failed", phase=phase,
+            error=error_type, detail=detail,
+        )
+        delegation_events.append_event(
+            self._store, task_id, "progress",
+            f"coordinator_dispatch_failed:{phase}:{ref_suffix}", payload,
+            origin="runtime", assignment_ref=assignment_ref,
+        )
+        if assignment_ref:
+            self._append_assignment_failure_if_unreported(
+                task_id, assignment_ref,
+                dict(error=f"dispatch_failed:{error_type}", detail=detail),
+            )
+        return dict(error=error_type, detail=detail, phase=phase)
+
     # -- delegation_requested / assignment_cancel_requested processing --
 
-    def _process_new_events(
-        self, task_id: str, coordinator_channel: ChannelContext, cancel_event: threading.Event,
+    def _process_new_events_safely(
+        self, task_id: str, coordinator_channel: ChannelContext,
+        cancel_event: threading.Event,
         emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
+        *, phase: str,
     ) -> None:
+        """Run event dispatch without hiding a coordinator-side failure."""
+        try:
+            self._process_new_events(task_id, coordinator_channel, cancel_event, emit_tool_call)
+        except Exception as error:  # noqa: BLE001 - durable diagnostic is the recovery contract
+            self._record_coordinator_dispatch_failure(task_id, error, phase=phase)
+
+    def _process_new_events(
+        self, task_id, coordinator_channel, cancel_event, emit_tool_call=None,
+    ):
+        """Execute only reservations created by the runtime scheduler."""
         with self._store.connection() as db:
             requests = db.execute(
-                "SELECT * FROM task_events WHERE task_id=? AND event_type='delegation_requested' ORDER BY id",
+                "SELECT e.* FROM task_events e "
+                "JOIN runtime_nodes n ON n.task_id=e.task_id AND n.assignment_ref=e.assignment_ref "
+                "JOIN runtime_tasks t ON t.task_id=n.task_id AND t.revision=n.revision "
+                "WHERE e.task_id=? AND e.event_type='delegation_requested' AND e.superseded=0 "
+                "AND n.status='running' AND t.state IN ('EXECUTING','REVIEWING') ORDER BY e.id",
                 (task_id,),
             ).fetchall()
-            cancels = db.execute(
-                "SELECT * FROM task_events WHERE task_id=? AND event_type='assignment_cancel_requested' ORDER BY id",
-                (task_id,),
-            ).fetchall()
-            clarifications = db.execute(
-                "SELECT * FROM task_events WHERE task_id=? AND event_type='coordinator_clarification' ORDER BY id",
-                (task_id,),
-            ).fetchall()
-            # T025: carried as 'progress' rows (see delegation.events
-            # .INTEGRATION_PROGRESS_KINDS docstring on why a brand new
-            # event_type is not used); the 'integrate:' dedup_key prefix is
-            # this operation's own reserved namespace (see mcp_tools
-            # ._coordinator_integrate), never colliding with an unrelated
-            # progress note.
-            integrations = db.execute(
-                "SELECT * FROM task_events WHERE task_id=? AND event_type='progress' "
-                "AND dedup_key LIKE 'integrate:%' ORDER BY id",
-                (task_id,),
-            ).fetchall()
-            candidates = db.execute(
-                "SELECT * FROM task_events WHERE task_id=? AND event_type='progress' "
-                "AND dedup_key LIKE 'prepare_candidate:%' ORDER BY id",
-                (task_id,),
-            ).fetchall()
-            checks = db.execute(
-                "SELECT * FROM task_events WHERE task_id=? AND event_type='progress' "
-                "AND dedup_key LIKE 'request_check:%' ORDER BY id",
-                (task_id,),
-            ).fetchall()
-        import json
-
-        # P1 #7 fix: the dedup bookkeeping below (which needs the shared
-        # lock, to stay race-free against a concurrent _process_new_events
-        # call for the same task) is now the *only* thing done under
-        # self._lock. Every external/blocking effect -- executor.submit's
-        # own dispatch, _cancel_assignment, _integrate_assignment -- runs
-        # after the lock is released (P1 #7's second point: no blocking
-        # external operation under the shared runtime lock).
-        #
-        # For a submitted future specifically: this also closes the
-        # deadlock itself. future.add_done_callback() invokes the callback
-        # *immediately, on the calling thread* when the future is already
-        # done (documented concurrent.futures behavior) -- so registering
-        # it while still holding self._lock let an already-finished future
-        # re-enter _on_worker_done's self._cond (built on that same
-        # non-reentrant lock) on the same thread and deadlock. Ordering is
-        # preserved without that risk: the future is added to self._running
-        # (under a short, separate lock acquisition) strictly *before*
-        # add_done_callback is ever called, so a callback -- whether fired
-        # synchronously right here or later from a worker thread -- always
-        # finds the future already present to discard; it can never be
-        # missed, and it is never observable as still "running" once its
-        # own callback has had a chance to run.
         to_delegate = []
-        to_cancel = []
-        to_clarify = []
-        to_integrate = []
-        to_prepare_candidate = []
-        to_check = []
         with self._lock:
             for row in requests:
                 assignment_ref = row["assignment_ref"]
                 if assignment_ref in self._dispatched_delegations:
                     continue
                 self._dispatched_delegations.add(assignment_ref)
-                # The ref is the event's own column, carried alongside the
-                # payload rather than merged into it: the payload is what
-                # the delegate tool wrote, and it stays that.
                 to_delegate.append((assignment_ref, json.loads(row["payload_json"])))
-
-            for row in cancels:
-                assignment_ref = row["assignment_ref"]
-                if assignment_ref in self._dispatched_cancels:
-                    continue
-                self._dispatched_cancels.add(assignment_ref)
-                to_cancel.append((assignment_ref, json.loads(row["payload_json"]).get("reason", "")))
-
-            for row in clarifications:
-                assignment_ref = row["assignment_ref"]
-                key = (task_id, assignment_ref)
-                session_ref = self._worker_sessions.get(key)
-                if session_ref is None or row["id"] in self._delivered_clarification_ids:
-                    continue
-                self._delivered_clarification_ids.add(row["id"])
-                message = json.loads(row["payload_json"]).get("message", "")
-                to_clarify.append((key, session_ref, message, row["id"]))
-
-            for row in integrations:
-                if row["id"] in self._dispatched_integrations:
-                    continue
-                self._dispatched_integrations.add(row["id"])
-                payload = json.loads(row["payload_json"])
-                to_integrate.append((payload["assignment_ref"], payload["request_key"],
-                                     payload.get("candidate_ref"), payload.get("expected_base_digest")))
-
-            for row in candidates:
-                if row["id"] in self._dispatched_candidates:
-                    continue
-                self._dispatched_candidates.add(row["id"])
-                to_prepare_candidate.append(json.loads(row["payload_json"]))
-
-            for row in checks:
-                if row["id"] in self._dispatched_checks:
-                    continue
-                self._dispatched_checks.add(row["id"])
-                to_check.append(json.loads(row["payload_json"]))
 
         for assignment_ref, payload in to_delegate:
             # The card appears when the worker is dispatched, not when the
@@ -5077,199 +3274,28 @@ class OrchestratingRuntime:
                     # still alive.
                     self._worker_card_emitters.setdefault(assignment_ref, emit_tool_call)
                 self._open_assignments.setdefault(task_id, set()).add(assignment_ref)
-            future = self._executor.submit(
-                self._provision_and_prompt, task_id, coordinator_channel, payload, cancel_event,
-            )
-            with self._lock:
-                self._running.setdefault(task_id, set()).add(future)
-            future.add_done_callback(lambda f, t=task_id: self._on_worker_done(t, f))
-
-        for assignment_ref, reason in to_cancel:
-            self._cancel_assignment(task_id, assignment_ref, reason)
-
-        for key, session_ref, message, row_id in to_clarify:
-            future = self._executor.submit(self._deliver_clarification, task_id, key, session_ref, message, cancel_event, row_id)
-            with self._lock:
-                self._running.setdefault(task_id, set()).add(future)
-            future.add_done_callback(lambda f, t=task_id: self._on_worker_done(t, f))
-
-        for payload in to_prepare_candidate:
-            future = self._executor.submit(self._prepare_candidate, task_id, payload)
-            with self._lock:
-                self._running.setdefault(task_id, set()).add(future)
-            future.add_done_callback(lambda f, t=task_id: self._on_worker_done(t, f))
-
-        for payload in to_check:
-            future = self._executor.submit(self._run_candidate_check, task_id, payload)
-            with self._lock:
-                self._running.setdefault(task_id, set()).add(future)
-            future.add_done_callback(lambda f, t=task_id: self._on_worker_done(t, f))
-
-        for assignment_ref, request_key, candidate_ref, expected_base_digest in to_integrate:
-            self._integrate_assignment(task_id, assignment_ref, request_key,
-                                       candidate_ref=candidate_ref, expected_base_digest=expected_base_digest)
-
-        self._terminate_completed_workers(task_id)
-
-    def _prepare_candidate(self, task_id: str, payload: Mapping[str, Any]) -> None:
-        """Materialize one requested candidate and publish a durable outcome."""
-        from ..delegation import candidates as candidate_staging
-
-        candidate_id = payload["candidate_id"]
-        refs = payload["assignment_refs"]
-        request_key = payload["request_key"]
-        try:
-            with self._store.connection() as db:
-                placeholders = ",".join("?" for _ in refs)
-                rows = db.execute(
-                    f"SELECT idempotency_key,attempt_id FROM delegation_provisioning "
-                    f"WHERE task_id=? AND idempotency_key IN ({placeholders})",
-                    (task_id, *refs),
-                ).fetchall()
-            by_ref = {row["idempotency_key"]: row for row in rows}
-            if set(by_ref) != set(refs):
-                raise StoreError("candidate_assignment_unavailable")
-            attempts = [by_ref[ref]["attempt_id"] for ref in refs]
-            if any(not attempt for attempt in attempts):
-                raise StoreError("candidate_attempt_unavailable")
-            with self._store.connection() as db:
-                terminal = {
-                    row["assignment_ref"] for row in db.execute(
-                        f"SELECT DISTINCT assignment_ref FROM task_events WHERE task_id=? "
-                        f"AND event_type='worker_result' AND superseded=0 "
-                        f"AND assignment_ref IN ({placeholders})",
-                        (task_id, *attempts),
-                    ).fetchall()
-                }
-            if terminal != set(attempts):
-                raise StoreError("candidate_requires_published_results")
-            candidate = candidate_staging.prepare_candidate(
-                self._store, task_id, attempts, candidate_id=candidate_id,
-            )
-            event_payload = dict(kind="candidate_ready", candidate_id=candidate_id,
-                                 assignment_refs=refs, request_key=request_key,
-                                 content_digest=candidate["content_digest"],
-                                 project_base_digest=candidate["project_base_digest"])
-            dedup_key = f"candidate_ready:{request_key}"
-        except Exception as error:
-            conflict = isinstance(error, candidate_staging.CandidateConflict)
-            event_payload = dict(kind="candidate_conflict" if conflict else "candidate_failed",
-                                 candidate_id=candidate_id, assignment_refs=refs,
-                                 request_key=request_key, error=str(error))
-            if conflict:
-                event_payload["conflict_paths"] = error.candidate.get("conflict_paths", [])
-            dedup_key = f"candidate_outcome:{request_key}"
-        delegation_events.append_event(
-            self._store, task_id, "progress", dedup_key, event_payload, origin="runtime",
-        )
-        self._notify()
-
-    def _run_candidate_check(self, task_id: str, payload: Mapping[str, Any]) -> None:
-        """Observe one exact staged candidate without replaying an uncertain command."""
-        from ..delegation import candidate_checks, check_requests
-
-        check_id = payload["check_id"]
-        request = check_requests.get_check_request(self._store, check_id)
-        if request is None or request["task_id"] != task_id:
-            return
-        if request["status"] == "running":
-            # The process may have exited between persisting its observed
-            # evidence and recording completion. Reconcile that exact row;
-            # otherwise preserve the external command's unknown outcome.
             try:
-                with self._store.connection() as db:
-                    receipt = db.execute(
-                        "SELECT evidence_id FROM check_evidence_operations WHERE task_id=? AND idempotency_key=?",
-                        (task_id, f"candidate-check:{check_id}"),
-                    ).fetchone()
-            except sqlite3.OperationalError:
-                receipt = None
-            if receipt is not None:
-                from ..delegation.check_evidence import get_check_evidence
+                future = self._executor.submit(
+                    self._provision_and_prompt, task_id, coordinator_channel, payload, cancel_event,
+                )
+            except Exception as error:  # noqa: BLE001 - convert submit failure into durable assignment state
+                with self._lock:
+                    open_refs = self._open_assignments.get(task_id)
+                    if open_refs is not None:
+                        open_refs.discard(assignment_ref)
+                        if not open_refs:
+                            self._open_assignments.pop(task_id, None)
+                self._record_coordinator_dispatch_failure(
+                    task_id, error, phase="executor_submit", assignment_ref=assignment_ref,
+                )
+                continue
+            with self._lock:
+                self._running.setdefault(task_id, set()).add(future)
+            future.add_done_callback(
+                lambda f, t=task_id, a=assignment_ref: self._on_worker_done(t, f, a)
+            )
 
-                evidence = get_check_evidence(self._store, receipt["evidence_id"])
-                result = dict(evidence_id=evidence["evidence_id"],
-                              observed_result=evidence["observed_result"])
-                request = check_requests.complete_check(self._store, check_id, result)
-            else:
-                request = check_requests.mark_unknown(self._store, check_id)
-        elif request["status"] == "queued":
-            request = check_requests.claim_check(self._store, check_id)
-            try:
-                reusable = check_requests.find_reusable_passed_check(
-                    self._store, task_id=task_id,
-                    candidate_id=request["candidate_id"],
-                    candidate_digest=request["candidate_digest"],
-                    argv=request["argv"], checked_files=request["checked_files"],
-                )
-                if reusable is not None:
-                    # Reuse is still bound to the exact current candidate. Read
-                    # the staged manifest on both sides of the durable clone so
-                    # a concurrent mutation cannot silently turn old evidence
-                    # into evidence for a different candidate.
-                    from ..delegation.candidates import _digest_manifest, _manifest, get_candidate
-                    from ..delegation.check_evidence import record_check_evidence
 
-                    candidate = get_candidate(self._store, request["candidate_id"])
-                    if candidate is None or candidate.get("status") != "ready":
-                        raise candidate_checks.CandidateCheckError("candidate_not_ready")
-                    before_digest = _digest_manifest(_manifest(candidate["stage_path"]))
-                    if before_digest != request["candidate_digest"]:
-                        raise candidate_checks.CandidateCheckError("candidate_digest_mismatch")
-                    prior_evidence = reusable["evidence"]
-                    evidence = record_check_evidence(
-                        self._store, task_id, check_id, request["candidate_id"],
-                        request["candidate_digest"], request["requirement_bindings"],
-                        prior_evidence["environment"], prior_evidence["command"],
-                        prior_evidence["observed_result"],
-                        {"status": "unassessed", "reason": "reused exact assessed observation"},
-                        checked_files=request["checked_files"],
-                        idempotency_key=f"candidate-check:{check_id}",
-                    )
-                    after_digest = _digest_manifest(_manifest(candidate["stage_path"]))
-                    if after_digest != before_digest:
-                        raise candidate_checks.CandidateCheckError("candidate_changed_during_check")
-                    result = dict(
-                        evidence_id=evidence["evidence_id"],
-                        observed_result=evidence["observed_result"],
-                        reused=True,
-                        observation_source="exact_prior_assessed_pass",
-                        reused_from_check_id=reusable["request"]["check_id"],
-                        reused_from_evidence_id=prior_evidence["evidence_id"],
-                    )
-                else:
-                    observed = candidate_checks.run_candidate_check(
-                        self._store, task_id, check_id, request["candidate_id"],
-                        request["candidate_digest"], request["argv"],
-                        assessment={"status": "unassessed", "reason": "runtime observation only"},
-                        requirement_bindings=request["requirement_bindings"],
-                        checked_files=request["checked_files"],
-                        idempotency_key=f"candidate-check:{check_id}",
-                    )
-                    result = dict(evidence_id=observed["evidence"]["evidence_id"],
-                                  observed_result=observed["observed_result"])
-                request = check_requests.complete_check(self._store, check_id, result)
-            except candidate_checks.CandidateCheckError as error:
-                request = check_requests.fail_check(
-                    self._store, check_id,
-                    f"candidate_check_execution_failed:{error.code}",
-                )
-            except Exception:
-                request = check_requests.fail_check(
-                    self._store, check_id, "candidate_check_execution_failed:unexpected_error",
-                )
-        kind = {"completed": "candidate_check_observed", "failed": "candidate_check_failed",
-                "unknown": "candidate_check_unknown"}.get(request["status"])
-        if kind is None:
-            return
-        event_payload = dict(kind=kind, check_ref=check_id, candidate_ref=request["candidate_id"],
-                             candidate_digest=request["candidate_digest"],
-                             status=request["status"], result=request["result"], error=request["error"])
-        delegation_events.append_event(
-            self._store, task_id, "progress", f"candidate_check_outcome:{check_id}",
-            event_payload, origin="runtime",
-        )
-        self._notify()
 
     def _terminate_completed_workers(self, task_id: str) -> None:
         """T017: a worker that reached a terminal state (published a
@@ -5299,13 +3325,23 @@ class OrchestratingRuntime:
             if prov is not None and prov["attempt_id"]:
                 attempt_ids.add(prov["attempt_id"])
         with self._lock:
+            in_flight = set(self._worker_turns_in_flight)
+            with self._store.connection() as db:
+                attempt_ids = {a for a in attempt_ids if not (row := db.execute(
+                    'SELECT idempotency_key FROM delegation_provisioning WHERE attempt_id=?',(a,)
+                ).fetchone()) or row[0] not in in_flight}
             newly_terminal = [a for a in attempt_ids if a not in self._terminated_attempts]
             self._terminated_attempts.update(newly_terminal)
         for attempt_id in newly_terminal:
             try:
                 self._engine.terminate_owned(attempt_id)
+                from ..orchestration.recovery import release_observed
+                if not release_observed(self,task_id,attempt_id):
+                    with self._lock:
+                        self._terminated_attempts.discard(attempt_id)
             except Exception:
-                pass
+                with self._lock:
+                    self._terminated_attempts.discard(attempt_id)
             self._cleanup_isolated_workspace_if_integrated(task_id, attempt_id)
         if newly_terminal:
             self._notify()
@@ -5355,149 +3391,9 @@ class OrchestratingRuntime:
             row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
         return row["project_root"]
 
-    def _accepted_pipeline_text_for_final_guard(self, task_id: str) -> str | None:
-        """Read the current, digest-checked pipeline through the store reader.
 
-        No unverified filesystem read can authorize a digest in the final
-        response. If the current edition cannot be read completely, the
-        final guard withholds exact digest claims rather than guessing.
-        """
-        try:
-            with self._store.connection() as db:
-                row = db.execute(
-                    "SELECT id FROM reports WHERE task_id=? AND kind='pipeline' LIMIT 1",
-                    (task_id,),
-                ).fetchone()
-                if row is None:
-                    return None
-                args = dict(task_id=task_id, report_id=row["id"], limit=4000)
-                chunks = []
-                total = 0
-                while True:
-                    page = self._store._read(db, args)
-                    chunks.append(page["markdown"])
-                    total += len(page["markdown"])
-                    if total > 100_000:
-                        return None
-                    if page["next_cursor"] is None:
-                        return "".join(chunks)
-                    args["cursor"] = page["next_cursor"]
-        except (StoreError, OSError, ValueError, sqlite3.Error):
-            return None
 
-    def _direct_worker_publication_matches(self, task_id: str, after_event_id: int, revision: dict) -> bool:
-        """Recognize a same-turn direct worker result at its publication boundary.
 
-        This is an observed tree match, not OS-level attribution: another
-        process with the same user privileges can still write between the
-        worker's last edit and publication. A missing/partial observation,
-        cancelled result, or subsequent project change never qualifies.
-        """
-        if revision.get("kind") != "observed":
-            return False
-        with self._store.connection() as db:
-            rows = db.execute(
-                "SELECT e.assignment_ref, e.payload_json, p.workspace_binding_id FROM task_events e "
-                "JOIN delegation_provisioning p ON p.task_id=e.task_id AND p.attempt_id=e.assignment_ref "
-                "WHERE e.task_id=? AND e.id>? AND e.event_type='worker_result' AND e.superseded=0 "
-                "ORDER BY e.id DESC",
-                (task_id, after_event_id),
-            ).fetchall()
-            for row in rows:
-                if row["workspace_binding_id"] not in {"shared_project_root", "serialized_shared_root"}:
-                    continue
-                report_ref = json.loads(row["payload_json"]).get("report_ref")
-                if not isinstance(report_ref, str):
-                    continue
-                observations = db.execute(
-                    "SELECT kind, dirty_digest, manifest_json FROM attempt_revisions WHERE attempt_id=? AND phase=? "
-                    "ORDER BY rowid ASC",
-                    (row["assignment_ref"], f"worker_publish:{report_ref}"),
-                ).fetchall()
-                # Concurrent duplicate publications with separate captures
-                # have ambiguous provenance. A normal idempotent retry has
-                # exactly one retained observation.
-                if len(observations) != 1:
-                    continue
-                observed = observations[0]
-                try:
-                    manifest = json.loads(observed["manifest_json"]) if observed["manifest_json"] else None
-                except (TypeError, ValueError):
-                    manifest = None
-                publication = dict(kind=observed["kind"], dirty_digest=observed["dirty_digest"], manifest=manifest)
-                attributed, reason = delegation_revision.shared_publication_attribution(
-                    self._store, task_id, row["assignment_ref"], publication, revision,
-                )
-                if attributed:
-                    return True
-                # Keep the refusal observable for the coordinator and for
-                # postmortem review.  A matching shared-root tree without a
-                # unique durable owner is intentionally not authorization.
-                if reason:
-                    delegation_events.append_event(
-                        self._store, task_id, "progress",
-                        f"direct_worker_attribution_refused:{row['assignment_ref']}:{reason}",
-                        dict(kind="direct_worker_attribution_refused",
-                             assignment_ref=row["assignment_ref"], reason=reason),
-                        origin="runtime", assignment_ref=row["assignment_ref"],
-                    )
-        return False
-
-    def _pending_direct_worker_change(self, task_id: str) -> tuple[int, int] | None:
-        """Restore an unresolved project-change boundary after pause/restart.
-
-        The progress event records only the event cursor, not an assertion
-        that the worker caused the change.  An exact subsequent publication
-        resolves it; a failed or lost worker leaves it blocking.
-        """
-        with self._store.connection() as db:
-            row = db.execute(
-                "SELECT id, payload_json FROM task_events WHERE task_id=? "
-                "AND event_type='progress' AND dedup_key LIKE 'direct_worker_change_pending:%' "
-                "ORDER BY id DESC LIMIT 1", (task_id,),
-            ).fetchone()
-            if row is None:
-                return None
-            resolved = db.execute(
-                "SELECT 1 FROM task_events WHERE task_id=? AND dedup_key=? LIMIT 1",
-                (task_id, f"direct_worker_change_resolved:{row['id']}"),
-            ).fetchone()
-        if resolved is not None:
-            return None
-        try:
-            cursor = json.loads(row["payload_json"])["after_event_id"]
-        except (KeyError, TypeError, ValueError):
-            return (row["id"], -1)  # malformed evidence must never authorize a result
-        return (row["id"], cursor if isinstance(cursor, int) and cursor >= 0 else -1)
-
-    def _direct_worker_still_open(self, task_id: str) -> bool:
-        """Whether a bound direct-project worker can still publish a result.
-
-        Consult both the live assignment owner and durable terminal events.
-        ``_open_assignments`` may remain populated after ``worker_result``
-        when the host did not wire an ACP tool-call sink, while a provisioning
-        row normally remains ``ready`` for audit. Neither stale marker means
-        that attempt can publish another result or excuse later project drift.
-        """
-        with self._lock:
-            open_refs = tuple(self._open_assignments.get(task_id) or ())
-        if not open_refs:
-            return False
-        with self._store.connection() as db:
-            return any(
-                db.execute(
-                    "SELECT 1 FROM delegation_provisioning p WHERE p.task_id=? "
-                    "AND p.idempotency_key=? AND p.attempt_id IS NOT NULL "
-                    "AND p.workspace_binding_id IN "
-                    "('shared_project_root','serialized_shared_root') "
-                    "AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=p.task_id "
-                    "AND ((e.event_type='worker_result' AND e.assignment_ref=p.attempt_id) "
-                    "OR (e.event_type IN ('assignment_failed','assignment_cancelled') "
-                    "AND e.assignment_ref=p.idempotency_key))) LIMIT 1",
-                    (task_id, ref),
-                ).fetchone() is not None
-                for ref in open_refs
-            )
 
     def _mark_work_attempt_failed(self, task_id: str, assignment_ref: str,
                                   reason: str, idempotency_key: str) -> None:
@@ -5565,51 +3461,25 @@ class OrchestratingRuntime:
             _record_sync_error(error)
             return
 
-    def _deliver_clarification(self, task_id, key, session_ref, message, cancel_event, event_row_id) -> None:
-        generation_delivery_id = None
-        try:
-            pending_delivery = getattr(self._engine, "pending_delivery", None)
-            role_id = None
-            if pending_delivery is not None:
-                pending = pending_delivery(session_ref)
-                if pending:
-                    role_id = self._role_id_for_pending(task_id, pending)
-            if role_id is not None:
-                message, generation_delivery_id, delivery_blocked = self._begin_generation_delivery(
-                    task_id, session_ref, role_id, message,
-                )
-                if delivery_blocked:
-                    # T024: permanently blocked (budget overflow / compaction
-                    # loop) -- never prompt this worker with it; the
-                    # explicit blocked task state was already recorded.
-                    self._mark_work_attempt_failed(task_id, key[1], "context_budget_blocked", f"work-failed:{event_row_id}:budget")
-                    delegation_events.append_event(
-                        self._store, task_id, "assignment_failed", f"assignment_failed:{key[1]}",
-                        dict(error="context_budget_blocked"), origin="runtime", assignment_ref=key[1],
-                    )
-                    return
-            self._engine.prompt(session_ref, message, cancel_event)
-        except EngineTurnFailed as failure:
-            self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind=failure.kind, stop_reason=None)
-            self._mark_work_attempt_failed(task_id, key[1], f"engine_failure:{failure.kind}", f"work-failed:{event_row_id}:engine")
-            delegation_events.append_event(
-                self._store, task_id, "assignment_failed", f"assignment_failed:{key[1]}",
-                dict(error=f"engine_failure:{failure.kind}", kind=failure.kind),
-                origin="runtime", assignment_ref=key[1],
-            )
-            return
-        self._finalize_generation_delivery(session_ref, generation_delivery_id, failure_kind=None, stop_reason=StopReason.END_TURN)
-        delegation_events.append_event(
-            self._store, task_id, "progress", f"clarification_delivered:{event_row_id}",
-            dict(note="clarification delivered"), origin="runtime", assignment_ref=key[1],
-        )
 
-    def _on_worker_done(self, task_id: str, future: Future) -> None:
+    def _on_worker_done(
+        self, task_id: str, future: Future, assignment_ref: str | None = None,
+    ) -> None:
         with self._cond:
             pending = self._running.get(task_id)
             if pending is not None:
                 pending.discard(future)
             self._cond.notify_all()
+        if assignment_ref is None:
+            return
+        try:
+            error = future.exception()
+        except BaseException as lookup_error:  # noqa: BLE001 - make callback failures observable too
+            error = lookup_error
+        if error is not None:
+            self._record_coordinator_dispatch_failure(
+                task_id, error, phase="worker_future", assignment_ref=assignment_ref,
+            )
 
     def _attempt_worker_route_fallback(
         self, task_id: str, assignment_ref: str, assignment_id: str, role_id: str, old_attempt_id: str,
@@ -5789,7 +3659,22 @@ class OrchestratingRuntime:
         )
         return new_session_ref, True, new_attempt_id
 
-    def _provision_and_prompt(self, task_id: str, coordinator_channel: ChannelContext, payload: Mapping[str, Any], cancel_event: threading.Event) -> None:
+    def _provision_and_prompt(self, task_id, coordinator_channel, payload, cancel_event):
+        from ..orchestration.limits import Deadline, WORKER_SECONDS, REVIEW_SECONDS, assignment_current
+        from ..orchestration.state import event
+        assignment=payload['assignment_ref']
+        if not assignment_current(self._store,task_id,assignment): return
+        def timed_out():
+            with self._store.connection() as db:
+                db.execute('BEGIN IMMEDIATE')
+                event(db,task_id,'WORKER_TIMEOUT',dict(assignment_ref=assignment))
+                db.commit()
+            self._cancel_assignment(task_id,assignment,'worker_timeout')
+        seconds=REVIEW_SECONDS if payload['role']=='worker-code-reviewer' else WORKER_SECONDS
+        with Deadline(cancel_event,seconds,timed_out,idle_seconds=300) as deadline:
+            return self._provision_and_prompt_inner(task_id,coordinator_channel,payload,deadline)
+
+    def _provision_and_prompt_inner(self, task_id: str, coordinator_channel: ChannelContext, payload: Mapping[str, Any], cancel_event: threading.Event) -> None:
         # T017: capacity queuing happens *inside* SessionRuntime.open() (see
         # delegation.live_adapters.EngineSessionManagerAdapter.open) -- never
         # by retrying this whole delegate() call. delegate() uses an
@@ -5798,6 +3683,7 @@ class OrchestratingRuntime:
         # after a mid-step exception would fight that protocol's own
         # contention recovery instead of just taking longer, exactly like a
         # slow real engine launch it is already built to tolerate.
+        from ..orchestration.limits import assignment_current
         assignment_ref = payload["assignment_ref"]
         # A worker future may have been submitted immediately before
         # /cortex-stop.  The continuation cancel event is intentionally not
@@ -5806,16 +3692,28 @@ class OrchestratingRuntime:
         # effect.
         if acp_steering.is_stopped(self._store, task_id):
             return
+        # A replacement coordinator has a new channel. Reusing its channel
+        # for an old request would derive a different provisioning identity
+        # and launch a worker which no original card or graph attempt owns.
+        from ..delegation.provisioning import _idempotency_key
+
+        if _idempotency_key(task_id, coordinator_channel.channel_id, payload["request_key"]) != assignment_ref:
+            from ..recovery.worker_reconciliation import _mark_graph_attempt_failed_tx
+
+            with self._store.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                _mark_graph_attempt_failed_tx(db, task_id, assignment_ref, "recovery_worker_lost")
+                delegation_events.append_event_tx(
+                    db, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
+                    dict(error="recovery_worker_lost", detail="Delegation belongs to a previous coordinator channel; issue a fresh delegation."),
+                    origin="runtime", assignment_ref=assignment_ref,
+                )
+                db.commit()
+            return
         try:
             result = self._provisioning.delegate(
                 coordinator_channel, payload["title"], payload["brief"], payload["role"],
                 payload["acceptance"], payload["request_key"],
-                # D-T035-04: the coordinator's own optional route choice,
-                # carried verbatim from the ``delegation_requested`` event
-                # payload (``delegation.mcp_tools._coordinator_delegate``);
-                # every event predating this field is a plain dict without
-                # these keys, so ``.get`` keeps them replaying as omitted.
-                engine=payload.get("engine"), model=payload.get("model"), effort=payload.get("effort"),
             )
         except Exception as error:
             # Duck-typed, and deliberately so. The same refusal reaches here
@@ -5890,7 +3788,8 @@ class OrchestratingRuntime:
         # A concurrent stop can scan provisioning before this open finishes.
         # Close the exact attempt here too, so a stale future cannot leave a
         # newly opened process behind or send a first model turn.
-        if acp_steering.is_stopped(self._store, task_id):
+        from ..orchestration.limits import assignment_current
+        if cancel_event.is_set() or not assignment_current(self._store,task_id,assignment_ref):
             try:
                 self._engine.terminate_owned(result.attempt_id)
             except Exception:
@@ -5913,44 +3812,6 @@ class OrchestratingRuntime:
         # worker's ChannelContext, only its engine session ref.
         self._worker_sessions[(task_id, assignment_ref)] = result.engine_session_ref
         brief = f"{payload['title']}\n\n{payload['brief']}\n\nAcceptance: {payload['acceptance']}"
-        if payload.get("handoff_mode") == "report_review":
-            # This is structured task context, not a reconstructed title or
-            # summary.  The worker's role protocol performs the bounded
-            # read_report call; the runtime supplies the exact durable ref.
-            brief += (
-                "\n\nPredecessor report handoff:\n"
-                + json.dumps({
-                    "handoff_mode": "report_review",
-                    "predecessor_report_ref": payload["predecessor_report_ref"],
-                }, ensure_ascii=False, sort_keys=True)
-            )
-        if payload.get("plan_assignment_ref"):
-            from ..delegation.context_packet import build_context_packet
-            from ..delegation.work_graph import WorkGraph
-
-            planned = WorkGraph(self._store).get_assignment(payload["plan_assignment_ref"])
-            if planned is None or planned["task_id"] != task_id:
-                delegation_events.append_event(
-                    self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
-                    dict(error="planned_assignment_unavailable"), origin="runtime",
-                    assignment_ref=assignment_ref,
-                )
-                return
-            predecessor = planned["predecessors"]
-            input_candidate = predecessor[0]["candidate_ref"] if predecessor else None
-            try:
-                packet = build_context_packet(
-                    self._store, task_id, assignment_id=payload["plan_assignment_ref"],
-                    input_candidate_ref=input_candidate,
-                )
-            except StoreError as error:
-                delegation_events.append_event(
-                    self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
-                    dict(error=f"context_packet_unavailable:{error}"), origin="runtime",
-                    assignment_ref=assignment_ref,
-                )
-                return
-            brief += "\n\nCurrent structured task context (data has explicit trust labels):\n" + packet.to_prompt()
         generation_delivery_id = None
         # A clean worker END_TURN with no durable Cortex outcome gets one
         # procedural chance to finish the existing report/publication
@@ -5979,6 +3840,13 @@ class OrchestratingRuntime:
                     f"{render_worker_catalog(self._task_project_root(task_id))}\n\n---\n\n{brief}"
                 )
                 recovery_prompt = None
+                worker_prompt = (
+                    'You are a worker, not the user-facing coordinator. Communicate exclusively in English: '
+                    'all progress messages, summaries, reports, questions and final responses. '
+                    'The original user text and coordinator language below are context, not your response language. '
+                    'Preserve exact quoted evidence and any language explicitly required for project artifacts.\n\n'
+                    + worker_prompt + '\n\nWorker response language: English only, including the final response.'
+                )
                 delivered_prompt, generation_delivery_id, delivery_blocked = self._begin_generation_delivery(
                     task_id, result.engine_session_ref, payload["role"], worker_prompt,
                 )
@@ -6007,74 +3875,68 @@ class OrchestratingRuntime:
                 worker_delta_seen = False
                 worker_terminal_text = False
                 # ``TURN_DELTA`` callbacks carry text only in the portable
-                # runtime contract.  Number each observed chunk within this
-                # worker turn so equal adjacent chunks (for example three
-                # spaces or repeated words) remain separate durable events.
-                # The counter is scoped to this attempt/turn, never shared by
-                # concurrent workers or fallback attempts.
+                # runtime contract. Keep chunks in memory until the next
+                # observable tool boundary or the turn end. The worker panel
+                # receives complete message blocks, never token-sized rows.
                 worker_delta_sequence = 0
+                # ACP message chunks do not survive the portable engine
+                # adapter with their provider messageId. Keep an explicit
+                # durable identity for each logical worker prose segment;
+                # increment it for every tool boundary, including hidden
+                # Cortex/provider calls that are intentionally omitted from
+                # the worker panel.
+                worker_message_turn_id = f"{getattr(result, 'attempt_id', None) or result.engine_session_ref}:turn:{_hop}"
+                worker_message_segment = 0
+                worker_message_block_sequence = 0
                 worker_stream_redactor = StreamingRedactor(max_chars=4000)
 
-                def _on_worker_delta(chunk_text: str, _ref: str = assignment_ref) -> bool:
+                def _on_worker_delta(chunk_text: str) -> bool:
+                    cancel_event.touch()
                     # Buffer contiguous chunks so a credential split across
                     # ACP updates can be redacted before the worker card is
                     # updated. The coordinator's text channel stays clear.
                     nonlocal worker_delta_seen, worker_delta_sequence
                     if chunk_text:
                         worker_delta_sequence += 1
-                        sequence = worker_delta_sequence
                         worker_delta_seen = True
                         safe_chunk = worker_stream_redactor.push(str(chunk_text))
                         if not safe_chunk:
                             return True
                         with self._lock:
-                            feed = self._worker_card_emitter(task_id, _ref)
-                            self._worker_activity[_ref] = "[worker message] " + safe_chunk
-                        attempt_id = str(getattr(result, "attempt_id", None) or result.engine_session_ref)
-                        self._record_worker_activity(
-                            task_id, assignment_ref, attempt_id,
-                            "message",
-                            "[worker message] " + safe_chunk, status="in_progress",
-                            stream_sequence=sequence,
-                        )
-                        worker_message_buffer.append(safe_chunk)
-                        if len("".join(worker_message_buffer)) >= 3500:
-                            _flush_worker_message(feed=feed, final=False)
-                        self._emit_worker_activity_tool_calls(feed)
+                            worker_message_buffer.append(safe_chunk)
+                            feed = self._worker_card_emitter(task_id, assignment_ref)
+                        if feed is not None:
+                            self._emit_worker_card(
+                                feed, assignment_ref, status='in_progress',
+                                entry='[worker message] '+''.join(worker_message_buffer),
+                                entry_ref=f'{worker_message_turn_id}:segment:{worker_message_segment}',
+                            )
                     return True
 
                 def _on_worker_display_update(update: dict, _ref: str = assignment_ref) -> None:
-                    """Expose observable worker plans/thought chunks safely.
-
-                    ACP does not expose hidden chain-of-thought; it may expose
-                    explicit ``agent_thought_chunk`` and plan updates.  Those
-                    are data from the worker session, never coordinator
-                    instructions, and are labelled as such in the worker
-                    card.  Unknown display updates are retained as bounded
-                    structured data instead of being dropped.
-                    """
+                    cancel_event.touch()
                     if not isinstance(update, dict):
                         return
                     with self._lock:
                         feed = self._worker_card_emitter(task_id, _ref)
+                    _flush_worker_message_block(feed=feed)
+                    display = self._task_display_emitters.get(task_id)
+                    if display is not None:
+                        display({**update, "_meta": {**update.get("_meta", {}),
+                                                    "cortex.assignment": _ref}})
                     kind = str(update.get("sessionUpdate") or update.get("type") or "display")
-                    # The adapter can mirror a complete tool-call envelope
-                    # here.  Tool calls are rendered by _on_worker_tool_call;
-                    # copying the envelope would show raw JSON and duplicate
-                    # the action in the worker card.
-                    text_value = _worker_display_text(update)
-                    if text_value is None:
-                        return
-                    # Keep the worker card focused on project/MCP actions and
-                    # its final message. Provider thought/plan streams are
-                    # internal narration, not work a reader can act on.
-                    if "thought" in kind.lower() or "plan" in kind.lower():
-                        return
-                    # Provider display prose is not a terminal worker
-                    # response. Keep it out of the card entirely.
-                    return
+                    text_value = _worker_display_text(update) or json.dumps(update, ensure_ascii=False)
+                    self._record_worker_activity(
+                        task_id, _ref, result.attempt_id, f"display:{new_id('display_')}",
+                        text_value, kind=kind, content_value=update,
+                    )
+                    if feed is not None:
+                        self._append_worker_entry(_ref, text_value)
+                        self._emit_worker_card(feed, _ref, status="in_progress")
 
                 def _on_worker_tool_call(ref, kind, title, status, *rest, _ref=assignment_ref) -> None:
+                    cancel_event.touch()
+                    nonlocal worker_message_segment
                     # Keyword-only ``_ref``: this callback is invoked
                     # positionally by the adapter, which grew ``locations``
                     # and ``content`` arguments -- as a positional default
@@ -6088,11 +3950,17 @@ class OrchestratingRuntime:
                     # Any tool boundary ends the preceding prose segment,
                     # including hidden Cortex bookkeeping. Only deltas after
                     # the last tool can become the terminal final message.
+                    with self._lock:
+                        feed = self._worker_card_emitter(task_id, _ref)
+                    # Finalize the ordinary message before changing its
+                    # segment identity. This also applies to hidden runtime
+                    # tools, whose own card is intentionally omitted.
+                    _flush_worker_message_block(feed=feed)
+                    boundary_ref = str(ref) if ref else f"anonymous:{worker_message_segment + 1}"
+                    if boundary_ref not in worker_message_boundary_refs:
+                        worker_message_boundary_refs.add(boundary_ref)
+                        worker_message_segment += 1
                     worker_message_buffer.clear()
-                    if isinstance(title, str) and _NATIVE_SUBAGENT.search(title):
-                        # The adapter still cancels provider-owned children,
-                        # but their bookkeeping never enters the worker card.
-                        cancel_event.set()
                     locations = rest[0] if rest else None
                     content = rest[1] if len(rest) > 1 else None
                     raw_input = rest[2] if len(rest) > 2 else None
@@ -6105,35 +3973,19 @@ class OrchestratingRuntime:
                         worker_tool_locations[ref] = locations
                     elif ref:
                         locations = worker_tool_locations.get(ref)
-                    if _is_engine_internal_tool(title, kind, locations, raw_input, content) or ref in worker_wait_refs:
-                        worker_wait_refs.add(ref)
-                        worker_pending_titleless.pop(ref, None)
-                        return
                     supplied_title = isinstance(title, str) and bool(title.strip())
                     title_value = title
                     if ref and supplied_title and ref in worker_pending_titleless:
                         pending = worker_pending_titleless.pop(ref)
-                        if _is_wait_tool(title):
-                            worker_wait_refs.add(ref)
-                            return
                         _on_worker_tool_call(
                             ref, pending[0], title, pending[1], pending[2], pending[3], pending[4], pending[5],
                         )
-                    elif ref and not supplied_title and _acp_tool_call_status(status) in {"pending", "in_progress"}:
-                        worker_pending_titleless[ref] = (kind, status, locations, content, raw_input, raw_output)
-                        return
                     with self._lock:
                         _tool_feed = self._worker_card_emitter(task_id, assignment_ref)
-                    _flush_worker_message(feed=_tool_feed, final=True)
                     if supplied_title and ref and isinstance(title_value, str) and title_value.strip():
                         worker_tool_titles[ref] = _compact_text(title_value.strip(), _TOOL_CALL_TITLE_MAX_CHARS)
                     if not title:
                         title = worker_tool_titles.get(ref) or "unnamed observable tool call"
-                    if _NATIVE_SUBAGENT.search(title):
-                        # Provider-owned child work is engine machinery, not
-                        # an action on the project. Keep it out of the card.
-                        self._note_native_subagent(task_id, title)
-                        return
                     safe_content = _client_safe_content(content)
                     action = _worker_tool_details(
                         str(title), status, locations, safe_content,
@@ -6187,6 +4039,7 @@ class OrchestratingRuntime:
                 worker_tool_inputs: dict[str, Any] = {}
                 worker_tool_locations: dict[str, Any] = {}
                 worker_tool_cards: set[str] = set()
+                worker_message_boundary_refs: set[str] = set()
                 worker_wait_refs: set[str] = set()
                 worker_pending_titleless: dict[str, tuple[Any, ...]] = {}
                 worker_message_buffer: list[str] = []
@@ -6195,8 +4048,20 @@ class OrchestratingRuntime:
                                               locations, content, raw_input,
                                               raw_output=None) -> None:
                     """Append one worker project/MCP call to its lifecycle card."""
+                    from .read_history import metadata_only_read
+                    if metadata_only_read(title, kind, raw_input):
+                        content = None
+                        raw_output = {'status': 'failed'} if _acp_tool_call_status(status) == 'failed' else None
                     if feed is None or not ref:
                         return
+                    feed(dict(
+                        tool_call_id=_worker_action_tool_call_id(assignment_ref, str(result.attempt_id), str(ref)),
+                        new=str(ref) not in worker_tool_cards,
+                        title=str(title or "Worker tool call"), kind=_acp_tool_call_kind(kind),
+                        status=_acp_tool_call_status(status), locations=_client_safe_raw(locations or []),
+                        content=_client_safe_content(content or []), raw_input=_client_safe_raw(raw_input),
+                        raw_output=_client_safe_raw(raw_output),
+                    ))
                     tool_ref = str(ref)
                     first = tool_ref not in worker_tool_cards
                     if first:
@@ -6245,37 +4110,46 @@ class OrchestratingRuntime:
                             entry=f"Error: {line}", entry_ref=f"worker-tool-error:{tool_ref}",
                         )
 
-                def _flush_worker_message(*, feed, final: bool = True,
-                                          final_response: bool = False) -> None:
-                    """Render only the worker's final streamed message.
+                def _flush_worker_message_block(*, feed, final_response: bool = False) -> None:
+                    """Persist and render one complete worker prose block.
 
-                    Interim worker prose is progress chatter in the host
-                    timeline. Drop it at each observable boundary; the final
-                    flush retains the last model-authored message only.
+                    This is the only worker-delta emission point. A tool
+                    boundary or normal turn end closes the block, so live
+                    cards and replayed history contain the same message-sized
+                    records and never expose token-sized fragments.
                     """
-                    if feed is None or not worker_message_buffer:
-                        return
-                    if not final_response:
-                        worker_message_buffer.clear()
-                        return
-                    pending_text = "".join(worker_message_buffer)
-                    text_value = pending_text
+                    nonlocal worker_message_block_sequence
+                    pending_stream_text = worker_stream_redactor.flush()
+                    if pending_stream_text:
+                        worker_message_buffer.append(pending_stream_text)
+                    text_value = "".join(worker_message_buffer)
                     worker_message_buffer.clear()
-                    label = "final response"
-                    if final_response and text_value.strip():
-                        self._worker_final_response_seen.add(assignment_ref)
+                    if not text_value.strip():
+                        return
+                    worker_message_block_sequence += 1
                     attempt_id = str(getattr(result, "attempt_id", None) or result.engine_session_ref)
-                    if text_value.strip():
-                        if not self._record_worker_activity(
-                            task_id, assignment_ref, attempt_id, "final-response",
-                            f"[final response] {scrub_text(text_value, max_chars=max(4000, len(text_value) * 2 + 1000))}",
-                            status="in_progress",
-                        ):
-                            return
-                    self._emit_worker_card(
-                        feed, assignment_ref, status="in_progress",
-                        entry=f"[{label}] {scrub_text(text_value, max_chars=max(4000, len(text_value) * 2 + 1000))}",
+                    label = "final response" if final_response else "worker message"
+                    activity_ref = "final-response" if final_response else "message"
+                    message_id = f"{worker_message_turn_id}:segment:{worker_message_segment}"
+                    safe_text = scrub_text(text_value, max_chars=max(4000, len(text_value) * 2 + 1000))
+                    if final_response:
+                        self._worker_final_response_seen.add(assignment_ref)
+                    recorded = self._record_worker_activity(
+                        task_id, assignment_ref, attempt_id, activity_ref,
+                        f"[{label}] {safe_text}", status="in_progress",
+                        stream_sequence=worker_message_block_sequence,
+                        message_id=message_id,
                     )
+                    if not recorded:
+                        return
+                    with self._lock:
+                        self._worker_activity[assignment_ref] = f"[{label}] {safe_text}"
+                    if feed is not None:
+                        self._emit_worker_card(
+                            feed, assignment_ref, status="in_progress",
+                            entry=f"[{label}] {safe_text}",
+                            entry_ref=message_id,
+                        )
 
                 def _emit_worker_event(
                     event_kind: str, text_value: str, *, status: str, feed,
@@ -6287,18 +4161,12 @@ class OrchestratingRuntime:
                         feed, assignment_ref, status="failed" if status == "failed" else "in_progress",
                         entry=f"[{event_kind}] {scrub_text(str(text_value), max_chars=4000)}",
                     )
-                # Internal Cortex calls are filtered before this worker card
-                # path and therefore never enter its durable/replayable
-                # activity stream.
-                # The stop can arrive while the card metadata above is being
-                # prepared.  Recheck at the last boundary before entering
-                # the engine so a queued stale worker cannot create a model
-                # turn after the terminal stop was committed.
-                if acp_steering.is_stopped(self._store, task_id):
+                # Recheck immediately before every native turn, including the
+                # one bounded same-session completion follow-up.
+                if cancel_event.is_set() or not assignment_current(self._store,task_id,assignment_ref):
                     with self._lock:
                         self._worker_turns_in_flight.discard(assignment_ref)
-                        if worker_recovery_used:
-                            self._worker_recoveries_in_flight.discard(assignment_ref)
+                        self._worker_recoveries_in_flight.discard(assignment_ref)
                     return
                 worker_outcome = None
                 try:
@@ -6318,10 +4186,13 @@ class OrchestratingRuntime:
                         with self._lock:
                             self._worker_final_response_seen.add(assignment_ref)
                         attempt_id = str(getattr(result, "attempt_id", None) or result.engine_session_ref)
+                        worker_message_block_sequence += 1
                         if not self._record_worker_activity(
                             task_id, assignment_ref, attempt_id, "final-response",
                             f"[final response] {scrub_text(outcome.text, max_chars=max(4000, len(outcome.text) * 2 + 1000))}",
                             status="in_progress",
+                            stream_sequence=worker_message_block_sequence,
+                            message_id=f"{worker_message_turn_id}:segment:{worker_message_segment}",
                         ):
                             return
                         with self._lock:
@@ -6342,15 +4213,21 @@ class OrchestratingRuntime:
                     # partial stream as a successful "final response".
                     # Only an observed normal end_turn makes a delta-only
                     # terminal message authoritative.
-                    _flush_worker_message(
-                        feed=_final_worker_feed, final=True,
-                        final_response=(
-                            worker_outcome is not None
-                            and worker_outcome.stop_reason == StopReason.END_TURN
-                            and not worker_terminal_text
-                        ),
+                    delta_only_terminal = (
+                        worker_outcome is not None
+                        and worker_outcome.stop_reason == StopReason.END_TURN
+                        and not worker_terminal_text
                     )
-                    task_stopped = acp_steering.is_stopped(self._store, task_id)
+                    if delta_only_terminal:
+                        _flush_worker_message_block(
+                            feed=_final_worker_feed, final_response=True,
+                        )
+                    else:
+                        # PromptOutcome.text is authoritative when present;
+                        # cancellation/failure leaves only a partial block.
+                        # Neither should duplicate or relabel buffered text.
+                        worker_message_buffer.clear()
+                    task_stopped = not assignment_current(self._store,task_id,assignment_ref)
                     with self._lock:
                         pending_result = getattr(self, "_pending_worker_results", {}).pop(
                             assignment_ref, None
@@ -6423,7 +4300,7 @@ class OrchestratingRuntime:
                     and not pending_result
                     and not worker_recovery_used
                     and not cancel_event.is_set()
-                    and not acp_steering.is_stopped(self._store, task_id)
+                    and assignment_current(self._store,task_id,assignment_ref)
                 ):
                     with self._worker_recovery_claim_lock:
                         recovery_state = self._claim_worker_same_session_recovery(task_id, assignment_ref)
@@ -6636,31 +4513,6 @@ class OrchestratingRuntime:
                 origin="runtime", assignment_ref=assignment_ref,
             )
 
-    def _integrated_without_acceptance(self, task_id: str) -> bool:
-        """A worker's change is in the project and nothing accepted it.
-
-        Both halves read the durable record only: an ``integrate`` progress
-        row for this task, and no ``coordinator_decision`` accepting it
-        afterwards. A turn that ends any other way (still running, waiting
-        on a question, nothing delivered yet) says nothing.
-        """
-        try:
-            with self._store.connection() as db:
-                integrated = db.execute(
-                    "SELECT id FROM task_events WHERE task_id=? AND event_type='progress' "
-                    "AND dedup_key LIKE 'integrate:%' ORDER BY id DESC LIMIT 1",
-                    (task_id,),
-                ).fetchone()
-                if integrated is None:
-                    return False
-                accepted = db.execute(
-                    "SELECT 1 FROM task_events WHERE task_id=? AND event_type='coordinator_decision' "
-                    "AND id>? AND payload_json LIKE ? LIMIT 1",
-                    (task_id, integrated["id"], '%"decision": "accept"%'),
-                ).fetchone()
-            return accepted is None
-        except Exception:  # noqa: BLE001 - never fail a turn over a notice
-            return False
 
     def _assignment_already_reported(self, task_id: str, assignment_ref: str) -> bool:
         """Whether this assignment already has a terminal event of its own.
@@ -7005,6 +4857,8 @@ class OrchestratingRuntime:
                     pass
             try:
                 self._engine.terminate_owned(row["attempt_id"])
+                from ..orchestration.recovery import release_observed
+                release_observed(self,task_id,row['attempt_id'])
             except Exception:
                 pass
         delegation_events.append_event(
@@ -7062,52 +4916,6 @@ class OrchestratingRuntime:
         # _wait_for_progress) -- no _running entry is added/removed by this
         # call, so there is nothing for _cond to usefully notify here.
 
-    def _make_host_fs_checker(self, project_root: str, task_id: str):
-        """T025 (lead follow-up) / EXT-01 #5: builds the per-path unsaved-
-        host-buffer check ``delegation.integration.integrate`` consults,
-        reusing the existing T014 ``engine.fs_bridge.HostFsForwarder``/
-        ``RevisionLog`` abstraction (never a bespoke second wire protocol)
-        rather than calling a host fs requester directly.
-
-        The requester consulted is this exact call's own registered
-        ``self._task_fs_requesters[task_id]`` (set by ``start_prompt`` for
-        the duration of the call that is running this integration -- see
-        that method's own docstring) if one was registered, else this
-        runtime's constructor-time ``self._host_fs_requester`` default (kept
-        only for callers/tests that never opt into the per-task mechanism).
-
-        Returns ``None`` -- capability genuinely absent -- when neither is
-        set (host never negotiated fs, or no live connection is wired for
-        this task right now); the caller then durably records
-        ``host_buffer_state: 'unknown'`` instead of silently treating
-        "unknown" the same as "checked, no conflict".
-
-        The returned ``checker`` *raises* (never silently returns ``None``)
-        when the host round-trip for one specific path could not be trusted
-        (timeout/closed transport/malformed reply) -- ``integrate()`` itself
-        is responsible for turning that into a per-path conflict and an
-        overall ``host_buffer_state: 'check_failed'`` (see its own
-        docstring); a clean "the host has no buffer for this exact path"
-        answer stays a plain ``None`` return, never a conflict by itself."""
-        requester = self._task_fs_requesters.get(task_id)
-        if requester is None:
-            requester = self._host_fs_requester
-        if requester is None:
-            return None
-        from ..engine.fs_bridge import HostFsForwarder
-
-        forwarder = HostFsForwarder(host_fs_requester=requester)
-        binding_stub = _IntegrationHostBinding(f"integration:{task_id}")
-
-        def checker(relpath: str):
-            absolute_path = os.path.join(project_root, relpath)
-            result = forwarder.read_text_file(binding_stub, dict(path=absolute_path))
-            content = result.get("content") if isinstance(result, dict) else None
-            if not isinstance(content, str):
-                raise ValueError(f"host fs checker: malformed/missing content for {relpath!r}.")
-            return content.encode("utf-8", "surrogateescape")
-
-        return checker
 
     def host_mcp_servers_for_task(self, task_id: str):
         """The client's own MCP servers for the session currently running
@@ -7134,138 +4942,6 @@ class OrchestratingRuntime:
         with self._lock:
             return self._task_permission_requesters.get(task_id)
 
-    def _identical_integration_conflicts(self, task_id: str, assignment_ref: str, conflict_paths) -> int:
-        """How many integration conflicts this assignment has already had
-        with this exact path/reason signature. Signature, not count: a
-        conflict that moved to a different path or a different reason is
-        progress, and must not be counted against a retry."""
-        import json
 
-        signature = sorted(
-            (path, (detail or {}).get("reason")) for path, detail in (conflict_paths or {}).items()
-        )
-        seen = 0
-        with self._store.connection() as db:
-            rows = db.execute(
-                "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='progress' "
-                "AND assignment_ref=? AND dedup_key LIKE 'integration_conflict:%'",
-                (task_id, assignment_ref),
-            ).fetchall()
-        for row in rows:
-            try:
-                previous = json.loads(row["payload_json"] or "{}").get("conflict_paths") or {}
-            except (TypeError, ValueError):
-                continue
-            if sorted((path, (detail or {}).get("reason")) for path, detail in previous.items()) == signature:
-                seen += 1
-        return seen
-
-    def _integrate_assignment(self, task_id: str, assignment_ref: str, request_key: str,
-                              *, candidate_ref: str | None = None,
-                              expected_base_digest: str | None = None) -> None:
-        """T025 (lead follow-up): performs the actual technical application
-        (``delegation.integration.integrate``) for an ``integrate``
-        request, then appends the coordinator-visible outcome as its own
-        durable ``progress`` event (never silently absorbed) --
-        ``payload["kind"]`` is ``integration_applied`` (status
-        ``applied``/``noop``) or ``integration_conflict`` (status
-        ``conflict``), each dedup-keyed by ``request_key`` so a retried
-        request never double-appends (see ``delegation.events
-        .INTEGRATION_PROGRESS_KINDS`` on why these are ``progress`` rows,
-        not a new ``event_type``)."""
-        with self._store.connection() as db:
-            provisioning_row = db.execute(
-                "SELECT attempt_id, workspace_binding_id, task_id FROM delegation_provisioning "
-                "WHERE idempotency_key=?", (assignment_ref,),
-            ).fetchone()
-            task_row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if provisioning_row is None or task_row is None or provisioning_row["workspace_binding_id"] is None:
-            delegation_events.append_event(
-                self._store, task_id, "progress", f"integration_conflict:{request_key}",
-                dict(kind="integration_conflict", assignment_ref=assignment_ref, request_key=request_key,
-                     conflict_paths={"*": {"reason": "unknown_assignment_or_workspace"}},
-                     host_buffer_state="unknown"),
-                origin="runtime", assignment_ref=assignment_ref,
-            )
-            return
-        project_root = task_row["project_root"]
-        host_fs_checker = self._make_host_fs_checker(project_root, task_id)
-        if candidate_ref:
-            from ..delegation.candidates import get_candidate
-
-            candidate = get_candidate(self._store, candidate_ref)
-            if (candidate is None or candidate["task_id"] != task_id
-                    or provisioning_row["attempt_id"] not in candidate["attempt_ids"]
-                    or expected_base_digest != candidate.get("project_base_digest")):
-                result = dict(status="conflict", conflict_paths={"*": {"reason": "candidate_binding_mismatch"}},
-                              host_buffer_state="unknown")
-            else:
-                try:
-                    result = delegation_integration.integrate_candidate(
-                        self._store, task_id=task_id, project_root=project_root,
-                        candidate_id=candidate_ref, request_key=request_key,
-                        expected_base_digest=expected_base_digest,
-                        host_fs_checker=host_fs_checker,
-                    )
-                except StoreError as error:
-                    result = dict(status="conflict", conflict_paths={"*": {"reason": str(error)}},
-                                  host_buffer_state="unknown")
-        else:
-            result = delegation_integration.integrate(
-                self._store, task_id=task_id, project_root=project_root, assignment_ref=assignment_ref,
-                request_key=request_key, attempt_id=provisioning_row["attempt_id"],
-                workspace_binding_id=provisioning_row["workspace_binding_id"], host_fs_checker=host_fs_checker,
-            )
-        if result["status"] == "conflict":
-            conflict_paths = result["conflict_paths"]
-            if isinstance(conflict_paths, list):
-                conflict_paths = {path: {"reason": result.get("reason", "candidate_conflict")}
-                                  for path in conflict_paths}
-            payload = dict(
-                kind="integration_conflict", assignment_ref=assignment_ref, request_key=request_key,
-                candidate_ref=candidate_ref, conflict_paths=conflict_paths,
-                host_buffer_state=result.get("host_buffer_state", "unknown"),
-            )
-            # A conflict is a legitimate "try again": the host had an
-            # unsaved buffer, main moved. The identical conflict over and
-            # over is not -- watched live, a worker finished, integration
-            # conflicted, the coordinator sent it back to redo work that
-            # was already done, and that ran in a circle. Count how many
-            # times this exact signature has already happened for this
-            # assignment, so the coordinator is told when retrying has
-            # stopped being a strategy. Advisory, never a runtime gate: the
-            # coordinator still owns what to do about it.
-            repeats = self._identical_integration_conflicts(task_id, assignment_ref, conflict_paths)
-            if repeats + 1 >= _IDENTICAL_INTEGRATION_CONFLICT_LIMIT:
-                payload["repeated"] = repeats + 1
-            delegation_events.append_event(
-                self._store, task_id, "progress", f"integration_conflict:{request_key}",
-                payload, origin="runtime", assignment_ref=assignment_ref,
-            )
-        else:
-            # The project just changed, and this runtime changed it, on the
-            # worker's own request. Record the resulting revision as
-            # authorized: the coordinator-turn digest backstop compares the
-            # project before and after a turn and cannot otherwise tell this
-            # apart from the coordinator writing to the project itself --
-            # observed live blocking a turn that had done everything right
-            # (evidence/T035/RUN-08).
-            try:
-                with self._lock:
-                    self._authorized_project_revisions.setdefault(task_id, []).append(
-                        delegation_revision.capture_revision(project_root),
-                    )
-            except Exception:  # noqa: BLE001 - an unrecorded baseline only costs a false block
-                pass
-            delegation_events.append_event(
-                self._store, task_id, "progress", f"integration_applied:{request_key}",
-                dict(kind="integration_applied", assignment_ref=assignment_ref, request_key=request_key,
-                     candidate_ref=candidate_ref,
-                     status=result["status"], applied_paths=result["applied_paths"],
-                     integrated_head=result["integrated_head"],
-                     integrated_dirty_digest=result["integrated_dirty_digest"],
-                     host_buffer_state=result["host_buffer_state"]),
-                origin="runtime", assignment_ref=assignment_ref,
-            )
         # Not self._notify() here -- same reasoning as _cancel_assignment
         # above.

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import pytest
 import json
+import os
+import subprocess
 from pathlib import Path
 
 from cortex_runtime.engine.claude_adapter_acp import (
@@ -13,6 +15,7 @@ from cortex_runtime.engine.claude_adapter_acp import (
     build_claude_evidence_status,
     build_claude_session_new_meta,
     build_first_prompt_blocks,
+    claude_native_subagent_restriction_meta,
 )
 from cortex_runtime.portable.errors import PortableError
 
@@ -67,12 +70,63 @@ def test_build_first_prompt_blocks_never_writes_a_file_or_returns_env_vars(tmp_p
     assert blocks == [{"type": "text", "text": "instructions"}]
 
 
-def test_build_claude_session_new_meta_preserves_preset_with_append():
-    meta = build_claude_session_new_meta("You are operating under Cortex orchestration.")
-    assert meta == {
-        "systemPrompt": {"append": "You are operating under Cortex orchestration."},
-        "claudeCode": {"options": {"disallowedTools": ["Agent", "Task"], "strictMcpConfig": True}},
-    }
+def test_claude_native_tools_are_disabled_for_every_role():
+    for role in ['coordinator','worker']:
+        meta=build_claude_session_new_meta('Cortex instructions',role=role)
+        assert meta['systemPrompt']=={'append':'Cortex instructions'}
+        options=meta['claudeCode']['options']
+        assert options['tools']==[]
+        assert options['settingSources']==[]
+        assert options['plugins']==[]
+        assert options['strictMcpConfig'] is True
+        assert options['managedSettings']['disableAllHooks'] is True
+        assert {'Agent','Task'}<=set(options['disallowedTools'])
+
+
+def test_installed_claude_acp_0_78_accepts_tool_allowlist_and_forwards_it():
+    """Static exact-install forwarding check; it does not call Claude."""
+    root = Path("/home/igovet/.local/state/cortex/engines/claude-agent-acp")
+    adapter = root / "dist/acp-agent.js"
+    sdk_types = root / "node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts"
+    if not adapter.exists() or not sdk_types.exists():
+        pytest.skip("Pinned local Claude ACP/SDK copy is unavailable")
+    package = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    assert package["version"] == "0.78.0"
+    adapter_source = adapter.read_text(encoding="utf-8")
+    sdk_source = sdk_types.read_text(encoding="utf-8")
+    assert "const tools = userProvidedOptions?.tools ??" in adapter_source
+    assert "disallowedTools: [...(userProvidedOptions?.disallowedTools || []), ...disallowedTools]" in adapter_source
+    assert "tools?: string[] | {" in sdk_source
+    assert "disallowedTools?: string[];" in sdk_source
+    assert "passing 'Skill' here is deprecated" in sdk_source
+
+
+def test_installed_claude_acp_0_78_initialize_is_no_paid_and_reports_pinned_version(tmp_path):
+    """The exact installed entrypoint must expose ACP before authentication."""
+    root = Path("/home/igovet/.local/state/cortex/engines/claude-agent-acp")
+    entry = root / "dist/index.js"
+    if not entry.exists():
+        pytest.skip("Pinned local Claude ACP copy is unavailable")
+    env = os.environ.copy()
+    env["CLAUDE_CONFIG_DIR"] = str(tmp_path / "empty-claude-config")
+    env["HOME"] = str(tmp_path / "empty-home")
+    result = subprocess.run(
+        ["node", str(entry)],
+        input=(json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": {"name": "cortex-no-paid-test", "version": "1"},
+            },
+        }) + "\n").encode(),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env, cwd=tmp_path, timeout=10, check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode(errors="replace")
+    messages = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    response = next(message for message in messages if message.get("id") == 1)
+    assert response["result"]["agentInfo"]["version"] == "0.78.0"
 
 
 def test_build_claude_session_new_meta_rejects_empty_instructions():

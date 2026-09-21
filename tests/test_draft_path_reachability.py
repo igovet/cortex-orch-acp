@@ -1,78 +1,32 @@
-"""A draft's path must be one the session that was handed it can write.
-
-`create_draft` returns "an absolute server-created project path to edit with
-native file tools", under `<project>/.cortex/pipeline-drafts`. A coordinator
-whose engine runs in an isolated workspace cannot write an absolute path
-outside that workspace -- its sandbox refuses it. Observed live, turn after
-turn: "the file is outside the working directory I may write to, so ordinary
-editing hit the sandbox limit".
-
-The workspace carries the project's real `.cortex` (one directory, reached by
-a second name), so the same file has a reachable spelling. This covers that
-the rewrite happens, that it is the same file, and that it never happens when
-it would not be.
-"""
-from __future__ import annotations
-
-import os
-import sys
+"""Draft publication uses channel-owned IDs regardless of engine cwd."""
 from pathlib import Path
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
-
-from cortex_runtime.server import _reachable_draft_path  # noqa: E402
-
-
-def _project_with_workspace(tmp_path):
-    project = tmp_path / "project"
-    (project / ".cortex" / "pipeline-drafts").mkdir(parents=True)
-    work = tmp_path / "work"
-    work.mkdir()
-    os.symlink(project / ".cortex", work / ".cortex")
-    return project, work
+import pytest
+from cortex_runtime.bootstrap import bootstrap_task
+from cortex_runtime.portable.identity import SourceEvent
+from cortex_runtime.store import Store
+from cortex_runtime.trusted_channel import resolve_channel
+from cortex_runtime.orchestration.state import TaskMachine
+from cortex_runtime.orchestration.gateway import dispatch
+from cortex_runtime.contracts import StoreError
 
 
-def test_the_path_is_rewritten_through_the_workspace(tmp_path, monkeypatch):
-    project, work = _project_with_workspace(tmp_path)
-    draft = project / ".cortex" / "pipeline-drafts" / "d1.md"
-    draft.write_text("# plan\n")
-    monkeypatch.chdir(work)
-
-    result = _reachable_draft_path({"draft_path": str(draft), "draft_id": "d1"}, str(project))
-
-    assert result["draft_path"] == str(work / ".cortex" / "pipeline-drafts" / "d1.md")
-    assert result["draft_id"] == "d1", "the rest of the receipt is untouched"
-    # The same file, not a copy: writing through the returned path is the write.
-    with open(result["draft_path"], "w") as handle:
-        handle.write("# filled\n")
-    assert draft.read_text() == "# filled\n"
-
-
-def test_nothing_is_rewritten_when_the_working_directory_is_the_project(tmp_path, monkeypatch):
-    project, _work = _project_with_workspace(tmp_path)
-    draft = project / ".cortex" / "pipeline-drafts" / "d1.md"
-    draft.write_text("# plan\n")
-    monkeypatch.chdir(project)
-    result = _reachable_draft_path({"draft_path": str(draft)}, str(project))
-    assert result["draft_path"] == str(draft)
-
-
-def test_nothing_is_rewritten_when_the_working_directory_holds_a_different_store(tmp_path, monkeypatch):
-    """The rewrite is only ever safe because it is checked. A working
-    directory with an unrelated `.cortex` must be left alone."""
-    project, _work = _project_with_workspace(tmp_path)
-    draft = project / ".cortex" / "pipeline-drafts" / "d1.md"
-    draft.write_text("# plan\n")
-    other = tmp_path / "other"
-    (other / ".cortex").mkdir(parents=True)
-    monkeypatch.chdir(other)
-    result = _reachable_draft_path({"draft_path": str(draft)}, str(project))
-    assert result["draft_path"] == str(draft)
-
-
-def test_a_result_without_a_draft_path_is_returned_unchanged(tmp_path, monkeypatch):
-    project, work = _project_with_workspace(tmp_path)
-    monkeypatch.chdir(work)
-    assert _reachable_draft_path({"ok": True}, str(project)) == {"ok": True}
-    assert _reachable_draft_path("not a dict", str(project)) == "not a dict"
+@pytest.mark.parametrize('cwd_kind',['project','isolated','unrelated_store'])
+def test_draft_gateway_is_bound_to_project_not_engine_cwd(tmp_path,monkeypatch,cwd_kind):
+    root=tmp_path/'project';root.mkdir()
+    store=Store(root/'.cortex',project_root=root)
+    task=bootstrap_task(store,SourceEvent(origin='test',event_id='draft'),'Inspect','owner')
+    TaskMachine(store).create(task.task_id,'Inspect')
+    channel=resolve_channel(store,task.channel_id,task.secret)
+    cwd=root if cwd_kind=='project' else tmp_path/cwd_kind
+    cwd.mkdir(exist_ok=True)
+    if cwd_kind=='unrelated_store': (cwd/'.cortex').mkdir()
+    monkeypatch.chdir(cwd)
+    draft=store.call('create_draft',dict(template='general',request_key='draft'),channel.principal_thread_id,trusted=True)
+    content=draft['required_first_line']+'\n\n# Report\n\nObserved result.\n'
+    dispatch(store,channel,'draft_write',dict(draft_id=draft['draft_id'],content=content,request_key='fill'))
+    result=store.call('write_report',dict(draft_id=draft['draft_id'],title='Report',summary='Observed result',author='runtime-test',request_key='publish'),channel.principal_thread_id,trusted=True)
+    assert result['report_id']
+    with pytest.raises(StoreError):
+        dispatch(store,channel,'draft_write',dict(draft_id=draft['draft_id'],content=content,request_key='overwrite'))
+    if cwd!=root:
+        assert not list(cwd.rglob('*.md'))

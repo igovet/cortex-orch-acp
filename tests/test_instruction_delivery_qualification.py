@@ -119,10 +119,9 @@ def test_claude_agent_acp_pinned_plan_is_qualified_via_session_new_meta():
     # Never delivered via a leading prompt block for this pinned version --
     # a distinct, session/new-level channel instead.
     assert plan.blocks == ()
-    assert plan.session_new_meta == {
-        "systemPrompt": {"append": role.body_portable},
-        "claudeCode": {"options": {"disallowedTools": ["Agent", "Task"], "strictMcpConfig": True}},
-    }
+    assert plan.session_new_meta['systemPrompt']=={'append':role.body_portable}
+    assert plan.session_new_meta['claudeCode']['options']['tools']==[]
+    assert plan.session_new_meta['claudeCode']['options']['strictMcpConfig'] is True
 
 
 def test_claude_agent_acp_unrecognized_version_plan_is_unsupported():

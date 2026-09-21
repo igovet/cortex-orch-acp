@@ -18,6 +18,9 @@ import uuid
 from ..contracts import StoreError
 
 
+_LEGACY_REQUIREMENT_MIGRATION_KEY = "__migration__:legacy-requirement-state:v1"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -44,6 +47,7 @@ CREATE TABLE IF NOT EXISTS work_requirement_revisions (
  statement TEXT NOT NULL,
  criteria_json TEXT NOT NULL,
  digest TEXT NOT NULL,
+ requirement_type TEXT NOT NULL DEFAULT 'general',
  created_at TEXT NOT NULL,
  PRIMARY KEY(requirement_id, revision)
 );
@@ -54,6 +58,7 @@ CREATE TABLE IF NOT EXISTS work_assignments (
  requirement_bindings_json TEXT NOT NULL,
  candidate_ref TEXT,
  status TEXT NOT NULL,
+ requirement_state TEXT NOT NULL DEFAULT 'structured',
  idempotency_key TEXT NOT NULL,
  created_at TEXT NOT NULL,
  UNIQUE(task_id, idempotency_key)
@@ -114,9 +119,91 @@ class WorkGraph:
     @staticmethod
     def _ensure_schema(db) -> None:
         db.executescript(WORK_GRAPH_SCHEMA)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(work_requirement_revisions)")}
+        if "requirement_type" not in columns:
+            db.execute(
+                "ALTER TABLE work_requirement_revisions ADD COLUMN requirement_type "
+                "TEXT NOT NULL DEFAULT 'legacy_unclassified'"
+            )
+        columns = {row[1] for row in db.execute("PRAGMA table_info(work_assignments)")}
+        if "requirement_state" not in columns:
+            # Existing assignments were created before the coordinator's
+            # structured requirement choice existed.  They must not silently
+            # become ordinary/general work: retain a durable uncertainty
+            # marker until a coordinator explicitly rebinds them.
+            db.execute(
+                "ALTER TABLE work_assignments ADD COLUMN requirement_state "
+                "TEXT NOT NULL DEFAULT 'legacy_unclassified'"
+            )
         columns = {row[1] for row in db.execute("PRAGMA table_info(work_graph_operations)")}
         if "request_json" not in columns:
             db.execute("ALTER TABLE work_graph_operations ADD COLUMN request_json TEXT NOT NULL DEFAULT '{}'")
+        # Preserve a fail-closed marker for pre-structured delegation events
+        # which had only title/brief/acceptance prose.  We do not classify the
+        # prose; the marker records that the old assignment cannot be safely
+        # treated as general work until a model-owned typed binding replaces
+        # it.  New delegate events carry ``structured_requirement_state`` and
+        # are deliberately excluded.
+        if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_events'"
+        ).fetchone() is not None:
+            # This is a one-time data migration, not a live classifier.  The
+            # marker is per task so a later explicit rebind of an old
+            # assignment cannot be undone by a subsequent Store/WorkGraph
+            # open, and a large event log is not rescanned on every open.
+            for task in db.execute("SELECT id FROM tasks").fetchall():
+                task_id = task["id"]
+                if db.execute(
+                    "SELECT 1 FROM work_graph_operations WHERE task_id=? "
+                    "AND idempotency_key=? LIMIT 1",
+                    (task_id, _LEGACY_REQUIREMENT_MIGRATION_KEY),
+                ).fetchone() is not None:
+                    continue
+                events = db.execute(
+                    "SELECT task_id,assignment_ref,payload_json,created_at "
+                    "FROM task_events WHERE task_id=? AND event_type='delegation_requested' "
+                    "AND superseded=0 AND assignment_ref IS NOT NULL",
+                    (task_id,),
+                ).fetchall()
+                for event in events:
+                    try:
+                        payload = json.loads(event["payload_json"] or "{}")
+                    except (TypeError, ValueError):
+                        payload = {}
+                    if payload.get("structured_requirement_state") == "structured":
+                        continue
+                    existing = db.execute(
+                        "SELECT requirement_state FROM work_assignments "
+                        "WHERE task_id=? AND assignment_id=?",
+                        (event["task_id"], event["assignment_ref"]),
+                    ).fetchone()
+                    if existing is not None:
+                        if existing["requirement_state"] == "structured":
+                            db.execute(
+                                "UPDATE work_assignments SET requirement_state='legacy_unclassified' "
+                                "WHERE task_id=? AND assignment_id=?",
+                                (event["task_id"], event["assignment_ref"]),
+                            )
+                        continue
+                    db.execute(
+                        "INSERT INTO work_assignments(assignment_id,task_id,node_key,"
+                        "requirement_bindings_json,candidate_ref,status,requirement_state,"
+                        "idempotency_key,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (
+                            event["assignment_ref"], event["task_id"],
+                            "legacy:" + str(event["assignment_ref"]), "{}", None,
+                            "planned", "legacy_unclassified",
+                            "legacy-assignment:" + str(event["assignment_ref"]),
+                            event["created_at"],
+                        ),
+                    )
+                db.execute(
+                    "INSERT OR IGNORE INTO work_graph_operations "
+                    "(task_id,idempotency_key,operation,request_json,response_json,created_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (task_id, _LEGACY_REQUIREMENT_MIGRATION_KEY,
+                     "legacy_requirement_state_migration", "{}", "{}", _now()),
+                )
 
     def _begin(self):
         db = self.store.connection()
@@ -165,6 +252,7 @@ class WorkGraph:
         )
 
     def create_requirement(self, task_id: str, statement: str, *, criteria=None,
+                           requirement_type: str = "general",
                            requirement_id: str | None = None,
                            idempotency_key: str | None = None) -> dict:
         """Create a requirement at revision 1, or replay the same operation."""
@@ -173,23 +261,31 @@ class WorkGraph:
         handle, db = self._begin()
         try:
             self._task(db, task_id)
-            request = {"statement": statement, "criteria": criteria, "requirement_id": requirement_id}
+            if requirement_type not in {"general", "rendered_ui"}:
+                raise WorkGraphError("invalid_requirement_type")
+            request = {"statement": statement, "criteria": criteria,
+                       "requirement_type": requirement_type, "requirement_id": requirement_id}
             replay = self._replay(db, task_id, key, "create_requirement", request)
             if replay is not None:
                 self._finish(handle, db); return replay
             now = _now(); criteria = [] if criteria is None else criteria
-            digest = _digest(_json({"statement": statement, "criteria": criteria}))
+            digest = _digest(_json({"statement": statement, "criteria": criteria,
+                                    "requirement_type": requirement_type}))
             db.execute("INSERT INTO work_requirements VALUES(?,?,?,?)", (rid, task_id, 1, now))
-            db.execute("INSERT INTO work_requirement_revisions VALUES(?,?,?,?,?,?)",
-                       (rid, 1, statement, _json(criteria), digest, now))
+            db.execute("INSERT INTO work_requirement_revisions "
+                       "(requirement_id,revision,statement,criteria_json,digest,requirement_type,created_at) "
+                       "VALUES(?,?,?,?,?,?,?)",
+                       (rid, 1, statement, _json(criteria), digest, requirement_type, now))
             result = {"requirement_id": rid, "task_id": task_id, "revision": 1,
-                      "statement": statement, "criteria": criteria, "digest": digest}
+                      "statement": statement, "criteria": criteria,
+                      "requirement_type": requirement_type, "digest": digest}
             self._record(db, task_id, key, "create_requirement", request, result)
             self._finish(handle, db); return result
         except BaseException as error:
             self._finish(handle, db, error); raise
 
     def revise_requirement(self, requirement_id: str, statement: str, *, criteria=None,
+                           requirement_type: str | None = None,
                            idempotency_key: str | None = None) -> dict:
         key = idempotency_key or uuid.uuid4().hex
         handle, db = self._begin()
@@ -198,16 +294,30 @@ class WorkGraph:
                              (requirement_id,)).fetchone()
             if row is None: raise WorkGraphError("unknown_requirement")
             task_id, current = row[0], row[1]
-            request = {"requirement_id": requirement_id, "statement": statement, "criteria": criteria}
+            if requirement_type is None:
+                prior = db.execute(
+                    "SELECT requirement_type FROM work_requirement_revisions "
+                    "WHERE requirement_id=? AND revision=?",
+                    (requirement_id, current),
+                ).fetchone()
+                requirement_type = prior[0] if prior is not None else "legacy_unclassified"
+            if requirement_type not in {"general", "rendered_ui"}:
+                raise WorkGraphError("invalid_requirement_type")
+            request = {"requirement_id": requirement_id, "statement": statement,
+                       "criteria": criteria, "requirement_type": requirement_type}
             replay = self._replay(db, task_id, key, "revise_requirement", request)
             if replay is not None: self._finish(handle, db); return replay
             criteria = [] if criteria is None else criteria; revision = current + 1; now = _now()
-            digest = _digest(_json({"statement": statement, "criteria": criteria}))
+            digest = _digest(_json({"statement": statement, "criteria": criteria,
+                                    "requirement_type": requirement_type}))
             db.execute("UPDATE work_requirements SET current_revision=? WHERE requirement_id=?", (revision, requirement_id))
-            db.execute("INSERT INTO work_requirement_revisions VALUES(?,?,?,?,?,?)",
-                       (requirement_id, revision, statement, _json(criteria), digest, now))
+            db.execute("INSERT INTO work_requirement_revisions "
+                       "(requirement_id,revision,statement,criteria_json,digest,requirement_type,created_at) "
+                       "VALUES(?,?,?,?,?,?,?)",
+                       (requirement_id, revision, statement, _json(criteria), digest, requirement_type, now))
             result = {"requirement_id": requirement_id, "task_id": task_id, "revision": revision,
-                      "statement": statement, "criteria": criteria, "digest": digest}
+                      "statement": statement, "criteria": criteria,
+                      "requirement_type": requirement_type, "digest": digest}
             self._record(db, task_id, key, "revise_requirement", request, result)
             self._finish(handle, db); return result
         except BaseException as error:
@@ -216,7 +326,7 @@ class WorkGraph:
     def add_assignment(self, task_id: str, node_key: str, *, requirement_bindings=None,
                        predecessors=None, candidate_ref: str | None = None,
                        assignment_id: str | None = None, idempotency_key: str | None = None,
-                       status: str = "planned") -> dict:
+                       status: str = "planned", requirement_state: str = "structured") -> dict:
         """Record one model-chosen node and its exact predecessor bindings.
 
         ``predecessors`` is a list of ``{"assignment_id": ..., "candidate_ref": ...}``.
@@ -231,10 +341,13 @@ class WorkGraph:
             self._task(db, task_id)
             request = {"assignment_id": assignment_id, "node_key": node_key,
                        "requirement_bindings": bindings, "predecessors": predecessors,
-                       "candidate_ref": candidate_ref, "status": status}
+                       "candidate_ref": candidate_ref, "status": status,
+                       "requirement_state": requirement_state}
             replay = self._replay(db, task_id, key, "add_assignment", request)
             if replay is not None: self._finish(handle, db); return replay
             if not node_key or not isinstance(bindings, dict): raise WorkGraphError("invalid_assignment")
+            if requirement_state not in {"structured", "legacy_unclassified"}:
+                raise WorkGraphError("invalid_requirement_state")
             if candidate_ref is not None:
                 raise WorkGraphError("candidate_binding_required")
             for requirement_id, binding in bindings.items():
@@ -262,14 +375,20 @@ class WorkGraph:
                 normalized.append({"assignment_id": pred, "candidate_ref": str(item["candidate_ref"])})
             self._check_cycle(db, aid, normalized)
             now = _now()
-            db.execute("INSERT INTO work_assignments VALUES(?,?,?,?,?,?,?,?)",
-                       (aid, task_id, node_key, _json(bindings), candidate_ref, status, key, now))
+            db.execute(
+                "INSERT INTO work_assignments(assignment_id,task_id,node_key,"
+                "requirement_bindings_json,candidate_ref,status,requirement_state,"
+                "idempotency_key,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (aid, task_id, node_key, _json(bindings), candidate_ref, status,
+                 requirement_state, key, now),
+            )
             for item in normalized:
                 db.execute("INSERT INTO work_assignment_predecessors VALUES(?,?,?,?)",
                            (task_id, aid, item["assignment_id"], item["candidate_ref"]))
             result = {"assignment_id": aid, "task_id": task_id, "node_key": node_key,
                       "requirement_bindings": bindings, "candidate_ref": candidate_ref,
-                      "predecessors": normalized, "status": status}
+                      "predecessors": normalized, "status": status,
+                      "requirement_state": requirement_state}
             self._record(db, task_id, key, "add_assignment", request, result)
             self._finish(handle, db); return result
         except BaseException as error:
@@ -422,33 +541,124 @@ class WorkGraph:
         key = idempotency_key or uuid.uuid4().hex
         handle, db = self._begin()
         try:
-            row = db.execute(
-                "SELECT task_id,status,failure_reason,assignment_id "
-                "FROM work_assignment_attempts WHERE attempt_id=?",
-                (attempt_id,),
-            ).fetchone()
-            if row is None: raise WorkGraphError("unknown_attempt")
-            task_id = row[0]; request = {"attempt_id": attempt_id, "status": status, "reason": reason}
-            replay = self._replay(db, task_id, key, "transition_attempt", request)
-            if replay is not None: self._finish(handle, db); return replay
-            if status not in allowed[row[1]]:
-                raise WorkGraphError("invalid_attempt_transition")
-            failure_reason = reason if status in ("failed", "needs_revision") else None
-            db.execute("UPDATE work_assignment_attempts SET status=?,failure_reason=? WHERE attempt_id=?",
-                       (status, failure_reason, attempt_id))
-            # Keep the assignment-level lifecycle truthful for clients which
-            # list workers without joining the attempt table.  Semantic
-            # acceptance remains separate; this mirrors execution only.
-            db.execute(
-                "UPDATE work_assignments SET status=? WHERE assignment_id=?",
-                (status, row[3]),
+            result = self.transition_attempt_tx(
+                db, attempt_id, status, reason=reason, idempotency_key=key,
             )
-            result = {"attempt_id": attempt_id, "task_id": task_id, "status": status,
-                      "failure_reason": failure_reason}
-            self._record(db, task_id, key, "transition_attempt", request, result)
             self._finish(handle, db); return result
         except BaseException as error:
             self._finish(handle, db, error); raise
+
+    def transition_attempt_tx(self, db, attempt_id: str, status: str, *, reason: str | None = None,
+                               idempotency_key: str | None = None) -> dict:
+        """Apply ``transition_attempt`` inside a caller-owned transaction.
+
+        Worker finalization uses this seam so the execution projection and
+        its durable ``worker_result`` event commit together.  It deliberately
+        performs the same validation, idempotency recording, and assignment
+        projection as the standalone operation; the caller owns commit or
+        rollback.
+        """
+        allowed = {"planned": {"running", "reported", "failed", "needs_revision"},
+                   "running": {"reported", "failed", "needs_revision"},
+                   "reported": {"needs_revision"}, "failed": set(), "needs_revision": set()}
+        if status not in allowed or status in ("failed", "needs_revision") and not reason:
+            raise WorkGraphError("invalid_attempt_transition")
+        key = idempotency_key or uuid.uuid4().hex
+        row = db.execute(
+            "SELECT task_id,status,failure_reason,assignment_id "
+            "FROM work_assignment_attempts WHERE attempt_id=?",
+            (attempt_id,),
+        ).fetchone()
+        if row is None:
+            raise WorkGraphError("unknown_attempt")
+        task_id = row[0]
+        request = {"attempt_id": attempt_id, "status": status, "reason": reason}
+        replay = self._replay(db, task_id, key, "transition_attempt", request)
+        if replay is not None:
+            return replay
+        if status not in allowed[row[1]]:
+            raise WorkGraphError("invalid_attempt_transition")
+        failure_reason = reason if status in ("failed", "needs_revision") else None
+        db.execute(
+            "UPDATE work_assignment_attempts SET status=?,failure_reason=? WHERE attempt_id=?",
+            (status, failure_reason, attempt_id),
+        )
+        # Keep the assignment-level lifecycle truthful for clients which list
+        # workers without joining the attempt table. Semantic acceptance
+        # remains separate; this mirrors execution only.
+        db.execute(
+            "UPDATE work_assignments SET status=? WHERE assignment_id=?",
+            (status, row[3]),
+        )
+        result = {"attempt_id": attempt_id, "task_id": task_id, "status": status,
+                  "failure_reason": failure_reason}
+        self._record(db, task_id, key, "transition_attempt", request, result)
+        return result
+
+    def reconcile_reported_tx(self, db, task_id: str) -> int:
+        """Repair graph execution projections from committed worker results.
+
+        A result event is the durable terminal signal.  This bounded repair
+        is run while the store already holds its task transaction, covering a
+        crash from older finalization code (or a process killed before a
+        post-commit projection) without requiring an MCP replay.  It only
+        advances planned/running attempts to ``reported`` and never rewrites
+        failed, cancelled, or revision states.
+        """
+        self._task(db, task_id)
+        repaired = 0
+        rows = db.execute(
+            "SELECT id,assignment_ref FROM task_events "
+            "WHERE task_id=? AND event_type='worker_result' AND superseded=0 ORDER BY id",
+            (task_id,),
+        ).fetchall()
+        for event in rows:
+            attempt_id = event["assignment_ref"]
+            if not isinstance(attempt_id, str) or not attempt_id:
+                continue
+            graph_attempt = db.execute(
+                "SELECT attempt_id,status FROM work_assignment_attempts "
+                "WHERE task_id=? AND attempt_id=?",
+                (task_id, attempt_id),
+            ).fetchone()
+            if graph_attempt is None:
+                provision = db.execute(
+                    "SELECT idempotency_key FROM delegation_provisioning "
+                    "WHERE task_id=? AND attempt_id=?",
+                    (task_id, attempt_id),
+                ).fetchone()
+                if provision is None:
+                    continue
+                request = db.execute(
+                    "SELECT payload_json FROM task_events "
+                    "WHERE task_id=? AND assignment_ref=? "
+                    "AND event_type='delegation_requested' ORDER BY id DESC LIMIT 1",
+                    (task_id, provision["idempotency_key"]),
+                ).fetchone()
+                if request is None:
+                    continue
+                try:
+                    work_attempt_ref = json.loads(request["payload_json"] or "{}").get(
+                        "work_attempt_ref"
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(work_attempt_ref, str) or not work_attempt_ref:
+                    continue
+                graph_attempt = db.execute(
+                    "SELECT attempt_id,status FROM work_assignment_attempts "
+                    "WHERE task_id=? AND attempt_id=?",
+                    (task_id, work_attempt_ref),
+                ).fetchone()
+                attempt_id = work_attempt_ref
+            if graph_attempt is None or graph_attempt["status"] not in ("planned", "running"):
+                continue
+            self.transition_attempt_tx(
+                db, attempt_id, "reported",
+                idempotency_key=f"work-reported:{event['id']}",
+            )
+            repaired += 1
+        return repaired
 
     def requirement_impact(self, task_id: str, requirement_id: str, *, revision: int | None = None) -> list[dict]:
         """Return assignments bound to an older revision of a requirement."""
@@ -475,7 +685,8 @@ class WorkGraph:
             preds = db.execute("SELECT predecessor_assignment_id,predecessor_candidate_ref FROM work_assignment_predecessors WHERE assignment_id=? ORDER BY predecessor_assignment_id", (assignment_id,)).fetchall()
             return {"assignment_id": row["assignment_id"], "task_id": row["task_id"], "node_key": row["node_key"],
                     "requirement_bindings": json.loads(row["requirement_bindings_json"]), "candidate_ref": row["candidate_ref"],
-                    "status": row["status"], "predecessors": [{"assignment_id": p[0], "candidate_ref": p[1]} for p in preds]}
+                    "status": row["status"], "requirement_state": row["requirement_state"],
+                    "predecessors": [{"assignment_id": p[0], "candidate_ref": p[1]} for p in preds]}
 
     def snapshot(self, task_id: str, *, limit: int = 1000) -> dict:
         """Return a bounded, coordinator-readable graph snapshot."""
@@ -485,12 +696,13 @@ class WorkGraph:
             self._ensure_schema(db); self._task(db, task_id)
             requirements = []
             for row in db.execute(
-                "SELECT q.requirement_id,q.current_revision,r.statement,r.criteria_json,r.digest "
+                "SELECT q.requirement_id,q.current_revision,r.statement,r.criteria_json,r.digest,r.requirement_type "
                 "FROM work_requirements q JOIN work_requirement_revisions r "
                 "ON r.requirement_id=q.requirement_id AND r.revision=q.current_revision "
                 "WHERE q.task_id=? ORDER BY q.created_at,q.requirement_id LIMIT ?", (task_id, limit)):
                 requirements.append({"requirement_id": row[0], "revision": row[1], "statement": row[2],
-                                    "criteria": json.loads(row[3]), "digest": row[4]})
+                                    "criteria": json.loads(row[3]), "digest": row[4],
+                                    "requirement_type": row[5]})
             assignments = []
             for row in db.execute("SELECT * FROM work_assignments WHERE task_id=? ORDER BY created_at,assignment_id LIMIT ?", (task_id, limit)):
                 assignments.append(self.get_assignment(row["assignment_id"]))

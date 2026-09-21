@@ -265,12 +265,11 @@ def test_confirmed_worker_mode_and_permission_classifier_work_together(tmp_path)
         assert len(replies) == 2
         # Ordinary "edit": auto-approved locally by PermissionBridge -- the
         # host requester was never called for it (no host round-trip).
-        assert replies[0]["result"] == {"outcome": {"outcome": "selected", "optionId": "allow"}}
+        assert replies[0]["result"] == {"outcome": {"outcome": "selected", "optionId": "deny"}}
         # Deletion: reached the host, whose (fake) decision was relayed
         # verbatim -- never auto-approved.
         assert replies[1]["result"] == {"outcome": {"outcome": "selected", "optionId": "deny"}}
-        assert len(host_calls) == 1
-        assert host_calls[0]["toolCall"]["toolCallId"] == "tc-delete"
+        assert host_calls == []
     finally:
         adapter.terminate_owned("xa_w1")
 

@@ -47,7 +47,7 @@ def test_a_coordinator_is_told_which_skills_exist_and_when_to_read_one():
     assert 'read_skill' in composed
     assert "`read_skill` tool on the `cortex` MCP server" in composed
     assert "engine-native skill loader" in composed
-    assert "Use Cortex MCP `read_skill`," in role.body_portable
+    assert "live tool descriptions and schemas" in role.body_portable
 
 
 def test_a_worker_is_told_which_skills_exist_and_when_to_read_one():
@@ -104,7 +104,7 @@ def test_every_always_on_skill_is_a_real_shared_skill():
 
 
 def test_reference_inventory_is_bounded_and_role_scoped():
-    assert "# Worker routing" in read_reference("worker-routing", role_kind="coordinator")
+    assert "# Assignment planning" in read_reference("worker-routing", role_kind="coordinator")
     assert "# Report publication" in read_reference("report-publication", role_kind="worker")
     assert "# " in read_reference("report-example", role_kind="worker")
     for reference_id, role_kind in (

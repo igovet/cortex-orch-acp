@@ -16,7 +16,7 @@
 
 ## Evidence links and delivery state
 
-<!-- Link relevant reports and artifacts. Distinguish implemented work from observed Git/CI/deploy/production delivery and coordinator acceptance; bind delivery claims to exact revisions and receipts. Include rollout, causal, retry, and incident evidence only when relevant. -->
+<!-- Link relevant reports and artifacts. Distinguish implemented work from observed Git/CI/deploy/production delivery and runtime completion; bind delivery claims to exact revisions and receipts. Include rollout, causal, retry, and incident evidence only when relevant. -->
 
 ## Risks and remaining work
 

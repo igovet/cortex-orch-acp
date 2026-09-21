@@ -445,6 +445,19 @@ def _assignment_state(db, task_id: str, assignment_ref: str, worker_key: str) ->
 
 def _section_pipeline_and_assignments(db, task_id: str, recipient: dict) -> dict:
     section: dict = {}
+    task = db.execute('SELECT state,revision,review_cycle,goal,blocker FROM runtime_tasks WHERE task_id=?',(task_id,)).fetchone()
+    if task:
+        from ..orchestration.policy import denied_paths
+        section['runtime'] = dict(task)
+        section['runtime']['denied_write_paths'] = denied_paths(db,task_id)
+        section['runtime']['native_tools_enabled'] = False
+        section['runtime']['max_workers'] = 4
+        sql = 'SELECT node_id,role,objective,dependencies_json,scope_json,status,assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=?'
+        values = [task_id,task['revision']]
+        if recipient['role'] != 'coordinator':
+            sql += ' AND assignment_ref=?'
+            values.append(recipient['assignment_ref'])
+        section['runtime']['nodes'] = [dict(row) for row in db.execute(sql+' ORDER BY node_id',values)]
     if recipient["role"] == "coordinator":
         section["current_pipeline"] = _pipeline_ref(db, task_id)
         rows = db.execute(
@@ -553,25 +566,6 @@ def _worker_results_for(db, task_id: str, worker_key: str) -> list[dict]:
     return results
 
 
-def _coordinator_decisions_for(db, task_id: str, assignment_ref: str | None = None) -> list[dict]:
-    query = "SELECT id, payload_json, superseded, created_at FROM task_events WHERE task_id=? AND event_type='coordinator_decision'"
-    params: list = [task_id]
-    if assignment_ref is not None:
-        query += " AND assignment_ref=?"
-        params.append(assignment_ref)
-    query += " ORDER BY id"
-    rows = db.execute(query, params).fetchall()
-    decisions = []
-    for row in rows:
-        payload = json.loads(row["payload_json"])
-        decisions.append(dict(
-            cursor=row["id"], superseded=bool(row["superseded"]), created_at=row["created_at"],
-            assignment_ref=payload.get("assignment_ref"), decision=payload.get("decision"),
-            rationale=payload.get("rationale"),
-        ))
-    return decisions
-
-
 def _section_publications_and_checks(db, task_id: str, recipient: dict) -> dict:
     receipt_query = (
         "SELECT attempt_id,tool_call_ref,command_sha256,command_text,host_outcome "
@@ -595,16 +589,14 @@ def _section_publications_and_checks(db, task_id: str, recipient: dict) -> dict:
                 by_assignment[assignment_ref] = results
         return dict(
             results_by_assignment=by_assignment,
-            coordinator_decisions=_coordinator_decisions_for(db, task_id)[-_MAX_LIST_ENTRIES:],
             permission_receipts=[dict(row) for row in receipts],
         )
     results = _worker_results_for(db, task_id, recipient["attempt_id"])
-    decisions = _coordinator_decisions_for(db, task_id, recipient["assignment_ref"])
     receipts = db.execute(
         receipt_query + " AND attempt_id=? ORDER BY created_at DESC LIMIT ?",
         (task_id, recipient["attempt_id"], _MAX_LIST_ENTRIES),
     ).fetchall()
-    return dict(own_results=results, coordinator_decisions_for_own_assignment=decisions,
+    return dict(own_results=results,
                 own_permission_receipts=[dict(row) for row in receipts])
 
 
@@ -814,15 +806,12 @@ def _section_continuation_intent(db, task_id: str, recipient: dict) -> dict:
                 wait_detail=json.loads(orchestration["wait_detail_json"]) if orchestration["wait_detail_json"] else None,
                 requirement_revision=orchestration["requirement_revision"], updated_at=orchestration["updated_at"],
             )
-        decisions = _coordinator_decisions_for(db, task_id)
-        section["last_coordinator_decision"] = decisions[-1] if decisions else _unavailable("no_coordinator_decision_recorded")
-        task_accepts = [d for d in decisions if d["assignment_ref"] == "task" and d["decision"] == "accept" and not d["superseded"]]
-        state = orchestration["state"] if orchestration is not None else None
+        task = db.execute('SELECT state FROM runtime_tasks WHERE task_id=?',(task_id,)).fetchone()
+        state = task['state'] if task else None
         section["task_acceptance"] = dict(
-            accepted=state == "accepted" and bool(task_accepts),
+            accepted=state == "COMPLETED",
             stored_task_state=state,
-            task_accept_decision_cursor=task_accepts[-1]["cursor"] if task_accepts else None,
-            note="An assignment decision or report prose does not accept the task; only a durable task-level decision with accepted task state does.",
+            note="Only the runtime completion invariants can set COMPLETED. Reports and model statements do not accept the task.",
         )
     else:
         cancel = db.execute(

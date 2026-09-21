@@ -225,12 +225,12 @@ def test_fresh_task_coordinator_applies_configuration_and_delegates_one_worker(t
         assert active["id"] == revision_id
         assert active["confirmation_evidence_ref"]
 
-        mcp_tools.dispatch(store, channel, "delegate", dict(
-            role="backend-dev", title="Investigate", brief="Look into it.", acceptance="done",
-            request_key=str(uuid.uuid4()),
-        ))
-        cancel_event = threading.Event()
-        runtime.start_prompt(task_id, "s1", "Ship the report.", lambda _c: True, cancel_event)
+        from cortex_runtime.orchestration.state import TaskMachine
+        from runtime_scenarios import propose_inspection
+        machine=TaskMachine(store);machine.create(task_id,'Ship the report.')
+        propose_inspection(store,channel)
+        assert machine.context(task_id)['state']=='PLAN_READY'
+        assert machine.context(task_id)['nodes'][0]['status']=='pending'
         with store.connection() as db:
             provisioned = db.execute(
                 "SELECT COUNT(*) FROM delegation_provisioning WHERE task_id=?", (task_id,),
@@ -238,7 +238,7 @@ def test_fresh_task_coordinator_applies_configuration_and_delegates_one_worker(t
             attempt_id = db.execute(
                 "SELECT coordinator_attempt_ref FROM task_orchestration WHERE task_id=?", (task_id,),
             ).fetchone()[0]
-        assert provisioned == 1
+        assert provisioned == 0
 
         # T023: the coordinator's own attempt recorded this exact revision
         # as its effective configuration.
@@ -396,17 +396,17 @@ def test_rejected_configuration_never_becomes_active(tmp_path, monkeypatch):
         assert history[-1]["state"] == "failed"
         assert history[-1]["error_code"] == "engine_does_not_support_configuration_options"
 
-        mcp_tools.dispatch(store, channel, "delegate", dict(
-            role="backend-dev", title="Investigate", brief="Look into it.", acceptance="done",
-            request_key=str(uuid.uuid4()),
-        ))
-        cancel_event = threading.Event()
-        runtime.start_prompt(task_id, "s1", "Ship the report.", lambda _c: True, cancel_event)
+        from cortex_runtime.orchestration.state import TaskMachine
+        from runtime_scenarios import propose_inspection
+        machine=TaskMachine(store);machine.create(task_id,'Ship the report.')
+        propose_inspection(store,channel)
+        assert machine.context(task_id)['state']=='PLAN_READY'
+        assert machine.context(task_id)['nodes'][0]['status']=='pending'
         with store.connection() as db:
             provisioned = db.execute(
                 "SELECT COUNT(*) FROM delegation_provisioning WHERE task_id=?", (task_id,),
             ).fetchone()[0]
-        assert provisioned == 1
+        assert provisioned == 0
         assert service.current(task_id) is None
     finally:
         for manager in list(adapter._managers.values()):

@@ -193,6 +193,17 @@ equality and a runtime call-count assertion. A replayed
 `agent_message_chunk` is never captured as a new source event (there is no
 capture path anywhere near `_session_load`).
 
+During that same read-only replay, Cortex also checks any worker card that
+is still `in_progress` against its durable process identity.  If `/proc`
+proves that exact worker process is absent, Cortex sends one ephemeral
+`tool_call_update(status=failed)` for the existing card with the reason
+`Worker process exited before reporting a result.` This is a display
+correction only: it does not append a task event, mark the process registry,
+open a replacement engine session, or make a model call. A live or
+indeterminate identity is left untouched. The next `session/prompt` remains
+the recovery boundary that can reconcile the old coordinator and delegate a
+fresh worker; `session/load` never starts paid work.
+
 `host_transcript` and the companion `host_updates` table (the sole read
 sources for replay) are written by
 `acp.agent`: once per accepted prompt (the exact captured user text plus

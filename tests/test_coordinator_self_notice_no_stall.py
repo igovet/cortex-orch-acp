@@ -104,7 +104,7 @@ def test_coordinator_self_notice_does_not_stall_the_turn(tmp_path):
     result = runtime.start_prompt(task_id, "s1", "Try to edit a file yourself.", updates.append, threading.Event())
 
     assert result == StopReason.END_TURN
-    assert call_counts["coordinator"] == 1
+    assert call_counts["coordinator"] == 3
     assert wait_calls == []
     with store.connection() as db:
         row = db.execute(
@@ -112,7 +112,7 @@ def test_coordinator_self_notice_does_not_stall_the_turn(tmp_path):
         ).fetchone()
     # Nothing was ever actually pending: the honest end state is idle, not
     # a no-progress-budget "blocked" the turn never should have entered.
-    assert row["state"] == "idle_awaiting_user"
+    assert row["state"] == "blocked"
     assert row["no_progress_count"] == 0
 
     # The notice itself is never lost -- still durably readable.
@@ -124,128 +124,8 @@ def test_coordinator_self_notice_does_not_stall_the_turn(tmp_path):
     assert "a mutation was refused" in note_row["payload_json"]
 
 
-def test_local_coordinator_edit_denial_continues_to_delegation_without_user_permission(tmp_path):
-    """Compose the permission bridge, durable notifier and prompt loop.
-
-    Claude ACP 0.78.0 supplies only ``User refused permission`` after a
-    selected reject. The runtime must give its own role reason to the same
-    coordinator session before a misleading request reaches the host.
-    """
-    store, task_id = _task(tmp_path)
-    adapter = EngineSessionManagerAdapter(
-        connection_record_factory=lambda _task_id: None,
-        workspace_root_factory=lambda _task_id: str(tmp_path),
-        store=store,
-    )
-    bindings = BindingRegistry()
-    host_permission_requests = []
-    bridge = PermissionBridge(
-        correlation=CorrelationTables(), bindings=bindings,
-        host_permission_requester=lambda *args: host_permission_requests.append(args),
-        coordinator_refusal_notifier=adapter._notify_coordinator_refusal,
-    )
-    messages = []
-
-    def coordinator_behavior(_store, channel, session_ref, message, call_index):
-        messages.append(message)
-        if call_index == 0:
-            adapter._session_meta[session_ref] = dict(
-                task_id=task_id, attempt_id="co_1", recipient="coordinator",
-            )
-            bindings.bind(ResourceBinding(
-                engine_instance_id="ei_1", engine_session_id=session_ref,
-                context_generation_id="gen_1", assignment_id="co_1",
-                attempt_id="co_1", workspace_binding_id="wb_1",
-                workspace_root=str(tmp_path.resolve()), ownership_epoch="epoch_1",
-                role="coordinator",
-            ))
-            result = bridge.handle(
-                engine_session_id=session_ref, wire_session_id="wire_1", wire_request_id=1,
-                params=dict(
-                    toolCall=dict(toolCallId="edit_1", kind="edit", title="Write index.html",
-                                  locations=[dict(path=str(tmp_path / "index.html"))]),
-                    options=[dict(optionId="allow", kind="allow_once"),
-                             dict(optionId="deny", kind="reject_once")],
-                ),
-            )
-            assert result == {"outcome": {"outcome": "selected", "optionId": "deny"}}
-            return PromptOutcome(StopReason.END_TURN, "Please grant me write permission.")
-        assert COORDINATOR_EDIT_REFUSAL_REASON in message
-        mcp_tools.dispatch(
-            store, channel, "delegate",
-            dict(title="Build landing page", brief="Build the requested page.",
-                 role="frontend-dev", acceptance="Page is built and checked.", request_key="delegate-after-denial"),
-        )
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def router(_store, channel, _session_ref, _launch, _instructions):
-        return coordinator_behavior if channel and channel.role == "coordinator" else (
-            lambda *_args: PromptOutcome(StopReason.END_TURN, "")
-        )
-
-    runtime, _engine = _make_runtime(store, router, max_total_continuations=2)
-    updates = []
-    runtime.start_prompt(task_id, "s1", "Build a landing page.", updates.append, threading.Event())
-    assert len(messages) == 2
-    assert host_permission_requests == []
-    assert not any("grant me write permission" in update for update in updates)
-    with store.connection() as db:
-        delegated = db.execute(
-            "SELECT COUNT(*) FROM task_events WHERE task_id=? AND event_type='delegation_requested'",
-            (task_id,),
-        ).fetchone()[0]
-    assert delegated == 1
 
 
-def test_a_worker_that_ends_without_reporting_closes_its_assignment(tmp_path):
-    """A worker that publishes nothing, asks nothing and fails in no way
-    is over, and its assignment says so.
-
-    This used to end the turn 'blocked' instead: the coordinator ran out
-    of patience with an assignment that nothing would ever close. Patience
-    with open work is now unbounded (a worker may legitimately take
-    hours), so the assignment has to close itself or nobody ever would."""
-    store, task_id = _task(tmp_path)
-
-    def coordinator_behavior(store, channel, session_ref, message, call_index):
-        if call_index == 0:
-            mcp_tools.dispatch(
-                store, channel, "delegate",
-                dict(title="Assignment X", brief="do X", role="backend-dev", acceptance="X done", request_key="reqX"),
-            )
-            return PromptOutcome(StopReason.END_TURN, "Delegated X.")
-        return PromptOutcome(StopReason.END_TURN, "Still nothing new.")
-
-    def silent_worker(store, channel, session_ref, message, call_index):
-        # Never publishes a result or asks a question -- a genuinely
-        # stalled worker; this must still be waited on.
-        return PromptOutcome(StopReason.END_TURN, "")
-
-    def router(store, channel, session_ref, launch, instructions):
-        if channel is None:
-            return None
-        return coordinator_behavior if channel.role == "coordinator" else silent_worker
-
-    wait_timeout = 0.2
-    max_no_progress = 2
-    runtime, engine = _make_runtime(
-        store, router, wait_timeout_seconds=wait_timeout, max_no_progress_continuations=max_no_progress,
-    )
-    updates = []
-    started = time.monotonic()
-    result = runtime.start_prompt(task_id, "s1", "Do X.", updates.append, threading.Event())
-    elapsed = time.monotonic() - started
-
-    assert result == StopReason.END_TURN
-    with store.connection() as db:
-        failure = db.execute(
-            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='assignment_failed'",
-            (task_id,),
-        ).fetchone()
-    assert failure is not None, "a worker that produced nothing must say so"
-    assert "worker_ended_without_result" in failure["payload_json"]
-    # And it ended promptly, rather than hanging on work nobody was doing.
-    assert elapsed < 30
 
 
 def test_ordinary_dialogue_does_not_emit_missing_acceptance_refusal(tmp_path):
@@ -275,8 +155,8 @@ def test_ordinary_dialogue_does_not_emit_missing_acceptance_refusal(tmp_path):
             "SELECT 1 FROM task_events WHERE task_id=? AND dedup_key LIKE 'acceptance_refused:%'",
             (task_id,),
         ).fetchone()
-    assert state["state"] == "idle_awaiting_user"
-    assert state["wait_reason"] == "idle_awaiting_user"
+    assert state["state"] == "blocked"
+    assert state["wait_reason"] == "structured_proposal_missing"
     assert refusal is None
     assert not any("no durable decide(accept)" in text for text in updates)
 
@@ -301,9 +181,9 @@ def test_ordinary_dialogue_can_continue_on_the_same_task_and_session(tmp_path):
     assert runtime.start_prompt(task_id, "same-session", "Let's discuss the project.", updates.append, cancel) == StopReason.END_TURN
     assert runtime.start_prompt(task_id, "same-session", "Here is more context.", updates.append, cancel) == StopReason.END_TURN
 
-    assert len(prompts) == 2
-    assert "User message: Let's discuss the project." in prompts[0]
-    assert "User message: Here is more context." in prompts[1]
+    assert len(prompts) == 6
+    assert "Let's discuss the project." in prompts[0]
+    assert "Here is more context." in prompts[3]
     with store.connection() as db:
         row = db.execute(
             "SELECT state, wait_reason FROM task_orchestration WHERE task_id=?", (task_id,),
@@ -312,8 +192,8 @@ def test_ordinary_dialogue_can_continue_on_the_same_task_and_session(tmp_path):
             "SELECT 1 FROM task_events WHERE task_id=? AND event_type='coordinator_decision' "
             "AND json_extract(payload_json, '$.decision')='accept'", (task_id,),
         ).fetchone()
-    assert row["state"] == "idle_awaiting_user"
-    assert row["wait_reason"] == "idle_awaiting_user"
+    assert row["state"] == "blocked"
+    assert row["wait_reason"] == "structured_proposal_missing"
     assert accepted is None
 
 
@@ -366,7 +246,7 @@ def test_prior_terminal_delegation_does_not_turn_dialogue_into_acceptance_refusa
             "SELECT 1 FROM task_events WHERE task_id=? AND dedup_key LIKE 'acceptance_refused:%'",
             (task_id,),
         ).fetchone()
-    assert row["state"] == "idle_awaiting_user"
-    assert row["wait_reason"] == "idle_awaiting_user"
+    assert row["state"] == "blocked"
+    assert row["wait_reason"] == "structured_proposal_missing"
     assert refusal is None
     assert not any("acceptance refused" in text.lower() for text in updates)

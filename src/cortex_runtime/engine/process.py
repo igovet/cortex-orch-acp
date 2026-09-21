@@ -64,6 +64,10 @@ _CODEX_NEW_SESSION_SOURCE = b'''    const response = await this.codexClient.thre
       cwd: request.cwd
     });'''
 _CODEX_NEW_SESSION_PATCHED = b'''    const sessionConfig = await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers);
+    const cortexRole = request._meta?.cortexRole;
+    if (cortexRole !== undefined && cortexRole !== "coordinator" && cortexRole !== "worker") {
+      throw RequestError.invalidParams({}, "Unsupported Cortex role");
+    }
     const cortexInstructions = request._meta?.systemPrompt;
     let developerInstructions;
     if (cortexInstructions !== void 0) {
@@ -85,7 +89,9 @@ _CODEX_NEW_SESSION_PATCHED = b'''    const sessionConfig = await this.createSess
       modelProvider: this.getModelProvider(),
       cwd: request.cwd,
       ...(developerInstructions === void 0 ? {} : { developerInstructions })
-    });'''
+    });
+    this.cortexSessionRoles ??= new Map();
+    this.cortexSessionRoles.set(response.thread.id, cortexRole);'''
 
 # App Server combines thread/start.config after the process -c overrides.
 # codex-acp's top-level features table replaces the preceding -c features
@@ -108,6 +114,15 @@ _CODEX_SESSION_CONFIG_PATCHED = b'''function forceGitRootTurnDiffPaths(config2) 
     ["agents.enabled"]: ignoredAgentsEnabled,
     ["features.multi_agent"]: ignoredMultiAgent,
     ["features.multi_agent_v2"]: ignoredMultiAgentV2,
+    ["features.shell_tool"]: ignoredShell,
+    ["features.js_repl"]: ignoredJsRepl,
+    ["features.hooks"]: ignoredHooks,
+    ["features.apps"]: ignoredApps,
+    ["features.plugins"]: ignoredPlugins,
+    ["features.view_image"]: ignoredViewImage,
+    ["features.image_generation"]: ignoredImageGen,
+    ["features.browser_use"]: ignoredBrowser,
+    ["features.computer_use"]: ignoredComputer,
     ...remainingConfig
   } = config2;
   return {
@@ -121,8 +136,18 @@ _CODEX_SESSION_CONFIG_PATCHED = b'''function forceGitRootTurnDiffPaths(config2) 
       cwd_relative_turn_diffs: false,
       multi_agent: false,
       multi_agent_v2: false,
-      plugins: false
-    }
+      plugins: false,
+      hooks: false,
+      apps: false,
+      shell_tool: false,
+      js_repl: false,
+      view_image: false,
+      image_generation: false,
+      browser_use: false,
+      computer_use: false
+    },
+    web_search: "disabled",
+    tools: { update_plan: { enabled: false }, experimental_request_user_input: { enabled: false } }
   };
 }'''
 
@@ -136,7 +161,7 @@ _CODEX_MCP_DEDUP_SOURCE = b'''    let serversToConfigure = requestedServers;
     }'''
 _CODEX_MCP_DEDUP_PATCHED = b'''    const serversToConfigure = requestedServers;'''
 _CODEX_MCP_ENTRY_SOURCE = b'''"mcp_servers": Object.fromEntries(serversToConfigure.map((mcp) => [mcp.name, this.createMcpSeverConfig(mcp.server)]))'''
-_CODEX_MCP_ENTRY_PATCHED = b'''"mcp_servers": Object.fromEntries(serversToConfigure.map((mcp) => [mcp.name, { ...this.createMcpSeverConfig(mcp.server), enabled: true }]))'''
+_CODEX_MCP_ENTRY_PATCHED = b'''"mcp_servers": Object.fromEntries(serversToConfigure.map((mcp) => [mcp.name, { ...this.createMcpSeverConfig(mcp.server), enabled: true, default_tools_approval_mode: "approve" }]))'''
 
 # Keep every Cortex turn inside Codex's project workspace while excluding the
 # host temporary trees that native terminal tools can otherwise write
@@ -156,11 +181,8 @@ _CODEX_SEND_PROMPT_SOURCE = b'''    return await this.codexClient.runTurn({
       serviceTier
     }, onTurnStarted);'''
 _CODEX_SEND_PROMPT_PATCHED = b'''    const cortexSandboxPolicy = {
-      type: "workspaceWrite",
-      writableRoots: [],
-      networkAccess: false,
-      excludeTmpdirEnvVar: true,
-      excludeSlashTmp: true
+      type: "readOnly",
+      networkAccess: false
     };
     return await this.codexClient.runTurn({
       threadId: request.sessionId,
@@ -486,8 +508,13 @@ import subprocess
 import sys
 
 BINARY = __BINARY__
-BASE = ["-c", "agents.enabled=false", "-c", "features.multi_agent=false",
-        "-c", "features.multi_agent_v2=false", "-c", "features.plugins=false"]
+BASE = ["-c", "features.js_repl=false", "-c", "agents.enabled=false", "-c", "features.multi_agent=false",
+        "-c", "features.multi_agent_v2=false", "-c", "features.plugins=false",
+        "-c", "features.hooks=false", "-c", "features.apps=false", "-c", "features.shell_tool=false",
+        "-c", "features.view_image=false", "-c", "features.image_generation=false",
+        "-c", "features.browser_use=false", "-c", "features.computer_use=false",
+        "-c", "tools.update_plan.enabled=false", "-c", "tools.experimental_request_user_input.enabled=false",
+        "-c", 'web_search="disabled"']
 
 def checked(args):
     response = subprocess.run([BINARY, *args], stdout=subprocess.PIPE,
@@ -518,6 +545,30 @@ try:
     if any(observed.get(name) != "false" for name in
            ("multi_agent", "multi_agent_v2", "plugins")):
         raise ValueError("Codex process features are not disabled")
+    # This installed CLI exposes startup model_catalog_json, shell_type=disabled
+    # and nullable apply_patch_tool_type. Preserve model identities, routing,
+    # context sizes and instructions; remove native action implementations.
+    version = checked(["--version"]).strip()
+    if version not in {"codex-cli 0.154.0", "codex-cli 0.155.1"}:
+        raise ValueError("Unqualified native Codex tool catalogue version")
+    catalogue = json.loads(checked(["debug", "models", "--bundled"]))
+    if not isinstance(catalogue.get("models"), list) or not catalogue["models"]:
+        raise ValueError("Native model catalogue is absent")
+    for model in catalogue["models"]:
+        if not isinstance(model, dict) or "slug" not in model or "shell_type" not in model or "apply_patch_tool_type" not in model:
+            raise ValueError("Native model catalogue shape changed")
+        model["tool_mode"] = "direct"
+        model["shell_type"] = "disabled"
+        model["apply_patch_tool_type"] = None
+        model["experimental_supported_tools"] = []
+    import tempfile
+    directory = os.path.dirname(os.path.realpath(__file__))
+    with tempfile.NamedTemporaryFile(mode="w", dir=directory, prefix="gateway-models-", suffix=".json", delete=False) as output:
+        json.dump(catalogue, output)
+        output.flush()
+        os.fsync(output.fileno())
+        catalogue_path = output.name
+    BASE += ["-c", "model_catalog_json=" + json.dumps(catalogue_path)]
     discovered = servers(BASE)
     overrides = [arg for item in discovered for arg in
                  ("-c", "mcp_servers." + item["name"] + ".enabled=false")]
@@ -618,6 +669,7 @@ class EngineProcess:
                 field="cwd",
             )
         self.mcp_broker = None
+        self.external_mcp_brokers = []
         self.engine_instance_id = "eirt_" + uuid.uuid4().hex[:12]
         self.logs = EngineLogs(self.engine_instance_id, environ)
         if broker_mcp:
@@ -752,8 +804,24 @@ class EngineProcess:
         """True once the process is *observed* to have actually exited."""
         return self._exited_event.wait(timeout)
 
+    def broker_external_mcp(self, credentials, config):
+        from .mcp_bridge import MCP_RELAY_SCRIPT
+        allowed=config.get('allowed_tools')
+        if not isinstance(allowed,list) or not allowed:
+            raise _validation_error('external_mcp_explicit_tool_grants_required',
+                                    'Configure exact allowed_tools in the owner-only Cortex MCP registry.')
+        broker=McpBroker(credentials,python_executable=sys.executable,
+                         server_script=str(Path(__file__).with_name('external_proxy.py')),
+                         server_config=config,observe=self.logs.observe)
+        self.external_mcp_brokers.append(broker)
+        return dict(name=config['name'],command=sys.executable,
+                    args=['-B',str(MCP_RELAY_SCRIPT),'--relay',broker.endpoint,broker.relay_token],env=[])
+
     def terminate(self, *, grace: float = TERMINATE_GRACE_SECONDS) -> None:
         """SIGTERM the process group, grace, SIGKILL the process group, reap."""
+        for broker in self.external_mcp_brokers:
+            broker.close()
+        self.external_mcp_brokers.clear()
         if self._exited_event.is_set():
             return
         try:

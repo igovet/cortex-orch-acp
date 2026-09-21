@@ -93,18 +93,15 @@ Inventory every affected executable example across those pages;
 run safe examples against the current source and compare exact exit status and
 stdout with their documented expectations. Mark examples that cannot safely
 run or whose output cannot be verified as unresolved, naming the reason.
-The writing worker may perform this comparison and repair bounded gaps. Assign
-a separate `code_reviewer` for these changed documentation claims. The reviewer checks
+The writing worker may perform this comparison and repair bounded gaps. The runtime supplies an independent reviewer for these changed documentation claims. The reviewer checks
 current source and post-write documentation, including the complete relevant example inventory
 and observed results, without relying on the writer's claim that a search was
-clean. Add an independent
-`code_reviewer` or `build_verification` worker when a concrete unresolved risk warrants it, such
-as ambiguous feature boundaries, conflicting source evidence, unexplained
+clean. Propose additional specialist investigation for a concrete unresolved risk, such as ambiguous feature boundaries, conflicting source evidence, unexplained
 surfaces, consequential safety behavior, or checks the writer cannot run or
-interpret. Do not assign both by default or repeat a check on an unchanged
-revision without a reason. A purely factual, low-risk refresh may stay with one
-writer. Report unresolved gaps honestly. The model owns
-every adaptation and completion decision; this is not backend phase ordering.
+interpret. Do not repeat a check on an unchanged revision without a reason. A small refresh
+may use one writing assignment; independent review and command verification remain
+mandatory runtime stages. Report unresolved gaps honestly. Models propose
+adaptations; the runtime owns scheduling, review and completion.
 
 ## Relationship to the final documentation stage
 
@@ -112,10 +109,9 @@ A harvest or harvest-refresh is documentation-impacting by definition. Its
 documentation delegations serve as the dedicated documentation-sync worker or
 workers for `docs/project/`, `docs/features/`, and any affected public
 documentation. After the final writing or corrective delegation, the
-coordinator assesses the worker's source comparison and checks, and adds a
-separate verifier only for a concrete unresolved risk. It decides readiness
-from meaningful worker evidence
-and the current pipeline. It may follow bounded report cursors for facts needed by
+coordinator assesses the worker's source comparison and checks and submits a
+synthesis grounded in retained evidence. The runtime requires independent review
+and automatic verification before completion. It may follow bounded report cursors for facts needed by
 that decision, while documentation indexes and project files remain worker-owned.
 Missing specialist interpretation requires a bounded worker check.
 

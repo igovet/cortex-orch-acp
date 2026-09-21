@@ -203,12 +203,9 @@ class EngineSessionManager:
         abandon_wait_seconds: float = DEFAULT_ABANDON_WAIT_SECONDS,
         policy: ResourcePolicy | None = None,
         host_permission_requester=None,
-        permission_receipt_sink=None,
         max_concurrent_client_requests: int = DEFAULT_MAX_CONCURRENT_CLIENT_REQUESTS,
         terminal_output_persist=None,
         coordinator_refusal_notifier=None,
-        coordinator_draft_write_authorizer=None,
-        worker_draft_write_authorizer=None,
         host_mcp_servers=None,
         mcp_role: str | None = None,
         broker_mcp=False,
@@ -247,11 +244,10 @@ class EngineSessionManager:
         self._update_queue_maxsize = update_queue_maxsize
         self._abandon_wait_seconds = abandon_wait_seconds
         self._policy = policy if policy is not None else ResourcePolicy()
+        if channel_credentials is not None and (self._policy.fs_local or self._policy.terminal):
+            raise _fail('native_resources_disabled','Channel-bound actions must use the runtime Tool Gateway.')
         self._host_permission_requester = host_permission_requester
-        self._permission_receipt_sink = permission_receipt_sink
         self._coordinator_refusal_notifier = coordinator_refusal_notifier
-        self._coordinator_draft_write_authorizer = coordinator_draft_write_authorizer
-        self._worker_draft_write_authorizer = worker_draft_write_authorizer
         # The client's own MCP servers, to be offered to this engine
         # alongside Cortex's own. Held in memory only: a client's env and
         # header values are its secrets (see engine.mcp_bridge
@@ -416,9 +412,6 @@ class EngineSessionManager:
                 host_permission_requester=self._host_permission_requester,
                 call_timeout=max(self._call_timeout, DEFAULT_MANUAL_PERMISSION_TIMEOUT),
                 coordinator_refusal_notifier=self._coordinator_refusal_notifier,
-                permission_receipt_sink=self._permission_receipt_sink,
-                coordinator_draft_write_authorizer=self._coordinator_draft_write_authorizer,
-                worker_draft_write_authorizer=self._worker_draft_write_authorizer,
             )
             self._fs_bridge = FsBridge()
             self._terminal_bridge = TerminalBridge(persist_sink=self._terminal_output_persist)
@@ -673,7 +666,10 @@ class EngineSessionManager:
         # Use the verified connection record's engine identity; model labels
         # and host display provider names are not admission authorities.
         external_servers = host_mcp_servers(self._host_mcp_servers, role=self._mcp_role, engine=self._record.engine)
-        params["mcpServers"] = list(params["mcpServers"]) + external_servers
+        if external_servers and (self._process is None or self._channel_credentials is None):
+            raise _fail('external_mcp_gateway_required','External servers require a trusted runtime gateway.')
+        params["mcpServers"] = list(params["mcpServers"]) + [
+            self._process.broker_external_mcp(self._channel_credentials,server) for server in external_servers]
         if session_new_meta is not None:
             if not isinstance(session_new_meta, dict):
                 raise _fail("invalid_field", "session_new_meta must be a dict.", field="session_new_meta")
@@ -752,7 +748,7 @@ class EngineSessionManager:
                 "schema_digests": {},
                 "required_tools": ["create_draft", "write_report"],
                 "missing_required_tools": ["create_draft", "write_report"],
-                "worker_publish_result_present": None,
+                "worker_result_submit_present": None,
             }
         else:
             receipt = broker.tools_receipt
@@ -1156,8 +1152,6 @@ class EngineSessionManager:
                     str(wire_session_id), wire_tool_call_id, meta,
                 )
             title = update.get("title")
-            if isinstance(title, str) and len(title) > 200:
-                title = title[:200]
             locations = update.get("locations")
             content = update.get("content")
             raw_output = update.get("rawOutput")

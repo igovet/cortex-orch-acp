@@ -23,8 +23,8 @@ def test_preserves_existing_private_registry_and_is_idempotent(tmp_path, monkeyp
     path = config / "mcp-servers.json"
     existing = {
         "version": 1,
-        "servers": {"existing": {
-            "command": "/bin/true", "args": [], "env": {"TOKEN": "private"}, "enabled": True,
+        "servers": {"playwright":{"command":"/old/node","engines":["claude-agent-acp"]},"existing": {
+            "command": "/bin/true", "args": [], "env": {"TOKEN": "private"}, "enabled": True, "allowed_tools": ["inspect"],
         }},
     }
     path.write_text(json.dumps(existing), encoding="utf-8")
@@ -34,8 +34,9 @@ def test_preserves_existing_private_registry_and_is_idempotent(tmp_path, monkeyp
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.setattr(module, "_install", lambda prefix: prefix / "cli.js")
-    monkeypatch.setattr(module, "probe", lambda node, cli: 26)
+    monkeypatch.setattr(module, "probe", lambda node, cli: ["browser_snapshot","browser_navigate"])
     monkeypatch.setattr(module.shutil, "which", lambda name: "/usr/bin/node")
+    monkeypatch.setattr(module,"browser_grants",lambda prefix,home: (["--executable-path","/opt/browser/chrome"],["/opt/browser"]))
 
     assert module.main() == 0
     first = path.read_bytes()
@@ -44,5 +45,8 @@ def test_preserves_existing_private_registry_and_is_idempotent(tmp_path, monkeyp
     registered = json.loads(first)
     assert registered["servers"]["existing"] == existing["servers"]["existing"]
     assert registered["servers"]["playwright"]["roles"] == ["worker"]
+    assert registered["servers"]["playwright"]["allowed_tools"] == ["browser_snapshot","browser_navigate"]
+    assert registered["servers"]["playwright"]["network"] is True
     assert registered["servers"]["playwright"]["engines"] == ["claude-agent-acp"]
+    assert "/opt/browser" in registered["servers"]["playwright"]["read_paths"]
     assert "private" not in capsys.readouterr().out

@@ -148,6 +148,8 @@ def record_steering(store, task_id: str, origin: str, event_id: str, text: str) 
     actually gates/delivers the continuation -- this row exists purely so
     the requirement_revision boundary is durably visible in the event log,
     independent of the coalesced text."""
+    from ..orchestration.policy import steer
+    steer(store, task_id, text, f'user:{origin}:{event_id}')
     revision = bump_requirement_revision(store, task_id)
     delegation_events.append_event(
         store, task_id, "progress", f"user_steering:{origin}:{event_id}",
@@ -182,7 +184,7 @@ def _undelivered_steering_ids_tx(db, task_id: str) -> list[int]:
     return ids
 
 
-def mark_stopped(store, task_id: str) -> bool:
+def mark_stopped(store, task_id: str, *, source: str = "cortex_stop_command", session_id: str | None = None) -> bool:
     """Insert into ``task_stopped`` iff not already stopped (and iff
     ``task_id`` actually exists -- see below), and -- in that exact same
     transaction -- supersede every still-undelivered steering/user_message
@@ -211,6 +213,8 @@ def mark_stopped(store, task_id: str) -> bool:
     real -- see ``OrchestratingRuntime.stop_task``, which surfaces this as
     an explicit, non-silent error to the caller).
     """
+    if source not in {"cortex_stop_command", "paseo_session_cancel"}:
+        raise ValueError("unknown task stop source")
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -221,6 +225,13 @@ def mark_stopped(store, task_id: str) -> bool:
                 db.commit()
                 return False
             db.execute("INSERT INTO task_stopped (task_id, stopped_at) VALUES (?,?)", (task_id, _now()))
+            # Commit provenance with the stop marker, before process teardown.
+            # ACP identifies the client transport, not the human/UI action.
+            delegation_events.append_event_tx(
+                db, task_id, "progress", "task_stop_observed",
+                dict(kind="task_stop_observed", source=source, session_id=session_id),
+                origin="runtime",
+            )
             ids = _undelivered_steering_ids_tx(db, task_id)
             if ids:
                 db.executemany("UPDATE task_events SET superseded=1 WHERE id=?", [(event_id,) for event_id in ids])
