@@ -738,6 +738,7 @@ class EngineProcess:
                 launch_command, fds = self._jail_stack.enter_context(engine_jail(
                     cwd, self._jail_dir / "tmp", launch_command, jail["scopes"], env=process_env,
                     state_dirs={state: record.engine}, writable=[self._socket_dir],
+                    readonly=jail.get("readonly") or (),
                 ))
                 process_env = {"PATH": "/usr/bin:/bin"}
             # Spawned from one process-lifetime thread: the jail's

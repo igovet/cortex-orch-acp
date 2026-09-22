@@ -95,12 +95,42 @@ print('isolated')
     assert (root/'.cortex'/'secret').read_text()=='secret'
 
 
-def test_scoped_command_rejects_hardlink_to_outside(tmp_path):
+def test_a_hardlink_to_outside_is_read_only_and_never_refuses_the_worker(tmp_path):
+    """A build's hardlinks refused the whole worker; writing through one must
+    still never reach the file outside the project."""
+    import subprocess
     root=tmp_path/'project';root.mkdir();scratch=tmp_path/'scratch';scratch.mkdir()
     outside=tmp_path/'private';outside.write_text('private')
-    (root/'linked').hardlink_to(outside)
-    with pytest.raises(StoreError,match='gateway_hardlink_denied'):
+    (root/'linked').hardlink_to(outside);(root/'work').mkdir()
+    script='echo x >> linked && echo WROTE; echo ok > work/own.txt && echo OWN'
+    with gateway_command(root,scratch,['/bin/sh','-c',script],['.']) as (command,fds):
+        done=subprocess.run(command,pass_fds=fds,capture_output=True,text=True,env={'PATH':'/usr/bin:/bin'})
+    assert 'WROTE' not in done.stdout and 'OWN' in done.stdout
+    assert outside.read_text()=='private' and (root/'work'/'own.txt').read_text()=='ok\n'
+
+
+def test_project_shapes_that_used_to_refuse_the_worker_now_run(tmp_path):
+    """A private-name symlink, a socket in scope, and the tree limit each
+    stopped a worker from starting at all."""
+    import socket, subprocess
+    from cortex_runtime.orchestration import sandbox
+    root=tmp_path/'project';root.mkdir();scratch=tmp_path/'scratch';scratch.mkdir()
+    (root/'shared').mkdir();(root/'shared'/'settings.json').write_text('secret')
+    (root/'.claude').symlink_to(root/'shared')
+    server=socket.socket(socket.AF_UNIX);server.bind(str(root/'db.sock'))
+    try:
+        with gateway_command(root,scratch,['/bin/sh','-c','ls shared; echo done'],['.']) as (command,fds):
+            done=subprocess.run(command,pass_fds=fds,capture_output=True,text=True,env={'PATH':'/usr/bin:/bin'})
+        assert 'done' in done.stdout and 'settings.json' not in done.stdout  # masked through the link
+    finally:
+        server.close()
+    original=sandbox._TREE_LIMIT
+    sandbox._TREE_LIMIT=1
+    try:
         with gateway_command(root,scratch,['true'],['.']): pass
+        sandbox.verification_command(root,scratch,['true'])
+    finally:
+        sandbox._TREE_LIMIT=original
 
 
 @pytest.mark.parametrize('role',['coordinator','worker'])

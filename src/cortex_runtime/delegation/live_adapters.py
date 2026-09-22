@@ -111,10 +111,13 @@ def _jail_for(store, channel_credentials) -> dict:
     channel_id, secret, _ = channel_credentials
     channel = resolve_channel(store, channel_id, secret)
     scopes = []
+    readonly = []
     if channel.role != "coordinator":
         with store.connection() as db:
             try:
                 scopes, _ = _authority(db, channel)
+                from ..orchestration.gateway import write_denials
+                readonly = write_denials(db, channel.task_id)
             except StoreError:
                 scopes = []
 
@@ -132,7 +135,7 @@ def _jail_for(store, channel_credentials) -> dict:
             # ``transport_eof``. Stay alive and re-check on the next poll.
             return str(error) not in _CHANNEL_AUTHORITY_LOST_CODES
 
-    return {"scopes": list(scopes), "alive": alive}
+    return {"scopes": list(scopes), "readonly": list(readonly), "alive": alive}
 
 
 def _session_new_meta_for(

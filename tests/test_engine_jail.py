@@ -128,3 +128,24 @@ def test_transient_store_error_is_not_read_as_channel_revocation(tmp_path):
 
     store.connection = busy
     assert jail['alive']()  # transient error -> stay alive, re-check next tick
+
+
+def test_a_linked_engine_state_dir_and_config_still_run_locked_down(tmp_path, tree):
+    """A dotfile manager links ~/.claude and its settings elsewhere; that
+    refused every engine. It must run, with the config still read-only."""
+    real = tmp_path / 'dotfiles' / 'claude'
+    real.mkdir(parents=True)
+    # The dangerous case: the config links to a file inside the writable
+    # state dir (a target elsewhere on the host is read-only already).
+    (real / 'managed-settings.json').write_text('{"a": 1}\n')
+    (real / 'settings.json').symlink_to(real / 'managed-settings.json')
+    state = tmp_path / 'home' / '.claude'
+    state.symlink_to(real)
+    result = _run(tmp_path, f'''
+        cd {state}
+        echo s > sessions.json && echo state-ok
+        echo bad > settings.json || echo settings-ro
+    ''', [], state=state)
+    assert result.stdout.split() == ['state-ok', 'settings-ro'], result.stderr
+    assert (real / 'sessions.json').read_text() == 's\n'
+    assert (real / 'managed-settings.json').read_text() == '{"a": 1}\n'

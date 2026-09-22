@@ -15,6 +15,30 @@ from contextlib import contextmanager
 from ..contracts import StoreError
 
 
+# Entries walked to find grants; past it grants stop (narrower), while
+# private names are still masked everywhere.
+_TREE_LIMIT = 2_000_000
+# Hardlinks in one granted directory past which it stays read-only.
+_HARDLINK_DIR_LIMIT = 256
+
+
+def _private_target(path: Path, root: Path) -> Path | None:
+    """What to mask for a private name: the path itself, or -- for a
+    symlink (``.claude -> shared/claude`` is common) -- the project path it
+    points to. ``None``: nothing to mask (dangling, a loop, or outside the
+    project, which the sandbox only ever shows read-only). A private symlink
+    used to refuse the whole worker."""
+    if not path.is_symlink():
+        return path
+    try:
+        target = path.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if target == root or root not in target.parents or target.is_symlink():
+        return None
+    return target
+
+
 def verification_command(root, scratch, argv, system_root=False):
     """``system_root`` mounts the whole host read-only (an engine may be
     installed anywhere) and hides the owner's runtime sockets under /run/user,
@@ -43,19 +67,19 @@ def verification_command(root, scratch, argv, system_root=False):
     command += ['--proc', '/proc', '--dev', '/dev', '--bind', str(scratch), '/tmp',
                 '--ro-bind', str(root), str(root)]
     from .gateway import PRIVATE
-    visited = 0
     for current, dirs, files in os.walk(root,followlinks=False):
-        visited += len(dirs)+len(files)
-        if visited > 200000: raise StoreError('gateway_tree_limit')
         for name in list(dirs)+files:
             path = Path(current)/name
             if name in PRIVATE:
-                if path.is_symlink(): raise StoreError('gateway_private_path_symlink')
                 if name in dirs:
                     dirs.remove(name)
-                    command += ['--tmpfs',str(path),'--remount-ro',str(path)]
+                target = _private_target(path, root)
+                if target is None:
+                    continue
+                if target.is_dir():
+                    command += ['--tmpfs',str(target),'--remount-ro',str(target)]
                 else:
-                    command += ['--ro-bind','/dev/null',str(path)]
+                    command += ['--ro-bind','/dev/null',str(target)]
             elif name in dirs and path.is_symlink():
                 dirs.remove(name)
     return command + ['--chdir', str(root), '--', *argv]
@@ -81,6 +105,70 @@ def allow_network(command):
     command[at:at] = files
 
 
+# HOME entries that stay read-only: credentials, and anything that would run
+# code outside the sandbox later (autostart and systemd units live in
+# .config, executables on PATH in .local/bin, desktop entries in
+# .local/share/applications). The agents' own configuration is locked by the
+# engine jail itself.
+SENSITIVE_HOME = frozenset({'.ssh', '.gnupg', '.aws', '.azure', '.kube', '.docker', '.password-store', '.pki',
+                            '.mozilla', '.thunderbird', '.config', '.local', '.claude', '.codex', '.cortex',
+                            # a dotfiles repository (hooks run later) and the
+                            # orchestrator's own state and runtime
+                            '.git', '.paseo', '.hermes', '.cortex-dev'})
+SENSITIVE_LOCAL_SHARE = frozenset({'keyrings', 'applications', 'autostart', 'systemd'})
+TOOL_DIRS_CREATED = ('.cache', '.npm')
+
+
+def tool_state_dirs(home: str) -> list[str]:
+    """HOME directories every sandboxed process may write: each existing
+    hidden directory (where package managers, SDKs and build tools of any
+    language keep caches and data) except SENSITIVE_HOME, ~/go, and the
+    XDG data/state directories. Not a list of tools: a list would always
+    miss one, and that project would fail."""
+    root = Path(home)
+    for name in TOOL_DIRS_CREATED:
+        path = root / name
+        if not path.exists() and not path.is_symlink():
+            try:
+                path.mkdir(mode=0o700)
+            except OSError:
+                pass
+    found = []
+    try:
+        entries = list(os.scandir(root))
+    except OSError:
+        return []
+    for entry in entries:
+        name = entry.name
+        if (name.startswith('.') or name == 'go') and name not in SENSITIVE_HOME and entry.is_dir(follow_symlinks=False):
+            found.append(str(root / name))
+    share = root / '.local' / 'share'
+    if share.is_dir() and not share.is_symlink():
+        try:
+            found += [str(share / entry.name) for entry in os.scandir(share)
+                      if entry.name not in SENSITIVE_LOCAL_SHARE and entry.is_dir(follow_symlinks=False)]
+        except OSError:
+            pass
+    state = root / '.local' / 'state'
+    if state.is_dir() and not state.is_symlink():
+        found.append(str(state))
+    return sorted(found)
+
+
+def compact_argv(command, fds):
+    """Hand bwrap a long argument list through a file descriptor (``--args``)
+    instead of the command line, whose size limit a large grant list hit.
+    Call last, just before starting the process; returns ``(command, fds)``."""
+    if len(command) < 512 or '--' not in command:
+        return command, tuple(fds)
+    # bwrap takes only options from --args; the command stays on argv.
+    split = command.index('--')
+    fd = os.memfd_create('cortex-bwrap-args')
+    os.write(fd, b''.join(arg.encode('utf-8', 'surrogateescape') + b'\0' for arg in command[1:split]))
+    os.lseek(fd, 0, os.SEEK_SET)
+    return [command[0], '--args', str(fd), *command[split:]], (*fds, fd)
+
+
 def as_owner(command, environ):
     """Run a sandbox command as the owner would in their terminal, in place.
 
@@ -95,6 +183,7 @@ def as_owner(command, environ):
     has_home = home.startswith('/') and Path(home).is_dir()
     if has_home:
         mounts += ['--ro-bind', home, home]
+        mounts += [arg for path in tool_state_dirs(home) for arg in ('--bind', path, path)]
     # After the scratch /tmp mount (a HOME under /tmp must stay read-only),
     # before the project mounts (project grants stay writable on top).
     at = command.index('--ro-bind', command.index('--dev') + 1)
@@ -102,20 +191,24 @@ def as_owner(command, environ):
     env = [arg for name, value in environ.items()
            if name not in {'HOME', 'TMPDIR', 'PWD', 'OLDPWD'} and not _SECRET_ENV.search(name)
            for arg in ('--setenv', name, value)]
-    # HOME is read-only; caches go to the command's writable scratch /tmp.
-    env += ['--setenv', 'HOME', home if has_home else '/tmp', '--setenv', 'XDG_CACHE_HOME', '/tmp/.cache']
+    # HOME is read-only except the tool caches mounted above.
+    env += ['--setenv', 'HOME', home if has_home else '/tmp']
+    if not has_home:
+        env += ['--setenv', 'XDG_CACHE_HOME', '/tmp/.cache']
     at = command.index('--chdir')
     command[at:at] = env
     allow_network(command)
 
 
 @contextmanager
-def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root=False):
+def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root=False, readonly=()):
     """Pin mount sources to no-follow descriptors, then constrain writes.
 
+    ``.`` (or ``**``) grants the whole project, new top-level files included.
     Globs grant existing matches only. Explicit directory grants allow new
     children; explicit new files are first created with project_write.
-    Private names in ``reveal`` are mounted read-only instead of hidden.
+    ``readonly`` (the user's deny-write paths) stays read-only on top of any
+    grant. Private names in ``reveal`` are mounted read-only instead of hidden.
     """
     from .gateway import PRIVATE, _parts, _parent, _matches
     root = Path(root).resolve(strict=True)
@@ -133,16 +226,34 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
         for scope in scopes:
             _parts(scope)
             if scope in {'.','**','**/*'}:
-                candidates.update(n for n in os.listdir(root) if n not in PRIVATE)
+                candidates.add('.')
             elif scope.endswith('/**') and not any(c in scope[:-3] for c in '*?['):
                 candidates.add(scope[:-3])
             elif not any(c in scope for c in '*?['):
                 candidates.add(scope)
         visited=0
+        linked=[]
+        # A file inside a granted directory needs no bind of its own (one per
+        # file overflowed bwrap's argument list on a large tree).
+        dir_grants={c for c in candidates if (root/c).is_dir() and not (root/c).is_symlink()}
+        whole='.' in dir_grants
+        def granting_dir(relative):
+            parts=relative.split('/')
+            found=next(('/'.join(parts[:i]) for i in range(1,len(parts)) if '/'.join(parts[:i]) in dir_grants),None)
+            if found is None and whole:
+                # Under the whole-project grant, a hardlink-heavy directory is
+                # judged by its top-level entry (node_modules), not the project.
+                return parts[0] if len(parts)>1 else '.'
+            return found
+        denied_exact=set();denied_globs=[]
+        for pattern in readonly:
+            base=pattern[:-3] if pattern.endswith('/**') else pattern
+            if any(c in base for c in '*?['): denied_globs.append(pattern)
+            else: denied_exact.add(base.strip('/'))
+        denied_found=[]
         for current,dirs,files in os.walk(root,followlinks=False):
             visited+=len(dirs)+len(files)
-            if visited>200000:
-                raise StoreError('gateway_tree_limit')
+            over_limit = visited>_TREE_LIMIT  # grants stop; private masking does not
             for name in list(dirs):
                 path=Path(current)/name
                 if name in PRIVATE:
@@ -154,29 +265,76 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
                 relative=path.relative_to(root).as_posix()
                 if name in PRIVATE:
                     private_paths.add(path)
-                elif _matches(relative,scopes):
+                elif over_limit:
+                    continue
+                if denied_globs and _matches(relative,denied_globs):
+                    denied_found.append(relative)
+                if name in PRIVATE:
+                    continue
+                elif (owner:=granting_dir(relative)) is not None or _matches(relative,scopes):
                     info=path.lstat()
                     if stat.S_ISREG(info.st_mode) and info.st_nlink!=1:
-                        raise StoreError('gateway_hardlink_denied')
-                    if not path.is_symlink(): candidates.add(relative)
+                        # Its other link may be outside the project: writing
+                        # through it would escape the scope. Read-only, not a
+                        # refusal -- a build's hardlinks (gradle, pnpm) used to
+                        # stop the whole worker from starting.
+                        linked.append((relative,owner))
+                    elif owner is None and not path.is_symlink(): candidates.add(relative)
+        # A directory made of hardlinks (pnpm's node_modules points into a
+        # store shared by every project) stays read-only as a whole: writing
+        # there corrupts other projects, and a bind per link hits the
+        # kernel's mount limit.
+        per_grant={}
+        for _,owner in linked:
+            if owner is not None: per_grant[owner]=per_grant.get(owner,0)+1
+        demoted={owner for owner,count in per_grant.items() if count>_HARDLINK_DIR_LIMIT and owner!='.'}
+        candidates-=demoted
+        linked=[relative for relative,owner in linked if owner not in demoted]
+        # Read-only on top of the writable binds: demoted directories and the
+        # user's deny-write paths.
+        overlays=sorted(demoted|{path for path in denied_exact if path and (root/path).exists()}|set(denied_found))
         for relative in sorted(candidates,key=lambda p:(len(PurePath(p).parts),p)):
             path=root/relative
             if not path.exists(): continue
             if relative=='.':
                 granted=os.dup(fds[0])
             else:
-                with _parent(root,relative) as (parent,leaf):
-                    granted=os.open(leaf,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+                try:
+                    kind=path.lstat().st_mode
+                    if not stat.S_ISREG(kind) and not stat.S_ISDIR(kind):
+                        continue  # a socket/FIFO/device is never granted (see below)
+                    with _parent(root,relative) as (parent,leaf):
+                        granted=os.open(leaf,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+                except OSError:
+                    continue  # vanished or unopenable: not granted, never a refused worker
             info=os.fstat(granted)
             if not stat.S_ISREG(info.st_mode) and not stat.S_ISDIR(info.st_mode):
-                os.close(granted); raise StoreError('gateway_regular_file_required')
+                # A socket, FIFO or device (a database's socket in a docker
+                # volume) is never granted -- skipped, not a refused worker.
+                os.close(granted); continue
             fds.append(granted)
             command+=['--bind',f'/proc/self/fd/{granted}',str(path)]
-        for path in sorted(private_paths):
-            if path.is_symlink():
-                # Never follow a private-path symlink when applying a mount.
-                raise StoreError('gateway_private_path_symlink')
-            if path.name in reveal and path.exists():
+        for relative in overlays:
+            try:
+                with _parent(root,relative) as (parent,leaf):
+                    pinned=os.open(leaf,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+            except OSError:
+                continue
+            fds.append(pinned)
+            command+=['--ro-bind',f'/proc/self/fd/{pinned}',str(root/relative)]
+        for relative in linked:  # after the writable binds, so these win
+            with _parent(root,relative) as (parent,leaf):
+                pinned=os.open(leaf,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+            if not stat.S_ISREG(os.fstat(pinned).st_mode):
+                os.close(pinned); continue
+            fds.append(pinned)
+            command+=['--ro-bind',f'/proc/self/fd/{pinned}',str(root/relative)]
+        for original in sorted(private_paths):
+            # Never mount through a private symlink: mask its in-project target.
+            path = _private_target(original, root)
+            if path is None:
+                continue
+            if original.name in reveal and path.exists():
                 command+=['--ro-bind',str(path),str(path)]
             elif path.is_file():
                 command+=['--ro-bind','/dev/null',str(path)]
@@ -203,7 +361,7 @@ ENGINE_HIDDEN = ('plugins',)
 
 
 @contextmanager
-def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=()):
+def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(), readonly=()):
     """Run a whole engine process the way a worker's shell runs.
 
     The project is read-only except the granted scopes, `.cortex` is hidden
@@ -215,23 +373,39 @@ def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(
     """
     from .gateway import PRIVATE
     with gateway_command(root, scratch, argv, scopes, reveal=frozenset(PRIVATE) - {'.cortex'},
-                         system_root=True) as (command, fds):
+                         system_root=True, readonly=readonly) as (command, fds):
         as_owner(command, {'HOME': env.get('HOME', '')})
         extra = [arg for name, value in env.items() for arg in ('--setenv', name, value)]
         extra += ['--setenv', 'TMPDIR', '/tmp']
         state_dirs = state_dirs or {}
+        real_dirs = {}
         for directory in (*state_dirs, *writable):
             path = Path(directory)
-            if not path.exists() and directory in state_dirs:
+            if not path.exists() and not path.is_symlink() and directory in state_dirs:
                 path.mkdir(mode=0o700, parents=True)
-            if path.is_symlink() or not path.is_dir():
+            # A dotfile manager links ~/.claude or ~/.codex elsewhere: bind the
+            # real directory (the link then resolves into it). Refusing it
+            # stopped every engine for such an owner.
+            real = path.resolve()
+            if directory in state_dirs and not real.exists():
+                real.mkdir(mode=0o700, parents=True)
+            if not real.is_dir():
                 raise StoreError('engine_state_dir_invalid')
-            extra += ['--bind', str(path), str(path)]
+            real_dirs[directory] = real
+            extra += ['--bind', str(real), str(real)]
         for directory, engine in state_dirs.items():
             for name, neutral in ENGINE_CONFIG[engine].items():
-                path = Path(directory) / name
+                path = real_dirs[directory] / name
                 if path.is_symlink():
-                    raise StoreError('engine_state_config_symlink')
+                    # Lock what it points to instead; the rest of the host is
+                    # read-only already, so a target elsewhere needs nothing.
+                    try:
+                        target = path.resolve(strict=True)
+                    except (OSError, RuntimeError):
+                        continue
+                    if real_dirs[directory] in target.parents:
+                        extra += ['--ro-bind', str(target), str(target)]
+                    continue
                 if not path.exists():
                     if neutral is None:
                         path.mkdir(mode=0o700)
@@ -239,9 +413,14 @@ def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(
                         path.write_text(neutral)
                 extra += ['--ro-bind', str(path), str(path)]
             for name in ENGINE_HIDDEN:
-                path = Path(directory) / name
+                path = real_dirs[directory] / name
                 if path.is_dir() and not path.is_symlink():
                     extra += ['--tmpfs', str(path), '--remount-ro', str(path)]
         at = command.index('--chdir')
         command[at:at] = extra
-        yield command, fds
+        launch, launch_fds = compact_argv(command, fds)
+        try:
+            yield launch, launch_fds
+        finally:
+            for extra in set(launch_fds) - set(fds):
+                os.close(extra)

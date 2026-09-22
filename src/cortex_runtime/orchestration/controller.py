@@ -1,6 +1,7 @@
 """Deterministic task driver over ACP engine sessions and runtime services."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -51,17 +52,30 @@ def _verification(runtime, task_id, machine, emit_tool_call, cancel):
         if emit_tool_call:
             emit_tool_call(dict(tool_call_id=ref, new=True, title='Verify project', kind='execute',
                                 status='in_progress', raw_input=dict(argv=argv, cwd=str(root))))
-        with tempfile.TemporaryDirectory(prefix='cortex-verification-') as scratch:
-            # No shell and no access to the real private store, even from an interpreter.
-            from .sandbox import verification_command
+        with tempfile.TemporaryDirectory(prefix='cortex-verification-') as scratch, contextlib.ExitStack() as stack:
+            # The owner's toolchain (npm, node in their home), as a worker's
+            # command_run has it: a bare /usr/bin sandbox made every npm check
+            # fail. Only directories the project ignores (caches, builds,
+            # node_modules) are writable, so sources stay untouched and the
+            # revision (which skips ignored paths) cannot drift. No access to
+            # the real private store, even from an interpreter.
+            from .sandbox import as_owner, gateway_command
             try:
-                command = verification_command(root, scratch, argv)
+                scopes = [path + '/**' for path in revision.ignored_directories(str(root))]
+                command, fds = stack.enter_context(gateway_command(root, scratch, argv, scopes, system_root=True))
+                as_owner(command, os.environ)
             except StoreError as error:
                 machine.move(task_id, 'BLOCKED', blocker=str(error))
                 return
             with tempfile.TemporaryFile() as output:
-                proc = subprocess.Popen(command, stdout=output, stderr=subprocess.STDOUT,
-                                        env={'PATH': '/usr/bin:/bin'})
+                from .sandbox import compact_argv
+                launch, launch_fds = compact_argv(command, fds)
+                try:
+                    proc = subprocess.Popen(launch, stdout=output, stderr=subprocess.STDOUT, pass_fds=launch_fds,
+                                            env={'PATH': '/usr/bin:/bin'})
+                finally:
+                    for extra in set(launch_fds) - set(fds):
+                        os.close(extra)
                 deadline = time.monotonic() + 300
                 interrupted = False
                 while proc.poll() is None:
@@ -344,6 +358,10 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 continue
             if running:
                 capacity_wait_started = None
+                # A worker waiting on the user (a deletion, a write outside
+                # the project) gets its permission card here.
+                from .consent import relay
+                relay(runtime, task_id, language)
                 cancel_event.wait(.1)
                 continue
             if any(n['status'] == 'running' for n in nodes):
@@ -411,7 +429,7 @@ def _stop_question(question, context, language):
     code, _, detail = question['blocker'].partition(':')
     try:
         # The code stays visible for diagnosis next to the plain reason.
-        reason = messages.render('stop_reason.' + code, language, detail=detail) + f" [{question['blocker']}]"
+        reason = messages.render('stop_reason.' + code, language, detail=detail or '').replace(' ()', '') + f" [{question['blocker']}]"
     except KeyError:
         reason = question['blocker']
     details = ''

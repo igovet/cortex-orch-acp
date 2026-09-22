@@ -849,3 +849,19 @@ def test_git_ignored_content_of_any_size_stays_outside_the_revision(tmp_path):
     assert revision.capture_revision(str(tmp_path))["dirty_digest"] != first["dirty_digest"]
     (tmp_path / "new.py").write_text("x\n")  # untracked but not ignored: part of the work
     assert any("new.py" in line for line in revision.capture_revision(str(tmp_path))["manifest"])
+
+
+def test_a_git_worktree_gets_a_git_listed_revision(tmp_path):
+    """A worktree's .git is a pointer file the sandbox masks; git must still
+    be pointed at the real metadata."""
+    import subprocess
+    from cortex_runtime.delegation import revision
+    main = tmp_path / "main"
+    subprocess.run(["git", "init", "-q", str(main)], check=True)
+    subprocess.run(["git", "-C", str(main), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "i"], check=True)
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt")], check=True, capture_output=True)
+    (tmp_path / "wt" / ".gitignore").write_text("cache/\n")
+    (tmp_path / "wt" / "cache").mkdir(); (tmp_path / "wt" / "cache" / "x").write_text("x")
+    (tmp_path / "wt" / "app.py").write_text("x")
+    assert revision._git_listed_paths(str(tmp_path / "wt"))[0] == {".gitignore", "app.py"}
+    assert revision.ignored_directories(str(tmp_path / "wt")) == ["cache"]

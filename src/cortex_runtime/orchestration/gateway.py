@@ -50,7 +50,15 @@ SCHEMAS = {
     'command_run': obj(dict(argv=array(text('Literal command argument. Only scoped workers may run commands; coordinators and consultants cannot execute them. No implicit shell.',16384), maximum=128, minimum=1),
                             timeout_seconds=dict(type='integer', minimum=1, description='Optional maximum runtime, including child processes. Omit to run until the command exits.'),
                             request_key=text('Unique action identity; ambiguous interrupted calls are never re-executed automatically.',128)), required=['argv','request_key']),
+    'outside_write': obj(dict(path=text('Absolute path OUTSIDE the project (inside it, write with your own tools). The user confirms first; the parent directory must exist.',4096),
+                              content=text('Complete new UTF-8 file content.',1000000),
+                              request_key=text('Unique action identity.',128))),
+    'outside_command': obj(dict(argv=array(text('Literal command argument, run as the user outside the sandbox after the user confirms (e.g. a global install, a change in HOME). No implicit shell.',16384), maximum=128, minimum=1),
+                                cwd=text('Absolute working directory; defaults to the project root.',4096),
+                                timeout_seconds=dict(type='integer', minimum=1, description='Optional maximum runtime; default 600.'),
+                                request_key=text('Unique action identity.',128)), required=['argv','request_key']),
 }
+SCHEMAS['outside_write']['properties']['content']['minLength'] = 0
 SCHEMAS['draft_write']['properties']['draft_id']['pattern'] = r'^d_[0-9a-f]{12}$'
 # Empty files are legitimate writes.
 SCHEMAS['project_write']['properties']['content']['minLength'] = 0
@@ -102,7 +110,16 @@ def _authority(db, channel):
                       (channel.task_id,channel.attempt_id,task['revision'])).fetchone()
     if not node or node['status'] != 'running':
         raise StoreError('gateway_assignment_inactive')
-    return ([] if node['stage']=='review' or node['role'] in READ_ONLY else json.loads(node['scope_json'])), node['assignment_ref']
+    # A writing worker may change the whole project (the owner's rule: all of
+    # the project, nothing outside it without consent); the plan's scope only
+    # describes the work. Reviewers and read-only roles write nothing.
+    return ([] if node['stage']=='review' or node['role'] in READ_ONLY else ['.']), node['assignment_ref']
+
+
+def write_denials(db, task_id):
+    """The user's deny-write paths: read-only even inside a writing grant."""
+    from .policy import denied_paths
+    return denied_paths(db, task_id)
 
 
 def _matches(path, scopes):
@@ -170,14 +187,21 @@ def _write(root,args):
 def _command(store,channel,root,scopes,args,ref,owner,effects):
     from .sandbox import as_owner, gateway_command
     with tempfile.TemporaryDirectory(prefix='cortex-command-') as scratch, tempfile.TemporaryFile() as output:
-        with gateway_command(root,scratch,args['argv'],scopes) as (command,fds):
+        # The whole host read-only, as the worker's own jailed shell sees it.
+        with store.connection() as db: denied=write_denials(db,channel.task_id)
+        with gateway_command(root,scratch,args['argv'],scopes,system_root=True,readonly=denied) as (command,fds):
             # A worker's shell is the owner's shell, still scope-confined.
             as_owner(command,os.environ)
             with store.connection() as db:
                 db.execute('BEGIN IMMEDIATE')
                 _authority(db,channel)
                 effects['possible'] = True
-                proc=subprocess.Popen(command,stdout=output,stderr=subprocess.STDOUT,pass_fds=fds,env={'PATH':'/usr/bin:/bin'},start_new_session=True)
+                from .sandbox import compact_argv
+                launch,launch_fds=compact_argv(command,fds)
+                try:
+                    proc=subprocess.Popen(launch,stdout=output,stderr=subprocess.STDOUT,pass_fds=launch_fds,env={'PATH':'/usr/bin:/bin'},start_new_session=True)
+                finally:
+                    for extra in set(launch_fds)-set(fds): os.close(extra)
                 db.commit()
             failure=None
             # No default limit: a long build or backfill runs to completion;
@@ -209,6 +233,48 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                 output=data.decode('utf-8',errors='replace'),large_output_id=retained['id'])
 
 
+def _outside(store,channel,root,operation,args,ref,owner,effects):
+    """Write a file or run a command outside the sandbox, as the user, once
+    the user allows it (orchestration.consent)."""
+    from . import consent
+    target=Path(args['path'] if operation=='outside_write' else (args.get('cwd') or root))
+    if not target.is_absolute():
+        raise StoreError('outside_path_must_be_absolute','path',str(target),'an absolute path','Give an absolute path.')
+    project=Path(root).resolve()
+    resolved=Path(os.path.normpath(str(target)))
+    if operation=='outside_write' and (resolved==project or project in resolved.parents):
+        raise StoreError('outside_path_inside_project','path',str(target),'a path outside the project',
+                         'Inside the project, write with your own tools or project_write.')
+    def still_allowed():
+        with store.connection() as db: _authority(db,channel)
+    if not consent.request(store,channel,operation,consent.subject_of(operation,args),still_allowed=still_allowed):
+        raise StoreError('outside_action_not_confirmed','operation',operation,'the user allowing it',
+                         'The user did not allow this action; do the work another way or explain what you need.')
+    effects['possible']=True
+    if operation=='outside_write':
+        data=args['content'].encode('utf-8')
+        temporary=resolved.with_name(resolved.name+'.cortex-'+uuid.uuid4().hex)
+        with open(temporary,'xb') as stream:
+            stream.write(data); stream.flush(); os.fsync(stream.fileno())
+        os.replace(temporary,resolved)
+        return dict(path=str(resolved),byte_count=len(data),sha256=hashlib.sha256(data).hexdigest())
+    with tempfile.TemporaryFile() as output:
+        try:
+            done=subprocess.run(args['argv'],cwd=str(resolved),stdout=output,stderr=subprocess.STDOUT,
+                                timeout=args.get('timeout_seconds') or 600)
+            code,failure=done.returncode,None
+        except subprocess.TimeoutExpired:
+            code,failure=None,'timeout'
+        except OSError as error:
+            code,failure=None,f'not_started:{error.strerror}'
+        output.seek(0); data=output.read()
+    from ..recovery.large_output_store import persist_output
+    retained=persist_output(store,task_id=channel.task_id,owner_scope=owner,source_kind='terminal',
+                            source_ref=ref,data=data,exit_code=code,failure=failure)
+    return dict(tool_call_ref=ref,exit_code=code,complete=failure is None,failure=failure,
+                output=data.decode('utf-8',errors='replace')[-65536:],large_output_id=retained['id'])
+
+
 def dispatch(store,channel,operation,args):
     validate(SCHEMAS[operation],args)
     digest=hashlib.sha256(encoded(args).encode()).hexdigest()
@@ -227,8 +293,11 @@ def dispatch(store,channel,operation,args):
                 raise StoreError('gateway_read_failure', 'path', args['path'],
                     'a readable regular UTF-8 file or directory',
                     'The project read failed; no mutation was attempted. Check the path, file type and read access.') from error
-        if operation in {'project_write','project_mkdir','project_delete'} and not _matches(args['path'],scopes):
+        if operation in {'project_write','project_mkdir','project_delete'} and (
+                not _matches(args['path'],scopes) or _matches(args['path'],write_denials(db,channel.task_id))):
             raise StoreError('gateway_scope_denied')
+        if operation in {'outside_write','outside_command'} and not scopes:
+            raise StoreError('gateway_scope_denied')  # writing workers only
         role=db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',(channel.attempt_id,)).fetchone() if channel.attempt_id else None
         if operation=='command_run' and (channel.role=='coordinator' or (role and 'consultant' in role['role_id'])):
             raise StoreError('gateway_command_denied')
@@ -256,7 +325,17 @@ def dispatch(store,channel,operation,args):
             result=project_git_evidence(store,channel.task_id,owner,root,args['kind'])
         elif operation=='command_run':
             result=_command(store,channel,root,scopes,args,ref,owner,effects)
+        elif operation in {'outside_write','outside_command'}:
+            result=_outside(store,channel,root,operation,args,ref,owner,effects)
         else:
+            if operation=='project_delete':
+                # A deletion is the user's to confirm (never inside the
+                # write transaction below: the wait is a person's).
+                from . import consent
+                def still_allowed():
+                    with store.connection() as db: _authority(db,channel)
+                if not consent.request(store,channel,'project_delete',args['path'],still_allowed=still_allowed):
+                    raise StoreError('deletion_not_confirmed')
             with store.connection() as db:
                 db.execute('BEGIN IMMEDIATE')
                 scopes,owner=_authority(db,channel)

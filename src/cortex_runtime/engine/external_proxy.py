@@ -125,6 +125,8 @@ def main():
             command[index:index]=grants
             if config.get('network') is True:
                 allow_network(command)
+            from cortex_runtime.orchestration.sandbox import compact_argv
+            command,fds=compact_argv(command,fds)
             child=subprocess.Popen(command,pass_fds=fds,stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL,bufsize=0,env={'PATH':'/usr/bin:/bin'})
             stopped=threading.Event()

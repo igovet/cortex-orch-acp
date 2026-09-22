@@ -51,7 +51,8 @@ def retry_lost(runtime,task_id,node):
         attempts=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'",(task_id,)).fetchall()
         count=sum(json.loads(row[0]).get('node')==node['node_id'] and json.loads(row[0]).get('revision')==node['revision'] for row in attempts)
         if count>=MAX_ATTEMPT_RETRIES:
-            raise StoreError('worker_retry_limit')
+            # Carry the last cause, so the user is asked about what failed.
+            raise StoreError('worker_retry_limit'+(':'+reason if reason else ''))
         if provision:
             receipts=db.execute("SELECT r.result_json FROM runtime_requests r JOIN trusted_channels c ON c.channel_id=r.actor "
                                 "WHERE r.task_id=? AND c.attempt_id=? AND r.operation IN ('command_run','project_write','project_mkdir','project_delete','draft_write','external_call')",

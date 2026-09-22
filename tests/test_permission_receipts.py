@@ -32,8 +32,10 @@ def test_mutation_replay_does_not_repeat_or_replace_content(worker):
     with pytest.raises(StoreError,match='request_key_conflict'):dispatch(store,ch,'project_write',dict(args,content='changed'))
 
 
-def test_delete_checks_exact_content_and_replays_receipt(worker):
+def test_delete_checks_exact_content_and_replays_receipt(worker,monkeypatch):
     import hashlib
+    from cortex_runtime.orchestration import consent
+    monkeypatch.setattr(consent,'request',lambda *a,**k: True)  # the user allowed it
     store,ch,directory=worker;target=directory/'sentinel';target.write_text('keep')
     args=dict(path=str(target.relative_to(store.project_root)),expected_sha256=hashlib.sha256(b'keep').hexdigest(),request_key='delete')
     assert dispatch(store,ch,'project_delete',args)==dict(deleted=True)
@@ -62,3 +64,45 @@ def test_rejected_precondition_receipt_is_stable(worker):
     target.unlink()
     with pytest.raises(StoreError,match='gateway_write_conflict'):dispatch(store,ch,'project_write',args)
     assert not target.exists()
+
+
+def test_a_deletion_the_user_did_not_allow_keeps_the_file(worker,monkeypatch):
+    import hashlib
+    from cortex_runtime.orchestration import consent
+    monkeypatch.setattr(consent,'request',lambda *a,**k: False)
+    store,ch,directory=worker;target=directory/'sentinel';target.write_text('keep')
+    args=dict(path=str(target.relative_to(store.project_root)),expected_sha256=hashlib.sha256(b'keep').hexdigest(),request_key='delete')
+    with pytest.raises(StoreError,match='deletion_not_confirmed'):
+        dispatch(store,ch,'project_delete',args)
+    assert target.read_text()=='keep'
+
+
+def test_outside_actions_run_only_after_the_user_allows_them_on_a_card(worker,tmp_path):
+    """Outside the project the sandbox is read-only: a write or a command
+    there waits for the user's card, and runs as the user when allowed."""
+    import threading, time
+    from cortex_runtime.orchestration import consent
+    store,ch,directory=worker
+    outside=tmp_path.parent/(tmp_path.name+'-outside.txt')
+    cards=[]
+    class Runtime:
+        _store=store
+        def permission_requester_for_task(self,task_id):
+            def ask(engine_session_id,params,timeout):
+                cards.append(params['toolCall']['title'])
+                return {'outcome':{'outcome':'selected','optionId':'allow' if 'outside' in params['toolCall']['title'] else 'deny'}}
+            return ask
+    stop=threading.Event()
+    def controller():
+        while not stop.is_set():
+            consent.relay(Runtime(),ch.task_id,'en'); time.sleep(.05)
+    threading.Thread(target=controller,daemon=True).start()
+    try:
+        with pytest.raises(StoreError,match='outside_path_inside_project'):
+            dispatch(store,ch,'outside_write',dict(path=str(directory/'x'),content='x',request_key='in'))
+        assert dispatch(store,ch,'outside_write',dict(path=str(outside),content='hi',request_key='w'))['byte_count']==2
+        assert outside.read_text()=='hi' and any(str(outside) in card for card in cards)
+        done=dispatch(store,ch,'outside_command',dict(argv=['echo','hello'],request_key='c'))
+        assert done['exit_code']==0 and 'hello' in done['output']
+    finally:
+        stop.set(); outside.unlink(missing_ok=True)

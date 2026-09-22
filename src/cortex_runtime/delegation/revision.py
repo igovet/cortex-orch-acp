@@ -520,50 +520,89 @@ def _walk(root: str, budget: dict, deadline: float, records: list, *, parent_fd=
         os.close(fd)
 
 
-def _git_listed_paths(root: str):
-    """``(files, dirs)`` git would consider: tracked plus untracked files that
-    are not ignored -- or ``None`` (not a plain git repository, or git failed),
-    which falls back to walking everything.
+def git_metadata_dirs(root: str) -> list[str] | None:
+    """The git metadata directories a read-only git needs for ``root``: its
+    ``.git`` directory, or for a worktree the ``gitdir:`` target plus the
+    shared ``commondir`` -- or ``None`` when ``root`` is not a git checkout or
+    something where git reads is not a regular file (a planted FIFO would
+    stall it)."""
+    import stat as _stat
+    dot = os.path.join(root, ".git")
+    try:
+        if os.path.islink(dot):
+            return None
+        if os.path.isdir(dot):
+            gitdir = dot
+        elif os.path.isfile(dot):
+            with open(dot, "rb") as stream:
+                line = stream.read(4096).decode("utf-8", "replace").strip()
+            if not line.startswith("gitdir:"):
+                return None
+            gitdir = os.path.normpath(os.path.join(root, line[len("gitdir:"):].strip()))
+        else:
+            return None
+        dirs = [gitdir]
+        common = os.path.join(gitdir, "commondir")
+        if os.path.isfile(common) and not os.path.islink(common):
+            with open(common, "rb") as stream:
+                target = stream.read(4096).decode("utf-8", "replace").strip()
+            dirs.append(os.path.normpath(os.path.join(gitdir, target)))
+        for directory in dirs:
+            if not os.path.isdir(directory) or os.path.islink(directory):
+                return None
+        for directory in dirs:
+            for name in ("HEAD", "index", "config", "packed-refs", os.path.join("info", "exclude")):
+                try:
+                    mode = os.lstat(os.path.join(directory, name)).st_mode
+                except FileNotFoundError:
+                    continue
+                if not _stat.S_ISREG(mode):
+                    return None
+    except OSError:
+        return None
+    return list(dict.fromkeys(dirs))
 
-    A project of any size, with databases, docker volumes or build output in
-    its tree, is bounded by what its own .gitignore already excludes. git runs
-    read-only in the verification sandbox (no network, no home), with
-    fsmonitor and hooks disabled; ``ls-files`` runs no content filters.
-    """
+
+def sandboxed_git(root: str, args: list[str], timeout: float = 20) -> bytes | None:
+    """stdout of a read-only ``git <args>`` in the verification sandbox (no
+    network, no home, fsmonitor and hooks off), or ``None`` when ``root`` is
+    not a usable git checkout or git failed."""
     import subprocess
     import tempfile
     from ..orchestration.sandbox import verification_command
-    metadata = os.path.join(root, ".git")
-    if not os.path.isdir(metadata) or os.path.islink(metadata):
+    metadata = git_metadata_dirs(root)
+    if metadata is None:
         return None
-    # A FIFO or device planted where git reads would stall it: only regular
-    # files (or nothing) there, else fall back to the plain walk.
-    import stat as _stat
-    for name in ("HEAD", "index", "config", "packed-refs", os.path.join("info", "exclude")):
-        try:
-            mode = os.lstat(os.path.join(metadata, name)).st_mode
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return None
-        if not _stat.S_ISREG(mode):
-            return None
-    argv = ["/usr/bin/git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-            "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."]
+    argv = ["/usr/bin/git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args]
     try:
-        with tempfile.TemporaryDirectory(prefix="cortex-revision-git-") as scratch:
+        with tempfile.TemporaryDirectory(prefix="cortex-git-") as scratch:
             command = verification_command(root, scratch, argv)
             index = command.index("--chdir")
-            command[index:index] = ["--ro-bind", metadata, metadata, "--setenv", "GIT_CONFIG_NOSYSTEM", "1",
-                                    "--setenv", "GIT_CONFIG_GLOBAL", "/dev/null"]
+            binds = [arg for directory in metadata for arg in ("--ro-bind", directory, directory)]
+            # Explicit: the sandbox masks .git itself (a worktree's pointer file).
+            command[index:index] = [*binds, "--setenv", "GIT_DIR", metadata[0], "--setenv", "GIT_WORK_TREE", str(root),
+                                    "--setenv", "GIT_CONFIG_NOSYSTEM", "1",
+                                    "--setenv", "GIT_CONFIG_GLOBAL", "/dev/null", "--setenv", "GIT_TERMINAL_PROMPT", "0"]
             done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                  env={"PATH": "/usr/bin:/bin"}, timeout=20)
-    except Exception:  # noqa: BLE001 - any failure falls back to the full walk
+                                  env={"PATH": "/usr/bin:/bin"}, timeout=timeout)
+    except Exception:  # noqa: BLE001 - callers fall back
         return None
-    if done.returncode != 0:
+    return done.stdout if done.returncode == 0 else None
+
+
+def _git_listed_paths(root: str):
+    """``(files, dirs)`` git would consider: tracked plus untracked files that
+    are not ignored -- or ``None``, which falls back to walking everything.
+
+    A project of any size, with databases, docker volumes or build output in
+    its tree, is bounded by what its own .gitignore already excludes.
+    ``ls-files`` runs no content filters.
+    """
+    out = sandboxed_git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."])
+    if out is None:
         return None
     files, dirs = set(), set()
-    for raw in done.stdout.split(b"\0"):
+    for raw in out.split(b"\0"):
         if not raw:
             continue
         path = raw.decode("utf-8", "surrogateescape")
@@ -572,6 +611,33 @@ def _git_listed_paths(root: str):
         for depth in range(1, len(parts)):
             dirs.add("/".join(parts[:depth]))
     return files, dirs
+
+
+def ignored_directories(root: str) -> list[str]:
+    """Existing directories the project itself treats as disposable -- git-
+    ignored ones (caches, builds, installed dependencies), or without git the
+    known dependency/cache directory names near the top. A verification
+    command may write only there."""
+    out = sandboxed_git(root, ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--", "."])
+    found = []
+    if out is not None:
+        for raw in out.split(b"\0"):
+            path = raw.decode("utf-8", "surrogateescape")
+            if path.endswith("/"):
+                found.append(path.rstrip("/"))
+    else:
+        for top in sorted(os.listdir(root)):
+            candidates = [top] + ([f"{top}/{child}" for child in sorted(os.listdir(os.path.join(root, top)))]
+                                  if os.path.isdir(os.path.join(root, top)) and not os.path.islink(os.path.join(root, top)) else [])
+            found += [path for path in candidates if path.split("/")[-1] in _EXCLUDED_ANY_DEPTH]
+    from ..orchestration.gateway import PRIVATE
+    kept = []
+    for path in sorted(set(found)):
+        if (set(path.split("/")) & (PRIVATE | _EXCLUDED_TOP_LEVEL) or any(path.startswith(k + "/") for k in kept)
+                or not os.path.isdir(os.path.join(root, path)) or os.path.islink(os.path.join(root, path))):
+            continue
+        kept.append(path)
+    return kept
 
 
 def _tree_digest(root) -> tuple[str | None, str | None, list[str] | None]:

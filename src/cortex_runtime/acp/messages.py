@@ -224,6 +224,30 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "old workers could not be confirmed stopped",
         "ru": "не удалось подтвердить остановку прежних исполнителей",
     },
+    "stop_reason.worker_retry_limit": {
+        "en": "a worker failed to start or run three times in a row ({detail})",
+        "ru": "исполнитель трижды подряд не смог запуститься или отработать ({detail})",
+    },
+    "stop_reason.worker_failure_not_retryable": {
+        "en": "a worker failed in a way retrying cannot fix ({detail})",
+        "ru": "исполнитель упал так, что повтор не поможет ({detail})",
+    },
+    "stop_reason.lost_worker_action_outcome_unknown": {
+        "en": "a lost worker may have left an action half-done",
+        "ru": "потерянный исполнитель мог оставить действие незавершённым",
+    },
+    "stop_reason.review_revision_unavailable": {
+        "en": "the project state could not be captured for review",
+        "ru": "не удалось зафиксировать состояние проекта для ревью",
+    },
+    "stop_reason.no_runnable_nodes": {
+        "en": "no remaining task in the plan can run",
+        "ru": "ни одна оставшаяся задача плана не может запуститься",
+    },
+    "stop_reason.verification_revision_unavailable": {
+        "en": "the project state could not be captured for verification",
+        "ru": "не удалось зафиксировать состояние проекта для проверки",
+    },
     "stop_reason.verification_review_revision_changed": {
         "en": "the project changed after review",
         "ru": "проект изменился после ревью",

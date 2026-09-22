@@ -46,9 +46,11 @@ def project_git_evidence(store, task_id, owner_scope, root, kind):
     import tempfile
     from .sandbox import verification_command
     from ..recovery.large_output_store import persist_output
+    from ..delegation.revision import git_metadata_dirs
     root = Path(root).resolve(strict=True)
-    metadata = root / '.git'
-    if not metadata.is_dir() or metadata.is_symlink():
+    # A .git directory, or a worktree's gitdir pointer and its common dir.
+    metadata = git_metadata_dirs(str(root))
+    if metadata is None:
         return dict(available=False, diagnostic='git_directory_unavailable', kind=kind)
     # Fixed executable and argv, no pager, hooks, fsmonitor, external diff or
     # text conversion. The child's root and project are read-only, with no home.
@@ -62,7 +64,8 @@ def project_git_evidence(store, task_id, owner_scope, root, kind):
     with tempfile.TemporaryDirectory(prefix='cortex-git-read-') as scratch:
         command = verification_command(root, scratch, argv)
         index = command.index('--chdir')
-        command[index:index] = ['--ro-bind', str(metadata), str(metadata),
+        command[index:index] = [*(arg for directory in metadata for arg in ('--ro-bind', directory, directory)),
+                               '--setenv', 'GIT_DIR', metadata[0], '--setenv', 'GIT_WORK_TREE', str(root),
                                '--setenv', 'GIT_CONFIG_NOSYSTEM', '1',
                                '--setenv', 'GIT_CONFIG_GLOBAL', '/dev/null',
                                '--setenv', 'GIT_TERMINAL_PROMPT', '0']
