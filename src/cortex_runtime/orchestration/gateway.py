@@ -79,16 +79,21 @@ def _parent(root, value):
         os.close(fd)
 
 
-def _authority(db, channel):
-    task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
+def channel_authority(db, channel):
+    """The channel itself is live: not revoked, not expired, current owner."""
     token = db.execute('SELECT revoked_at,expires_at FROM trusted_channels WHERE channel_id=?', (channel.channel_id,)).fetchone()
     from .state import now
-    if not task or task['state'] in TERMINAL | {'BLOCKED','RECOVERING','WAITING_USER'}:
-        raise StoreError('gateway_task_inactive')
     if not token or token['revoked_at'] or (token['expires_at'] and token['expires_at'] <= now()):
         raise StoreError('gateway_channel_inactive')
     if current_owner_epoch(db, channel.task_id) != channel.owner_epoch:
         raise StoreError('stale_ownership_epoch')
+
+
+def _authority(db, channel):
+    task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
+    if not task or task['state'] in TERMINAL | {'BLOCKED','RECOVERING','WAITING_USER'}:
+        raise StoreError('gateway_task_inactive')
+    channel_authority(db, channel)
     if channel.role == 'coordinator':
         return [], 'coordinator'
     node = db.execute('SELECT n.* FROM runtime_nodes n JOIN delegation_provisioning p '

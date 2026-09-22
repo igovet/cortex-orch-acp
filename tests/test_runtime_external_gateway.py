@@ -191,3 +191,25 @@ for line in sys.stdin:
                 assert result['tls'] is (granted and Path('/etc/ssl/certs/ca-certificates.crt').is_file())
             finally: close(proc)
     finally: listener.close()
+
+
+def test_coordinator_relay_starts_before_the_task_row_and_survives_recovery(tmp_path):
+    """The coordinator session (and its relay) opens before runtime_tasks has a
+    row; the relay used to exit 65 and the engine never restarted it."""
+    root=tmp_path/'project';root.mkdir()
+    store=Store(root/'.cortex',project_root=root)
+    task=bootstrap_task(store,SourceEvent(origin='external-test',event_id='early'),'Inspect','owner')
+    script=tmp_path/'server.py';script.write_text(SERVER)
+    config=dict(name='fixture',command='/usr/bin/python3',args=['-B',str(script)],allowed_tools=['inspect'],
+                read_only_tools=['inspect'],coordinator_tools=['inspect'],read_paths=[str(script)])
+    path=Path(__file__).resolve().parents[1]/'src/cortex_runtime/engine/external_proxy.py'
+    env=dict(PATH='/usr/bin:/bin',PYTHONDONTWRITEBYTECODE='1',CORTEX_CHANNEL_PROJECT_ROOT=str(root),
+             CORTEX_CHANNEL_ID=task.channel_id,CORTEX_CHANNEL_SECRET=task.secret,CORTEX_EXTERNAL_SERVER=json.dumps(config))
+    proc=subprocess.Popen([sys.executable,'-B',str(path)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=env,bufsize=0)
+    try:
+        assert 'result' in call(proc,1,'initialize')
+        assert [t['name'] for t in call(proc,2,'tools/list')['result']['tools']]==['inspect']
+        machine=TaskMachine(store);machine.create(task.task_id,'Inspect')
+        machine.move(task.task_id,'RECOVERING')
+        assert 'result' in call(proc,3,'tools/list')
+    finally: close(proc)

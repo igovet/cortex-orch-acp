@@ -18,7 +18,7 @@ import time
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
 from cortex_runtime.store import Store
 from cortex_runtime.trusted_channel import resolve_channel
-from cortex_runtime.orchestration.gateway import _authority, PRIVATE, READ_ONLY
+from cortex_runtime.orchestration.gateway import _authority, channel_authority, PRIVATE, READ_ONLY
 from cortex_runtime.orchestration.sandbox import allow_network, gateway_command
 from cortex_runtime.orchestration.state import event, encoded
 from cortex_runtime.contracts import StoreError
@@ -81,8 +81,20 @@ def main():
     allowed=config.get('allowed_tools')
     if not isinstance(allowed,list) or not allowed or any(not isinstance(n,str) or not n for n in allowed):
         raise StoreError('external_mcp_explicit_tool_grants_required')
+    def authorize(db):
+        # A coordinator's lookups are read-only and live as long as its
+        # channel: its session (and this relay) opens before the runtime
+        # task row exists and outlives RECOVERING/WAITING_USER, and an engine
+        # never restarts a dead MCP server. Workers stay bound to their node.
+        if channel.role=='coordinator':
+            channel_authority(db,channel)
+            task=db.execute('SELECT state FROM runtime_tasks WHERE task_id=?',(channel.task_id,)).fetchone()
+            if task and task['state'] in {'CANCELLED','FAILED'}:
+                raise StoreError('gateway_task_inactive')
+            return [],'coordinator'
+        return _authority(db,channel)
     with store.connection() as db:
-        scopes,owner=_authority(db,channel)
+        scopes,owner=authorize(db)
         role=db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',(channel.attempt_id,)).fetchone()
         if channel.role=='coordinator' or role and role[0] in READ_ONLY:
             allowed=[tool for tool in allowed if tool in config.get('read_only_tools',[])]
@@ -120,7 +132,7 @@ def main():
             def monitor():
                 while not stopped.wait(.05) and child.poll() is None:
                     try:
-                        with store.connection() as db: _authority(db,channel)
+                        with store.connection() as db: authorize(db)
                     except Exception:
                         child.kill();return
             watcher=threading.Thread(target=monitor,daemon=True);watcher.start()
@@ -129,7 +141,7 @@ def main():
                     request=json.loads(line)
                     method=request.get('method');identifier=request.get('id')
                     try:
-                        with store.connection() as db: _authority(db,channel)
+                        with store.connection() as db: authorize(db)
                         if method not in {'initialize','notifications/initialized','ping','tools/list','tools/call','notifications/cancelled'}:
                             raise StoreError('external_mcp_method_denied')
                         tool=request.get('params',{}).get('name')
@@ -139,7 +151,7 @@ def main():
                             if tool not in allowed: raise StoreError('external_mcp_tool_denied')
                             with store.connection() as db:
                                 db.execute('BEGIN IMMEDIATE')
-                                _authority(db,channel)
+                                authorize(db)
                                 previous=db.execute('SELECT * FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
                                                     (channel.task_id,channel.channel_id,receipt_key)).fetchone()
                                 if previous:
@@ -155,7 +167,7 @@ def main():
                                 db.commit()
                         with store.connection() as db:
                             db.execute('BEGIN IMMEDIATE')
-                            _authority(db,channel)
+                            authorize(db)
                             write_frame(child.stdin,line,time.monotonic()+5)
                             db.commit()
                         if identifier is None: continue
@@ -197,6 +209,7 @@ def main():
 
 if __name__=='__main__':
     try: main()
-    except Exception:
-        print('cortex external MCP gateway refused startup',file=sys.stderr)
+    except Exception as error:
+        # Name the reason: a bare refusal hid a coordinator relay dying on every session.
+        print(f'cortex external MCP gateway refused startup: {type(error).__name__}: {error}',file=sys.stderr)
         raise SystemExit(65)
