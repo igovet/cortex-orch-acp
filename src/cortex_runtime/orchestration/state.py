@@ -435,8 +435,14 @@ class TaskMachine:
             result = dict(result, report_digest=report_digest(self.store, task_id, report['filename']))
             checks = result.get('checks', [])
             from .gateway import verified_check
-            failed = any(c.get('outcome') != 'passed' or
-                         not verified_check(db, task_id, provision['attempt_id'], c.get('tool_call_ref'))
+            # A check that failed, or a pass without its own verified run,
+            # fails the node. not_run/unverified are honest disclosures, not
+            # failures: an investigation's evidence steps are rarely runtime
+            # command_run receipts, and failing on them stopped every one.
+            # They stay in the result for review, verification and synthesis.
+            failed = any(c.get('outcome') == 'failed' or
+                         (c.get('outcome') == 'passed' and
+                          not verified_check(db, task_id, provision['attempt_id'], c.get('tool_call_ref')))
                          for c in checks)
             status = 'failed' if failed else 'completed'
             if node['stage'] == 'review' and result.get('verdict') not in {'APPROVE', 'REQUEST_CHANGES', 'BLOCK'}:

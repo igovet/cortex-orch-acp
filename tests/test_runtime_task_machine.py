@@ -484,3 +484,11 @@ def test_plan_complexity_is_optional_and_bounded(machine):
         state.submit_plan(channel, bad, 'bad')
     light = plan(); light['tasks'][0]['complexity'] = 'low'
     state.submit_plan(channel, light, 'ok')
+
+
+def test_a_task_that_failed_before_stops_became_questions_reopens_on_a_new_message(machine):
+    from cortex_runtime.orchestration.policy import steer
+    state, channel = machine
+    state.move(channel.task_id, 'FAILED', blocker='coordinator_turn_failed:refusal')
+    assert steer(state.store, channel.task_id, 'Try again, please.', 'user:test:1')
+    assert state.context(channel.task_id)['state'] == 'RECOVERING'

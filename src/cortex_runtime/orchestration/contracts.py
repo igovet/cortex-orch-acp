@@ -43,7 +43,7 @@ RESULT = obj(dict(
     summary=text('Summary of the result.', 4000),
     verdict=dict(type='string', enum=['APPROVE', 'REQUEST_CHANGES', 'BLOCK'], description='Required for the runtime reviewer; other roles must omit.'),
     checks=array(obj(dict(name=text('Check name.',200), outcome=dict(type='string', enum=['passed','failed','not_run','unverified']),
-                         tool_call_ref=text('Exact tool_call_ref returned by command_run in this attempt. A passed claim requires the retained complete command result with exit code zero.',128)), required=['name','outcome']), maximum=20),
+                         tool_call_ref=text('Exact tool_call_ref returned by command_run in this attempt (strongest evidence). Omit it for a check you ran with your own shell: a passed claim is then accepted when this attempt ran a shell command that completed.',128)), required=['name','outcome']), maximum=20),
     request_key=text('Unique result delivery key.',128),
 ), required=['report_ref','summary','checks','request_key'])
 RESULT['properties']['report_ref']['pattern'] = r'^r_[0-9a-f]{12}$'
@@ -53,7 +53,7 @@ REQUESTS = {
     'escalation_request': obj(dict(reason=text('Problem requiring independent senior consultation. Runtime retains configured model/effort policy.'),request_key=text('Unique proposal identity.',128))),
 }
 COORDINATOR.update(REQUESTS)
-RESULT['properties']['checks']['description'] = 'Executed automated checks with retained command evidence. Every passed item needs its own supporting tool_call_ref; descriptive review observations belong in the report. Failed, not_run or unverified checks block completion.'
+RESULT['properties']['checks']['description'] = 'Executed automated checks with retained command evidence. Every passed item needs its own supporting tool_call_ref; descriptive review observations belong in the report. A failed check fails the assignment; not_run or unverified checks are retained as disclosed gaps for review and synthesis.'
 WORKER = {'result_submit': RESULT, **REQUESTS}
 
 

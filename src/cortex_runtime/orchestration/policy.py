@@ -52,10 +52,12 @@ def steer(store,task_id,text,identity):
         if not task: return False
         existing=db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND type='USER_STEERING' AND actor=?",(task_id,identity)).fetchone()
         if existing: return False
-        if task['state'] in {'CANCELLED','FAILED'}: return False
+        if task['state']=='CANCELLED': return False
         # A new user request can extend completed work; it creates a new plan
         # revision and invalidates the prior completion, never edits its report.
-        if task['state']=='COMPLETED':
+        # A task that FAILED before failures became questions reopens the same
+        # way instead of ignoring every later message.
+        if task['state'] in {'COMPLETED','FAILED'}:
             db.execute("UPDATE runtime_tasks SET state='RECOVERING',synthesis=NULL,blocker=NULL WHERE task_id=?",(task_id,))
             event(db,task_id,'TASK_REOPENED',{},identity)
         elif task['state']!='RECOVERING':

@@ -66,7 +66,13 @@ def resolve_check_tx(db, attempt_id: str, tool_call_ref: str | None) -> str:
     evidence lookup and finalization.
     """
     if not tool_call_ref:
-        return "claimed"
+        # Uncited: engine_reported when this attempt ran a shell command
+        # that completed (see orchestration.gateway.verified_check).
+        ran = db.execute(
+            "SELECT 1 FROM tool_result_observations WHERE attempt_id=? AND kind='execute' AND status='completed' LIMIT 1",
+            (attempt_id,),
+        ).fetchone()
+        return "engine_reported" if ran else "claimed"
     row = db.execute(
         "SELECT status FROM tool_result_observations "
         "WHERE attempt_id=? AND tool_call_ref=? ORDER BY id DESC LIMIT 1",

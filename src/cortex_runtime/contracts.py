@@ -261,7 +261,7 @@ ERROR_HELP = {
     "coordinator_only": "Only the bound coordinator can change Cortex participation state.",
     "invalid_source_revision": "Use an existing requirements source revision actually used by the report.",
     "acceptance_refused": "The task is not ready for acceptance. Read correction for the exact missing evidence or pending event; an identical retry cannot resolve it.",
-    "check_evidence_required": "A passed automated check requires a complete successful command receipt from this worker attempt. Correct the evidence before submitting the result.",
+    "check_evidence_required": "A passed check needs a command this worker attempt actually ran: a complete zero-exit command_run receipt, or a completed shell command of your own. Run the check, or mark it not_run or unverified.",
     "gateway_path_not_found": "The requested project path does not exist. No file was changed.",
     "gateway_command_denied": "This channel cannot execute commands. Coordinators answer informational questions using project reads; execution belongs to scoped workers for requested work.",
     "gateway_read_failure": "The requested project path could not be read. No file was changed.",

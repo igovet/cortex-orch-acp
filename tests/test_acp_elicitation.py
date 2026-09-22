@@ -36,7 +36,7 @@ def test_paseo_question_bridge_uses_core_permission_choice_schema():
     seen = {}
 
     class Requester:
-        def request(self, method, params, timeout):
+        def request(self, method, params, timeout, cancelled=None, id_suffix=None):
             seen.update(method=method, params=params, timeout=timeout)
             option_id = "cortex-question-2" if len(params["options"]) > 1 else "cortex-question-1"
             return {"outcome": {"outcome": "selected", "optionId": option_id}}
@@ -53,6 +53,35 @@ def test_paseo_question_bridge_uses_core_permission_choice_schema():
         "__cortex_question": True, "questionId": "pq-durable", "question": "Pick",
     }
     _schema_validator("RequestPermissionRequest").validate(seen["params"])
+
+
+def test_paseo_question_card_waits_for_the_user_and_a_typed_message_answers_it():
+    """A 30 s timeout ended the turn while Paseo kept the card; a later Submit was lost."""
+    import threading, time
+    from cortex_runtime.acp.host_requests import HostRequester
+
+    class Transport:
+        def send_response(self, body, timeout=None):
+            return True
+
+    waiter = {}
+    requester = HostRequester(Transport())
+    elicitor = _PaseoQuestionElicitor(requester, session_id="sess-1", timeout=0.05,
+                                      register=lambda deliver: waiter.__setitem__("deliver", deliver))
+    result = {}
+    thread = threading.Thread(target=lambda: result.update(answer=elicitor.elicit("s", "Next?", ["Continue", "Finish"])))
+    thread.start()
+    time.sleep(0.3)  # well past the old host timeout: still waiting for the person
+    assert thread.is_alive() and waiter["deliver"] is not None
+    waiter["deliver"][1]("2")
+    thread.join(2)
+    assert result["answer"] == "Finish" and waiter["deliver"] is None
+
+    cancel = threading.Event()
+    elicitor = _PaseoQuestionElicitor(requester, session_id="sess-1", cancel_event=cancel)
+    thread = threading.Thread(target=lambda: result.update(cancelled=elicitor.elicit("s", "Next?", ["A", "B"])))
+    thread.start(); cancel.set(); thread.join(2)
+    assert not thread.is_alive() and result["cancelled"] is None
 
 
 def test_paseo_env_enables_bridge_without_elicitation_capability():
@@ -358,3 +387,68 @@ def test_elicitation_timeout_constructor_param_is_validated_bounded(tmp_path):
         Agent(FakeRuntime(), elicitation_timeout_seconds=10_000.0)
     with pytest.raises(ValueError):
         Agent(FakeRuntime(), elicitation_timeout_seconds=-1.0)
+
+
+def test_a_card_answered_after_its_wait_ended_is_still_delivered_to_its_question():
+    """A Submit after timeout, cancel, reconnect or restart was dropped."""
+    import json as _json
+    from cortex_runtime.acp.host_requests import HostRequester, HostRequestTimeout
+
+    sent = []
+
+    class Transport:
+        def send_response(self, body, timeout=None):
+            sent.append(body); return True
+
+    late = []
+    first, second = HostRequester(Transport()), HostRequester(Transport())
+    first.on_late = lambda request_id, message: late.append((request_id, message))
+    with pytest.raises(HostRequestTimeout):
+        first.request("session/request_permission", {}, timeout=0.01, id_suffix="q.pq_abc123")
+    request_id = sent[-1]["id"]
+    assert request_id.endswith("_q.pq_abc123")
+    second.request  # a new connection's ids never collide with the old one's
+    assert not request_id.startswith(f"hr_{second._nonce}_")
+    reply = {"jsonrpc": "2.0", "id": request_id, "result": {"outcome": {"outcome": "selected", "optionId": "cortex-question-2"}}}
+    assert first.handle_response(reply)
+    assert late == [(request_id, reply)]
+
+    started = []
+    agent = Agent.__new__(Agent)
+    agent.environ = {}
+    agent.sessions = {"s1": {"task_id": "t_1", "project": "/p"}}
+    agent._store_for = lambda project: "store"
+    agent._run_late_answer = lambda *args: started.append(args)
+    import cortex_runtime.acp.agent as agent_module
+    original = agent_module.acp_questions_store.get
+    agent_module.acp_questions_store.get = lambda store, qid: type("Q", (), dict(id=qid, task_id="t_1", options=["A", "B"]))()
+    try:
+        agent._on_late_host_response(request_id, reply)
+        import time as _time
+        for _ in range(50):
+            if started: break
+            _time.sleep(0.01)
+    finally:
+        agent_module.acp_questions_store.get = original
+    assert started and started[0][0] == "s1" and started[0][2].id == "pq_abc123" and started[0][3] == "2"
+
+
+def test_a_late_click_on_a_stale_card_never_answers_the_question_now_waiting():
+    import threading as _threading
+    import cortex_runtime.acp.agent as agent_module
+    delivered, recorded = [], []
+    session = {"lock": _threading.Lock(), "active": _threading.Event(), "project": "/p", "task_id": "t_1",
+               "question_waiter": ("pq_second", lambda text: delivered.append(text) or True)}
+    agent = Agent.__new__(Agent)
+    agent._store_for = lambda project: "store"
+    original = agent_module.acp_questions_store.answer
+    agent_module.acp_questions_store.answer = lambda store, qid, value, source: recorded.append((qid, value)) or False
+    try:
+        stale = type("Q", (), dict(id="pq_first", task_id="t_1", options=["A", "B"]))()
+        agent._run_late_answer("s1", session, stale, "2")
+        assert delivered == [] and recorded == [("pq_first", "B")]
+        current = type("Q", (), dict(id="pq_second", task_id="t_1", options=["C", "D"]))()
+        agent._run_late_answer("s1", session, current, "1")
+        assert delivered == ["1"]
+    finally:
+        agent_module.acp_questions_store.answer = original

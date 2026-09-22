@@ -60,9 +60,9 @@ def dispatch(store, channel, operation, args):
                     ):
                         raise StoreError('check_evidence_required',
                             f'arguments.checks[{index}].tool_call_ref', 'missing or unverified',
-                            'this attempt’s complete command_run receipt with exit_code 0',
-                            'Use the exact tool_call_ref from a successful command_run that actually checked this claim. '
-                            'Unexecuted or unresolved checks must be not_run or unverified and block completion. '
+                            'a command this attempt ran: a zero-exit command_run receipt or a completed shell command of your own',
+                            'Cite the exact command_run tool_call_ref, or omit tool_call_ref for a check you ran with your own shell. '
+                            'Unexecuted or unresolved checks must be not_run or unverified; they are retained as disclosed gaps. '
                             'Descriptive review observations belong in the report, not automated checks.')
                 db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
                            (channel.task_id, args['request_key'], channel.channel_id, operation, digest,

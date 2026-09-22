@@ -113,6 +113,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
     published_states = set()
     capacity_wait_started = None
     failure_stop_reason = StopReason.END_TURN
+    reopened = False
     while True:
         if cancel_event.is_set():
             _pause_turn(runtime,task_id,machine,emit_tool_call)
@@ -133,6 +134,12 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                     runtime._cancel_assignment(task_id,node['assignment_ref'],'replanning',emit_tool_call=emit_tool_call)
             with runtime._store.connection() as db:
                 attempts=db.execute("SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",(task_id,)).fetchall()
+            # Finish off what is still owned before judging it: otherwise an
+            # answer to the resulting question re-enters this same check forever.
+            for row in attempts:
+                if runtime._engine.lookup_owned(row['attempt_id']) != 'absent':
+                    try: runtime._engine.terminate_owned(row['attempt_id'])
+                    except Exception: pass
             if any(runtime._engine.lookup_owned(row['attempt_id']) != 'absent' for row in attempts):
                 machine.move(task_id,'BLOCKED',blocker='replanning_worker_termination_unconfirmed')
             else:
@@ -159,7 +166,8 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                        'Runtime schedules planned workers and mandatory review. '
                        + _released_request(runtime, task_id)
                        if state == 'PLANNING' else
-                       'Reconcile the retained results and runtime verification, then submit synthesis. Runtime decides completion. ')
+                       'Reconcile the retained results and runtime verification, then submit synthesis. State plainly every not_run or unverified '
+                       'worker check as a gap the user should know about. Runtime decides completion. ')
             delivery_marker=f'runtime-coordinator:{time.monotonic_ns()}'
             pending_events=events.claim_unconsumed(runtime._store,task_id,delivery_marker)
             from ..acp import messages as localized_messages
@@ -201,8 +209,10 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 streamed.append(text)
                 safe = redactor.push(text)
                 return emit_update(safe) if safe else True
+            tool_seen = []
             def on_tool(*args):
                 nonlocal answer_pending
+                tool_seen.append(True)
                 answer_pending = machine.context(task_id)['state'] == 'ANSWER_READY'
                 flush()
                 if tool_emitter:
@@ -238,6 +248,20 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                         # message reopens a fresh one via recovery, instead of
                         # reusing the corpse and re-raising this forever.
                         runtime._evict_coordinator_session(task_id, kind)
+                        # A session that died idle between turns did nothing
+                        # with this prompt: reopen once and resend it, so the
+                        # user's message simply runs instead of a question.
+                        if (not reopened and not streamed and not tool_seen
+                                and machine.context(task_id)['state'] == state):
+                            reopened = True
+                            try:
+                                channel, session_ref = runtime._ensure_coordinator(task_id)
+                            except Exception:
+                                pass
+                            else:
+                                events.release_claim(runtime._store, task_id, delivery_marker)
+                                prompted[key] -= 1
+                                continue
                     machine.move(task_id, 'BLOCKED', blocker=str(error) if isinstance(error,StoreError) else ('engine_failure:'+kind if kind else f'coordinator_prompt_failed:{type(error).__name__}'))
                 continue
             if pending_events:

@@ -41,4 +41,28 @@ def test_result_uses_actual_gateway_evidence(tmp_path,case):
         args['checks'][0]['outcome']='failed' if case=='failed' else 'unverified'
     mcp_tools.dispatch(store,worker,'result_submit',args)
     node=next(n for n in TaskMachine(store).context(task.task_id)['nodes'] if n['assignment_ref']==assignment)
-    assert node['status']==('completed' if case=='passed' else 'failed')
+    # Only a real failure fails the node; not_run/unverified are retained disclosures.
+    assert node['status']==('failed' if case=='failed' else 'completed')
+    assert node['result']['checks'][0]['outcome']==args['checks'][0]['outcome']
+
+
+@pytest.mark.parametrize('case',['uncited_ran','cited_completed','cited_failed','no_shell'])
+def test_a_check_the_engine_ran_with_its_own_shell_counts_as_passed(tmp_path,case):
+    from cortex_runtime.delegation.evidence import record_tool_result_observed
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    task=bootstrap_task(store,SourceEvent(origin='evidence',event_id='shell'),'Check','owner')
+    coordinator=resolve_channel(store,task.channel_id,task.secret)
+    worker,assignment=provision_fixture(store,coordinator)
+    report=publish_fixture_report(store,worker)
+    if case!='no_shell':
+        record_tool_result_observed(store,task.task_id,worker.attempt_id,'tc_shell','execute','pytest -q',
+                                    'failed' if case=='cited_failed' else 'completed')
+    check=dict(name='pytest',outcome='passed',**({'tool_call_ref':'tc_shell'} if case.startswith('cited') else {}))
+    args=dict(report_ref=report,summary='Observed',checks=[check],request_key='result')
+    if case in {'cited_failed','no_shell'}:
+        with pytest.raises(StoreError, match='check_evidence_required'):
+            mcp_tools.dispatch(store,worker,'result_submit',args)
+        return
+    mcp_tools.dispatch(store,worker,'result_submit',args)
+    node=next(n for n in TaskMachine(store).context(task.task_id)['nodes'] if n['assignment_ref']==assignment)
+    assert node['status']=='completed'

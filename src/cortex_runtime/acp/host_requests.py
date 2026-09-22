@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import collections
 import itertools
+import secrets
 import threading
 import time
 
@@ -65,11 +66,20 @@ class HostRequester:
         self._timed_out = collections.OrderedDict()
         self._counter = itertools.count(1)
         self._closed = threading.Event()
+        # Unique per requester, so an answer to an earlier connection's
+        # (or process's) request can never be taken for a new one's.
+        self._nonce = secrets.token_hex(4)
+        #: ``(request_id, message)`` for a reply nobody waits for any more
+        #: (timed out, cancelled, or from an earlier connection). The id's
+        #: own ``id_suffix`` says what it answered.
+        self.on_late = None
 
-    def request(self, method: str, params, *, timeout: float = 30.0):
+    def request(self, method: str, params, *, timeout: float = 30.0, cancelled=None, id_suffix: str | None = None):
+        """``cancelled`` (optional, zero-arg) ends the wait early exactly
+        like a timeout: the id is tombstoned and a late reply dropped."""
         if self._closed.is_set():
             raise HostRequestClosed(method)
-        request_id = f"hr_{next(self._counter)}"
+        request_id = f"hr_{self._nonce}_{next(self._counter)}" + (f"_{id_suffix}" if id_suffix else "")
         entry = _Pending()
         with self._lock:
             self._pending[request_id] = entry
@@ -91,7 +101,11 @@ class HostRequester:
             if callable(writer_closed) and writer_closed():
                 raise HostRequestClosed(method)
             raise HostRequestTimeout(method)
-        got = entry.event.wait(max(0.0, deadline - time.monotonic()))
+        while True:
+            remaining = max(0.0, deadline - time.monotonic())
+            got = entry.event.wait(remaining if cancelled is None else min(remaining, 0.2))
+            if got or remaining <= 0 or (cancelled is not None and cancelled()):
+                break
         if not got:
             with self._lock:
                 current = self._pending.get(request_id)
@@ -136,22 +150,31 @@ class HostRequester:
                 was_timed_out = request_id in self._timed_out
                 if was_timed_out:
                     self._timed_out.pop(request_id, None)
-            if was_timed_out:
-                if self._logs is not None:
-                    self._logs.observe("host_request_late_or_duplicate_response", request_id=request_id)
-                return True
             if self._logs is not None:
-                self._logs.observe("host_request_unknown_response_id", request_id=request_id)
+                self._logs.observe("host_request_late_or_duplicate_response" if was_timed_out
+                                   else "host_request_unknown_response_id", request_id=request_id)
+            self._deliver_late(request_id, message)
             return True
         if already_set or entry.timed_out:
             with self._lock:
                 self._pending.pop(request_id, None)
             if self._logs is not None:
                 self._logs.observe("host_request_late_or_duplicate_response", request_id=request_id)
+            if entry.timed_out:
+                self._deliver_late(request_id, message)
             return True
         entry.response = message
         entry.event.set()
         return True
+
+    def _deliver_late(self, request_id, message) -> None:
+        if self.on_late is None:
+            return
+        try:
+            self.on_late(request_id, message)
+        except Exception:
+            # A late reply is best effort; it must never break the reader.
+            pass
 
     def close(self) -> None:
         """Resolve every still-pending call as closed; called on inbound

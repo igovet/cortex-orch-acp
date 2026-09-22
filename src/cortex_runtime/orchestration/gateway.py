@@ -312,8 +312,21 @@ def dispatch(store,channel,operation,args):
 
 
 def verified_check(db,task_id,attempt_id,ref):
-    """A successful native MCP envelope is not proof that its command passed."""
-    if not isinstance(ref,str) or not ref.startswith('gateway:'): return False
+    """Evidence behind a passed check, strongest first.
+
+    A ``gateway:`` ref must be this attempt's complete, zero-exit command_run.
+    A command the engine ran with its own shell counts too -- it executed it
+    within its own tools: a cited engine tool call must have completed in
+    this attempt, and an uncited pass needs at least one completed engine
+    shell run in this attempt. A pass with no command run at all is a claim.
+    """
+    if not isinstance(ref,str) or not ref.startswith('gateway:'):
+        if isinstance(ref,str) and ref:
+            row=db.execute("SELECT status FROM tool_result_observations WHERE attempt_id=? AND tool_call_ref=? ORDER BY id DESC LIMIT 1",
+                           (attempt_id,ref)).fetchone()
+            return bool(row) and row[0]=='completed'
+        return bool(db.execute("SELECT 1 FROM tool_result_observations WHERE attempt_id=? AND kind='execute' AND status='completed' LIMIT 1",
+                               (attempt_id,)).fetchone())
     rows=db.execute("SELECT r.result_json FROM runtime_requests r JOIN trusted_channels c ON c.channel_id=r.actor "
                     "WHERE r.task_id=? AND c.attempt_id=? AND r.operation='command_run'",(task_id,attempt_id))
     matches=[]

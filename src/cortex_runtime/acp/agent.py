@@ -24,6 +24,7 @@ import inspect
 import json
 import sqlite3
 import os
+import re
 import sys
 import threading
 from typing import Mapping
@@ -43,6 +44,7 @@ from .protocol import RpcError
 from .runtime import OrchestrationUnavailable, UnavailableRuntime
 from .transport import StdioTransport, EOF
 from . import replay_store as acp_replay_store
+from . import questions_store as acp_questions_store
 from ..catalog import refresh as catalog_refresh
 from ..bootstrap import _current_owner_epoch_obj, append_source_event, bootstrap_task
 from ..catalog.model import CatalogEntry
@@ -207,12 +209,24 @@ class _RealHostElicitor:
 
 
 class _PaseoQuestionElicitor:
-    """Paseo plugin bridge using ACP's core permission card as a choice UI."""
+    """Paseo plugin bridge using ACP's core permission card as a choice UI.
 
-    def __init__(self, host_requester: HostRequester, *, session_id: str, timeout: float = 30.0) -> None:
+    The card stays until the user answers -- a 30 s timeout used to end the
+    turn while Paseo kept showing the card, and a later Submit was dropped.
+    The wait ends on a card choice, on a message typed into the same session
+    (``register`` hands the agent a way to deliver it; it is the answer), or
+    when the turn is cancelled."""
+
+    #: A question waits for a person, not for a host round trip.
+    QUESTION_TIMEOUT_SECONDS = 24 * 3600.0
+
+    def __init__(self, host_requester: HostRequester, *, session_id: str, timeout: float = 30.0,
+                 cancel_event=None, register=None) -> None:
         self._host_requester = host_requester
         self._session_id = session_id
         self._timeout = timeout
+        self._cancel_event = cancel_event
+        self._register = register
         self._question_id = None
 
     def set_question_id(self, question_id: str) -> None:
@@ -237,16 +251,55 @@ class _PaseoQuestionElicitor:
             ],
             _meta=dict(cortexQuestion=True),
         )
+        typed = []
+
+        def deliver(text: str) -> bool:
+            value = text.strip()
+            typed.append(choices[int(value) - 1] if value.isdigit() and 1 <= int(value) <= len(choices) else text)
+            return True
+
+        if self._register is not None:
+            # Tagged with its question: a late click on another question's
+            # stale card must never answer this one.
+            self._register((self._question_id, deliver))
+        answered_by_card = False
         try:
-            result = self._host_requester.request("session/request_permission", params, timeout=self._timeout)
+            result = self._host_requester.request(
+                "session/request_permission", params,
+                timeout=max(self._timeout, self.QUESTION_TIMEOUT_SECONDS),
+                cancelled=lambda: bool(typed) or (self._cancel_event is not None and self._cancel_event.is_set()),
+                # A Submit that arrives after this wait ended is still this
+                # question's answer (see Agent._on_late_host_response).
+                id_suffix=f"q.{self._question_id}" if self._question_id else None,
+            )
         except (HostRequestTimeout, HostRequestClosed, HostRequestError):
-            return None
+            return typed[0] if typed else None
+        else:
+            answered_by_card = not typed
+        finally:
+            if self._register is not None:
+                self._register(None)
+            if not answered_by_card:
+                self._close_card(params["toolCall"]["toolCallId"])
+        if typed:
+            return typed[0]
         if not isinstance(result, dict):
             return None
         outcome = result.get("outcome")
         if not isinstance(outcome, dict) or outcome.get("outcome") != "selected":
             return None
         return option_ids.get(outcome.get("optionId"))
+
+    def _close_card(self, tool_call_id):
+        """Best effort: mark the card's tool call finished so the host can
+        retire a card that was answered in chat or abandoned."""
+        transport = getattr(self._host_requester, "_transport", None)
+        send = getattr(transport, "send_notification", None)
+        if callable(send):
+            try:
+                send(protocol.tool_call_update(self._session_id, tool_call_id, status="completed"))
+            except Exception:
+                pass
 
 
 class Agent:
@@ -396,6 +449,81 @@ class Agent:
         # namespace ("hr_"-prefixed ids) disjoint from any id the host
         # itself chooses for its own requests to this agent.
         self.host_requester = HostRequester(transport)
+        self.host_requester.on_late = self._on_late_host_response
+
+    _LATE_QUESTION_ID = re.compile(r"_q\.(pq_[0-9A-Za-z]+)$")
+
+    def _on_late_host_response(self, request_id, message):
+        """A question card answered after its turn stopped waiting (the turn
+        was cancelled, the connection or process was replaced): record the
+        choice as that question's answer and carry the task on, instead of
+        dropping it."""
+        match = self._LATE_QUESTION_ID.search(request_id) if isinstance(request_id, str) else None
+        outcome = (message.get("result") or {}).get("outcome") if isinstance(message, dict) else None
+        if match is None or not isinstance(outcome, dict) or outcome.get("outcome") != "selected":
+            return
+        option = str(outcome.get("optionId") or "")
+        if not option.startswith("cortex-question-") or not option[len("cortex-question-"):].isdigit():
+            return
+        question_id, choice = match.group(1), option[len("cortex-question-"):]
+        for session_id, session in list(self.sessions.items()):
+            if not session.get("task_id"):
+                continue
+            store = self._store_for(session["project"])
+            question = acp_questions_store.get(store, question_id)
+            if question is not None and question.task_id == session["task_id"]:
+                threading.Thread(target=self._run_late_answer, name="acp-late-answer",
+                                 args=(session_id, session, question, choice), daemon=True).start()
+                return
+        observe(self.environ, "session/request_permission", "late_answer_unmatched")
+
+    def _run_late_answer(self, session_id, session, question, choice):
+        cancel_event = threading.Event()
+        with session["lock"]:
+            waiter = session.get("question_waiter")
+            if session["active"] is not None:
+                # A turn is running: hand it the answer if it waits on this
+                # very question's card, else record it durably (a no-op for
+                # a question already answered) for that turn to pick up.
+                if waiter is not None and waiter[0] == question.id:
+                    waiter[1](choice)
+                else:
+                    store = self._store_for(session["project"])
+                    options = question.options or []
+                    value = options[int(choice) - 1] if 1 <= int(choice) <= len(options) else choice
+                    acp_questions_store.answer(store, question.id, value, "elicitation")
+                return
+            session["active"] = cancel_event
+            session["background"] = True
+        try:
+            answer_method, answer_kwargs = self._runtime_call_kwargs(
+                "answer_question", project_root=session["project"],
+                emit_tool_call=self._make_emit_tool_call(session_id, cancel_event),
+            )
+            if answer_method is None:
+                return
+            store = self._store_for(session["project"])
+            message_id = f"assistant:late-answer:{question.id}"
+
+            def emit_update(chunk_text):
+                if cancel_event.is_set() or self.transport is None:
+                    return False
+                with self._history_lock(session_id):
+                    try:
+                        acp_replay_store.append_host_transcript(
+                            store, session_id, "agent_message", chunk_text, message_id=message_id)
+                    except (StoreError, OSError, ValueError, TypeError, sqlite3.Error):
+                        return False
+                return self.transport.send_notification(protocol.agent_message_chunk(session_id, chunk_text, message_id))
+
+            answer_method(session["task_id"], session_id, question, choice, emit_update, cancel_event, **answer_kwargs)
+        except Exception:
+            observe(self.environ, "session/request_permission", "late_answer_failed")
+        finally:
+            with session["lock"]:
+                if session["active"] is cancel_event:
+                    session["active"] = None
+                    session["background"] = False
 
     def _track_request_id(self, request_id):
         """Record ``request_id`` as used on this connection; return whether
@@ -793,7 +921,7 @@ class Agent:
         value = defaults.get("language") if isinstance(defaults, dict) else None
         return value if value in ("en", "ru") else None
 
-    def _make_elicitor(self, session_id):
+    def _make_elicitor(self, session_id, cancel_event=None, session=None):
         """T020: a real ``_RealHostElicitor`` iff the host advertised
         ``clientCapabilities.elicitation.form`` at ``initialize`` --
         schema-1.4.0's own convention: ``form`` omitted or ``null`` means
@@ -810,6 +938,8 @@ class Agent:
         if self.environ.get("CORTEX_PASEO_QUESTION_UI") == "1":
             return _PaseoQuestionElicitor(
                 self.host_requester, session_id=session_id, timeout=self._elicitation_timeout_seconds,
+                cancel_event=cancel_event,
+                register=None if session is None else (lambda deliver: session.__setitem__("question_waiter", deliver)),
             )
         capabilities = self.client_capabilities if isinstance(self.client_capabilities, dict) else {}
         elicitation = capabilities.get("elicitation")
@@ -1096,6 +1226,29 @@ class Agent:
         if session is None:
             raise RpcError(-32602, "Unknown sessionId.")
         cancel_event = threading.Event()
+        background = None
+        with session["lock"]:
+            if session["active"] is not None:
+                # The running turn is waiting on a question card: a message
+                # typed into this session is that question's answer, and the
+                # running turn carries on with it.
+                waiter = session.get("question_waiter")
+                if waiter is not None and text and waiter[1](text):
+                    self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result("end_turn")))
+                    return
+                background = session["active"] if session.get("background") else None
+                if background is None:
+                    raise RpcError(-32602, "A prompt is already in flight for this session.")
+        if background is not None:
+            # A continuation Cortex started on its own (a late card answer)
+            # yields to the user: interrupt it, then take the session.
+            background.set()
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                with session["lock"]:
+                    if session["active"] is None:
+                        break
+                time.sleep(0.05)
         with session["lock"]:
             if session["active"] is not None:
                 raise RpcError(-32602, "A prompt is already in flight for this session.")
@@ -1294,7 +1447,7 @@ class Agent:
             # doesn't advertise it, and every pre-T020 runtime) falls back
             # to the runtime's own constructor default (also None), which
             # is the unconditional plain-text ask_user fallback.
-            start_prompt_kwargs["host_elicitor"] = self._make_elicitor(session_id)
+            start_prompt_kwargs["host_elicitor"] = self._make_elicitor(session_id, cancel_event, session)
         if self._runtime_accepts_host_permission_requester:
             # EXT-01 #5: same "never guessed, None is the honest default"
             # convention as host_elicitor above.
