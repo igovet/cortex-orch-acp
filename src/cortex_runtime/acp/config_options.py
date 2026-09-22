@@ -490,20 +490,22 @@ def combined_model_values(selectable_entries: Sequence[CatalogEntry]) -> dict[st
     }
 
 
-def _allowed_efforts(entry, selectable_entries, project_root, environ) -> tuple[str, ...] | None:
-    """The same effort rule automatic routing applies (``routing.auto_route
-    .permitted_efforts``), so the selector never offers what dispatch would
-    lower anyway."""
-    if entry is None:
-        return None
-    from ..routing import auto_route
-
-    try:
-        tier_overrides = auto_route.load_overrides(project_root, environ).get("tiers") or {}
-    except PortableError:
-        tier_overrides = {}
-    tiers = auto_route.model_tiers(selectable_entries, tier_overrides)
-    return auto_route.permitted_efforts(entry, tiers[entry.route.id])
+def model_efforts(
+    connections: Mapping[str, ConnectionRecord], project_root: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, list[str]]:
+    """Each Paseo model selector value -> the efforts its engine supports.
+    Paseo's ACP bridge otherwise gives every model the efforts of whichever
+    one was selected when it built its catalog (none at all for a model
+    without efforts)."""
+    entries = presented_entries(filter_denied_entries(
+        selectable_entries_from_snapshots(connections, environ), project_root, environ))
+    values = combined_model_values(entries)
+    result = {}
+    for entry in entries:
+        option = build_thought_level_option(entry, {}, None, None)
+        result[values[entry.route.id]] = [item["value"] for item in option["options"]] if option else []
+    return result
 
 
 def build_thought_level_option(
@@ -686,7 +688,6 @@ def build_config_options(
         model_effective_state = model_option.get("_meta", {}).get("_cortex", {}).get("state", provider_effective_state)
         thought_option = build_thought_level_option(
             chosen_entry, current.get("parameters") or {}, model_effective_state, current_revision,
-            allowed_efforts=_allowed_efforts(chosen_entry, selectable_entries, project_root, environ),
         )
         if thought_option is not None:
             options.append(thought_option)

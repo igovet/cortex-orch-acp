@@ -1460,7 +1460,10 @@ class EngineSessionManagerAdapter:
         from ..routing import auto_route
 
         auto_route.refuse_if_denied(record.engine, model, project_root, self._environ)
-        allowed = auto_route.allowed_efforts(record.engine, model, project_root, self._environ)
+        # The tier effort rule is for automatic worker routing; the
+        # coordinator runs at the effort chosen in the editor.
+        allowed = (auto_route.allowed_efforts(record.engine, model, project_root, self._environ)
+                   if launch.get("assignment_id") else None)
         if requested_effort is not None and allowed is not None and requested_effort not in allowed:
             # Lowered, never refused: a saved effort from before the rule
             # (e.g. ultra) must not make the thread unusable. Recorded as

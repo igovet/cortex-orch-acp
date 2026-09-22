@@ -13,6 +13,7 @@ a hidden provider/native fallback -- see
 ``cortex_runtime.acp.production_runtime`` and
 ``docs/acp/orchestration.md``.
 """
+import os
 import sys
 
 from cortex_runtime.acp.agent import main
@@ -72,7 +73,21 @@ def _ensure_first_run_configuration():
         pass
 
 
+def _print_model_efforts():
+    """CORTEX_MODEL_EFFORTS=1: print each model's efforts as JSON and exit
+    (read by the Paseo plugin's catalog; see config_options.model_efforts)."""
+    import json
+
+    from cortex_runtime.acp import config_options
+    from cortex_runtime.connections import registry
+
+    print(json.dumps(config_options.model_efforts(registry.read_registry().connections)))
+
+
 if __name__ == '__main__':
+    if os.environ.get("CORTEX_MODEL_EFFORTS") == "1":
+        _print_model_efforts()
+        raise SystemExit(0)
     _fail_closed_on_pinned_mismatch()
     _ensure_first_run_configuration()
     main(runtime=ProductionOrchestratingRuntime())

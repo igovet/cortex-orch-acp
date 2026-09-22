@@ -287,8 +287,10 @@ automatically, from what your engines actually advertise:
 - **Effort** follows the role tier (`high` / `medium` / `low`), clamped to
   what the model supports. `ultra` is never used; `max` only on a model in
   the `light` tier (e.g. Luna); flagship models (Astra, Fable) never above
-  `high`. The editor's effort selector offers only these, and an effort
-  saved from before is lowered to the nearest allowed one, not refused.
+  `high`. This rule is for workers only: the editor's effort selector offers
+  every effort the chosen model's engine reports, and the coordinator runs at
+  the one you pick. In Paseo each model shows its own efforts (the plugin
+  reads them from Cortex when Paseo builds its model list).
 
 Only engine-confirmed model lists are used. Until a connection's models have
 been observed, a worker stays on the coordinator's route.

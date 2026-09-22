@@ -561,8 +561,9 @@ def test_thought_level_option_narrows_to_the_selected_models_own_set_not_an_engi
     options_for_wide = config_options.build_config_options(
         entries, connections, current=dict(route_id=wide_entry.route.id, state="active", revision=1))
     thought_option = next(o for o in options_for_wide if o["id"] == config_options.THOUGHT_LEVEL_OPTION_ID)
+    # Every effort the engine reports: the worker tier rule does not narrow it.
     assert {item["value"] for item in thought_option["options"]} == {
-        "low", "medium", "high", "max"}
+        "low", "medium", "high", "max", "ultra"}
 
 
 def test_thought_level_option_orders_every_supported_effort_weakest_first():

@@ -1,6 +1,7 @@
 import { isHiddenOperation } from "../shared/timeline-visibility.ts";
 import { presentToolSemantics } from "../shared/tool-presentation.ts";
 import { gatewayPresentation } from "../shared/gateway-presentation.ts";
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -345,7 +346,47 @@ export function steerRefusal<T extends { type: string }>(input: T): ProviderEven
   } as ProviderEvent;
 }
 
+/** The Cortex process a shimmed launch command starts (see shimmedCommand). */
+function launchTarget(command: readonly string[]): LaunchConfig | undefined {
+  const prefix = "CORTEX_ACP_TARGET=";
+  const raw = command.find((part) => part.startsWith(prefix));
+  return raw === undefined ? undefined : JSON.parse(raw.slice(prefix.length)) as LaunchConfig;
+}
+
+/** Each model's own efforts, from Cortex (CORTEX_MODEL_EFFORTS=1). */
+function modelEfforts(command: readonly string[]): Promise<Record<string, string[]>> {
+  const target = launchTarget(command);
+  if (target === undefined) return Promise.resolve({});
+  return new Promise((resolve, reject) => {
+    execFile(target.argv[0], target.argv.slice(1), {
+      env: { ...process.env, ...(target.env ?? {}), CORTEX_MODEL_EFFORTS: "1" },
+      timeout: 15000,
+    }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(JSON.parse(stdout) as Record<string, string[]>);
+    });
+  });
+}
+
+/**
+ * Paseo's ACP bridge gives every model the efforts of whichever one was
+ * selected when it built its catalog, so switching models showed the wrong
+ * efforts, or none. Each model gets its own.
+ */
+export function withModelEfforts<T extends { models: ReadonlyArray<{ id: string }> }>(
+  catalog: T, efforts: Record<string, string[]>,
+): T {
+  return {
+    ...catalog,
+    models: catalog.models.map((model) => ({
+      ...model,
+      thinkingOptions: (efforts[model.id] ?? []).map((value) => ({ id: value, label: value })),
+    })),
+  };
+}
+
 export function createCortexProvider(): ProviderRegistration {
+  const command = cortexCommand();
   const base = runAcpProvider({
     // Register the native provider under `cortex` for new chats. The setup
     // command removes only the exact owned generic registration; old generic
@@ -354,7 +395,7 @@ export function createCortexProvider(): ProviderRegistration {
     id: "cortex",
     label: "Cortex",
     description: "Cortex ACP orchestration",
-    command: cortexCommand(),
+    command,
     // Cortex advertises its slash commands immediately after session/new.
     // Paseo otherwise emits session.ready and asks the composer for its
     // command list before that asynchronous notification arrives, caching an
@@ -369,6 +410,13 @@ export function createCortexProvider(): ProviderRegistration {
     // failure status and title when an agent supplies no output; do not claim
     // an underlying cause that the ACP event did not report.
     transformers: [{
+      async discover(catalog) {
+        try {
+          return withModelEfforts(catalog, await modelEfforts(command));
+        } catch {
+          return catalog; // Cortex unavailable: the bridge's own catalog, unchanged
+        }
+      },
       toolCall(snapshot) {
         if (snapshot.status !== "failed" || snapshot.output !== null) {
           return snapshot;
