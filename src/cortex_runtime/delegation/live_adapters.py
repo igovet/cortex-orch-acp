@@ -91,6 +91,12 @@ def _option_mapping_for(engine: str):
     return None
 
 
+# The trusted_channel.resolve_channel StoreError codes that mean this
+# channel's authority is genuinely gone (see that function). Any other
+# StoreError from resolve_channel is transient store/infra, never revocation.
+_CHANNEL_AUTHORITY_LOST_CODES = frozenset({"channel_unknown", "channel_revoked", "channel_expired"})
+
+
 def _jail_for(store, channel_credentials) -> dict:
     """The engine jail for one channel: exactly the scopes its gateway grants.
 
@@ -115,9 +121,16 @@ def _jail_for(store, channel_credentials) -> dict:
     def alive():
         try:
             resolve_channel(store, channel_id, secret)
-        except StoreError:
-            return False
-        return True
+            return True
+        except StoreError as error:
+            # Only a definitive channel invalidation means authority is lost.
+            # A transient store error (``storage_busy`` under routine lock
+            # contention, or a WAL/-shm sidecar mid-recreation) must never be
+            # read as revocation: this runs on a 1s watchdog poll for every
+            # engine, and racing it against any writer would otherwise kill a
+            # perfectly live engine -- surfacing later as a spurious
+            # ``transport_eof``. Stay alive and re-check on the next poll.
+            return str(error) not in _CHANNEL_AUTHORITY_LOST_CODES
 
     return {"scopes": list(scopes), "alive": alive}
 

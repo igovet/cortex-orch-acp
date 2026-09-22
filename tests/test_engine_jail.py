@@ -110,3 +110,21 @@ def test_jail_grants_the_coordinator_no_scope_and_follows_the_channel(tmp_path):
     assert jail['alive']()
     revoke_channel(store, boot.channel_id)
     assert not jail['alive']()
+
+
+def test_transient_store_error_is_not_read_as_channel_revocation(tmp_path):
+    """A ``storage_busy`` from routine lock contention on the 1s authority
+    poll must never kill a live engine (that surfaced as spurious
+    transport_eof); only a definitive channel invalidation reports lost."""
+    from cortex_runtime.contracts import StoreError
+
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    boot = bootstrap_task(store, SourceEvent(origin='jail-test', event_id='busy'), 'Implement', 'owner')
+    jail = _jail_for(store, (boot.channel_id, boot.secret, str(tmp_path)))
+    assert jail['alive']()  # baseline: channel is live
+
+    def busy():
+        raise StoreError("storage_busy")
+
+    store.connection = busy
+    assert jail['alive']()  # transient error -> stay alive, re-check next tick

@@ -2286,6 +2286,22 @@ class OrchestratingRuntime:
             # reported success/failure race.
             pass
 
+    def _evict_coordinator_session(self, task_id: str, reason: str) -> None:
+        """Forget a coordinator engine session this process can no longer
+        prompt (its stdio transport hit EOF / the process is gone).
+
+        Without this, ``_ensure_coordinator`` keeps handing back the same
+        dead cached ``session_ref`` on every following turn, so each one
+        re-raises the identical ``transport_eof`` and the task stays blocked
+        forever. Terminating the owned attempt (releases its capacity) and
+        dropping the cached channel/session makes the next turn fall through
+        to the reopen/recovery path instead of reusing the corpse.
+        """
+        self._terminate_coordinator_attempt(task_id)
+        with self._lock:
+            self._coordinator_channels.pop(task_id, None)
+            self._coordinator_sessions.pop(task_id, None)
+
     def _recover_unrecorded_source_events(self, task_id: str, *, exclude: tuple[str | None, str | None] = (None, None)) -> None:
         from . import replay_store
 

@@ -225,6 +225,34 @@ def test_coordinator_engine_failure_blocks_without_silent_end_turn(tmp_path):
 
 
 
+def test_coordinator_transport_eof_reopens_fresh_session_on_next_turn(tmp_path):
+    """A dead coordinator (transport EOF) must not be reused forever: the
+    turn blocks, but the next user message reopens a fresh session and runs."""
+    store, task_id = _task(tmp_path)
+    calls = {"n": 0}
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise EngineTurnFailed("transport_eof")
+        return PromptOutcome(StopReason.END_TURN, "recovered")
+
+    def router(store, channel, session_ref, launch, instructions):
+        return coordinator_behavior if channel and channel.role == "coordinator" else None
+
+    runtime, engine = _make_runtime(store, router)
+    first = runtime.start_prompt(task_id, "s1", "Go.", lambda t: True, threading.Event())
+    assert first == StopReason.END_TURN
+    dead_session = runtime._coordinator_sessions.get(task_id)
+    assert dead_session is None  # evicted, not left cached for reuse
+
+    # The follow-up prompt reopens a fresh session and completes.
+    second = runtime.start_prompt(task_id, "s2", "Please continue.", lambda t: True, threading.Event())
+    assert second == StopReason.END_TURN
+    assert calls["n"] > 1  # the second turn actually reached the (reopened) engine
+    assert runtime._coordinator_sessions.get(task_id) not in (None, "es_1")
+
+
 def test_coordinator_max_tokens_with_no_unfinished_action_blocks_not_success(tmp_path):
     store, task_id = _task(tmp_path)
 

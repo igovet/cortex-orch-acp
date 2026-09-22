@@ -763,7 +763,12 @@ class EngineProcess:
             try:
                 current = alive()
             except Exception:
-                current = False
+                # An unexpected error probing authority is a transient infra
+                # hiccup, never proof of revocation: keep the live engine and
+                # re-check next tick rather than killing it (which would
+                # surface as a spurious transport_eof). A genuine revocation
+                # is reported by alive() returning False, cleanly.
+                continue
             if not current:
                 self.logs.observe("jail_authority_revoked")
                 self.terminate()

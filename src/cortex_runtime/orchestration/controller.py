@@ -17,6 +17,15 @@ from ..delegation import revision
 from ..portable.engine_contract import StopReason
 from ..observability.redact import StreamingRedactor
 
+# Coordinator engine failure kinds that mean the session can never be prompted
+# again (the process/transport is gone), as distinct from a slow-but-alive
+# engine. See engine.failure_classification._ENGINE_FAILURE_MARKERS;
+# 'timeout_alive' is deliberately excluded -- it never applies to the unbounded
+# coordinator prompt turn, and the engine is still alive when it is raised.
+_COORDINATOR_SESSION_DEAD_KINDS = frozenset({
+    'transport_eof', 'poisoned', 'process_exit', 'process_crashed', 'nonzero_exit',
+})
+
 
 def _verification(runtime, task_id, machine, emit_tool_call, cancel):
     """Run retained literal argv commands, with bounded time and complete output.
@@ -222,7 +231,13 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                     _pause_turn(runtime,task_id,machine,emit_tool_call)
                     return StopReason.CANCELLED
                 else:
-                    machine.move(task_id, 'BLOCKED', blocker=str(error) if isinstance(error,StoreError) else ('engine_failure:'+error.kind if hasattr(error,'kind') else f'coordinator_prompt_failed:{type(error).__name__}'))
+                    kind = getattr(error, 'kind', None)
+                    if kind in _COORDINATOR_SESSION_DEAD_KINDS:
+                        # Drop the dead coordinator session so the next user
+                        # message reopens a fresh one via recovery, instead of
+                        # reusing the corpse and re-raising this forever.
+                        runtime._evict_coordinator_session(task_id, kind)
+                    machine.move(task_id, 'BLOCKED', blocker=str(error) if isinstance(error,StoreError) else ('engine_failure:'+kind if kind else f'coordinator_prompt_failed:{type(error).__name__}'))
                 continue
             if pending_events:
                 events.mark_delivered(runtime._store,task_id,delivery_marker)
