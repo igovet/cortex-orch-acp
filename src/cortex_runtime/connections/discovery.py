@@ -1,4 +1,5 @@
-"""Engine discovery: find engines the client (e.g. Zed) already installed.
+"""Engine discovery: find Cortex's own engine installs (kept current by
+``connections.engine_update``); a client's (e.g. Zed's) copy is never used.
 
 D-T035-02: an engine is no longer something Cortex installs, copies, or
 pins for itself -- it is whatever the user already configured in their
@@ -83,8 +84,20 @@ def _node_binary(environ: dict[str, str] | None) -> str | None:
         return found
 
 
-def _registry_root(environ: dict[str, str] | None) -> Path:
-    return _home(environ) / ".local" / "share" / "zed" / "external_agents" / "registry" / "npx"
+def owned_root(environ: dict[str, str] | None = None) -> Path:
+    """Cortex's own engine installs: ``<root>/<engine>/<version>/node_modules/...``,
+    kept current by ``connections.engine_update``."""
+    env = os.environ if environ is None else environ
+    data = env.get("XDG_DATA_HOME")
+    return (Path(data) if data else _home(environ) / ".local" / "share") / "cortex" / "engines"
+
+
+def version_key(text: str) -> tuple[int, ...]:
+    """``"0.80.0"`` -> ``(0, 80, 0)``; anything else sorts first."""
+    try:
+        return tuple(int(part) for part in text.split("."))
+    except ValueError:
+        return ()
 
 
 def _declared_bin(package_json_path: Path) -> tuple[str, str] | None:
@@ -128,14 +141,25 @@ def discover_engine(
     package_name = _PACKAGE_NAME.get(engine)
     if package_name is None:
         return None
-    root = registry_root if registry_root is not None else _registry_root(environ)
     node = node_binary if node_binary is not None else _node_binary(environ)
     if not node:
         return None
+    if registry_root is not None:
+        return _discover_in(_subdirs(registry_root), engine, package_name, node, environ)
+    # Only Cortex's own installs, newest version first; a client's (e.g.
+    # Zed's) copy is never used.
+    owned = sorted(_subdirs(owned_root(environ) / engine), key=lambda p: version_key(p.name), reverse=True)
+    return _discover_in(owned, engine, package_name, node, environ)
+
+def _subdirs(root: Path) -> list[Path]:
     try:
-        entries = sorted(p for p in root.iterdir() if p.is_dir())
+        return sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
     except OSError:
-        return None
+        return []
+
+
+def _discover_in(entries: list[Path], engine: str, package_name: str, node: str,
+                 environ: dict[str, str] | None) -> EngineDiscovery | None:
     for entry in entries:
         package_json = entry / "node_modules" / package_name / "package.json"
         try:

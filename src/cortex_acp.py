@@ -62,6 +62,14 @@ def _ensure_first_run_configuration():
         onboarding.sync_discovered_connections(discovery.discover_all())
     except Exception:  # noqa: BLE001 - startup is never blocked by this
         pass
+    # Cortex's own engine copies: updated in the background, used from the
+    # next session on; offline or any npm failure keeps the current version.
+    try:
+        from cortex_runtime.connections import engine_update
+
+        engine_update.start_background_update()
+    except Exception:  # noqa: BLE001 - startup is never blocked by this
+        pass
 
 
 if __name__ == '__main__':

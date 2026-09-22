@@ -327,11 +327,22 @@ export function emulatesSteer(offered: readonly string[], supported: readonly st
   return offered.includes("prompt.steer") && !supported.includes("prompt.steer");
 }
 
-/** A steer prompt delivered as the bridge's follow-up (interrupt, then send). */
-export function steerAsFollowUp<T extends { type: string }>(input: T): T {
-  const prompt = (input as { prompt?: { delivery?: string } }).prompt;
-  if (input.type !== "session.prompt" || prompt?.delivery !== "steer") return input;
-  return { ...input, prompt: { ...prompt, delivery: "auto" } } as T;
+/**
+ * The answer to a steer prompt: "failed", never delivered. Paseo then falls
+ * back to its own replacement (cancel the running turn, send the message as a
+ * new one). Delivering it as a follow-up instead made the bridge open a new
+ * turn itself, and Paseo refused that with "Active turn changed before
+ * steering could be delivered".
+ */
+export function steerRefusal<T extends { type: string }>(input: T): ProviderEvent | null {
+  const { sessionId, prompt } = input as { sessionId?: string; prompt?: { delivery?: string; clientMessageId?: string } };
+  if (input.type !== "session.prompt" || prompt?.delivery !== "steer") return null;
+  return {
+    type: "session.prompt_result",
+    sessionId,
+    clientMessageId: prompt.clientMessageId,
+    result: { type: "failed", error: { message: "Cortex replaces the running turn instead of steering it." } },
+  } as ProviderEvent;
 }
 
 export function createCortexProvider(): ProviderRegistration {
@@ -376,9 +387,8 @@ export function createCortexProvider(): ProviderRegistration {
       const connection = await base.connect(request);
       // Paseo sends a message typed during a running turn as a "steer"
       // prompt, which the stock ACP bridge does not support ("Provider does
-      // not support prompt.steer"). Cortex takes it the way the bridge
-      // delivers any follow-up: the running turn is interrupted and the
-      // message steers the same task.
+      // not support prompt.steer"). Cortex advertises it and refuses each
+      // one (see steerRefusal), so Paseo replaces the running turn itself.
       const steer = emulatesSteer(request.capabilities, connection.capabilities);
       const capabilities = steer ? [...connection.capabilities, "prompt.steer"] : connection.capabilities;
       const questionActions = new Map<
@@ -388,11 +398,16 @@ export function createCortexProvider(): ProviderRegistration {
       const openedSessions = new Set<string>();
       const bufferedTimeline = new Map<string, ProviderEvent[]>();
       const bufferedTimelineBytes = new Map<string, number>();
+      const listeners = new Set<(event: ProviderEvent) => void>();
       return {
         ...connection,
         capabilities,
         send(input: Parameters<typeof connection.send>[0]) {
-          if (steer) input = steerAsFollowUp(input);
+          const refusal = steer ? steerRefusal(input) : null;
+          if (refusal) {
+            queueMicrotask(() => listeners.forEach((listener) => listener(refusal)));
+            return Promise.resolve() as ReturnType<typeof connection.send>;
+          }
           if (
             input.type === "session.permission" &&
             input.response.behavior === "allow" &&
@@ -436,10 +451,12 @@ export function createCortexProvider(): ProviderRegistration {
           openedSessions.clear();
           bufferedTimeline.clear();
           bufferedTimelineBytes.clear();
+          listeners.clear();
           return connection.close();
         },
         onEvent(listener) {
-          return connection.onEvent((event) => {
+          listeners.add(listener);
+          const unsubscribe = connection.onEvent((event) => {
             if (!visibleTimeline(event)) return;
             if (event.type === "session.opened") {
               openedSessions.add(event.sessionId);
@@ -526,6 +543,10 @@ export function createCortexProvider(): ProviderRegistration {
             }
             listener(presentTimeline(event));
           });
+          return () => {
+            listeners.delete(listener);
+            unsubscribe();
+          };
         },
       };
     },

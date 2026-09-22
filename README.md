@@ -64,7 +64,7 @@ advertised API. Report prose and final chat messages cannot complete a task.
 | Engine connections | `~/.config/cortex/connections.json` | Cortex, on first run; `scripts/cortex_acp_setup.py` for the rest |
 | Connection secrets (API-key connections only) | `~/.config/cortex/secrets/<connection id>` | setup tooling only |
 | Engine credentials | your own native directories, `~/.codex` and `~/.claude` | the engine's own CLI (`codex`, `claude`) |
-| Engine installs | wherever your editor put them (Zed: `~/.local/share/zed/external_agents/`) | your editor |
+| Engine installs | `~/.local/share/cortex/engines/<engine>/<version>/` | Cortex (updated at startup) |
 | Worker routing overrides (optional) | `~/.config/cortex/routing.json` | you, by hand |
 | Your defaults | `~/.config/cortex/defaults.json` | the model/effort selectors in the editor |
 | One project's tasks | `<project>/.cortex/` | Cortex |
@@ -149,15 +149,20 @@ work still requires independent review and verification.
 
 ## Setting it up in Zed
 
-Three things have to be true. Zed already gives you the first two if you use
-its external agents at all.
+Three things have to be true. Cortex takes care of the first; signing in to
+each engine's CLI covers the second.
 
 ### 1. The engines
 
-Cortex does not install, copy or pin an engine. It runs the ones **your editor
-already installed**, from where your editor put them. In Zed that is the agent
-registry under `~/.local/share/zed/external_agents/`, filled when you add
-`codex-acp` or `claude-agent-acp` as external agents.
+Cortex runs its own copies of `codex-acp` and `claude-agent-acp` from
+`~/.local/share/cortex/engines/`, the same in every client; an editor's own
+copy (e.g. Zed's agent registry) is never used. At each startup Cortex asks
+npm in the background for newer versions and installs one beside the current
+copy; it is used from the next session on, and one previous version is kept.
+Offline, or on any npm failure, the current version simply stays. The very
+first start has no copy yet, so the engines become usable from the session
+after that first install (a few seconds with a network). This needs `npm`
+beside the `node` Cortex launches engines with, or on `PATH`.
 
 Sign in to each engine with its own CLI (`codex`, `claude`), as you would to
 use it on its own. Cortex reads those native credential directories
