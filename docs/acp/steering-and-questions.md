@@ -15,6 +15,19 @@ Only an answer recorded against that exact question resumes the requesting
 phase. Exact retries preserve the original question identity; changed deliveries
 with the same key fail.
 
+The coordinator writes the details (the proposed plan, the evidence, what each
+choice leads to) as its chat message. The question itself is one short line
+with short answer options. A question asked while reconciling is how the
+coordinator hands the user a decision after verified work, such as approving a
+proposed fix plan. Before this, the coordinator wrote such a plan into its
+synthesis, and the runtime reported the task as finished (`Завершено`) while
+the plan still waited for approval. The question keeps the task open in
+`WAITING_USER`. The answer resumes planning rather than reconciling: the
+coordinator submits a plan for the chosen work, which becomes a new revision
+with its own review and verification. If the user chose to finish, it closes
+the task with a short `answer_submit`. The coordinator uses `synthesis_submit`
+only when nothing is left for the user to decide.
+
 An ordinary prompt answers the single open question. Multiple open questions
 require the existing explicit `/cortex-answer` selection. A cancelled or
 superseded question cannot be revived by a late reply. Answered questions are

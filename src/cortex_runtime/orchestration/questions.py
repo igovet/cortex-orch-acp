@@ -22,6 +22,14 @@ def request(store, channel, args):
         if not task or task['state'] not in allowed:
             raise StoreError('question_not_expected')
         resume_state=task['state']
+        details={}
+        if resume_state=='RECONCILING':
+            # A decision left after verified work (approve a proposed plan,
+            # confirm manual steps) either starts new work or ends the task:
+            # both are planning decisions, so the answer returns there.
+            revision=db.execute('SELECT revision FROM runtime_tasks WHERE task_id=?',(channel.task_id,)).fetchone()[0]
+            resume_state='PLANNING'
+            details=dict(after_verification=True,revision=revision)
         if channel.role=='worker':
             from .gateway import _authority
             _authority(db,channel)
@@ -33,7 +41,7 @@ def request(store, channel, args):
                    (question_id, channel.task_id, f'runtime:{channel.channel_id}:{args["request_key"]}',
                     args['question'], encoded(args.get('options')) if args.get('options') else None, now()))
         event(db, channel.task_id, 'USER_QUESTION_REQUESTED',
-              dict(question_id=question_id, question=args['question'], options=args.get('options'), resume_state=resume_state), channel.channel_id)
+              dict(question_id=question_id, question=args['question'], options=args.get('options'), resume_state=resume_state, **details), channel.channel_id)
         transition(db, channel.task_id, 'WAITING_USER')
         receipt = dict(question_id=question_id, state='WAITING_USER')
         db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',

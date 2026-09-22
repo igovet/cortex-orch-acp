@@ -855,6 +855,43 @@ def replay_session(store, session_id: str) -> list[dict]:
         if not isinstance(attachments, list):
             continue
         result.append(dict(kind=row["kind"], text=row["text"], attachments=attachments, message_id=row["message_id"]))
+    return _merge_tool_call_updates(result)
+
+
+def _merge_tool_call_updates(history: list[dict]) -> list[dict]:
+    """Fold each card's run of ``tool_call_update``s into its final state.
+
+    An ACP ``tool_call_update`` replaces every field it carries (``content``
+    included), so the merged update renders exactly what the whole run did.
+    A worker card resends its full cumulative log on every update: replaying
+    each one grew quadratically (883 updates, 17.7 MB for one card) and
+    overflowed the client's history buffer, so the chat could not reopen.
+    The merged update takes the run's last position; a new ``tool_call`` for
+    the same id starts a new run.
+    """
+    run_of: dict[int, tuple[str, int]] = {}
+    last_of: dict[tuple[str, int], int] = {}
+    generation: dict[str, int] = {}
+    for index, entry in enumerate(history):
+        update = entry.get("update") if entry["kind"] == "update" else None
+        card = update.get("toolCallId") if update else None
+        if not isinstance(card, str):
+            continue
+        if update["sessionUpdate"] == "tool_call":
+            generation[card] = generation.get(card, 0) + 1
+        elif update["sessionUpdate"] == "tool_call_update":
+            run_of[index] = (card, generation.get(card, 0))
+            last_of[run_of[index]] = index
+    merged: dict[tuple[str, int], dict] = {}
+    result = []
+    for index, entry in enumerate(history):
+        run = run_of.get(index)
+        if run is None:
+            result.append(entry)
+            continue
+        merged.setdefault(run, {}).update(entry["update"])
+        if last_of[run] == index:
+            result.append(dict(kind="update", update=merged.pop(run)))
     return result
 
 

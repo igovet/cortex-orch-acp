@@ -31,11 +31,11 @@ NODE['properties']['role']['enum'] = sorted(role for role in WORKER_ALIASES if r
 PLAN = obj(dict(tasks=array(NODE, minimum=1), verification=array(array(text('Literal argument of a verification command copied exactly from the project\'s own documented verification (docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json scripts), interpreter path included; set environment variables with ["env", "NAME=value", ...]. Runs with the owner\'s tools; only git-ignored paths are writable.', 4096), minimum=1), maximum=16, minimum=1)))
 COORDINATOR = {
     'task_get_context': obj({}),
-    'answer_submit': obj(dict(text=text('Answer a read-only question directly, in the selected coordinator language, grounded in the project files you inspected. Use for explanations, project overviews and factual questions that need no changes or delegated investigation. Available before any plan or worker exists, or after the user answered a runtime stop question by choosing to finish. Does not certify implementation, review, or tests; use plan_submit when the user requests changes.',32000), request_key=text('Unique answer delivery key; exact retries return the same receipt.',128))),
+    'answer_submit': obj(dict(text=text('Answer a read-only question directly, in the selected coordinator language, grounded in the project files you inspected. Use for explanations, project overviews and factual questions that need no changes or delegated investigation. Available before any plan or worker exists, or after the user answered a runtime stop question or a question asked after verification by choosing to finish. Does not certify implementation, review, or tests; use plan_submit when the user requests changes.',32000), request_key=text('Unique answer delivery key; exact retries return the same receipt.',128))),
     'plan_submit': obj(dict(plan=PLAN, request_key=text('Unique proposal delivery key; exact retries return the same receipt.', 128))),
-    'synthesis_submit': obj(dict(text=text('Final synthesis grounded in current reports and runtime verification.', 32000))),
-    'user_question_request': obj(dict(question=text('Question requiring user input.', 4000),
-                                     options=array(text('Suggested answer.', 1000), maximum=8),
+    'synthesis_submit': obj(dict(text=text('Final synthesis grounded in current reports and runtime verification. Only when nothing is left for the user to decide: it completes the task.', 32000))),
+    'user_question_request': obj(dict(question=text('One short line naming the decision, e.g. "Approve the plan above?". Put the details, evidence and each option\'s consequences in your message text before this call, not here.', 4000),
+                                     options=array(text('One short answer the user can pick, e.g. "Approve the plan" or "Do it in a separate task".', 1000), maximum=8),
                                      request_key=text('Unique question delivery key. Exact retries preserve question identity.', 128)),
                                  required=['question', 'request_key']),
 }

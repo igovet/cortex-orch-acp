@@ -149,7 +149,8 @@ def _ask_about_stop(db, task_id, source, blocker):
 
 
 def released_by_user(db, task):
-    """The user answered a runtime stop question for this plan revision.
+    """The user answered a runtime stop question for this plan revision, or
+    a question the coordinator asked after this revision was verified.
 
     Only then may the coordinator close delegated work with a direct answer;
     it can never skip review or verification on its own."""
@@ -159,7 +160,7 @@ def released_by_user(db, task):
     asked = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED'",
                        (task['task_id'],)).fetchall()
     stops = {q['question_id'] for q in map(lambda r: json.loads(r[0]), asked)
-             if q.get('blocker') and q.get('revision') == task['revision']}
+             if (q.get('blocker') or q.get('after_verification')) and q.get('revision') == task['revision']}
     answered = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_ANSWER_RECEIVED'",
                           (task['task_id'],)).fetchall()
     return any(json.loads(r[0]).get('question_id') in stops for r in answered)

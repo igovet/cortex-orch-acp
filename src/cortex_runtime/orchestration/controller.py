@@ -185,7 +185,9 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                           or _failed_worker_request(context))
                        if state == 'PLANNING' else
                        'Reconcile the retained results and runtime verification, then submit synthesis. State plainly every not_run or unverified '
-                       'worker check as a gap the user should know about. Runtime decides completion. ')
+                       'worker check as a gap the user should know about. Runtime decides completion. '
+                       'If the user must still decide something (approve a proposed plan, choose between fixes, confirm manual steps), '
+                       'write the full details as your message and ask with user_question_request instead of submitting synthesis. ')
             delivery_marker=f'runtime-coordinator:{time.monotonic_ns()}'
             pending_events=events.claim_unconsumed(runtime._store,task_id,delivery_marker)
             from ..acp import messages as localized_messages

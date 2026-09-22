@@ -215,6 +215,10 @@ parseStream(child.stdout, (frame) => {
 child.on("error", (error) => { stop(1); fail(`agent process failed: ${error.message}`); });
 child.on("close", (code) => {
   if (!closed) stop(code === 0 ? 0 : 1);
+  // Paseo still holds our stdin open, so without an explicit exit a dead
+  // agent left every pending request (a session/load above all) unanswered
+  // forever instead of failing as a closed provider.
+  process.stdout.write("", () => process.exit());
 });
 process.on("SIGTERM", () => { if (!child.killed) child.kill("SIGTERM"); });
 process.on("SIGINT", () => { if (!child.killed) child.kill("SIGINT"); });

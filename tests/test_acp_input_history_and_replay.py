@@ -1429,3 +1429,30 @@ def test_read_body_omitted_from_wire_and_durable_display_history(tmp_path, title
     assert 'READ_BODY_MARKER' not in str(replay_store.replay_session(store, sid))
     assert emit(dict(sessionUpdate='tool_call', toolCallId='shell-1', title='Shell', kind='execute', rawOutput='COMMAND_OUTPUT'))
     assert 'COMMAND_OUTPUT' in str(replay_store.replay_session(store, sid))
+
+
+def test_replay_folds_each_card_update_run_into_its_final_state(tmp_path):
+    """A worker card resends its whole log per update; replay sends it once."""
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    agent.bind_transport(_RecordingTransport())
+    agent.initialized = True
+    sid = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(tmp_path))
+    log = ""
+    replay_store.append_host_update(store, sid, dict(sessionUpdate="tool_call", toolCallId="worker:a", title="W", status="in_progress"))
+    for step in range(50):
+        log += f"line {step}\n"
+        replay_store.append_host_update(store, sid, dict(sessionUpdate="tool_call_update", toolCallId="worker:a", rawInput=log))
+    replay_store.append_host_transcript(store, sid, "agent_message", "between")
+    replay_store.append_host_update(store, sid, dict(sessionUpdate="tool_call_update", toolCallId="worker:a", status="completed"))
+    replay_store.append_host_update(store, sid, dict(sessionUpdate="tool_call", toolCallId="worker:a", title="W2", status="in_progress"))
+    replay_store.append_host_update(store, sid, dict(sessionUpdate="tool_call_update", toolCallId="worker:a", status="failed"))
+
+    history = replay_store.replay_session(store, sid)
+    shapes = [(e["kind"], e.get("update", {}).get("sessionUpdate")) for e in history]
+    assert shapes == [
+        ("update", "tool_call"), ("agent_message", None), ("update", "tool_call_update"),
+        ("update", "tool_call"), ("update", "tool_call_update"),
+    ]
+    assert history[2]["update"] == dict(sessionUpdate="tool_call_update", toolCallId="worker:a", rawInput=log, status="completed")
+    assert history[4]["update"]["status"] == "failed" and "rawInput" not in history[4]["update"]

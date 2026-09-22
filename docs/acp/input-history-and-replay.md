@@ -212,7 +212,15 @@ attachment descriptors) and once per runtime-produced
 text replies follow the same display-history path. Structured updates such as
 `tool_call`, `tool_call_update`, and display-only plan/thought updates are
 stored as the exact update payload before enqueueing the notification and
-replayed as `session/update` notifications in the same sequence. This
+replayed as `session/update` notifications in the same sequence, except
+that each card's run of `tool_call_update`s is replayed as one update that
+carries the run's final value for every field. The merged update sits at the
+run's last position, and a new `tool_call` for the same id starts a new run.
+ACP updates replace the fields they carry, so the rendered card is the same.
+A worker card resends its whole cumulative log on every update, so replaying
+every row grew quadratically. One long worker run produced 17.7 MB, more than
+the Paseo history buffer below, and that chat could not reopen. The stored
+rows are not changed. This
 preserves a real runtime event even if the transport writer fails after
 enqueueing, without claiming that the host rendered it. These records are
 never read by, or fed into,
@@ -241,7 +249,10 @@ Cortex provider therefore launches the repository-owned
 `session/load` request, forwards the exact response first, and flushes the
 frames on the next event-loop turn. The relay is bounded at the same 4,096
 items and approximately 16 MiB, rejects malformed or truncated frames, and
-terminates the child on failure. This changes only the client-facing ordering
+terminates the child on failure. The relay exits as soon as the child exits.
+Paseo keeps the relay's stdin open, so a relay that only stopped its child
+used to leave a pending `session/load` unanswered forever. Paseo showed that
+as "Couldn't refresh agent history". This changes only the client-facing ordering
 needed by Paseo 0.8; Cortex remains ACP-compliant toward its own engine
 client. It is a compatibility path for Paseo 0.8, not a general ACP ordering
 rule.

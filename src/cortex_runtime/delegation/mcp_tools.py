@@ -336,11 +336,11 @@ _ROLE_HANDLERS = dict(coordinator=_COORDINATOR_HANDLERS, worker=_WORKER_HANDLERS
 
 _OPERATION_DESCRIPTIONS = dict(
     task_get_context="Read the current runtime task, original goal, validated plan, results and user answers.",
-    answer_submit="Submit a direct answer to an informational question before any plan or workers exist, or a final summary after the user answered a runtime stop question by choosing to finish. The runtime records and delivers the answer; this does not certify code changes or tests.",
+    answer_submit="Submit a direct answer to an informational question before any plan or workers exist, or a final summary after the user chose to finish when answering a runtime stop question or a question asked after verification. The runtime records and delivers the answer; this does not certify code changes or tests.",
     plan_submit="For changes or substantial delegated work, submit a dependency plan for runtime validation. Accepted only while the task is planning. The runtime chooses routes, schedules assignments, requires review and runs verification.",
     verification_submit="After the runtime verification failed and the work itself is fine: replace only the verification commands and verify again, without redoing the reviewed work.",
-    synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. Accepted only after every task, the review and the verification finished. This does not complete or accept the task.",
-    user_question_request="Request user input while planning or reconciling. The runtime persists the question before elicitation and resumes only after a real answer.",
+    synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. Accepted only after every task, the review and the verification finished. The runtime then completes the task, so use it only when nothing is left for the user to decide; otherwise ask with user_question_request.",
+    user_question_request="Request user input while planning or reconciling. Write the details in your message first; the question itself is one short line with short answer options. The runtime persists the question before elicitation and resumes only after a real answer. A question asked while reconciling (approve a proposed plan, choose how to continue) keeps the task open, and the answer returns it to planning: submit a plan for the chosen work, or answer_submit a short close when the user chose to finish.",
     result_submit="Submit this worker attempt's exact immutable report reference, summary and observed checks. Reviewers must include a verdict. This cannot accept the task.",
     ask_question="Ask the user for information this assignment cannot finish without. It stops every running worker and returns the task to planning; after the answer the coordinator re-plans with it.",
     read_skill=(

@@ -542,3 +542,40 @@ def test_a_failed_worker_returns_to_the_coordinator_a_bounded_number_of_times(ma
         assert state.context(channel.task_id)['state'] == 'RECOVERING'
         state.move(channel.task_id, 'EXECUTING')
     assert not state.return_to_coordinator(channel.task_id, 'worker_failed')  # then the user is asked
+
+
+def test_a_decision_left_after_verification_keeps_the_task_open_until_the_user_answers(machine):
+    """A proposed plan used to go out as synthesis text, and the task showed
+    as finished while the user still had to approve it."""
+    import json
+    from cortex_runtime.orchestration.questions import pending, request, resume_answered
+    from cortex_runtime.acp.questions_store import answer
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'p'); state.move(channel.task_id, 'EXECUTING')
+    digest = 'd' * 64
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET status='completed', stage='review', result_json=? WHERE task_id=?",
+                   (json.dumps(dict(project_digest=digest)), channel.task_id))
+        db.commit()
+    state.move(channel.task_id, 'REVIEWING'); state.move(channel.task_id, 'VERIFYING')
+    ok = dict(argv=['python3', '-B', '-m', 'pytest', '-q'], exit_code=0, complete=True, revision_digest=digest)
+    assert state.record_verification(channel.task_id, [ok], digest)
+    request(state.store, channel, dict(question='Approve the plan above?', options=['Approve', 'Finish'], request_key='q'))
+    assert state.context(channel.task_id)['state'] == 'WAITING_USER'
+    assert answer(state.store, pending(state.store, channel.task_id)['question_id'], 'Approve', 'text')
+    assert resume_answered(state.store, channel.task_id)
+    # Planning again: the approved work is a new plan revision ...
+    assert state.context(channel.task_id)['state'] == 'PLANNING'
+    assert state.submit_plan(channel, plan(2), 'approved')['revision'] == 2
+    # ... and a user who chose to finish lets the coordinator close it.
+    state.move(channel.task_id, 'EXECUTING')
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET status='completed', stage='review', result_json=? WHERE task_id=?",
+                   (json.dumps(dict(project_digest=digest)), channel.task_id))
+        db.commit()
+    state.move(channel.task_id, 'REVIEWING'); state.move(channel.task_id, 'VERIFYING')
+    assert state.record_verification(channel.task_id, [ok], digest)
+    request(state.store, channel, dict(question='Anything else?', options=['Finish'], request_key='q2'))
+    assert answer(state.store, pending(state.store, channel.task_id)['question_id'], 'Finish', 'text')
+    assert resume_answered(state.store, channel.task_id)
+    assert state.submit_answer(channel, 'Done as approved.', 'close')['state'] == 'ANSWER_READY'

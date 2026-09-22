@@ -53,3 +53,23 @@ for line in sys.stdin:
     assert [frame.get("id") for frame in output] == [1, 2, None]
     assert output[2]["method"] == "session/update"
     assert output[2]["params"]["update"] == "history"
+
+
+def test_shim_exits_when_the_agent_dies_while_the_client_stays_connected(tmp_path):
+    """A dead agent must fail the provider, not leave session/load unanswered."""
+    agent = tmp_path / "agent.py"
+    agent.write_text("import sys\nsys.stdin.readline()\nsys.exit(3)\n", encoding="utf-8")
+    env = dict(os.environ)
+    env["CORTEX_ACP_TARGET"] = json.dumps({"argv": [sys.executable, str(agent)]})
+    process = subprocess.Popen(
+        ["node", str(SHIM)], cwd=ROOT, env=env,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    assert process.stdin is not None
+    process.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "session/load", "params": {"sessionId": "s"}}) + "\n")
+    process.stdin.flush()
+    try:
+        process.wait(timeout=5)
+    finally:
+        process.kill()
+    assert process.returncode == 1
