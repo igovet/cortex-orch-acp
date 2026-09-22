@@ -353,15 +353,14 @@ store while the test targets another project, which Cortex rejects as
 `project_storage_mismatch`. Restart the isolated daemon from the exact
 disposable project root and retain the command/cwd in the observation record.
 
-For Luna-only paid qualification, copy
-`policy/route-policy.qualification-luna.json` from this checkout to the
-disposable project's `.cortex/route-policy.json` **before** starting the
-client session. This project-local policy outranks the user's normal policy
-and allows `codex-acp/gpt-5.6-luna` at `medium` or `high` for every role,
-defaulting to `high`. Verify the exact policy path and offered coordinator
-route, then inspect the durable route audit for each delegated attempt.
-An explicit unsupported worker choice must be refused before engine launch.
-Do not install this qualification file into the user's global Cortex config.
+For Luna-only paid qualification, write
+`{"pin": {"*": "codex-acp/gpt-5.6-luna:high"}}` to the disposable project's
+`.cortex/routing.json` **before** starting the client session. This
+project-local file outranks the user's own overrides and routes every worker
+role to `codex-acp/gpt-5.6-luna` at `high`; if Luna is unavailable the
+delegation is refused before engine launch. Inspect the durable route audit
+(`route_basis: auto:pin`) for each delegated attempt. Do not install this
+file into the user's global Cortex config.
 
 - Zed 1.20.1 (or the then-current qualified version — re-verify and record
   the exact version at run time) with Cortex registered via

@@ -42,7 +42,7 @@ class RouteUnresolved(OrchestrationUnavailable):
     ``remediation`` carries the refusal's own sentence, when the underlying
     :class:`PortableError` had one, so the person reading it is told what
     to change. Live (2026-09-19) a thread became unusable with nothing but
-    ``route_policy_not_authorized`` on screen, while the refusal itself
+    a bare refusal code on screen, while the refusal itself
     already knew which role, engine, model and effort it had refused and
     exactly what the policy allows instead -- and that sentence was thrown
     away one frame before the client.

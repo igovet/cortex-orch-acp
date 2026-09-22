@@ -1305,99 +1305,29 @@ class EngineSessionManagerAdapter:
         )
 
     def _resolve_runtime_route(self, launch, project_root) -> None:
-        """Resolve the first available administrator-authorized role route.
-
-        A model has no route parameters. Configured per-role routes and runtime
-        fallback decisions are the only sources of engine/model/effort choice.
-        """
-        from ..portable.errors import PortableError, PortableErrorCategory
+        """Choose this worker's connection, model and effort automatically
+        (``routing.auto_route``): the role's tier, the models the engines
+        actually advertised, and how much of each account's plan is left.
+        An already-resolved route (mixed-team profile, fallback) wins."""
         if not launch.get('assignment_id') or launch.get('route_override') or launch.get('resolved_connection_id'):
             return
-        role=launch.get('role_id')
-        if not role: return
-        from ..configuration import route_policy as route_policy_module
-        from ..connections import registry as connection_registry
-        policy,malformed=route_policy_module.load_route_policy(project_root,self._environ)
-        if malformed is not None:
-            raise PortableError(category=PortableErrorCategory.VALIDATION,code='invalid_route_policy',
-                                remediation='Repair the configured role route policy.',retry_eligible=False)
-        if policy is None: return
-        entries=policy.roles.get(role) or policy.default
-        if not entries: return
-        state=connection_registry.read_registry(self._environ)
-        available={c.engine for c in state.connections.values() if c.launch_command is not None
-                   and getattr(c.state,'value',c.state)=='configured'}
-        first=next((entry for entry in entries if entry.engine in available),None)
-        if first is None:
-            raise PortableError(category=PortableErrorCategory.VALIDATION,code='engine_not_connected',
-                                remediation='No configured engine satisfies this role policy.',retry_eligible=False)
-        engine=first.engine
-        model=None if first.model==route_policy_module.WILDCARD else first.model
-        effort=policy.resolve_effort(role,engine,model,None)
-        from ..connections import registry as connection_registry
-        from ..portable.errors import PortableError, PortableErrorCategory
+        role = launch.get('role_id')
+        if not role:
+            return
+        from ..routing import auto_route
 
-        # A raw registry lookup, never ``connections.onboarding
-        # .resolve_connection_for_route``'s stricter live login/credential
-        # re-verification -- that check runs, exactly once, a few lines
-        # below this method's own caller (the pre-existing "record =
-        # state.connections.get(override_connection_id)" branch this
-        # method feeds ``launch["resolved_connection_id"]`` into), the
-        # same as every other route-override source (T027 mixed-team,
-        # fallback). This only ever needs to know whether the requested
-        # engine has *a* connection at all.
-        state = connection_registry.read_registry(self._environ)
-        # A registry may contain more than one connection for an engine.  In
-        # particular, a client-discovered API-key placeholder can precede the
-        # operator-pinned native connection and have ``launch_command=None``.
-        # Selecting the first engine match made a worker inherit that
-        # unusable record even when a valid ACP install was registered later.
-        # Resolve the route to a launchable record here; ``EngineProcess``
-        # remains the final fail-closed check for the exact command.
-        coordinator_connection_id = launch.get("coordinator_route_connection_id")
-        exact = state.connections.get(coordinator_connection_id) if coordinator_connection_id else None
-        if exact is not None and exact.engine == engine and exact.launch_command is not None:
-            # Preserve the task's selected account whenever the policy keeps
-            # the worker on that engine.  A policy entry names an engine/model,
-            # not permission to silently switch the account behind the task.
-            connection_id = exact.id
-        else:
-            # An explicitly policy-selected alternate engine has no exact
-            # task route identity to inherit, so resolve it to a launchable
-            # connection.  Never choose a discovery placeholder lacking an
-            # executable command.
-            connection_id = next(
-                (
-                    candidate_id
-                    for candidate_id, candidate in state.connections.items()
-                    if candidate.engine == engine and candidate.launch_command is not None
-                ),
-                None,
-            )
-        if connection_id is None:
-            raise PortableError(
-                category=PortableErrorCategory.VALIDATION,
-                code="engine_not_connected",
-                remediation=(
-                    f"role {role!r} requires engine {engine!r} for this delegation, but this user has "
-                    "no connection for it; connect that engine (see cortex_acp_setup.py) before "
-                    "delegating this role with it."
-                ),
-                retry_eligible=False,
-                field="engine",
-            )
-        launch["resolved_connection_id"] = connection_id
-        launch["resolved_model"] = model
-        # What authorized this route, recorded with the attempt. The
-        # task's own route profile did not: absent an explicit mixed-team
-        # profile it authorizes only the coordinator's route, and this
-        # route has no id under it to check (route ids exist only inside
-        # such a profile's own ``route_details``). Saying so in the audit
-        # is the difference between a permission granted by the user's
-        # route policy and a check that quietly passed.
-        launch["route_basis"] = "route_policy"
-        if effort:
-            launch["parameters"] = dict(launch.get("parameters") or {}, effort=effort)
+        choice = auto_route.choose(role, project_root, self._environ)
+        if choice is None:
+            return
+        launch["resolved_connection_id"] = choice.connection_id
+        launch["resolved_model"] = choice.model
+        # What authorized this route, recorded with the attempt. The task's
+        # own route profile did not: absent an explicit mixed-team profile
+        # it authorizes only the coordinator's route.
+        launch["route_basis"] = choice.basis
+        if choice.effort:
+            launch["parameters"] = dict(launch.get("parameters") or {}, effort=choice.effort)
+            launch["effort_source"] = "auto_route"
 
     def _authorize_dispatch(self, record, task_id, launch, project_root=None) -> None:
         """T027: refuse *before* any capacity reservation/process launch
@@ -1410,20 +1340,14 @@ class EngineSessionManagerAdapter:
         ``resolve_worker``, which already ran before this launch was ever
         constructed.
 
-        D-T035-03: once the route itself is authorized (or, for a fallback,
-        already authorized up-front by ``routing.authorization
-        .authorize_fallback``), this also narrows by the user's own
-        hand-edited ``configuration.route_policy`` file -- which engine/
-        model/effort combinations this role may actually dispatch with.
-        Checked strictly *after* the route/ceiling authorization above (or
-        skipped below) so a permissive policy can never grant a route the
-        ceiling/profile has already refused -- it can only ever narrow
-        further.
+        Once the route itself is authorized, a model the user listed under
+        ``deny`` in ``routing.json`` (see ``routing.auto_route``) is still
+        refused -- checked strictly *after* the route/ceiling authorization,
+        so it can only ever narrow further.
         """
         config_revision = launch.get("config_revision")
         if not config_revision:
             return
-        from ..configuration import route_policy as route_policy_module
         from ..configuration import store as configuration_store
         from ..configuration.policy import RouteProfile
         from ..routing import authorization as routing_authorization
@@ -1465,43 +1389,20 @@ class EngineSessionManagerAdapter:
         requested_effort = parameters.get("effort") or parameters.get("thought_level")
         if requested_effort is None:
             requested_effort = revision["parameters"].get("effort") or revision["parameters"].get("thought_level")
-        policy, malformed = route_policy_module.load_route_policy(project_root, self._environ)
-        if malformed is not None:
-            self._record_malformed_route_policy(task_id, malformed)
-            from ..portable.errors import PortableError,PortableErrorCategory
-            raise PortableError(category=PortableErrorCategory.VALIDATION,code='invalid_route_policy',remediation='Repair the configured role route policy.',retry_eligible=False)
-        if policy is None:
-            return
-        resolved_effort = policy.resolve_effort(role, record.engine, model, requested_effort)
-        if resolved_effort is not None and resolved_effort != requested_effort:
-            # The policy named a default effort for this route and nothing
-            # else selected one; feed it back into ``launch["parameters"]``
-            # (the same per-attempt override surface ``_record_route_audit``
-            # already fingerprints/audits) so the resolved default is what
-            # this attempt is actually recorded as having used -- never a
-            # silent substitution the audit trail would miss.
-            launch["parameters"] = dict(parameters, effort=resolved_effort)
-            # Keep the provenance explicit.  A policy default is an effective
-            # launch value, but it must never be presented as if the user had
-            # selected it in the task configuration revision.
-            launch["effort_source"] = "route_policy_default"
-        elif requested_effort is not None:
-            launch["effort_source"] = "configuration_or_request"
+        from ..routing import auto_route
 
-    def _record_malformed_route_policy(self, task_id, detail) -> None:
-        """D-T035-03: a route policy file that exists but cannot be read or
-        parsed must never silently mean "no restrictions" -- recorded
-        durably here (never blocking the attempt: falls back to the
-        previous, policy-free behaviour, exactly like an absent file) so
-        the problem stays visible instead of disappearing."""
-        try:
-            from ..observability import events as observability_events
-
-            observability_events.append_event(
-                self._store, task_id, "route_policy", "malformed", "observed", detail=detail,
-            )
-        except Exception:  # noqa: BLE001 - recording the problem must never itself block dispatch
-            pass
+        auto_route.refuse_if_denied(record.engine, model, project_root, self._environ)
+        allowed = auto_route.allowed_efforts(record.engine, model, project_root, self._environ)
+        if requested_effort is not None and allowed is not None and requested_effort not in allowed:
+            # Lowered, never refused: a saved effort from before the rule
+            # (e.g. ultra) must not make the thread unusable. Recorded as
+            # this attempt's effective effort, with its provenance.
+            clamped = auto_route.nearest(requested_effort, allowed)
+            if clamped is not None:
+                launch["parameters"] = dict(parameters, effort=clamped)
+                launch["effort_source"] = "clamped_from_" + requested_effort
+        if requested_effort is not None:
+            launch.setdefault("effort_source", "configuration_or_request")
 
     def _record_route_audit(self, record, task_id, attempt_id, launch) -> None:
         """T027: durably audit the actual engine/connection/model/params

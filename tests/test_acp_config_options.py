@@ -78,27 +78,16 @@ def _build_and_save_snapshot(record, *, environ, model_id="model-placeholder-1",
     return snapshot
 
 
-def test_route_policy_filters_selector_models_and_effort_values(tmp_path, monkeypatch):
+def test_denied_models_are_not_offered_by_the_selector(tmp_path, monkeypatch):
     environ = _isolate(tmp_path, monkeypatch)
     record = _configured_connection(environ=environ)
     _build_and_save_snapshot(record, environ=environ, model_id="gpt-5.6-luna", thought_level="high")
     project = tmp_path / "project"
     (project / ".cortex").mkdir(parents=True)
-    (project / ".cortex" / "route-policy.json").write_text(json.dumps({
-        "roles": {},
-        "default": [{"engine": "codex-acp", "model": "gpt-5.6-luna",
-                      "efforts": ["high"], "default_effort": "high"}],
-    }))
     entries = config_options.selectable_entries_from_snapshots({record.id: record}, environ)
-    offered = config_options.filter_entries_by_route_policy(entries, str(project), environ)
-    assert [entry.route.model for entry in offered] == ["gpt-5.6-luna"]
-    options = config_options.build_config_options(
-        offered, {record.id: record},
-        current={"route_id": offered[0].route.id, "state": "active", "revision": 1},
-        project_root=str(project), environ=environ,
-    )
-    effort = next(option for option in options if option["id"] == config_options.THOUGHT_LEVEL_OPTION_ID)
-    assert [item["value"] for item in effort["options"]] == ["high"]
+    assert config_options.filter_denied_entries(entries, str(project), environ) == entries
+    (project / ".cortex" / "routing.json").write_text(json.dumps({"deny": ["gpt-5.6-luna"]}))
+    assert config_options.filter_denied_entries(entries, str(project), environ) == ()
 
 
 def test_engine_default_alias_is_hidden_from_model_and_effort_pickers(tmp_path, monkeypatch):
@@ -533,7 +522,11 @@ def test_thought_level_option_narrows_to_the_selected_models_own_set_not_an_engi
 
     # End-to-end through build_config_options: switching the selected route
     # from one model to the other must narrow, never keep offering the
-    # other model's wider set.
+    # other model's wider set. Here Luna is the engine's lightest model, so
+    # routing.auto_route's rule allows it max; ultra is never offered.
+    strongest = _entry_with_model_thought_levels(
+        connection_id, "gpt-6-astra", ("low", "medium", "high", "max", "ultra"))
+    entries = [strongest, narrow_entry, wide_entry]
     connections = {connection_id: _fake_connection_record(connection_id, name="work")}
     options_for_narrow = config_options.build_config_options(
         entries, connections, current=dict(route_id=narrow_entry.route.id, state="active", revision=1))
@@ -544,7 +537,7 @@ def test_thought_level_option_narrows_to_the_selected_models_own_set_not_an_engi
         entries, connections, current=dict(route_id=wide_entry.route.id, state="active", revision=1))
     thought_option = next(o for o in options_for_wide if o["id"] == config_options.THOUGHT_LEVEL_OPTION_ID)
     assert {item["value"] for item in thought_option["options"]} == {
-        "low", "medium", "high", "max", "ultra"}
+        "low", "medium", "high", "max"}
 
 
 def test_thought_level_option_orders_every_supported_effort_weakest_first():
@@ -554,28 +547,6 @@ def test_thought_level_option_orders_every_supported_effort_weakest_first():
     )
     option = config_options.build_thought_level_option(entry, {}, None, None)
     assert [item["value"] for item in option["options"]] == [
-        "low", "medium", "high", "xhigh", "max", "ultra",
-    ]
-
-
-def test_shipped_policy_offers_every_model_supported_coordinator_effort(tmp_path):
-    policy_dir = tmp_path / ".cortex"
-    policy_dir.mkdir()
-    policy_dir.joinpath("route-policy.json").write_bytes(
-        (Path(__file__).resolve().parents[1] / "policy" / "route-policy.default.json").read_bytes()
-    )
-    connection_id = "cn_" + "f" * 12
-    entry = _entry_with_model_thought_levels(
-        connection_id, "gpt-6-astra",
-        ("high", "low", "max", "medium", "ultra", "xhigh"),
-    )
-    options = config_options.build_config_options(
-        [entry], {connection_id: _fake_connection_record(connection_id)},
-        dict(route_id=entry.route.id, state="active", revision=1),
-        project_root=str(tmp_path), environ={"HOME": str(tmp_path.parent)},
-    )
-    effort = next(option for option in options if option["id"] == "thought_level")
-    assert [item["value"] for item in effort["options"]] == [
         "low", "medium", "high", "xhigh", "max", "ultra",
     ]
 

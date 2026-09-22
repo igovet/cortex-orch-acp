@@ -217,8 +217,8 @@ class TaskMachine:
             request=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED' ORDER BY id DESC LIMIT 1",(channel.task_id,)).fetchone()
             escalation=json.loads(request[0]) if request else {}
             if escalation.get('operation')=='escalation_request' and escalation.get('revision')==task['revision']:
-                # The runtime chooses a readonly consultant under the existing
-                # administrator route policy. The model never chooses a model.
+                # The runtime routes a readonly consultant automatically
+                # (routing.auto_route). The model never chooses a model.
                 proposed_nodes=[dict(id='_consultation',role='senior-consultant',
                     objective=escalation['proposal']['reason'],dependencies=[],scope=['.'])]+[
                     dict(node,dependencies=['_consultation',*node['dependencies']]) for node in proposed_nodes]

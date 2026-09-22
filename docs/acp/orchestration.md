@@ -60,6 +60,6 @@ it. Lost workers are retried at most twice after confirmed absence, and uncertai
 action receipts prevent replay. Coordinator, worker and review turns have total
 and idle deadlines. Scope reservations remain occupied until engine termination
 is observed. A task waiting for another task's capacity remains pending with a
-bounded wait. Senior escalation inserts a read-only consultant chosen by runtime
-route policy. Three accepted automatic replans and three review cycles bound the
+bounded wait. Senior escalation inserts a read-only consultant routed automatically
+by the runtime. Three accepted automatic replans and three review cycles bound the
 respective loops; exhausted limits require user input or a new plan.

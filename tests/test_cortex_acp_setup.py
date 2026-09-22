@@ -413,36 +413,6 @@ def test_add_connection_cli_rejects_unknown_install_record_fields_before_mutatio
     assert setup.status()["connections"] == []
 
 
-# -- init-route-policy (D-T035-03) ---------------------------------------
-
-def test_init_route_policy_creates_default_permitting_both_engines(tmp_path, monkeypatch):
-    _, _, home = _isolate(tmp_path, monkeypatch)
-    result = setup.init_route_policy()
-    assert result["created"] is True
-    path = Path(result["path"])
-    # Where the rest of the configuration lives: _isolate sets
-    # XDG_CONFIG_HOME, and load_route_policy reads the XDG location, so
-    # writing under HOME would write a file nothing ever reads.
-    import os
-    assert path == Path(os.environ["XDG_CONFIG_HOME"]) / "cortex" / "route-policy.json"
-    data = json.loads(path.read_text(encoding="utf-8"))
-    engines = {entry["engine"] for entry in data["default"]}
-    assert engines == {"codex-acp", "claude-agent-acp"}
-    for entry in data["default"]:
-        assert entry["default_effort"] in entry["efforts"]
-
-
-def test_init_route_policy_is_idempotent_and_never_overwrites(tmp_path, monkeypatch):
-    _isolate(tmp_path, monkeypatch)
-    first = setup.init_route_policy()
-    path = Path(first["path"])
-    path.write_text('{"roles": {"marker": []}}', encoding="utf-8")
-    second = setup.init_route_policy()
-    assert second["created"] is False
-    # The hand-edited (or here, test-mutated) file is untouched.
-    assert json.loads(path.read_text(encoding="utf-8")) == {"roles": {"marker": []}}
-
-
 def test_pin_route_persists_user_default_route(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
     secret_file = tmp_path / "secret.txt"

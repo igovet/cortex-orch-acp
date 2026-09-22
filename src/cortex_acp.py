@@ -45,20 +45,10 @@ def _ensure_first_run_configuration():
     A person installing this agent configures it in their editor and
     expects it to work; they should have to run a setup step only for the
     one thing that genuinely requires them -- connecting an engine to
-    their own account, which is never done silently. The route policy is
-    not that: it is a file in their own configuration directory,
-    permitting what is already permitted.
+    their own account, which is never done silently.
 
-    Never fails startup: a user whose configuration directory cannot be
-    written still gets a working agent, just without a policy file.
+    Never fails startup.
     """
-    try:
-        from cortex_runtime.configuration.route_policy import ensure_default_policy
-
-        ensure_default_policy()
-    except Exception:  # noqa: BLE001 - startup is never blocked by this
-        pass
-
     # D-T035-02: an engine the user already configured in their client (e.g.
     # Zed) needs no separate Cortex setup step -- discover it and, iff
     # Cortex has no connection for it yet, register one that references the

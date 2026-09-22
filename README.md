@@ -65,7 +65,7 @@ advertised API. Report prose and final chat messages cannot complete a task.
 | Connection secrets (API-key connections only) | `~/.config/cortex/secrets/<connection id>` | setup tooling only |
 | Engine credentials | your own native directories, `~/.codex` and `~/.claude` | the engine's own CLI (`codex`, `claude`) |
 | Engine installs | wherever your editor put them (Zed: `~/.local/share/zed/external_agents/`) | your editor |
-| Route + effort policy | `~/.config/cortex/route-policy.json` | you, by hand |
+| Worker routing overrides (optional) | `~/.config/cortex/routing.json` | you, by hand |
 | Your defaults | `~/.config/cortex/defaults.json` | the model/effort selectors in the editor |
 | One project's tasks | `<project>/.cortex/` | Cortex |
 
@@ -199,8 +199,7 @@ Then pick **Cortex** in the agent panel. It never starts on its own.
 ### 3. Nothing else, usually
 
 On its first start Cortex finds the engines your editor installed, gives each
-one a connection pointing at your own credentials, and writes a default
-`~/.config/cortex/route-policy.json` permitting both. None of that needs your
+one a connection pointing at your own credentials. None of that needs your
 consent, because none of it reaches outside your own configuration.
 
 You only need the setup tool for the cases that genuinely need you:
@@ -260,25 +259,47 @@ Equivalent commands, for a client without those selectors:
 | `/cortex-stop` | stop the active task, close its bound ACP host sessions, and terminate its owned coordinator and worker attempts, including workers with terminal events still awaiting process exit |
 | `/cortex-answer <n> <text>` | answer one open coordinator question |
 
-### Decide who may use what — `route-policy.json`
+### Which model a worker gets
 
-The coordinator's own route is your choice in the editor. Which routes a
-*worker* may use is the policy file:
+The coordinator's own route is your choice in the editor. Workers are routed
+automatically, from what your engines actually advertise:
 
-`~/.config/cortex/route-policy.json`
+- **Role tier.** Architecture, security, performance, debugging and the
+  senior consultant are `deep`; exploration, planning, general work and
+  writing are `light`; everything else is `standard`.
+- **Model tier.** Each engine lists its models strongest first; that list is
+  split into thirds. A new model gets a tier without any configuration.
+- **Plan usage.** Codex's own rate limits (from `~/.codex/sessions`) and
+  Claude's (reported during each turn). Deep and standard work goes to an
+  account below 85% first; light work goes to an account *above* 85% first,
+  spending the rest of a nearly used-up plan on cheap work. An exhausted
+  window is never chosen.
+- **Effort** follows the role tier (`high` / `medium` / `low`), clamped to
+  what the model supports. `ultra` is never used; `max` only on a model in
+  the `light` tier (e.g. Luna); flagship models (Astra, Fable) never above
+  `high`. The editor's effort selector offers only these, and an effort
+  saved from before is lowered to the nearest allowed one, not refused.
 
-Cortex writes it on its first run with both engines permitted; after that it
-is yours to edit by hand. Cortex reads, in precedence order:
+Only engine-confirmed model lists are used. Until a connection's models have
+been observed, a worker stays on the coordinator's route.
 
-1. `<project>/.cortex/route-policy.json` — this project only
-2. `$CORTEX_ROUTE_POLICY` — a path you set in your editor's `env` for Cortex
-3. `~/.config/cortex/route-policy.json` — the default location
-4. `~/.cortex/route-policy.json` — older user configuration location
+To override, add an optional `routing.json` (first found wins:
+`<project>/.cortex/routing.json`, `$CORTEX_ROUTING`,
+`~/.config/cortex/routing.json`):
 
-A policy can only ever **narrow**. It cannot grant a route or an effort that
-the permission ceiling forbids — otherwise editing a file would be a way
-around the ceiling, which is the one thing a ceiling is for. A malformed file
-fails closed with `invalid_route_policy`; it is never read as "no restrictions".
+```json
+{
+  "pin":   {"security-auditor": "claude-agent-acp/opus:high", "*": "codex-acp/gpt-5.6-luna"},
+  "deny":  ["gpt-5.5", "claude-agent-acp/haiku"],
+  "tiers": {"gpt-5.6-luna": "light"}
+}
+```
+
+A pin is strict: if the pinned route is not available the delegation is
+refused, never substituted. `deny` also removes a model from the editor's
+selector and refuses it when chosen explicitly. Routing never widens the
+permission ceiling. A malformed file fails closed with
+`invalid_routing_overrides`.
 
 ### MCP servers
 

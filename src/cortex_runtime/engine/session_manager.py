@@ -1211,6 +1211,11 @@ class EngineSessionManager:
             # a display update so the session that owns this engine can show
             # it; it is never folded into the per-call token accounting.
             context = context_usage_update(update)
+            meta = update.get("_meta")
+            if isinstance(meta, dict) and "_claude/rateLimit" in meta:
+                from ..connections import quota
+
+                quota.observe(self._record.id, meta["_claude/rateLimit"], self._environ)
             return EngineEvent(kind=EngineEventKind.USAGE_UPDATE, usage_basis=basis, usage_values=values,
                                display_update=context)
         if kind == "user_message_chunk":

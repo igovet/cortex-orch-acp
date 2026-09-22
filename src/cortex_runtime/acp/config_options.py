@@ -61,65 +61,19 @@ from ..connections.model import ConnectionRecord
 from ..portable.errors import PortableError
 
 
-def filter_entries_by_route_policy(
+def filter_denied_entries(
     entries: Sequence[CatalogEntry], project_root: str | None = None,
-    environ: Mapping[str, str] | None = None, *, role: str = "coordinator",
+    environ: Mapping[str, str] | None = None,
 ) -> tuple[CatalogEntry, ...]:
-    """Apply the project's route policy to the ACP selector surface.
+    """Drop routes the user listed under ``deny`` in ``routing.json`` (see
+    ``routing.auto_route``), so the selector never offers what dispatch
+    would refuse. A malformed file is left to dispatch to report."""
+    from ..routing import auto_route
 
-    The dispatch path remains the final authorization boundary.  Filtering
-    here keeps Zed and ``/cortex-model`` truthful, so a route that the policy
-    would reject is not presented as selectable in the first place.  A
-    malformed policy is deliberately left to the existing dispatch-side
-    diagnostic; it must not turn a UI refresh into an invented empty catalog.
-    """
-    if not entries:
-        return tuple()
-    from ..configuration import route_policy
-
-    policy, malformed = route_policy.load_route_policy(project_root, environ)
-    if policy is None or malformed is not None:
-        return tuple(entries)
-    allowed: list[CatalogEntry] = []
-    for entry in entries:
-        try:
-            policy.resolve_effort(role, entry.route.engine, entry.route.model, None)
-        except PortableError:
-            continue
-        allowed.append(entry)
-    return tuple(allowed)
-
-
-def allowed_efforts_for_entry(
-    entry: CatalogEntry, project_root: str | None = None,
-    environ: Mapping[str, str] | None = None, *, role: str = "coordinator",
-) -> frozenset[str] | None:
-    """Return policy-permitted effort values for one offered route.
-
-    ``None`` means no policy restriction.  A wildcard policy is intersected
-    with the engine-advertised values by the caller, while an explicit policy
-    narrows the advertised values to exactly its permitted set.
-    """
-    # Direct callers that build a standalone option set have no project
-    # scope, so they must retain the catalog's truthful engine-advertised
-    # values. Session callers always provide their concrete project root.
-    if project_root is None:
-        return None
-    from ..configuration import route_policy
-
-    policy, malformed = route_policy.load_route_policy(project_root, environ)
-    if policy is None or malformed is not None:
-        return None
-    entries = policy.roles.get(role)
-    if entries is None:
-        entries = policy.default
-    if entries is None:
-        return None
-    matches = [item for item in entries if item.matches(entry.route.engine, entry.route.model)]
-    if not matches:
-        return frozenset()
-    values = set().union(*(set(item.efforts) for item in matches))
-    return None if route_policy.WILDCARD in values else frozenset(values)
+    return tuple(
+        entry for entry in entries
+        if not auto_route.is_denied(entry.route.engine, entry.route.model, project_root, environ)
+    )
 
 # T035: three independent axes -- provider (which configured connection),
 # model (within that provider), and thought_level (reasoning effort) --
@@ -505,12 +459,28 @@ def combined_model_values(selectable_entries: Sequence[CatalogEntry]) -> dict[st
     }
 
 
+def _allowed_efforts(entry, selectable_entries, project_root, environ) -> tuple[str, ...] | None:
+    """The same effort rule automatic routing applies (``routing.auto_route
+    .permitted_efforts``), so the selector never offers what dispatch would
+    lower anyway."""
+    if entry is None:
+        return None
+    from ..routing import auto_route
+
+    try:
+        tier_overrides = auto_route.load_overrides(project_root, environ).get("tiers") or {}
+    except PortableError:
+        tier_overrides = {}
+    tiers = auto_route.model_tiers(selectable_entries, tier_overrides)
+    return auto_route.permitted_efforts(entry, tiers[entry.route.id])
+
+
 def build_thought_level_option(
     current_entry: CatalogEntry | None,
     current_parameters: Mapping[str, object],
     current_state: str | None,
     current_revision: int | None,
-    *, allowed_efforts: frozenset[str] | None = None,
+    *, allowed_efforts: Sequence[str] | None = None,
 ) -> dict | None:
     """The ``thought_level`` SessionConfigOption, or ``None`` when the
     currently selected route reports no ``thought_level`` parameter.
@@ -690,7 +660,7 @@ def build_config_options(
         model_effective_state = model_option.get("_meta", {}).get("_cortex", {}).get("state", provider_effective_state)
         thought_option = build_thought_level_option(
             chosen_entry, current.get("parameters") or {}, model_effective_state, current_revision,
-            allowed_efforts=allowed_efforts_for_entry(chosen_entry, project_root, environ),
+            allowed_efforts=_allowed_efforts(chosen_entry, selectable_entries, project_root, environ),
         )
         if thought_option is not None:
             options.append(thought_option)

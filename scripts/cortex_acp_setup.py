@@ -55,18 +55,12 @@ an unrelated one:
    Never touches the pinned user-default route -- unlike ``pin-route``/
    ``record-observation``, this only refreshes the cached catalog snapshot
    a later selection reads from.
-6. ``init-route-policy`` -- write a default, hand-editable
-   ``~/.config/cortex/route-policy.json`` (D-T035-03, see
-   ``cortex_runtime.configuration.route_policy`` for the schema/precedence)
-   pre-populated permitting every role for both supported engines at a
-   sensible effort range; never overwrites an existing file, here or
-   anywhere else the read-precedence chain would already find one.
-7. ``install-paseo-plugin`` -- validate and install the repository-owned
+6. ``install-paseo-plugin`` -- validate and install the repository-owned
    Paseo 0.8 provider plugin through the installed Paseo CLI. This is the
    single explicit Cortex-on-Paseo installation command; it is idempotent,
    preserves unrelated daemon configuration/plugins, and verifies the plugin
    reaches ``running``. It never runs implicitly when an ACP session starts.
-8. ``print-client-recipes`` -- delegates entirely to the existing T011
+7. ``print-client-recipes`` -- delegates entirely to the existing T011
    ``cortex_acp_client_config.py`` (Zed dry-run-by-default entry +
    ``--print-codeg-recipe``); this script never re-implements or
    duplicates that write path.
@@ -98,7 +92,6 @@ sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(SCRIPTS.parent / "src"))
 
 from cortex_runtime.catalog import discovery, refresh as catalog_refresh, store as catalog_store  # noqa: E402
-from cortex_runtime.configuration import route_policy as route_policy_module  # noqa: E402
 from cortex_runtime.configuration import store as configuration_store  # noqa: E402
 from cortex_runtime.connections import discovery as connection_discovery, onboarding, registry  # noqa: E402
 from cortex_runtime.connections.model import AuthMode, EngineNativeDir  # noqa: E402
@@ -639,56 +632,6 @@ def refresh_catalog(*, connection_id, workspace_root=None, timeout=None, environ
     )
 
 
-def init_route_policy(environ=None):
-    """D-T035-03: write a default, hand-editable ``route-policy.json`` at
-    ``~/.config/cortex/route-policy.json`` (see
-    ``cortex_runtime.configuration.route_policy`` for the exact schema and
-    read precedence) -- pre-populated permitting every role for both
-    engines this project supports, at a sensible effort range, so the file
-    always exists in a working (unrestrictive) state the user can then
-    narrow by hand. Never overwrites an existing file, at this path or any
-    other location ``route_policy.load_route_policy`` would find first;
-    idempotent -- rerunning after a file already exists changes nothing and
-    reports ``created=False``.
-    """
-    existing_policy, malformed = route_policy_module.load_route_policy(project_root=None, environ=environ)
-    # The same XDG rules every other Cortex config obeys (see
-    # connections.registry): a user who moved their configuration with
-    # XDG_CONFIG_HOME would otherwise get this one file written somewhere
-    # their own setup does not look.
-    env = os.environ if environ is None else environ
-    config_home = env.get("XDG_CONFIG_HOME") or ""
-    base = Path(config_home) if config_home.startswith("/") else Path(env.get("HOME") or Path.home()) / ".config"
-    path = base / "cortex" / "route-policy.json"
-    if path.is_file():
-        return dict(path=str(path), created=False, reason="already_exists")
-    if malformed is not None or existing_policy is not None:
-        # A different location in the read-precedence chain already has a
-        # policy (or a malformed one) in effect; writing a second file here
-        # would never actually be read (see load_route_policy's own
-        # first-match-wins docstring) and could confuse the user into
-        # thinking it applies. Report where the existing one actually is
-        # instead of writing a dead file.
-        return dict(path=str(path), created=False, reason="policy_already_in_effect_elsewhere", detail=malformed)
-    # The file the user actually maintains, shipped verbatim rather than
-    # rebuilt from code. It is a document with their own judgement in it --
-    # which effort levels each model is worth using at -- and its exact
-    # shape and formatting are theirs. Regenerating it from a dict would
-    # reformat it on every change and quietly lose anything expressed only
-    # in its layout.
-    template = _ROOT / "policy" / "route-policy.default.json"
-    try:
-        body = template.read_text(encoding="utf-8")
-    except OSError as error:
-        return dict(path=str(path), created=False, reason="template_unavailable", detail=str(error))
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp_path = path.with_suffix(".json.tmp")
-    tmp_path.write_text(body, encoding="utf-8")
-    os.chmod(tmp_path, 0o600)
-    os.replace(tmp_path, path)
-    return dict(path=str(path), created=True)
-
-
 def status(environ=None):
     """Read-only report of current setup state; always safe to run."""
     result = dict(storage=None, connections=[], pinned_route=None, discovered_engines=None)
@@ -769,7 +712,6 @@ def main(argv=None):
 
     sub.add_parser("status", help="Report current setup state (read-only, default).")
     sub.add_parser("init-storage", help="Create/verify owner-private config/state roots.")
-    sub.add_parser("init-route-policy", help="Write a default, hand-editable ~/.config/cortex/route-policy.json (never overwrites an existing one).")
     sub.add_parser("install-paseo-plugin", help="Install and verify the Cortex provider plugin in Paseo (explicit setup only).")
 
     p_validate = sub.add_parser(
@@ -830,9 +772,6 @@ def main(argv=None):
         return 0
     if step == "init-storage":
         print(_json(init_storage()))
-        return 0
-    if step == "init-route-policy":
-        print(_json(init_route_policy()))
         return 0
     if step == "install-paseo-plugin":
         print(_json(install_paseo_plugin()))

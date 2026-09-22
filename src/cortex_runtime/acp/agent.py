@@ -728,7 +728,7 @@ class Agent:
     def _selectable_entries_and_connections(self, project_root=None):
         registry_state = connection_registry.read_registry(self.environ)
         entries = acp_config_options.selectable_entries_from_snapshots(registry_state.connections, self.environ)
-        entries = acp_config_options.filter_entries_by_route_policy(
+        entries = acp_config_options.filter_denied_entries(
             entries, project_root, self.environ)
         # A literal engine ``default`` is an internal alias, not a concrete
         # model choice. Keep its catalog record for evidence, but omit it from
