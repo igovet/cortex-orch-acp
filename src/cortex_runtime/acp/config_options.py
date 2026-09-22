@@ -465,15 +465,25 @@ def build_combined_model_option(
 
 
 def combined_model_values(selectable_entries: Sequence[CatalogEntry]) -> dict[str, str]:
-    """Map each route to a unique value accepted by Paseo's model selector."""
+    """Map each route to a unique value accepted by Paseo's model selector.
+
+    An engine ``default`` alias shown in its own right (see
+    presented_entries) goes by the model id it resolves to: Paseo reads a
+    literal ``default`` model as "none selected" and drops the session's
+    settings, the coordinator language among them."""
+    def model(entry: CatalogEntry) -> str:
+        if entry.route.model.casefold() == _ENGINE_DEFAULT_VALUE and entry.model_description:
+            return entry.model_description
+        return entry.route.model
+
     counts: dict[str, int] = {}
     route_ids = {entry.route.id for entry in selectable_entries}
     for entry in selectable_entries:
-        counts[entry.route.model] = counts.get(entry.route.model, 0) + 1
+        counts[model(entry)] = counts.get(model(entry), 0) + 1
     return {
         entry.route.id: (
-            entry.route.model
-            if counts[entry.route.model] == 1 and entry.route.model not in route_ids
+            model(entry)
+            if counts[model(entry)] == 1 and model(entry) not in route_ids
             else entry.route.id
         )
         for entry in selectable_entries

@@ -143,6 +143,9 @@ def test_engine_default_alias_shows_the_model_it_alone_reaches(tmp_path, monkeyp
     assert [(entry.route.model, entry.model_name) for entry in presented] == [
         ("default", "Opus 5.5 (1M)"), ("claude-opus-5[1m]", "Opus 5 (1M)"), ("claude-sonnet-5", "Sonnet 5")]
     assert config_options.presented_entries(presented) == presented
+    # Paseo reads a literal "default" model as none selected.
+    assert list(config_options.combined_model_values(presented).values()) == [
+        "claude-opus-5-5[1m]", "claude-opus-5[1m]", "claude-sonnet-5"]
 
 
 # --- config_options.py unit tests -------------------------------------------
