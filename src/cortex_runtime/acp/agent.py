@@ -875,11 +875,7 @@ class Agent:
         entries = acp_config_options.selectable_entries_from_snapshots(registry_state.connections, self.environ)
         entries = acp_config_options.filter_denied_entries(
             entries, project_root, self.environ)
-        # A literal engine ``default`` is an internal alias, not a concrete
-        # model choice. Keep its catalog record for evidence, but omit it from
-        # both ACP selectors and the equivalent /cortex-model command.
-        entries = tuple(entry for entry in entries if entry.route.model.casefold() != "default")
-        return entries, registry_state.connections
+        return acp_config_options.presented_entries(entries), registry_state.connections
 
     def _default_selection_from_user_defaults(self):
         """The last explicit ``/cortex-model``/``set_config_option`` choice

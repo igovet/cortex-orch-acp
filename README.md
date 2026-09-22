@@ -239,7 +239,12 @@ engine** → **effort of that model** → **language**. Paseo exposes one
 model picker, so Cortex puts the engine-provided model name first and its
 description, engine, account and catalog evidence below it. Paseo's mode
 picker selects the coordinator language (Auto, English or Russian). The
-literal engine aliases `default` are omitted from model and effort choices.
+literal engine alias `default` is omitted from effort choices, and from model
+choices when it only duplicates a listed model. When it is the only way to reach
+its model (Claude with an `availableModels` list in `~/.claude/settings.json`
+that does not name the newest model), it is shown under that model's name, so a
+new default model appears without any configuration. A model the engine gives
+no name for is named from its ID (`claude-opus-5[1m]` → `Opus 5 (1M)`).
 For Paseo, a unique model ID is also the selector value, so its `--model`
 option can select it before the first prompt. If two accounts offer the same
 model ID, their selector values are exact route IDs; choose one in the model

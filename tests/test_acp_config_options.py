@@ -123,6 +123,28 @@ def test_engine_default_alias_is_hidden_from_model_and_effort_pickers(tmp_path, 
         assert effort["currentValue"] == "low"
 
 
+def test_engine_default_alias_shows_the_model_it_alone_reaches(tmp_path, monkeypatch):
+    """claude-agent-acp with an ``availableModels`` list that omits the newest
+    model reaches it only through ``default``, described by its bare id."""
+    environ = _isolate(tmp_path, monkeypatch)
+    record = _configured_connection(environ=environ)
+    raw = [
+        dict(id="model", name="Model", type="select", category="model",
+             currentValue="default", options=[
+                 dict(value="default", name="Default (recommended)", description="claude-opus-5-5[1m]"),
+                 dict(value="claude-opus-5[1m]", name="claude-opus-5[1m]"),
+                 dict(value="claude-sonnet-5", name="Sonnet 5"),
+             ]),
+    ]
+    observation = discovery.parse_observation(raw)
+    catalog_store.save_snapshot(discovery.build_catalog({record.id: record}, {record.id: observation}), environ)
+    entries = config_options.selectable_entries_from_snapshots({record.id: record}, environ)
+    presented = config_options.presented_entries(entries)
+    assert [(entry.route.model, entry.model_name) for entry in presented] == [
+        ("default", "Opus 5.5 (1M)"), ("claude-opus-5[1m]", "Opus 5 (1M)"), ("claude-sonnet-5", "Sonnet 5")]
+    assert config_options.presented_entries(presented) == presented
+
+
 # --- config_options.py unit tests -------------------------------------------
 
 # --- T035: seeded model list, superseded by a real observation ------------

@@ -48,11 +48,15 @@ settings; those are out of scope for this task (T010).
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Iterable, Mapping, Sequence
 
 from ..catalog import discovery as catalog_discovery
 from ..catalog import store as catalog_store
-from ..catalog.labels import build_model_label, build_provider_label, disambiguate_labels, engine_short_name
+from ..catalog.labels import (
+    build_model_label, build_provider_label, disambiguate_labels, engine_short_name, model_display_name,
+    resolved_default_model,
+)
 from ..catalog.model import CatalogEntry
 from ..connections import account_identity as connection_account_identity
 from ..connections import onboarding as connection_onboarding
@@ -236,6 +240,29 @@ def selectable_entries_from_snapshots(
     return tuple(selectable)
 
 
+def presented_entries(entries: Sequence[CatalogEntry]) -> tuple[CatalogEntry, ...]:
+    """Entries as a person should choose them. An engine's literal
+    ``default`` alias is dropped when it only duplicates a listed model, and
+    shown under its model's name when it is the only way to reach that model
+    (claude-agent-acp: a model outside ``availableModels``). A model the
+    engine gave no name for gets one from its id."""
+    listed: dict[str, set[str]] = {}
+    for entry in entries:
+        listed.setdefault(entry.connection_id, set()).add(entry.route.model)
+    presented = []
+    for entry in entries:
+        if entry.route.model.casefold() == _ENGINE_DEFAULT_VALUE:
+            resolved = resolved_default_model(
+                entry.route.model, entry.model_description, listed[entry.connection_id])
+            if resolved is None:
+                continue
+            entry = replace(entry, model_name=model_display_name(resolved))
+        elif not entry.model_name or entry.model_name == entry.route.model:
+            entry = replace(entry, model_name=model_display_name(entry.route.model))
+        presented.append(entry)
+    return tuple(presented)
+
+
 _UNAVAILABLE_DESCRIPTION = "Saved route is unavailable — choose a route"
 _UNAVAILABLE_THOUGHT_LEVEL_DESCRIPTION = "Depends on an unavailable route — choose a route"
 
@@ -340,10 +367,7 @@ def build_model_option(
     (e.g. a persisted default from a provider that has since dropped that
     model) the same way.
     """
-    provider_entries = tuple(
-        entry for entry in provider_entries
-        if entry.route.model.casefold() != _ENGINE_DEFAULT_VALUE
-    )
+    provider_entries = presented_entries(provider_entries)
     if not provider_entries:
         return None
     first_entry_by_model: dict[str, CatalogEntry] = {}
@@ -400,10 +424,7 @@ def build_combined_model_option(
     identifies the provider/account and Paseo must not render a duplicate
     provider selector.
     """
-    selectable_entries = tuple(
-        entry for entry in selectable_entries
-        if entry.route.model.casefold() != _ENGINE_DEFAULT_VALUE
-    )
+    selectable_entries = presented_entries(selectable_entries)
     if not selectable_entries:
         return None
     values = combined_model_values(selectable_entries)
@@ -574,14 +595,9 @@ def build_config_options(
     ``selectable_entries`` is empty (no model is selectable yet): language
     is never gated on route/connection availability.
     """
-    # Some engines advertise a literal ``default`` model/effort as an
-    # implementation alias.  It is not a concrete choice for a person and
-    # must not leak into either client's model picker.  Keep the underlying
-    # catalog evidence intact; only the public selection surface is filtered.
-    selectable_entries = tuple(
-        entry for entry in selectable_entries
-        if entry.route.model.casefold() != _ENGINE_DEFAULT_VALUE
-    )
+    # An engine's literal ``default`` alias is shown only when it is the one
+    # way to reach its model (see presented_entries); catalog evidence is untouched.
+    selectable_entries = presented_entries(selectable_entries)
     current = current or {}
     options: list[dict] = []
     current_route_id = current.get("route_id")

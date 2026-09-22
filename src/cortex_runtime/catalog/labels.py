@@ -293,3 +293,28 @@ def disambiguate_labels(entries: Iterable[tuple[str, str]]) -> dict[str, str]:
         else:
             result[route_id] = label
     return result
+
+
+_MODEL_ID = re.compile(r"[a-z][a-z0-9.]*(?:-[a-z0-9.]+)+(?:\[[a-z0-9]+\])?")
+_VERSIONED_ID = re.compile(r"(?:claude-)?([a-z]+)-(\d+(?:-\d{1,2})*)(?:-\d{8})?(?:\[([a-z0-9]+)\])?")
+
+
+def model_display_name(model: str) -> str:
+    """A readable name for a model id the engine gave no name for:
+    ``claude-opus-5-5[1m]`` -> ``Opus 5.5 (1M)``. Anything else unchanged."""
+    match = _VERSIONED_ID.fullmatch(model)
+    if match is None:
+        return model
+    family, version, context = match.groups()
+    name = f"{family.capitalize()} {version.replace('-', '.')}"
+    return f"{name} ({context.upper()})" if context else name
+
+
+def resolved_default_model(model: str, description: str | None, listed: Iterable[str]) -> str | None:
+    """The model an engine's ``default`` alias stands for, iff that model is
+    not also listed on its own (claude-agent-acp describes ``default`` by a
+    listed model's name, or by the bare resolved id when none matches).
+    ``None`` for every other entry, or an alias that only duplicates one."""
+    if model.casefold() != "default" or not description or not _MODEL_ID.fullmatch(description):
+        return None
+    return None if description in set(listed) else description

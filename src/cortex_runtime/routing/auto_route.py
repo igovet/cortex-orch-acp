@@ -223,12 +223,11 @@ def allowed_efforts(engine: str, model: str | None, project_root=None, environ=N
 
 def _entries(overrides, connections, environ) -> list:
     """Launchable, non-denied catalog entries, in each engine's own order."""
-    from ..acp.config_options import selectable_entries_from_snapshots
+    from ..acp.config_options import presented_entries, selectable_entries_from_snapshots
 
     return [
-        entry for entry in selectable_entries_from_snapshots(connections, environ)
-        if entry.route.model.casefold() != "default"
-        and getattr(connections.get(entry.connection_id), "launch_command", None) is not None
+        entry for entry in presented_entries(selectable_entries_from_snapshots(connections, environ))
+        if getattr(connections.get(entry.connection_id), "launch_command", None) is not None
         and not _denied(overrides, entry.route.engine, entry.route.model)
     ]
 
