@@ -19,7 +19,12 @@ def obj(properties, required=None):
 NODE = obj(dict(id=text('Unique plan node name.', 64), role=text('Specialist role. Runtime resolves its profile and route.', 80),
                 objective=text('One bounded implementation or investigation objective. The runtime automatically adds mandatory independent code review and final verification after all proposed tasks; do not duplicate those stages in this plan.'),
                 dependencies=array(text('Predecessor node name.', 64)),
-                scope=array(text('Requested project-relative path or glob; runtime policy decides access.', 512), minimum=1)))
+                scope=array(text('Requested project-relative path or glob; runtime policy decides access.', 512), minimum=1),
+                complexity=dict(type='string', enum=['low', 'normal', 'high'],
+                                description='How hard this task is, judged from the work itself: low for a narrow lookup or mechanical change, '
+                                            'high for cross-cutting root-cause analysis, production incidents, concurrency, security or data-loss risk; '
+                                            'omit for normal. The runtime turns it into a stronger or cheaper route; it never names a model.')),
+           required=['id', 'role', 'objective', 'dependencies', 'scope'])
 from ..portable.roles import WORKER_ALIASES
 NODE['properties']['role']['enum'] = sorted(role for role in WORKER_ALIASES if role not in {'code-reviewer','build-verification'})
 PLAN = obj(dict(tasks=array(NODE, minimum=1), verification=array(array(text('Literal verification argument. Project is read-only; write generated output only under /tmp.', 4096), minimum=1), maximum=16, minimum=1)))

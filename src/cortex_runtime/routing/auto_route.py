@@ -17,9 +17,11 @@ available -- replaces the hand-maintained per-role ``route-policy.json``.
    the cheapest model is the one worth running at its maximum); flagship
    models (:data:`FLAGSHIP_FAMILIES`) never above ``high``. The same rule
    narrows the editor's selector and any explicitly chosen effort.
-5. Cheap first, stronger on evidence: a retried attempt or a fix after
-   review requested changes runs one tier above its role (``escalate``),
-   so the strongest models work only where a weaker one already fell short.
+5. The work moves the role's tier: the coordinator's planned
+   ``complexity`` (``low``/``high``) shifts it one step cheaper/stronger,
+   and a retried attempt or a fix after review requested changes runs one
+   more step up (``escalate``) -- the strongest models run on hard work or
+   where a weaker one already fell short. The model never names a model.
 
 Only engine-confirmed catalogs are used -- a connection whose models were
 never observed (seed catalog) is not routed to automatically; the worker
@@ -94,10 +96,10 @@ class Choice:
 
 
 def choose(role: str, project_root=None, environ: Mapping[str, str] | None = None, *,
-           escalate: bool = False) -> Choice | None:
+           escalate: bool = False, complexity: str = "normal") -> Choice | None:
     """The route this worker role should open on, or ``None`` when nothing
     engine-confirmed is available (keep the coordinator's route).
-    ``escalate`` lifts the role one tier (a retry or a review fix)."""
+    See :func:`tier_for` for ``escalate`` and ``complexity``."""
     from ..connections import quota
     from ..connections import registry as connection_registry
 
@@ -113,7 +115,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             usage_cache[key] = quota.used_percent(connections[entry.connection_id], entry.route.model, environ)
         return usage_cache[key]
 
-    role_tier = tier_for(role, escalate)
+    role_tier = tier_for(role, escalate, complexity)
     pin = _pin_for(overrides, role)
     if pin is not None:
         engine, model, effort = pin
@@ -136,9 +138,14 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     return Choice(picked.connection_id, picked.route.model, effort, "auto")
 
 
-def tier_for(role: str, escalate: bool = False) -> str:
-    tier = ROLE_TIERS.get(role, "standard")
-    return TIERS[max(0, TIERS.index(tier) - 1)] if escalate else tier
+_COMPLEXITY_SHIFT = {"low": 1, "normal": 0, "high": -1}
+
+
+def tier_for(role: str, escalate: bool = False, complexity: str = "normal") -> str:
+    """The role's tier, one step cheaper for ``low`` work, one step
+    stronger for ``high`` work, and one more step stronger when escalated."""
+    index = TIERS.index(ROLE_TIERS.get(role, "standard")) + _COMPLEXITY_SHIFT.get(complexity, 0) - bool(escalate)
+    return TIERS[min(len(TIERS) - 1, max(0, index))]
 
 
 def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, str] | None = None):

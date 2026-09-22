@@ -31,6 +31,10 @@ For work that needs a plan, submit it using
 the advertised proposal API. Include concrete objectives, dependency relationships,
 requested project scope and executable verification. Prefer focused assignments
 with useful outputs. Include documentation and tests where the change requires them.
+Mark each task's complexity from the work, not the role: `high` for cross-cutting
+root-cause analysis, production incidents, concurrency, security or data-loss risk;
+`low` for a narrow lookup or mechanical change; omit it otherwise. It sets how
+strong, and how costly, the worker's model is; overrating it wastes the plan.
 The runtime validates the proposal and schedules the work.
 
 When the runtime requests reconciliation, read the relevant immutable reports,

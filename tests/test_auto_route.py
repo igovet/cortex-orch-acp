@@ -146,3 +146,11 @@ def test_debugging_starts_standard_and_escalates_one_tier():
     assert auto_route.tier_for("worker-debugger", escalate=True) == "deep"
     assert auto_route.tier_for("worker-explorer", escalate=True) == "standard"
     assert auto_route.tier_for("worker-security-auditor", escalate=True) == "deep"
+
+
+def test_planned_complexity_shifts_the_role_tier_one_step():
+    assert auto_route.tier_for("worker-debugger", complexity="high") == "deep"
+    assert auto_route.tier_for("worker-debugger", complexity="low") == "light"
+    assert auto_route.tier_for("worker-security-auditor", complexity="low") == "standard"
+    assert auto_route.tier_for("worker-explorer", complexity="low") == "light"
+    assert auto_route.tier_for("worker-debugger", escalate=True, complexity="low") == "standard"

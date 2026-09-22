@@ -1,6 +1,10 @@
 {
   "name": "cortex",
+<<<<<<< Updated upstream
   "version": "1.0.0+sha256.155a08bb34480193",
+=======
+  "version": "1.0.0+sha256.3500a89de234af45",
+>>>>>>> Stashed changes
   "description": "Durable runtime-owned ACP orchestration with immutable reports and complete observed tool transcripts.",
   "author": {
     "name": "igovet"

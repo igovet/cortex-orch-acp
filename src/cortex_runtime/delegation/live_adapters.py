@@ -1329,11 +1329,11 @@ class EngineSessionManagerAdapter:
             return
         from ..routing import auto_route
 
-        from ..orchestration.state import escalated_attempt
+        from ..orchestration.state import attempt_routing
 
-        escalate = bool(launch.get('task_id') and launch.get('attempt_id')) and escalated_attempt(
-            self._store, launch['task_id'], launch['attempt_id'])
-        choice = auto_route.choose(role, project_root, self._environ, escalate=escalate)
+        escalate, complexity = (attempt_routing(self._store, launch['task_id'], launch['attempt_id'])
+                                if launch.get('task_id') and launch.get('attempt_id') else (False, 'normal'))
+        choice = auto_route.choose(role, project_root, self._environ, escalate=escalate, complexity=complexity)
         if choice is None:
             return
         launch["resolved_connection_id"] = choice.connection_id

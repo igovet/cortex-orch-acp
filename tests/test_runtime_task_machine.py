@@ -459,18 +459,28 @@ def test_stop_asks_the_user_and_only_their_answer_lets_the_coordinator_close(mac
 
 
 def test_only_retries_and_review_fixes_escalate_the_route(machine):
-    from cortex_runtime.orchestration.state import escalated_attempt, event
+    from cortex_runtime.orchestration.state import attempt_routing, event
     state, channel = machine
-    state.submit_plan(channel, plan(), 'p'); state.move(channel.task_id, 'EXECUTING')
+    hard = plan(); hard['tasks'][0]['complexity'] = 'high'
+    state.submit_plan(channel, hard, 'p'); state.move(channel.task_id, 'EXECUTING')
     node = state.claim_ready(channel.task_id, channel.channel_id)[0]
     with state.store.connection() as db:
         db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                    (node['assignment_ref'], channel.task_id, 'xa_first', 'worker-debugger', 'ready', 'ready', 0, 'now', 'now')); db.commit()
-    assert not escalated_attempt(state.store, channel.task_id, 'xa_first')
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (False, 'high')
     with state.store.connection() as db:
         event(db, channel.task_id, 'ASSIGNMENT_RETRIED', dict(node=node['node_id'], revision=1, retry=1)); db.commit()
-    assert escalated_attempt(state.store, channel.task_id, 'xa_first')
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high')
     with state.store.connection() as db:
         db.execute("UPDATE runtime_nodes SET node_id='_fix_0_N0' WHERE task_id=?", (channel.task_id,))
         db.execute("DELETE FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'"); db.commit()
-    assert escalated_attempt(state.store, channel.task_id, 'xa_first')
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high')  # a fix keeps its node's complexity
+
+
+def test_plan_complexity_is_optional_and_bounded(machine):
+    state, channel = machine
+    bad = plan(); bad['tasks'][0]['complexity'] = 'extreme'
+    with pytest.raises(StoreError, match='invalid_plan_node'):
+        state.submit_plan(channel, bad, 'bad')
+    light = plan(); light['tasks'][0]['complexity'] = 'low'
+    state.submit_plan(channel, light, 'ok')

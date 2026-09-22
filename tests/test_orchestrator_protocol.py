@@ -12,7 +12,7 @@ def test_coordinator_has_proposals_and_questions_but_no_lifecycle_or_route_contr
     assert not {'delegate','decide','cancel','complete_task','set_task_state','integrate'} & tools.keys()
     plan=tools['plan_submit']['inputSchema']['properties']['plan']
     node=plan['properties']['tasks']['items']
-    assert set(node['properties'])=={'id','role','objective','dependencies','scope'}
+    assert set(node['properties'])=={'id','role','objective','dependencies','scope','complexity'}  # a bounded work estimate, never a route
     assert node['additionalProperties'] is False
     assert 'question' in tools['user_question_request']['inputSchema']['required']
 

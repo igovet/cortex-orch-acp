@@ -134,22 +134,27 @@ def released_by_user(db, task):
     return any(json.loads(r[0]).get('question_id') in stops for r in answered)
 
 
-def escalated_attempt(store, task_id, attempt_id):
-    """This attempt follows evidence that a weaker run fell short: it is a
-    retry of its node or a fix after review requested changes."""
+def attempt_routing(store, task_id, attempt_id):
+    """What routing needs to know about this attempt's node: the planned
+    ``complexity`` and whether it is escalated -- a retry of its node or a
+    fix after review requested changes, i.e. a weaker run already fell short."""
     with store.connection() as db:
         provision = db.execute('SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
                                (task_id, attempt_id)).fetchone()
         node = provision and db.execute('SELECT node_id,revision FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
                                         (task_id, provision['idempotency_key'])).fetchone()
         if not node:
-            return False
-        if node['node_id'].startswith('_fix_'):
-            return True
+            return False, 'normal'
+        plan = db.execute('SELECT plan_json FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
         retries = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'",
                              (task_id,)).fetchall()
-    return any(json.loads(r[0]).get('node') == node['node_id'] and json.loads(r[0]).get('revision') == node['revision']
-               for r in retries)
+    fix = re.fullmatch(r'_fix_\d+_(.+)', node['node_id'])
+    planned = fix.group(1) if fix else node['node_id']
+    tasks = json.loads(plan['plan_json'])['tasks'] if plan and plan['plan_json'] else []
+    complexity = next((t.get('complexity', 'normal') for t in tasks if t['id'] == planned), 'normal')
+    retried = any(json.loads(r[0]).get('node') == node['node_id'] and json.loads(r[0]).get('revision') == node['revision']
+                  for r in retries)
+    return bool(fix) or retried, complexity
 
 
 def validate_scope(scope):
@@ -173,7 +178,9 @@ def validate_plan(plan):
         raise StoreError('invalid_plan_size')
     ids = set()
     for node in nodes:
-        if not isinstance(node, dict) or set(node) != {'id', 'role', 'objective', 'dependencies', 'scope'}:
+        if (not isinstance(node, dict) or not {'id', 'role', 'objective', 'dependencies', 'scope'} <= set(node)
+                or set(node) - {'id', 'role', 'objective', 'dependencies', 'scope', 'complexity'}
+                or node.get('complexity', 'normal') not in {'low', 'normal', 'high'}):
             raise StoreError('invalid_plan_node')
         key = node['id']
         if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,63}', key) or key in ids:
