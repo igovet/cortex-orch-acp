@@ -111,3 +111,35 @@ def test_never_maps_fast_or_collaboration_mode_or_model_config(parameter_name):
 def test_empty_observed_options_rejects_model():
     with pytest.raises(ConfigurationRejected):
         claude_option_mapping(_revision(), [])
+
+
+def test_sdk_unknown_model_takes_its_effort_from_session_new_meta_not_a_config_option():
+    """A model the engine's SDK does not know keeps its bare id as its name
+    and gets no effort option; its effort rides on session/new's _meta
+    (see claude_adapter_acp.SDK_EFFORTS for the captured evidence)."""
+    from cortex_runtime.engine.claude_adapter_acp import (
+        EFFORT_CHANNEL_PARAM, SDK_EFFORTS, SESSION_NEW_META_CHANNEL, build_claude_session_new_meta,
+        claude_native_subagent_restriction_meta, sdk_unknown_model,
+    )
+
+    observed = _observed_config_options()
+    model_option = next(option for option in observed if option["id"] == "model")
+    unknown = "claude-opus-5[1m]"
+    model_option["options"].append({"value": unknown, "name": unknown, "description": ""})
+
+    assert sdk_unknown_model(unknown, unknown) is True
+    assert sdk_unknown_model("model-a", "Model A") is False
+
+    mapping = claude_option_mapping(_revision(model=unknown, supported_parameters=(
+        ("thought_level", "max"), (EFFORT_CHANNEL_PARAM, SESSION_NEW_META_CHANNEL))), observed)
+    assert mapping == [("model", unknown)]
+    # A model the engine does name still configures its effort the usual way.
+    assert ("effort", "medium") in claude_option_mapping(
+        _revision(model="model-a", supported_parameters=(("thought_level", "medium"),)), observed)
+
+    options = build_claude_session_new_meta("role", role="coordinator", effort="max")["claudeCode"]["options"]
+    assert options["effort"] == "max"
+    assert "effort" not in claude_native_subagent_restriction_meta(role="worker")["claudeCode"]["options"]
+    with pytest.raises(Exception):
+        build_claude_session_new_meta("role", effort="ultra")
+    assert SDK_EFFORTS == ("low", "medium", "high", "xhigh", "max")

@@ -283,6 +283,24 @@ def seed_observation(engine: str) -> "Observation | None":
     return parse_observation(raw)
 
 
+def _with_sdk_efforts(engine: str, model: str, model_name: str, supported_parameters):
+    """claude-agent-acp advertises no effort for a model its bundled SDK does
+    not know, yet the SDK still sends that session's effort for it (see
+    ``engine.claude_adapter_acp.SDK_EFFORTS`` for the captured evidence, and
+    why a model the SDK *does* know without efforts -- Haiku -- keeps none).
+    Such a model is recognisable here by having no display name of its own."""
+    if engine != "claude-agent-acp" or any(name == "thought_level" for name, _ in supported_parameters):
+        return supported_parameters
+    from ..engine.claude_adapter_acp import (
+        EFFORT_CHANNEL_PARAM, SDK_EFFORTS, SESSION_NEW_META_CHANNEL, sdk_unknown_model,
+    )
+
+    if not sdk_unknown_model(model, model_name):
+        return supported_parameters
+    return (tuple(supported_parameters) + ((EFFORT_CHANNEL_PARAM, SESSION_NEW_META_CHANNEL),)
+            + tuple(("thought_level", value) for value in SDK_EFFORTS))
+
+
 def build_catalog(
     connections: Mapping[str, ConnectionRecord],
     observations: Mapping[str, Observation | None],
@@ -323,6 +341,7 @@ def build_catalog(
             # overwhelming default, identical to every pre-existing
             # observation/test).
             supported_parameters = observation.parameter_pairs_for(model)
+            supported_parameters = _with_sdk_efforts(record.engine, model, model_name, supported_parameters)
             route = ExecutionRoute(
                 engine=record.engine,
                 connection_id=connection_id,

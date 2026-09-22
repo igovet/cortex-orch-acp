@@ -182,8 +182,23 @@ def project_rules_for_claude(project_root: str | None) -> str:
     return "## Project rules (follow them)\n\n" + "\n\n".join(parts)
 
 
+def _sdk_effort_for(record, launch) -> str | None:
+    """The effort to hand claude-agent-acp at session/new, for a model whose
+    SDK-unknown id gets no effort config option (see
+    ``engine.claude_adapter_acp.SDK_EFFORTS``). ``None`` for every other
+    engine/model, which configure their effort the ordinary way."""
+    if record.engine != "claude-agent-acp":
+        return None
+    from ..engine.claude_adapter_acp import SDK_EFFORTS
+
+    parameters = launch.get("parameters") or {}
+    effort = parameters.get("effort") or parameters.get("thought_level")
+    return effort if effort in SDK_EFFORTS else None
+
+
 def _session_new_meta_for(
     engine: str, version: str, instructions: str | None, *, role: str = "worker", project_root: str | None = None,
+    effort: str | None = None,
 ):
     """The ``session/new`` ``_meta`` payload this engine's own qualified
     delivery mechanism builds for ``instructions``, or ``None``.
@@ -201,7 +216,7 @@ def _session_new_meta_for(
         if engine == "claude-agent-acp" and version == "0.78.0":
             from ..engine.claude_adapter_acp import claude_native_subagent_restriction_meta
 
-            return claude_native_subagent_restriction_meta(role=role)
+            return claude_native_subagent_restriction_meta(role=role, effort=effort)
         return None
     if engine == "claude-agent-acp" and version == "0.78.0":
         rules = project_rules_for_claude(project_root)
@@ -213,7 +228,7 @@ def _session_new_meta_for(
         # the launch role is already known.
         from ..engine.claude_adapter_acp import build_claude_session_new_meta
 
-        return build_claude_session_new_meta(instructions, role=role)
+        return build_claude_session_new_meta(instructions, role=role, effort=effort)
     from ..engine.instruction_delivery_registry import delivery_for
     from ..portable.instruction_delivery import DeliveryQualification
 
@@ -803,7 +818,7 @@ class EngineSessionManagerAdapter:
             # metadata. Codex also receives its tagged generation prompt.
             session_new_meta = _session_new_meta_for(
                 record.engine, _pinned_version_for(record.engine), instructions, role=recipient,
-                project_root=workspace_root,
+                project_root=workspace_root, effort=_sdk_effort_for(record, launch),
             )
             session_id = manager.create_session(
                 task_id, launch.get("assignment_id") or attempt_id, session_new_meta=session_new_meta,
@@ -1595,7 +1610,8 @@ class EngineSessionManagerAdapter:
         ledger = InstructionBundleLedger(self._store)
         ledger.save_intended(bundle)
         meta = _session_new_meta_for(record.engine, version, instructions, role=recipient,
-                                     project_root=getattr(manager, "_workspace_root", None))
+                                     project_root=getattr(manager, "_workspace_root", None),
+                                     effort=_sdk_effort_for(record, launch))
         if meta is not None:
             import json
 

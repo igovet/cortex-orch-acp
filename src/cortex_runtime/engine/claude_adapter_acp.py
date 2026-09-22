@@ -121,11 +121,16 @@ def claude_option_mapping(revision, observed_config_options) -> list[tuple[str, 
         _require_supported_option(_CLAUDE_MODEL_OPTION_ID, revision.route.model, observed_config_options),
     ]
     parameters = dict(revision.route.supported_parameters)
+    # A model the engine's SDK does not know has no effort option to set at
+    # all; the catalog routes its effort through session/new's _meta instead
+    # (see SDK_EFFORTS and catalog.discovery._with_sdk_efforts).
+    via_meta = parameters.get(EFFORT_CHANNEL_PARAM) == SESSION_NEW_META_CHANNEL
     for name in _EFFORT_PARAM_NAMES:
         if name in parameters:
-            mapping.append(
-                _require_supported_option(_CLAUDE_EFFORT_OPTION_ID, parameters[name], observed_config_options)
-            )
+            if not via_meta:
+                mapping.append(
+                    _require_supported_option(_CLAUDE_EFFORT_OPTION_ID, parameters[name], observed_config_options)
+                )
             break
     if _MODE_PARAM_NAME in parameters:
         mapping.append(
@@ -278,7 +283,33 @@ CLAUDE_SUBAGENT_TOOLS = ("Agent", "Task", "Workflow", "TeamCreate", "TeamDelete"
                          "ScheduleWakeup", "Monitor", "CronCreate", "CronDelete", "CronList", "RemoteTrigger")
 
 
-def claude_native_subagent_restriction_meta(*, role: str = "worker") -> dict:
+# A model claude-agent-acp's bundled SDK does not know (an id an
+# ``availableModels`` allowlist names, e.g. ``claude-opus-5[1m]``) keeps its
+# bare id as its display name and gets no ``effort`` config option at all --
+# yet the SDK still sends that session's effort for it. Observed against the
+# installed 0.81.0 engine's own bundled CLI, with the request captured
+# locally: ``claude-opus-5`` and ``claude-fable-5`` carry
+# ``output_config.effort`` (low/high/max), while ``haiku`` -- a model the SDK
+# does know and reports no efforts for -- carries none. So these efforts are
+# offered for an unknown model only, and delivered through session/new's
+# ``_meta.claudeCode.options.effort`` (acp-agent.js ``userProvidedOptions``)
+# instead of the config option the engine never offers.
+SDK_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+
+# The catalog marks such a route with this pair, so a mapping never has to
+# re-derive "the SDK does not know this model" from a live session whose
+# model option still describes the session's *current* model.
+EFFORT_CHANNEL_PARAM = "effort_channel"
+SESSION_NEW_META_CHANNEL = "session_new_meta"
+
+
+def sdk_unknown_model(model: str, model_name: str | None) -> bool:
+    """True when the engine gave ``model`` no display name of its own."""
+    return bool(model) and (model_name or model) == model
+
+
+def claude_native_subagent_restriction_meta(*, role: str = "worker", effort: str | None = None) -> dict:
     """Build the pinned Claude native-tool policy for one Cortex role.
 
     Claude keeps its whole native tool preset, native context loading
@@ -302,13 +333,21 @@ def claude_native_subagent_restriction_meta(*, role: str = "worker") -> dict:
             retry_eligible=False, field="role",
         )
 
+    if effort is not None and (not isinstance(effort, str) or effort not in SDK_EFFORTS):
+        raise PortableError(
+            category=PortableErrorCategory.VALIDATION, code="invalid_field",
+            remediation=f"'effort' must be one of {SDK_EFFORTS}.", retry_eligible=False, field="effort",
+        )
     options = {"strictMcpConfig": True, "skills": "all",
                "plugins": [], "managedSettings": {"disableAllHooks": True},
                "disallowedTools": list(CLAUDE_SUBAGENT_TOOLS)}
+    if effort is not None:
+        options["effort"] = effort
     return {"claudeCode": {"options": options}}
 
 
-def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker") -> dict:
+def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker",
+                                  effort: str | None = None) -> dict:
     """``_meta`` payload for ``session/new`` appending Cortex instructions.
 
     The real, statically-confirmed claude-agent-acp 0.78.0 instructions
@@ -344,5 +383,5 @@ def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker
         )
     return {
         "systemPrompt": {"append": instructions_text},
-        **claude_native_subagent_restriction_meta(role=role),
+        **claude_native_subagent_restriction_meta(role=role, effort=effort),
     }

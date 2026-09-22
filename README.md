@@ -289,7 +289,12 @@ automatically, from what your engines actually advertise:
   the `light` tier (e.g. Luna); flagship models (Astra, Fable) never above
   `high`. This rule is for workers only: the editor's effort selector offers
   every effort the chosen model's engine reports, and the coordinator runs at
-  the one you pick. In Paseo each model shows its own efforts (the plugin
+  the one you pick. A Claude model the engine's own SDK does not know (an id
+  an `availableModels` list in `~/.claude/settings.json` names, e.g.
+  `claude-opus-5[1m]`) gets no effort option from the engine, so Cortex
+  offers `low`-`max` for it and hands the chosen level over at `session/new`
+  instead. Haiku, which the SDK knows and reports no efforts for, keeps
+  none. In Paseo each model shows its own efforts (the plugin
   reads them from Cortex when Paseo builds its model list).
 
 Only engine-confirmed model lists are used. Until a connection's models have
