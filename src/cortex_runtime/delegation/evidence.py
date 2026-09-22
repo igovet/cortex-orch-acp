@@ -41,18 +41,11 @@ def record_tool_result_observed(
         return
     bounded_title = (title or "")[:200] or None
     bounded_kind = (kind or "")[:64] or None
-    with store.connection() as db:
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            db.execute(
-                "INSERT INTO tool_result_observations (task_id, attempt_id, tool_call_ref, kind, title, status, created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (task_id, attempt_id, tool_call_ref, bounded_kind, bounded_title, status, _now()),
-            )
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
+    store.immediate_write(lambda db: db.execute(
+        "INSERT INTO tool_result_observations (task_id, attempt_id, tool_call_ref, kind, title, status, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (task_id, attempt_id, tool_call_ref, bounded_kind, bounded_title, status, _now()),
+    ))
 
 
 def _latest_status(store, attempt_id: str, tool_call_ref: str) -> str | None:

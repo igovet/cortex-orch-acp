@@ -69,35 +69,36 @@ def persist_output(
         raise LargeOutputError("invalid_owner_scope")
     record_id = new_id("lo_")
     filename = record_id + ".bin"
+    # Resolve the directory and write the file OUTSIDE any write transaction:
+    # doing the SELECT that resolves the directory on the same connection that
+    # then BEGIN IMMEDIATEs was a read->write upgrade, which SQLite fails
+    # instantly under contention (see store.immediate_write). The file write is
+    # also slow (fsync of possibly-large output) and must never hold the global
+    # write lock. The INSERT then runs on a clean write-first, retrying
+    # transaction.
     with store.connection() as db:
         directory = _large_outputs_dir(store, db, task_id)
-        path = directory / filename
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    path = directory / filename
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
         try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-        except BaseException:
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-            raise
-        sync_directory(directory)
-        db.execute("BEGIN IMMEDIATE")
-        try:
-            db.execute(
-                "INSERT INTO large_outputs "
-                "(id, task_id, owner_scope, source_kind, source_ref, filename, byte_count, "
-                " truncated, exit_code, signal, failure, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (record_id, task_id, owner_scope, source_kind, source_ref, filename, len(data),
-                 1 if truncated else 0, exit_code, signal, failure, store._now()),
-            )
-            db.commit()
-        except BaseException:
-            db.rollback()
-            raise
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    sync_directory(directory)
+    store.immediate_write(lambda db: db.execute(
+        "INSERT INTO large_outputs "
+        "(id, task_id, owner_scope, source_kind, source_ref, filename, byte_count, "
+        " truncated, exit_code, signal, failure, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (record_id, task_id, owner_scope, source_kind, source_ref, filename, len(data),
+         1 if truncated else 0, exit_code, signal, failure, store._now()),
+    ))
     return dict(
         id=record_id, task_id=task_id, owner_scope=owner_scope, source_kind=source_kind,
         source_ref=source_ref, filename=filename, byte_count=len(data), truncated=truncated,

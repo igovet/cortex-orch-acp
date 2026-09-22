@@ -229,6 +229,16 @@ class Server:
             except StoreError as exc:
                 observe(name, str(exc), meta=params.get('_meta'), arguments=params.get('arguments'))
                 return self.error(exc)
+            except Exception:
+                # A delegation/gateway op that raised something other than a
+                # StoreError (e.g. a raw sqlite3.OperationalError from lock
+                # contention) must never escape to the opaque -32603 catch-all:
+                # log the real cause and return a structured, retryable
+                # storage_error, exactly like the BY_NAME branch below already
+                # does. Its request_key dedup makes an exact retry idempotent.
+                _log_unexpected(f'tools/call:{name}')
+                observe(name, 'storage_error', meta=params.get('_meta'), arguments=params.get('arguments'))
+                return self.error(StoreError('storage_error'))
         if name in {'create_task','set_governance'} or (name == 'create_draft' and params.get('arguments',{}).get('template') == 'pipeline'):
             return self.error(StoreError('runtime_owned_operation'))
         if name not in BY_NAME:

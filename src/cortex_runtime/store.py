@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import stat
 import threading
+import time
 import uuid
 
 from . import _fault_injection
@@ -606,6 +607,38 @@ class Store:
         finally:
             if db is not None:db.close()
             fcntl.flock(lock_fd,fcntl.LOCK_UN); os.close(lock_fd)
+
+    def immediate_write(self, body, *, attempts=8, base_delay=0.02, max_delay=0.4):
+        """Run ``body(db)`` in a write transaction whose FIRST table-touching
+        statement is ``BEGIN IMMEDIATE``, retrying a contended lock.
+
+        A read (SELECT) before ``BEGIN IMMEDIATE`` on the same connection is a
+        read->write upgrade: under concurrency SQLite refuses to wait on it
+        (SQLITE_BUSY_SNAPSHOT) and fails *instantly*, bypassing the 15s busy
+        timeout -- the source of spurious "database is locked" failures that
+        surfaced to workers as an opaque server error. Taking the write lock
+        up front lets the busy timeout apply, and a still-contended lock is
+        then retried with exponential backoff before giving up. ``body`` must
+        be replayable (it may run more than once on retry) and must not commit
+        or begin its own transaction -- this owns BEGIN/COMMIT/ROLLBACK."""
+        delay = base_delay
+        for attempt in range(attempts):
+            try:
+                with self.connection() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    try:
+                        result = body(db)
+                        db.commit()
+                        return result
+                    except BaseException:
+                        db.rollback()
+                        raise
+            except sqlite3.OperationalError as error:
+                message = str(error).lower()
+                if attempt == attempts - 1 or ("lock" not in message and "busy" not in message):
+                    raise
+                time.sleep(min(delay, max_delay))
+                delay *= 2
 
     def call(self,operation,args,thread_id,parent_thread_id=None,*,original_request=None,steering_source=None,trusted=False,authorization=None):
         """``trusted`` is set only by ``server._dispatch_channeled`` (never
