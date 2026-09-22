@@ -15,8 +15,10 @@ available -- replaces the hand-maintained per-role ``route-policy.json``.
 4. Effort follows the role's tier, clamped to what that model supports.
    ``ultra`` is never used; ``max`` only on a ``light`` model (Luna-class:
    the cheapest model is the one worth running at its maximum); flagship
-   models (:data:`FLAGSHIP_FAMILIES`) never above ``high``. The same rule
-   narrows the editor's selector and any explicitly chosen effort.
+   models (:data:`FLAGSHIP_FAMILIES`) never above ``high``. This rule is
+   for automatic worker routing only: the editor's own effort selector
+   offers every effort the engine reports, and the coordinator runs at the
+   effort chosen there.
 5. The work moves the role's tier: the coordinator's planned
    ``complexity`` (``low``/``high``) shifts it one step cheaper/stronger,
    and a retried attempt or a fix after review requested changes runs one
