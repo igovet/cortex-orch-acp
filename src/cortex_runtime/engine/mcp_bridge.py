@@ -40,6 +40,13 @@ def allowed_mcp_servers(role: str) -> tuple[str, ...]:
     return ("cortex",)
 
 
+def coordinator_tools(entry) -> list[str]:
+    """The tools a coordinator may call on a registry server:
+    ``coordinator_tools`` when set, else ``read_only_tools``."""
+    tools = entry.get("coordinator_tools")
+    return list(entry.get("read_only_tools") or ()) if tools is None else list(tools)
+
+
 def host_mcp_servers(servers, *, role: str | None = None, engine: str | None = None) -> list[dict[str, object]]:
     """The client's own MCP servers, as they must look on the wire to an
     engine.
@@ -61,10 +68,13 @@ def host_mcp_servers(servers, *, role: str | None = None, engine: str | None = N
     forwarded: list[dict[str, object]] = []
     if role is not None and role not in _ROLES:
         raise ValueError(f"role must be one of {_ROLES!r}.")
-    if role == "coordinator":
-        return forwarded
     for entry in servers or ():
         if not isinstance(entry, dict):
+            continue
+        # The coordinator orients, it does not investigate: only a registry
+        # server with an explicit read-only lookup set reaches it, and the
+        # proxy narrows it to exactly that set.
+        if role == "coordinator" and not coordinator_tools(entry):
             continue
         name = entry.get("name")
         if not isinstance(name, str) or not name or name in _ROLES or name == "cortex":

@@ -22,6 +22,7 @@ from cortex_runtime.orchestration.gateway import _authority, PRIVATE, READ_ONLY
 from cortex_runtime.orchestration.sandbox import allow_network, gateway_command
 from cortex_runtime.orchestration.state import event, encoded
 from cortex_runtime.contracts import StoreError
+from cortex_runtime.engine.mcp_bridge import coordinator_tools
 
 
 def _ready(fd, event, timeout):
@@ -85,6 +86,8 @@ def main():
         role=db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',(channel.attempt_id,)).fetchone()
         if channel.role=='coordinator' or role and role[0] in READ_ONLY:
             allowed=[tool for tool in allowed if tool in config.get('read_only_tools',[])]
+        if channel.role=='coordinator':
+            allowed=[tool for tool in allowed if tool in coordinator_tools(config)]
     with tempfile.TemporaryDirectory(prefix='cortex-external-') as scratch:
         with gateway_command(root,scratch,[config['command'],*config.get('args',[])],scopes) as (command,fds):
             # Administrator-owned registry values are the only extra grants.

@@ -18,7 +18,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from cortex_runtime.engine.mcp_bridge import build_mcp_servers, host_mcp_servers  # noqa: E402
+from cortex_runtime.engine.mcp_bridge import build_mcp_servers, coordinator_tools, host_mcp_servers  # noqa: E402
 from cortex_runtime.configuration.mcp_servers import load_mcp_servers  # noqa: E402
 
 
@@ -315,6 +315,37 @@ def test_owner_registry_roles_scope_external_servers_without_wire_metadata(tmp_p
         else:
             raise AssertionError(f"invalid engines accepted: {invalid!r}")
 
+
+def test_coordinator_gets_only_registry_lookup_tools(tmp_path):
+    import json
+    from cortex_runtime.portable.errors import PortableError
+
+    config = tmp_path / "config" / "cortex"
+    config.mkdir(parents=True)
+    path = config / "mcp-servers.json"
+    path.write_text(json.dumps({"servers": {
+        "index": {"command": "/bin/true", "allowed_tools": ["search", "read", "reindex"],
+                  "read_only_tools": ["search", "read"], "coordinator_tools": ["search"]},
+        "readonly": {"command": "/bin/true", "allowed_tools": ["a"], "read_only_tools": ["a"]},
+        "writer": {"command": "/bin/true", "allowed_tools": ["write"]},
+    }}), encoding="utf-8")
+    path.chmod(0o600)
+    env = {"HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path / "config")}
+    entries = load_mcp_servers(tmp_path, environ=env, client_servers=[{"name": "client", "command": "/bin/true"}])
+    coordinator = host_mcp_servers(entries, role="coordinator", engine="claude-agent-acp")
+    assert [entry["name"] for entry in coordinator] == ["index", "readonly"]
+    assert [coordinator_tools(entry) for entry in coordinator] == [["search"], ["a"]]
+
+    path.write_text(json.dumps({"servers": {
+        "index": {"command": "/bin/true", "allowed_tools": ["search", "reindex"],
+                  "read_only_tools": ["search"], "coordinator_tools": ["reindex"]},
+    }}), encoding="utf-8")
+    try:
+        load_mcp_servers(tmp_path, environ=env)
+    except PortableError as exc:
+        assert exc.code == "invalid_mcp_registry"
+    else:
+        raise AssertionError("coordinator_tools outside read_only_tools accepted")
 
 def test_engine_session_filters_external_mcp_and_records_bounded_inventory(tmp_path):
     import json

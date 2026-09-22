@@ -12,6 +12,7 @@ bridge::
         "command": "/absolute/path/to/server", "args": [],
         "env": {"TOKEN": "secret"}, "enabled": true,
         "allowed_tools": ["inspect"], "read_only_tools": ["inspect"],
+        "coordinator_tools": ["inspect"],
         "read_paths": ["/absolute/path/to/server"],
         "write_paths": ["/absolute/path/to/its/cache"], "network": false
     }}}
@@ -141,6 +142,11 @@ def _normalize_entries(raw: object, path: Path) -> list[dict[str, object]]:
         if not isinstance(readonly,list) or any(tool not in allowed_tools for tool in readonly):
             raise _error('invalid_mcp_registry',f'{path}: {name}.read_only_tools must be a subset of allowed_tools.')
         entry['read_only_tools']=list(readonly)
+        if 'coordinator_tools' in spec:
+            lookup=spec['coordinator_tools']
+            if not isinstance(lookup,list) or any(tool not in readonly for tool in lookup):
+                raise _error('invalid_mcp_registry',f'{path}: {name}.coordinator_tools must be a subset of read_only_tools.')
+            entry['coordinator_tools']=list(lookup)
         if roles is not None:
             # Private Cortex routing metadata; never forward as an ACP field.
             entry["roles"] = list(roles)
