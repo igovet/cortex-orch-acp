@@ -220,6 +220,10 @@ class _PaseoQuestionElicitor:
     #: A question waits for a person, not for a host round trip.
     QUESTION_TIMEOUT_SECONDS = 24 * 3600.0
 
+    #: The config id that carries a card's typed "Other..." answer (see
+    #: ``Agent._answer_question_card``).
+    ANSWER_CONFIG_ID = "cortex_question_answer"
+
     def __init__(self, host_requester: HostRequester, *, session_id: str, timeout: float = 30.0,
                  cancel_event=None, register=None) -> None:
         self._host_requester = host_requester
@@ -507,7 +511,8 @@ class Agent:
                 else:
                     store = self._store_for(session["project"])
                     options = question.options or []
-                    value = options[int(choice) - 1] if 1 <= int(choice) <= len(options) else choice
+                    index = int(choice) if choice.strip().isdigit() else 0
+                    value = options[index - 1] if 1 <= index <= len(options) else choice
                     acp_questions_store.answer(store, question.id, value, "elicitation")
                 return
             session["active"] = cancel_event
@@ -2182,6 +2187,10 @@ class Agent:
         session = self.sessions.get(session_id)
         if session is None:
             raise RpcError(-32602, "Unknown sessionId.")
+        if (config_id == _PaseoQuestionElicitor.ANSWER_CONFIG_ID and kind == "value_id"
+                and self.environ.get("CORTEX_PASEO_QUESTION_UI") == "1"):
+            self._answer_question_card(request_id, session_id, session, value)
+            return
         with session["lock"]:
             store = self._store_for(session["project"])
             accepted, options, error = self._apply_config_selection(store, session, config_id, kind, value)
@@ -2192,6 +2201,39 @@ class Agent:
             return
         self.transport.send_response(protocol.result_response(request_id, protocol.set_config_option_response(options)))
         self.transport.send_notification(protocol.config_option_update(session_id, options))
+
+    def _answer_question_card(self, request_id, session_id, session, value):
+        """A question card's typed "Other..." answer, from Paseo.
+
+        Paseo's ACP bridge answers a card only with one of its options, so
+        the Cortex provider carries the typed text here (the bridge forwards
+        any config id) and then retires the card. The text answers that
+        question exactly as a message typed into the chat would."""
+        try:
+            payload = json.loads(value)
+            question_id, text = payload["questionId"], payload["answer"]
+        except (ValueError, TypeError, KeyError):
+            raise RpcError(-32602, "A question answer needs questionId and answer.") from None
+        if not isinstance(question_id, str) or not isinstance(text, str) or not text.strip():
+            raise RpcError(-32602, "A question answer needs questionId and a non-empty answer.")
+        store = self._store_for(session["project"])
+        question = acp_questions_store.get(store, question_id)
+        if question is None or question.task_id != session.get("task_id"):
+            raise RpcError(-32602, "Unknown question.")
+        with self._history_lock(session_id):
+            acp_replay_store.append_host_transcript(store, session_id, "user_message", text)
+        with session["lock"]:
+            waiter = session.get("question_waiter")
+            delivered = (session["active"] is not None and waiter is not None
+                         and waiter[0] == question_id and waiter[1](text))
+        if not delivered:
+            # The turn no longer waits on this card: answer it as a late
+            # card choice would be.
+            threading.Thread(target=self._run_late_answer, name="acp-late-answer",
+                             args=(session_id, session, question, text), daemon=True).start()
+        with session["lock"]:
+            options = self._config_options_for_session(session, store)
+        self.transport.send_response(protocol.result_response(request_id, protocol.set_config_option_response(options)))
 
     def _session_set_mode(self, request_id, params):
         """Paseo renders ACP modes but hides generic ``other`` options.

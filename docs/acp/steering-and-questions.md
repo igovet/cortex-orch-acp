@@ -28,6 +28,18 @@ with its own review and verification. If the user chose to finish, it closes
 the task with a short `answer_submit`. The coordinator uses `synthesis_submit`
 only when nothing is left for the user to decide.
 
+In Paseo the question is a card with its options and an "Other..." field for
+an answer of the user's own. Paseo's stock ACP bridge can answer a card only
+with one of its options, so the Cortex provider
+(`integrations/paseo/server/provider.ts`) sends the typed text to Cortex as the
+`cortex_question_answer` config value, with the question id. Paseo's bridge
+forwards any config id. Cortex accepts that id only when it runs under the
+Paseo provider, and only for an existing question of the session's own task.
+The text answers the question exactly as a message typed into the chat would,
+and is kept in the chat history. Once Cortex has accepted it, the provider
+retires the card as declined; Cortex ignores that late decline. If Cortex
+refuses the text, the card stays open.
+
 An ordinary prompt answers the single open question. Multiple open questions
 require the existing explicit `/cortex-answer` selection. A cancelled or
 superseded question cannot be revived by a late reply. Answered questions are

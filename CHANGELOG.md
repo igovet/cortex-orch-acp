@@ -26,6 +26,9 @@ refresh agent history" with no way to continue. Replay now sends each card's
 final state once (0.36 MB for the same chat). The Paseo relay also exits when
 Cortex exits, so a failed load reports an error instead of hanging.
 
+A question card in Paseo now has an "Other..." field next to its options. The
+typed text answers the question as a message typed into the chat would.
+
 A plan the user still has to approve no longer ends the task as finished. The
 coordinator used to write such a plan into its final synthesis, so the runtime
 printed `Завершено` under a question. It now writes the details as its message

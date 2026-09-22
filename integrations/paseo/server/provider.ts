@@ -2,6 +2,7 @@ import { isHiddenOperation } from "../shared/timeline-visibility.ts";
 import { presentToolSemantics } from "../shared/tool-presentation.ts";
 import { gatewayPresentation } from "../shared/gateway-presentation.ts";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -323,6 +324,21 @@ function cortexCommand(): CommandArgv {
  * to `question`. `send()` remains delegated to the stock ACP bridge, so the
  * selectedActionId is returned to the exact Cortex ACP session unchanged.
  */
+/** Config id Cortex reads a card's typed "Other..." answer from. */
+export const QUESTION_ANSWER_CONFIG_ID = "cortex_question_answer";
+const ANSWER_REQUEST_PREFIX = "cortex-question-answer:";
+
+/** The typed text of a card answer that picked none of its options. */
+export function typedAnswer(
+  answers: unknown,
+  actions: ReadonlyArray<{ label: string }>,
+): string | undefined {
+  if (!answers || typeof answers !== "object" || Array.isArray(answers)) return undefined;
+  const answer = Object.values(answers).find((value): value is string => typeof value === "string");
+  if (answer === undefined || !answer.trim()) return undefined;
+  return actions.some((action) => action.label === answer) ? undefined : answer;
+}
+
 /** Paseo offers prompt.steer and the stock ACP bridge lacks it. */
 export function emulatesSteer(offered: readonly string[], supported: readonly string[]): boolean {
   return offered.includes("prompt.steer") && !supported.includes("prompt.steer");
@@ -432,170 +448,242 @@ export function createCortexProvider(): ProviderRegistration {
   return {
     ...base,
     async connect(request) {
-      const connection = await base.connect(request);
-      // Paseo sends a message typed during a running turn as a "steer"
-      // prompt, which the stock ACP bridge does not support ("Provider does
-      // not support prompt.steer"). Cortex advertises it and refuses each
-      // one (see steerRefusal), so Paseo replaces the running turn itself.
-      const steer = emulatesSteer(request.capabilities, connection.capabilities);
-      const capabilities = steer ? [...connection.capabilities, "prompt.steer"] : connection.capabilities;
-      const questionActions = new Map<
-        string,
-        Array<{ id: string; label: string }>
-      >();
-      const openedSessions = new Set<string>();
-      const bufferedTimeline = new Map<string, ProviderEvent[]>();
-      const bufferedTimelineBytes = new Map<string, number>();
-      const listeners = new Set<(event: ProviderEvent) => void>();
-      return {
-        ...connection,
-        capabilities,
-        send(input: Parameters<typeof connection.send>[0]) {
-          const refusal = steer ? steerRefusal(input) : null;
-          if (refusal) {
-            queueMicrotask(() => listeners.forEach((listener) => listener(refusal)));
-            return Promise.resolve() as ReturnType<typeof connection.send>;
-          }
-          if (
-            input.type === "session.permission" &&
-            input.response.behavior === "allow" &&
-            input.response.selectedActionId === undefined &&
-            input.response.updatedInput !== undefined
-          ) {
-            const answers = input.response.updatedInput.answers;
-            const answer =
-              answers &&
-              typeof answers === "object" &&
-              !Array.isArray(answers)
-                ? Object.values(answers).find(
-                    (value): value is string => typeof value === "string",
-                  )
-                : undefined;
-            const actions = questionActions.get(input.permissionId);
-            const selected = actions?.find((action) => action.label === answer);
-            if (actions && !selected) {
-              throw new Error(
-                `Cortex question response did not match a displayed option for ${input.permissionId}`,
-              );
-            }
-            if (selected) {
-              input = {
-                ...input,
-                response: {
-                  behavior: "allow",
-                  selectedActionId: selected.id,
-                },
-              };
-            }
-          }
-          const result = connection.send(input);
-          if (input.type === "session.permission") {
-            void result.finally(() => questionActions.delete(input.permissionId));
-          }
-          return result;
-        },
-        close() {
-          questionActions.clear();
-          openedSessions.clear();
-          bufferedTimeline.clear();
-          bufferedTimelineBytes.clear();
-          listeners.clear();
-          return connection.close();
-        },
-        onEvent(listener) {
-          listeners.add(listener);
-          const unsubscribe = connection.onEvent((event) => {
-            if (!visibleTimeline(event)) return;
-            if (event.type === "session.opened") {
-              openedSessions.add(event.sessionId);
-              listener(steer && !event.capabilities.includes("prompt.steer")
-                ? { ...event, capabilities: [...event.capabilities, "prompt.steer"] }
-                : event);
-              const pending = bufferedTimeline.get(event.sessionId);
-              bufferedTimeline.delete(event.sessionId);
-              bufferedTimelineBytes.delete(event.sessionId);
-              for (const historical of pending ?? []) {
-                if (visibleTimeline(historical)) listener(presentTimeline(historical));
-              }
-              return;
-            }
-            if (event.type === "timeline.item" && !openedSessions.has(event.sessionId)) {
-              const pending = bufferedTimeline.get(event.sessionId) ?? [];
-              const eventBytes = JSON.stringify(event).length;
-              const pendingBytes = bufferedTimelineBytes.get(event.sessionId) ?? 0;
-              if (
-                pending.length >= MAX_BUFFERED_TIMELINE_ITEMS ||
-                pendingBytes + eventBytes > MAX_BUFFERED_TIMELINE_BYTES
-              ) {
-                throw new Error(
-                  `Paseo timeline history buffer exceeded limits for ${event.sessionId}`,
-                );
-              }
-              pending.push(event);
-              bufferedTimeline.set(event.sessionId, pending);
-              bufferedTimelineBytes.set(event.sessionId, pendingBytes + eventBytes);
-              return;
-            }
-            if (event.type === "session.closed" || event.type === "session.runtime_failed") {
-              openedSessions.delete(event.sessionId);
-              bufferedTimeline.delete(event.sessionId);
-              bufferedTimelineBytes.delete(event.sessionId);
-              listener(event);
-              return;
-            }
-            if (
-              event.type === "session.permission" &&
-              isCortexQuestionRequest(event.request)
-            ) {
-              const actions = event.request.actions ?? [];
-              // Paseo sends the visible answer string back in
-              // updatedInput.answers. Prefixing the ordinal makes that value
-              // unique even when two source options share a label.
-              const displayActions = actions.map((action, index) => ({
-                id: action.id,
-                label: `${index + 1}. ${action.label}`,
-              }));
-              questionActions.set(event.request.id, displayActions);
-              const questionText =
-                typeof event.request.input?.question === "string"
-                  ? event.request.input.question
-                  : event.request.title ?? "Choose an option";
-              listener({
-                ...event,
-                request: {
-                  ...event.request,
-                  kind: "question",
-                  // The marker is a wire-only discriminator. Do not expose
-                  // it in Paseo's question card input/details.
-                  input: {
-                    questions: [
-                      {
-                        question: questionText,
-                        header: "Cortex",
-                        options: displayActions.map((action) => ({ label: action.label })),
-                        multiSelect: false,
-                      },
-                    ],
-                  },
-                  metadata: Object.fromEntries(
-                    Object.entries(event.request.metadata ?? {}).filter(
-                      ([key]) =>
-                        key !== CORTEX_QUESTION_INPUT_MARKER &&
-                        key !== "questionId" &&
-                        key !== "optionPrefix",
-                    ),
-                  ),
-                },
-              });
-              return;
-            }
-            listener(presentTimeline(event));
-          });
-          return () => {
-            listeners.delete(listener);
-            unsubscribe();
+      return wrapCortexConnection(await base.connect(request), request.capabilities);
+    },
+  };
+}
+
+type ProviderConnection = Awaited<ReturnType<ProviderRegistration["connect"]>>;
+
+/** Cortex presentation and question handling around the stock ACP bridge. */
+export function wrapCortexConnection(
+  connection: ProviderConnection,
+  offered: readonly string[],
+): ProviderConnection {
+  // Paseo sends a message typed during a running turn as a "steer"
+  // prompt, which the stock ACP bridge does not support ("Provider does
+  // not support prompt.steer"). Cortex advertises it and refuses each
+  // one (see steerRefusal), so Paseo replaces the running turn itself.
+  const steer = emulatesSteer(offered, connection.capabilities);
+  const capabilities = steer ? [...connection.capabilities, "prompt.steer"] : connection.capabilities;
+  const questionActions = new Map<
+    string,
+    Array<{ id: string; label: string }>
+  >();
+  const questionIds = new Map<string, string>();
+  // Our own configure requests: their completion is ours to await,
+  // never Paseo's to see.
+  const answerRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+  connection.onEvent((event) => {
+    if (event.type !== "request.completed" && event.type !== "request.failed") return;
+    const pending = answerRequests.get(event.requestId);
+    if (!pending) return;
+    answerRequests.delete(event.requestId);
+    if (event.type === "request.completed") pending.resolve();
+    else pending.reject(new Error(event.error.message));
+  });
+  /**
+   * Paseo's bridge answers a card only with one of its options. A typed
+   * "Other..." answer therefore goes to Cortex as a config value (the
+   * bridge forwards any config id), and only once Cortex has it is the
+   * card retired as declined -- Cortex ignores a decline that arrives
+   * after the answer.
+   */
+  async function sendTypedAnswer(
+    input: Extract<Parameters<typeof connection.send>[0], { type: "session.permission" }>,
+    questionId: string,
+    answer: string,
+  ) {
+    const requestId = `${ANSWER_REQUEST_PREFIX}${randomUUID()}`;
+    const delivered = new Promise<void>((resolve, reject) => answerRequests.set(requestId, { resolve, reject }));
+    await connection.send({
+      type: "session.configure",
+      requestId,
+      sessionId: input.sessionId,
+      changes: { settings: { [QUESTION_ANSWER_CONFIG_ID]: JSON.stringify({ questionId, answer }) } },
+    });
+    await delivered;
+    listeners.forEach((listener) => listener({
+      type: "timeline.item",
+      sessionId: input.sessionId,
+      item: { type: "user_message", id: `cortex-question-answer:${questionId}`, text: answer },
+    } as ProviderEvent));
+    await connection.send({ ...input, response: { behavior: "deny" } });
+  }
+  const openedSessions = new Set<string>();
+  const bufferedTimeline = new Map<string, ProviderEvent[]>();
+  const bufferedTimelineBytes = new Map<string, number>();
+  const listeners = new Set<(event: ProviderEvent) => void>();
+  return {
+    ...connection,
+    capabilities,
+    send(input: Parameters<typeof connection.send>[0]) {
+      const refusal = steer ? steerRefusal(input) : null;
+      if (refusal) {
+        queueMicrotask(() => listeners.forEach((listener) => listener(refusal)));
+        return Promise.resolve() as ReturnType<typeof connection.send>;
+      }
+      if (
+        input.type === "session.permission" &&
+        input.response.behavior === "allow" &&
+        input.response.selectedActionId === undefined &&
+        input.response.updatedInput !== undefined
+      ) {
+        const answers = input.response.updatedInput.answers;
+        const answer =
+          answers &&
+          typeof answers === "object" &&
+          !Array.isArray(answers)
+            ? Object.values(answers).find(
+                (value): value is string => typeof value === "string",
+              )
+            : undefined;
+        const actions = questionActions.get(input.permissionId);
+        const selected = actions?.find((action) => action.label === answer);
+        const typed = actions ? typedAnswer(answers, actions) : undefined;
+        const questionId = questionIds.get(input.permissionId);
+        if (typed !== undefined && questionId !== undefined) {
+          const permissionId = input.permissionId;
+          // A refused answer keeps the card and its options for a retry.
+          return sendTypedAnswer(input, questionId, typed).then(() => {
+            questionActions.delete(permissionId);
+            questionIds.delete(permissionId);
+          }) as ReturnType<typeof connection.send>;
+        }
+        if (actions && !selected) {
+          throw new Error(
+            `Cortex question response did not match a displayed option for ${input.permissionId}`,
+          );
+        }
+        if (selected) {
+          input = {
+            ...input,
+            response: {
+              behavior: "allow",
+              selectedActionId: selected.id,
+            },
           };
-        },
+        }
+      }
+      const result = connection.send(input);
+      if (input.type === "session.permission") {
+        void result.finally(() => {
+          questionActions.delete(input.permissionId);
+          questionIds.delete(input.permissionId);
+        });
+      }
+      return result;
+    },
+    close() {
+      questionActions.clear();
+      questionIds.clear();
+      answerRequests.clear();
+      openedSessions.clear();
+      bufferedTimeline.clear();
+      bufferedTimelineBytes.clear();
+      listeners.clear();
+      return connection.close();
+    },
+    onEvent(listener) {
+      listeners.add(listener);
+      const unsubscribe = connection.onEvent((event) => {
+        if (!visibleTimeline(event)) return;
+        if ((event.type === "request.completed" || event.type === "request.failed")
+          && event.requestId.startsWith(ANSWER_REQUEST_PREFIX)) return;
+        if (event.type === "session.opened") {
+          openedSessions.add(event.sessionId);
+          listener(steer && !event.capabilities.includes("prompt.steer")
+            ? { ...event, capabilities: [...event.capabilities, "prompt.steer"] }
+            : event);
+          const pending = bufferedTimeline.get(event.sessionId);
+          bufferedTimeline.delete(event.sessionId);
+          bufferedTimelineBytes.delete(event.sessionId);
+          for (const historical of pending ?? []) {
+            if (visibleTimeline(historical)) listener(presentTimeline(historical));
+          }
+          return;
+        }
+        if (event.type === "timeline.item" && !openedSessions.has(event.sessionId)) {
+          const pending = bufferedTimeline.get(event.sessionId) ?? [];
+          const eventBytes = JSON.stringify(event).length;
+          const pendingBytes = bufferedTimelineBytes.get(event.sessionId) ?? 0;
+          if (
+            pending.length >= MAX_BUFFERED_TIMELINE_ITEMS ||
+            pendingBytes + eventBytes > MAX_BUFFERED_TIMELINE_BYTES
+          ) {
+            throw new Error(
+              `Paseo timeline history buffer exceeded limits for ${event.sessionId}`,
+            );
+          }
+          pending.push(event);
+          bufferedTimeline.set(event.sessionId, pending);
+          bufferedTimelineBytes.set(event.sessionId, pendingBytes + eventBytes);
+          return;
+        }
+        if (event.type === "session.closed" || event.type === "session.runtime_failed") {
+          openedSessions.delete(event.sessionId);
+          bufferedTimeline.delete(event.sessionId);
+          bufferedTimelineBytes.delete(event.sessionId);
+          listener(event);
+          return;
+        }
+        if (
+          event.type === "session.permission" &&
+          isCortexQuestionRequest(event.request)
+        ) {
+          const actions = event.request.actions ?? [];
+          // Paseo sends the visible answer string back in
+          // updatedInput.answers. Prefixing the ordinal makes that value
+          // unique even when two source options share a label.
+          const displayActions = actions.map((action, index) => ({
+            id: action.id,
+            label: `${index + 1}. ${action.label}`,
+          }));
+          questionActions.set(event.request.id, displayActions);
+          if (typeof event.request.input?.questionId === "string") {
+            questionIds.set(event.request.id, event.request.input.questionId);
+          }
+          const questionText =
+            typeof event.request.input?.question === "string"
+              ? event.request.input.question
+              : event.request.title ?? "Choose an option";
+          listener({
+            ...event,
+            request: {
+              ...event.request,
+              kind: "question",
+              // The marker is a wire-only discriminator. Do not expose
+              // it in Paseo's question card input/details.
+              input: {
+                questions: [
+                  {
+                    question: questionText,
+                    header: "Cortex",
+                    options: displayActions.map((action) => ({ label: action.label })),
+                    multiSelect: false,
+                    // Paseo 0.9 shows an "Other..." field next to the
+                    // options; its text reaches Cortex via sendTypedAnswer.
+                    ...(questionIds.has(event.request.id) ? { allowOther: true } : {}),
+                  },
+                ],
+              },
+              metadata: Object.fromEntries(
+                Object.entries(event.request.metadata ?? {}).filter(
+                  ([key]) =>
+                    key !== CORTEX_QUESTION_INPUT_MARKER &&
+                    key !== "questionId" &&
+                    key !== "optionPrefix",
+                ),
+              ),
+            },
+          });
+          return;
+        }
+        listener(presentTimeline(event));
+      });
+      return () => {
+        listeners.delete(listener);
+        unsubscribe();
       };
     },
   };

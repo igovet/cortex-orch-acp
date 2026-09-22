@@ -461,3 +461,62 @@ def test_a_long_markdown_question_goes_to_the_chat_and_the_card_keeps_the_short_
     assert body == "**План**\n- шаг 1\n- шаг 2" and title == "Подтверждаешь план?"
     body, title = elicitor.split_question("**План**\n- шаг 1\n- шаг 2")
     assert body.startswith("**План**") and title is None
+
+
+def test_a_typed_other_answer_on_a_paseo_card_answers_its_question(monkeypatch):
+    """Paseo's "Other..." field: the bridge can only pick a card option, so
+    the provider carries the typed text as a config value."""
+    import contextlib
+    import threading as _threading
+    import cortex_runtime.acp.agent as agent_module
+
+    delivered, transcript, late, responses = [], [], [], []
+    question = type("Q", (), dict(id="pq_1", task_id="t_1", options=["A", "B"]))()
+    session = {"lock": _threading.Lock(), "active": _threading.Event(), "project": "/p", "task_id": "t_1",
+               "question_waiter": ("pq_1", lambda text: delivered.append(text) or True)}
+    agent = Agent.__new__(Agent)
+    agent.environ = {"CORTEX_PASEO_QUESTION_UI": "1"}
+    agent.sessions = {"s1": session}
+    agent._store_for = lambda project: "store"
+    agent._history_lock = lambda session_id: contextlib.nullcontext()
+    agent._config_options_for_session = lambda session, store: []
+    agent._run_late_answer = lambda *args: late.append(args)
+    agent.transport = type("T", (), dict(send_response=lambda self, body: responses.append(body) or True))()
+    monkeypatch.setattr(agent_module.acp_questions_store, "get",
+                        lambda store, qid: question if qid == "pq_1" else None)
+    monkeypatch.setattr(agent_module.acp_replay_store, "append_host_transcript",
+                        lambda store, sid, kind, text, *a, **k: transcript.append((sid, kind, text)))
+
+    def answer(value, request_id=1):
+        agent._session_set_config_option(request_id, dict(
+            sessionId="s1", configId=_PaseoQuestionElicitor.ANSWER_CONFIG_ID, value=json.dumps(value)))
+
+    # The turn waits on this card: the text is its answer, and the chat keeps it.
+    answer(dict(questionId="pq_1", answer="Neither, do C"))
+    assert delivered == ["Neither, do C"] and late == []
+    assert transcript == [("s1", "user_message", "Neither, do C")]
+    assert responses[-1]["result"] == {"configOptions": []}
+    # The turn no longer waits on it: answered as a late card choice would be.
+    session["question_waiter"] = None
+    answer(dict(questionId="pq_1", answer="Later text"), 2)
+    for _ in range(50):
+        if late: break
+        time.sleep(0.01)
+    assert late and late[0][2] is question and late[0][3] == "Later text"
+    # Another task's question, or no text, is refused and never recorded.
+    from cortex_runtime.acp.protocol import RpcError
+    for bad in (dict(questionId="pq_other", answer="x"), dict(questionId="pq_1", answer="  ")):
+        with pytest.raises(RpcError):
+            answer(bad, 3)
+    assert len(transcript) == 2
+    # Outside Paseo the id is an ordinary (unknown) config option.
+    agent.environ = {}
+    agent._apply_config_selection = lambda *args: (False, [], RpcError(-32602, "unknown"))
+    agent.transport.send_notification = lambda body: True
+    answer(dict(questionId="pq_1", answer="x"), 4)
+    assert len(transcript) == 2
+
+
+def test_the_paseo_provider_sends_typed_answers_under_the_id_cortex_reads():
+    provider = Path(__file__).resolve().parents[1] / "integrations" / "paseo" / "server" / "provider.ts"
+    assert f'QUESTION_ANSWER_CONFIG_ID = "{_PaseoQuestionElicitor.ANSWER_CONFIG_ID}"' in provider.read_text()
