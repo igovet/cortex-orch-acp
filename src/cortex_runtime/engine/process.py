@@ -17,6 +17,7 @@ import hashlib
 import shutil
 import sys
 import signal
+import concurrent.futures
 import subprocess
 import tempfile
 import threading
@@ -578,6 +579,12 @@ class ProcessObservation:
     PROCESS_EXITED = "process_exited"
 
 
+# Engines are started from this thread only; it lives as long as the
+# process (idle pool threads never exit), so a jailed engine dies with Cortex,
+# never with the turn that happened to open it. See EngineProcess.start.
+_ENGINE_SPAWNER = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="engine-spawner")
+
+
 class EngineProcess:
     """One launched engine subprocess: env isolation, stderr capture, termination.
 
@@ -731,7 +738,13 @@ class EngineProcess:
                     state_dirs={state: record.engine}, writable=[self._socket_dir],
                 ))
                 process_env = {"PATH": "/usr/bin:/bin"}
-            self.process = subprocess.Popen(
+            # Spawned from one process-lifetime thread: the jail's
+            # --die-with-parent is PR_SET_PDEATHSIG, which the kernel fires
+            # when the *spawning thread* exits. Spawned from a turn's thread,
+            # a coordinator was SIGKILLed the moment its turn ended (cancel,
+            # completion) and the next message hit a dead session.
+            self.process = _ENGINE_SPAWNER.submit(
+                subprocess.Popen,
                 launch_command,
                 cwd=cwd,
                 env=process_env,
@@ -740,7 +753,7 @@ class EngineProcess:
                 stderr=subprocess.PIPE,
                 start_new_session=True,
                 pass_fds=fds,
-            )
+            ).result()
         except Exception:
             if self.mcp_broker is not None:
                 self.mcp_broker.close()

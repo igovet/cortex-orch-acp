@@ -1790,6 +1790,16 @@ class EngineSessionManagerAdapter:
         if manager is not None:
             manager.invalidate_session(engine_session_ref, reason)
 
+    def invalidate_turn(self, engine_session_ref: str) -> None:
+        """Like :meth:`invalidate_session`, but scoped to the turn in flight:
+        the session keeps working for the next turn (see
+        ``EngineSessionManager.invalidate_turn``)."""
+        with self._lock:
+            attempt_id = self._session_to_attempt.get(engine_session_ref)
+            manager = self._managers.get(attempt_id) if attempt_id is not None else None
+        if manager is not None:
+            manager.invalidate_turn(engine_session_ref)
+
     def shutdown(self) -> None:
         """Signal every queued open to abort, then terminate every owned
         engine process with a confirmed/ambiguous release (never a

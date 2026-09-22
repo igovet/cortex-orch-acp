@@ -444,5 +444,8 @@ def _pause_turn(runtime,task_id,machine,emit_tool_call):
         if node['assignment_ref'] and node['status']=='running':
             runtime._cancel_assignment(task_id,node['assignment_ref'],'turn_interrupted',emit_tool_call=emit_tool_call)
 
+    # The engine already cancelled the prompt itself (the cancel event is
+    # the engine's session/cancel); keep its process and context, as after
+    # any turn, so the next message continues the same session. A task stop
+    # (stop_task) is what releases the coordinator.
     runtime._set_state(task_id,'recovering',wait_reason='turn_interrupted')
-    runtime._terminate_coordinator_attempt(task_id)

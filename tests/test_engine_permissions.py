@@ -98,3 +98,16 @@ def test_notifier_failure_cannot_turn_refusal_into_approval(tmp_path):
     def broken(*args): raise RuntimeError('observer failed')
     bridge=PermissionBridge(correlation=CorrelationTables(),bindings=bindings,coordinator_refusal_notifier=broken)
     assert call(bridge,dict(PARAMS,toolCall=dict(name='Agent')))['outcome']['optionId']=='deny'
+
+
+def test_a_cancelled_turn_goes_stale_but_the_session_keeps_working(tmp_path):
+    """Cancel used to release the whole session: the continuing coordinator's
+    later cortex tool calls were all refused and it could never submit."""
+    from types import SimpleNamespace
+    from cortex_runtime.engine.session_manager import EngineSessionManager
+    bindings=BindingRegistry(); bindings.bind(_binding(tmp_path))
+    in_flight=bindings.get('es_a')
+    EngineSessionManager.invalidate_turn(SimpleNamespace(bindings=bindings),'es_a')
+    assert not in_flight.is_current(bindings.snapshot(in_flight))  # the cancelled turn's request
+    fresh=bindings.get('es_a')
+    assert fresh.is_current(bindings.snapshot(fresh))  # the next turn's request

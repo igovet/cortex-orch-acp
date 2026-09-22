@@ -1139,12 +1139,18 @@ class OrchestratingRuntime:
             from .. import _fault_injection
 
             _fault_injection.checkpoint("t028_cancel_before_permission_invalidate")
+            # A cancel ends this turn, not the session: releasing the session
+            # made every later cortex tool call of the continuing coordinator
+            # refused, so it could never submit again.
+            invalidate_turn = getattr(self._engine, "invalidate_turn", None)
             invalidate = getattr(self._engine, "invalidate_session", None)
-            if invalidate is not None:
-                try:
+            try:
+                if invalidate_turn is not None:
+                    invalidate_turn(session_ref)
+                elif invalidate is not None:
                     invalidate(session_ref, "session_cancelled")
-                except Exception:
-                    pass
+            except Exception:
+                pass
         return None
 
     def cancel_task(

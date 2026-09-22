@@ -781,14 +781,16 @@ def test_stop_unknown_task_id_is_an_error_never_a_false_confirmation(tmp_path):
     assert acp_steering.is_stopped(store, "t_does_not_exist") is False
 
 
-def test_terminal_client_cancellation_releases_coordinator_engine(tmp_path):
-    """A client stop that returns a terminal CANCELLED outcome must not
-    leave the coordinator process/reservation alive after the task state is
-    persisted as cancelled."""
+def test_client_cancellation_keeps_the_coordinator_session_for_the_next_turn(tmp_path):
+    """Cancelling a turn used to kill the coordinator process while its
+    session stayed cached, so the next message hit a corpse and reopened a
+    fresh session. The engine cancels its own prompt; the session continues."""
     store, task_id = _task(tmp_path)
+    sessions = []
 
     def coordinator_behavior(store, channel, session_ref, message, call_index):
-        return PromptOutcome(StopReason.CANCELLED, "cancelled")
+        sessions.append(session_ref)
+        return PromptOutcome(StopReason.CANCELLED if call_index == 1 else StopReason.END_TURN, "turn")
 
     def router(store, channel, session_ref, launch, instructions):
         return coordinator_behavior if channel and channel.role == "coordinator" else None
@@ -796,15 +798,15 @@ def test_terminal_client_cancellation_releases_coordinator_engine(tmp_path):
     runtime, engine = _make_runtime(store, router)
     result = runtime.start_prompt(task_id, "s1", "Stop this.", lambda _text: True, threading.Event())
     assert result == StopReason.CANCELLED
-
     with store.connection() as db:
         row = db.execute(
             "SELECT state, coordinator_attempt_ref FROM task_orchestration WHERE task_id=?",
             (task_id,),
         ).fetchone()
     assert row["state"] == "recovering"
-    assert row["coordinator_attempt_ref"] in engine.terminate_calls
-    assert row["coordinator_attempt_ref"] not in engine._owned
+    assert row["coordinator_attempt_ref"] not in engine.terminate_calls
+    runtime.start_prompt(task_id, "s1", "Carry on.", lambda _text: True, threading.Event())
+    assert len(set(sessions)) == 1  # the same session, never a reopen
 
 
 def test_stop_races_the_first_start_prompt_between_bootstrap_and_provisioning(tmp_path, monkeypatch):

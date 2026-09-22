@@ -572,6 +572,14 @@ class EngineSessionManager:
     def invalidate_session(self, engine_session_id: str, reason: str | None = None) -> None:
         self.bindings.invalidate_session(engine_session_id, reason)
 
+    def invalidate_turn(self, engine_session_id: str) -> None:
+        """A cancelled turn: everything it had in flight (and any late reply
+        to it) goes stale, while the session itself stays usable -- the next
+        turn's requests get the fresh binding. invalidate_session instead
+        releases the session for good."""
+        import uuid
+        self.bindings.invalidate_generation(engine_session_id, "turn_" + uuid.uuid4().hex)
+
     def invalidate_epoch(self, workspace_binding_id: str, new_epoch: str) -> None:
         self.bindings.invalidate_epoch(workspace_binding_id, new_epoch)
 
