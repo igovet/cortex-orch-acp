@@ -66,7 +66,7 @@ def test_cannot_skip_review_or_complete_with_chat(machine):
     assert state.context(channel.task_id)['state'] == 'EXECUTING'
 
 
-def test_scheduler_respects_dependencies_and_global_capacity(machine):
+def test_scheduler_respects_dependencies_with_no_worker_limit(machine):
     state, channel = machine
     proposed = plan(8)
     proposed['tasks'][1]['dependencies'] = ['N0']
@@ -75,8 +75,8 @@ def test_scheduler_respects_dependencies_and_global_capacity(machine):
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(state.claim_ready, channel.task_id, channel.channel_id) for _ in range(2)]
         nodes = [n for future in futures for n in future.result()]
-    assert len(nodes) == 4
-    assert len({n['assignment_ref'] for n in nodes}) == 4
+    assert len(nodes) == 7
+    assert len({n['assignment_ref'] for n in nodes}) == 7
     assert 'N1' not in {n['node_id'] for n in nodes}
 
 
@@ -413,3 +413,18 @@ def test_project_overview_reads_and_answers_once_without_workers(tmp_path,langua
     context=TaskMachine(store).context(task.task_id)
     assert context['state']=='COMPLETED' and context['nodes']==[] and context['verification'] is None
     assert (tmp_path/'README.md').read_text()=='A static website for focus sessions.\n'
+
+
+def test_another_tasks_stale_running_node_never_blocks_this_one(machine):
+    """A blocked task whose worker is long gone kept its node 'running' with
+    services/** and held every later task off the same files for good."""
+    state, ch = machine
+    other = bootstrap_task(state.store, SourceEvent(origin='test', event_id='two'), 'Earlier attempt', 'owner')
+    state.create(other.task_id, 'Earlier attempt')
+    other_channel = SimpleNamespace(task_id=other.task_id, channel_id='coordinator', role='coordinator')
+    wide = plan(); wide['tasks'][0]['scope'] = ['src/**']
+    state.submit_plan(other_channel, wide, 'other'); state.move(other.task_id, 'EXECUTING')
+    assert state.claim_ready(other.task_id, 'coordinator')
+    state.move(other.task_id, 'BLOCKED', blocker='worker_failure')
+    state.submit_plan(ch, plan(5), 'mine'); state.move(ch.task_id, 'EXECUTING')
+    assert len(state.claim_ready(ch.task_id, ch.channel_id)) == 5

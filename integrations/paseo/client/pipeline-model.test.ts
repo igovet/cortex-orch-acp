@@ -16,6 +16,7 @@ const base = {
     "ref-b": { order: 20, result: null, decision: null },
     "ref-a": { order: 10, result: { summary: "Fixed", checks: [{ name: "adds", outcome: "passed" }, { name: "width", outcome: "failed" }] }, decision: { decision: "accept", rationale: null } },
   },
+  plan: null,
   workers: [worker("b", "running", "QA"), worker("a", "reported", "Implement")],
 };
 
@@ -46,4 +47,23 @@ assert.equal(view.headline.text, "Completed");
 view = buildPipeline({ ...base, task: { ...base.task, state: "idle_awaiting_user", waitDetail: "Needs a decision" } });
 assert.equal(view.steps.at(-1)?.status, "blocked");
 assert.equal(view.steps.at(-1)?.body, "Needs a decision");
+// Accepted runtime plan: nodes appear before any worker starts, a started
+// node is shown once (by its worker), and a waiting node says why.
+const node = (id: string, status: string, assignmentRef: string | null, waiting: string | null = null) => ({
+  id, role: "worker-debugger", objective: `Diagnose ${id}. Read-only.`, stage: "execution", status, assignmentRef, waiting,
+});
+view = buildPipeline({ ...base, requirements: [], delegations: {}, workers: [worker("a", "running", "Implement")],
+  plan: { state: "EXECUTING", blocker: null, nodes: [node("a", "running", "ref-a"), node("b", "pending", null, "Waiting for a")] } });
+assert.deepEqual(view.steps.map((s) => [s.kind, s.status, s.title]), [
+  ["request", "done", "Request"], ["plan", "done", "Plan"], ["worker", "active", "Implement"],
+  ["worker", "pending", "Diagnose b."], ["finish", "pending", "Review and acceptance"],
+]);
+assert.equal(view.steps[1].subtitle, "2 planned steps");
+assert.equal(view.steps[3].subtitle, "debugger · Waiting for a");
+
+view = buildPipeline({ ...base, requirements: [], delegations: {}, workers: [],
+  task: { ...base.task, state: "blocked" },
+  plan: { state: "BLOCKED", blocker: "scheduler_capacity_timeout", nodes: [node("a", "cancelled", null)] } });
+assert.equal(view.steps[2].status, "cancelled");
+assert.equal(view.steps.at(-1)?.body, "scheduler_capacity_timeout");
 console.log("pipeline model tests passed");

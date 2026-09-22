@@ -60,7 +60,6 @@ TRANSITIONS = {
 }
 TERMINAL = {'FAILED', 'CANCELLED', 'COMPLETED'}
 MAX_NODES = 64
-MAX_WORKERS = 4
 MAX_REVIEW_CYCLES = 3
 
 
@@ -181,7 +180,7 @@ class TaskMachine:
         value = dict(task)
         value['runtime_proposals']=[json.loads(row[0]) for row in reversed(proposals)]
         value['steering'] = [json.loads(row[0]) for row in reversed(steering)]
-        value['policy'] = dict(deny_write=denials, native_tools=False, max_workers=MAX_WORKERS)
+        value['policy'] = dict(deny_write=denials, native_tools=False)
         value['verification']=json.loads(verification[0]) if verification else None
         value['user_answers'] = [dict(answer) for answer in answers]
         value['plan'] = json.loads(value.pop('plan_json') or 'null')
@@ -288,8 +287,8 @@ class TaskMachine:
                 transition(db, task_id, 'CANCELLED')
             db.commit()
 
-    def claim_ready(self, task_id, channel_id, max_workers=MAX_WORKERS):
-        """Reserve dependency-ready nodes atomically; never exceed the runtime ceiling."""
+    def claim_ready(self, task_id, channel_id):
+        """Reserve dependency-ready nodes atomically."""
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
@@ -298,15 +297,16 @@ class TaskMachine:
             nodes = [dict(n) for n in db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid',
                                                 (task_id, task['revision']))]
             completed = {n['node_id'] for n in nodes if n['status'] == 'completed'}
-            active_nodes = db.execute("""SELECT n.scope_json FROM runtime_nodes n WHERE n.status='running'
+            # Only this task's own in-flight workers hold a write scope. No
+            # worker-count limit, and no other task -- live, blocked or long
+            # dead -- can keep this one from starting.
+            active_nodes = db.execute("""SELECT n.scope_json FROM runtime_nodes n WHERE n.task_id=? AND (n.status='running'
                 OR (n.assignment_ref IS NOT NULL AND EXISTS (
                     SELECT 1 FROM delegation_provisioning p WHERE p.idempotency_key=n.assignment_ref
                 ) AND NOT EXISTS (
                     SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='WORKER_RELEASED'
                     AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref
-                ))""").fetchall()
-            running = len(active_nodes)
-            capacity = max(0, min(max_workers, MAX_WORKERS) - running)
+                )))""", (task_id,)).fetchall()
             stage = 'review' if task['state'] == 'REVIEWING' else 'execution'
             ready = [n for n in nodes if n['status'] == 'pending' and n['stage'] == stage
                      and set(json.loads(n['dependencies_json'])) <= completed]
@@ -314,7 +314,6 @@ class TaskMachine:
             occupied = [json.loads(n['scope_json']) for n in active_nodes]
             selected = []
             for candidate in ready:
-                if len(selected)>=capacity: break
                 scope = json.loads(candidate['scope_json'])
                 if any(overlaps(a,b) for grant in occupied for a in grant for b in scope):
                     continue

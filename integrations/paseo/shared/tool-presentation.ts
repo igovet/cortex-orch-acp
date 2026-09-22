@@ -195,10 +195,16 @@ export function presentToolSemantics(input: ToolPresentationInput): ToolPresenta
           : title.match(/^skill\b/i) || nativeKind === "skill" ? NATIVE_SKILL
             : title.match(/^(governance|decide)\b/i) || nativeKind === "governance" ? NATIVE_GOVERNANCE
             : undefined;
-  const mapped = ACTIONS[name] ?? native;
+  // A shell call titled with its own command (Claude's Bash: "for f in …")
+  // carries that command in its input even when no tool kind came with it.
+  const shellInput = !ACTIONS[name] && !native && stringValue(input.rawInput ?? input.input, "command", "cmd") ? NATIVE_SHELL : undefined;
+  const mapped = ACTIONS[name] ?? native ?? shellInput;
   if (!mapped) {
     const action = humanize(name || title || "tool");
-    return { kind: "generic", icon: "Wrench", action, target: null, label: action, expandable: true, systemOperation: false, visible: true };
+    // A title that is itself a command line (Claude's Grep: `grep -rn "x" src`)
+    // says what the call does; its first word alone ("Grep") does not.
+    const commandLine = !/^mcp(?:__|\.)/i.test(title) && /\s/.test(title) ? compactTarget(title) : null;
+    return { kind: "generic", icon: "Wrench", action, target: commandLine, label: commandLine ?? action, expandable: true, systemOperation: false, visible: true };
   }
   let target = targetFor(name, input, mapped.action);
   if (!target && native && !/^mcp(?:__|\.)/i.test(title)) {

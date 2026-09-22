@@ -27,7 +27,7 @@ db = sqlite3.connect('file:' + quote(root + '/.cortex/cortex.sqlite3', safe='/')
 db.row_factory = sqlite3.Row
 tables = {r[0] for r in db.execute("select name from sqlite_master where type='table'")}
 task = db.execute('select id, created_at from tasks where id=? and project_root=?', (task_id, root)).fetchone()
-out = {'available': task is not None, 'tokens': {'total': None, 'coordinator': None}, 'task': None, 'messages': [], 'requirements': [], 'delegations': {}}
+out = {'available': task is not None, 'tokens': {'total': None, 'coordinator': None}, 'task': None, 'messages': [], 'requirements': [], 'delegations': {}, 'plan': None}
 if task is not None:
     out['task'] = {'id': task['id'], 'createdAt': task['created_at'], 'state': None, 'waitReason': None, 'waitDetail': None}
     if 'task_orchestration' in tables:
@@ -69,6 +69,26 @@ if task is not None:
             payload = load(row['payload_json'])
             if isinstance(payload.get('decision'), str):
                 delegations[row['assignment_ref']]['decision'] = {'decision': payload['decision'], 'rationale': clip(payload.get('rationale'), 600)}
+    # The runtime's own plan: every node of the current revision, so a step
+    # is visible from the moment the plan is accepted, not only once a
+    # worker has started for it.
+    if 'runtime_tasks' in tables and 'runtime_nodes' in tables:
+        runtime = db.execute('select state, revision, blocker from runtime_tasks where task_id=?', (task_id,)).fetchone()
+        if runtime is not None:
+            rows = db.execute('''select node_id, role, objective, stage, status, assignment_ref, dependencies_json
+                from runtime_nodes where task_id=? and revision=? order by rowid''', (task_id, runtime['revision'])).fetchall()
+            finished = {r['node_id'] for r in rows if r['status'] == 'completed'}
+            nodes = []
+            for r in rows:
+                try: dependencies = [d for d in json.loads(r['dependencies_json']) if isinstance(d, str)]
+                except (ValueError, TypeError): dependencies = []
+                waiting = None
+                if r['status'] == 'pending':
+                    unmet = [d for d in dependencies if d not in finished]
+                    waiting = 'Waiting for ' + ', '.join(unmet) if unmet else 'Waiting to start'
+                nodes.append({'id': r['node_id'], 'role': r['role'] or '', 'objective': clip(r['objective'], 2000) or '',
+                    'stage': r['stage'] or '', 'status': r['status'] or 'pending', 'assignmentRef': r['assignment_ref'], 'waiting': waiting})
+            out['plan'] = {'state': runtime['state'], 'blocker': clip(runtime['blocker'], 600), 'nodes': nodes}
     if 'usage_records' in tables:
         rows = db.execute('select attempt_id, tokens_json from usage_records where task_id=?', (task_id,)).fetchall()
         out['tokens'] = {'total': sum_tokens(rows), 'coordinator': sum_tokens([r for r in rows if (r['attempt_id'] or '').startswith('co_')])}
@@ -76,7 +96,7 @@ print(json.dumps(out, ensure_ascii=False))
 `;
 
 function unavailable(message: string): Pipeline {
-  return { available: false, message, tokens: { total: null, coordinator: null }, task: null, messages: [], requirements: [], delegations: {}, workers: [] };
+  return { available: false, message, tokens: { total: null, coordinator: null }, task: null, messages: [], requirements: [], delegations: {}, plan: null, workers: [] };
 }
 
 export async function getPipeline(input: { workspaceId: string; agentId: string }, context: PluginHandlerContext): Promise<Pipeline> {

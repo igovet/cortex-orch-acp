@@ -70,6 +70,28 @@ function workerStep(worker: Pipeline["workers"][number], pipeline: Pipeline): Pi
   };
 }
 
+const NODE_STATUS: Record<string, StepStatus> = {
+  completed: "done", running: "active", pending: "pending", cancelled: "cancelled", failed: "failed",
+};
+
+/** A planned runtime node no worker has started for (yet, or ever). */
+function nodeStep(node: NonNullable<Pipeline["plan"]>["nodes"][number]): PipelineStep {
+  const firstLine = node.objective.split(/(?<=[.!?])\s|\n/, 1)[0].trim();
+  const role = node.role.replace(/^worker-/i, "");
+  return {
+    key: `node:${node.id}`,
+    kind: "worker",
+    status: NODE_STATUS[node.status] ?? "pending",
+    title: (firstLine.length > 120 ? `${firstLine.slice(0, 119)}…` : firstLine) || node.id,
+    subtitle: [role, node.stage === "review" ? "review" : null, node.waiting ?? (node.status === "running" ? "Starting" : null)]
+      .filter(Boolean).join(" · "),
+    badges: [],
+    body: node.objective || undefined,
+    items: [],
+    assignmentRef: node.assignmentRef ?? undefined,
+  };
+}
+
 /** The whole task as one top-to-bottom list: request, plan, every delegated
  * worker in delegation order, then the coordinator's acceptance. */
 export function buildPipeline(pipeline: Pipeline): PipelineView {
@@ -77,9 +99,15 @@ export function buildPipeline(pipeline: Pipeline): PipelineView {
   const accepted = state === "accepted";
   const [request, ...followUps] = pipeline.messages;
   const order = (worker: Pipeline["workers"][number]) => pipeline.delegations[worker.assignmentRef ?? worker.id]?.order ?? Number.MAX_SAFE_INTEGER;
-  const workers = [...pipeline.workers].sort((a, b) => order(a) - order(b)).map((worker) => workerStep(worker, pipeline));
+  const started = new Set(pipeline.workers.map((worker) => worker.assignmentRef ?? worker.id));
+  const plannedNodes = (pipeline.plan?.nodes ?? []).filter((node) => !node.assignmentRef || !started.has(node.assignmentRef));
+  const workers = [
+    ...[...pipeline.workers].sort((a, b) => order(a) - order(b)).map((worker) => workerStep(worker, pipeline)),
+    ...plannedNodes.map(nodeStep),
+  ];
   const live = state === "running" || state === "recovering";
 
+  const nodeCount = pipeline.plan?.nodes.length ?? 0;
   const planned = pipeline.requirements.length > 0 || workers.length > 0;
   const plan: PipelineStep = {
     key: "plan",
@@ -88,6 +116,7 @@ export function buildPipeline(pipeline: Pipeline): PipelineView {
     title: "Plan",
     subtitle: pipeline.requirements.length > 0
       ? `${pipeline.requirements.length} requirement${pipeline.requirements.length === 1 ? "" : "s"}`
+      : nodeCount > 0 ? `${nodeCount} planned step${nodeCount === 1 ? "" : "s"}`
       : planned ? "Delegated without recorded requirements" : "The coordinator is reading the request",
     badges: [],
     body: pipeline.requirements.map((requirement) => requirement.statement).join("\n\n") || undefined,
@@ -105,7 +134,7 @@ export function buildPipeline(pipeline: Pipeline): PipelineView {
     title: accepted ? "Accepted" : live ? (planned && !workerActive ? "Coordinator is reviewing" : "Review and acceptance") : TASK_STATE[state]?.text ?? state,
     subtitle: accepted ? "The coordinator accepted the verified result" : undefined,
     badges: [],
-    body: accepted ? undefined : pipeline.task?.waitDetail ?? undefined,
+    body: accepted ? undefined : pipeline.task?.waitDetail ?? (!live ? pipeline.plan?.blocker ?? undefined : undefined),
     items: [],
   };
 

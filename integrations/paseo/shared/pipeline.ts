@@ -31,6 +31,21 @@ export const readPipeline = defineRpc({
       result: z.object({ summary: z.string().nullable(), checks: z.array(check) }).nullable(),
       decision: z.object({ decision: z.string(), rationale: z.string().nullable() }).nullable(),
     })),
+    // The runtime's accepted plan (current revision), including nodes no
+    // worker has started for yet. Null for a task the runtime never planned.
+    plan: z.object({
+      state: z.string(),
+      blocker: z.string().nullable(),
+      nodes: z.array(z.object({
+        id: z.string(),
+        role: z.string(),
+        objective: z.string(),
+        stage: z.string(),
+        status: z.string(),
+        assignmentRef: z.string().nullable(),
+        waiting: z.string().nullable(),
+      })),
+    }).nullable().default(null),
     workers: readWorkerHistory.output.shape.assignments,
   }),
 });

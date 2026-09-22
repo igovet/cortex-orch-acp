@@ -323,8 +323,8 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                     else:
                         machine.move(task_id, 'BLOCKED', blocker='review_blocked')
                 continue
-            # Another task may own the global slots or an overlapping scope.
-            # Retain pending nodes and wait with cancellation and a deadline.
+            # A finished worker of this task may still hold an overlapping
+            # scope until its engine is seen gone. Wait with a deadline.
             if any(n['status']=='pending' for n in nodes):
                 capacity_wait_started = capacity_wait_started or time.monotonic()
                 if time.monotonic()-capacity_wait_started < 1800:

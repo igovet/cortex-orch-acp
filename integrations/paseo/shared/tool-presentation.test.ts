@@ -97,3 +97,14 @@ test("unwraps Codex tool envelopes and hides only protocol/wait operations", () 
     assert.equal(presentToolSemantics({ name, rawInput: {path: "README.md"} }).expandable, false);
   }
 });
+
+test("a call titled with its own command line shows that command, not its first word", () => {
+  const loop = "for f in services/*/service; do grep -c intent \"$f\"/*.py; done";
+  assert.equal(presentToolSemantics({ name: loop, rawInput: { command: loop } }).label, `Shell — ${loop}`);
+  assert.equal(presentToolSemantics({ name: 'grep -rn "stop" services/trading-engine' }).label,
+    'grep -rn "stop" services/trading-engine');
+  const long = presentToolSemantics({ name: `grep -rn "${"x".repeat(200)}" src` }).label;
+  assert.ok(long.startsWith('grep -rn "xxx') && long.endsWith("…") && long.length === 158);
+  assert.equal(presentToolSemantics({ name: "Grep" }).label, "Grep");
+  assert.equal(presentToolSemantics({ name: "mcp__other__search_code", input: { query: "q" } }).label, "Search Code");
+});
