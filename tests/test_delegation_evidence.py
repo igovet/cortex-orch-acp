@@ -55,7 +55,9 @@ def test_a_check_the_engine_ran_with_its_own_shell_counts_as_passed(tmp_path,cas
     worker,assignment=provision_fixture(store,coordinator)
     report=publish_fixture_report(store,worker)
     if case!='no_shell':
-        record_tool_result_observed(store,task.task_id,worker.attempt_id,'tc_shell','execute','pytest -q',
+        # As engines report it: kind only on the first update, then status alone.
+        record_tool_result_observed(store,task.task_id,worker.attempt_id,'tc_shell','execute','pytest -q','pending')
+        record_tool_result_observed(store,task.task_id,worker.attempt_id,'tc_shell',None,None,
                                     'failed' if case=='cited_failed' else 'completed')
     check=dict(name='pytest',outcome='passed',**({'tool_call_ref':'tc_shell'} if case.startswith('cited') else {}))
     args=dict(report_ref=report,summary='Observed',checks=[check],request_key='result')

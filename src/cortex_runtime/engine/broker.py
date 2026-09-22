@@ -33,13 +33,16 @@ class McpBroker:
     """Keep task-channel credentials in the runtime's MCP child process."""
 
     def __init__(self, channel_credentials, *, python_executable: str, server_script: str,
-                 observe=None, server_config=None, socket_dir=None):
+                 observe=None, server_config=None, socket_dir=None, stderr_log=None):
         if not channel_credentials or len(channel_credentials) != 3:
             raise ValueError("channel_credentials are required for an MCP broker")
         self._credentials = tuple(channel_credentials)
         self._python = python_executable
         self._script = server_script
         self._observe = observe
+        # The engine's private, size-capped stderr file (never the
+        # observation log): the server's own tracebacks land there.
+        self._stderr_log = stderr_log
         self._server_config = server_config
         self._ready = threading.Event()
         self._closed = threading.Event()
@@ -210,9 +213,20 @@ class McpBroker:
             env['CORTEX_EXTERNAL_SERVER'] = json.dumps(self._server_config)
         child = subprocess.Popen([self._python, "-B", self._script], cwd=project_root, env=env,
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                 stderr=subprocess.DEVNULL, start_new_session=True)
+                                 stderr=subprocess.PIPE if self._stderr_log is not None else subprocess.DEVNULL,
+                                 start_new_session=True)
         self._child = child
         self._event("mcp_server_started", pid=child.pid)
+        if self._stderr_log is not None:
+            def drain_stderr():
+                # server._log_unexpected writes the cause of an opaque
+                # storage_error here; DEVNULL used to discard every one.
+                try:
+                    for line in child.stderr:
+                        self._stderr_log.append_line(f"[mcp-server {child.pid}] " + line.decode("utf-8", errors="replace"))
+                except (OSError, ValueError):
+                    pass
+            threading.Thread(target=drain_stderr, name="mcp-server-stderr", daemon=True).start()
         if remainder:
             child.stdin.write(remainder)
             child.stdin.flush()

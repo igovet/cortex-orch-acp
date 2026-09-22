@@ -171,13 +171,14 @@ def test_adapter_fails_closed_for_an_unknown_engine_session_id(tmp_path):
     assert fake_runtime.lookups == []
 
 
-def test_worker_native_edit_and_delete_are_allowed_without_the_requester_via_real_fake_engine(tmp_path):
+def test_worker_native_edit_is_allowed_and_delete_asks_the_user_via_real_fake_engine(tmp_path):
     """Real ``EngineSessionManager``/``PermissionBridge`` machinery, a real
     fake-engine subprocess (never a stub bypassing the wire), routed through
     the exact production seam (``adapter.set_runtime`` ->
     ``permission_requester_for_task``): native edits and deletions act
     inside the engine jail, so both are allowed locally and the registered
-    requester is never consulted."""
+    requester is consulted only for the deletion (the owner's rule: rm only
+    with consent)."""
     store, task_id, epoch = _bootstrap(tmp_path, "delete")
     environ = isolated_environ(tmp_path)
 
@@ -229,8 +230,9 @@ def test_worker_native_edit_and_delete_are_allowed_without_the_requester_via_rea
         replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
         assert len(replies) == 2
         assert replies[0]["result"] == {"outcome": {"outcome": "selected", "optionId": "allow"}}
-        assert replies[1]["result"] == {"outcome": {"outcome": "selected", "optionId": "allow"}}
-        assert host_calls == []
-        assert fake_runtime.lookups == []
+        # A deletion is the user's to confirm: routed to the task's requester,
+        # whose answer here is deny; the edit never reached it.
+        assert replies[1]["result"] == {"outcome": {"outcome": "selected", "optionId": "deny"}}
+        assert [call["toolCall"]["toolCallId"] for call in host_calls] == ["tc-delete"]
     finally:
         adapter.terminate_owned("xa_w1")

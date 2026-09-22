@@ -778,6 +778,41 @@ def test_stop_from_reconnected_session_uses_original_card_emitter(tmp_path):
     assert new_cards == []
 
 
+def test_clamp_attempt_context_size_never_regresses_within_an_attempt():
+    """claude-agent-acp reports a placeholder context size (e.g. 200000)
+    on every mid-turn usage_update and corrects it to the model's real
+    size (e.g. 1000000) only on the turn's final usage_update, same
+    attempt, same ``used`` count. The clamp must keep the largest size
+    seen for that attempt and never let a later, smaller report undo it,
+    while a different attempt starts its own tracking from scratch."""
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._lock = threading.RLock()
+    runtime._attempt_context_size_max = {}
+    runtime._model_context_size_max = {}
+    runtime._attempt_models = {"xa_1": "claude-agent-acp/claude-sonnet-5", "xa_2": "codex-acp/gpt-5.6-luna",
+                               "xa_3": "claude-agent-acp/claude-sonnet-5"}
+
+    assert runtime._clamp_attempt_context_size("xa_1", 200000) == 200000
+    assert runtime._clamp_attempt_context_size("xa_1", 200000) == 200000
+    assert runtime._clamp_attempt_context_size("xa_1", 1000000) == 1000000
+    # A late/stale smaller report after the real size is known must not
+    # regress the panel back down.
+    assert runtime._clamp_attempt_context_size("xa_1", 200000) == 1000000
+
+    # A different model tracks its own max independently.
+    assert runtime._clamp_attempt_context_size("xa_2", 258400) == 258400
+    # A later worker on the same model starts at the size already learned.
+    assert runtime._clamp_attempt_context_size("xa_3", 200000) == 1000000
+
+    # Invalid/absent sizes are left alone by the caller (None means "do
+    # not touch the reported size").
+    assert runtime._clamp_attempt_context_size("xa_1", None) is None
+    assert runtime._clamp_attempt_context_size("xa_1", 0) is None
+    assert runtime._clamp_attempt_context_size("xa_1", -5) is None
+    assert runtime._clamp_attempt_context_size("xa_1", True) is None
+    assert runtime._clamp_attempt_context_size(None, 200000) is None
+
+
 
 
 

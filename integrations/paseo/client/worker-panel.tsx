@@ -15,6 +15,7 @@ import { workerAssignmentLine, workerDisplayName } from "./worker-display.js";
 import { workerPopoverStatus } from "./worker-popover-status.js";
 import { openWorkspaceFile } from "./open-workspace-file.ts";
 import { UsageMeter } from "./usage-meter.tsx";
+import { MarkdownText } from "./markdown-text.tsx";
 
 const styles = {
   title: { fontSize: 18, lineHeight: 24, fontWeight: "600" as const },
@@ -120,7 +121,7 @@ export function TranscriptEvent({ event, expanded, onToggle, onOpenFile, theme }
   const final = /result|final|complete/.test(event.type.toLowerCase());
   const message = cleanEventText(event);
   if (!tool) return <View style={{ marginVertical: final ? 13 : 9, gap: 6 }}>
-    {message && <Text selectable style={[styles.body, { color: theme.colors.foreground }]}>{message}</Text>}
+    {message && <MarkdownText text={message} color={theme.colors.foreground} mutedColor={theme.colors.foregroundMuted} surfaceColor={theme.colors.surface1} />}
   </View>;
   const presentation = presentTool(event);
   const semantics = toolSemantics(event);

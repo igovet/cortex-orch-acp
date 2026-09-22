@@ -882,6 +882,11 @@ class OrchestratingRuntime:
         # a stale marker that may be safely reclaimed after a crash.
         self._worker_recoveries_in_flight: set[str] = set()
         self._worker_recovery_claim_lock = threading.Lock()
+        # Per-attempt running max context-window size; see
+        # _clamp_attempt_context_size's docstring for why.
+        self._attempt_context_size_max: dict[str, int] = {}
+        self._model_context_size_max: dict[str, int] = {}
+        self._attempt_models: dict[str, str | None] = {}
         # The most recent scrubbed excerpt of each in-flight worker's own
         # engine turn, so its card can show what it is doing rather than
         # only that it is running. Written by the worker's own on_delta,
@@ -2753,6 +2758,49 @@ class OrchestratingRuntime:
             # also handles an already-snapshotted tick racing this cleanup.
             self._worker_activity.pop(assignment_ref, None)
 
+    def _clamp_attempt_context_size(self, attempt_id: str | None, size: Any) -> int | None:
+        """The largest context-window ``size`` reported so far for this
+        attempt, or ``None`` when ``size`` is not a valid positive int.
+
+        Some engines (observed: claude-agent-acp) report a smaller
+        placeholder context-window size on every mid-turn ``usage_update``
+        and only correct it to the model's real size on the turn's final
+        ``usage_update`` -- same attempt, same ``used`` count, size jumping
+        e.g. 200000 -> 1000000. A context window never actually shrinks
+        mid-attempt, so a smaller size reported after a larger one is the
+        same stale placeholder, not new evidence; the panel keeps showing
+        the largest (most accurate) size seen so far instead of flickering
+        back down.
+        """
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or not attempt_id:
+            return None
+        model = self._attempt_model(attempt_id)
+        with self._lock:
+            # Per model too: the engine only corrects the size at the end of a
+            # turn, so without this every new worker opened on 200k.
+            size = max(size, self._attempt_context_size_max.get(attempt_id, 0),
+                       self._model_context_size_max.get(model, 0) if model else 0)
+            self._attempt_context_size_max[attempt_id] = size
+            if model:
+                self._model_context_size_max[model] = size
+        return size
+
+    def _attempt_model(self, attempt_id: str) -> str | None:
+        """``engine/model`` this attempt was routed to (cached)."""
+        with self._lock:
+            if attempt_id in self._attempt_models:
+                return self._attempt_models[attempt_id]
+        try:
+            with self._store.connection() as db:
+                row = db.execute("SELECT engine, model FROM attempt_route_audit WHERE attempt_id=? ORDER BY rowid DESC LIMIT 1",
+                                 (attempt_id,)).fetchone()
+        except Exception:  # noqa: BLE001 - display nicety only
+            return None
+        model = f"{row['engine']}/{row['model']}" if row is not None else None
+        with self._lock:
+            self._attempt_models[attempt_id] = model
+        return model
+
     def _append_worker_entry(self, assignment_ref: str, entry: str, ref: str | None = None) -> None:
         """Add one worker event, replacing the prior line for the same tool."""
         line = str(entry).strip()
@@ -3936,6 +3984,9 @@ class OrchestratingRuntime:
                     if update.get("sessionUpdate") == "usage_update":
                         # The worker's context fill for the Workers views:
                         # durable, but neither prose nor a transcript row.
+                        clamped_size = self._clamp_attempt_context_size(result.attempt_id, update.get("size"))
+                        if clamped_size is not None and clamped_size != update.get("size"):
+                            update = {**update, "size": clamped_size}
                         self._record_worker_activity(
                             task_id, _ref, result.attempt_id, "context",
                             f"context {update.get('used')}/{update.get('size')}",

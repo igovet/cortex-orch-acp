@@ -5,6 +5,7 @@ export type WorkerEvent = WorkerHistory["assignments"][number]["attempts"][numbe
 export type TranscriptEntry = { event: WorkerEvent; updates: WorkerEvent[] };
 
 const MESSAGE_MARKER = "[worker message] ";
+const FINAL_RESPONSE_MARKER = "[final response] ";
 
 function messageChunk(event: WorkerEvent): string | null {
   if (event.tool_kind != null || event.type !== "progress") return null;
@@ -57,6 +58,13 @@ export function groupWorkerEvents(events: WorkerEvent[]): TranscriptEntry[] {
     if (ref) byRef.set(ref, row);
   }
   const transcript: TranscriptEntry[] = [];
+  // The engine's authoritative final-response text sometimes restates every
+  // worker-message segment shown so far verbatim, glued together with no
+  // separators (see orchestrating_runtime._flush_worker_message_block). Track
+  // that same concatenation here so a final-response row never repeats what
+  // is already on screen; it clears each time a final-response is emitted,
+  // matching the server's own buffer reset.
+  let shownMessageText = "";
   for (const row of rows) {
     const chunk = messageChunk(row.event);
     const previous = transcript[transcript.length - 1];
@@ -68,8 +76,18 @@ export function groupWorkerEvents(events: WorkerEvent[]): TranscriptEntry[] {
     if (chunk !== null && previous && previous.updates.every((update) => messageChunk(update) !== null) && sameMessage) {
       previous.event = { ...previous.event, text: previous.event.text + chunk };
       previous.updates.push(...row.updates);
+      shownMessageText += chunk;
     } else if (chunk !== null) {
       transcript.push({ event: { ...row.event, text: chunk }, updates: row.updates });
+      shownMessageText += chunk;
+    } else if (row.event.activity_ref === "final-response") {
+      const marker = row.event.text.indexOf(FINAL_RESPONSE_MARKER);
+      const body = marker < 0 ? row.event.text : row.event.text.slice(marker + FINAL_RESPONSE_MARKER.length);
+      const remainder = body.startsWith(shownMessageText.trim()) && shownMessageText.trim()
+        ? body.slice(shownMessageText.trim().length).trim()
+        : body;
+      shownMessageText = "";
+      if (remainder) transcript.push({ event: { ...row.event, text: marker < 0 ? remainder : `${row.event.text.slice(0, marker + FINAL_RESPONSE_MARKER.length)}${remainder}` }, updates: row.updates });
     } else {
       transcript.push(row);
     }

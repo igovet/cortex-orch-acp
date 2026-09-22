@@ -11,9 +11,17 @@ workspace -- including a delegated worker. Because a revision capture must
 be safe to run against a workspace a worker just finished writing into,
 this module now never invokes git, never opens a file through a symlink
 (``O_NOFOLLOW``), and never follows a symlinked directory when walking the
-tree. The result is *stricter* than ``git status`` (git-ignored build
-output changes now count as a workspace change); that is intentional and
-documented below, not a bug.
+tree. The file *contents* are never read through git.
+
+Which paths are observed: in a plain git repository, exactly the files git
+would consider -- tracked plus untracked-but-not-ignored -- listed by
+``git ls-files`` run read-only in the verification sandbox with fsmonitor
+and hooks off (``_git_listed_paths``; ``ls-files`` runs no content filters,
+and a non-regular file where git reads makes it fall back). A project of any
+size, with databases, docker volumes or build output inside, is then bounded
+by its own .gitignore. Otherwise the whole tree is walked, minus dependency/
+cache directories, under the file cap. Files over ``_CONTENT_HASH_MAX_BYTES``
+(or past the total hash budget) are identified by size/inode/mtime/ctime.
 
 A capture has two independent parts:
 
@@ -64,7 +72,13 @@ from datetime import datetime, timezone
 _MAX_FILES = 50_000
 _MAX_TOTAL_HASH_BYTES = 512 * 1024 * 1024
 _MAX_FILE_HASH_BYTES = 64 * 1024 * 1024
+# Content is hashed up to this size (source files); larger files are
+# identified by size/inode/mtime/ctime (see _hash_file).
+_CONTENT_HASH_MAX_BYTES = 1024 * 1024
 _TIME_BUDGET_SECONDS = 20.0
+# With git's file list the tree is bounded by what the project tracks, not by
+# a file cap; a very large repository just takes longer.
+_GIT_TIME_BUDGET_SECONDS = 300.0
 _READ_CHUNK = 1024 * 1024
 
 _HEAD_FILE_CAP = 4096
@@ -76,6 +90,11 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")  # sha-1 (40) or sha-256 
 _REF_NAME_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 _EXCLUDED_TOP_LEVEL = {".git", ".cortex"}
+# Installed dependencies and tool caches, at any depth: not source, never
+# reviewed, and a real JS/mobile project's node_modules alone exceeded
+# _MAX_FILES, so no revision could be captured and review never started.
+_EXCLUDED_ANY_DEPTH = {"node_modules", ".venv", "venv", "__pycache__", "Pods", ".gradle",
+                       ".expo", ".next", ".turbo", ".pytest_cache", ".mypy_cache"}
 
 # Claude's ACP runtime creates this short-lived lock while it services
 # scheduled-task bookkeeping.  It is engine-owned housekeeping, not a
@@ -388,6 +407,16 @@ def _hash_file(path: str, budget: dict, deadline: float, *, parent_fd=None, name
             opened_st = os.fstat(fd)
         except OSError as error:
             raise _Unavailable(f"unreadable_entry:{path}:{error}") from error
+        if (opened_st.st_size > _CONTENT_HASH_MAX_BYTES
+                or budget["total_bytes"] + opened_st.st_size > _MAX_TOTAL_HASH_BYTES):
+            # Build artifacts (an .apk, native .so files: 1.7 GB in one real
+            # mobile project) blew the hash budget, so no capture was ever
+            # available and review never started. A large file is identified
+            # by its metadata instead: ctime changes on every write and no
+            # process can set it back.
+            return "stat:" + hashlib.sha256(
+                f"{opened_st.st_size}:{opened_st.st_ino}:{opened_st.st_mtime_ns}:{opened_st.st_ctime_ns}".encode()
+            ).hexdigest()
         while True:
             if time.monotonic() > deadline:
                 raise _Unavailable("capture_timed_out")
@@ -434,9 +463,14 @@ def _walk(root: str, budget: dict, deadline: float, records: list, *, parent_fd=
                 top = relpath.split("/", 1)[0]
                 if not relprefix and top in _EXCLUDED_TOP_LEVEL:
                     continue
+                if entry.name in _EXCLUDED_ANY_DEPTH and entry.is_dir(follow_symlinks=False):
+                    continue
                 kind = _classify(entry)
+                listed = budget.get("listed")
+                if listed is not None and relpath not in (listed[1] if kind == "d" else listed[0]):
+                    continue  # git-ignored: a database, a volume, build output...
                 budget["files"] += 1
-                if budget["files"] > _MAX_FILES:
+                if listed is None and budget["files"] > _MAX_FILES:
                     raise _Unavailable("workspace_too_large")
                 display_path = os.path.join(budget["root"], *relpath.split("/"))
                 if _is_engine_volatile_path(relpath) and kind == "f":
@@ -486,11 +520,66 @@ def _walk(root: str, budget: dict, deadline: float, records: list, *, parent_fd=
         os.close(fd)
 
 
+def _git_listed_paths(root: str):
+    """``(files, dirs)`` git would consider: tracked plus untracked files that
+    are not ignored -- or ``None`` (not a plain git repository, or git failed),
+    which falls back to walking everything.
+
+    A project of any size, with databases, docker volumes or build output in
+    its tree, is bounded by what its own .gitignore already excludes. git runs
+    read-only in the verification sandbox (no network, no home), with
+    fsmonitor and hooks disabled; ``ls-files`` runs no content filters.
+    """
+    import subprocess
+    import tempfile
+    from ..orchestration.sandbox import verification_command
+    metadata = os.path.join(root, ".git")
+    if not os.path.isdir(metadata) or os.path.islink(metadata):
+        return None
+    # A FIFO or device planted where git reads would stall it: only regular
+    # files (or nothing) there, else fall back to the plain walk.
+    import stat as _stat
+    for name in ("HEAD", "index", "config", "packed-refs", os.path.join("info", "exclude")):
+        try:
+            mode = os.lstat(os.path.join(metadata, name)).st_mode
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        if not _stat.S_ISREG(mode):
+            return None
+    argv = ["/usr/bin/git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+            "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "."]
+    try:
+        with tempfile.TemporaryDirectory(prefix="cortex-revision-git-") as scratch:
+            command = verification_command(root, scratch, argv)
+            index = command.index("--chdir")
+            command[index:index] = ["--ro-bind", metadata, metadata, "--setenv", "GIT_CONFIG_NOSYSTEM", "1",
+                                    "--setenv", "GIT_CONFIG_GLOBAL", "/dev/null"]
+            done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  env={"PATH": "/usr/bin:/bin"}, timeout=20)
+    except Exception:  # noqa: BLE001 - any failure falls back to the full walk
+        return None
+    if done.returncode != 0:
+        return None
+    files, dirs = set(), set()
+    for raw in done.stdout.split(b"\0"):
+        if not raw:
+            continue
+        path = raw.decode("utf-8", "surrogateescape")
+        files.add(path)
+        parts = path.split("/")
+        for depth in range(1, len(parts)):
+            dirs.add("/".join(parts[:depth]))
+    return files, dirs
+
+
 def _tree_digest(root) -> tuple[str | None, str | None, list[str] | None]:
     """Returns ``(digest_hex, None, manifest)`` or ``(None, reason, None)``."""
     root = str(root)
-    budget = dict(files=0, total_bytes=0, root=root)
-    deadline = time.monotonic() + _TIME_BUDGET_SECONDS
+    listed = _git_listed_paths(root)
+    budget = dict(files=0, total_bytes=0, root=root, listed=listed)
+    deadline = time.monotonic() + (_GIT_TIME_BUDGET_SECONDS if listed is not None else _TIME_BUDGET_SECONDS)
     records: list[str] = []
     try:
         _walk(root, budget, deadline, records)
@@ -505,8 +594,8 @@ def _tree_digest(root) -> tuple[str | None, str | None, list[str] | None]:
 
 
 def capture_revision(workspace_root) -> dict:
-    """Read-only, pure-Python observation of ``workspace_root`` -- never
-    executes git or any other repo-configurable program. Returns
+    """Read-only observation of ``workspace_root`` (git, sandboxed, only
+    lists paths -- see the module docstring). Returns
     ``dict(kind, head, dirty_digest, detail)``: ``kind`` is ``"observed"``
     (``dirty_digest`` a sha256 tree-manifest digest; ``head`` is a
     best-effort sha, possibly ``None``) or ``"unavailable"`` (``head``/

@@ -158,7 +158,9 @@ _CODEX_MCP_ENTRY_PATCHED = b'''"mcp_servers": Object.fromEntries(serversToConfig
 
 # Codex runs inside Cortex's engine jail (orchestration.sandbox.engine_jail),
 # which is the boundary: its own sandbox cannot start in a nested user
-# namespace, so every turn is full access and never asks for approval.
+# namespace, so every turn is full access. It still asks ("untrusted": all
+# but known-safe reads) so each command reaches engine.permissions, which
+# allows it at once unless it deletes -- that one the user confirms.
 _CODEX_SEND_PROMPT_SOURCE = b'''    return await this.codexClient.runTurn({
       threadId: request.sessionId,
       input,
@@ -173,7 +175,7 @@ _CODEX_SEND_PROMPT_SOURCE = b'''    return await this.codexClient.runTurn({
 _CODEX_SEND_PROMPT_PATCHED = b'''    return await this.codexClient.runTurn({
       threadId: request.sessionId,
       input,
-      approvalPolicy: "never",
+      approvalPolicy: "untrusted",
       approvalsReviewer: "user",
       sandboxPolicy: { type: "dangerFullAccess" },
       summary: disableSummary ? "none" : "auto",
@@ -659,7 +661,7 @@ class EngineProcess:
             server_script = str(Path(__file__).resolve().parents[2] / "cortex.py")
             self.mcp_broker = McpBroker(
                 channel_credentials, python_executable=sys.executable, server_script=server_script,
-                observe=self.logs.observe, socket_dir=self._socket_dir,
+                observe=self.logs.observe, socket_dir=self._socket_dir, stderr_log=self.logs.stderr,
             )
         pinned_engine_vars = None
         adapter_entry_override = None
@@ -841,7 +843,8 @@ class EngineProcess:
                                     'Configure exact allowed_tools in the owner-only Cortex MCP registry.')
         broker=McpBroker(credentials,python_executable=sys.executable,
                          server_script=str(Path(__file__).with_name('external_proxy.py')),
-                         server_config=config,observe=self.logs.observe,socket_dir=self._socket_dir)
+                         server_config=config,observe=self.logs.observe,socket_dir=self._socket_dir,
+                         stderr_log=self.logs.stderr)
         self.external_mcp_brokers.append(broker)
         return dict(name=config['name'],command=sys.executable,
                     args=['-B',str(MCP_RELAY_SCRIPT),'--relay',broker.endpoint,broker.relay_token],env=[])

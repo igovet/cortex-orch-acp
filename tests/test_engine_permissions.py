@@ -111,3 +111,28 @@ def test_a_cancelled_turn_goes_stale_but_the_session_keeps_working(tmp_path):
     assert not in_flight.is_current(bindings.snapshot(in_flight))  # the cancelled turn's request
     fresh=bindings.get('es_a')
     assert fresh.is_current(bindings.snapshot(fresh))  # the next turn's request
+
+
+@pytest.mark.parametrize('command,deletes',[
+    ('rm src/probe.test.ts',True),('cd app && rm -rf build',True),('/bin/rm x',True),('git clean -fd',True),
+    ('find . -name "*.tmp" -delete',True),('xargs rm < list',True),('python3 -c "import os; os.remove(\'a\')"',True),
+    ('node -e "fs.rmSync(\'d\',{recursive:true})"',True),('git rm old.ts',True),('unlink a',True),
+    ('cat src/rm.ts',False),('npm run format',False),('grep -rn remove src',False),('ls 2>/dev/null',False),
+    ('npx vitest run',False),('git status',False)])
+def test_deletions_are_recognized_from_the_declared_command(command,deletes):
+    from cortex_runtime.engine.permissions import is_deletion
+    assert is_deletion(dict(toolCall=dict(kind='execute',rawInput=dict(command=command))))==deletes
+
+
+@pytest.mark.parametrize('answer,expected',[('allow','allow'),('deny','deny'),(None,'deny'),('raise','deny'),('forged','deny')])
+def test_a_deletion_runs_only_when_the_user_allows_it(tmp_path,answer,expected):
+    """rm ran without asking: the bridge allowed every native action."""
+    bindings=BindingRegistry();bindings.bind(_binding(tmp_path));asked=[]
+    def host(engine_session_id,params,timeout):
+        asked.append((params['toolCall']['title'],timeout))
+        if answer=='raise': raise TimeoutError()
+        return None if answer is None else {'outcome':{'outcome':'selected','optionId':answer}}
+    bridge=_bridge(bindings=bindings,host_permission_requester=host)
+    params=dict(PARAMS,toolCall=dict(toolCallId='tc-9',name='Bash',kind='execute',rawInput=dict(command='rm src/probe.test.ts')))
+    assert call(bridge,params)=={'outcome':{'outcome':'selected','optionId':expected}}
+    assert asked and 'rm src/probe.test.ts' in asked[0][0] and asked[0][1]>=600

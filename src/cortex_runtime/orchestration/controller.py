@@ -305,7 +305,12 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 review_evidence = []
                 if node['stage'] == 'review':
                     from .artifacts import project_git_evidence
-                    machine.start_review(task_id, node['assignment_ref'])
+                    try:
+                        machine.start_review(task_id, node['assignment_ref'])
+                    except StoreError as error:
+                        # Never a crashed turn: ask the user with the reason.
+                        machine.move(task_id, 'BLOCKED', blocker=str(error))
+                        break
                     for kind in ('status', 'diff'):
                         ref = f"review:{node['assignment_ref']}:{kind}"
                         if emit_tool_call:

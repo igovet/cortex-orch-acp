@@ -311,6 +311,13 @@ def dispatch(store,channel,operation,args):
     return result
 
 
+# A completed engine shell run in this attempt. Only the call's first
+# observation carries kind='execute'; its status updates carry none.
+ENGINE_SHELL_COMPLETED = ("SELECT 1 FROM tool_result_observations c WHERE c.attempt_id=? AND c.status='completed' "
+                          "AND EXISTS (SELECT 1 FROM tool_result_observations k WHERE k.attempt_id=c.attempt_id "
+                          "AND k.tool_call_ref=c.tool_call_ref AND k.kind='execute') LIMIT 1")
+
+
 def verified_check(db,task_id,attempt_id,ref):
     """Evidence behind a passed check, strongest first.
 
@@ -325,8 +332,7 @@ def verified_check(db,task_id,attempt_id,ref):
             row=db.execute("SELECT status FROM tool_result_observations WHERE attempt_id=? AND tool_call_ref=? ORDER BY id DESC LIMIT 1",
                            (attempt_id,ref)).fetchone()
             return bool(row) and row[0]=='completed'
-        return bool(db.execute("SELECT 1 FROM tool_result_observations WHERE attempt_id=? AND kind='execute' AND status='completed' LIMIT 1",
-                               (attempt_id,)).fetchone())
+        return bool(db.execute(ENGINE_SHELL_COMPLETED,(attempt_id,)).fetchone())
     rows=db.execute("SELECT r.result_json FROM runtime_requests r JOIN trusted_channels c ON c.channel_id=r.actor "
                     "WHERE r.task_id=? AND c.attempt_id=? AND r.operation='command_run'",(task_id,attempt_id))
     matches=[]

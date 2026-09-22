@@ -723,7 +723,8 @@ def test_publication_attribution_accepts_only_benign_generated_manifest_drift(tm
     (tmp_path / "__pycache__").mkdir()
     (tmp_path / "__pycache__" / "test.cpython-313.pyc").write_bytes(b"cache")
     current = delegation_revision.capture_revision(tmp_path)
-    assert delegation_revision.publication_attribution(publication, current) == "benign_generated_only"
+    # __pycache__ is outside the revision now (a dependency/cache directory).
+    assert delegation_revision.publication_attribution(publication, current) == "exact"
 
     (tmp_path / "unrelated.txt").write_text("external\n")
     current = delegation_revision.capture_revision(tmp_path)
@@ -807,3 +808,44 @@ def test_shared_workers_overlapping_manifest_deltas_are_ambiguous():
     b_independent = _manifest_capture({"src/a.py": "A", "src/b.py": "B"})
     assert delegation_revision.overlapping_manifest_deltas(base, a, base, b_overlap) == {"src/a.py"}
     assert delegation_revision.overlapping_manifest_deltas(base, a, b_base, b_independent) == set()
+
+
+def test_a_real_mobile_project_still_gets_a_revision(tmp_path, monkeypatch):
+    """node_modules and 1.7 GB of Android build output made every capture
+    'workspace_too_large', so review never started and the turn crashed."""
+    import os, time
+    from cortex_runtime.delegation import revision
+    monkeypatch.setattr(revision, "_CONTENT_HASH_MAX_BYTES", 8)
+    monkeypatch.setattr(revision, "_MAX_FILES", 20)
+    (tmp_path / "src").mkdir(); (tmp_path / "src" / "app.ts").write_text("x")
+    deps = tmp_path / "apps" / "node_modules"; deps.mkdir(parents=True)
+    for index in range(50):
+        (deps / f"m{index}.js").write_text("m")
+    artifact = tmp_path / "app-release.apk"; artifact.write_bytes(b"0123456789abcdef")
+    first = revision.capture_revision(str(tmp_path))
+    assert first["kind"] == "observed"
+    (deps / "new.js").write_text("ignored")
+    assert revision.capture_revision(str(tmp_path))["dirty_digest"] == first["dirty_digest"]
+    time.sleep(0.01); artifact.write_bytes(b"0123456789ABCDEF")  # same size, new content
+    assert revision.capture_revision(str(tmp_path))["dirty_digest"] != first["dirty_digest"]
+
+
+def test_git_ignored_content_of_any_size_stays_outside_the_revision(tmp_path):
+    """A database, a docker volume or build output inside the project must not
+    make the capture unavailable or count as a change."""
+    import subprocess
+    from cortex_runtime.delegation import revision
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("data/\n")
+    (tmp_path / "app.py").write_text("print(1)\n")
+    data = tmp_path / "data"; data.mkdir()
+    for index in range(200):
+        (data / f"row{index}.db").write_text("x")
+    first = revision.capture_revision(str(tmp_path))
+    assert first["kind"] == "observed" and not any("data/" in line for line in first["manifest"])
+    (data / "more.db").write_text("y")
+    assert revision.capture_revision(str(tmp_path))["dirty_digest"] == first["dirty_digest"]
+    (tmp_path / "app.py").write_text("print(2)\n")
+    assert revision.capture_revision(str(tmp_path))["dirty_digest"] != first["dirty_digest"]
+    (tmp_path / "new.py").write_text("x\n")  # untracked but not ignored: part of the work
+    assert any("new.py" in line for line in revision.capture_revision(str(tmp_path))["manifest"])

@@ -249,7 +249,7 @@ class TaskMachine:
         value = dict(task)
         value['runtime_proposals']=[json.loads(row[0]) for row in reversed(proposals)]
         value['steering'] = [json.loads(row[0]) for row in reversed(steering)]
-        value['policy'] = dict(deny_write=denials, native_tools=False)
+        value['policy'] = dict(deny_write=denials, native_tools=True)
         value['verification']=json.loads(verification[0]) if verification else None
         value['user_answers'] = [dict(answer) for answer in answers]
         value['plan'] = json.loads(value.pop('plan_json') or 'null')

@@ -450,7 +450,9 @@ def _section_pipeline_and_assignments(db, task_id: str, recipient: dict) -> dict
         from ..orchestration.policy import denied_paths
         section['runtime'] = dict(task)
         section['runtime']['denied_write_paths'] = denied_paths(db,task_id)
-        section['runtime']['native_tools_enabled'] = False
+        # Native tools work, bounded by the engine jail; a stale False made
+        # workers refuse to count their own shell checks.
+        section['runtime']['native_tools_enabled'] = True
         sql = 'SELECT node_id,role,objective,dependencies_json,scope_json,status,assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=?'
         values = [task_id,task['revision']]
         if recipient['role'] != 'coordinator':

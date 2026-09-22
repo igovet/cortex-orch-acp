@@ -1,10 +1,17 @@
 """Final ACP permission fence.
 
 Engine processes run inside Cortex's engine jail, which bounds every native
-tool, so a native action is allowed; MCP calls are mediated again by their
-channel-bound gateway. Only a native subagent launch is refused. Titles,
+tool to the project, so a native action is allowed -- except a deletion,
+which the user confirms (the owner's rule: everything inside the project,
+but rm only with consent). MCP calls are mediated again by their
+channel-bound gateway. A native subagent launch is refused. Titles,
 descriptions and raw inputs never supply tool identity.
+
+Deletion is recognized lexically from what the engine declares: ACP's
+``delete``/``move`` kinds and the command text of a shell/interpreter call.
+Code that hides a deletion from that text is outside this fence.
 """
+import re
 import threading
 
 CANCELLED_OUTCOME = {'outcome': {'outcome': 'cancelled'}}
@@ -14,6 +21,46 @@ SUBAGENT_TOOLS = frozenset({'Agent','Task','Workflow','TeamCreate','TeamDelete',
 COORDINATOR_EDIT_REFUSAL_REASON = 'Native subagents are disabled. Do the work in this session.'
 COORDINATOR_MUTATION_REFUSAL_REASON = COORDINATOR_EDIT_REFUSAL_REASON
 COORDINATOR_PRIVATE_OR_CHECK_REFUSAL_REASON = COORDINATOR_EDIT_REFUSAL_REASON
+
+_DELETION_KINDS = frozenset({"delete", "move"})
+_DELETION_COMMAND = re.compile(
+    r"(?:^|[;&|(`]\s*|\bxargs\s+(?:-\S+\s+)*|\bexec\s+|\bsudo\s+)"
+    r"(?:\S*/)?(?:rm|rmdir|unlink|shred)\b"
+    r"|\bgit\s+(?:-\S+\s+)*(?:clean|rm)\b"
+    r"|\bfind\b[^;&|]*\s-delete\b"
+    r"|\bos\s*\.\s*(?:remove|unlink|rmdir|removedirs)\s*\("
+    r"|\bshutil\s*\.\s*rmtree\s*\("
+    r"|\.\s*(?:unlink|rmdir)\s*\(\s*\)"
+    r"|\bfs\s*\.\s*(?:rm|rmdir|unlink|rmSync|rmdirSync|unlinkSync)\s*\(",
+)
+#: A deletion waits for a person, not a host round trip.
+DELETION_CONFIRM_TIMEOUT_SECONDS = 1800.0
+
+
+def _command_text(tool_call: dict) -> str:
+    raw = tool_call.get("rawInput")
+    parts = []
+    if isinstance(raw, dict):
+        for key in ("command", "cmd", "script", "input"):
+            value = raw.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, list):
+                parts.append(" ".join(str(item) for item in value))
+            elif isinstance(value, dict):
+                parts.extend(str(value.get(k)) for k in ("cmd", "command") if isinstance(value.get(k), str))
+    elif isinstance(raw, str):
+        parts.append(raw)
+    return "\n".join(parts)
+
+
+def is_deletion(params) -> bool:
+    """True when this permission request would delete project content."""
+    call = _tool_call(params)
+    if call.get("kind") in _DELETION_KINDS:
+        return True
+    return bool(_DELETION_COMMAND.search(_command_text(call)))
+
 
 def _tool_call(params) -> dict:
     tool_call = (params or {}).get("toolCall") if isinstance(params, dict) else None
@@ -157,6 +204,37 @@ class PermissionBridge:
                 self._in_flight.discard(dedup_key)
             self._track_action_end(wire_session_id, action_ref)
 
+    def _confirm_deletion(self, engine_session_id, binding, params, action_ref) -> dict:
+        """Ask the connected user; anything but an explicit choice of one of
+        the engine's own allow options (no host, timeout, disconnect, a
+        stale turn, a reject) leaves the file in place."""
+        self._observe("deletion_confirmation_requested", engine_session_id=engine_session_id)
+        rejected = _auto_reject_option_id(params)
+        refused = dict(outcome=dict(outcome="selected", optionId=rejected)) if rejected else dict(CANCELLED_OUTCOME)
+        if self._host_permission_requester is None:
+            self._observe("deletion_refused_no_host", engine_session_id=engine_session_id)
+            return refused
+        call = dict(_tool_call(params))
+        command = _command_text(call).strip()
+        call["title"] = f"Confirm deletion: {command[:300]}" if command else f"Confirm deletion: {call.get('title') or 'file'}"
+        try:
+            response = self._host_permission_requester(
+                engine_session_id, dict(params, toolCall=call), DELETION_CONFIRM_TIMEOUT_SECONDS)
+        except Exception:  # noqa: BLE001 - timeout/EOF is a refusal
+            self._observe("deletion_refused_host_failed", engine_session_id=engine_session_id)
+            return refused
+        if not binding.is_current(self._bindings.snapshot(binding, action_key=action_ref)):
+            self._observe("deletion_refused_stale", engine_session_id=engine_session_id)
+            return dict(CANCELLED_OUTCOME)
+        outcome = (response or {}).get("outcome") if isinstance(response, dict) else None
+        offered = {o.get("optionId"): o.get("kind") for o in (params or {}).get("options") or [] if isinstance(o, dict)}
+        chosen = outcome.get("optionId") if isinstance(outcome, dict) and outcome.get("outcome") == "selected" else None
+        if chosen in offered and str(offered[chosen]).startswith("allow"):
+            self._observe("deletion_confirmed", engine_session_id=engine_session_id)
+            return dict(outcome=dict(outcome="selected", optionId=chosen))
+        self._observe("deletion_refused_by_user", engine_session_id=engine_session_id)
+        return refused
+
     def _action_ref(self, wire_session_id, params):
         tool_call = (params or {}).get("toolCall") if isinstance(params, dict) else None
         wire_tool_call_id = (tool_call or {}).get("toolCallId") if isinstance(tool_call, dict) else None
@@ -180,6 +258,8 @@ class PermissionBridge:
         meta=call.get('_meta') if isinstance(call.get('_meta'),dict) else {}
         claude=meta.get('claudeCode') if isinstance(meta.get('claudeCode'),dict) else {}
         name=call.get('name') or claude.get('toolName')
+        if name not in SUBAGENT_TOOLS and is_deletion(params):
+            return self._confirm_deletion(engine_session_id, binding, params, action_ref)
         if name not in SUBAGENT_TOOLS:
             option=_auto_allow_option_id(params)
             if option is not None:

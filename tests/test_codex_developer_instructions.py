@@ -246,7 +246,7 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
     adapter_text = copied.read_bytes()
     assert _CODEX_SEND_PROMPT_PATCHED in adapter_text
     assert b'sandboxPolicy: { type: "dangerFullAccess" }' in adapter_text
-    assert b'approvalPolicy: "never"' in adapter_text
+    assert b'approvalPolicy: "untrusted"' in adapter_text
     assert original.read_bytes() == source
 
     fake_binary = tmp_path / "fake-codex"
@@ -320,7 +320,7 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
         turn_starts = [entry for entry in traces_after_prompt if entry["method"] == "turn/start"]
         assert len(turn_starts) == 1
         assert turn_starts[0]["params"]["sandboxPolicy"] == {"type": "dangerFullAccess"}
-        assert turn_starts[0]["params"]["approvalPolicy"] == "never"
+        assert turn_starts[0]["params"]["approvalPolicy"] == "untrusted"
 
     finally:
         proc.terminate()

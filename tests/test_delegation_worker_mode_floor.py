@@ -266,8 +266,9 @@ def test_confirmed_worker_mode_and_permission_classifier_work_together(tmp_path)
         # Native edit and delete act inside the engine jail: both are
         # allowed locally by PermissionBridge, never a host round-trip.
         assert replies[0]["result"] == {"outcome": {"outcome": "selected", "optionId": "allow"}}
-        assert replies[1]["result"] == {"outcome": {"outcome": "selected", "optionId": "allow"}}
-        assert host_calls == []
+        # The deletion asked the user (who denied it here); the edit did not.
+        assert replies[1]["result"] == {"outcome": {"outcome": "selected", "optionId": "deny"}}
+        assert [call["toolCall"]["toolCallId"] for call in host_calls] == ["tc-delete"]
     finally:
         adapter.terminate_owned("xa_w1")
 

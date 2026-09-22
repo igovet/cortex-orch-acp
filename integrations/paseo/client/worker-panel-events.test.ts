@@ -81,6 +81,33 @@ assert.deepEqual(protocolRows.map((row) => row.event.id), [20, 21, 22, 23, 24, 2
 assert.equal(protocolRows[4].event.text, "maturity/state ");
 assert.equal(protocolRows[5].event.text, "[final response] assessment.");
 assert.equal(protocolRows[6].event.text, "real worker message");
+// The final-response event can restate every prior worker-message segment
+// glued together with no separator; that duplicate must not render again.
+const duplicated = groupWorkerEvents([
+  event(60, { activity_ref: "message", text: "[worker message] Now let me look at an existing module. " }),
+  event(61, { activity_ref: "tool:read", tool_kind: "read", text: "Read a.md" }),
+  event(62, { activity_ref: "message", text: "[worker message] Good, vi.mock is the pattern." }),
+  event(63, {
+    activity_ref: "final-response",
+    text: "[final response] Now let me look at an existing module. Good, vi.mock is the pattern.",
+  }),
+]);
+assert.deepEqual(duplicated.map((row) => row.event.id), [60, 61, 62]);
+
+// A final-response that adds real content past the shown prefix keeps only
+// the new part.
+const partialDuplicate = groupWorkerEvents([
+  event(70, { activity_ref: "message", text: "[worker message] Read the file." }),
+  event(71, { activity_ref: "final-response", text: "[final response] Read the file. Here is the summary." }),
+]);
+assert.equal(partialDuplicate[partialDuplicate.length - 1].event.text, "[final response] Here is the summary.");
+
+// A final-response with genuinely new text (no prior chatter) is unaffected.
+const freshFinal = groupWorkerEvents([
+  event(80, { activity_ref: "final-response", text: "[final response] Answer." }),
+]);
+assert.equal(freshFinal[freshFinal.length - 1].event.text, "[final response] Answer.");
+
 console.log("worker-panel event grouping tests passed");
 
 const filtered = groupWorkerEvents([
