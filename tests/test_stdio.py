@@ -163,11 +163,14 @@ def test_preview_budget_has_headroom_and_exact_length_correction(tmp_path):
     server=Server(channel_credentials=(channel.channel_id, channel.secret, str(tmp_path)))
     args=dict(title='Review',summary='x'*321,
               author='reviewer',draft_id='d_000000000000',request_key='preview-check')
+    from cortex_runtime.contracts import clip_summary_preview, validate
+    clipped=clip_summary_preview('write_report',args)['summary']
+    # An overlong preview is clipped visibly instead of costing a retry.
+    assert len(clipped)==320 and clipped.endswith('full text in the report]')
+    validate('write_report',clip_summary_preview('write_report',args))
     result=server.dispatch('tools/call',dict(name='write_report',arguments=args))
     error=json.loads(result['content'][0]['text'])
-    assert result['isError'] and error['field']=='summary'
-    assert '321' in error['received'] and '320' in error['correction']
-    assert 'x'*321 not in result['content'][0]['text']
+    assert error.get('field')!='summary'
 
 
 def test_draft_routes_are_schema_visible_and_errors_explain_the_exact_repair(tmp_path):

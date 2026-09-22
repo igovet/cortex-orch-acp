@@ -168,6 +168,70 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Options:",
         "ru": "Варианты ответа:",
     },
+    "stop_question": {
+        "en": "The task stopped: {reason}.{details}\n\nWhat should happen next? You can also reply in your own words.",
+        "ru": "Задача остановилась: {reason}.{details}\n\nЧто делать дальше? Можно ответить своими словами.",
+    },
+    "stop_option_continue": {
+        "en": "Continue: let the coordinator decide how to proceed",
+        "ru": "Продолжить: пусть координатор решит, как быть дальше",
+    },
+    "stop_option_finish": {
+        "en": "Finish: accept the current results and close the task",
+        "ru": "Завершить: принять текущие результаты и закрыть задачу",
+    },
+    "stop_reason.worker_failed": {
+        "en": "a worker finished, but not all of its checks passed",
+        "ru": "исполнитель закончил работу, но не все его проверки пройдены",
+    },
+    "stop_reason.verification_failed": {
+        "en": "the final verification commands failed",
+        "ru": "финальные проверочные команды не прошли",
+    },
+    "stop_reason.review_cycle_limit": {
+        "en": "the review requested changes too many times",
+        "ru": "ревью слишком много раз запросило доработки",
+    },
+    "stop_reason.review_blocked": {
+        "en": "the reviewer blocked the change",
+        "ru": "ревьюер заблокировал изменение",
+    },
+    "stop_reason.structured_proposal_missing": {
+        "en": "the coordinator did not produce a plan or an answer",
+        "ru": "координатор не выдал ни плана, ни ответа",
+    },
+    "stop_reason.coordinator_turn_failed": {
+        "en": "the coordinator turn ended abnormally ({detail})",
+        "ru": "ход координатора завершился нештатно ({detail})",
+    },
+    "stop_reason.engine_failure": {
+        "en": "the coordinator engine failed ({detail})",
+        "ru": "движок координатора упал ({detail})",
+    },
+    "stop_reason.scheduler_capacity_timeout": {
+        "en": "no worker capacity became free in time",
+        "ru": "не освободились слоты для исполнителей",
+    },
+    "stop_reason.workers_still_running": {
+        "en": "workers are still running",
+        "ru": "исполнители ещё работают",
+    },
+    "stop_reason.replanning_worker_termination_unconfirmed": {
+        "en": "old workers could not be confirmed stopped",
+        "ru": "не удалось подтвердить остановку прежних исполнителей",
+    },
+    "stop_reason.verification_review_revision_changed": {
+        "en": "the project changed after review",
+        "ru": "проект изменился после ревью",
+    },
+    "worker_failed_details": {
+        "en": "\n\n{node} ({report_ref}){unpassed}\n\n{summary}",
+        "ru": "\n\n{node} ({report_ref}){unpassed}\n\n{summary}",
+    },
+    "unpassed_checks_label": {
+        "en": "Unpassed checks",
+        "ru": "Непройденные проверки",
+    },
     "new_task_created": {
         "en": "Started a new, separate task ({task_id}); the active task is unaffected.",
         "ru": "Начата новая, отдельная задача ({task_id}); активная задача не затронута.",

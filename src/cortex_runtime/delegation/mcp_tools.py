@@ -311,7 +311,7 @@ _ROLE_HANDLERS = dict(coordinator=_COORDINATOR_HANDLERS, worker=_WORKER_HANDLERS
 
 _OPERATION_DESCRIPTIONS = dict(
     task_get_context="Read the current runtime task, original goal, validated plan, results and user answers.",
-    answer_submit="Submit a direct answer to an informational question before any plan or workers exist. The runtime records and delivers the answer; this does not certify code changes or tests.",
+    answer_submit="Submit a direct answer to an informational question before any plan or workers exist, or a final summary after the user answered a runtime stop question by choosing to finish. The runtime records and delivers the answer; this does not certify code changes or tests.",
     plan_submit="For changes or substantial delegated work, submit a dependency plan for runtime validation. The runtime chooses routes, schedules assignments, requires review and runs verification.",
     synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. This does not complete or accept the task.",
     user_question_request="Request user input. The runtime persists the question before elicitation and resumes only after a real answer.",

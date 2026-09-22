@@ -112,7 +112,7 @@ def test_coordinator_self_notice_does_not_stall_the_turn(tmp_path):
         ).fetchone()
     # Nothing was ever actually pending: the honest end state is idle, not
     # a no-progress-budget "blocked" the turn never should have entered.
-    assert row["state"] == "blocked"
+    assert row["state"] == "waiting_for_user"
     assert row["no_progress_count"] == 0
 
     # The notice itself is never lost -- still durably readable.
@@ -155,7 +155,7 @@ def test_ordinary_dialogue_does_not_emit_missing_acceptance_refusal(tmp_path):
             "SELECT 1 FROM task_events WHERE task_id=? AND dedup_key LIKE 'acceptance_refused:%'",
             (task_id,),
         ).fetchone()
-    assert state["state"] == "blocked"
+    assert state["state"] == "waiting_for_user"
     assert state["wait_reason"] == "structured_proposal_missing"
     assert refusal is None
     assert not any("no durable decide(accept)" in text for text in updates)
@@ -192,7 +192,7 @@ def test_ordinary_dialogue_can_continue_on_the_same_task_and_session(tmp_path):
             "SELECT 1 FROM task_events WHERE task_id=? AND event_type='coordinator_decision' "
             "AND json_extract(payload_json, '$.decision')='accept'", (task_id,),
         ).fetchone()
-    assert row["state"] == "blocked"
+    assert row["state"] == "waiting_for_user"
     assert row["wait_reason"] == "structured_proposal_missing"
     assert accepted is None
 
@@ -246,7 +246,7 @@ def test_prior_terminal_delegation_does_not_turn_dialogue_into_acceptance_refusa
             "SELECT 1 FROM task_events WHERE task_id=? AND dedup_key LIKE 'acceptance_refused:%'",
             (task_id,),
         ).fetchone()
-    assert row["state"] == "blocked"
+    assert row["state"] == "waiting_for_user"
     assert row["wait_reason"] == "structured_proposal_missing"
     assert refusal is None
     assert not any("acceptance refused" in text.lower() for text in updates)

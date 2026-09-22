@@ -116,7 +116,7 @@ def test_claude_agent_acp_coordinator_session_runs_through_the_real_session_mana
         assert "Checked in." in "".join(updates)
         with store.connection() as db:
             state = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()["state"]
-        assert state == "blocked"
+        assert state == "waiting_for_user"
         assert adapter._managers  # no structured plan; never accepted
     finally:
         for manager in list(adapter._managers.values()):

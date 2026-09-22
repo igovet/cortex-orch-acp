@@ -25,7 +25,7 @@ NODE['properties']['role']['enum'] = sorted(role for role in WORKER_ALIASES if r
 PLAN = obj(dict(tasks=array(NODE, minimum=1), verification=array(array(text('Literal verification argument. Project is read-only; write generated output only under /tmp.', 4096), minimum=1), maximum=16, minimum=1)))
 COORDINATOR = {
     'task_get_context': obj({}),
-    'answer_submit': obj(dict(text=text('Answer a read-only question directly, in the selected coordinator language, grounded in the project files you inspected. Use for explanations, project overviews and factual questions that need no changes or delegated investigation. Available only before any plan or worker exists. Does not certify implementation, review, or tests; use plan_submit when the user requests changes.',32000), request_key=text('Unique answer delivery key; exact retries return the same receipt.',128))),
+    'answer_submit': obj(dict(text=text('Answer a read-only question directly, in the selected coordinator language, grounded in the project files you inspected. Use for explanations, project overviews and factual questions that need no changes or delegated investigation. Available before any plan or worker exists, or after the user answered a runtime stop question by choosing to finish. Does not certify implementation, review, or tests; use plan_submit when the user requests changes.',32000), request_key=text('Unique answer delivery key; exact retries return the same receipt.',128))),
     'plan_submit': obj(dict(plan=PLAN, request_key=text('Unique proposal delivery key; exact retries return the same receipt.', 128))),
     'synthesis_submit': obj(dict(text=text('Final synthesis grounded in current reports and runtime verification.', 32000))),
     'user_question_request': obj(dict(question=text('Question requiring user input.', 4000),
@@ -64,18 +64,27 @@ def validate(schema, value, field='arguments'):
             validate(schema['properties'][name], child, f'{field}.{name}')
     elif kind == 'array':
         if not isinstance(value, list) or not schema.get('minItems',0) <= len(value) <= schema['maxItems']:
-            raise StoreError('invalid_arguments', field)
+            target = f"array of {schema.get('minItems',0)} to {schema['maxItems']} items"
+            raise StoreError('invalid_arguments', field, f'{len(value)} items' if isinstance(value, list) else type(value).__name__,
+                             target, f'Send {field} as an {target}.')
         for index, child in enumerate(value):
             validate(schema['items'], child, f'{field}[{index}]')
     elif kind == 'integer':
         if type(value) is not int or not schema['minimum'] <= value <= schema['maximum']:
-            raise StoreError('invalid_arguments', field)
+            target = f"integer from {schema['minimum']} to {schema['maximum']}"
+            raise StoreError('invalid_arguments', field, repr(value)[:40], target, f'Send {field} as an {target}.')
     elif kind == 'string':
-        if not isinstance(value,str) or not schema.get('minLength',0) <= len(value) <= schema.get('maxLength',32000):
-            raise StoreError('invalid_arguments',field)
+        if not isinstance(value,str):
+            raise StoreError('invalid_arguments',field,type(value).__name__,'JSON string',f'Send {field} as a JSON string.')
+        target = f"between {schema.get('minLength',0)} and {schema.get('maxLength',32000)} characters"
+        if not schema.get('minLength',0) <= len(value) <= schema.get('maxLength',32000):
+            raise StoreError('invalid_arguments',field,f'{len(value)} Unicode characters',target,
+                             f'Rewrite {field} {target} and verify its character count.')
         if 'pattern' in schema and re.fullmatch(schema['pattern'],value) is None:
-            raise StoreError('invalid_arguments',field)
+            raise StoreError('invalid_arguments',field,value[:40],schema['pattern'],
+                             'Copy the server-issued identifier unchanged from its authoritative receipt.')
         if 'enum' in schema and value not in schema['enum']:
-            raise StoreError('invalid_arguments',field)
+            allowed = ', '.join(schema['enum'])
+            raise StoreError('invalid_arguments',field,value[:40],allowed,f'Choose exactly one advertised value: {allowed}.')
     else:
         raise StoreError('invalid_schema')

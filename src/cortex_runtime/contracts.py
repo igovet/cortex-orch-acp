@@ -296,6 +296,28 @@ def _received(value):
     return type(value).__name__
 
 
+def clip_summary_preview(name, args):
+    """Fit an overlong ``summary`` preview instead of rejecting the call.
+
+    Both summaries only preview an immutable report that holds the full text,
+    and models miscount characters: a rejection cost a worker four retries.
+    The clip is marked, deterministic (exact retries stay identical) and never
+    touches the report itself.
+    """
+    if name == "write_report":
+        limit = BY_NAME[name]["inputSchema"]["properties"]["summary"]["maxLength"]
+    elif name == "result_submit":
+        from .orchestration.contracts import RESULT
+        limit = RESULT["properties"]["summary"]["maxLength"]
+    else:
+        return args
+    summary = args.get("summary") if isinstance(args, dict) else None
+    if not isinstance(summary, str) or len(summary) <= limit:
+        return args
+    marker = " … [clipped; full text in the report]"
+    return dict(args, summary=summary[:limit - len(marker)].rstrip() + marker)
+
+
 def validate(name, args):
     import json
     import re

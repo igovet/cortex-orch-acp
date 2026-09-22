@@ -85,9 +85,53 @@ def transition(db, task_id, target, *, blocker=None):
     if target not in allowed:
         raise StoreError('invalid_state_transition', 'state', f'{source} -> {target}',
                          ', '.join(sorted(allowed)), 'The runtime owns stage transitions.')
+    if target == 'BLOCKED':
+        # A stop is never a dead end: the user is asked why and what next,
+        # and the answer resumes through RECOVERING (workers confirmed gone)
+        # into PLANNING, where the coordinator acts on it.
+        _ask_about_stop(db, task_id, source, blocker or 'unknown')
+        return
     db.execute('UPDATE runtime_tasks SET state=?,blocker=?,updated_at=? WHERE task_id=?',
                (target, blocker, now(), task_id))
     event(db, task_id, 'TASK_STATE_CHANGED', dict(previous=source, state=target, blocker=blocker))
+
+
+STOP_OPTIONS = ('Continue: let the coordinator decide how to proceed',
+                'Finish: accept the current results and close the task')
+
+
+def _ask_about_stop(db, task_id, source, blocker):
+    from ..portable.identity import new_id
+    revision = db.execute('SELECT revision FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()['revision']
+    if source == 'WAITING_USER':
+        db.execute("UPDATE pending_questions SET status='superseded',answered_at=? WHERE task_id=? AND status='open'",
+                   (now(), task_id))
+    question_id = new_id('pq_')
+    text = f'The task stopped: {blocker}. What should happen next?'
+    db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at) VALUES(?,?,?,?,?,'open',?)",
+               (question_id, task_id, f'runtime:stop:{question_id}', text, encoded(list(STOP_OPTIONS)), now()))
+    event(db, task_id, 'USER_QUESTION_REQUESTED', dict(question_id=question_id, question=text, options=list(STOP_OPTIONS),
+                                                       resume_state='RECOVERING', blocker=blocker, revision=revision))
+    db.execute('UPDATE runtime_tasks SET state=?,blocker=?,updated_at=? WHERE task_id=?',
+               ('WAITING_USER', blocker, now(), task_id))
+    event(db, task_id, 'TASK_STATE_CHANGED', dict(previous=source, state='WAITING_USER', blocker=blocker))
+
+
+def released_by_user(db, task):
+    """The user answered a runtime stop question for this plan revision.
+
+    Only then may the coordinator close delegated work with a direct answer;
+    it can never skip review or verification on its own."""
+    if db.execute("SELECT 1 FROM runtime_nodes WHERE task_id=? AND status IN ('pending','running')",
+                  (task['task_id'],)).fetchone():
+        return False
+    asked = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED'",
+                       (task['task_id'],)).fetchall()
+    stops = {q['question_id'] for q in map(lambda r: json.loads(r[0]), asked)
+             if q.get('blocker') and q.get('revision') == task['revision']}
+    answered = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_ANSWER_RECEIVED'",
+                          (task['task_id'],)).fetchall()
+    return any(json.loads(r[0]).get('question_id') in stops for r in answered)
 
 
 def validate_scope(scope):
@@ -262,9 +306,9 @@ class TaskMachine:
                 return json.loads(previous['result_json'])
             task=db.execute('SELECT * FROM runtime_tasks WHERE task_id=?',(channel.task_id,)).fetchone()
             if (not task or task['state'] not in {'PLANNING','ANSWER_READY'}
-                or task['revision'] != 0 or task['plan_json'] is not None
-                or db.execute('SELECT 1 FROM runtime_nodes WHERE task_id=?',(channel.task_id,)).fetchone()
-                or db.execute("SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",(channel.task_id,)).fetchone()):
+                or not (released_by_user(db, task) or (task['revision'] == 0 and task['plan_json'] is None
+                and not db.execute('SELECT 1 FROM runtime_nodes WHERE task_id=?',(channel.task_id,)).fetchone()
+                and not db.execute("SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",(channel.task_id,)).fetchone()))):
                 raise StoreError('direct_answer_not_available')
             if task['state']=='ANSWER_READY':
                 if task['synthesis']!=text: raise StoreError('answer_conflict')
@@ -486,9 +530,10 @@ class TaskMachine:
             raise StoreError('completion_task_stopped')
         task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
         if task['state']=='ANSWER_READY':
-            if (task['revision']!=0 or task['plan_json'] is not None or not task['synthesis'] or task['blocker']
-                or db.execute('SELECT 1 FROM runtime_nodes WHERE task_id=?',(task_id,)).fetchone()
-                or db.execute("SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",(task_id,)).fetchone()):
+            if (not task['synthesis'] or task['blocker'] or not (released_by_user(db, task) or (
+                task['revision']==0 and task['plan_json'] is None
+                and not db.execute('SELECT 1 FROM runtime_nodes WHERE task_id=?',(task_id,)).fetchone()
+                and not db.execute("SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",(task_id,)).fetchone()))):
                 raise StoreError('completion_answer_invariant')
             proposal=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ANSWER_SUBMITTED' ORDER BY id DESC LIMIT 1",(task_id,)).fetchone()
             if not proposal or json.loads(proposal[0]).get('text')!=task['synthesis']:

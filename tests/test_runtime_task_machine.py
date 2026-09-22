@@ -224,7 +224,7 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
         assert calls == expected
         assert any('COMPLETED' in text for text in output)
     else:
-        assert context['state'] == 'BLOCKED', context
+        assert context['state'] == 'WAITING_USER', context  # a stop is a question, never a dead end
         assert context['blocker'] == {'review_block': 'review_blocked', 'verification_fail': 'verification_failed', 'synthesis_drift': 'completion_project_revision_changed', 'post_review_drift': 'verification_review_revision_changed'}[scenario]
 
 
@@ -428,3 +428,31 @@ def test_another_tasks_stale_running_node_never_blocks_this_one(machine):
     state.move(other.task_id, 'BLOCKED', blocker='worker_failure')
     state.submit_plan(ch, plan(5), 'mine'); state.move(ch.task_id, 'EXECUTING')
     assert len(state.claim_ready(ch.task_id, ch.channel_id)) == 5
+
+
+def test_stop_asks_the_user_and_only_their_answer_lets_the_coordinator_close(machine):
+    """A stopped investigation used to dead-end in BLOCKED with only a code."""
+    from cortex_runtime.orchestration.questions import pending, resume_answered
+    from cortex_runtime.acp.questions_store import answer
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'p'); state.move(channel.task_id, 'EXECUTING')
+    assert state.claim_ready(channel.task_id, channel.channel_id)
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET status='failed' WHERE task_id=?", (channel.task_id,)); db.commit()
+    state.move(channel.task_id, 'BLOCKED', blocker='worker_failed')
+    context = state.context(channel.task_id)
+    assert (context['state'], context['blocker']) == ('WAITING_USER', 'worker_failed')
+    question = pending(state.store, channel.task_id)
+    assert question['blocker'] == 'worker_failed' and question['resume_state'] == 'RECOVERING'
+    state.move(channel.task_id, 'RECOVERING'); state.move(channel.task_id, 'PLANNING')
+    with pytest.raises(StoreError, match='direct_answer_not_available'):
+        state.submit_answer(channel, 'Done.', 'unasked')  # the coordinator alone cannot skip review
+    state.move(channel.task_id, 'BLOCKED', blocker='worker_failed')
+    question = pending(state.store, channel.task_id)
+    assert answer(state.store, question['question_id'], 'Finish', 'text')
+    assert resume_answered(state.store, channel.task_id)
+    assert state.context(channel.task_id)['state'] == 'RECOVERING'
+    state.move(channel.task_id, 'PLANNING')
+    assert state.submit_answer(channel, 'Report r_x: root cause found; checks not run.', 'final')['state'] == 'ANSWER_READY'
+    state.move(channel.task_id, 'COMPLETED')
+    assert state.context(channel.task_id)['state'] == 'COMPLETED'

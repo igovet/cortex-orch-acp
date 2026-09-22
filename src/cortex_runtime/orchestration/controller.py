@@ -107,8 +107,8 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
         from .questions import resume_answered
         resume_answered(runtime._store, task_id)
     if context['state'] == 'BLOCKED':
-        emit_update(("Выполнение заблокировано: " if language == "ru" else "Runtime blocked: ")+str(context["blocker"]))
-        return StopReason.END_TURN
+        # A task stopped before stops became questions: ask now.
+        machine.move(task_id, 'BLOCKED', blocker=context['blocker'])
     prompted = {}
     published_states = set()
     capacity_wait_started = None
@@ -157,6 +157,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                        'The coordinator can inspect files but cannot execute commands. Do not expand a description into a defect audit. '
                        'If changes or substantial delegated work are required, submit a focused structured plan. '
                        'Runtime schedules planned workers and mandatory review. '
+                       + _released_request(runtime, task_id)
                        if state == 'PLANNING' else
                        'Reconcile the retained results and runtime verification, then submit synthesis. Runtime decides completion. ')
             delivery_marker=f'runtime-coordinator:{time.monotonic_ns()}'
@@ -251,7 +252,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 return StopReason.CANCELLED
             if outcome.stop_reason != StopReason.END_TURN:
                 failure_stop_reason = outcome.stop_reason
-                machine.move(task_id,'FAILED',blocker='coordinator_turn_failed:'+outcome.stop_reason.value)
+                machine.move(task_id,'BLOCKED',blocker='coordinator_turn_failed:'+outcome.stop_reason.value)
             elif state == 'RECONCILING' and machine.context(task_id)['synthesis']:
                 with runtime._lock:
                     active = bool(runtime._running.get(task_id))
@@ -358,12 +359,14 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                     runtime._cancel_assignment(task_id,node['assignment_ref'],'worker_question',emit_tool_call=emit_tool_call)
             from .questions import pending, resume_answered
             question = pending(runtime._store, task_id)
+            if question.get('blocker'):
+                question = _stop_question(question, context, language)
             if runtime._handle_ask_user(task_id, session_id, emit_update, language, question, host_elicitor):
                 if resume_answered(runtime._store, task_id):
                     prompted.pop((question['resume_state'], context['revision']),None)
                     continue
-            runtime._set_state(task_id, 'waiting_for_user', wait_reason='user_question')
-            return StopReason.END_TURN
+            runtime._set_state(task_id, 'waiting_for_user', wait_reason=question.get('blocker') or 'user_question')
+            return failure_stop_reason
         if state in {'COMPLETED', 'FAILED', 'BLOCKED', 'CANCELLED'}:
             runtime._set_state(task_id, 'accepted' if state == 'COMPLETED' else state.lower(),
                                wait_reason=context['blocker'])
@@ -371,6 +374,40 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             emit_update('\n\n' + (labels[state] if language == 'ru' else f"Runtime: {state}") + (f" — {context['blocker']}" if context['blocker'] else ''))
             return StopReason.CANCELLED if state == 'CANCELLED' else failure_stop_reason
         machine.move(task_id, 'BLOCKED', blocker='recovery_required')
+
+
+def _stop_question(question, context, language):
+    """Render a runtime stop question in the turn language, with the evidence."""
+    from ..acp import messages
+    code, _, detail = question['blocker'].partition(':')
+    try:
+        # The code stays visible for diagnosis next to the plain reason.
+        reason = messages.render('stop_reason.' + code, language, detail=detail) + f" [{question['blocker']}]"
+    except KeyError:
+        reason = question['blocker']
+    details = ''
+    if code == 'worker_failed':
+        # The retained report is still the user's deliverable.
+        for node in context['nodes']:
+            result = node['status'] == 'failed' and node['result']
+            if not result:
+                continue
+            unpassed = ', '.join(f"{c['name']}: {c['outcome']}" for c in result.get('checks', []) if c.get('outcome') != 'passed')
+            details += messages.render('worker_failed_details', language, node=node['node_id'], report_ref=result['report_ref'],
+                                       summary=result['summary'],
+                                       unpassed=f"\n{messages.render('unpassed_checks_label', language)}: {unpassed}" if unpassed else '')
+    return dict(question, question=messages.render('stop_question', language, reason=reason, details=details),
+                options=[messages.render('stop_option_continue', language), messages.render('stop_option_finish', language)])
+
+
+def _released_request(runtime, task_id):
+    from .state import released_by_user
+    with runtime._store.connection() as db:
+        task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+        released = bool(task) and released_by_user(db, task)
+    return ('The runtime stopped this task and the user answered its stop question (see retained events). '
+            'If the user chose to finish or stop, submit answer_submit with a final summary grounded in the retained reports, '
+            'stating plainly which checks did not pass. Otherwise submit a new plan or ask the user. ') if released else ''
 
 
 def _pause_turn(runtime,task_id,machine,emit_tool_call):

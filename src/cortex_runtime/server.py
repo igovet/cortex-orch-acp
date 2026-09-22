@@ -18,7 +18,7 @@ import time
 import traceback
 from collections import OrderedDict
 
-from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, ERROR_HELP, validate
+from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, ERROR_HELP, validate, clip_summary_preview
 from .channeled_tools import channeled_base_tools
 from .delegation import contracts as delegation_contracts
 from .delegation import mcp_tools as delegation_mcp_tools
@@ -204,6 +204,8 @@ class Server:
             observe('tools/call','invalid_arguments')
             raise ProtocolError(-32602,'Malformed tools/call parameters. Supply name as a string and arguments as an object; only name, arguments and _meta are allowed.')
         name = params['name']
+        if isinstance(params.get('arguments'), dict):
+            params = dict(params, arguments=clip_summary_preview(name, params['arguments']))
         if self.channel_credentials is None:
             observe('tools/call','channel_required')
             return self.error(StoreError('channel_required'))

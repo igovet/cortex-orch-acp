@@ -344,12 +344,12 @@ def test_steering_persists_before_delivery_and_targets_same_task(tmp_path):
         rows = db.execute(
             "SELECT event_type, payload_json FROM task_events WHERE task_id=? ORDER BY id", (task_id,),
         ).fetchall()
-    steering_rows = [r for r in rows if r["event_type"] == "progress" and '"kind": "user_steering"' in r["payload_json"]]
-    assert len(steering_rows) == 1
+    # The first turn stopped without a proposal, so the runtime asked what
+    # next; this prompt is that question's answer on the same task.
+    answered = [r for r in rows if r["event_type"] == "progress" and '"kind": "question_answered"' in r["payload_json"]]
+    assert len(answered) == 1
     import json
-    payload = json.loads(steering_rows[0]["payload_json"])
-    assert payload["requirement_revision"] == 1
-    assert "staging DB" in payload["text"]
+    assert "staging DB" in json.loads(answered[0]["payload_json"])["answer_text"]
     assert "Actually, use the staging DB." in seen_messages[3]
 
 
@@ -518,7 +518,7 @@ def test_russian_conversation_gets_russian_system_lines_and_no_worker_leak(tmp_p
     # no worker -- the worker ends its turn without publishing, which
     # closes its assignment (it used to exhaust the coordinator's patience
     # instead, and the line was the blocked one).
-    assert any("Выполнение заблокировано" in u for u in updates), updates
+    assert any("Задача остановилась" in u for u in updates), updates
     assert not any("was NOT delegated" in u for u in updates), updates
     assert not any(u.startswith("Blocked") for u in updates)
     assert not any("English worker report" in u for u in updates)

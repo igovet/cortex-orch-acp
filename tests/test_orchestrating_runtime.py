@@ -348,7 +348,7 @@ def test_coordinator_emits_complete_blocks_in_tool_order(tmp_path):
 
     messages = [text for kind, text in timeline if kind == "message"]
     assert messages[:2] == ["before", "after"]
-    assert messages[-1].endswith("structured_proposal_missing")
+    assert "[structured_proposal_missing]" in messages[-1]
     message_positions = [index for index, (kind, _value) in enumerate(timeline) if kind == "message"]
     tool_positions = [index for index, (kind, _value) in enumerate(timeline) if kind == "tool"]
     assert tool_positions

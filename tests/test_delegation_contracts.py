@@ -72,3 +72,11 @@ def test_integer_fields_reject_boolean_and_array_bounds_are_real():
     with pytest.raises(StoreError): dc.validate('worker','project_read',dict(path='src',offset=True))
     with pytest.raises(StoreError): dc.validate('worker','command_run',dict(argv=[],request_key='empty'))
     with pytest.raises(StoreError): dc.validate('worker','scope_request',dict(scope=[],reason='why',request_key='scope'))
+
+
+def test_overlong_result_summary_names_the_limit():
+    # A worker once retried result_submit three times against a bare 'arguments.summary'.
+    args=dict(report_ref='r_'+'a'*12,summary='x'*4053,checks=[],request_key='result')
+    with pytest.raises(StoreError) as error: dc.validate('worker','result_submit',args)
+    assert (error.value.field,error.value.received,error.value.expected)==('arguments.summary','4053 Unicode characters','between 1 and 4000 characters')
+    assert '4000' in error.value.correction

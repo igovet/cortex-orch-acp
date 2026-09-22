@@ -188,7 +188,7 @@ def test_coordinator_refusal_returns_stop_reason_refusal_and_opens_only_one_sess
     assert len(engine.sessions) == 1  # never re-routed to a second engine/session
     with store.connection() as db:
         row = db.execute("SELECT state, wait_reason FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
-    assert row["state"] == "failed"
+    assert row["state"] == "waiting_for_user"  # asked what next, never a dead end
     assert row["wait_reason"] == "coordinator_turn_failed:refusal"
 
 
@@ -218,7 +218,7 @@ def test_coordinator_engine_failure_blocks_without_silent_end_turn(tmp_path):
         user_message = db.execute(
             "SELECT consumed_by FROM task_events WHERE task_id=? AND event_type='user_message'", (task_id,),
         ).fetchone()
-    assert row["state"] == "blocked"
+    assert row["state"] == "waiting_for_user"
     assert row["wait_reason"] == "engine_failure:transport_eof"
     assert user_message["consumed_by"] is not None  # uncertain transmission is reconciled on recovery
 
@@ -267,7 +267,7 @@ def test_coordinator_max_tokens_with_no_unfinished_action_blocks_not_success(tmp
     assert result == StopReason.MAX_TOKENS
     with store.connection() as db:
         row = db.execute("SELECT state, wait_reason FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
-    assert row["state"] == "failed"
+    assert row["state"] == "waiting_for_user"
     assert row["wait_reason"] == "coordinator_turn_failed:max_tokens"
 
 
