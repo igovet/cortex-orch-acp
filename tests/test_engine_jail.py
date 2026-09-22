@@ -81,11 +81,13 @@ def test_engine_state_is_writable_but_config_and_plugins_are_not(tmp_path, tree)
     assert (state / 'plugins' / 'p').is_dir()
 
 
-def test_owner_runtime_sockets_are_hidden(tmp_path, tree):
+def test_owner_runtime_sockets_are_visible_like_on_the_host(tmp_path, tree):
+    """Everything that works on the host works in the sandbox: the session
+    bus, audio, display and keyring live under /run/user."""
     if not Path('/run/user').is_dir():
         pytest.skip('no /run/user on this host')
     result = _run(tmp_path, 'ls -A /run/user | wc -l', [])
-    assert result.stdout.split() == ['0']
+    assert result.stdout.split() != ['0']
 
 
 def test_revoked_channel_terminates_the_jailed_engine(tmp_path, tree):

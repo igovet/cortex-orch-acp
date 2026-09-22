@@ -12,6 +12,7 @@ import re
 import json
 import hashlib
 import os
+from pathlib import Path
 import shlex
 import sqlite3
 import threading
@@ -59,6 +60,8 @@ def _question_answer_value(question, text: str) -> str:
 from . import steering as acp_steering
 
 COORDINATOR_ROLE_ID = "orchestrator"
+# Same-session follow-ups for a worker turn that ended without a result.
+MAX_WORKER_CONTINUATIONS = 5
 DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS = 3
 # No cap: the coordinator may continue as many times as the work needs
 # ("У координатора не должно быть никаких ограничений, он хоть миллион
@@ -2775,15 +2778,63 @@ class OrchestratingRuntime:
         if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or not attempt_id:
             return None
         model = self._attempt_model(attempt_id)
+        learned = self._learned_context_size(model) if model else 0
         with self._lock:
             # Per model too: the engine only corrects the size at the end of a
             # turn, so without this every new worker opened on 200k.
-            size = max(size, self._attempt_context_size_max.get(attempt_id, 0),
-                       self._model_context_size_max.get(model, 0) if model else 0)
+            size = max(size, self._attempt_context_size_max.get(attempt_id, 0), learned)
             self._attempt_context_size_max[attempt_id] = size
+            grew = bool(model) and size > learned
             if model:
                 self._model_context_size_max[model] = size
+        if grew:
+            self._save_context_sizes()
         return size
+
+    def _context_sizes_path(self):
+        base = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+        return Path(base) / "cortex" / "context-windows.json"
+
+    def _learned_context_size(self, model: str) -> int:
+        """The largest window ever reported for ``model``: remembered across
+        processes (a file) and recovered from this project's history, so a
+        worker opens on 1M rather than the engine's mid-turn 200k."""
+        with self._lock:
+            if not getattr(self, "_context_sizes_loaded", False):
+                self._context_sizes_loaded = True
+                known = {}
+                try:
+                    known.update(json.loads(self._context_sizes_path().read_text()))
+                except (OSError, ValueError):
+                    pass
+                try:
+                    with self._store.connection() as db:
+                        for row in db.execute(
+                                "SELECT a.engine||'/'||a.model AS m, MAX(CAST(json_extract(e.payload_json,'$.content.size') AS INTEGER)) AS s "
+                                "FROM task_events e JOIN attempt_route_audit a ON a.attempt_id=json_extract(e.payload_json,'$.attempt_id') "
+                                "WHERE e.event_type='progress' AND json_extract(e.payload_json,'$.activity_ref')='context' GROUP BY m"):
+                            if isinstance(row["s"], int):
+                                known[row["m"]] = max(row["s"], known.get(row["m"], 0))
+                except Exception:  # noqa: BLE001 - display nicety only
+                    pass
+                for name, value in known.items():
+                    if isinstance(value, int) and value > self._model_context_size_max.get(name, 0):
+                        self._model_context_size_max[name] = value
+                if known:
+                    self._save_context_sizes()
+            return self._model_context_size_max.get(model, 0)
+
+    def _save_context_sizes(self) -> None:
+        path = self._context_sizes_path()
+        with self._lock:
+            data = dict(self._model_context_size_max)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(data, sort_keys=True))
+            os.replace(temporary, path)
+        except OSError:
+            pass
 
     def _attempt_model(self, attempt_id: str) -> str | None:
         """``engine/model`` this attempt was routed to (cached)."""
@@ -3883,7 +3934,7 @@ class OrchestratingRuntime:
         # procedural chance to finish the existing report/publication
         # protocol in this same engine session.  The marker is durable so a
         # duplicate runtime cannot execute that continuation twice.
-        worker_recovery_used = False
+        worker_recovery_count = 0
         recovery_prompt = None
         # T027 review fix (MEDIUM): a loop, not a single hardcoded retry --
         # each EngineTurnFailed may fall over to a *different* untried
@@ -3918,7 +3969,7 @@ class OrchestratingRuntime:
                 )
                 if delivery_blocked:
                     with self._lock:
-                        if worker_recovery_used:
+                        if worker_recovery_count:
                             self._worker_recoveries_in_flight.discard(assignment_ref)
                     delegation_events.append_event(
                         self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
@@ -3927,7 +3978,7 @@ class OrchestratingRuntime:
                     return
                 if acp_steering.is_stopped(self._store, task_id):
                     with self._lock:
-                        if worker_recovery_used:
+                        if worker_recovery_count:
                             self._worker_recoveries_in_flight.discard(assignment_ref)
                     return
                 with self._lock:
@@ -4303,7 +4354,7 @@ class OrchestratingRuntime:
                             worker_outcome is not None
                             and worker_outcome.stop_reason == StopReason.END_TURN
                             and pending_result is None
-                            and not worker_recovery_used
+                            and worker_recovery_count < MAX_WORKER_CONTINUATIONS
                             and not cancel_event.is_set()
                             and not task_stopped
                         )
@@ -4365,12 +4416,13 @@ class OrchestratingRuntime:
                 if (
                     outcome.stop_reason == StopReason.END_TURN
                     and not pending_result
-                    and not worker_recovery_used
+                    and worker_recovery_count < MAX_WORKER_CONTINUATIONS
                     and not cancel_event.is_set()
                     and assignment_current(self._store,task_id,assignment_ref)
                 ):
                     with self._worker_recovery_claim_lock:
-                        recovery_state = self._claim_worker_same_session_recovery(task_id, assignment_ref)
+                        recovery_state = self._claim_worker_same_session_recovery(
+                            task_id, assignment_ref, worker_recovery_count + 1)
                         if recovery_state == "claimed":
                             with self._lock:
                                 self._worker_recoveries_in_flight.add(assignment_ref)
@@ -4380,9 +4432,14 @@ class OrchestratingRuntime:
                             failure_kind=None, stop_reason=outcome.stop_reason,
                         )
                         generation_delivery_id = None
-                        worker_recovery_used = True
+                        worker_recovery_count += 1
                         recovery_prompt = (
                             "Runtime completion follow-up for this existing assignment. "
+                            "You ended your turn without publishing a result. A background job's "
+                            "notification cannot reach you after your turn ends: if you started a "
+                            "build, test or other background work, wait for it inside this turn by "
+                            "checking its output or status (with short sleeps) until it finishes, and "
+                            "never end the turn to wait. "
                             "Continue in this same session. Compare the work actually completed "
                             "and the checks actually run with the assignment's deliverables and "
                             "acceptance criteria. Finish missing implementation and necessary "
@@ -4615,7 +4672,7 @@ class OrchestratingRuntime:
         except Exception:  # noqa: BLE001 - never fail a failure path over this
             return False
 
-    def _claim_worker_same_session_recovery(self, task_id: str, assignment_ref: str) -> str:
+    def _claim_worker_same_session_recovery(self, task_id: str, assignment_ref: str, number: int = 1) -> str:
         """Claim the single procedural continuation for an empty worker turn.
 
         The claim and the result/publication check share one immediate
@@ -4657,11 +4714,15 @@ class OrchestratingRuntime:
                 if published is not None:
                     db.commit()
                     return "complete"
+                # One marker per continuation (up to MAX_WORKER_CONTINUATIONS):
+                # a single one left a worker waiting on its own background
+                # build failed and restarted from scratch.
+                marker_key = f"worker_recovery:{assignment_ref}" + (f":{number}" if number > 1 else "")
                 marker = db.execute(
                     "SELECT 1 FROM task_events WHERE task_id=? "
                     "AND assignment_ref=? AND event_type='progress' "
                     "AND dedup_key=? LIMIT 1",
-                    (task_id, assignment_ref, f"worker_recovery:{assignment_ref}"),
+                    (task_id, assignment_ref, marker_key),
                 ).fetchone()
                 if marker is not None:
                     db.commit()
@@ -4685,8 +4746,8 @@ class OrchestratingRuntime:
                     # the normal race-safe terminal reconciliation.
                     return "orphaned" if attempt_state == "absent" else "already_running"
                 delegation_events.append_event_tx(
-                    db, task_id, "progress", f"worker_recovery:{assignment_ref}",
-                    dict(kind="worker_same_session_recovery", assignment_ref=assignment_ref),
+                    db, task_id, "progress", marker_key,
+                    dict(kind="worker_same_session_recovery", assignment_ref=assignment_ref, number=number),
                     origin="runtime", assignment_ref=assignment_ref,
                 )
                 db.commit()

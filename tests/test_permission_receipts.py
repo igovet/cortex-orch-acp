@@ -90,7 +90,8 @@ def test_outside_actions_run_only_after_the_user_allows_them_on_a_card(worker,tm
         def permission_requester_for_task(self,task_id):
             def ask(engine_session_id,params,timeout):
                 cards.append(params['toolCall']['title'])
-                return {'outcome':{'outcome':'selected','optionId':'allow' if 'outside' in params['toolCall']['title'] else 'deny'}}
+                assert params['toolCall']['title'].startswith('Confirm: ')
+                return {'outcome':{'outcome':'selected','optionId':'allow' if params['toolCall']['rawInput']['kind'].startswith('outside') else 'deny'}}
             return ask
     stop=threading.Event()
     def controller():

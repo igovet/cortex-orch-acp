@@ -23,6 +23,8 @@ def dispatch(store, channel, operation, args):
         return machine.submit_answer(channel, args['text'], args['request_key'], authorization=lambda db: _authority(db,channel))
     if operation == 'plan_submit':
         return machine.submit_plan(channel, args['plan'], args['request_key'], authorization=lambda db: _authority(db,channel))
+    if operation == 'verification_submit':
+        return machine.submit_verification(channel, args['verification'], args['request_key'], authorization=lambda db: _authority(db,channel))
     if operation == 'synthesis_submit':
         return machine.submit_synthesis(channel, args['text'], authorization=lambda db: _authority(db,channel))
     if operation == 'user_question_request':

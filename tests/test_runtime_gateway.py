@@ -82,7 +82,8 @@ for path in ['other','.cortex/new']:
  except OSError: pass
  else: raise AssertionError(path)
 assert not Path('.cortex/secret').exists()
-assert not Path(%r).exists()
+outside=Path(%r)
+assert outside.read_text()=='private'  # the host is visible (this one is under the shared /tmp)
 assert 'INHERITED_SECRET' not in os.environ
 print('isolated')
 """ % str(outside)

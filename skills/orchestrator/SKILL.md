@@ -35,6 +35,12 @@ Mark each task's complexity from the work, not the role: `high` for cross-cuttin
 root-cause analysis, production incidents, concurrency, security or data-loss risk;
 `low` for a narrow lookup or mechanical change; omit it otherwise. It sets how
 strong, and how costly, the worker's model is; overrating it wastes the plan.
+Take verification commands from the project's own documentation
+(docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json
+scripts) and copy them exactly, with the documented interpreter path and its
+limits (one test file per command where the project says so). Set environment
+variables as `["env", "NAME=value", "command", ...]`. Never invent a test
+command the project does not document.
 The runtime validates the proposal and schedules the work.
 
 When the runtime requests reconciliation, read the relevant immutable reports,

@@ -17,6 +17,7 @@ import threading
 CANCELLED_OUTCOME = {'outcome': {'outcome': 'cancelled'}}
 # Claude's subagent tools and Codex's collaboration (multi-agent) tools.
 SUBAGENT_TOOLS = frozenset({'Agent','Task','Workflow','TeamCreate','TeamDelete','SendMessage',
+                            'ScheduleWakeup','Monitor','CronCreate','CronDelete','CronList','RemoteTrigger',
                             'spawn_agent','send_input','close_agent','resume_agent'})
 COORDINATOR_EDIT_REFUSAL_REASON = 'Native subagents are disabled. Do the work in this session.'
 COORDINATOR_MUTATION_REFUSAL_REASON = COORDINATOR_EDIT_REFUSAL_REASON
@@ -216,7 +217,7 @@ class PermissionBridge:
             return refused
         call = dict(_tool_call(params))
         command = _command_text(call).strip()
-        call["title"] = f"Confirm deletion: {command[:300]}" if command else f"Confirm deletion: {call.get('title') or 'file'}"
+        call["title"] = f"Confirm: {command[:300]}" if command else f"Confirm: {call.get('title') or 'file'}"
         try:
             response = self._host_permission_requester(
                 engine_session_id, dict(params, toolCall=call), DELETION_CONFIRM_TIMEOUT_SECONDS)

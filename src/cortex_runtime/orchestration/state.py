@@ -46,12 +46,12 @@ CREATE TABLE IF NOT EXISTS runtime_requests (
 
 TRANSITIONS = {
     'CREATED': {'PLANNING'},
-    'PLANNING': {'PLAN_READY', 'ANSWER_READY', 'WAITING_USER'},
+    'PLANNING': {'PLAN_READY', 'ANSWER_READY', 'WAITING_USER', 'VERIFYING'},
     'ANSWER_READY': {'COMPLETED'},
     'PLAN_READY': {'EXECUTING'},
     'EXECUTING': {'REVIEWING', 'WAITING_USER'},
     'REVIEWING': {'EXECUTING', 'VERIFYING', 'WAITING_USER'},
-    'VERIFYING': {'RECONCILING'},
+    'VERIFYING': {'RECONCILING', 'PLANNING'},
     'RECONCILING': {'COMPLETED', 'WAITING_USER'},
     'WAITING_USER': {'PLANNING', 'RECONCILING'},
     'RECOVERING': {'PLANNING', 'EXECUTING', 'REVIEWING', 'VERIFYING', 'RECONCILING'},
@@ -61,6 +61,10 @@ TRANSITIONS = {
 TERMINAL = {'FAILED', 'CANCELLED', 'COMPLETED'}
 MAX_NODES = 64
 MAX_REVIEW_CYCLES = 3
+# Automatic returns of a failed verification to the coordinator, per task.
+MAX_VERIFICATION_REPAIRS = 3
+# Automatic returns of a failed worker result to the coordinator, per task.
+MAX_COORDINATOR_RETURNS = 3
 
 
 def now():
@@ -100,8 +104,35 @@ STOP_OPTIONS = ('Continue: let the coordinator decide how to proceed',
                 'Finish: accept the current results and close the task')
 
 
+# Stops about the work itself: the coordinator knows the context, so it asks
+# the user a concrete question (what failed, why, what was tried, concrete
+# options). A stop about the coordinator itself gets the runtime's question.
+WORK_LEVEL_STOPS = ('verification_failed', 'worker_failed', 'worker_retry_limit', 'worker_failure_not_retryable',
+                    'review_cycle_limit', 'review_blocked', 'no_runnable_nodes', 'scheduler_capacity_timeout',
+                    'lost_worker_', 'verification_review_revision_changed', 'verification_revision_unavailable',
+                    'review_revision_unavailable', 'completion_')
+
+
+def _coordinator_should_ask(db, task_id, blocker):
+    if not blocker.startswith(WORK_LEVEL_STOPS):
+        return False
+    asked = db.execute("SELECT MAX(id) FROM runtime_events WHERE task_id=? AND type='ASK_USER_REQUIRED'", (task_id,)).fetchone()[0]
+    answered = db.execute("SELECT MAX(id) FROM runtime_events WHERE task_id=? AND type='USER_ANSWER_RECEIVED'", (task_id,)).fetchone()[0]
+    # Once per user answer: a coordinator that could not ask gets the runtime's question.
+    return asked is None or (answered is not None and answered > asked)
+
+
 def _ask_about_stop(db, task_id, source, blocker):
     from ..portable.identity import new_id
+    if source != 'WAITING_USER' and _coordinator_should_ask(db, task_id, blocker):
+        event(db, task_id, 'ASK_USER_REQUIRED', dict(blocker=blocker))
+        db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')", (task_id,))
+        db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",
+                   (now(), task_id))
+        db.execute('UPDATE runtime_tasks SET state=?,blocker=NULL,updated_at=? WHERE task_id=?',
+                   ('RECOVERING', now(), task_id))
+        event(db, task_id, 'TASK_STATE_CHANGED', dict(previous=source, state='RECOVERING', blocker=None))
+        return
     revision = db.execute('SELECT revision FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()['revision']
     if source == 'WAITING_USER':
         db.execute("UPDATE pending_questions SET status='superseded',answered_at=? WHERE task_id=? AND status='open'",
@@ -251,6 +282,13 @@ class TaskMachine:
         value['steering'] = [json.loads(row[0]) for row in reversed(steering)]
         value['policy'] = dict(deny_write=denials, native_tools=True)
         value['verification']=json.loads(verification[0]) if verification else None
+        with self.store.connection() as db:
+            asked = db.execute("SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type='ASK_USER_REQUIRED' ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+            answered = db.execute("SELECT MAX(id) FROM runtime_events WHERE task_id=? AND type IN ('USER_ANSWER_RECEIVED','PLAN_ACCEPTED')", (task_id,)).fetchone()[0]
+        value['ask_user_required'] = json.loads(asked[1])['blocker'] if asked and (answered is None or answered < asked[0]) else None
+        with self.store.connection() as db:
+            value['verification_attempts'] = db.execute(
+                "SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='VERIFICATION_REVISED'", (task_id,)).fetchone()[0]
         value['user_answers'] = [dict(answer) for answer in answers]
         value['plan'] = json.loads(value.pop('plan_json') or 'null')
         value['nodes'] = [{**dict(n), 'dependencies': json.loads(n['dependencies_json']),
@@ -551,10 +589,71 @@ class TaskMachine:
                               and c.get('revision_digest') == revision_digest for c, argv in zip(checks, commands)))
             event(db, task_id, 'VERIFICATION_PASSED' if passed else 'VERIFICATION_FAILED',
                   dict(revision=task['revision'], revision_digest=revision_digest, checks=checks))
-            transition(db, task_id, 'RECONCILING' if passed else 'BLOCKED',
-                       blocker=None if passed else 'verification_failed')
+            failures = db.execute("SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='VERIFICATION_FAILED'",
+                                  (task_id,)).fetchone()[0]
+            if passed:
+                transition(db, task_id, 'RECONCILING')
+            elif failures <= MAX_VERIFICATION_REPAIRS:
+                # A wrong or failing check goes back to the coordinator with
+                # its output to repair (verification_submit, or a new plan
+                # when the code is wrong) -- never a stop for a mistake.
+                transition(db, task_id, 'PLANNING')
+            else:
+                transition(db, task_id, 'BLOCKED', blocker='verification_failed')
             db.commit()
         return passed
+
+    def return_to_coordinator(self, task_id, reason):
+        """Hand the task back to the coordinator (RECOVERING, then PLANNING)
+        instead of stopping, at most MAX_COORDINATOR_RETURNS times per task."""
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            returned = db.execute("SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='RETURNED_TO_COORDINATOR'",
+                                  (task_id,)).fetchone()[0]
+            if returned >= MAX_COORDINATOR_RETURNS:
+                db.commit()
+                return False
+            event(db, task_id, 'RETURNED_TO_COORDINATOR', dict(reason=reason))
+            # As steering does: nothing of the old plan keeps holding its
+            # scope (a node left 'running' blocked the new plan forever).
+            db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')", (task_id,))
+            db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",
+                       (now(), task_id))
+            transition(db, task_id, 'RECOVERING')
+            db.commit()
+        return True
+
+    def submit_verification(self, channel, verification, request_key, *, authorization=None):
+        """Replace only the plan's verification after it failed, and verify
+        again -- the reviewed work is not redone."""
+        digest = hashlib.sha256(encoded(dict(verification=verification)).encode()).hexdigest()
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if authorization: authorization(db)
+            previous = db.execute('SELECT * FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                                  (channel.task_id, channel.channel_id, request_key)).fetchone()
+            if previous:
+                if previous['operation'] != 'verification_submit' or previous['digest'] != digest:
+                    raise StoreError('request_key_conflict')
+                return json.loads(previous['result_json'])
+            task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
+            last = db.execute("SELECT type FROM runtime_events WHERE task_id=? AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED','PLAN_ACCEPTED') ORDER BY id DESC LIMIT 1",
+                              (channel.task_id,)).fetchone()
+            nodes = db.execute('SELECT status FROM runtime_nodes WHERE task_id=? AND revision=?',
+                               (channel.task_id, task['revision'] if task else -1)).fetchall()
+            if (not task or task['state'] != 'PLANNING' or not last or last[0] != 'VERIFICATION_FAILED'
+                    or not nodes or any(n['status'] != 'completed' for n in nodes)):
+                raise StoreError('verification_repair_not_expected')
+            plan = json.loads(task['plan_json'])
+            plan['verification'] = verification
+            db.execute('UPDATE runtime_tasks SET plan_json=? WHERE task_id=?', (encoded(plan), channel.task_id))
+            event(db, channel.task_id, 'VERIFICATION_REVISED', dict(verification=verification), channel.channel_id)
+            transition(db, channel.task_id, 'VERIFYING')
+            receipt = dict(recorded=True, state='VERIFYING')
+            db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
+                       (channel.task_id, request_key, channel.channel_id, 'verification_submit', digest, encoded(receipt)))
+            db.commit()
+        return receipt
 
     def _completion_invariants(self, db, task_id):
         if db.execute('SELECT 1 FROM task_stopped WHERE task_id=?', (task_id,)).fetchone():

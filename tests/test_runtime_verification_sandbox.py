@@ -18,7 +18,7 @@ def test_real_check_cannot_read_private_home_or_runtime_store(tmp_path):
     scratch = tmp_path / 'scratch'
     scratch.mkdir()
     script = ('from pathlib import Path; import os; '
-              f'assert not Path({str(outside)!r}).exists(); '
+              f'assert Path({str(outside)!r}).read_text() == "private"; '  # the shared /tmp, like the host
               f'assert not Path({str(project / ".cortex" / "private")!r}).exists(); '
               'assert "CORTEX_TEST_SECRET" not in os.environ; print("isolated")')
     command = verification_command(project, scratch, ['python3', '-B', '-c', script])

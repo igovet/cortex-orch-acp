@@ -22,6 +22,10 @@ _TREE_LIMIT = 2_000_000
 _HARDLINK_DIR_LIMIT = 256
 
 
+def _dev_index(command) -> int:
+    return next(i for i, arg in enumerate(command) if arg in ('--dev', '--dev-bind'))
+
+
 def _private_target(path: Path, root: Path) -> Path | None:
     """What to mask for a private name: the path itself, or -- for a
     symlink (``.claude -> shared/claude`` is common) -- the project path it
@@ -41,20 +45,20 @@ def _private_target(path: Path, root: Path) -> Path | None:
 
 def verification_command(root, scratch, argv, system_root=False):
     """``system_root`` mounts the whole host read-only (an engine may be
-    installed anywhere) and hides the owner's runtime sockets under /run/user,
-    whose session bus could start processes outside the sandbox."""
+    installed anywhere), with the host's real /dev and /run/user."""
     binary = shutil.which('bwrap')
     if binary is None:
         raise StoreError('verification_sandbox_unavailable')
     root = Path(root).resolve(strict=True)
-    command = [binary, '--die-with-parent', '--unshare-pid', '--unshare-ipc', '--unshare-net',
+    # With the whole host visible, its processes and IPC too (ps, pgrep, a
+    # running app or dev server): nothing the host offers is taken away.
+    namespaces = [] if system_root else ['--unshare-pid', '--unshare-ipc']
+    command = [binary, '--die-with-parent', *namespaces, '--unshare-net',
                '--clearenv', '--setenv', 'PATH', '/usr/local/bin:/usr/bin:/bin',
-               '--setenv', 'HOME', '/tmp', '--setenv', 'TMPDIR', '/tmp',
+               '--setenv', 'HOME', str(scratch), '--setenv', 'TMPDIR', str(scratch),
                '--setenv', 'LANG', 'C.UTF-8', '--setenv', 'PYTHONDONTWRITEBYTECODE', '1']
     if system_root:
         command += ['--ro-bind', '/', '/']
-        if Path('/run/user').is_dir():
-            command += ['--tmpfs', '/run/user']
     for name in () if system_root else ('/usr', '/bin', '/sbin', '/lib', '/lib64'):
         path = Path(name)
         if path.is_symlink():
@@ -64,7 +68,14 @@ def verification_command(root, scratch, argv, system_root=False):
     for name in () if system_root else ('/etc/ld.so.cache', '/etc/ld.so.conf', '/etc/localtime'):
         if Path(name).is_file():
             command += ['--ro-bind', name, name]
-    command += ['--proc', '/proc', '--dev', '/dev', '--bind', str(scratch), '/tmp',
+    # The real /tmp (a screenshot the user points at, a file the worker leaves
+    # for the user) and this process's own scratch as TMPDIR. A private /tmp
+    # hid both directions.
+    # With the whole host visible, its real devices too (a USB phone for
+    # adb, a GPU); /run/user stays visible (session bus, audio, display,
+    # keyring): everything that works on the host works here.
+    command += ['--proc', '/proc', *(['--dev-bind', '/dev', '/dev'] if system_root else ['--dev', '/dev']),
+                '--bind', '/tmp', '/tmp', '--bind', str(scratch), str(scratch),
                 '--ro-bind', str(root), str(root)]
     from .gateway import PRIVATE
     for current, dirs, files in os.walk(root,followlinks=False):
@@ -155,6 +166,35 @@ def tool_state_dirs(home: str) -> list[str]:
     return sorted(found)
 
 
+PROJECT_BIN_DIRS = ('.venv/bin', 'venv/bin', 'node_modules/.bin')
+
+
+def project_toolchain_env(root: str, path: str, scratch: str) -> list[str]:
+    """``--setenv`` args that run commands the way the owner does in the
+    project: its virtualenv and node_modules/.bin first on PATH (VIRTUAL_ENV
+    set), and ``python`` meaning ``python3`` where no ``python`` exists --
+    a plan's ``python -m pytest`` failed on a system with only python3 and a
+    project .venv."""
+    dirs = [str(Path(root) / relative) for relative in PROJECT_BIN_DIRS if (Path(root) / relative).is_dir()]
+    entries = dirs + [entry for entry in path.split(':') if entry]
+    if not any((Path(entry) / 'python').exists() for entry in entries):
+        python3 = next((Path(entry) / 'python3' for entry in entries if (Path(entry) / 'python3').exists()), None)
+        if python3 is not None:
+            shims = Path(scratch) / '.cortex-shims'
+            try:
+                shims.mkdir(exist_ok=True)
+                if not (shims / 'python').exists():
+                    (shims / 'python').symlink_to(python3)
+                entries.append(str(shims))
+            except OSError:
+                pass
+    env = ['--setenv', 'PATH', ':'.join(dict.fromkeys(entries))]
+    venv = next((Path(root) / relative for relative in ('.venv', 'venv') if (Path(root) / relative / 'bin').is_dir()), None)
+    if venv is not None:
+        env += ['--setenv', 'VIRTUAL_ENV', str(venv)]
+    return env
+
+
 def compact_argv(command, fds):
     """Hand bwrap a long argument list through a file descriptor (``--args``)
     instead of the command line, whose size limit a large grant list hit.
@@ -186,15 +226,17 @@ def as_owner(command, environ):
         mounts += [arg for path in tool_state_dirs(home) for arg in ('--bind', path, path)]
     # After the scratch /tmp mount (a HOME under /tmp must stay read-only),
     # before the project mounts (project grants stay writable on top).
-    at = command.index('--ro-bind', command.index('--dev') + 1)
+    at = command.index('--ro-bind', _dev_index(command) + 1)
     command[at:at] = mounts
     env = [arg for name, value in environ.items()
            if name not in {'HOME', 'TMPDIR', 'PWD', 'OLDPWD'} and not _SECRET_ENV.search(name)
            for arg in ('--setenv', name, value)]
     # HOME is read-only except the tool caches mounted above.
-    env += ['--setenv', 'HOME', home if has_home else '/tmp']
+    scratch = command[command.index('TMPDIR', command.index('--clearenv')) + 1]
+    env += ['--setenv', 'HOME', home if has_home else scratch]
+    env += project_toolchain_env(command[command.index('--chdir') + 1], environ.get('PATH', ''), scratch)
     if not has_home:
-        env += ['--setenv', 'XDG_CACHE_HOME', '/tmp/.cache']
+        env += ['--setenv', 'XDG_CACHE_HOME', f'{scratch}/.cache']
     at = command.index('--chdir')
     command[at:at] = env
     allow_network(command)
@@ -214,7 +256,7 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
     root = Path(root).resolve(strict=True)
     command = verification_command(root, scratch, argv, system_root)
     # Replace project bind and build scoped grants before masking private data.
-    start = command.index('--ro-bind', command.index('--dev') + 1)
+    start = command.index('--ro-bind', _dev_index(command) + 1)
     command = command[:start]
     fds = []
     try:
@@ -375,8 +417,10 @@ def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(
     with gateway_command(root, scratch, argv, scopes, reveal=frozenset(PRIVATE) - {'.cortex'},
                          system_root=True, readonly=readonly) as (command, fds):
         as_owner(command, {'HOME': env.get('HOME', '')})
-        extra = [arg for name, value in env.items() for arg in ('--setenv', name, value)]
-        extra += ['--setenv', 'TMPDIR', '/tmp']
+        extra = [arg for name, value in env.items() if name != 'PATH' for arg in ('--setenv', name, value)]
+        extra += ['--setenv', 'TMPDIR', str(scratch)]
+        # The worker's shell finds the project's own toolchain first.
+        extra += project_toolchain_env(str(Path(root).resolve()), env.get('PATH', ''), str(scratch))
         state_dirs = state_dirs or {}
         real_dirs = {}
         for directory in (*state_dirs, *writable):

@@ -789,6 +789,8 @@ def test_clamp_attempt_context_size_never_regresses_within_an_attempt():
     runtime._lock = threading.RLock()
     runtime._attempt_context_size_max = {}
     runtime._model_context_size_max = {}
+    runtime._context_sizes_loaded = True  # never read or write the real state file
+    runtime._save_context_sizes = lambda: None
     runtime._attempt_models = {"xa_1": "claude-agent-acp/claude-sonnet-5", "xa_2": "codex-acp/gpt-5.6-luna",
                                "xa_3": "claude-agent-acp/claude-sonnet-5"}
 

@@ -313,6 +313,7 @@ _OPERATION_DESCRIPTIONS = dict(
     task_get_context="Read the current runtime task, original goal, validated plan, results and user answers.",
     answer_submit="Submit a direct answer to an informational question before any plan or workers exist, or a final summary after the user answered a runtime stop question by choosing to finish. The runtime records and delivers the answer; this does not certify code changes or tests.",
     plan_submit="For changes or substantial delegated work, submit a dependency plan for runtime validation. The runtime chooses routes, schedules assignments, requires review and runs verification.",
+    verification_submit="After the runtime verification failed and the work itself is fine: replace only the verification commands and verify again, without redoing the reviewed work.",
     synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. This does not complete or accept the task.",
     user_question_request="Request user input. The runtime persists the question before elicitation and resumes only after a real answer.",
     result_submit="Submit this worker attempt's exact immutable report reference, summary and observed checks. Reviewers must include a verdict. This cannot accept the task.",

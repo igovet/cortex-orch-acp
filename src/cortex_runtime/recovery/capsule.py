@@ -453,6 +453,19 @@ def _section_pipeline_and_assignments(db, task_id: str, recipient: dict) -> dict
         # Native tools work, bounded by the engine jail; a stale False made
         # workers refuse to count their own shell checks.
         section['runtime']['native_tools_enabled'] = True
+        if recipient['role'] != 'coordinator':
+            # What a worker must know about where it runs, so nothing in it
+            # reads as a wall: a read-only path outside the project or a lost
+            # background notification used to stop work.
+            section['runtime']['environment'] = (
+                "You run as the user: their tools, virtualenvs, network, the whole machine readable. Follow "
+                "the project's agent instruction files (AGENTS.md and the docs they point to). You may change "
+                "anything in the project. Outside it the filesystem is read-only: write there with outside_write, "
+                "run commands that change things outside with outside_command; the user confirms each, so a "
+                "read-only error outside the project means use them, not give up. Deleting asks the user too. "
+                "Never end your turn to wait for a background job (its notification cannot reach you); wait "
+                "inside the turn by checking its output. If something fails, find another way or say exactly "
+                "what you need.")
         sql = 'SELECT node_id,role,objective,dependencies_json,scope_json,status,assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=?'
         values = [task_id,task['revision']]
         if recipient['role'] != 'coordinator':

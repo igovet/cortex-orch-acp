@@ -27,7 +27,7 @@ NODE = obj(dict(id=text('Unique plan node name.', 64), role=text('Specialist rol
            required=['id', 'role', 'objective', 'dependencies', 'scope'])
 from ..portable.roles import WORKER_ALIASES
 NODE['properties']['role']['enum'] = sorted(role for role in WORKER_ALIASES if role not in {'code-reviewer','build-verification'})
-PLAN = obj(dict(tasks=array(NODE, minimum=1), verification=array(array(text('Literal verification argument. Project is read-only; write generated output only under /tmp.', 4096), minimum=1), maximum=16, minimum=1)))
+PLAN = obj(dict(tasks=array(NODE, minimum=1), verification=array(array(text('Literal argument of a verification command copied exactly from the project\'s own documented verification (docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json scripts), interpreter path included; set environment variables with ["env", "NAME=value", ...]. Runs with the owner\'s tools; only git-ignored paths are writable.', 4096), minimum=1), maximum=16, minimum=1)))
 COORDINATOR = {
     'task_get_context': obj({}),
     'answer_submit': obj(dict(text=text('Answer a read-only question directly, in the selected coordinator language, grounded in the project files you inspected. Use for explanations, project overviews and factual questions that need no changes or delegated investigation. Available before any plan or worker exists, or after the user answered a runtime stop question by choosing to finish. Does not certify implementation, review, or tests; use plan_submit when the user requests changes.',32000), request_key=text('Unique answer delivery key; exact retries return the same receipt.',128))),
@@ -52,6 +52,9 @@ REQUESTS = {
     'scope_request': obj(dict(reason=text('Why the current scope prevents completion.'),scope=array(text('Requested project-relative path or glob.',512),minimum=1),request_key=text('Unique proposal identity.',128))),
     'escalation_request': obj(dict(reason=text('Problem requiring independent senior consultation. Runtime retains configured model/effort policy.'),request_key=text('Unique proposal identity.',128))),
 }
+COORDINATOR['verification_submit'] = obj(dict(
+    verification=dict(PLAN['properties']['verification'], description='Corrected verification commands. Only after the runtime verification failed and the work itself is fine: it verifies again without redoing the reviewed work. When the code is wrong, submit a new plan instead.'),
+    request_key=text('Unique proposal identity.',128)))
 COORDINATOR.update(REQUESTS)
 RESULT['properties']['checks']['description'] = 'Executed automated checks with retained command evidence. Every passed item needs its own supporting tool_call_ref; descriptive review observations belong in the report. A failed check fails the assignment; not_run or unverified checks are retained as disclosed gaps for review and synthesis.'
 WORKER = {'result_submit': RESULT, **REQUESTS}

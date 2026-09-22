@@ -322,6 +322,18 @@ function cortexCommand(): CommandArgv {
  * to `question`. `send()` remains delegated to the stock ACP bridge, so the
  * selectedActionId is returned to the exact Cortex ACP session unchanged.
  */
+/** Paseo offers prompt.steer and the stock ACP bridge lacks it. */
+export function emulatesSteer(offered: readonly string[], supported: readonly string[]): boolean {
+  return offered.includes("prompt.steer") && !supported.includes("prompt.steer");
+}
+
+/** A steer prompt delivered as the bridge's follow-up (interrupt, then send). */
+export function steerAsFollowUp<T extends { type: string }>(input: T): T {
+  const prompt = (input as { prompt?: { delivery?: string } }).prompt;
+  if (input.type !== "session.prompt" || prompt?.delivery !== "steer") return input;
+  return { ...input, prompt: { ...prompt, delivery: "auto" } } as T;
+}
+
 export function createCortexProvider(): ProviderRegistration {
   const base = runAcpProvider({
     // Register the native provider under `cortex` for new chats. The setup
@@ -362,6 +374,13 @@ export function createCortexProvider(): ProviderRegistration {
     ...base,
     async connect(request) {
       const connection = await base.connect(request);
+      // Paseo sends a message typed during a running turn as a "steer"
+      // prompt, which the stock ACP bridge does not support ("Provider does
+      // not support prompt.steer"). Cortex takes it the way the bridge
+      // delivers any follow-up: the running turn is interrupted and the
+      // message steers the same task.
+      const steer = emulatesSteer(request.capabilities, connection.capabilities);
+      const capabilities = steer ? [...connection.capabilities, "prompt.steer"] : connection.capabilities;
       const questionActions = new Map<
         string,
         Array<{ id: string; label: string }>
@@ -371,7 +390,9 @@ export function createCortexProvider(): ProviderRegistration {
       const bufferedTimelineBytes = new Map<string, number>();
       return {
         ...connection,
+        capabilities,
         send(input: Parameters<typeof connection.send>[0]) {
+          if (steer) input = steerAsFollowUp(input);
           if (
             input.type === "session.permission" &&
             input.response.behavior === "allow" &&
@@ -422,7 +443,9 @@ export function createCortexProvider(): ProviderRegistration {
             if (!visibleTimeline(event)) return;
             if (event.type === "session.opened") {
               openedSessions.add(event.sessionId);
-              listener(event);
+              listener(steer && !event.capabilities.includes("prompt.steer")
+                ? { ...event, capabilities: [...event.capabilities, "prompt.steer"] }
+                : event);
               const pending = bufferedTimeline.get(event.sessionId);
               bufferedTimeline.delete(event.sessionId);
               bufferedTimelineBytes.delete(event.sessionId);

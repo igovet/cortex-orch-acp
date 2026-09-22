@@ -223,9 +223,13 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
             assert any(n['role']=='worker-senior-consultant' for n in context['nodes'])
         assert calls == expected
         assert any('COMPLETED' in text for text in output)
+    elif scenario in {'synthesis_drift', 'post_review_drift'}:
+        # A project that changed under the pipeline is recovered by the
+        # coordinator re-planning, not a stop.
+        assert context['state'] == 'COMPLETED', context
     else:
-        assert context['state'] == 'WAITING_USER', context  # a stop is a question, never a dead end
-        assert context['blocker'] == {'review_block': 'review_blocked', 'verification_fail': 'verification_failed', 'synthesis_drift': 'completion_project_revision_changed', 'post_review_drift': 'verification_review_revision_changed'}[scenario]
+        # Never a dead end: after the automatic attempts the user is asked.
+        assert context['state'] == 'WAITING_USER', context
 
 
 def test_question_requires_exact_real_answer_and_retries_share_identity(machine):
@@ -441,13 +445,18 @@ def test_stop_asks_the_user_and_only_their_answer_lets_the_coordinator_close(mac
         db.execute("UPDATE runtime_nodes SET status='failed' WHERE task_id=?", (channel.task_id,)); db.commit()
     state.move(channel.task_id, 'BLOCKED', blocker='worker_failed')
     context = state.context(channel.task_id)
-    assert (context['state'], context['blocker']) == ('WAITING_USER', 'worker_failed')
+    # A stop about the work: the coordinator asks the user a concrete question.
+    assert (context['state'], context['ask_user_required']) == ('RECOVERING', 'worker_failed')
+    state.move(channel.task_id, 'EXECUTING')
+    state.move(channel.task_id, 'BLOCKED', blocker='structured_proposal_missing')  # a stop about the coordinator
+    context = state.context(channel.task_id)
+    assert (context['state'], context['blocker']) == ('WAITING_USER', 'structured_proposal_missing')
     question = pending(state.store, channel.task_id)
-    assert question['blocker'] == 'worker_failed' and question['resume_state'] == 'RECOVERING'
+    assert question['blocker'] == 'structured_proposal_missing' and question['resume_state'] == 'RECOVERING'
     state.move(channel.task_id, 'RECOVERING'); state.move(channel.task_id, 'PLANNING')
     with pytest.raises(StoreError, match='direct_answer_not_available'):
         state.submit_answer(channel, 'Done.', 'unasked')  # the coordinator alone cannot skip review
-    state.move(channel.task_id, 'BLOCKED', blocker='worker_failed')
+    state.move(channel.task_id, 'BLOCKED', blocker='structured_proposal_missing')
     question = pending(state.store, channel.task_id)
     assert answer(state.store, question['question_id'], 'Finish', 'text')
     assert resume_answered(state.store, channel.task_id)
@@ -492,3 +501,44 @@ def test_a_task_that_failed_before_stops_became_questions_reopens_on_a_new_messa
     state.move(channel.task_id, 'FAILED', blocker='coordinator_turn_failed:refusal')
     assert steer(state.store, channel.task_id, 'Try again, please.', 'user:test:1')
     assert state.context(channel.task_id)['state'] == 'RECOVERING'
+
+
+def test_a_failed_verification_goes_back_to_the_coordinator_to_repair(machine):
+    """A wrong check command stopped the task; it must come back to the
+    coordinator with its output, and a corrected command verifies again
+    without redoing the reviewed work."""
+    import json
+    from cortex_runtime.orchestration.state import MAX_VERIFICATION_REPAIRS
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'p'); state.move(channel.task_id, 'EXECUTING')
+    digest = 'd' * 64
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET status='completed', result_json=? WHERE task_id=?",
+                   (json.dumps(dict(project_digest=digest)), channel.task_id))
+        db.execute("UPDATE runtime_nodes SET stage='review' WHERE task_id=?", (channel.task_id,))
+        db.commit()
+    bad = dict(argv=['python', '-m', 'pytest'], exit_code=127, complete=True, revision_digest=digest)
+    for _ in range(MAX_VERIFICATION_REPAIRS):
+        state.move(channel.task_id, 'REVIEWING'); state.move(channel.task_id, 'VERIFYING')
+        assert state.record_verification(channel.task_id, [bad], digest) is False
+        assert state.context(channel.task_id)['state'] == 'PLANNING'
+        fixed = [['python3', '-m', 'pytest', '-q']]
+        assert state.submit_verification(channel, fixed, f'fix-{_}')['state'] == 'VERIFYING'
+        assert state.context(channel.task_id)['plan']['verification'] == fixed
+        state.move(channel.task_id, 'RECOVERING'); state.move(channel.task_id, 'EXECUTING')
+    state.move(channel.task_id, 'REVIEWING'); state.move(channel.task_id, 'VERIFYING')
+    state.record_verification(channel.task_id, [bad], digest)
+    context = state.context(channel.task_id)
+    # Only now the user is asked -- by the coordinator, concretely.
+    assert (context['state'], context['ask_user_required']) == ('RECOVERING', 'verification_failed')
+
+
+def test_a_failed_worker_returns_to_the_coordinator_a_bounded_number_of_times(machine):
+    from cortex_runtime.orchestration.state import MAX_COORDINATOR_RETURNS
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'p'); state.move(channel.task_id, 'EXECUTING')
+    for _ in range(MAX_COORDINATOR_RETURNS):
+        assert state.return_to_coordinator(channel.task_id, 'worker_failed')
+        assert state.context(channel.task_id)['state'] == 'RECOVERING'
+        state.move(channel.task_id, 'EXECUTING')
+    assert not state.return_to_coordinator(channel.task_id, 'worker_failed')  # then the user is asked

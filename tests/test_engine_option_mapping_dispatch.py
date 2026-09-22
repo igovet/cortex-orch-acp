@@ -46,7 +46,7 @@ def test_option_mapping_for_dispatches_by_engine_name():
     assert _option_mapping_for("some-future-engine") is None
 
 
-GATEWAY_ONLY = dict(disallowedTools=['Agent','Task','Workflow','TeamCreate','TeamDelete','SendMessage'],strictMcpConfig=True,skills='all',plugins=[],managedSettings=dict(disableAllHooks=True))
+GATEWAY_ONLY = dict(disallowedTools=['Agent','Task','Workflow','TeamCreate','TeamDelete','SendMessage','ScheduleWakeup','Monitor','CronCreate','CronDelete','CronList','RemoteTrigger'],strictMcpConfig=True,skills='all',plugins=[],managedSettings=dict(disableAllHooks=True))
 
 
 def test_session_new_meta_for_pinned_engines_builds_a_payload():

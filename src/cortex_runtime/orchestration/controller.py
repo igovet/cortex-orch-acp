@@ -94,7 +94,9 @@ def _verification(runtime, task_id, machine, emit_tool_call, cancel):
                              source_ref=ref,data=data,exit_code=code,
                              failure='interrupted' if interrupted else None)
         observed = dict(argv=argv,exit_code=code,complete=not interrupted and unchanged,
-                        revision_digest=digest,large_output_id=saved['id'])
+                        revision_digest=digest,large_output_id=saved['id'],
+                        # What the coordinator needs to repair a failing check.
+                        output_tail=body[-3000:] if code != 0 or interrupted or not unchanged else None)
         checks.append(observed)
         if emit_tool_call:
             emit_tool_call(dict(tool_call_id=ref, new=False, status='completed' if code == 0 and observed['complete'] else 'failed',
@@ -179,6 +181,8 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                        'If changes or substantial delegated work are required, submit a focused structured plan. '
                        'Runtime schedules planned workers and mandatory review. '
                        + _released_request(runtime, task_id)
+                       + (_ask_user_request(context) or _verification_repair_request(context)
+                          or _failed_worker_request(context))
                        if state == 'PLANNING' else
                        'Reconcile the retained results and runtime verification, then submit synthesis. State plainly every not_run or unverified '
                        'worker check as a gap the user should know about. Runtime decides completion. ')
@@ -354,7 +358,19 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             with runtime._lock:
                 running = bool(runtime._running.get(task_id))
             if any(n['status'] == 'failed' for n in nodes):
-                machine.move(task_id, 'BLOCKED', blocker='worker_failed')
+                # Wait only for nodes still working; a finished node's session
+                # teardown must never hold the task (it hung here once).
+                if running and any(n['status'] in ('running', 'pending') for n in nodes):
+                    # Let parallel workers finish; the coordinator decides
+                    # with every result in hand.
+                    from .consent import relay
+                    relay(runtime, task_id, language)
+                    cancel_event.wait(.1)
+                    continue
+                # A failed check (often unrelated, pre-existing) is the
+                # coordinator's to handle, not a stop: it replans or notes it.
+                if not machine.return_to_coordinator(task_id, 'worker_failed'):
+                    machine.move(task_id, 'BLOCKED', blocker='worker_failed')
                 continue
             if running:
                 capacity_wait_started = None
@@ -370,7 +386,11 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                     for node in nodes:
                         if node['status']=='running': retry_lost(runtime,task_id,node)
                 except StoreError as error:
-                    machine.move(task_id,'BLOCKED',blocker=str(error))
+                    # Retries used up: the coordinator decides how to get the
+                    # work done (another approach, another role, a smaller
+                    # step) before the user is asked.
+                    if not machine.return_to_coordinator(task_id, str(error)):
+                        machine.move(task_id,'BLOCKED',blocker=str(error))
                 continue
             if all(n['status'] == 'completed' for n in nodes):
                 runtime._terminate_completed_workers(task_id)
@@ -443,8 +463,54 @@ def _stop_question(question, context, language):
             details += messages.render('worker_failed_details', language, node=node['node_id'], report_ref=result['report_ref'],
                                        summary=result['summary'],
                                        unpassed=f"\n{messages.render('unpassed_checks_label', language)}: {unpassed}" if unpassed else '')
+    if code == 'verification_failed':
+        # Exactly what failed and what it printed: a bare code left the user
+        # with nothing to decide on.
+        for check in (context.get('verification') or {}).get('checks') or ():
+            if check.get('exit_code') == 0 and check.get('complete'):
+                continue
+            command = ' '.join(check.get('argv') or ())
+            tail = (check.get('output_tail') or '').strip()[-1500:]
+            details += f"\n\n`{command}` → exit {check.get('exit_code')}" + (f"\n```\n{tail}\n```" if tail else '')
+        attempts = context.get('verification_attempts')
+        if attempts:
+            details += ('\n\nКоординатор пытался исправить проверку: ' if language == 'ru'
+                        else '\n\nThe coordinator tried to repair it: ') + str(attempts)
     return dict(question, question=messages.render('stop_question', language, reason=reason, details=details),
                 options=[messages.render('stop_option_continue', language), messages.render('stop_option_finish', language)])
+
+
+def _ask_user_request(context):
+    if not context.get('ask_user_required'):
+        return ''
+    return (f"Automatic handling is exhausted ({context['ask_user_required']}). Ask the user NOW with "
+            "user_question_request, in the user's language: say plainly what failed and why (use the verification "
+            "output, failed checks and reports in context), what was already tried, and offer 2-4 concrete next "
+            "actions as options; the user may also answer in their own words. Do not submit a plan before the answer. ")
+
+
+def _failed_worker_request(context):
+    if not any(n.get('status') == 'failed' and n.get('result') for n in context.get('nodes') or ()):
+        if any(n.get('status') in ('running', 'cancelled') for n in context.get('nodes') or ()):
+            return ('A worker could not finish its assignment after several attempts (it ended without a result or '
+                    'failed to start). Get the work done another way: split it, change the approach or role, and '
+                    'submit a new plan carrying over completed work by report id. ')
+        return ''
+    return ('A worker finished but some of its checks FAILED (see nodes[].result.checks and its report). Decide yourself: '
+            'submit a new plan that fixes what is needed, carrying over the completed work by report id, or -- when the '
+            'failure is unrelated to this task or pre-existing -- submit a plan for only what remains and state the gap. '
+            'Do not stop the task for it. ')
+
+
+def _verification_repair_request(context):
+    verification = context.get('verification') or {}
+    if not context.get('nodes') or 'checks' not in verification or all(
+            c.get('exit_code') == 0 and c.get('complete') for c in verification['checks']):
+        return ''
+    return ('The runtime verification FAILED; context.verification has each command, exit code and output tail. '
+            'Find how to run the check correctly in this project (read its docs, Makefile, package.json, its virtualenvs; '
+            'a missing interpreter or tool is a wrong command, not a reason to stop) and submit verification_submit with '
+            'corrected commands. If the code itself is wrong, submit a new plan that fixes it. ')
 
 
 def _released_request(runtime, task_id):

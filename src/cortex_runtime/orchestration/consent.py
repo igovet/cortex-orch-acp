@@ -76,10 +76,11 @@ def _claim_pending(store, task_id: str) -> list[dict]:
     return rows
 
 
+# The card says what will happen, nothing more.
 _TITLES = {
-    'outside_write': {'en': 'Write outside the project: {subject}', 'ru': 'Запись вне проекта: {subject}'},
-    'outside_command': {'en': 'Run outside the sandbox: {subject}', 'ru': 'Команда вне песочницы: {subject}'},
-    'project_delete': {'en': 'Delete from the project: {subject}', 'ru': 'Удаление из проекта: {subject}'},
+    'outside_write': {'en': 'Confirm: write {subject}', 'ru': 'Confirm: запись {subject}'},
+    'outside_command': {'en': 'Confirm: {subject}', 'ru': 'Confirm: {subject}'},
+    'project_delete': {'en': 'Confirm: delete {subject}', 'ru': 'Confirm: удаление {subject}'},
 }
 
 

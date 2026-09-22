@@ -271,7 +271,11 @@ def build_first_prompt_blocks(instructions_text: str, user_blocks: list) -> list
 
 
 # Native tools that start another agent. The owner excluded native subagents.
-CLAUDE_SUBAGENT_TOOLS = ("Agent", "Task", "Workflow", "TeamCreate", "TeamDelete", "SendMessage")
+CLAUDE_SUBAGENT_TOOLS = ("Agent", "Task", "Workflow", "TeamCreate", "TeamDelete", "SendMessage",
+                         # Deferred wake-ups need an interactive session to
+                         # fire; in a Cortex turn the model waits on one, ends
+                         # its turn, and never resumes.
+                         "ScheduleWakeup", "Monitor", "CronCreate", "CronDelete", "CronList", "RemoteTrigger")
 
 
 def claude_native_subagent_restriction_meta(*, role: str = "worker") -> dict:

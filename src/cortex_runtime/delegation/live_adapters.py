@@ -38,6 +38,7 @@ shortcut. No test in this repository launches a real engine.
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 import os
@@ -138,8 +139,51 @@ def _jail_for(store, channel_credentials) -> dict:
     return {"scopes": list(scopes), "readonly": list(readonly), "alive": alive}
 
 
+PROJECT_RULE_FILES = ("AGENTS.md", "CLAUDE.md")
+_PROJECT_RULES_MAX_CHARS = 64_000
+
+
+def _claude_trusts(project_root: str) -> bool:
+    """Whether Claude Code's own trust record covers ``project_root``: an
+    untrusted folder gets no project memory (AGENTS.md/CLAUDE.md) at all."""
+    try:
+        with open(os.path.join(os.path.expanduser("~"), ".claude.json"), encoding="utf-8") as stream:
+            projects = json.load(stream).get("projects") or {}
+    except (OSError, ValueError, AttributeError):
+        return False
+    root = os.path.realpath(project_root)
+    while True:
+        entry = projects.get(root)
+        if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted"):
+            return True
+        parent = os.path.dirname(root)
+        if parent == root:
+            return False
+        root = parent
+
+
+def project_rules_for_claude(project_root: str | None) -> str:
+    """The project's own agent rules to hand a Claude session that would not
+    load them itself (an untrusted folder: no project memory at all). Empty
+    when Claude loads them natively."""
+    if not project_root or _claude_trusts(project_root):
+        return ""
+    parts = []
+    for name in PROJECT_RULE_FILES:
+        path = os.path.join(project_root, name)
+        try:
+            if os.path.isfile(path) and not os.path.islink(path):
+                with open(path, encoding="utf-8", errors="replace") as stream:
+                    parts.append(f"### {name}\n\n{stream.read(_PROJECT_RULES_MAX_CHARS)}")
+        except OSError:
+            continue
+    if not parts:
+        return ""
+    return "## Project rules (follow them)\n\n" + "\n\n".join(parts)
+
+
 def _session_new_meta_for(
-    engine: str, version: str, instructions: str | None, *, role: str = "worker",
+    engine: str, version: str, instructions: str | None, *, role: str = "worker", project_root: str | None = None,
 ):
     """The ``session/new`` ``_meta`` payload this engine's own qualified
     delivery mechanism builds for ``instructions``, or ``None``.
@@ -160,6 +204,9 @@ def _session_new_meta_for(
             return claude_native_subagent_restriction_meta(role=role)
         return None
     if engine == "claude-agent-acp" and version == "0.78.0":
+        rules = project_rules_for_claude(project_root)
+        if rules:
+            instructions = instructions + "\n\n" + rules
         # Keep the registry's qualification and instruction channel, but add
         # the recipient-specific native built-in policy at the runtime seam.
         # The registry is intentionally role-agnostic; this adapter is where
@@ -756,6 +803,7 @@ class EngineSessionManagerAdapter:
             # metadata. Codex also receives its tagged generation prompt.
             session_new_meta = _session_new_meta_for(
                 record.engine, _pinned_version_for(record.engine), instructions, role=recipient,
+                project_root=workspace_root,
             )
             session_id = manager.create_session(
                 task_id, launch.get("assignment_id") or attempt_id, session_new_meta=session_new_meta,
@@ -1543,7 +1591,8 @@ class EngineSessionManagerAdapter:
         )
         ledger = InstructionBundleLedger(self._store)
         ledger.save_intended(bundle)
-        meta = _session_new_meta_for(record.engine, version, instructions, role=recipient)
+        meta = _session_new_meta_for(record.engine, version, instructions, role=recipient,
+                                     project_root=getattr(manager, "_workspace_root", None))
         if meta is not None:
             import json
 
