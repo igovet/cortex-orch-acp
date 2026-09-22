@@ -117,7 +117,7 @@ def test_delegate_produces_one_ready_assignment_with_no_model_ids(tmp_path):
     assert outcome.workspace_binding_id and outcome.channel_id
     assert outcome.engine_session_ref and outcome.config_revision and outcome.context_snapshot_ref
     # codex-acp 1.12.0 is QUALIFIED as of T035 live evidence (see
-    # engine.instruction_delivery_registry.CodexAcp1_12Delivery).
+    # engine.instruction_delivery_registry.CodexAcpDelivery).
     assert outcome.instruction_delivery == "qualified"
     assert ws.create_calls == 1
     assert eng.open_calls == 1

@@ -45,6 +45,42 @@ _NATIVE_CREDENTIAL_SUBDIR = {
 
 SUPPORTED_ENGINES: tuple[str, ...] = tuple(_PACKAGE_NAME)
 
+# The adapter versions Cortex has actually qualified for launch. codex-acp
+# is byte-verified twice over -- ``engine.process
+# ._prepare_codex_manual_review_adapter`` patches one exact bundle shape,
+# and ``engine.instruction_delivery_registry`` qualifies one exact version
+# -- so a newer install (``connections.engine_update`` installs one beside
+# the current one) is not launchable until it has been qualified too.
+# Preferring the newest install unconditionally took Codex offline
+# entirely once 1.13.0 was installed: every codex session and every
+# catalog refresh failed closed with
+# ``codex_manual_review_adapter_unsupported``, and the engine's newly
+# published models could never appear in the model catalog (live,
+# 2026-09-22). ``claude-agent-acp`` has a version-independent delivery
+# registration and no byte-level patch, so any installed version launches.
+QUALIFIED_ADAPTER_VERSIONS: dict[str, tuple[str, ...] | None] = {
+    "codex-acp": ("1.12.0", "1.13.0"),
+    "claude-agent-acp": None,
+}
+
+
+def is_qualified(engine: str, version: str) -> bool:
+    """True iff Cortex has qualified ``version`` of ``engine`` for launch.
+
+    ``None`` in :data:`QUALIFIED_ADAPTER_VERSIONS` means every version; an
+    engine with no entry at all is never qualified.
+    """
+    allowed = QUALIFIED_ADAPTER_VERSIONS.get(engine, ())
+    return allowed is None or version in allowed
+
+
+def is_pinned(engine: str, version: str) -> bool:
+    """True iff ``version`` is one of the *named* versions an engine is
+    qualified for -- an engine qualified for every version (``None``) has
+    no pinned version to protect, so its installs are pruned normally."""
+    allowed = QUALIFIED_ADAPTER_VERSIONS.get(engine)
+    return isinstance(allowed, tuple) and version in allowed
+
 
 @dataclass(frozen=True)
 class EngineDiscovery:
@@ -146,9 +182,17 @@ def discover_engine(
         return None
     if registry_root is not None:
         return _discover_in(_subdirs(registry_root), engine, package_name, node, environ)
-    # Only Cortex's own installs, newest version first; a client's (e.g.
-    # Zed's) copy is never used.
-    owned = sorted(_subdirs(owned_root(environ) / engine), key=lambda p: version_key(p.name), reverse=True)
+    # Only Cortex's own installs; a client's (e.g. Zed's) copy is never
+    # used. A qualified version always wins over a newer unqualified one
+    # (see :func:`is_qualified`); among equals, newest first. With no
+    # qualified install at all the newest is still reported, so the launch
+    # refusal names the real unqualified version instead of reporting the
+    # engine as absent.
+    owned = sorted(
+        _subdirs(owned_root(environ) / engine),
+        key=lambda p: (is_qualified(engine, p.name), version_key(p.name)),
+        reverse=True,
+    )
     return _discover_in(owned, engine, package_name, node, environ)
 
 def _subdirs(root: Path) -> list[Path]:

@@ -2799,6 +2799,17 @@ class OrchestratingRuntime:
         """The largest window ever reported for ``model``: remembered across
         processes (a file) and recovered from this project's history, so a
         worker opens on 1M rather than the engine's mid-turn 200k."""
+        # The first load's write-back happens after this lock is released:
+        # ``self._lock`` is not reentrant, and calling _save_context_sizes
+        # (which takes it again) from inside deadlocked the whole runtime
+        # permanently -- the worker thread that first learned a size never
+        # released the lock, so the controller loop (blocked in
+        # _terminate_completed_workers) never observed the state change that
+        # would have shown the user the worker's question, and the ACP reader
+        # thread (blocked in cancel) stopped handling any client message at
+        # all. The session simply stopped, mid-turn, with nothing shown
+        # (live, 2026-09-22).
+        pending: dict[str, int] | None = None
         with self._lock:
             if not getattr(self, "_context_sizes_loaded", False):
                 self._context_sizes_loaded = True
@@ -2821,13 +2832,24 @@ class OrchestratingRuntime:
                     if isinstance(value, int) and value > self._model_context_size_max.get(name, 0):
                         self._model_context_size_max[name] = value
                 if known:
-                    self._save_context_sizes()
-            return self._model_context_size_max.get(model, 0)
+                    pending = dict(self._model_context_size_max)
+            size = self._model_context_size_max.get(model, 0)
+        if pending is not None:
+            self._write_context_sizes(pending)
+        return size
 
     def _save_context_sizes(self) -> None:
-        path = self._context_sizes_path()
         with self._lock:
             data = dict(self._model_context_size_max)
+        self._write_context_sizes(data)
+
+    def _write_context_sizes(self, data: dict) -> None:
+        """Write an already-taken snapshot. Separate from
+        :meth:`_save_context_sizes` so a caller that already holds
+        ``self._lock`` can write without retaking it (see
+        :meth:`_learned_context_size`), and so this file I/O never happens
+        under the lock at all."""
+        path = self._context_sizes_path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             temporary = path.with_suffix(".tmp")

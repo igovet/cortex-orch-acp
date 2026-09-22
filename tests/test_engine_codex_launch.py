@@ -249,24 +249,29 @@ def test_installed_codex_app_server_reads_disabled_agents_and_features(tmp_path)
             proc.wait(timeout=3)
 
 
+def _pinned_bundle() -> bytes:
+    """The exact call sites the private adapter patch requires, once each."""
+    return (b"// pinned test bundle\n" + _CODEX_AGENT_REVIEWER_SOURCE + b"\n"
+            + _CODEX_NEW_SESSION_SOURCE + b"\n" + _CODEX_SESSION_CONFIG_SOURCE
+            + b"\n" + _CODEX_MCP_DEDUP_SOURCE
+            + b"\n" + _CODEX_MCP_ENTRY_SOURCE
+            + b"\n" + _CODEX_SEND_PROMPT_SOURCE
+            + b"\n" + _CODEX_RAW_RESPONSE_CASE_SOURCE
+            + b"\n" + _CODEX_RESPONSE_ITEM_TYPES_SOURCE
+            + b"\n" + _CODEX_HISTORY_CASE_BLOCK_SOURCE
+            + b"\n" + _CODEX_UPDATE_EVENT_SOURCE
+            + b"\n" + _CODEX_TURN_STARTED_SOURCE
+            + b"\n" + _CODEX_ITEM_EVENT_SWITCH_SOURCE
+            + b"\n" + _CODEX_COMPLETE_ITEM_EVENT_SWITCH_SOURCE
+            + b"\n" + _CODEX_FUNCTION_CALL_SOURCE)
+
+
 def test_pinned_private_codex_adapter_uses_manual_reviewer_and_preserves_original(tmp_path):
     package = tmp_path / "install" / "node_modules" / "@agentclientprotocol" / "codex-acp"
     dist = package / "dist"
     dist.mkdir(parents=True)
     original = dist / "index.js"
-    source = (b"// pinned test bundle\n" + _CODEX_AGENT_REVIEWER_SOURCE + b"\n"
-              + _CODEX_NEW_SESSION_SOURCE + b"\n" + _CODEX_SESSION_CONFIG_SOURCE
-              + b"\n" + _CODEX_MCP_DEDUP_SOURCE
-              + b"\n" + _CODEX_MCP_ENTRY_SOURCE
-              + b"\n" + _CODEX_SEND_PROMPT_SOURCE
-              + b"\n" + _CODEX_RAW_RESPONSE_CASE_SOURCE
-              + b"\n" + _CODEX_RESPONSE_ITEM_TYPES_SOURCE
-              + b"\n" + _CODEX_HISTORY_CASE_BLOCK_SOURCE
-              + b"\n" + _CODEX_UPDATE_EVENT_SOURCE
-              + b"\n" + _CODEX_TURN_STARTED_SOURCE
-              + b"\n" + _CODEX_ITEM_EVENT_SWITCH_SOURCE
-              + b"\n" + _CODEX_COMPLETE_ITEM_EVENT_SWITCH_SOURCE
-              + b"\n" + _CODEX_FUNCTION_CALL_SOURCE)
+    source = _pinned_bundle()
     original.write_bytes(source)
     package_json = package / "package.json"
     package_json.write_text('{"version":"1.12.0","type":"module"}')
@@ -298,6 +303,41 @@ def test_pinned_private_codex_adapter_uses_manual_reviewer_and_preserves_origina
     assert copied.parent.parent.joinpath("node_modules").resolve() == package.parents[1].resolve()
     assert stat.S_IMODE(copied.stat().st_mode) == 0o600
     assert stat.S_IMODE(copied.parent.stat().st_mode) == 0o700
+
+
+def test_private_codex_adapter_repoints_a_stale_dependency_link(tmp_path):
+    """A link left by an earlier install (live, 2026-09-22: it still named
+    the editor's own registry copy) must be repointed at the install that
+    just passed verification, not refused -- refusing wedged every Codex
+    session and every model-catalog refresh with
+    ``codex_manual_review_adapter_drifted``, with no way to recover."""
+    package = tmp_path / "install" / "node_modules" / "@agentclientprotocol" / "codex-acp"
+    dist = package / "dist"
+    dist.mkdir(parents=True)
+    original = dist / "index.js"
+    original.write_bytes(_pinned_bundle())
+    package_json = package / "package.json"
+    package_json.write_text('{"version":"1.12.0","type":"module"}')
+    from types import SimpleNamespace
+    install = SimpleNamespace(
+        package_version="1.12.0", adapter_entry=str(original),
+        adapter_entry_sha256=hashlib.sha256(original.read_bytes()).hexdigest(),
+        package_json=str(package_json),
+    )
+    environ = isolated_environ(tmp_path)
+    connection_id = new_connection_id()
+    copied = Path(_prepare_codex_manual_review_adapter(install, connection_id, environ))
+
+    stale_target = tmp_path / "previous-install" / "node_modules"
+    stale_target.mkdir(parents=True)
+    link = copied.parent.parent / "node_modules"
+    link.unlink()
+    link.symlink_to(stale_target, target_is_directory=True)
+
+    again = Path(_prepare_codex_manual_review_adapter(install, connection_id, environ))
+    assert again == copied
+    assert link.is_symlink()
+    assert link.resolve() == package.parents[1].resolve()
 
 
 def test_private_codex_adapter_rejects_unknown_source_before_launch(tmp_path):

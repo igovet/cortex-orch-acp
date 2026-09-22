@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -776,6 +777,47 @@ def test_stop_from_reconnected_session_uses_original_card_emitter(tmp_path):
 
     assert [card["status"] for card in old_cards] == ["pending", "failed"]
     assert new_cards == []
+
+
+def test_learning_a_context_size_the_first_time_never_deadlocks(tmp_path, monkeypatch):
+    """The real ``self._lock`` is not reentrant. The first-load path used to
+    call ``_save_context_sizes`` while already holding it, so the worker
+    thread that first learned a size kept the lock forever: the controller
+    loop blocked in ``_terminate_completed_workers``, so the user never saw
+    the question that worker had asked, and the ACP reader thread blocked in
+    ``cancel``, so the session stopped answering the client at all -- a
+    silently frozen turn (live, 2026-09-22).
+
+    Deliberately exercises the real lock and the real first-load path;
+    ``test_clamp_attempt_context_size_never_regresses_within_an_attempt``
+    substitutes an ``RLock`` and stubs the save, which is exactly why it
+    could not see this.
+    """
+    state = tmp_path / "state"
+    (state / "cortex").mkdir(parents=True)
+    (state / "cortex" / "context-windows.json").write_text(
+        json.dumps({"claude-agent-acp/claude-sonnet-5": 1000000}))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._lock = threading.Lock()
+    runtime._model_context_size_max = {}
+    runtime._store = SimpleNamespace(connection=lambda: (_ for _ in ()).throw(RuntimeError("no store")))
+
+    learned = []
+    finished = threading.Event()
+
+    def call():
+        learned.append(runtime._learned_context_size("claude-agent-acp/claude-sonnet-5"))
+        finished.set()
+
+    threading.Thread(target=call, daemon=True).start()
+    assert finished.wait(10), "the first learned context size deadlocked on the runtime lock"
+    assert learned == [1000000]
+    # The write-back happened, outside the lock, and a second call still works.
+    assert json.loads((state / "cortex" / "context-windows.json").read_text()) == {
+        "claude-agent-acp/claude-sonnet-5": 1000000}
+    assert runtime._learned_context_size("claude-agent-acp/claude-sonnet-5") == 1000000
 
 
 def test_clamp_attempt_context_size_never_regresses_within_an_attempt():

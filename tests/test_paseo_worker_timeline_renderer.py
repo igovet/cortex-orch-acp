@@ -20,13 +20,51 @@ def test_paseo_worker_timeline_row_uses_supported_agent_context_and_panel_naviga
     assert 'useAgent(props.agentId, (agent) => agent.workspaceId)' in source
     assert 'client.openPanel("workers", { workspaceId, agentId: props.agentId, location: "workspace" })' in source
     assert 'locations: ["workspace"]' in source
-    assert 'let catalogueInFlight = false' in source
+    assert 'const refreshCatalogue = coalesced(async () => {' in source
     assert 'const candidates = new Map<string, Candidate>()' in source
     assert 'for (const agentId of candidates.keys())' in source
     assert 'the popover owns the empty state' in source
     assert 'refreshVisibility' not in source
     assert 'if (!candidates.has(agentId))' in source
     assert 'selectWorker(agentId, item.data.assignmentRef)' in source
+
+
+def test_paseo_pill_catalogue_lists_active_agents_once_by_workspace():
+    """One listing of every active agent matched to its own workspace, not
+    one project-filtered listing per workspace."""
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "projectKeys" in source  # only in the explanatory comment
+    assert "filter: { projectKeys" not in source
+    assert 'client.paseo.agents.list({' in source
+    assert 'scope: "active"' in source
+    assert 'workspaces.get(entry.agent.workspaceId)' in source
+    assert 'result.pageInfo.nextCursor' in source
+    # A pill that fails to register must not be swallowed as "empty catalogue".
+    assert source.index("updateRegistrations();\n  });") > source.index("      return;\n    }")
+
+
+def test_paseo_pill_catalogue_is_re_read_whatever_the_load_order():
+    """Loaded before the host connection was up, the first catalogue read
+    failed and `subscribe()` relayed no daemon update in the next 15s (it
+    only forwards updates something else asked the daemon to stream), so
+    the pills never appeared. A steady re-read, cleared on cleanup, keeps
+    the catalogue current regardless."""
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "const CATALOGUE_REFRESH_MS = 5000;" in source
+    assert "setInterval(() => { void refreshCatalogue(); }, CATALOGUE_REFRESH_MS)" in source
+    assert "clearInterval(poll);" in source
+
+
+def test_paseo_pill_catalogue_refresh_never_drops_a_subscription_event():
+    """A notification arriving mid-refresh used to be discarded outright,
+    so a just-created agent's Workers/Pipeline pills never appeared."""
+    source = SOURCE.read_text(encoding="utf-8")
+    assert 'import { coalesced } from "./client/coalesce.ts";' in source
+    assert 'const refreshCatalogue = coalesced(async () => {' in source
+    assert 'catalogueInFlight' not in source
+    helper = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "coalesce.ts").read_text(encoding="utf-8")
+    assert 'export function coalesced' in helper
+    assert 'queued = true;' in helper
 
 
 def test_paseo_worker_selection_is_plugin_owned_shared_state():

@@ -69,7 +69,16 @@ def update_engine(engine: str, *, environ: dict[str, str] | None = None) -> str 
             shutil.rmtree(staging, ignore_errors=True)
             return None
         staging.rename(root / latest)
-        for old in sorted(discovery._subdirs(root), key=lambda p: discovery.version_key(p.name))[:-_KEEP]:
+        # A pinned version is never pruned. codex-acp launches only from
+        # a byte-verified, qualified bundle (see ``discovery.is_pinned``),
+        # so deleting it to keep the two newest -- both possibly unqualified
+        # -- would leave the engine permanently unlaunchable rather than
+        # merely not-yet-current. An engine qualified for every version has
+        # nothing pinned and is pruned exactly as before.
+        keep = {path.name for path in sorted(discovery._subdirs(root), key=lambda p: discovery.version_key(p.name))[-_KEEP:]}
+        for old in discovery._subdirs(root):
+            if old.name in keep or discovery.is_pinned(engine, old.name):
+                continue
             shutil.rmtree(old, ignore_errors=True)
         return latest
 

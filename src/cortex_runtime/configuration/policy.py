@@ -90,7 +90,8 @@ COORDINATOR_MODE_FLOOR: Mapping[str, str] = {
 # not merely their own naming -- to always route a genuinely unsafe/
 # destructive action through ``session/request_permission``:
 #
-# - codex-acp 1.12.0 (``dist/index.js`` ``_AgentMode`` table): "agent"
+# - codex-acp 1.12.0 and 1.13.0 (``dist/index.js`` ``_AgentMode`` table,
+#   byte-identical in both qualified bundles): "agent"
 #   ("Approve for me") has ``approvalPolicy: "on-request"`` with
 #   ``approvalsReviewer: "auto_review"`` in the upstream bundle. In a real
 #   Paseo run this reviewer approved an exact `rm -- <sentinel>` internally,

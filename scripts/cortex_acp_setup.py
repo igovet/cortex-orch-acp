@@ -56,7 +56,7 @@ an unrelated one:
    ``record-observation``, this only refreshes the cached catalog snapshot
    a later selection reads from.
 6. ``install-paseo-plugin`` -- validate and install the repository-owned
-   Paseo 0.8 provider plugin through the installed Paseo CLI. This is the
+   Paseo 0.9 provider plugin through the installed Paseo CLI. This is the
    single explicit Cortex-on-Paseo installation command; it is idempotent,
    preserves unrelated daemon configuration/plugins, and verifies the plugin
    reaches ``running``. It never runs implicitly when an ACP session starts.
@@ -122,8 +122,11 @@ def _verify_paseo_plugin_source(plugin_dir=None):
     if not isinstance(manifest, dict) or manifest.get("id") != "cortex-acp":
         raise SystemExit("error: Paseo plugin manifest must declare id 'cortex-acp'.")
     requirements = manifest.get("requirements")
-    if not isinstance(requirements, dict) or not str(requirements.get("paseo", "")).startswith(">=0.8"):
-        raise SystemExit("error: Paseo plugin manifest must require Paseo >=0.8.0.")
+    # The provider now uses host APIs whose shape this project verified
+    # against Paseo 0.9 (agent listing scope/page, composer pills); 0.8 is no
+    # longer the host it is written for.
+    if not isinstance(requirements, dict) or not str(requirements.get("paseo", "")).startswith(">=0.9"):
+        raise SystemExit("error: Paseo plugin manifest must require Paseo >=0.9.0.")
     actual = _paseo_payload_sha256(root)
     if not isinstance(integrity, dict) or integrity.get("payload_sha256") != actual:
         raise SystemExit("error: Paseo plugin source hash does not match its integrity record.")
@@ -136,7 +139,7 @@ def _resolve_paseo_cli(environ=None):
     for candidate in candidates:
         if candidate and (Path(candidate).is_file() or ("/" not in candidate and shutil.which(candidate))):
             return candidate
-    raise SystemExit("error: Paseo 0.8 CLI was not found; set CORTEX_PASEO_CLI.")
+    raise SystemExit("error: Paseo CLI was not found; set CORTEX_PASEO_CLI.")
 
 
 def _ensure_private_directory(path: Path, *, create=False) -> Path:

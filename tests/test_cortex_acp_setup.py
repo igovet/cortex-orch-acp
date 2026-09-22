@@ -59,7 +59,7 @@ def test_install_paseo_plugin_is_idempotent_and_preserves_config(tmp_path, monke
     plugin = tmp_path / "paseo"
     plugin.mkdir()
     (plugin / "paseo-plugin.json").write_text(
-        json.dumps({"id": "cortex-acp", "requirements": {"paseo": ">=0.8.0"}}), encoding="utf-8"
+        json.dumps({"id": "cortex-acp", "requirements": {"paseo": ">=0.9.0"}}), encoding="utf-8"
     )
     digest = setup._paseo_payload_sha256(plugin)
     (plugin / "plugin-integrity.json").write_text(json.dumps({"payload_sha256": digest}), encoding="utf-8")
@@ -187,7 +187,7 @@ def test_install_paseo_plugin_removes_new_launch_record_when_install_fails(tmp_p
     plugin = tmp_path / "paseo"
     plugin.mkdir()
     (plugin / "paseo-plugin.json").write_text(
-        json.dumps({"id": "cortex-acp", "requirements": {"paseo": ">=0.8.0"}}), encoding="utf-8"
+        json.dumps({"id": "cortex-acp", "requirements": {"paseo": ">=0.9.0"}}), encoding="utf-8"
     )
     (plugin / "plugin-integrity.json").write_text(
         json.dumps({"payload_sha256": setup._paseo_payload_sha256(plugin)}), encoding="utf-8"
@@ -259,7 +259,7 @@ def test_install_paseo_plugin_repairs_overly_readable_daemon_config(tmp_path, mo
     plugin = tmp_path / "paseo"
     plugin.mkdir()
     (plugin / "paseo-plugin.json").write_text(
-        json.dumps({"id": "cortex-acp", "requirements": {"paseo": ">=0.8.0"}}), encoding="utf-8"
+        json.dumps({"id": "cortex-acp", "requirements": {"paseo": ">=0.9.0"}}), encoding="utf-8"
     )
     (plugin / "plugin-integrity.json").write_text(
         json.dumps({"payload_sha256": setup._paseo_payload_sha256(plugin)}), encoding="utf-8"

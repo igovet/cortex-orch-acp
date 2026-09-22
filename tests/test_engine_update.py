@@ -7,6 +7,7 @@ import os
 from cortex_runtime.connections import discovery, engine_update
 
 PACKAGE = "@agentclientprotocol/claude-agent-acp"
+CODEX_PACKAGE = "@agentclientprotocol/codex-acp"
 # A fake npm: `view` prints $FAKE_LATEST (or fails when unset, like offline),
 # `install --prefix DIR pkg@ver` writes a minimal package there.
 FAKE_NPM = """#!/usr/bin/env python3
@@ -61,3 +62,53 @@ def test_never_uses_a_client_registry_copy(tmp_path):
     (zed / "dist/index.js").write_text("")
     (zed / "package.json").write_text(json.dumps({"version": "0.78.0", "bin": {"x": "dist/index.js"}}))
     assert discovery.discover_engine("claude-agent-acp", environ=_environ(tmp_path)) is None
+
+
+def _install_codex(tmp_path, version):
+    root = discovery.owned_root(_environ(tmp_path)) / "codex-acp"
+    package = root / version / "node_modules" / CODEX_PACKAGE
+    (package / "dist").mkdir(parents=True)
+    (package / "dist" / "index.js").write_text("// adapter\n")
+    (package / "package.json").write_text(
+        json.dumps({"version": version, "bin": {"codex-acp": "dist/index.js"}}))
+    return root
+
+
+def test_a_qualified_codex_adapter_wins_over_a_newer_unqualified_one(tmp_path):
+    """Preferring the newest install took Codex offline entirely: only a
+    version whose exact bundle shape has been verified passes the
+    manual-review patch and the instruction-delivery registration, so
+    launching an unqualified one failed closed with
+    codex_manual_review_adapter_unsupported (live, 2026-09-22)."""
+    _install_codex(tmp_path, "1.13.0")
+    _install_codex(tmp_path, "1.14.0")
+    found = discovery.discover_engine("codex-acp", environ=_environ(tmp_path))
+    assert found.version == "1.13.0"
+    # The newest *qualified* version wins among qualified ones.
+    _install_codex(tmp_path, "1.12.0")
+    assert discovery.discover_engine("codex-acp", environ=_environ(tmp_path)).version == "1.13.0"
+    # claude-agent-acp qualifies every version, so it still tracks newest.
+    assert discovery.is_qualified("claude-agent-acp", "0.99.0")
+    assert not discovery.is_qualified("codex-acp", "1.14.0")
+
+
+def test_the_newest_install_is_still_reported_when_none_is_qualified(tmp_path):
+    """Naming the real unqualified version in the launch refusal beats
+    reporting the engine as absent."""
+    _install_codex(tmp_path, "1.14.0")
+    _install_codex(tmp_path, "1.15.0")
+    assert discovery.discover_engine("codex-acp", environ=_environ(tmp_path)).version == "1.15.0"
+
+
+def test_pruning_never_deletes_a_qualified_codex_adapter(tmp_path):
+    """Keeping only the two newest would delete every version Cortex can
+    actually launch, leaving the engine permanently unlaunchable."""
+    for version in ("1.12.0", "1.13.0", "1.14.0", "1.15.0"):
+        _install_codex(tmp_path, version)
+    env = _environ(tmp_path, "1.16.0")
+    assert engine_update.update_engine("codex-acp", environ=env) == "1.16.0"
+    root = discovery.owned_root(_environ(tmp_path)) / "codex-acp"
+    # The two newest (1.15.0, 1.16.0) are kept as usual, and both qualified
+    # versions survive on top of that; only unqualified 1.14.0 is pruned.
+    assert sorted(p.name for p in discovery._subdirs(root)) == ["1.12.0", "1.13.0", "1.15.0", "1.16.0"]
+    assert discovery.discover_engine("codex-acp", environ=_environ(tmp_path)).version == "1.13.0"

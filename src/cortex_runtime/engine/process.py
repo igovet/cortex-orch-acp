@@ -362,6 +362,24 @@ _CODEX_HISTORY_CASE_BLOCK_PATCHED = _CODEX_HISTORY_CASE_BLOCK_SOURCE.replace(
 )
 
 
+# The adapter versions whose exact bundle shape this patch was verified
+# against. 1.13.0 differs from 1.12.0 at exactly one patched call site --
+# ``runTurn``'s input argument was renamed (``input`` -> ``input: input2``)
+# -- and is byte-identical at every other call site checked below; the
+# variant is derived from the 1.12.0 literal rather than duplicated, so the
+# two can never drift apart silently. Every other version-keyed
+# registration for this engine (instruction delivery, compaction tier) must
+# name a version before it may appear here.
+_CODEX_SEND_PROMPT_1_13_RENAME = (b"      input,\n", b"      input: input2,\n")
+_CODEX_SEND_PROMPT_BY_VERSION = {
+    "1.12.0": (_CODEX_SEND_PROMPT_SOURCE, _CODEX_SEND_PROMPT_PATCHED),
+    "1.13.0": (
+        _CODEX_SEND_PROMPT_SOURCE.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
+        _CODEX_SEND_PROMPT_PATCHED.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
+    ),
+}
+
+
 def _private_verified_file(path: Path, content: bytes, *, mode: int = 0o600) -> None:
     if path.is_symlink():
         raise _validation_error("codex_manual_review_adapter_drifted", "The private adapter file is a symlink.")
@@ -383,6 +401,20 @@ def _private_verified_file(path: Path, content: bytes, *, mode: int = 0o600) -> 
         )
 
 
+def _resolved(path: Path) -> Path | None:
+    try:
+        return path.resolve()
+    except OSError:
+        return None
+
+
+def _symlink_target(link: Path) -> Path | None:
+    """The link's resolved target, or ``None`` when it cannot be resolved
+    (a broken or cyclic link) -- never raises, so a stale link is always
+    comparable against the verified install's own tree."""
+    return _resolved(link)
+
+
 def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=None) -> str:
     """Return a private adapter whose agent reviewer is the user, never auto_review.
 
@@ -390,8 +422,14 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
     source shape, version, or copy fails before engine launch. The production
     package and native account remain untouched.
     """
-    if install.package_version != "1.12.0":
-        raise _validation_error("codex_manual_review_adapter_unsupported", "Only the verified codex-acp 1.12.0 adapter is supported.")
+    send_prompt = _CODEX_SEND_PROMPT_BY_VERSION.get(install.package_version)
+    if send_prompt is None:
+        raise _validation_error(
+            "codex_manual_review_adapter_unsupported",
+            "Only a verified codex-acp adapter is supported: "
+            + ", ".join(sorted(_CODEX_SEND_PROMPT_BY_VERSION)) + ".",
+        )
+    send_prompt_source, send_prompt_patched = send_prompt
     package_dir = Path(install.package_json).parent
     if (
         Path(install.adapter_entry) != package_dir / "dist" / "index.js"
@@ -408,7 +446,7 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
         or source.count(_CODEX_SESSION_CONFIG_SOURCE) != 1
         or source.count(_CODEX_MCP_DEDUP_SOURCE) != 1
         or source.count(_CODEX_MCP_ENTRY_SOURCE) != 1
-        or source.count(_CODEX_SEND_PROMPT_SOURCE) != 1
+        or source.count(send_prompt_source) != 1
         or source.count(_CODEX_UPDATE_EVENT_SOURCE) != 1
         or source.count(_CODEX_RAW_RESPONSE_CASE_SOURCE) != 1
         or source.count(_CODEX_TURN_STARTED_SOURCE) != 1
@@ -427,7 +465,7 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
     patched = patched.replace(_CODEX_SESSION_CONFIG_SOURCE, _CODEX_SESSION_CONFIG_PATCHED, 1)
     patched = patched.replace(_CODEX_MCP_DEDUP_SOURCE, _CODEX_MCP_DEDUP_PATCHED, 1)
     patched = patched.replace(_CODEX_MCP_ENTRY_SOURCE, _CODEX_MCP_ENTRY_PATCHED, 1)
-    patched = patched.replace(_CODEX_SEND_PROMPT_SOURCE, _CODEX_SEND_PROMPT_PATCHED, 1)
+    patched = patched.replace(send_prompt_source, send_prompt_patched, 1)
     patched = patched.replace(_CODEX_FUNCTION_CALL_SOURCE, _CODEX_CUSTOM_TOOL_HELPERS_INSERT + _CODEX_FUNCTION_CALL_SOURCE, 1)
     patched = patched.replace(_CODEX_UPDATE_EVENT_SOURCE, _CODEX_RAW_RESPONSE_METHOD_INSERT + _CODEX_UPDATE_EVENT_SOURCE, 1)
     patched = patched.replace(_CODEX_RAW_RESPONSE_CASE_SOURCE, _CODEX_RAW_RESPONSE_CASE_PATCHED, 1)
@@ -452,6 +490,16 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
     # already verified install's node_modules tree without copying credentials.
     original_modules = package_dir.parents[1]
     private_modules = private_package / "node_modules"
+    if private_modules.is_symlink() and _symlink_target(private_modules) != _resolved(original_modules):
+        # A link left by an earlier install is repointed at the install
+        # that just passed verification above, never treated as drift: it
+        # names a tree this connection no longer launches from, and
+        # refusing instead of repointing wedged the engine permanently.
+        # Live (2026-09-22): this link still named the editor's own
+        # registry copy from before Cortex ran its own installs, so every
+        # Codex session and every model-catalog refresh failed closed with
+        # ``codex_manual_review_adapter_drifted``.
+        private_modules.unlink()
     if not private_modules.exists() and not private_modules.is_symlink():
         private_modules.symlink_to(original_modules, target_is_directory=True)
     if not private_modules.is_symlink() or private_modules.resolve() != original_modules.resolve():

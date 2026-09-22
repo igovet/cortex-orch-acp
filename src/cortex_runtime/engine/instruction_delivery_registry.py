@@ -17,9 +17,9 @@ from ..portable.roles import RoleInstructionSet
 
 
 @dataclass(frozen=True)
-class CodexAcp1_12Delivery:
-    """The pinned, private codex-acp 1.12.0 adapter delivers Cortex role
-    text through ``session/new _meta.systemPrompt`` to Codex App Server
+class CodexAcpDelivery:
+    """A verified, private codex-acp adapter delivers Cortex role text
+    through ``session/new _meta.systemPrompt`` to Codex App Server
     ``thread/start.developerInstructions``. Its exact-source-checked copy
     preserves effective native developer instructions before the Cortex text.
 
@@ -32,6 +32,16 @@ class CodexAcp1_12Delivery:
     replacements each get their own ``thread/start``. The behavior of native
     developer instructions after Codex internal compaction has not yet been
     observed in a real client and remains unverified.
+
+    Registered for 1.12.0 and 1.13.0. Both are verified against the same
+    delivery mechanism: the ``session/new``/``thread/start`` call sites the
+    private adapter patch rewrites are byte-identical in the two bundles
+    (see ``engine.process._CODEX_SEND_PROMPT_BY_VERSION``, whose only
+    version difference is an unrelated ``runTurn`` argument rename), and
+    the no-paid installed-bundle trace in
+    ``tests/test_codex_developer_instructions.py`` was run against each
+    bundle. 1.13.0 bundles Codex CLI 0.155.1 rather than 0.154.0, which is
+    what makes that CLI's newer models reachable at all.
     """
 
     engine: str = "codex-acp"
@@ -178,7 +188,8 @@ class ClaudeAgentAcpUnrecognizedVersionDelivery:
 # version of a known engine resolves to UnsupportedDelivery -- never a
 # guessed/interpolated qualification.
 _REGISTRY: dict[tuple[str, str], InstructionDelivery] = {
-    ("codex-acp", "1.12.0"): CodexAcp1_12Delivery(),
+    ("codex-acp", "1.12.0"): CodexAcpDelivery(version="1.12.0"),
+    ("codex-acp", "1.13.0"): CodexAcpDelivery(version="1.13.0"),
     ("claude-agent-acp", "0.78.0"): ClaudeAgentAcp0_78Delivery(),
     ("claude-agent-acp", "*"): ClaudeAgentAcpUnrecognizedVersionDelivery(),
 }

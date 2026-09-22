@@ -1,7 +1,7 @@
 """No-paid wire trace through the installed codex-acp bundle and fake App Server.
 
-Set CORTEX_CODEX_ACP_TEST_PACKAGE to an existing, operator-inspected 1.12.0
-package directory to run the real-bundle test; ordinary CI is independent of
+Set CORTEX_CODEX_ACP_TEST_PACKAGE to an existing, operator-inspected package
+directory for any qualified adapter version to run the real-bundle test; ordinary CI is independent of
 an external npm install. The fake Codex process never starts a model turn.
 """
 from __future__ import annotations
@@ -20,9 +20,10 @@ import pytest
 
 from cortex_runtime.engine.process import (
     _CODEX_AGENT_REVIEWER_MANUAL, _CODEX_NEW_SESSION_PATCHED, _CODEX_SESSION_CONFIG_PATCHED,
-    _CODEX_SEND_PROMPT_PATCHED,
+    _CODEX_SEND_PROMPT_BY_VERSION,
     _prepare_codex_manual_review_adapter,
 )
+from cortex_runtime.connections.discovery import QUALIFIED_ADAPTER_VERSIONS
 from cortex_runtime.engine.instruction_delivery_registry import delivery_for
 from cortex_runtime.portable.instruction_bundle import InstructionBundleLedger, capture_instruction_bundle
 from cortex_runtime.portable.roles import load_role
@@ -162,11 +163,14 @@ def test_installed_adapter_keeps_explicit_mcp_on_disabled_native_name(tmp_path):
     if not package_text:
         pytest.skip("set CORTEX_CODEX_ACP_TEST_PACKAGE to run the real-bundle no-paid trace")
     package = Path(package_text).resolve()
+    version = json.loads((package / "package.json").read_text())["version"]
+    assert version in QUALIFIED_ADAPTER_VERSIONS["codex-acp"], version
     original = package / "dist" / "index.js"
     source = original.read_bytes()
-    assert json.loads((package / "package.json").read_text())["version"] == "1.12.0"
+    version = json.loads((package / "package.json").read_text())["version"]
+    assert version in QUALIFIED_ADAPTER_VERSIONS["codex-acp"], version
     install = SimpleNamespace(
-        package_version="1.12.0", adapter_entry=str(original),
+        package_version=version, adapter_entry=str(original),
         package_json=str(package / "package.json"),
         adapter_entry_sha256=hashlib.sha256(source).hexdigest(),
     )
@@ -231,11 +235,14 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
     if not package_text:
         pytest.skip("set CORTEX_CODEX_ACP_TEST_PACKAGE to run the real-bundle no-paid trace")
     package = Path(package_text).resolve()
+    version = json.loads((package / "package.json").read_text())["version"]
+    assert version in QUALIFIED_ADAPTER_VERSIONS["codex-acp"], version
     original = package / "dist" / "index.js"
     source = original.read_bytes()
-    assert json.loads((package / "package.json").read_text())["version"] == "1.12.0"
+    version = json.loads((package / "package.json").read_text())["version"]
+    assert version in QUALIFIED_ADAPTER_VERSIONS["codex-acp"], version
     install = SimpleNamespace(
-        package_version="1.12.0", adapter_entry=str(original), package_json=str(package / "package.json"),
+        package_version=version, adapter_entry=str(original), package_json=str(package / "package.json"),
         adapter_entry_sha256=hashlib.sha256(source).hexdigest(),
     )
     environ = isolated_environ(tmp_path)
@@ -244,7 +251,7 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
     assert _CODEX_NEW_SESSION_PATCHED in copied.read_bytes()
     assert _CODEX_SESSION_CONFIG_PATCHED in copied.read_bytes()
     adapter_text = copied.read_bytes()
-    assert _CODEX_SEND_PROMPT_PATCHED in adapter_text
+    assert _CODEX_SEND_PROMPT_BY_VERSION[version][1] in adapter_text
     assert b'sandboxPolicy: { type: "dangerFullAccess" }' in adapter_text
     assert b'approvalPolicy: "untrusted"' in adapter_text
     assert original.read_bytes() == source
@@ -336,11 +343,12 @@ def test_installed_private_adapter_forwards_raw_custom_exec_tool_with_exact_call
     if not package_text:
         pytest.skip("set CORTEX_CODEX_ACP_TEST_PACKAGE to run the real-bundle no-paid trace")
     package = Path(package_text).resolve()
+    version = json.loads((package / "package.json").read_text())["version"]
+    assert version in QUALIFIED_ADAPTER_VERSIONS["codex-acp"], version
     original = package / "dist" / "index.js"
     source = original.read_bytes()
-    assert json.loads((package / "package.json").read_text())['version'] == '1.12.0'
     install = SimpleNamespace(
-        package_version="1.12.0", adapter_entry=str(original), package_json=str(package / "package.json"),
+        package_version=version, adapter_entry=str(original), package_json=str(package / "package.json"),
         adapter_entry_sha256=hashlib.sha256(source).hexdigest(),
     )
     environ = isolated_environ(tmp_path)
@@ -397,10 +405,12 @@ def test_installed_private_adapter_forwards_item_custom_exec_tool_with_exact_cal
     if not package_text:
         pytest.skip("set CORTEX_CODEX_ACP_TEST_PACKAGE to run the real-bundle no-paid trace")
     package = Path(package_text).resolve()
+    version = json.loads((package / "package.json").read_text())["version"]
+    assert version in QUALIFIED_ADAPTER_VERSIONS["codex-acp"], version
     original = package / "dist" / "index.js"
     source = original.read_bytes()
     install = SimpleNamespace(
-        package_version="1.12.0", adapter_entry=str(original), package_json=str(package / "package.json"),
+        package_version=version, adapter_entry=str(original), package_json=str(package / "package.json"),
         adapter_entry_sha256=hashlib.sha256(source).hexdigest(),
     )
     environ = isolated_environ(tmp_path)
@@ -455,10 +465,12 @@ def test_installed_private_adapter_deduplicates_raw_and_item_custom_exec_updates
     if not package_text:
         pytest.skip("set CORTEX_CODEX_ACP_TEST_PACKAGE to run the real-bundle no-paid trace")
     package = Path(package_text).resolve()
+    version = json.loads((package / "package.json").read_text())["version"]
+    assert version in QUALIFIED_ADAPTER_VERSIONS["codex-acp"], version
     original = package / "dist" / "index.js"
     source = original.read_bytes()
     install = SimpleNamespace(
-        package_version="1.12.0", adapter_entry=str(original), package_json=str(package / "package.json"),
+        package_version=version, adapter_entry=str(original), package_json=str(package / "package.json"),
         adapter_entry_sha256=hashlib.sha256(source).hexdigest(),
     )
     environ = isolated_environ(tmp_path)
@@ -504,9 +516,11 @@ def test_installed_private_adapter_preserves_custom_tool_lifecycle_order_and_ric
     if not package_text:
         pytest.skip("set CORTEX_CODEX_ACP_TEST_PACKAGE to run the real-bundle no-paid trace")
     package = Path(package_text).resolve()
+    version = json.loads((package / "package.json").read_text())["version"]
+    assert version in QUALIFIED_ADAPTER_VERSIONS["codex-acp"], version
     original = package / "dist" / "index.js"
     source = original.read_bytes()
-    install = SimpleNamespace(package_version="1.12.0", adapter_entry=str(original), package_json=str(package / "package.json"),
+    install = SimpleNamespace(package_version=version, adapter_entry=str(original), package_json=str(package / "package.json"),
                               adapter_entry_sha256=hashlib.sha256(source).hexdigest())
     environ = isolated_environ(tmp_path)
     copied = Path(_prepare_codex_manual_review_adapter(install, new_connection_id(), environ))
@@ -553,9 +567,11 @@ def test_installed_private_adapter_resets_custom_tool_ids_each_turn(tmp_path):
     if not package_text:
         pytest.skip("set CORTEX_CODEX_ACP_TEST_PACKAGE to run the real-bundle no-paid trace")
     package = Path(package_text).resolve()
+    version = json.loads((package / "package.json").read_text())["version"]
+    assert version in QUALIFIED_ADAPTER_VERSIONS["codex-acp"], version
     original = package / "dist" / "index.js"
     source = original.read_bytes()
-    install = SimpleNamespace(package_version="1.12.0", adapter_entry=str(original), package_json=str(package / "package.json"),
+    install = SimpleNamespace(package_version=version, adapter_entry=str(original), package_json=str(package / "package.json"),
                               adapter_entry_sha256=hashlib.sha256(source).hexdigest())
     environ = isolated_environ(tmp_path)
     copied = Path(_prepare_codex_manual_review_adapter(install, new_connection_id(), environ))

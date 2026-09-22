@@ -132,8 +132,19 @@ _AUTOMATIC_LIMITATION = (
 # ``delegation.live_adapters.ConfigurationServiceSnapshotSource``, which
 # has no real installed-version discovery wired in yet) still gets the
 # correct evidenced tier instead of an artificial downgrade.
+# codex-acp 1.13.0 keeps the same `automatic` tier on its own dist evidence:
+# `createCompletedContextCompactionUpdate` still carries
+# `_meta: CONTEXT_COMPACTION_META`, which is the whole signal
+# `engine.session_manager` detects. One verified difference, stated rather
+# than glossed: 1.13.0 gates the *in_progress* start update behind
+# `clientSupportsCompaction(capabilities) = capabilities?.session?.compaction
+# != null`, and Cortex advertises no such capability (see
+# `delegation.live_adapters._requested_capabilities`), so Cortex observes only
+# the completed signal, never the start/complete pair 1.12.0 sends. The tier
+# and its detection are unaffected; the start-phase COMPACTION_SIGNAL is not.
 _TIER_REGISTRY: dict[tuple[str, str], CompactionTier] = {
     ("codex-acp", "1.12.0"): CompactionTier("codex-acp", "1.12.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
+    ("codex-acp", "1.13.0"): CompactionTier("codex-acp", "1.13.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("claude-agent-acp", "0.78.0"): CompactionTier("claude-agent-acp", "0.78.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("claude-agent-acp", "0.77.0"): CompactionTier("claude-agent-acp", "0.77.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("claude-agent-acp", "*"): CompactionTier("claude-agent-acp", "*", AUTOMATIC, _AUTOMATIC_LIMITATION),

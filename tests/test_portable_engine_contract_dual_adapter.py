@@ -156,7 +156,7 @@ def test_generations_tier_and_instruction_delivery_qualification_are_this_engine
     via distinct evidence: claude-agent-acp's own session/new channel is
     QUALIFIED via T026's static dist evidence (a confirmed system-role
     channel), while codex-acp's own leading-block channel is QUALIFIED via
-    T035's live-run evidence (see ``CodexAcp1_12Delivery``'s own
+    T035's live-run evidence (see ``CodexAcpDelivery``'s own
     docstring) -- neither one's qualification is inferred from the
     other's."""
     tier = delegation_generations.tier_for(fixture.engine, fixture.version)

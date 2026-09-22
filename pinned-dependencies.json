@@ -1,6 +1,9 @@
 {
   "schema_version": 1,
-  "python_version_floor": [3, 11],
+  "python_version_floor": [
+    3,
+    11
+  ],
   "portable_contract_version": 1,
   "acp_schema_fixture": {
     "path": "tests/fixtures/acp/schema-1.4.0.json",
@@ -9,10 +12,13 @@
   },
   "engines": {
     "codex-acp": {
-      "pinned_package_version": "1.12.0",
+      "pinned_package_version": "1.13.0",
       "bundled_dependency": "@openai/codex",
-      "bundled_dependency_version": "0.154.0",
-      "install_record_note": "No project-owned install exists yet; an operator-recorded cortex_runtime.engine.codex_install.CodexAcpInstall (digests re-verified by verify_install) is the only trusted source of a launchable path -- see docs/acp/codex-acp-adapter.md."
+      "bundled_dependency_version": "0.155.1",
+      "install_record_note": "Qualified versions are listed in cortex_runtime.connections.discovery.QUALIFIED_ADAPTER_VERSIONS; discovery selects the newest qualified install and connections.engine_update never prunes one. An operator-recorded cortex_runtime.engine.codex_install.CodexAcpInstall (digests re-verified by verify_install) remains the only trusted source of a launchable path -- see docs/acp/codex-acp-adapter.md.",
+      "also_qualified_package_versions": [
+        "1.12.0"
+      ]
     },
     "claude-agent-acp": {
       "pinned_package_version": "0.78.0",

@@ -20,6 +20,47 @@ Nothing here claims a main-branch/newer-release capability (see
 `ADR-001b`'s own version-drift note: the lead cited 1.11.0; the actually
 pinned/verified copy reports 1.12.0).
 
+That pin is enforced at engine selection, not only at launch.
+`connections.discovery.QUALIFIED_ADAPTER_VERSIONS` names the qualified
+codex-acp versions; `discovery.discover_engine` prefers a qualified install
+over a newer unqualified one, and `connections.engine_update` never prunes a
+pinned version. Before this, `connections.engine_update`'s background
+install of 1.13.0 made discovery repoint the connection at it, and every
+Codex session and every catalog refresh then failed closed with
+`codex_manual_review_adapter_unsupported` — Codex was entirely unavailable
+and no new model could reach the catalogue (live, 2026-09-22).
+
+Qualified versions: **1.12.0** and **1.13.0**. What was verified for 1.13.0,
+against the installed bundle rather than assumed:
+
+- All 15 patched call sites match; exactly one differs from 1.12.0
+  (`_CODEX_SEND_PROMPT_SOURCE`: `runTurn`'s `input` became `input: input2`),
+  and that variant is derived from the 1.12.0 literal in
+  `engine.process._CODEX_SEND_PROMPT_BY_VERSION` so the two cannot drift
+  apart silently.
+- The `_AgentMode` table, the `CODEX_PATH app-server` invocation and the
+  `session/new` → `thread/start.developerInstructions` delivery call sites
+  are byte-identical in both bundles.
+- `tests/test_codex_developer_instructions.py`'s no-paid installed-bundle
+  trace (fake App Server, no model turn) passes against each bundle:
+  `CORTEX_CODEX_ACP_TEST_PACKAGE=<engines>/codex-acp/<version>/node_modules/@agentclientprotocol/codex-acp`,
+  12 passed for 1.12.0 and for 1.13.0 (2026-09-22).
+- Compaction stays `automatic`: `createCompletedContextCompactionUpdate`
+  still carries `_meta: CONTEXT_COMPACTION_META`, the signal
+  `engine.session_manager` detects. One real difference, recorded rather
+  than glossed: 1.13.0 gates the *in_progress* start update behind
+  `clientSupportsCompaction(capabilities) = capabilities?.session?.compaction
+  != null`, and Cortex advertises no such capability, so Cortex sees only the
+  completed signal where 1.12.0 sent a start/complete pair.
+
+1.13.0 bundles Codex CLI 0.155.1 instead of 0.154.0, which is what makes that
+CLI's `gpt-6-sol` / `gpt-6-luna` models reachable: `catalog.discovery` only
+records models a live adapter session actually advertised.
+
+Still unverified for both versions, as before: the behaviour of native
+developer instructions after Codex internal compaction has never been
+observed in a real client.
+
 ## Current runtime gateway policy
 
 The verified private codex-acp 1.12.0 copy and Codex CLI 0.154.0/0.155.1 wrapper disable

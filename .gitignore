@@ -16,3 +16,7 @@ docs/implementation
 
 .playwright-cli/
 .playwright-mcp/
+
+# Paseo plugin development dependencies (typecheck only; Paseo provides every
+# runtime module itself). Reproduce with `npm ci` from package-lock.json.
+integrations/paseo/node_modules/

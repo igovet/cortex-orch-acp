@@ -61,7 +61,36 @@ _PINNED_ENGINE_VERSION: dict[str, str] = {
 }
 
 
-def _pinned_version_for(engine: str) -> str:
+def _installed_version_for(record) -> str | None:
+    """The adapter version actually installed at ``record``'s own launch
+    command, read from that package's own ``package.json`` (the same
+    declaration ``connections.discovery`` selects installs by). ``None``
+    when there is no install-shaped launch command to read -- a test
+    double, or a record configured some other way."""
+    command = getattr(record, "launch_command", None) or ()
+    if len(command) != 2 or not isinstance(command[1], str):
+        return None
+    from ..connections.discovery import _declared_bin
+
+    declared = _declared_bin(Path(command[1]).parent.parent / "package.json")
+    return declared[0] if declared else None
+
+
+def _pinned_version_for(engine: str, record=None) -> str:
+    """The version ``delivery_for``/``tier_for`` are looked up by.
+
+    Prefers the version this connection will really launch, so a receipt
+    never names a registration other than the one that actually runs --
+    Cortex can now have more than one qualified adapter version installed
+    (see ``connections.discovery.QUALIFIED_ADAPTER_VERSIONS``). An
+    unregistered installed version resolves to no qualified delivery and
+    is refused, which is the point: it is never silently treated as the
+    pinned one.
+    """
+    if record is not None:
+        installed = _installed_version_for(record)
+        if installed:
+            return installed
     return _PINNED_ENGINE_VERSION.get(engine, "*")
 
 
@@ -817,7 +846,7 @@ class EngineSessionManagerAdapter:
             # Both pinned adapters now receive their qualified session/new
             # metadata. Codex also receives its tagged generation prompt.
             session_new_meta = _session_new_meta_for(
-                record.engine, _pinned_version_for(record.engine), instructions, role=recipient,
+                record.engine, _pinned_version_for(record.engine, record), instructions, role=recipient,
                 project_root=workspace_root, effort=_sdk_effort_for(record, launch),
             )
             session_id = manager.create_session(
@@ -1573,7 +1602,7 @@ class EngineSessionManagerAdapter:
         # (see ``delegation.generations.tier_for``'s own fallback -- an
         # engine with no wildcard evidence still correctly falls to
         # ``controlled_boundary``/``unqualified``, never a guessed tier).
-        version = _pinned_version_for(record.engine)
+        version = _pinned_version_for(record.engine, record)
         tier = delegation_generations.ensure_owner(
             self._store, task_id=task_id, engine_session_ref=session_id, engine=record.engine, version=version,
         )

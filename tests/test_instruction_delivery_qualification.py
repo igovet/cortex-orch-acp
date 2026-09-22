@@ -22,7 +22,7 @@ Further updated by T035 (2026-09-18): a live paid run against
 ``gpt-5.6-luna`` behind codex-acp 1.12.0 (see
 ``.cortex/acp-migration/evidence/T035/
 RUN-03-codex-luna-tagged-instructions.md`` and
-``engine.instruction_delivery_registry.CodexAcp1_12Delivery``'s own
+``engine.instruction_delivery_registry.CodexAcpDelivery``'s own
 docstring for the full evidence) promoted codex-acp 1.12.0's tagged
 leading-block channel from UNQUALIFIED to QUALIFIED. Tests below that
 previously asserted UNQUALIFIED for ``("codex-acp", "1.12.0")`` are
@@ -149,7 +149,7 @@ def test_qualify_delivery_admits_qualified_codex_acp_for_critical_role():
     """A codex-acp critical-rules role is no longer refused by default at
     the pinned 1.12.0 version -- T035 promoted this channel to QUALIFIED,
     so it needs no escape hatch at all any more (see
-    ``CodexAcp1_12Delivery``'s own docstring for the live evidence)."""
+    ``CodexAcpDelivery``'s own docstring for the live evidence)."""
     role = roles.load_role("worker-backend-dev")
     assert role.critical_rules
     plan = qualify_delivery(role, delivery_for("codex-acp", "1.12.0"), [])

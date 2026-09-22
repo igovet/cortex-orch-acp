@@ -12,6 +12,29 @@ integration; and explicit revision continuation. Instruction and context packets
 record their sources and actual delivery, including session replacement. Report
 publication remains separate from worker completion and coordinator decision.
 
+A worker that learned a context-window size for the first time in a process
+deadlocked the whole runtime on the non-reentrant runtime lock: the controller
+loop stopped observing state (so a question a worker had asked was never shown)
+and the ACP reader stopped handling any client message, freezing the turn with
+nothing displayed.
+
+codex-acp 1.13.0 is qualified alongside 1.12.0, so Cortex now runs the adapter
+that bundles Codex CLI 0.155.1 and its newer models (`gpt-6-sol`,
+`gpt-6-luna`) reach the model catalogue. An engine version is resolved from
+the install a connection will really launch rather than from a fixed constant.
+
+Cortex launches only the codex-acp adapter version it has qualified: engine
+discovery prefers a qualified install over a newer one, the background engine
+update never prunes a pinned version, and a private adapter copy left pointing
+at an earlier install is repointed instead of refused. Without this, the
+background install of codex-acp 1.13.0 made every Codex session and every
+model-catalog refresh fail closed, so Codex was unavailable and no newly
+published engine model could reach the catalogue.
+
+The Paseo plugin no longer drops a workspace/agent notification that arrives
+while it is already refreshing its catalogue, which could leave a just-created
+session without its Workers and Pipeline composer pills.
+
 The retired Codex plugin, gateway, native-subagent observer, capability manifest,
 old hook storage and phase evaluation harnesses are removed from the active
 package, tests and documentation. All 23 profiles and eight report templates

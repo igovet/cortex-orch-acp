@@ -159,7 +159,14 @@ Cortex runs its own copies of `codex-acp` and `claude-agent-acp` from
 copy (e.g. Zed's agent registry) is never used. At each startup Cortex asks
 npm in the background for newer versions and installs one beside the current
 copy; it is used from the next session on, and one previous version is kept.
-Offline, or on any npm failure, the current version simply stays. The very
+Offline, or on any npm failure, the current version simply stays. `codex-acp`
+is the exception: Cortex launches only an adapter version it has qualified
+(currently **1.12.0** and **1.13.0** — it patches those bundles' exact bytes
+and knows their instruction-delivery channel), picking the newest qualified
+one. A newer, not-yet-qualified install sits unused, and a qualified one is
+never pruned away. Worth knowing: each adapter version bundles its own Codex
+CLI, so models only a newer CLI knows about appear once that adapter version
+is qualified. The very
 first start has no copy yet, so the engines become usable from the session
 after that first install (a few seconds with a network). This needs `npm`
 beside the `node` Cortex launches engines with, or on `PATH`.

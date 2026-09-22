@@ -5,12 +5,13 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test:diff": "node --experimental-strip-types client/worker-panel-diff.test.ts",
-    "test:status": "node --experimental-strip-types client/worker-panel-status.test.ts"
+    "test:status": "node --experimental-strip-types client/worker-panel-status.test.ts",
+    "test:coalesce": "node --experimental-strip-types client/coalesce.test.ts"
   },
   "devDependencies": {
-    "@getpaseo/plugin": "0.8.0",
-    "@getpaseo/client": "0.8.0",
-    "@getpaseo/protocol": "0.8.0",
+    "@getpaseo/client": "^0.9.1",
+    "@getpaseo/plugin": "^0.9.1",
+    "@getpaseo/protocol": "^0.9.1",
     "@types/node": "^20.9.0",
     "@types/react": "~19.2.0",
     "react": "19.1.0",

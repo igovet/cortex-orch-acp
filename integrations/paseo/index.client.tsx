@@ -10,6 +10,7 @@ import { selectWorker } from "./client/worker-selection.js";
 import { WorkerPopover } from "./client/worker-popover.js";
 import { isWorkerTimelineRunning } from "./client/worker-timeline-status.js";
 import { workerCardMetadata } from "./client/worker-display.ts";
+import { coalesced } from "./client/coalesce.ts";
 import { UsageMeter, useWorkerUsage } from "./client/usage-meter.tsx";
 
 const workerTimelineSchema = z.object({
@@ -24,6 +25,8 @@ const workerTimelineSchema = z.object({
 });
 
 const CORTEX_PROVIDER = "cortex";
+// How often the Workers/Pipeline pill catalogue is re-read (see its poll).
+const CATALOGUE_REFRESH_MS = 5000;
 
 type WorkerTimelineData = z.output<typeof workerTimelineSchema>;
 
@@ -171,7 +174,6 @@ export default function contribute(client: PluginClientContext) {
   });
   let active = true;
   type Candidate = { workspace: { id: string }; agent: { id: string; status: string } };
-  let catalogueInFlight = false;
   const candidates = new Map<string, Candidate>();
   const registrations = new Map<string, { remove(): void }>();
   const updateRegistrations = () => {
@@ -234,36 +236,63 @@ export default function contribute(client: PluginClientContext) {
       registrations.set(agentId, { remove() { workers.remove(); pipeline.remove(); } });
     }
   };
-  const refreshCatalogue = async () => {
-    if (!active || catalogueInFlight) return;
-    catalogueInFlight = true;
+  // Coalesced, never dropped: creating an agent fires several
+  // subscription events inside the window one refresh (a workspace list
+  // plus the agent list) takes, and ignoring those lost the only
+  // notification carrying the new agent -- its Workers and Pipeline
+  // composer pills then never appeared for that session at all.
+  const refreshCatalogue = coalesced(async () => {
+    if (!active) return;
+    let next: Map<string, Candidate>;
     try {
       const listed = await client.paseo.workspaces.list();
-      const next = new Map<string, Candidate>();
-      await Promise.all(listed.entries.map(async (workspace) => {
-        const result = await client.paseo.agents.list({ filter: { projectKeys: [workspace.projectId] } });
+      const workspaces = new Map(listed.entries.map((workspace) => [workspace.id, workspace] as const));
+      next = new Map<string, Candidate>();
+      // One listing of every active agent, matched to its own workspace:
+      // one request instead of one per workspace, and no dependence on how
+      // the daemon resolves `filter.projectKeys` against a `projectId`.
+      let cursor: string | undefined;
+      for (let page = 0; page < 20; page += 1) {
+        const result = await client.paseo.agents.list({
+          scope: "active",
+          page: { limit: 200, ...(cursor ? { cursor } : {}) },
+        });
         for (const entry of result.entries) {
+          // An agent without a workspace has no composer to hold a pill.
+          const workspace = entry.agent.workspaceId ? workspaces.get(entry.agent.workspaceId) : undefined;
           // Workers and Pipeline read a Cortex task; other providers have none.
-          if (entry.agent.workspaceId === workspace.id && entry.agent.status !== "closed" && entry.agent.provider === CORTEX_PROVIDER) {
-            next.set(entry.agent.id, { workspace, agent: entry.agent });
-          }
+          if (!workspace || entry.agent.status === "closed" || entry.agent.provider !== CORTEX_PROVIDER) continue;
+          next.set(entry.agent.id, { workspace, agent: entry.agent });
         }
-      }));
-      candidates.clear();
-      for (const [agentId, candidate] of next) candidates.set(agentId, candidate);
-      updateRegistrations();
+        if (!result.pageInfo.hasMore || !result.pageInfo.nextCursor) break;
+        cursor = result.pageInfo.nextCursor;
+      }
     } catch {
       // Keep the last known catalogue; a transient host read must not remove
       // a valid Workers pill from the current session.
-    } finally {
-      catalogueInFlight = false;
+      return;
     }
-  };
+    candidates.clear();
+    for (const [agentId, candidate] of next) candidates.set(agentId, candidate);
+    // Deliberately outside the catch above: a pill that fails to register
+    // is a plugin bug Paseo should surface, not something to swallow into
+    // "the catalogue is empty".
+    updateRegistrations();
+  });
   void refreshCatalogue();
   const unsubscribe = client.paseo.workspaces.subscribe(() => { void refreshCatalogue(); });
   const unsubscribeAgents = client.paseo.agents.subscribe(() => { void refreshCatalogue(); });
+  // The subscriptions above are not enough on their own. This entry can run
+  // before the host connection is up, so the first read fails; and
+  // `subscribe()` only relays daemon updates that something else already
+  // asked the daemon to stream. Observed against the live daemon: loaded
+  // before the connection, the first read failed and no update arrived in
+  // the following 15s, so the pills never appeared at all. A steady re-read
+  // keeps the catalogue current whatever the load order.
+  const poll = setInterval(() => { void refreshCatalogue(); }, CATALOGUE_REFRESH_MS);
   return () => {
     active = false;
+    clearInterval(poll);
     unsubscribe();
     unsubscribeAgents();
     for (const registration of registrations.values()) registration.remove();
