@@ -232,6 +232,23 @@ class _PaseoQuestionElicitor:
     def set_question_id(self, question_id: str) -> None:
         self._question_id = question_id
 
+    #: Paseo renders the card's question as plain text, never markdown.
+    CARD_TEXT_LIMIT = 200
+
+    def split_question(self, question: str) -> tuple[str | None, str | None]:
+        """``(body, title)``: ``body`` belongs in the chat, where Paseo renders
+        markdown; ``title`` is the short line for the card (``None``: use a
+        generic prompt). A short single-line question stays on the card."""
+        text = question.strip()
+        if "\n" not in text and len(text) <= self.CARD_TEXT_LIMIT:
+            return None, text
+        lines = text.splitlines()
+        last = lines[-1].strip()
+        if (last.endswith("?") and len(last) <= self.CARD_TEXT_LIMIT
+                and not last.startswith(("-", "*", "#", "|", ">", "`")) and len(lines) > 1):
+            return "\n".join(lines[:-1]).rstrip(), last.strip("* ")
+        return text, None
+
     def elicit(self, session_id: str, question: str, options: list[str] | None) -> str | None:
         del session_id
         choices = list(options or [])

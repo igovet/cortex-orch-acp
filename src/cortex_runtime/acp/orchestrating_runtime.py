@@ -3140,11 +3140,22 @@ class OrchestratingRuntime:
             # otherwise it would incorrectly park an answered question in
             # waiting_for_user. Cancellation/supersession remains terminal.
             return question.status == "answered"
+        shown_body = False
         if elicitor is not None:
             if hasattr(elicitor, "set_question_id"):
                 elicitor.set_question_id(question.id)
+            card_text = decision["question"]
+            split = getattr(elicitor, "split_question", None)
+            if split is not None:
+                # A card shows plain text only: long/markdown content goes to
+                # the chat (rendered), the card keeps the short question.
+                body, title = split(card_text)
+                if body:
+                    # Own paragraph: chunks of one message are concatenated.
+                    shown_body = bool(emit_update(f"\n\n{body}\n\n"))
+                    card_text = title or acp_messages.render("question_card_title", language)
             try:
-                answer_text = elicitor.elicit(session_id, decision["question"], decision.get("options"))
+                answer_text = elicitor.elicit(session_id, card_text, decision.get("options"))
             except Exception:
                 answer_text = None
             if answer_text is not None:
@@ -3172,6 +3183,9 @@ class OrchestratingRuntime:
         # this as one ordinary text update so the next user prompt can answer
         # the same durable pending question through the normal text path.
         options = decision.get("options")
+        if shown_body:
+            # The body is already in the chat; repeat only the choices.
+            decision = dict(decision, question=acp_messages.render("question_card_title", language))
         if isinstance(options, list) and options:
             choices = "\n".join(
                 f"{index}. {choice}" for index, choice in enumerate(options, start=1)

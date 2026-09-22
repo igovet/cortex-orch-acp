@@ -164,6 +164,10 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "That question was answered concurrently; your reply was recorded but not applied. Send it again if it is new guidance.",
         "ru": "На этот вопрос уже ответили параллельно; ваш ответ сохранён, но не применён. Отправьте его снова, если это новое указание.",
     },
+    "question_card_title": {
+        "en": "Choose an answer",
+        "ru": "Выберите вариант ответа",
+    },
     "question_options_label": {
         "en": "Options:",
         "ru": "Варианты ответа:",

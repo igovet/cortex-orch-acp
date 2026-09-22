@@ -452,3 +452,12 @@ def test_a_late_click_on_a_stale_card_never_answers_the_question_now_waiting():
         assert delivered == ["1"]
     finally:
         agent_module.acp_questions_store.answer = original
+
+
+def test_a_long_markdown_question_goes_to_the_chat_and_the_card_keeps_the_short_line():
+    elicitor = _PaseoQuestionElicitor(object(), session_id="s")
+    assert elicitor.split_question("Какой цвет выбрать?") == (None, "Какой цвет выбрать?")
+    body, title = elicitor.split_question("**План**\n- шаг 1\n- шаг 2\n\nПодтверждаешь план?")
+    assert body == "**План**\n- шаг 1\n- шаг 2" and title == "Подтверждаешь план?"
+    body, title = elicitor.split_question("**План**\n- шаг 1\n- шаг 2")
+    assert body.startswith("**План**") and title is None
