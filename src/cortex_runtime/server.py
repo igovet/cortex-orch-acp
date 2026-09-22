@@ -18,7 +18,7 @@ import time
 import traceback
 from collections import OrderedDict
 
-from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, ERROR_HELP, validate, clip_summary_preview
+from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, error_help, outcome_uncertain, validate, clip_summary_preview
 from .channeled_tools import channeled_base_tools
 from .delegation import contracts as delegation_contracts
 from .delegation import mcp_tools as delegation_mcp_tools
@@ -194,10 +194,12 @@ class Server:
             try:
                 channel = self._channel_context()
             except StoreError as exc:
-                raise ProtocolError(-32001, ERROR_HELP.get(str(exc), ERROR_HELP['storage_error'])) from None
+                raise ProtocolError(-32001, error_help(str(exc))) from None
             if channel is None:
                 return dict(tools=TOOLS)
-            return dict(tools=list(channeled_base_tools()) + delegation_mcp_tools.tool_definitions(channel.role))
+            role_id, stage = delegation_mcp_tools.assignment_profile(self.store, channel)
+            return dict(tools=list(channeled_base_tools()) + delegation_mcp_tools.tool_definitions(
+                channel.role, role_id=role_id, stage=stage))
         if method != 'tools/call':
             raise ProtocolError(-32601,'Unknown method. Use initialize, ping, tools/list or tools/call; discover tool names through tools/list.')
         if not isinstance(params, dict) or set(params)-{'name','arguments','_meta'} or not isinstance(params.get('name'), str) or ('arguments' in params and not isinstance(params['arguments'],dict)):
@@ -320,12 +322,12 @@ class Server:
             if not isinstance(value,str): return value
             return re.sub(r'(?<![0-9a-f])t_[0-9a-f]{12}(?![0-9a-f])','<task>',value)
         code=str(failure)
-        data=dict(error=code,message=ERROR_HELP.get(code,ERROR_HELP['storage_error']),
-                  correction=public(failure.correction or ERROR_HELP.get(code,ERROR_HELP['storage_error'])))
+        data=dict(error=code,message=error_help(code),
+                  correction=public(failure.correction or error_help(code)))
         if failure.field:data['field']=failure.field
         if failure.received is not None:data['received']=public(failure.received)
         if failure.expected is not None:data['expected']=public(failure.expected)
-        data['write_state']='uncertain' if code in ('storage_error','file_conflict','unsafe_storage') else 'rejected'
+        data['write_state']='uncertain' if outcome_uncertain(code) else 'rejected'
         return dict(content=[dict(type='text',text=json.dumps(data))],isError=True)
 
 

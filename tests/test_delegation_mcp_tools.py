@@ -207,6 +207,27 @@ def test_an_unknown_skill_still_names_what_is_readable(tmp_path):
     assert "report-publication" in excinfo.value.expected
 
 
+def test_a_coordinator_can_read_its_own_role_but_not_another_role(tmp_path):
+    """Asking for `orchestrator` -- the role the coordinator is -- failed as
+    `unknown_skill`, a red failure on the first step of the session."""
+    store, task_id, coordinator = _task(tmp_path)
+    result = mcp_tools.dispatch(store, coordinator, "read_skill", dict(skill="orchestrator"))
+    assert result["skill"] == "orchestrator"
+    assert result["body"].strip()
+    # Only its own role: a worker's role is still not readable this way.
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, coordinator, "read_skill", dict(skill="worker-debugger"))
+    assert str(excinfo.value) == "unknown_skill"
+
+
+def test_a_worker_cannot_read_the_coordinator_role(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator)
+    with pytest.raises(StoreError) as excinfo:
+        mcp_tools.dispatch(store, worker, "read_skill", dict(skill="orchestrator"))
+    assert str(excinfo.value) == "unknown_skill"
+
+
 def _unfinished_worker_draft(store, worker, body="First section"):
     key = uuid.uuid4().hex
     draft = store.call(

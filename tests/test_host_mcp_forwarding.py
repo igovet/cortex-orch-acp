@@ -15,6 +15,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
@@ -388,3 +390,34 @@ def test_engine_session_filters_external_mcp_and_records_bounded_inventory(tmp_p
         "role": "worker", "engine": "codex-acp", "server_count": 1, "server_names": ["code-memory"],
         "names_truncated": False, "tool_count": None, "tool_schemas_observed": False,
     }
+
+
+
+def _registry(tmp_path, spec):
+    import json
+
+    root = Path("/var/tmp") / f"cortex-mcp-runtime-home-{tmp_path.name}"
+    config = root / "config" / "cortex"
+    config.mkdir(parents=True, exist_ok=True)
+    registry_file = config / "mcp-servers.json"
+    registry_file.write_text(json.dumps({"version": 1, "servers": {"code-index": dict(
+        allowed_tools=["inspect"], command="/usr/bin/true", **spec)}}), encoding="utf-8")
+    registry_file.chmod(0o600)
+    return dict(HOME=str(root), XDG_CONFIG_HOME=str(root / "config"), XDG_STATE_HOME=str(root / "state"))
+
+
+def test_a_registry_entry_can_name_its_private_runtime_dir_variables(tmp_path):
+    env = _registry(tmp_path, dict(runtime_dir_env=["CBM_RUNTIME_DIR"]))
+    (entry,) = load_mcp_servers(tmp_path, client_servers=[], environ=env)
+    assert entry["runtime_dir_env"] == ["CBM_RUNTIME_DIR"]
+
+
+@pytest.mark.parametrize("names", [["lower_case"], ["PATH"], ["HOME"], ["TMPDIR"], ["XDG_RUNTIME_DIR"],
+                                   ["A", "A"], "CBM_RUNTIME_DIR", [1]])
+def test_runtime_dir_variables_cannot_redirect_the_sandbox(tmp_path, names):
+    from cortex_runtime.portable.errors import PortableError
+
+    env = _registry(tmp_path, dict(runtime_dir_env=names))
+    with pytest.raises(PortableError) as excinfo:
+        load_mcp_servers(tmp_path, client_servers=[], environ=env)
+    assert excinfo.value.code == "invalid_mcp_registry"

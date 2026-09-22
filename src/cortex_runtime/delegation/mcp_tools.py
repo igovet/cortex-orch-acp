@@ -178,6 +178,24 @@ def _shared_list_sources(store, channel: ChannelContext, args: Mapping[str, Any]
     return replay_store.list_sources(store, channel.task_id, after, limit)
 
 
+def _own_role_id(store, channel: ChannelContext | None) -> str | None:
+    """The role this channel was issued for: the coordinator role, or the
+    worker role its attempt was provisioned with."""
+    if channel is None:
+        return None
+    if channel.role == "coordinator":
+        from ..acp.orchestrating_runtime import COORDINATOR_ROLE_ID
+
+        return COORDINATOR_ROLE_ID
+    if not channel.attempt_id:
+        return None
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT role_id FROM delegation_provisioning WHERE attempt_id=?", (channel.attempt_id,),
+        ).fetchone()
+    return row["role_id"] if row is not None else None
+
+
 def _shared_read_skill(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
     """Read a shared skill or a declared reference for this channel's role."""
     from ..portable.roles import (
@@ -195,6 +213,13 @@ def _shared_read_skill(store, channel: ChannelContext, args: Mapping[str, Any]) 
     if skill_id in references:
         return dict(skill=skill_id, title=skill_id.replace("-", " ").capitalize(),
                     body=read_reference(skill_id, role_kind=role_kind))
+    if skill_id and skill_id == _own_role_id(store, channel):
+        # A channel may always re-read its own role. A coordinator asking
+        # for `orchestrator` -- the role it is -- used to fail as
+        # `unknown_skill`, a red, misleading failure on the first step of
+        # every such session (live, 2026-09-22).
+        role_set = load_role(skill_id)
+        return dict(skill=skill_id, title=role_set.title, body=role_set.body_portable)
     if skill_id not in SHARED_ROLE_IDS:
         raise StoreError(
             "unknown_skill", "skill", str(requested),
@@ -312,12 +337,12 @@ _ROLE_HANDLERS = dict(coordinator=_COORDINATOR_HANDLERS, worker=_WORKER_HANDLERS
 _OPERATION_DESCRIPTIONS = dict(
     task_get_context="Read the current runtime task, original goal, validated plan, results and user answers.",
     answer_submit="Submit a direct answer to an informational question before any plan or workers exist, or a final summary after the user answered a runtime stop question by choosing to finish. The runtime records and delivers the answer; this does not certify code changes or tests.",
-    plan_submit="For changes or substantial delegated work, submit a dependency plan for runtime validation. The runtime chooses routes, schedules assignments, requires review and runs verification.",
+    plan_submit="For changes or substantial delegated work, submit a dependency plan for runtime validation. Accepted only while the task is planning. The runtime chooses routes, schedules assignments, requires review and runs verification.",
     verification_submit="After the runtime verification failed and the work itself is fine: replace only the verification commands and verify again, without redoing the reviewed work.",
-    synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. This does not complete or accept the task.",
-    user_question_request="Request user input. The runtime persists the question before elicitation and resumes only after a real answer.",
+    synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. Accepted only after every task, the review and the verification finished. This does not complete or accept the task.",
+    user_question_request="Request user input while planning or reconciling. The runtime persists the question before elicitation and resumes only after a real answer.",
     result_submit="Submit this worker attempt's exact immutable report reference, summary and observed checks. Reviewers must include a verdict. This cannot accept the task.",
-    ask_question="Record information needed to finish this assignment.",
+    ask_question="Ask the user for information this assignment cannot finish without. It stops every running worker and returns the task to planning; after the answer the coordinator re-plans with it.",
     read_skill=(
         "Read one shared skill or role-scoped reference. The input object has exactly one "
         "accepted field, `skill`; pass the exact skill/reference id there (for example "
@@ -329,13 +354,101 @@ _OPERATION_DESCRIPTIONS = dict(
     read_capsule="Read this channel's own deterministic recovery capsule: identity, applied config, exact "
                  "constraints with origins, own assignments/pipeline, confirmed publications/checks, open/"
                  "uncertain actions, newer events, role/tool access, and continuation intent.",
+    read_large_output="Page through an output too large to return inline (a command_run or project_git result), by its large_output_id, byte offset and limit.",
+    project_read="Read a project file (UTF-8 text, paged by offset/limit; returns its sha256 for a later write or delete) or list a directory. Read-only and always available.",
+    project_git="Read-only git evidence for the project: `status`, or the full working-tree `diff` against HEAD including edits that were already there. Large output is retained; page it with read_large_output.",
+    project_write="Create or replace one project file with complete UTF-8 content. Pass the file's current sha256 from project_read, or \"absent\" for a new file; a mismatch changes nothing. Only for a worker whose assignment may write; paths the user protected are refused.",
+    project_mkdir="Create one new project directory; its parent must already exist. Only for a worker whose assignment may write.",
+    project_delete="Delete one existing regular project file (never a directory), identified by its current sha256. The user confirms every deletion first. Only for a worker whose assignment may write.",
+    command_run="Run one command (argv, no shell) in the project root inside the sandbox, as the owner, with their toolchain. Returns exit_code, a tool_call_ref that result_submit accepts as check evidence, and the retained output (read_large_output). Not available to coordinators or consultants.",
+    outside_command="Run one command (argv, no shell) outside the sandbox as the user, for work the sandbox cannot do (a global install, a change in HOME). The user confirms it first on a permission card; a refusal means it did not run. Only for a worker whose assignment may write.",
+    outside_write="Write one file OUTSIDE the project as the user (inside the project use project_write or your own tools). The user confirms it first; the parent directory must exist. Only for a worker whose assignment may write.",
+    draft_write="Replace the whole content of one of your unpublished drafts (from create_draft), keeping the first line create_draft wrote. Publish it with write_report.",
+    replan_request="Ask the runtime for a new plan when evidence shows the current decomposition cannot reach the goal. It stops every running worker and returns the task to planning; at most three such requests per task, after which the user decides.",
+    scope_request="Report that the assignment's scope prevents completion and name the paths it needs. It stops every running worker and returns the task to planning so the coordinator can re-plan; it never widens the scope by itself. Counts toward the three re-plans per task.",
+    escalation_request="Ask for an independent senior consultation on a problem this attempt cannot resolve. It stops every running worker and returns the task to planning with a consultation; counts toward the three re-plans per task.",
     read_diagnostics="Read this task's own observability/usage diagnostics summary: resource caps, recovery "
                      "latency, repeat calls, schema/validation errors, manual interventions, duplicate "
                      "publications, tokens, and concurrency -- each with its declared unit and availability.",
 )
 
 
-def tool_definitions(role_kind: str) -> list[dict]:
+# Tools that change the project or act outside it. A channel with no write
+# grant -- the coordinator, a read-only worker role, a review stage -- is
+# refused every one of them by the gateway, so they are not offered to it.
+_WRITE_TOOLS = frozenset({"project_write", "project_mkdir", "project_delete", "outside_write", "outside_command"})
+
+
+def assignment_profile(store, channel: ChannelContext) -> tuple[str | None, str | None]:
+    """``(role_id, stage)`` of the assignment this worker channel runs, or
+    ``(None, None)`` when it cannot be resolved (then nothing is narrowed)."""
+    if channel is None or channel.role != "worker" or not channel.attempt_id:
+        return None, None
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT n.role, n.stage FROM delegation_provisioning p JOIN runtime_nodes n "
+            "ON n.task_id=p.task_id AND n.assignment_ref=p.idempotency_key "
+            "WHERE p.task_id=? AND p.attempt_id=? ORDER BY n.revision DESC LIMIT 1",
+            (channel.task_id, channel.attempt_id),
+        ).fetchone()
+    return (row["role"], row["stage"]) if row is not None else (None, None)
+
+
+def _offered(name: str, role_kind: str, role_id: str | None, stage: str | None) -> bool:
+    """Whether the gateway would ever accept ``name`` from this channel.
+
+    Advertising a tool the gateway always refuses costs a failed call to learn
+    it: a coordinator was offered project_write, command_run and the outside
+    tools although it has no write grant and may not execute anything.
+    """
+    from ..orchestration.gateway import READ_ONLY
+
+    if role_kind == "coordinator":
+        return name not in _WRITE_TOOLS and name != "command_run"
+    if role_id is None:
+        return True
+    if name in _WRITE_TOOLS and (stage == "review" or role_id in READ_ONLY):
+        return False
+    if name == "command_run" and "consultant" in role_id:
+        return False
+    return True
+
+
+def _narrow_result_submit(schema: dict, stage: str | None) -> dict:
+    """``verdict`` is required on a review stage and refused on every other:
+    offer it only where it is accepted. Workers that were shown it as an
+    optional field sent it anyway and failed with reviewer_only_verdict."""
+    if stage is None:
+        return schema
+    properties = dict(schema["properties"])
+    required = [name for name in schema["required"] if name != "verdict"]
+    if stage == "review":
+        required.append("verdict")
+    else:
+        properties.pop("verdict", None)
+    return dict(schema, properties=properties, required=required)
+
+
+def _enumerate_skills(schema: dict, role_kind: str, role_id: str | None) -> dict:
+    """Offer exactly the ids read_skill accepts from this role, so a guessed
+    id is no longer possible (a coordinator once asked for `orchestrator`
+    before its own role became readable)."""
+    from ..acp.orchestrating_runtime import COORDINATOR_ROLE_ID
+    from ..portable.roles import (
+        COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS, SHARED_ROLE_IDS, WORKER_REFERENCE_IDS,
+    )
+
+    ids = set(SHARED_ROLE_IDS) | EXAMPLE_REFERENCE_IDS
+    ids |= COORDINATOR_REFERENCE_IDS if role_kind == "coordinator" else WORKER_REFERENCE_IDS
+    own = COORDINATOR_ROLE_ID if role_kind == "coordinator" else role_id
+    if own:
+        ids.add(own)
+    properties = dict(schema["properties"])
+    properties["skill"] = dict(properties["skill"], enum=sorted(ids))
+    return dict(schema, properties=properties)
+
+
+def tool_definitions(role_kind: str, *, role_id: str | None = None, stage: str | None = None) -> list[dict]:
     """MCP ``tools/list`` entries for ``role_kind``'s delegation operations.
 
     Shape matches ``contracts.tool()``'s advertised entries exactly (name,
@@ -348,7 +461,13 @@ def tool_definitions(role_kind: str) -> list[dict]:
     schemas = delegation_contracts.schemas_for(role_kind)
     tools = []
     for name in sorted(schemas):
+        if not _offered(name, role_kind, role_id, stage):
+            continue
         schema = schemas[name]
+        if name == "result_submit":
+            schema = _narrow_result_submit(schema, stage)
+        if name == "read_skill":
+            schema = _enumerate_skills(schema, role_kind, role_id)
         tools.append(dict(
             name=name, title=name.replace("_", " ").capitalize(),
             description=_OPERATION_DESCRIPTIONS.get(name, f"Delegation operation '{name}'."),

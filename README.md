@@ -347,7 +347,13 @@ is not a compatibility path. Keep secrets out of repository configuration.
 
 External processes run in a Linux namespace with a read-only project, explicitly
 granted dependencies, private temporary storage, and only configured environment
-variables. Network-enabled gateways also mount public system DNS/host configuration
+variables. Each launch also gets its own owner-only runtime directory
+under `~/.cache/cortex-mcp-runtime/`, exported as `XDG_RUNTIME_DIR` and under each
+name listed in the entry's optional `runtime_dir_env`, and removed when the server
+exits. A server that coordinates through a per-user daemon needs this: started in
+the sandbox, `codebase-memory-mcp` otherwise found a daemon launched outside it,
+could not verify it across the sandbox's process namespaces, and never started
+(`"runtime_dir_env": ["CBM_RUNTIME_DIR"]`). Network-enabled gateways also mount public system DNS/host configuration
 and the system CA bundle, so name resolution and HTTPS work inside containment.
 Calls have deadlines; partial frames, uncertain outcomes and revoked
 channels cannot authorize retries. The broker retains actual `tools/list` evidence;

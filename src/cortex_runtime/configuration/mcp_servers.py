@@ -20,6 +20,13 @@ bridge::
 External servers run with the owner's real ``HOME``; ``write_paths`` is the
 only writable state they get beyond the task scope (e.g. an index cache).
 
+Every launch also gets its own private runtime directory, exported as
+``XDG_RUNTIME_DIR`` and under each name in ``runtime_dir_env``. A server that
+coordinates through a per-user daemon (codebase-memory-mcp's
+``CBM_RUNTIME_DIR``) otherwise finds a daemon started outside the sandbox and
+cannot verify it across the sandbox's process namespaces: it then answers
+``initialize`` with an id-less error and never starts.
+
 Only the user-global registry (``$XDG_CONFIG_HOME/cortex/mcp-servers.json``)
 is trusted. A project-local registry is deliberately unsupported because the
 project can be modified by a worker and must not gain a persistent executable
@@ -38,6 +45,9 @@ from ..connections import registry
 from ..portable.errors import PortableError, PortableErrorCategory
 
 _FILENAME = "mcp-servers.json"
+_ENV_NAME = __import__("re").compile(r"[A-Z_][A-Z0-9_]*")
+# Set by the sandbox itself; a registry entry may not redirect them.
+_RESERVED_ENV = frozenset({"PATH", "HOME", "TMPDIR", "XDG_RUNTIME_DIR"})
 
 
 def _error(code: str, remediation: str) -> PortableError:
@@ -142,6 +152,13 @@ def _normalize_entries(raw: object, path: Path) -> list[dict[str, object]]:
         if not isinstance(readonly,list) or any(tool not in allowed_tools for tool in readonly):
             raise _error('invalid_mcp_registry',f'{path}: {name}.read_only_tools must be a subset of allowed_tools.')
         entry['read_only_tools']=list(readonly)
+        runtime_env=spec.get('runtime_dir_env',[])
+        if (not isinstance(runtime_env,list) or len(set(runtime_env))!=len(runtime_env)
+                or any(not isinstance(item,str) or not _ENV_NAME.fullmatch(item) or item in _RESERVED_ENV
+                       for item in runtime_env)):
+            raise _error('invalid_mcp_registry',f'{path}: {name}.runtime_dir_env must be unique environment variable names.')
+        if runtime_env:
+            entry['runtime_dir_env']=list(runtime_env)
         if 'coordinator_tools' in spec:
             lookup=spec['coordinator_tools']
             if not isinstance(lookup,list) or any(tool not in readonly for tool in lookup):

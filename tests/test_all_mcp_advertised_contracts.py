@@ -48,7 +48,11 @@ def test_every_advertised_tool_uses_its_current_validator_and_read_classificatio
     advertised = {entry["name"]: entry for entry in entries}
     expected_base = {entry["name"] for entry in channeled_base_tools()}
     expected_delegation = set(delegation_contracts.schemas_for(role))
-    expected_names = expected_base | expected_delegation
+    # A coordinator has no write grant and may not execute: the gateway
+    # refuses those tools every time, so they are not offered to it.
+    never_usable = ({"project_write", "project_mkdir", "project_delete", "outside_write", "outside_command",
+                     "command_run"} if role == "coordinator" else set())
+    expected_names = expected_base | (expected_delegation - never_usable)
     # Keep this contract-derived: adding a new role operation must not leave a
     # stale hand-count in this coverage test (for example complete_assignment).
     assert len(advertised) == len(entries) == len(expected_names)

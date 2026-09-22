@@ -195,6 +195,13 @@ _REGISTRY: dict[tuple[str, str], InstructionDelivery] = {
 }
 
 
+def has_exact_registration(engine: str, version: str) -> bool:
+    """True iff ``(engine, version)`` has its own registration here -- not
+    merely the engine's ``"*"`` wildcard, which for an unrecognised version
+    is UNSUPPORTED."""
+    return (engine, version) in _REGISTRY
+
+
 def delivery_for(engine: str, version: str) -> InstructionDelivery:
     """Look up the delivery mechanism for an exact engine+version.
 

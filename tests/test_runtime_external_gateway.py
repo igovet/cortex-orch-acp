@@ -213,3 +213,58 @@ def test_coordinator_relay_starts_before_the_task_row_and_survives_recovery(tmp_
         machine.move(task.task_id,'RECOVERING')
         assert 'result' in call(proc,3,'tools/list')
     finally: close(proc)
+
+
+def test_a_mismatched_response_names_its_shape_without_content(proxy, tmp_path):
+    """A server that answers with a different id (codebase-memory-mcp
+    truncates ids above 2**31-1 to 32 bits) used to fail as a bare
+    external_mcp_response_identity_mismatch."""
+    store,task,machine,root,start=proxy
+    script=tmp_path/'mangler.py'
+    script.write_text('''import json,sys
+for line in sys.stdin:
+ q=json.loads(line)
+ if 'id' in q: print(json.dumps({'jsonrpc':'2.0','id':-539222987,'result':{'secret':'do not print'}}),flush=True)
+''')
+    proc=start(dict(args=['-B',str(script)],read_paths=[str(script)]))
+    try:
+        reply=call(proc,12345678901,'initialize')
+        assert 'identity_mismatch' in reply['error']['message']
+    finally: close(proc)
+    stderr=proc.stderr.read().decode()
+    assert 'response id mismatch on initialize: expected int 12345678901, got int -539222987' in stderr
+    assert "frame keys ['id', 'jsonrpc', 'result']" in stderr
+    assert 'do not print' not in stderr
+
+
+
+def test_each_launch_gets_a_private_runtime_dir_outside_tmp(proxy, tmp_path):
+    """codebase-memory-mcp coordinates through a per-user daemon. Started in
+    the sandbox it found one launched outside it, could not verify it across
+    the unshared process namespaces, and answered initialize with an id-less
+    error; a private directory under /tmp failed its secure-path check too."""
+    store,task,machine,root,start=proxy
+    home=tmp_path/'home';home.mkdir(mode=0o750)
+    script=tmp_path/'probe.py'
+    script.write_text('''import json,os,stat,sys
+for line in sys.stdin:
+ q=json.loads(line)
+ if 'id' not in q: continue
+ d=os.environ.get('CBM_RUNTIME_DIR','')
+ probe=os.path.join(d,'endpoint')
+ open(probe,'w').write('x')
+ info=dict(dir=d,xdg=os.environ.get('XDG_RUNTIME_DIR'),mode=oct(stat.S_IMODE(os.stat(d).st_mode)),writable=os.path.exists(probe))
+ print(json.dumps({'jsonrpc':'2.0','id':q['id'],'result':info}),flush=True)
+''')
+    first=start(dict(args=['-B',str(script)],read_paths=[str(script)],runtime_dir_env=['CBM_RUNTIME_DIR']),home=home)
+    second=start(dict(args=['-B',str(script)],read_paths=[str(script)],runtime_dir_env=['CBM_RUNTIME_DIR']),home=home)
+    try:
+        one=call(first,1,'initialize')['result'];two=call(second,1,'initialize')['result']
+    finally:
+        close(first);close(second)
+    base=str(home/'.cache'/'cortex-mcp-runtime')
+    for info in (one,two):
+        assert info['dir'].startswith(base+'/run-') and info['xdg']==info['dir']
+        assert info['mode']=='0o700' and info['writable']
+    assert one['dir']!=two['dir']
+    assert not list((home/'.cache'/'cortex-mcp-runtime').iterdir())

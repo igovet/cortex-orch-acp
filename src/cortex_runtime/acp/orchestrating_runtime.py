@@ -663,6 +663,31 @@ class PromptOutcome:
     text: str = ""
 
 
+def _describe_failure(error: BaseException) -> dict:
+    """What failed, in terms a person can act on, without user content.
+
+    A bare class name told nobody anything: every Claude worker once failed
+    as just ``PortableError`` while the actual cause was a refused,
+    UNSUPPORTED instruction delivery (live, 2026-09-22). A portable/store
+    error code and the failing source line carry no secret; the message is
+    deliberately left out, since it can quote a path or a value.
+    """
+    code = getattr(error, "code", None)
+    if code is None and isinstance(error, StoreError):
+        code = str(error)
+    where = ""
+    traceback = error.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame.f_code
+        where = f"{os.path.basename(frame.co_filename)}:{traceback.tb_lineno}"
+        traceback = traceback.tb_next
+    name = type(error).__name__
+    described = dict(error=f"{name}:{code}" if isinstance(code, str) and code else name)
+    if where:
+        described["where"] = where
+    return described
+
+
 class HostElicitor(Protocol):
     """T020: optional structured-input dependency, injected the same way
     ``SessionRuntime`` is (never required -- every existing caller/test
@@ -4614,10 +4639,11 @@ class OrchestratingRuntime:
                 self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind="unexpected_exception", stop_reason=None)
                 with self._lock:
                     self._worker_recoveries_in_flight.discard(assignment_ref)
-                self._mark_work_attempt_failed(task_id, assignment_ref, type(error).__name__, f"work-failed:{assignment_ref}:exception")
+                failure = _describe_failure(error)
+                self._mark_work_attempt_failed(task_id, assignment_ref, failure["error"], f"work-failed:{assignment_ref}:exception")
                 delegation_events.append_event(
                     self._store, task_id, "assignment_failed", f"assignment_failed:{assignment_ref}",
-                    dict(error=type(error).__name__), origin="runtime", assignment_ref=assignment_ref,
+                    failure, origin="runtime", assignment_ref=assignment_ref,
                 )
                 return
         self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind=None, stop_reason=outcome.stop_reason)

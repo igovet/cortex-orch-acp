@@ -99,7 +99,9 @@ def test_roles_advertise_only_the_new_protocol(tmp_path):
     for role,ch,key in [('coordinator',coordinator,secret),('worker',worker,wsecret)]:
         tools=_call(project,ch,key,_init_and('tools/list',{}),tmp_path)[-1]['result']['tools']
         names={t['name'] for t in tools}
-        assert set(schemas_for(role))<=names
+        never_usable={'project_write','project_mkdir','project_delete','outside_write','outside_command','command_run'} if role=='coordinator' else set()
+        assert set(schemas_for(role))-never_usable<=names
+        assert not never_usable & names
         assert not {'delegate','decide','complete_assignment','integrate','set_governance','create_task'} & names
         assert ('plan_submit' in names)==(role=='coordinator')
         assert ('result_submit' in names)==(role=='worker')

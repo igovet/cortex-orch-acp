@@ -12,6 +12,39 @@ integration; and explicit revision continuation. Instruction and context packets
 record their sources and actual delivery, including session replacement. Report
 publication remains separate from worker completion and coordinator decision.
 
+Claude workers work again: resolving the installed claude-agent-acp version
+(0.81.0, which has no delivery registration of its own) made every Claude worker
+refuse its first prompt while the coordinator kept working; an unregistered
+installed version now resolves to the pinned one as before. A failed worker is
+recorded with its error code and source line instead of a bare class name, and
+a coordinator can read its own role through `read_skill`.
+
+Every Cortex MCP tool is now fully described, and each channel is offered only
+what it can use. Twelve tools (project_read, project_write, command_run and the
+rest of the project, outside and re-plan tools) carried a placeholder
+description; the re-plan requests did not say they stop every running worker.
+A coordinator is no longer offered the six write and command tools the gateway
+always refuses it, read-only roles and review stages no longer see write tools,
+consultants no longer see command_run, and result_submit offers verdict only on
+a review stage, where it is required -- the most common worker refusal was a
+non-reviewer sending it. Rules that lived only in server code are now in the
+schemas (plan and scope paths, plan ids, project paths, the "absent" hash for a
+new file, the exact skill ids per role), and a self-contradicting check-evidence
+description was corrected. A test audits every tool in every role profile, so a
+placeholder or an undescribed field cannot come back.
+
+A refused Cortex tool call now says what to change. 148 of the 203 error codes
+had no text of their own and fell back to the storage-failure message ("check
+disk space ... retry only the identical request"), so a coordinator whose plan
+named a forbidden scope resubmitted the identical plan and failed again. Every
+plan-validation code has precise guidance, any other unlisted code reads as a
+refusal to correct (or, for an uncertain outcome, one not to repeat), and the
+plan schema itself states the scope rules.
+
+External MCP servers get a private runtime directory per launch, so
+codebase-memory-mcp no longer fails its handshake whenever its daemon is already
+running outside the sandbox.
+
 A worker that learned a context-window size for the first time in a process
 deadlocked the whole runtime on the non-reentrant runtime lock: the controller
 loop stopped observing state (so a question a worker had asked was never shown)

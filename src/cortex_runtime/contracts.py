@@ -265,6 +265,48 @@ ERROR_HELP = {
     "gateway_path_not_found": "The requested project path does not exist. No file was changed.",
     "gateway_command_denied": "This channel cannot execute commands. Coordinators answer informational questions using project reads; execution belongs to scoped workers for requested work.",
     "gateway_read_failure": "The requested project path could not be read. No file was changed.",
+    "request_key_conflict": "This request_key was already used for a different request. Reuse a key only to retry the identical call; give any different request a new key.",
+    "plan_not_expected": "A plan is accepted only while the task is planning. Read task_get_context for the current state: a plan is already running, so wait for its results or, from a worker, use replan_request.",
+    "direct_answer_not_available": "answer_submit is only for a question answered before any plan or worker exists, or after the user chose to finish at a stop question. Once work has been planned, finish through the plan and synthesis_submit.",
+    "answer_conflict": "A different answer was already submitted for this task. Resubmit exactly the accepted text, or leave it.",
+    "synthesis_not_expected": "A synthesis is accepted only after every planned task, the review and the verification finished. Read task_get_context and wait for that state.",
+    "synthesis_conflict": "A different synthesis was already accepted for this task. Resubmit exactly the accepted text, or leave it.",
+    "question_not_expected": "A question is accepted from the coordinator while planning or reconciling, and from a worker while its assignment runs. Continue the current step instead.",
+    "verification_not_expected": "Verification is recorded only while the task is verifying.",
+    "verification_repair_not_expected": "verification_submit is only for replanning after the runtime verification failed while every task completed. Otherwise submit a new plan.",
+    "reviewer_only_verdict": "Only a review assignment gives a verdict. Remove verdict and resubmit.",
+    "review_verdict_required": "A review assignment must give a verdict: APPROVE, REQUEST_CHANGES or BLOCK.",
+    "gateway_scope_denied": "This assignment may not write that path: it has no write grant (coordinator, read-only role or review), or the user protected the path. Nothing was changed.",
+    "gateway_path_denied": "Paths are project-relative: not absolute, no '..', backslash or NUL, and never inside .cortex, .git, .codex or .claude. Correct the path.",
+    "gateway_write_conflict": "The file changed since you read it, or expected_sha256 is wrong. Read it again with project_read and pass its current sha256 (\"absent\" only for a new file). Nothing was written.",
+    "gateway_task_inactive": "The task is not running (it is waiting for the user, recovering, blocked or finished), so no action is accepted now. Stop and let the runtime continue.",
+    "gateway_assignment_inactive": "This assignment is no longer running (cancelled, replanned or finished), so its channel accepts no actions. Stop.",
+    "gateway_regular_file_required": "That path is not a single regular file (a directory, link, device or hard-linked file). Choose a regular file.",
+    "gateway_file_required": "This operation needs a file path, not the project root.",
+    "deletion_not_confirmed": "The user did not confirm the deletion, so the file was kept. Do not retry it; continue without deleting.",
+    "replan_limit_requires_user_input": "This task already used its three re-plans. Finish with what the evidence supports, or ask the user.",
+    "wrong_channel_role": "This operation is not available to this channel's role. Use only the tools listed for it.",
+    "unknown_skill": "No readable skill or reference has that id. Use one of the ids listed for this role.",
+    "unknown_report_ref": "No published report has that report_ref in this task. Pass the exact report_id that write_report returned.",
+    "report_not_own": "That report was not published from this attempt's own draft. Publish your result with write_report and pass its report_id.",
+    "report_ref_already_published": "That report_ref is already the result of a different attempt. Publish this attempt's own report and pass its report_id.",
+    "unknown_large_output_ref": "No retained output has that large_output_id for this channel. Pass the exact id a command_run or project_git result returned.",
+    "assignment_report_missing": "The result names no published report of this assignment. Publish the report with write_report first.",
+    "assignment_report_mismatch": "The report_ref is not the report this attempt published. Pass the exact report_id from your own write_report.",
+    "stale_assignment_result": "This assignment belongs to an earlier plan revision or a finished task; its result is no longer accepted. Stop.",
+    "invalid_plan_fields": "A plan has exactly two fields: tasks and verification. Remove any other field and resubmit.",
+    "invalid_plan_size": "plan.tasks must be a list of 1 to the advertised maximum tasks.",
+    "invalid_plan_node": "Each task has exactly id, role, objective, dependencies and scope, plus optional complexity (low, normal or high). Put any note or rationale in objective.",
+    "duplicate_or_invalid_node": "A task id starts with a letter, uses only letters, digits, '_' and '-', is at most 64 characters, and is unique within the plan.",
+    "runtime_reserved_role": "A task role must be a worker role (worker-...). Review and build verification are added by the runtime; do not plan worker-code-reviewer or worker-build-verification.",
+    "invalid_node_objective": "A task objective is a non-empty string of at most 8000 characters.",
+    "invalid_assignment_scope": "scope is a non-empty list of at most 64 project-relative path globs, each a non-empty string of at most 512 characters. Use '.' for the whole project.",
+    "forbidden_assignment_scope": "A scope entry is a project-relative glob: not absolute, no '..' or backslash, and never naming .cortex, .git, .codex or .claude. Correct that entry and resubmit.",
+    "invalid_dependencies": "dependencies is a list of unique task ids (strings); use [] for a task with none.",
+    "unknown_dependency": "Every dependency must name the id of another task in the same plan.",
+    "cyclic_plan": "Task dependencies form a cycle. Break it so every task can start after the ones it depends on.",
+    "verification_required": "plan.verification is a list of 1 to 16 commands, each an argv list, that prove the whole result.",
+    "invalid_verification_command": "Each verification command is an argv list of 1 to 64 non-empty strings (at most 4096 characters each, no NUL), for example [\"python3\", \"-m\", \"pytest\", \"-q\"].",
     "storage_error": "Storage did not complete cleanly. Preserve the draft. Check disk space and access, then retry only the identical request and key because publication may be uncertain.",
     "channel_required": "This server process was launched without CORTEX_CHANNEL_ID/CORTEX_CHANNEL_SECRET/CORTEX_CHANNEL_PROJECT_ROOT. Every tool call requires a trusted channel; the Codex-plugin-harness-era unchanneled identity path was removed. Launch through the ACP orchestrator's engine spawn, which always supplies channel credentials.",
     "channel_unknown": "This trusted channel id and secret pair is not recognized. Use the exact channel_id and secret issued at bootstrap or worker delegation; never guess or reuse another channel's credentials.",
@@ -371,3 +413,30 @@ def validate(name, args):
             if not valid:raise StoreError("invalid_arguments",key,"invalid bounded metadata list","array matching its advertised items schema")
         elif type(value) is not int or value<rule["minimum"] or value>rule["maximum"]:
             raise StoreError("invalid_arguments",key,_received(value),f"integer {rule['minimum']}..{rule['maximum']}",f"Use a JSON integer from {rule['minimum']} through {rule['maximum']}.")
+
+
+# Codes that mean an action may already have happened: never "rejected".
+_UNCERTAIN_CODES = frozenset({"storage_error", "file_conflict", "unsafe_storage"})
+
+
+def outcome_uncertain(code: str) -> bool:
+    return code in _UNCERTAIN_CODES or code.endswith("_outcome_unknown") or code.startswith("ambiguous_")
+
+
+def error_help(code: str) -> str:
+    """The remediation for ``code``.
+
+    A code without its own entry used to get the storage-failure text --
+    "check disk space ... retry only the identical request" -- which told a
+    model its (invalid) request was right and should be repeated unchanged:
+    a coordinator's plan with a forbidden scope was resubmitted identically
+    and failed again (live, 2026-09-22). An unlisted code now says what it
+    is: a refusal to correct, or an uncertain outcome to check first.
+    """
+    if code in ERROR_HELP:
+        return ERROR_HELP[code]
+    if outcome_uncertain(code):
+        return (f"The outcome of this action is uncertain ({code}). Do not repeat it; "
+                "check whether it took effect first.")
+    return (f"Refused ({code}); nothing was changed. Read error, and field, received and "
+            "expected when present, and change the request: an identical retry fails the same way.")

@@ -9,6 +9,7 @@ import hashlib
 import os
 from pathlib import Path
 import select
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,30 @@ class Frames:
                 raise StoreError('external_mcp_frame_too_large')
         frame, self.buffer = self.buffer.split(b'\n', 1)
         return frame+b'\n'
+
+
+def private_runtime_dir(home, scratch):
+    """A fresh owner-only directory whose ancestors are not world-writable:
+    under the owner's cache when there is a real HOME, the scratch otherwise."""
+    base = Path(home)/'.cache'/'cortex-mcp-runtime' if home.startswith('/') and Path(home).is_dir() else Path(scratch)
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix='run-', dir=base))
+
+
+def describe_mismatch(method, expected, reply):
+    """One stderr line naming a response that does not answer the request in
+    flight -- its shape only (keys, id type and value), never its content."""
+    def shown(value):
+        if value is None or isinstance(value, bool) or isinstance(value, int):
+            return repr(value)
+        if isinstance(value, str):
+            return repr(value[:40])
+        return type(value).__name__
+    keys = sorted(reply) if isinstance(reply, dict) else type(reply).__name__
+    got = reply.get('id') if isinstance(reply, dict) else None
+    return (f'cortex external MCP gateway: response id mismatch on {method}: '
+            f'expected {type(expected).__name__} {shown(expected)}, '
+            f'got {type(got).__name__} {shown(got)}, frame keys {keys}')
 
 
 def write_frame(stream, data, deadline):
@@ -122,6 +147,18 @@ def main():
                 grants+=['--setenv','HOME',os.environ['HOME']]
             for item in config.get('env',[]):
                 grants+=['--setenv',item['name'],item['value']]
+            # A private runtime directory per launch, never shared: a server
+            # that coordinates through a per-user daemon would otherwise join
+            # one started outside this sandbox, which it cannot verify across
+            # the unshared process namespaces -- codebase-memory-mcp then
+            # answered initialize with an id-less error (live, 2026-09-22).
+            # Not under /tmp: inside the user namespace its owner shows as
+            # nobody, so a world-writable ancestor no longer passes a server's
+            # secure-path check, and the endpoint still could not be created.
+            runtime=private_runtime_dir(os.environ.get('HOME',''),scratch)
+            grants+=['--bind',str(runtime),str(runtime)]
+            for name in ('XDG_RUNTIME_DIR',*config.get('runtime_dir_env',[])):
+                grants+=['--setenv',name,str(runtime)]
             command[index:index]=grants
             if config.get('network') is True:
                 allow_network(command)
@@ -184,7 +221,13 @@ def main():
                                 else:
                                     sys.stdout.buffer.write(frame);sys.stdout.buffer.flush()
                                 continue
-                            if reply.get('id')!=identifier: raise StoreError('external_mcp_response_identity_mismatch')
+                            if reply.get('id')!=identifier:
+                                # Name what arrived: this has failed Codex's
+                                # handshake with a real code-index server
+                                # intermittently, and a bare code gave no way
+                                # to tell a stray frame from a mangled id.
+                                print(describe_mismatch(method,identifier,reply),file=sys.stderr,flush=True)
+                                raise StoreError('external_mcp_response_identity_mismatch')
                             if method=='tools/list' and 'result' in reply:
                                 reply['result']['tools']=[t for t in reply['result'].get('tools',[]) if t.get('name') in allowed]
                             if method=='tools/call':
@@ -207,6 +250,7 @@ def main():
                 stopped.set()
                 if child.poll() is None: child.kill()
                 child.wait(timeout=5)
+                shutil.rmtree(runtime,ignore_errors=True)
 
 
 if __name__=='__main__':

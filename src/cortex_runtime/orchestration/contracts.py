@@ -16,15 +16,16 @@ def obj(properties, required=None):
                 required=list(properties) if required is None else required, additionalProperties=False)
 
 
-NODE = obj(dict(id=text('Unique plan node name.', 64), role=text('Specialist role. Runtime resolves its profile and route.', 80),
-                objective=text('One bounded implementation or investigation objective. The runtime automatically adds mandatory independent code review and final verification after all proposed tasks; do not duplicate those stages in this plan.'),
+NODE = obj(dict(id=text('Unique plan node name: a letter, then letters, digits, \'_\' or \'-\', at most 64 characters.', 64), role=text('Specialist role. Runtime resolves its profile and route.', 80),
+                objective=text('One bounded implementation or investigation objective. The runtime automatically adds mandatory independent code review and final verification after all proposed tasks; do not duplicate those stages in this plan. Put any scope note or rationale here: a task has no other free-text field.'),
                 dependencies=array(text('Predecessor node name.', 64)),
-                scope=array(text('Requested project-relative path or glob; runtime policy decides access.', 512), minimum=1),
+                scope=array(text('Requested project-relative path or glob; \'.\' is the whole project. Never absolute, never containing \'..\' or a backslash, and never inside .cortex, .git, .codex or .claude. Runtime policy decides access.', 512), minimum=1),
                 complexity=dict(type='string', enum=['low', 'normal', 'high'],
                                 description='How hard this task is, judged from the work itself: low for a narrow lookup or mechanical change, '
                                             'high for cross-cutting root-cause analysis, production incidents, concurrency, security or data-loss risk; '
                                             'omit for normal. The runtime turns it into a stronger or cheaper route; it never names a model.')),
            required=['id', 'role', 'objective', 'dependencies', 'scope'])
+NODE['properties']['id']['pattern'] = r'^[A-Za-z][A-Za-z0-9_-]{0,63}$'
 from ..portable.roles import WORKER_ALIASES
 NODE['properties']['role']['enum'] = sorted(role for role in WORKER_ALIASES if role not in {'code-reviewer','build-verification'})
 PLAN = obj(dict(tasks=array(NODE, minimum=1), verification=array(array(text('Literal argument of a verification command copied exactly from the project\'s own documented verification (docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json scripts), interpreter path included; set environment variables with ["env", "NAME=value", ...]. Runs with the owner\'s tools; only git-ignored paths are writable.', 4096), minimum=1), maximum=16, minimum=1)))
@@ -40,23 +41,23 @@ COORDINATOR = {
 }
 RESULT = obj(dict(
     report_ref=text('Exact immutable report_id from write_report for this worker attempt.', 14),
-    summary=text('Summary of the result.', 4000),
-    verdict=dict(type='string', enum=['APPROVE', 'REQUEST_CHANGES', 'BLOCK'], description='Required for the runtime reviewer; other roles must omit.'),
-    checks=array(obj(dict(name=text('Check name.',200), outcome=dict(type='string', enum=['passed','failed','not_run','unverified']),
-                         tool_call_ref=text('Exact tool_call_ref returned by command_run in this attempt (strongest evidence). Omit it for a check you ran with your own shell: a passed claim is then accepted when this attempt ran a shell command that completed.',128)), required=['name','outcome']), maximum=20),
+    summary=text('What was found or changed, in plain words: the conclusion first, then what supports it. At most 4000 characters.', 4000),
+    verdict=dict(type='string', enum=['APPROVE', 'REQUEST_CHANGES', 'BLOCK'], description='The review decision: APPROVE when the change is correct, REQUEST_CHANGES for fixable problems, BLOCK when it must not proceed.'),
+    checks=array(obj(dict(name=text('What the check verified, e.g. "unit tests for services/trading" or "ruff on the changed files".',200), outcome=dict(type='string', enum=['passed','failed','not_run','unverified'], description='passed: you ran it in this attempt and it succeeded (see tool_call_ref for the evidence rule). failed: it ran and failed, which fails the assignment. not_run: you did not run it. unverified: it ran but its result could not be established.'),
+                         tool_call_ref=text('Evidence for a passed check, from this attempt only: the exact tool_call_ref a command_run returned (it must have exited 0), or the id of one of your own completed tool calls. Omit it for a check you ran with your own shell: a pass is then accepted only if this attempt ran at least one shell command that completed. A pass with no command run at all is refused.',128)), required=['name','outcome']), maximum=20),
     request_key=text('Unique result delivery key.',128),
 ), required=['report_ref','summary','checks','request_key'])
 RESULT['properties']['report_ref']['pattern'] = r'^r_[0-9a-f]{12}$'
 REQUESTS = {
     'replan_request': obj(dict(reason=text('Evidence requiring a new decomposition or additional investigation.'),request_key=text('Unique proposal identity.',128))),
-    'scope_request': obj(dict(reason=text('Why the current scope prevents completion.'),scope=array(text('Requested project-relative path or glob.',512),minimum=1),request_key=text('Unique proposal identity.',128))),
+    'scope_request': obj(dict(reason=text('Why the current scope prevents completion.'),scope=array(text('Requested project-relative path or glob; \'.\' is the whole project. Never absolute, never containing \'..\' or a backslash, and never inside .cortex, .git, .codex or .claude.',512),minimum=1),request_key=text('Unique proposal identity.',128))),
     'escalation_request': obj(dict(reason=text('Problem requiring independent senior consultation. Runtime retains configured model/effort policy.'),request_key=text('Unique proposal identity.',128))),
 }
 COORDINATOR['verification_submit'] = obj(dict(
     verification=dict(PLAN['properties']['verification'], description='Corrected verification commands. Only after the runtime verification failed and the work itself is fine: it verifies again without redoing the reviewed work. When the code is wrong, submit a new plan instead.'),
     request_key=text('Unique proposal identity.',128)))
 COORDINATOR.update(REQUESTS)
-RESULT['properties']['checks']['description'] = 'Executed automated checks with retained command evidence. Every passed item needs its own supporting tool_call_ref; descriptive review observations belong in the report. A failed check fails the assignment; not_run or unverified checks are retained as disclosed gaps for review and synthesis.'
+RESULT['properties']['checks']['description'] = 'Automated checks this attempt actually ran, up to 20; [] when there were none. Descriptive review observations belong in the report, not here. A failed check fails the assignment; not_run or unverified checks are kept as disclosed gaps for review and synthesis.'
 WORKER = {'result_submit': RESULT, **REQUESTS}
 
 

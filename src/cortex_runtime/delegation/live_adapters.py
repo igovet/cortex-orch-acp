@@ -79,18 +79,25 @@ def _installed_version_for(record) -> str | None:
 def _pinned_version_for(engine: str, record=None) -> str:
     """The version ``delivery_for``/``tier_for`` are looked up by.
 
-    Prefers the version this connection will really launch, so a receipt
-    never names a registration other than the one that actually runs --
-    Cortex can now have more than one qualified adapter version installed
-    (see ``connections.discovery.QUALIFIED_ADAPTER_VERSIONS``). An
-    unregistered installed version resolves to no qualified delivery and
-    is refused, which is the point: it is never silently treated as the
-    pinned one.
+    Prefers the version this connection will really launch when that exact
+    version has its own registration, so a receipt names the registration
+    that actually runs -- Cortex can have more than one qualified codex-acp
+    version installed (see ``connections.discovery
+    .QUALIFIED_ADAPTER_VERSIONS``). An installed version with no exact
+    registration keeps resolving to the engine's pinned version, exactly as
+    before this lookup existed: claude-agent-acp is installed at 0.81.0 while
+    only 0.78.0 is registered, and resolving the installed version made every
+    Claude worker refuse its first prompt with an UNSUPPORTED delivery
+    (live, 2026-09-22), while the coordinator, resolved without a record,
+    kept working.
     """
     if record is not None:
         installed = _installed_version_for(record)
         if installed:
-            return installed
+            from ..engine.instruction_delivery_registry import has_exact_registration
+
+            if has_exact_registration(engine, installed):
+                return installed
     return _PINNED_ENGINE_VERSION.get(engine, "*")
 
 
