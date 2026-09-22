@@ -61,6 +61,19 @@ assert.deepEqual(view.steps.map((s) => [s.kind, s.status, s.title]), [
 assert.equal(view.steps[1].subtitle, "2 planned steps");
 assert.equal(view.steps[3].subtitle, "debugger · Waiting for a");
 
+// Waiting for a step is not the coordinator working: nothing pulses.
+const waiting = { ...base, requirements: [], delegations: {}, workers: [],
+  plan: { state: "EXECUTING", blocker: null, nodes: [node("a", "pending", null, "Waiting to start")] } };
+view = buildPipeline(waiting);
+assert.deepEqual(view.steps.map((s) => s.status), ["done", "done", "pending", "pending"]);
+assert.equal(view.steps.at(-1)?.title, "Review and acceptance");
+view = buildPipeline({ ...waiting, plan: { ...waiting.plan, state: "RECONCILING", nodes: [node("a", "completed", null)] } });
+assert.deepEqual([view.steps.at(-1)?.status, view.steps.at(-1)?.title], ["active", "Coordinator is reviewing"]);
+view = buildPipeline({ ...waiting, plan: { ...waiting.plan, state: "VERIFYING", nodes: [node("a", "completed", null)] } });
+assert.deepEqual([view.steps.at(-1)?.status, view.steps.at(-1)?.title], ["active", "Running verification"]);
+view = buildPipeline({ ...waiting, plan: { state: "PLANNING", blocker: null, nodes: [] } });
+assert.deepEqual(view.steps.map((s) => s.status), ["done", "active", "pending"]);
+
 view = buildPipeline({ ...base, requirements: [], delegations: {}, workers: [],
   task: { ...base.task, state: "blocked" },
   plan: { state: "BLOCKED", blocker: "scheduler_capacity_timeout", nodes: [node("a", "cancelled", null)] } });

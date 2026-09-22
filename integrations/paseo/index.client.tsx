@@ -2,7 +2,7 @@ import { isHiddenOperation } from "./shared/timeline-visibility.ts";
 import { useAgent, type PluginClientContext, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useRef } from "react";
-import { Animated, Pressable, Text, View } from "react-native";
+import { Animated, Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { WorkerPanel } from "./client/worker-panel.js";
 import { PipelinePanel } from "./client/pipeline-panel.js";
@@ -215,9 +215,19 @@ export default function contribute(client: PluginClientContext) {
           title: "Pipeline",
           icon: "Workflow",
           label: "Pipeline",
-          behavior: {
+          // Phones have no explorer sidebar to open it in; there it opens in
+          // place, like Workers. The desktop keeps the sidebar tab.
+          behavior: Platform.OS === "web" ? {
             kind: "action",
             onPress: () => client.openPanel("pipeline", { workspaceId: candidate.workspace.id, agentId, location: "explorer" }),
+          } : {
+            kind: "popover",
+            Content: (props) => <PipelinePanel theme={props.theme} workspaceId={candidate.workspace.id} agentId={agentId} popover
+              onOpenWorker={(assignmentRef) => {
+                props.close();
+                selectWorker(agentId, assignmentRef);
+                client.openPanel("workers", { workspaceId: candidate.workspace.id, agentId, location: "workspace" });
+              }} />,
           },
         },
       });

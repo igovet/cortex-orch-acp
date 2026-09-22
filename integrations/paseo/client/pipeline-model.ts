@@ -109,10 +109,17 @@ export function buildPipeline(pipeline: Pipeline): PipelineView {
 
   const nodeCount = pipeline.plan?.nodes.length ?? 0;
   const planned = pipeline.requirements.length > 0 || workers.length > 0;
+  // With a runtime plan, a step pulses only while it really runs: the
+  // coordinator works in PLANNING and RECONCILING, the runtime's own checks
+  // in VERIFYING; anything else is workers, or waiting for one.
+  const runtime = pipeline.plan?.state ?? null;
+  const planStatus: StepStatus = runtime
+    ? (runtime === "PLANNING" && live ? "active" : planned ? "done" : "pending")
+    : planned ? "done" : live ? "active" : "pending";
   const plan: PipelineStep = {
     key: "plan",
     kind: "plan",
-    status: planned ? "done" : live ? "active" : "pending",
+    status: planStatus,
     title: "Plan",
     subtitle: pipeline.requirements.length > 0
       ? `${pipeline.requirements.length} requirement${pipeline.requirements.length === 1 ? "" : "s"}`
@@ -124,14 +131,18 @@ export function buildPipeline(pipeline: Pipeline): PipelineView {
   };
 
   const workerActive = workers.some((step) => step.status === "active");
+  const finishing = runtime ? live && (runtime === "RECONCILING" || runtime === "VERIFYING") : planned && !workerActive;
   const finish: PipelineStep = {
     key: "finish",
     kind: "finish",
     status: accepted ? "done"
       : state === "stopped" ? "cancelled"
       : !live ? "blocked"
-      : planned && !workerActive ? "active" : "pending",
-    title: accepted ? "Accepted" : live ? (planned && !workerActive ? "Coordinator is reviewing" : "Review and acceptance") : TASK_STATE[state]?.text ?? state,
+      : finishing ? "active" : "pending",
+    title: accepted ? "Accepted"
+      : !live ? TASK_STATE[state]?.text ?? state
+      : !finishing ? "Review and acceptance"
+      : runtime === "VERIFYING" ? "Running verification" : "Coordinator is reviewing",
     subtitle: accepted ? "The coordinator accepted the verified result" : undefined,
     badges: [],
     body: accepted ? undefined : pipeline.task?.waitDetail ?? (!live ? pipeline.plan?.blocker ?? undefined : undefined),

@@ -1,13 +1,17 @@
 import { useRpc, type PluginAgentPanelProps } from "@getpaseo/plugin/client";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useRef, useState } from "react";
-import { Animated, Pressable, Text, View } from "react-native";
+import { Animated, Pressable, Text, View, useWindowDimensions } from "react-native";
 import { readPipeline, type Pipeline } from "../shared/pipeline.js";
 import { UsageMeter } from "./usage-meter.tsx";
 import { buildPipeline, type PipelineStep, type StepItem, type StepStatus, type Tone } from "./pipeline-model.ts";
 
 type Theme = PluginAgentPanelProps["theme"];
-type Props = PluginAgentPanelProps & { onOpenWorker(assignmentRef: string): void };
+type Props = Pick<PluginAgentPanelProps, "theme" | "workspaceId" | "agentId"> & {
+  onOpenWorker(assignmentRef: string): void;
+  /** Shown in a composer-pill popover (phones), not a sidebar tab. */
+  popover?: boolean;
+};
 
 // Live tasks refresh often; settled ones only need to notice a new turn.
 const LIVE_POLL_MS = 1500;
@@ -135,8 +139,13 @@ function Step({ step, index, last, nextDone, theme, onOpenWorker }: {
   </View>;
 }
 
-export function PipelinePanel({ theme, workspaceId, agentId, onOpenWorker }: Props) {
+export function PipelinePanel({ theme, workspaceId, agentId, onOpenWorker, popover = false }: Props) {
   const rpc = useRpc(readPipeline);
+  const { height } = useWindowDimensions();
+  // A popover has no height of its own to fill: bound it and let it scroll.
+  const frame = popover
+    ? { flexGrow: 0, maxHeight: Math.round(height * 0.7), marginHorizontal: -12, backgroundColor: theme.colors.surface1 }
+    : { flex: 1, backgroundColor: theme.colors.surface0 };
   const [pipeline, setPipeline] = useState<Pipeline | null>(null);
   const [failed, setFailed] = useState(false);
 
@@ -163,7 +172,7 @@ export function PipelinePanel({ theme, workspaceId, agentId, onOpenWorker }: Pro
   const c = theme.colors;
   if (!pipeline || !pipeline.available) {
     const text = failed ? "The pipeline could not be read." : pipeline?.message ?? "Loading pipeline…";
-    return <View style={{ flex: 1, backgroundColor: c.surface0, padding: 16 }}>
+    return <View style={[frame, { padding: 16 }]}>
       <Text style={{ color: pipeline || failed ? c.statusWarning : c.foregroundMuted, fontSize: 13 }}>{text}</Text>
     </View>;
   }
@@ -171,7 +180,7 @@ export function PipelinePanel({ theme, workspaceId, agentId, onOpenWorker }: Pro
   const view = buildPipeline(pipeline);
   const headColor = toneColor(theme, view.headline.tone);
   const progress = view.total ? view.done / view.total : 0;
-  return <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: 14, gap: 16 }}>
+  return <ScrollView style={frame} contentContainerStyle={{ padding: 14, gap: 16 }}>
     <View style={{ gap: 8 }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: headColor }} />
