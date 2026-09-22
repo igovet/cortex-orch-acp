@@ -73,6 +73,8 @@ def test_configure_explicit_engine_error_is_rejected(tmp_path):
         session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
         with pytest.raises(ConfigurationRejected):
             manager.configure(session_id, _revision())
+        log = (manager._process.logs.directory / "observations.jsonl").read_text()
+        assert '"event": "set_config_option_rejected"' in log and '"option_id": "model"' in log
     finally:
         manager.shutdown(grace=2.0)
 

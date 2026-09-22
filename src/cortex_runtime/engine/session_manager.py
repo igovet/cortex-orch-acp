@@ -808,6 +808,13 @@ class EngineSessionManager:
                     timeout=self._call_timeout,
                 )
             except EngineProtocolError as protocol_error:
+                # The client only ever sees the bare message ("Internal
+                # error"); the engine's own detail lives in ``data`` and is
+                # kept here, through the redacting log, or it is lost.
+                self._process.logs.observe(
+                    "set_config_option_rejected", option_id=option_id,
+                    code=protocol_error.code, message=protocol_error.message, data=protocol_error.data,
+                )
                 if applied_pairs:
                     raise EngineConfigurationPartiallyApplied(
                         f"session/set_config_option for {option_id!r} was rejected by the engine "
