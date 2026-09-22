@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import sys
 import time
+import traceback
 from collections import OrderedDict
 
 from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, ERROR_HELP, validate
@@ -93,6 +94,23 @@ def _write_observation(operation, outcome, replayed=False, meta=None, arguments=
             os.write(fd, (json.dumps(row)+'\n').encode())
     finally:
         os.close(fd)
+
+
+def _log_unexpected(context):
+    """Write the current traceback to stderr for a swallowed unexpected error.
+
+    The client-facing reply stays deliberately opaque (see the catch-alls
+    that call this), but the real cause -- almost always a non-StoreError
+    like a raw ``sqlite3.OperationalError: database is locked`` under lock
+    contention -- must not vanish: the engine drains this process's stderr
+    into its EngineLogs, so this is the "local server" the reply tells the
+    operator to check. Never raises (a diagnostic must never alter outcome).
+    """
+    try:
+        sys.stderr.write(f"cortex-server unexpected error [{context}]:\n" + traceback.format_exc())
+        sys.stderr.flush()
+    except Exception:
+        pass
 
 
 def observe(operation, outcome, replayed=False, meta=None, arguments=None, result=None):
@@ -233,6 +251,7 @@ class Server:
             code = str(exc)
             failure = exc
         except Exception:
+            _log_unexpected(f'tools/call:{name}')
             code = 'storage_error'
             failure = StoreError(code)
         observe(name,code,meta=params.get('_meta'),arguments=params.get('arguments'))
@@ -341,6 +360,7 @@ def main():
         except (ValueError, UnicodeError, RecursionError):
             reply = dict(jsonrpc='2.0',id=None,error=dict(code=-32700,message='Cannot parse the request. Send one valid UTF-8 JSON object per line without duplicate keys; keep each line within 2,000,000 bytes. Nothing in this frame was executed.'))
         except Exception:
+            _log_unexpected('dispatch')
             reply = dict(jsonrpc='2.0',id=request_id,error=dict(code=-32603,message='The server failed to complete this request. Do not change arguments to guess a repair. Check the local server; a write may be uncertain, so preserve and retry only its exact original request and delivery key.'))
         sys.stdout.write(json.dumps(reply,ensure_ascii=False)+'\n')
         sys.stdout.flush()
