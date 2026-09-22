@@ -17,6 +17,9 @@ available -- replaces the hand-maintained per-role ``route-policy.json``.
    the cheapest model is the one worth running at its maximum); flagship
    models (:data:`FLAGSHIP_FAMILIES`) never above ``high``. The same rule
    narrows the editor's selector and any explicitly chosen effort.
+5. Cheap first, stronger on evidence: a retried attempt or a fix after
+   review requested changes runs one tier above its role (``escalate``),
+   so the strongest models work only where a weaker one already fell short.
 
 Only engine-confirmed catalogs are used -- a connection whose models were
 never observed (seed catalog) is not routed to automatically; the worker
@@ -67,13 +70,12 @@ _LIGHT_ONLY_EFFORTS = frozenset({"max"})
 FLAGSHIP_FAMILIES = ("astra", "fable")
 _FLAGSHIP_CEILING = "high"
 
-# What a mistake costs: design/security/performance/debugging get the
-# strongest models, exploration/planning/writing the cheapest.
+# What a mistake costs: design/security get the strongest models,
+# exploration/planning/writing the cheapest. Debugging and performance work
+# start at standard and escalate when that falls short (see ``escalate``).
 ROLE_TIERS = {
     "worker-architect": "deep",
     "worker-database-architect": "deep",
-    "worker-debugger": "deep",
-    "worker-performance-engineer": "deep",
     "worker-security-auditor": "deep",
     "worker-senior-consultant": "deep",
     "worker-explorer": "light",
@@ -91,9 +93,11 @@ class Choice:
     basis: str  # "auto" | "auto:pin"
 
 
-def choose(role: str, project_root=None, environ: Mapping[str, str] | None = None) -> Choice | None:
+def choose(role: str, project_root=None, environ: Mapping[str, str] | None = None, *,
+           escalate: bool = False) -> Choice | None:
     """The route this worker role should open on, or ``None`` when nothing
-    engine-confirmed is available (keep the coordinator's route)."""
+    engine-confirmed is available (keep the coordinator's route).
+    ``escalate`` lifts the role one tier (a retry or a review fix)."""
     from ..connections import quota
     from ..connections import registry as connection_registry
 
@@ -109,7 +113,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             usage_cache[key] = quota.used_percent(connections[entry.connection_id], entry.route.model, environ)
         return usage_cache[key]
 
-    role_tier = ROLE_TIERS.get(role, "standard")
+    role_tier = tier_for(role, escalate)
     pin = _pin_for(overrides, role)
     if pin is not None:
         engine, model, effort = pin
@@ -130,6 +134,11 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         return None
     effort = nearest(EFFORT_BY_TIER[role_tier], permitted_efforts(picked, tiers[picked.route.id]))
     return Choice(picked.connection_id, picked.route.model, effort, "auto")
+
+
+def tier_for(role: str, escalate: bool = False) -> str:
+    tier = ROLE_TIERS.get(role, "standard")
+    return TIERS[max(0, TIERS.index(tier) - 1)] if escalate else tier
 
 
 def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, str] | None = None):

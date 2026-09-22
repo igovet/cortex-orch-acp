@@ -139,3 +139,10 @@ def test_claude_usage_keeps_the_latest_window_per_kind_and_scopes_model_windows(
     assert quota.used_percent(record, "sonnet", environ) == pytest.approx(30.0)
     quota.observe(connection_id, {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": future}, environ)
     assert quota.used_percent(record, "sonnet", environ) == 100.0
+
+
+def test_debugging_starts_standard_and_escalates_one_tier():
+    assert auto_route.tier_for("worker-debugger") == "standard"
+    assert auto_route.tier_for("worker-debugger", escalate=True) == "deep"
+    assert auto_route.tier_for("worker-explorer", escalate=True) == "standard"
+    assert auto_route.tier_for("worker-security-auditor", escalate=True) == "deep"

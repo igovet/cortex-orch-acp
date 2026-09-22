@@ -134,6 +134,24 @@ def released_by_user(db, task):
     return any(json.loads(r[0]).get('question_id') in stops for r in answered)
 
 
+def escalated_attempt(store, task_id, attempt_id):
+    """This attempt follows evidence that a weaker run fell short: it is a
+    retry of its node or a fix after review requested changes."""
+    with store.connection() as db:
+        provision = db.execute('SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
+                               (task_id, attempt_id)).fetchone()
+        node = provision and db.execute('SELECT node_id,revision FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
+                                        (task_id, provision['idempotency_key'])).fetchone()
+        if not node:
+            return False
+        if node['node_id'].startswith('_fix_'):
+            return True
+        retries = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'",
+                             (task_id,)).fetchall()
+    return any(json.loads(r[0]).get('node') == node['node_id'] and json.loads(r[0]).get('revision') == node['revision']
+               for r in retries)
+
+
 def validate_scope(scope):
     if not isinstance(scope, list) or not scope or len(scope) > 64:
         raise StoreError('invalid_assignment_scope')
