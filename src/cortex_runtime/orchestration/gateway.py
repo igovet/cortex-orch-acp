@@ -186,12 +186,16 @@ def _write(root,args):
 
 def _command(store,channel,root,scopes,args,ref,owner,effects):
     from .sandbox import as_owner, gateway_command
-    with tempfile.TemporaryDirectory(prefix='cortex-command-') as scratch, tempfile.TemporaryFile() as output:
+    from . import ssh_askpass
+    with tempfile.TemporaryDirectory(prefix='cortex-command-') as scratch, tempfile.TemporaryFile() as output, \
+            tempfile.TemporaryDirectory(prefix='cortex-askpass-') as askpass_dir:
         # The whole host read-only, as the worker's own jailed shell sees it.
         with store.connection() as db: denied=write_denials(db,channel.task_id)
         with gateway_command(root,scratch,args['argv'],scopes,system_root=True,readonly=denied) as (command,fds):
             # A worker's shell is the owner's shell, still scope-confined.
             as_owner(command,os.environ)
+            # Opt-in: ssh asks for a password in a desktop dialog.
+            ssh_askpass.apply(command,os.environ,Path(askpass_dir))
             with store.connection() as db:
                 db.execute('BEGIN IMMEDIATE')
                 _authority(db,channel)

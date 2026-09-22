@@ -780,13 +780,20 @@ class EngineProcess:
             self.logs.observe(ProcessObservation.STARTING, command=list(launch_command), cwd=cwd)
             fds = ()
             if jail is not None:
+                from ..orchestration import ssh_askpass
                 from ..orchestration.sandbox import engine_jail
                 from ..connections.environment import _ISOLATION_ENV_VAR
                 state = process_env[_ISOLATION_ENV_VAR[record.engine]]
+                # Opt-in: ssh in the native shell asks for a password in a
+                # desktop dialog (see orchestration.ssh_askpass).
+                askpass_dir = self._jail_dir / "askpass"
+                askpass_env = ssh_askpass.prepare(base_env, askpass_dir)
+                process_env.update(askpass_env)
+                self.logs.observe("ssh_askpass", enabled=bool(askpass_env))
                 launch_command, fds = self._jail_stack.enter_context(engine_jail(
                     cwd, self._jail_dir / "tmp", launch_command, jail["scopes"], env=process_env,
                     state_dirs={state: record.engine}, writable=[self._socket_dir],
-                    readonly=jail.get("readonly") or (),
+                    readonly=jail.get("readonly") or (), sealed=[askpass_dir] if askpass_env else (),
                 ))
                 process_env = {"PATH": "/usr/bin:/bin"}
             # Spawned from one process-lifetime thread: the jail's

@@ -19,6 +19,12 @@ which is read-only and created neutral when absent; installed plugins are hidden
 A revoked or expired channel terminates the process. Engines therefore keep their
 native tools, `AGENTS.md`/`CLAUDE.md` loading and skills.
 
+With the owner's opt-in `ssh-askpass.json` (`orchestration.ssh_askpass`), the
+engine environment and each `command_run` also receive the display session and
+`SSH_ASKPASS` pointing at a Cortex-generated dialog script mounted read-only.
+ssh prompts then appear on the owner's desktop and the answers bypass the model.
+See [SECURITY.md](../../SECURITY.md#optional-ssh-password-dialog).
+
 The supported Codex CLI is 0.155.1 with codex-acp 1.12.0. A verified private
 adapter and per-process launcher disable native agents, multi-agent, plugin,
 hook and app features and each inherited MCP server; only session-specific

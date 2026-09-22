@@ -403,7 +403,7 @@ ENGINE_HIDDEN = ('plugins',)
 
 
 @contextmanager
-def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(), readonly=()):
+def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(), readonly=(), sealed=()):
     """Run a whole engine process the way a worker's shell runs.
 
     The project is read-only except the granted scopes, `.cortex` is hidden
@@ -411,7 +411,9 @@ def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(
     state directory (``state_dirs``: path -> engine) is writable except its
     ENGINE_CONFIG entries, which are created neutral when absent so none can
     be planted. `writable` adds plain
-    writable directories (the MCP broker sockets). `env` is the engine's own.
+    writable directories (the MCP broker sockets); `sealed` host paths are
+    mounted read-only over themselves (the ssh askpass script, which lives
+    under the otherwise writable /tmp). `env` is the engine's own.
     """
     from .gateway import PRIVATE
     with gateway_command(root, scratch, argv, scopes, reveal=frozenset(PRIVATE) - {'.cortex'},
@@ -460,6 +462,8 @@ def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(
                 path = real_dirs[directory] / name
                 if path.is_dir() and not path.is_symlink():
                     extra += ['--tmpfs', str(path), '--remount-ro', str(path)]
+        for path in sealed:
+            extra += ['--ro-bind', str(path), str(path)]
         at = command.index('--chdir')
         command[at:at] = extra
         launch, launch_fds = compact_argv(command, fds)

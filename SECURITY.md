@@ -68,6 +68,24 @@ running commands and external servers are terminated on observed revocation.
 This does not claim protection against a separate hostile process running as the
 same OS user and racing filesystem changes.
 
+### Optional ssh password dialog
+
+This is off by default. With `{"enabled": true}` in
+`$XDG_CONFIG_HOME/cortex/ssh-askpass.json`, an engine process started after
+that point and every worker `command_run` additionally receive the owner's
+`DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR` and
+`DBUS_SESSION_BUS_ADDRESS` (each checked for shape), plus `SSH_ASKPASS` and
+`SSH_ASKPASS_REQUIRE=force`. ssh then shows its prompt in a `zenity` or
+`kdialog` dialog, and the typed answer is written to ssh only. It never reaches
+the model, a transcript, a log or the store. Cortex generates the dialog script
+and mounts it read-only, so a sandboxed process cannot replace it. The switch
+lives in the owner's config directory, which the sandbox cannot write. Git also
+uses `SSH_ASKPASS` for HTTPS credential prompts. Any process in the sandbox can
+also draw windows on the owner's display, including a fake of this prompt, so
+type a password only for a connection you expect. When no display session or
+dialog program is available, nothing is added. `sudo` still fails: bubblewrap
+sets no_new_privs, which setuid programs refuse.
+
 Automatic verification has the same private-path isolation and a completely
 read-only project. Only its private `/tmp` is writable. Sandbox absence is a hard
 failure. Complete command bytes, exit status, timeout/cancellation and project

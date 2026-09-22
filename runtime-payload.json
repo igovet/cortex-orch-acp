@@ -129,6 +129,7 @@
     "src/cortex_runtime/orchestration/recovery.py",
     "src/cortex_runtime/orchestration/sandbox.py",
     "src/cortex_runtime/orchestration/scheduler.py",
+    "src/cortex_runtime/orchestration/ssh_askpass.py",
     "src/cortex_runtime/orchestration/state.py",
     "src/cortex_runtime/ownership.py",
     "src/cortex_runtime/packaging/__init__.py",

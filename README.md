@@ -67,6 +67,7 @@ advertised API. Report prose and final chat messages cannot complete a task.
 | Engine installs | `~/.local/share/cortex/engines/<engine>/<version>/` | Cortex (updated at startup) |
 | Worker routing overrides (optional) | `~/.config/cortex/routing.json` | you, by hand |
 | Your defaults | `~/.config/cortex/defaults.json` | the model/effort selectors in the editor |
+| ssh password dialog (optional, off) | `~/.config/cortex/ssh-askpass.json` | you, by hand (see [ssh passwords](#ssh-passwords)) |
 | One project's tasks | `<project>/.cortex/` | Cortex |
 
 A project's `.cortex/` holds `cortex.sqlite3` (tasks, events, audit),
@@ -373,6 +374,25 @@ an already-running plugin. Old entries without `allowed_tools` must be repaired
 with exact installed tool names and executable/dependency read grants; the updater
 never invents permissions from a server catalogue. See the
 [production repair evidence](docs/acp/evidence/paseo-2026-09-21/production-mcp-repair.md).
+
+### ssh passwords
+
+Commands run without a terminal, so by default an ssh that needs a password,
+a key passphrase or a host-key confirmation fails. To answer it in a desktop
+dialog instead, create `$XDG_CONFIG_HOME/cortex/ssh-askpass.json` (default
+`~/.config/cortex/ssh-askpass.json`):
+
+```json
+{"enabled": true}
+```
+
+New engine processes and worker `command_run` calls then show ssh's own prompt
+in a `zenity` (or `kdialog`) window. You type the answer, and it goes to ssh only,
+never to the model, the chat or `.cortex`. It needs a desktop session and one of
+those programs. Git also uses the dialog for HTTPS credential prompts when no
+other askpass is configured. `sudo` still cannot run in the sandbox (see
+[SECURITY.md](SECURITY.md#optional-ssh-password-dialog)). Use a key for your own
+user instead of `sudo ssh`.
 
 ## Checking it works
 
