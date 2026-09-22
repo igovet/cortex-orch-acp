@@ -48,7 +48,8 @@ Credential redaction remains; a downstream terminal reference cannot be relayed 
 if it belonged to the incoming client's terminal namespace. Only actually exposed
 engine events can be forwarded—absent native events are never fabricated.
 
-All native action tools are disabled in the pinned engines. The runtime gateway
+Engine processes run in the engine jail, where their native tools write only the
+assignment scope; native subagents are disabled. The runtime gateway
 checks current channel authority and assignment scope before each operation,
 contains commands and external MCP servers with bubblewrap, and retains exact
 receipts. See [permissions and containment](permissions-and-containment.md).

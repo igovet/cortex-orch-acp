@@ -158,8 +158,6 @@ def test_runtime_wrapper_disables_native_agents_without_changing_codex_home(tmp_
         "import json,sys\n" +
         "a=sys.argv[1:]\n" +
         "if a[-2:]==['features','list']: print('multi_agent stable false\\nmulti_agent_v2 stable false\\nplugins stable false')\n" +
-        "elif a==['--version']: print('codex-cli 0.155.1')\n" +
-        "elif a==['debug','models','--bundled']: print(json.dumps({'models':[{'slug':'fixture','shell_type':'default','apply_patch_tool_type':'freeform'}]}))\n" +
         "elif a[-3:]==['mcp','list','--json']: print(json.dumps([{'name':'native','enabled':'mcp_servers.native.enabled=false' not in a}]))\n" +
         f"else: open({str(capture)!r},'w').write('\\n'.join(a))\n").encode())
     environ = isolated_environ(tmp_path)
@@ -175,13 +173,10 @@ def test_runtime_wrapper_disables_native_agents_without_changing_codex_home(tmp_
     actual=capture.read_text().splitlines()
     assert actual[-3:]==['-c','mcp_servers.native.enabled=false','app-server']
     for setting in ['agents.enabled=false','features.multi_agent=false','features.multi_agent_v2=false',
-                    'features.plugins=false','features.hooks=false','features.apps=false','features.shell_tool=false',
-                    'features.view_image=false','features.image_generation=false','features.browser_use=false',
-                    'features.computer_use=false','tools.update_plan.enabled=false','web_search="disabled"']:
+                    'features.plugins=false','features.hooks=false','features.apps=false']:
         assert setting in actual
-    catalogue_arg=next(a for a in actual if a.startswith('model_catalog_json='))
-    catalogue=json.loads(Path(json.loads(catalogue_arg.split('=',1)[1])).read_text())
-    assert catalogue['models']==[dict(slug='fixture',shell_type='disabled',apply_patch_tool_type=None,tool_mode='direct',experimental_supported_tools=[])]
+    # Native action tools stay the engine's own: nothing disables or rewrites them.
+    assert not any(a.startswith(('features.shell_tool','web_search','model_catalog_json')) for a in actual)
     assert native_home.exists()
     assert Path(wrapper).is_file() and not Path(wrapper).is_symlink()
     assert stat.S_IMODE(Path(wrapper).stat().st_mode) & 0o777 == 0o700

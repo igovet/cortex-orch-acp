@@ -96,6 +96,34 @@ def test_usage_update_with_real_token_counts_is_engine_reported(tmp_path):
         manager.shutdown(grace=2.0)
 
 
+def test_acp_context_fill_and_prompt_response_usage_are_carried(tmp_path):
+    """ACP's own shapes: `usage_update` reports the context fill as top-level
+    `used`/`size` (a display update, never token accounting), and the
+    `session/prompt` response carries the turn's token counts."""
+    scenario = default_scenario(
+        prompt_updates=[
+            dict(delay=0.0, sessionUpdate="usage_update", used=84000, size=200000),
+            dict(delay=0.0, sessionUpdate="usage_update", used=5, size=0),
+            dict(delay=0.0, sessionUpdate="agent_message_chunk", content=dict(type="text", text="ok")),
+        ],
+        prompt_usage=dict(inputTokens=1200, outputTokens=300, cachedReadTokens=900, totalTokens=1500, thoughtTokens=None),
+    )
+    manager = _make_manager(tmp_path, scenario)
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        events = list(manager.prompt_turn(session_id, "hello"))
+    finally:
+        manager.shutdown(grace=2.0)
+    usage_events = [event for event in events if event.kind == EngineEventKind.USAGE_UPDATE]
+    assert usage_events[0].display_update == dict(sessionUpdate="usage_update", used=84000, size=200000)
+    assert usage_events[0].usage_basis == UsageBasis.UNKNOWN
+    assert usage_events[1].display_update is None  # a zero-sized window is not a fill
+    assert usage_events[-1].usage_basis == UsageBasis.ENGINE_REPORTED
+    assert usage_events[-1].usage_values == dict(inputTokens=1200, outputTokens=300, cachedReadTokens=900, totalTokens=1500)
+    assert events[-1].kind == EngineEventKind.TURN_END
+
+
 def test_usage_update_with_no_recognized_token_fields_is_unknown_not_engine_reported(tmp_path):
     """T035 FINDING-03: a `usage_update` notification whose `usage` payload
     yields no recognized integer token field (here: empty) must never be

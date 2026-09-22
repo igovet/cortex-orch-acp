@@ -1,10 +1,10 @@
 """Linux check sandbox: explicit system mounts, project only, no user home/network.
 
-This contains runtime-launched verification commands. It does not claim to
-intercept engine-native actions; engines have a different process boundary.
-A worker's own shell additionally runs as the owner (`as_owner`): their name,
-groups, read-only HOME, secret-free environment and network, while writes
-stay confined to the granted scope.
+This contains runtime-launched verification commands. A worker's own shell
+additionally runs as the owner (`as_owner`): their name, groups, read-only
+HOME, secret-free environment and network, while writes stay confined to the
+granted scope. `engine_jail` puts a whole engine process in the same box, so
+its native tools need no per-call interception.
 """
 from pathlib import Path, PurePath
 import re
@@ -15,7 +15,10 @@ from contextlib import contextmanager
 from ..contracts import StoreError
 
 
-def verification_command(root, scratch, argv):
+def verification_command(root, scratch, argv, system_root=False):
+    """``system_root`` mounts the whole host read-only (an engine may be
+    installed anywhere) and hides the owner's runtime sockets under /run/user,
+    whose session bus could start processes outside the sandbox."""
     binary = shutil.which('bwrap')
     if binary is None:
         raise StoreError('verification_sandbox_unavailable')
@@ -24,13 +27,17 @@ def verification_command(root, scratch, argv):
                '--clearenv', '--setenv', 'PATH', '/usr/local/bin:/usr/bin:/bin',
                '--setenv', 'HOME', '/tmp', '--setenv', 'TMPDIR', '/tmp',
                '--setenv', 'LANG', 'C.UTF-8', '--setenv', 'PYTHONDONTWRITEBYTECODE', '1']
-    for name in ('/usr', '/bin', '/sbin', '/lib', '/lib64'):
+    if system_root:
+        command += ['--ro-bind', '/', '/']
+        if Path('/run/user').is_dir():
+            command += ['--tmpfs', '/run/user']
+    for name in () if system_root else ('/usr', '/bin', '/sbin', '/lib', '/lib64'):
         path = Path(name)
         if path.is_symlink():
             command += ['--symlink', str(path.readlink()), name]
         elif path.exists():
             command += ['--ro-bind', name, name]
-    for name in ('/etc/ld.so.cache', '/etc/ld.so.conf', '/etc/localtime'):
+    for name in () if system_root else ('/etc/ld.so.cache', '/etc/ld.so.conf', '/etc/localtime'):
         if Path(name).is_file():
             command += ['--ro-bind', name, name]
     command += ['--proc', '/proc', '--dev', '/dev', '--bind', str(scratch), '/tmp',
@@ -103,15 +110,16 @@ def as_owner(command, environ):
 
 
 @contextmanager
-def gateway_command(root, scratch, argv, scopes):
+def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root=False):
     """Pin mount sources to no-follow descriptors, then constrain writes.
 
     Globs grant existing matches only. Explicit directory grants allow new
     children; explicit new files are first created with project_write.
+    Private names in ``reveal`` are mounted read-only instead of hidden.
     """
     from .gateway import PRIVATE, _parts, _parent, _matches
     root = Path(root).resolve(strict=True)
-    command = verification_command(root, scratch, argv)
+    command = verification_command(root, scratch, argv, system_root)
     # Replace project bind and build scoped grants before masking private data.
     start = command.index('--ro-bind', command.index('--dev') + 1)
     command = command[:start]
@@ -168,10 +176,72 @@ def gateway_command(root, scratch, argv, scopes):
             if path.is_symlink():
                 # Never follow a private-path symlink when applying a mount.
                 raise StoreError('gateway_private_path_symlink')
-            if path.is_file():
+            if path.name in reveal and path.exists():
+                command+=['--ro-bind',str(path),str(path)]
+            elif path.is_file():
                 command+=['--ro-bind','/dev/null',str(path)]
             elif path.exists():
                 command+=['--tmpfs',str(path),'--remount-ro',str(path)]
         yield command+['--chdir',str(root),'--',*argv],tuple(fds)
     finally:
         for fd in fds: os.close(fd)
+
+
+# What an engine state directory holds that configures later sessions, the
+# owner's own interactive ones included. The engine may write its state, not
+# these: a hook written here would later run outside any jail. Each maps to
+# its neutral content (None: a directory), created when absent.
+ENGINE_CONFIG = {
+    'codex-acp': {'config.toml': '', 'hooks.json': '{}\n', 'AGENTS.md': '', 'AGENTS.override.md': '',
+                  'skills': None, 'agents': None, 'prompts': None, 'rules': None},
+    'claude-agent-acp': {'settings.json': '{}\n', 'settings.local.json': '{}\n', 'CLAUDE.md': '',
+                         'AGENTS.md': '', 'skills': None, 'agents': None, 'commands': None,
+                         'hooks': None, 'output-styles': None, 'rules': None},
+}
+# Installed plugins are not loaded in Cortex sessions.
+ENGINE_HIDDEN = ('plugins',)
+
+
+@contextmanager
+def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=()):
+    """Run a whole engine process the way a worker's shell runs.
+
+    The project is read-only except the granted scopes, `.cortex` is hidden
+    and the other private names are read-only. HOME is read-only; each engine
+    state directory (``state_dirs``: path -> engine) is writable except its
+    ENGINE_CONFIG entries, which are created neutral when absent so none can
+    be planted. `writable` adds plain
+    writable directories (the MCP broker sockets). `env` is the engine's own.
+    """
+    from .gateway import PRIVATE
+    with gateway_command(root, scratch, argv, scopes, reveal=frozenset(PRIVATE) - {'.cortex'},
+                         system_root=True) as (command, fds):
+        as_owner(command, {'HOME': env.get('HOME', '')})
+        extra = [arg for name, value in env.items() for arg in ('--setenv', name, value)]
+        extra += ['--setenv', 'TMPDIR', '/tmp']
+        state_dirs = state_dirs or {}
+        for directory in (*state_dirs, *writable):
+            path = Path(directory)
+            if not path.exists() and directory in state_dirs:
+                path.mkdir(mode=0o700, parents=True)
+            if path.is_symlink() or not path.is_dir():
+                raise StoreError('engine_state_dir_invalid')
+            extra += ['--bind', str(path), str(path)]
+        for directory, engine in state_dirs.items():
+            for name, neutral in ENGINE_CONFIG[engine].items():
+                path = Path(directory) / name
+                if path.is_symlink():
+                    raise StoreError('engine_state_config_symlink')
+                if not path.exists():
+                    if neutral is None:
+                        path.mkdir(mode=0o700)
+                    else:
+                        path.write_text(neutral)
+                extra += ['--ro-bind', str(path), str(path)]
+            for name in ENGINE_HIDDEN:
+                path = Path(directory) / name
+                if path.is_dir() and not path.is_symlink():
+                    extra += ['--tmpfs', str(path), '--remount-ro', str(path)]
+        at = command.index('--chdir')
+        command[at:at] = extra
+        yield command, fds

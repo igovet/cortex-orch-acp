@@ -5,10 +5,12 @@ import { useEffect, useRef } from "react";
 import { Animated, Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { WorkerPanel } from "./client/worker-panel.js";
+import { PipelinePanel } from "./client/pipeline-panel.js";
 import { selectWorker } from "./client/worker-selection.js";
 import { WorkerPopover } from "./client/worker-popover.js";
 import { isWorkerTimelineRunning } from "./client/worker-timeline-status.js";
 import { workerCardMetadata } from "./client/worker-display.ts";
+import { UsageMeter, useWorkerUsage } from "./client/usage-meter.tsx";
 
 const workerTimelineSchema = z.object({
   callId: z.string(),
@@ -21,12 +23,15 @@ const workerTimelineSchema = z.object({
   status: z.enum(["running", "completed", "canceled", "failed"]),
 });
 
+const CORTEX_PROVIDER = "cortex";
+
 type WorkerTimelineData = z.output<typeof workerTimelineSchema>;
 
 function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }: PluginTimelineItemProps<z.output<typeof workerTimelineSchema>> & { workspaceId: string | null; onOpen: () => void }) {
   const metadata = workerCardMetadata(item.data.title, item.data.status);
   const opacity = useRef(new Animated.Value(1)).current;
   const isWorking = isWorkerTimelineRunning(item.data.status);
+  const usage = useWorkerUsage(workspaceId, agentId, item.data.assignmentRef, isWorking);
 
   useEffect(() => {
     if (!isWorking) {
@@ -67,6 +72,7 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
         </View>
         <Text numberOfLines={2} ellipsizeMode="tail" style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>{metadata.workerName}</Text>
         <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{metadata.subtitle}</Text>
+        <UsageMeter context={usage?.context} tokens={usage?.tokens} theme={theme} />
       </Animated.View>
     </Pressable>
   );
@@ -129,6 +135,30 @@ export default function contribute(client: PluginClientContext) {
     locations: ["workspace"],
     Component: WorkerPanel,
   });
+  // The task's whole lifecycle, top to bottom, beside the chat in the
+  // explorer (right sidebar). Paseo 0.8 has no "focused agent" hook, so the
+  // tab is bound to the chat that opened it, like every agent panel.
+  client.addWorkspacePanel({
+    id: "pipeline",
+    title: "Pipeline",
+    icon: "Workflow",
+    context: "agent",
+    locations: ["explorer"],
+    Component: (props) => <PipelinePanel {...props} onOpenWorker={(assignmentRef) => {
+      selectWorker(props.agentId, assignmentRef);
+      client.openPanel("workers", { workspaceId: props.workspaceId, agentId: props.agentId, location: "workspace" });
+    }} />,
+  });
+  client.addCommandCenterItem({
+    id: "open-pipeline",
+    title: "Open pipeline",
+    icon: "Workflow",
+    keywords: ["plan", "progress", "steps", "todo", "cortex"],
+    context: "agent",
+    onSelect({ agent, openPanel }) {
+      if (agent.provider === CORTEX_PROVIDER) openPanel("pipeline", { location: "explorer" });
+    },
+  });
   client.addCommandCenterItem({
     id: "open-workers",
     title: "Open workers",
@@ -151,16 +181,16 @@ export default function contribute(client: PluginClientContext) {
         registrations.delete(agentId);
       }
     }
-    // Keep the affordance present for every open ACP agent. Worker history is
-    // session-scoped and the popover owns the empty state, so a missing worker
-    // must not make the composer pill disappear or change the composer layout.
+    // Keep the affordances present for every open Cortex agent. Worker history
+    // is session-scoped and the popover owns the empty state, so a missing
+    // worker must not make the composer pill disappear or change the layout.
     for (const agentId of candidates.keys()) {
       const candidate = candidates.get(agentId);
       if (!candidate || registrations.has(agentId)) continue;
       // Composer pills are agent-scoped in Paseo 0.8. Header buttons are only
       // workspace-scoped, so using one here would leak one session's workers
       // into every chat sharing the workspace.
-      registrations.set(agentId, client.addComposerPill({
+      const workers = client.addComposerPill({
         id: `workers-${agentId}`,
         workspaceId: candidate.workspace.id,
         agentId,
@@ -176,7 +206,22 @@ export default function contribute(client: PluginClientContext) {
             }} />,
           },
         },
-      }));
+      });
+      const pipeline = client.addComposerPill({
+        id: `pipeline-${agentId}`,
+        workspaceId: candidate.workspace.id,
+        agentId,
+        button: {
+          title: "Pipeline",
+          icon: "Workflow",
+          label: "Pipeline",
+          behavior: {
+            kind: "action",
+            onPress: () => client.openPanel("pipeline", { workspaceId: candidate.workspace.id, agentId, location: "explorer" }),
+          },
+        },
+      });
+      registrations.set(agentId, { remove() { workers.remove(); pipeline.remove(); } });
     }
   };
   const refreshCatalogue = async () => {
@@ -188,7 +233,8 @@ export default function contribute(client: PluginClientContext) {
       await Promise.all(listed.entries.map(async (workspace) => {
         const result = await client.paseo.agents.list({ filter: { projectKeys: [workspace.projectId] } });
         for (const entry of result.entries) {
-          if (entry.agent.workspaceId === workspace.id && entry.agent.status !== "closed") {
+          // Workers and Pipeline read a Cortex task; other providers have none.
+          if (entry.agent.workspaceId === workspace.id && entry.agent.status !== "closed" && entry.agent.provider === CORTEX_PROVIDER) {
             next.set(entry.agent.id, { workspace, agent: entry.agent });
           }
         }

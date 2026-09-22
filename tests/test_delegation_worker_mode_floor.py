@@ -263,12 +263,10 @@ def test_confirmed_worker_mode_and_permission_classifier_work_together(tmp_path)
 
         replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
         assert len(replies) == 2
-        # Ordinary "edit": auto-approved locally by PermissionBridge -- the
-        # host requester was never called for it (no host round-trip).
-        assert replies[0]["result"] == {"outcome": {"outcome": "selected", "optionId": "deny"}}
-        # Deletion: reached the host, whose (fake) decision was relayed
-        # verbatim -- never auto-approved.
-        assert replies[1]["result"] == {"outcome": {"outcome": "selected", "optionId": "deny"}}
+        # Native edit and delete act inside the engine jail: both are
+        # allowed locally by PermissionBridge, never a host round-trip.
+        assert replies[0]["result"] == {"outcome": {"outcome": "selected", "optionId": "allow"}}
+        assert replies[1]["result"] == {"outcome": {"outcome": "selected", "optionId": "allow"}}
         assert host_calls == []
     finally:
         adapter.terminate_owned("xa_w1")

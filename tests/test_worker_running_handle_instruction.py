@@ -2,10 +2,10 @@
 from cortex_runtime.orchestration.gateway import SCHEMAS
 
 
-def test_command_schema_requires_identity_and_bounded_runtime():
+def test_command_schema_requires_identity_and_leaves_runtime_unbounded_by_default():
     schema=SCHEMAS['command_run']
     assert schema['required']==['argv','request_key']
-    assert schema['properties']['timeout_seconds']['maximum']==300
+    assert 'maximum' not in schema['properties']['timeout_seconds']
     assert 'ambiguous interrupted calls' in schema['properties']['request_key']['description']
     assert schema['additionalProperties'] is False
 

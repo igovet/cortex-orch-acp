@@ -104,7 +104,7 @@ def test_scoped_command_rejects_hardlink_to_outside(tmp_path):
 
 
 @pytest.mark.parametrize('role',['coordinator','worker'])
-def test_native_permission_cannot_restore_disabled_tools(tmp_path,role):
+def test_native_permission_allows_jailed_tools_but_never_subagents(tmp_path,role):
     from cortex_runtime.engine.permissions import PermissionBridge
     from cortex_runtime.engine.resource_binding import BindingRegistry,ResourceBinding
     from cortex_runtime.engine.correlation import CorrelationTables
@@ -118,7 +118,7 @@ def test_native_permission_cannot_restore_disabled_tools(tmp_path,role):
     for index,name in enumerate(['Bash','Read','Write','apply_patch','Agent','Task']):
         result=bridge.handle(engine_session_id='es_a',wire_session_id='w',wire_request_id=index,
             params=dict(base,toolCall=dict(name=name,title='mcp__cortex__project_read',kind='other',rawInput={'name':'mcp__cortex__project_read'})))
-        assert result['outcome']['optionId']=='deny'
+        assert result['outcome']['optionId']==('deny' if name in {'Agent','Task'} else 'allow')
     assert not host_calls
     result=bridge.handle(engine_session_id='es_a',wire_session_id='w',wire_request_id=100,
         params=dict(base,toolCall=dict(name='mcp__cortex__project_read',kind='other')))

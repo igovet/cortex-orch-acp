@@ -3650,19 +3650,11 @@ class OrchestratingRuntime:
         return new_session_ref, True, new_attempt_id
 
     def _provision_and_prompt(self, task_id, coordinator_channel, payload, cancel_event):
-        from ..orchestration.limits import Deadline, WORKER_SECONDS, REVIEW_SECONDS, assignment_current
-        from ..orchestration.state import event
-        assignment=payload['assignment_ref']
-        if not assignment_current(self._store,task_id,assignment): return
-        def timed_out():
-            with self._store.connection() as db:
-                db.execute('BEGIN IMMEDIATE')
-                event(db,task_id,'WORKER_TIMEOUT',dict(assignment_ref=assignment))
-                db.commit()
-            self._cancel_assignment(task_id,assignment,'worker_timeout')
-        seconds=REVIEW_SECONDS if payload['role']=='worker-code-reviewer' else WORKER_SECONDS
-        with Deadline(cancel_event,seconds,timed_out,idle_seconds=300) as deadline:
-            return self._provision_and_prompt_inner(task_id,coordinator_channel,payload,deadline)
+        from ..orchestration.limits import assignment_current
+        if not assignment_current(self._store,task_id,payload['assignment_ref']): return
+        # No clock bound: a worker that is only thinking must never be
+        # killed; a silent one is woken by live_adapters.prompt's nudge.
+        return self._provision_and_prompt_inner(task_id,coordinator_channel,payload,cancel_event)
 
     def _provision_and_prompt_inner(self, task_id: str, coordinator_channel: ChannelContext, payload: Mapping[str, Any], cancel_event: threading.Event) -> None:
         # T017: capacity queuing happens *inside* SessionRuntime.open() (see
@@ -3881,7 +3873,6 @@ class OrchestratingRuntime:
                 worker_stream_redactor = StreamingRedactor(max_chars=4000)
 
                 def _on_worker_delta(chunk_text: str) -> bool:
-                    cancel_event.touch()
                     # Buffer contiguous chunks so a credential split across
                     # ACP updates can be redacted before the worker card is
                     # updated. The coordinator's text channel stays clear.
@@ -3904,8 +3895,16 @@ class OrchestratingRuntime:
                     return True
 
                 def _on_worker_display_update(update: dict, _ref: str = assignment_ref) -> None:
-                    cancel_event.touch()
                     if not isinstance(update, dict):
+                        return
+                    if update.get("sessionUpdate") == "usage_update":
+                        # The worker's context fill for the Workers views:
+                        # durable, but neither prose nor a transcript row.
+                        self._record_worker_activity(
+                            task_id, _ref, result.attempt_id, "context",
+                            f"context {update.get('used')}/{update.get('size')}",
+                            kind="usage_update", content_value=update,
+                        )
                         return
                     with self._lock:
                         feed = self._worker_card_emitter(task_id, _ref)
@@ -3923,7 +3922,6 @@ class OrchestratingRuntime:
                         self._emit_worker_card(feed, _ref, status="in_progress")
 
                 def _on_worker_tool_call(ref, kind, title, status, *rest, _ref=assignment_ref) -> None:
-                    cancel_event.touch()
                     nonlocal worker_message_segment
                     # Keyword-only ``_ref``: this callback is invoked
                     # positionally by the adapter, which grew ``locations``

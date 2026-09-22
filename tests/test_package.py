@@ -265,7 +265,7 @@ def test_acp_instruction_boundaries_cover_observed_failures():
     discipline=(PLUGIN/'skills/tool-discipline/SKILL.md').read_text()
     assert 'Reuse retained results while relevant state is unchanged.' in discipline
     assert 'never replay a mutation for reassurance' in discipline
-    assert 'native tools are disabled' in discipline
+    assert 'native subagents are disabled' in discipline
     assert len(discipline)<4000
     publication=(PLUGIN/'agent-sources/references/report-publication.md').read_text()
     assert 'immutable report' in publication

@@ -270,40 +270,26 @@ def build_first_prompt_blocks(instructions_text: str, user_blocks: list) -> list
     return [leading_block, *user_blocks]
 
 
+# Native tools that start another agent. The owner excluded native subagents.
+CLAUDE_SUBAGENT_TOOLS = ("Agent", "Task", "Workflow", "TeamCreate", "TeamDelete", "SendMessage")
+
+
 def claude_native_subagent_restriction_meta(*, role: str = "worker") -> dict:
     """Build the pinned Claude native-tool policy for one Cortex role.
 
-    The installed claude-agent-acp 0.78.0 forwards
-    ``_meta.claudeCode.options.disallowedTools`` into its SDK query
-    (``dist/acp-agent.js:5910-5918,6065``). The bundled SDK 0.3.270
-    sends these names as ``--disallowedTools`` to Claude Code; its type
-    contract says they are removed from the model context and denied.
-    ``TaskCreate`` and its sibling plan tools are distinct from the
-    native subagent launch tools named ``Agent`` and ``Task``.
+    Claude keeps its whole native tool preset, native context loading
+    (``settingSources`` is left to the adapter's user/project/local default,
+    so ``CLAUDE.md``/``AGENTS.md`` load) and its skills (``skills: "all"``
+    makes the SDK allow ``Skill``). The engine process runs inside Cortex's
+    engine jail, which bounds what those tools can reach; roles differ only
+    in the scopes that jail grants, not in tools.
 
-    The same installed adapter spreads ``_meta.claudeCode.options`` into
-    the SDK query (``dist/acp-agent.js:6021-6036``). Its bundled SDK 0.3.270
-    maps ``strictMcpConfig`` to ``--strict-mcp-config`` and documents that
-    only explicitly supplied ``mcpServers`` are loaded, excluding native
-    user/project/plugin MCP configuration. Keep the production
-    ``CLAUDE_CONFIG_DIR`` for native-account authentication; the restriction
-    applies to this session's native tool context and MCP discovery, not its
-    account state.
-
-    The coordinator receives the SDK's documented string-tool allowlist. It
-    can read its registered pipeline draft with ``Read`` and edit it with
-    ``Edit``/``Write``. All three tools are forced through the ACP permission
-    bridge, which refuses other targets. Native project search, shell and
-    subagent tools remain explicitly disallowed.
-    ``Skill`` is deliberately omitted: the SDK supports the name, but that
-    native tool resolves user/project skill files outside Cortex's
-    authenticated ``read_skill`` surface, so it is not a safe role-scoped
-    capability here. Workers retain the preset's current built-in tools and
-    only lose native subagent launch tools.
-
-    This is a native Claude built-in-tool restriction. It is not an OS-level
-    filesystem boundary and it does not make arbitrary external MCP tools
-    read-only.
+    Removed are what the owner excluded: native subagents (``Agent``/``Task``,
+    ``Workflow`` and agent-team tools) via ``disallowedTools``, which the
+    installed claude-agent-acp 0.78.0 forwards as ``--disallowedTools``;
+    user/project MCP via ``strictMcpConfig`` (only the session's explicit
+    ``mcpServers`` load); hooks via managed ``disableAllHooks``; plugins via
+    an empty ``plugins`` option and a hidden plugin directory in the jail.
     """
     if role not in {"coordinator", "worker"}:
         raise PortableError(
@@ -312,12 +298,9 @@ def claude_native_subagent_restriction_meta(*, role: str = "worker") -> dict:
             retry_eligible=False, field="role",
         )
 
-    # Current SDK/adapter explicitly supports tools=[]: disable every native
-    # built-in, including shell, files, subagents and hosted tools. All actions
-    # now enter the channel-verified Cortex gateway.
-    options = {"strictMcpConfig": True, "tools": [], "settingSources": [],
+    options = {"strictMcpConfig": True, "skills": "all",
                "plugins": [], "managedSettings": {"disableAllHooks": True},
-               "disallowedTools": ["Agent", "Task"]}
+               "disallowedTools": list(CLAUDE_SUBAGENT_TOOLS)}
     return {"claudeCode": {"options": options}}
 
 

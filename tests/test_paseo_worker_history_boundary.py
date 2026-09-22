@@ -148,8 +148,11 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
 
     match = re.search(r"const PYTHON = String\.raw`\n(.*?)\n`;", SOURCE, re.S)
     assert match, "embedded history query was not found"
+    helpers = re.search(r"export const STORE_PYTHON_HELPERS = String\.raw`(.*?)`;", SOURCE, re.S)
+    assert helpers, "shared store helpers were not found"
+    query = match.group(1).replace("${STORE_PYTHON_HELPERS}", helpers.group(1))
     result = subprocess.run(
-        ["python3", "-B", "-c", match.group(1), str(project), task, "xa_revision", "0", "200", "", ""],
+        ["python3", "-B", "-c", query, str(project), task, "xa_revision", "0", "200", "", ""],
         capture_output=True, text=True, check=True,
     )
     output = json.loads(result.stdout)
@@ -177,7 +180,7 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
     # The terminal marker is outside a deliberately tiny history page; the
     # exact-attempt status query must still report the durable completion.
     bounded = subprocess.run(
-        ["python3", "-B", "-c", match.group(1), str(project), task, "xa_revision", "0", "1", "", ""],
+        ["python3", "-B", "-c", query, str(project), task, "xa_revision", "0", "1", "", ""],
         capture_output=True, text=True, check=True,
     )
     bounded_output = json.loads(bounded.stdout)
@@ -195,7 +198,7 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
     db.commit()
     db.close()
     incremental = subprocess.run(
-        ["python3", "-B", "-c", match.group(1), str(project), task, "xa_revision", "8", "200", "", ""],
+        ["python3", "-B", "-c", query, str(project), task, "xa_revision", "8", "200", "", ""],
         capture_output=True, text=True, check=True,
     )
     incremental_output = json.loads(incremental.stdout)
@@ -206,7 +209,7 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
     assert incremental_output["assignments"][0]["attempts"][0]["status"] == "completed"
 
     pending = subprocess.run(
-        ["python3", "-B", "-c", match.group(1), str(project), task, "", "0", "200", "", "request_pending"],
+        ["python3", "-B", "-c", query, str(project), task, "", "0", "200", "", "request_pending"],
         capture_output=True, text=True, check=True,
     )
     pending_output = json.loads(pending.stdout)
@@ -231,7 +234,7 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
     db.close()
     for selected_ref in ("", "delegate_hash"):
         explicit = subprocess.run(
-            ["python3", "-B", "-c", match.group(1), str(project), task, "", "0", "200", "", selected_ref],
+            ["python3", "-B", "-c", query, str(project), task, "", "0", "200", "", selected_ref],
             capture_output=True, text=True, check=True,
         )
         resolved = json.loads(explicit.stdout)
@@ -243,7 +246,7 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
         if selected_ref:
             assert len(assignment["attempts"]) == 1
     mismatch = subprocess.run(
-        ["python3", "-B", "-c", match.group(1), str(project), task, "xa_first", "0", "200", "", "delegate_hash"],
+        ["python3", "-B", "-c", query, str(project), task, "xa_first", "0", "200", "", "delegate_hash"],
         capture_output=True, text=True, check=True,
     )
     assert json.loads(mismatch.stdout)["assignments"] == []
@@ -257,7 +260,7 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
     db.commit()
     db.close()
     failed = subprocess.run(
-        ["python3", "-B", "-c", match.group(1), str(project), task, "xa_revision", "8", "1", "", "delegate_hash"],
+        ["python3", "-B", "-c", query, str(project), task, "xa_revision", "8", "1", "", "delegate_hash"],
         capture_output=True, text=True, check=True,
     )
     failed_assignment = json.loads(failed.stdout)['assignments'][0]
@@ -276,7 +279,20 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
         })))
     db.commit()
     db.close()
-    reads = subprocess.run(['python3', '-B', '-c', match.group(1), str(project), task, 'xa_revision', '9', '200', '', 'delegate_hash'], capture_output=True, text=True, check=True)
+    reads = subprocess.run(['python3', '-B', '-c', query, str(project), task, 'xa_revision', '9', '200', '', 'delegate_hash'], capture_output=True, text=True, check=True)
     assert 'READ_BODY_MARKER' not in reads.stdout
     assert 'README.md' in reads.stdout
     assert 'completed' in reads.stdout
+
+    # A context-fill row is the attempt's status, never a transcript event.
+    db = sqlite3.connect(db_path)
+    db.execute('insert into task_events values (?,?,?,?,?,?)', (12, task, 'progress', 'exec_revision', '12', json.dumps({
+        'kind': 'worker_activity', 'activity_ref': 'context', 'text': 'context 84000/200000',
+        'tool_kind': 'usage_update', 'content': {'sessionUpdate': 'usage_update', 'used': 84000, 'size': 200000},
+    })))
+    db.commit()
+    db.close()
+    fill = json.loads(subprocess.run(['python3', '-B', '-c', query, str(project), task, 'xa_revision', '11', '200', '', 'delegate_hash'], capture_output=True, text=True, check=True).stdout)
+    attempt = fill['assignments'][0]['attempts'][0]
+    assert attempt['events'] == []
+    assert attempt['context'] == {'used': 84000, 'size': 200000}

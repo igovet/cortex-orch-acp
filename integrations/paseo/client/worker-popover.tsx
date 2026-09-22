@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { readWorkerHistory, type WorkerHistory } from "../shared/worker-history.js";
 import { workerPopoverStatus, orderPopoverWorkers } from "./worker-popover-status.js";
 import { workerAssignmentLine } from "./worker-display.ts";
+import { latestAttempt, UsageMeter } from "./usage-meter.tsx";
 
 type Props = PluginButtonContentProps & {
   workspaceId: string;
@@ -48,6 +49,7 @@ export function WorkerPopover({ theme, layout, workspaceId, agentId, close, onOp
             <View style={{ flex: 1, flexDirection: "column", alignItems: "stretch", gap: 2, minWidth: 0 }}>
               <Text numberOfLines={1} style={{ flexShrink: 1, color: theme.colors.foreground, fontSize: 16, fontWeight: "400" }}>{line.workerName}</Text>
               <Text numberOfLines={1} style={{ flexShrink: 1, color: theme.colors.foregroundMuted, fontSize: 13 }}>{line.subtitle}</Text>
+              <UsageMeter context={latestAttempt(assignment)?.context} tokens={latestAttempt(assignment)?.tokens} theme={theme} />
             </View>
           </Pressable>;
         })}

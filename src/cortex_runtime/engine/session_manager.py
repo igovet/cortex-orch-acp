@@ -178,6 +178,15 @@ _DISPLAY_ONLY_UPDATES = frozenset({
 })
 
 
+def context_usage_update(update) -> dict | None:
+    """The ACP ``usage_update`` context fill, or None unless both counts are
+    real non-negative integers (a missing size is not a zero-sized window)."""
+    used, size = update.get("used"), update.get("size")
+    if not all(isinstance(v, int) and not isinstance(v, bool) and v >= 0 for v in (used, size)) or size == 0:
+        return None
+    return {"sessionUpdate": "usage_update", "used": used, "size": size}
+
+
 class EngineSessionManager:
     """One outgoing engine instance; launches its own process on demand.
 
@@ -209,6 +218,7 @@ class EngineSessionManager:
         host_mcp_servers=None,
         mcp_role: str | None = None,
         broker_mcp=False,
+        jail=None,
     ):
         """``install`` -- a
         :class:`~.codex_install.CodexAcpInstall`, or ``None`` -- is passed
@@ -248,6 +258,9 @@ class EngineSessionManager:
             raise _fail('native_resources_disabled','Channel-bound actions must use the runtime Tool Gateway.')
         self._host_permission_requester = host_permission_requester
         self._coordinator_refusal_notifier = coordinator_refusal_notifier
+        # ``jail`` -- ``{"scopes": [...], "alive": callable}`` or ``None`` --
+        # runs the engine process in engine_jail (see EngineProcess).
+        self._jail = jail
         # The client's own MCP servers, to be offered to this engine
         # alongside Cortex's own. Held in memory only: a client's env and
         # header values are its secrets (see engine.mcp_bridge
@@ -405,7 +418,7 @@ class EngineSessionManager:
             self._process = EngineProcess(
                 self._record, self._workspace_root, environ=self._environ, install=self._install,
                 broker_mcp=self._broker_mcp, project_root=project_root,
-                channel_credentials=self._channel_credentials,
+                channel_credentials=self._channel_credentials, jail=self._jail,
             )
             self._permission_bridge = PermissionBridge(
                 correlation=self.correlation, bindings=self.bindings, logs=self._process.logs,
@@ -986,6 +999,14 @@ class EngineSessionManager:
             if stop_reason is None:
                 self._process.logs.observe("unknown_stop_reason", stop_reason=result.get("stopReason"))
                 stop_reason = StopReason.END_TURN
+            # ACP PromptResponse.usage: the engine's own token counts for
+            # this turn (inputTokens, outputTokens, cached*, totalTokens).
+            usage = result.get("usage")
+            values = {key: value for key, value in usage.items()
+                      if isinstance(value, int) and not isinstance(value, bool)} if isinstance(usage, dict) else {}
+            if values:
+                yield EngineEvent(kind=EngineEventKind.USAGE_UPDATE, usage_basis=UsageBasis.ENGINE_REPORTED,
+                                  usage_values=values)
             yield EngineEvent(kind=EngineEventKind.TURN_END, stop_reason=stop_reason)
         finally:
             self._update_queues.pop(wire_session_id, None)
@@ -1186,7 +1207,12 @@ class EngineSessionManager:
             # "no usage_update event at all" case (delegation.live_adapters
             # .EngineSessionManagerAdapter.prompt's own basis=None default).
             basis = UsageBasis.ENGINE_REPORTED if values else UsageBasis.UNKNOWN
-            return EngineEvent(kind=EngineEventKind.USAGE_UPDATE, usage_basis=basis, usage_values=values)
+            # ACP's own context fill (`used` of `size` tokens) is carried as
+            # a display update so the session that owns this engine can show
+            # it; it is never folded into the per-call token accounting.
+            context = context_usage_update(update)
+            return EngineEvent(kind=EngineEventKind.USAGE_UPDATE, usage_basis=basis, usage_values=values,
+                               display_update=context)
         if kind == "user_message_chunk":
             # History replay (session/load): never translated into an
             # EngineEvent, never queued, never re-delivered as a user

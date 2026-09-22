@@ -70,17 +70,18 @@ def test_build_first_prompt_blocks_never_writes_a_file_or_returns_env_vars(tmp_p
     assert blocks == [{"type": "text", "text": "instructions"}]
 
 
-def test_claude_native_tools_are_disabled_for_every_role():
+def test_claude_keeps_native_tools_but_never_subagents_for_every_role():
     for role in ['coordinator','worker']:
         meta=build_claude_session_new_meta('Cortex instructions',role=role)
         assert meta['systemPrompt']=={'append':'Cortex instructions'}
         options=meta['claudeCode']['options']
-        assert options['tools']==[]
-        assert options['settingSources']==[]
+        assert 'tools' not in options
+        assert options['skills']=='all'
+        assert 'settingSources' not in options
         assert options['plugins']==[]
         assert options['strictMcpConfig'] is True
         assert options['managedSettings']['disableAllHooks'] is True
-        assert {'Agent','Task'}<=set(options['disallowedTools'])
+        assert {'Agent','Task','Workflow','TeamCreate'}<=set(options['disallowedTools'])
 
 
 def test_installed_claude_acp_0_78_accepts_tool_allowlist_and_forwards_it():

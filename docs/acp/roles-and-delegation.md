@@ -16,7 +16,7 @@ review/fix loop, while actual command verification belongs to the runtime. Route
 policy remains configured by the user and resolved by the runtime for each role.
 
 Requested scopes are validated before reservation and enforced by the runtime
-gateway. Native action tools are disabled in the supported pinned engine copies.
+gateway and by the engine jail around each worker's engine process.
 Scope expansion requires a structured proposal and replanning; it never changes
 an active worker’s authority in place. See [containment](permissions-and-containment.md)
 and [qualification status](runtime-rewrite-status.md). Prompts grant no authority.

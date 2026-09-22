@@ -81,6 +81,26 @@ def test_prompt_records_engine_reported_usage(tmp_path):
     assert records[0]["call_sequence"] == 1
 
 
+def test_context_fill_is_displayed_and_never_erases_reported_counts(tmp_path):
+    store, task_id = _task(tmp_path)
+    adapter = _adapter(store)
+    context = dict(sessionUpdate="usage_update", used=84000, size=200000)
+    manager = _FakeManager([
+        EngineEvent(kind=EngineEventKind.USAGE_UPDATE, usage_basis=UsageBasis.ENGINE_REPORTED,
+                    usage_values=dict(inputTokens=10, outputTokens=5)),
+        EngineEvent(kind=EngineEventKind.USAGE_UPDATE, usage_basis=UsageBasis.UNKNOWN, usage_values={},
+                    display_update=context),
+        EngineEvent(kind=EngineEventKind.TURN_END, stop_reason=StopReason.END_TURN),
+    ])
+    _register(adapter, task_id, "att-3", "sess-3", manager)
+    shown = []
+    adapter.prompt("sess-3", "hello", threading.Event(), on_display_update=shown.append)
+    assert shown == [context]
+    records = observability_usage.list_usage(store, task_id)
+    assert records[0]["basis"] == "engine_reported"
+    assert records[0]["tokens"] == dict(inputTokens=10, outputTokens=5)
+
+
 def test_missing_telemetry_is_unknown_never_zero_and_never_gates_execution(tmp_path):
     """An engine that reports no usage_update at all still lets the turn
     complete, and the recorded basis is 'unknown', never '0'/free (T029

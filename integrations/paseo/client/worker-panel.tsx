@@ -14,6 +14,7 @@ import { chatToolIcon, groupToolRuns, isToolEvent, nativeRow, toolSemantics, typ
 import { workerAssignmentLine, workerDisplayName } from "./worker-display.js";
 import { workerPopoverStatus } from "./worker-popover-status.js";
 import { openWorkspaceFile } from "./open-workspace-file.ts";
+import { UsageMeter } from "./usage-meter.tsx";
 
 const styles = {
   title: { fontSize: 18, lineHeight: 24, fontWeight: "600" as const },
@@ -365,6 +366,7 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
     return <Pressable key={assignment.id} accessibilityRole="button" accessibilityLabel={`Open worker ${line.workerName}`} onPress={() => attempt && setSelected(attempt.id)} style={[styles.card, { borderColor: theme.colors.border, backgroundColor: theme.colors.surface1 }]}>
       <Text numberOfLines={2} ellipsizeMode="tail" style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>{line.workerName}</Text>
       <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{line.subtitle}</Text>
+      <UsageMeter context={attempt?.context} tokens={attempt?.tokens} theme={theme} />
       {attempt && assignment.attempts.length > 1 && <Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>Attempt {attempt.attemptNo} · {assignment.attempts.length} attempts</Text>}
     </Pressable>;
   };
@@ -392,6 +394,7 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
             {route && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.provider}</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.model}</Text>{route.effort && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.effort} effort</Text></>}</>}
             <Text style={[styles.muted, { color: selectedAttempt.status === "failed" ? theme.colors.statusDanger : theme.colors.foregroundMuted }]}>· {workerStatus(selectedAttempt.status, selectedAttempt.events.length)}</Text>
           </View>
+          <UsageMeter context={selectedAttempt.context} tokens={selectedAttempt.tokens} theme={theme} />
           {selectedAssignment && selectedAssignment.attempts.length > 1 && <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
             {selectedAssignment.attempts.map((attempt) => <Pressable key={attempt.id} accessibilityRole="button" accessibilityState={{ selected: attempt.id === selectedAttempt.id }} onPress={() => { setExpandedEvent(null); setSelected(attempt.id); }} style={[styles.button, { backgroundColor: attempt.id === selectedAttempt.id ? theme.colors.surface2 : theme.colors.surface1, borderWidth: 1, borderColor: theme.colors.border }]}><Text style={[styles.muted, { color: attempt.id === selectedAttempt.id ? theme.colors.foreground : theme.colors.foregroundMuted }]}>Attempt {attempt.attemptNo}</Text></Pressable>)}
           </View>}

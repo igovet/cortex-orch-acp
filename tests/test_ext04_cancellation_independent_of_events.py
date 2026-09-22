@@ -169,3 +169,60 @@ def test_capacity_is_not_released_on_an_unconfirmed_stop_only_on_a_confirmed_one
     # A confirmed stop (the owned process's exit *was* observed) is the
     # only case that actually releases the slot.
     assert _terminate_owned_confirmed_or_ambiguous(exited=True) == "released"
+
+
+class _ThinkingManager:
+    """Silent until cancelled; answers a cancel with a cancelled turn and
+    the nudge prompt with a normal end_turn."""
+
+    def __init__(self):
+        from cortex_runtime.portable.engine_contract import EngineEvent, EngineEventKind, StopReason
+        self._event, self._kind, self._stop = EngineEvent, EngineEventKind, StopReason
+        self.prompts: list[str] = []
+        self._cancelled = threading.Event()
+
+    def prompt_turn(self, session_ref, message, *, prompt_blocks=None):
+        self.prompts.append(message)
+        if len(self.prompts) == 1:
+            self._cancelled.wait()
+            yield self._event(kind=self._kind.TURN_END, stop_reason=self._stop.CANCELLED)
+        else:
+            yield self._event(kind=self._kind.TURN_DELTA, delta_text="done")
+            yield self._event(kind=self._kind.TURN_END, stop_reason=self._stop.END_TURN)
+
+    def cancel(self, session_ref):
+        self._cancelled.set()
+
+
+def test_a_silent_live_engine_is_nudged_in_the_same_session_not_killed():
+    from cortex_runtime.portable.engine_contract import StopReason
+
+    manager = _ThinkingManager()
+    adapter = _make_adapter(manager)
+    adapter._STALL_NUDGE_SECONDS = 0.1
+    outcome = adapter.prompt("sess_1", "do the thing", threading.Event())
+    assert manager.prompts == ["do the thing", EngineSessionManagerAdapter._STALL_NUDGE_PROMPT]
+    assert outcome.stop_reason == StopReason.END_TURN
+    assert outcome.text == "done"
+
+
+def test_a_long_running_tool_call_is_never_nudged():
+    from cortex_runtime.portable.engine_contract import EngineEvent, EngineEventKind, StopReason
+
+    cancels: list[str] = []
+
+    class _LongToolManager:
+        def prompt_turn(self, session_ref, message, *, prompt_blocks=None):
+            yield EngineEvent(kind=EngineEventKind.TOOL_CALL_OBSERVED, tool_call_ref="t1", tool_call_status="in_progress")
+            time.sleep(0.5)  # a silent shell command, far past the stall limit
+            yield EngineEvent(kind=EngineEventKind.TOOL_CALL_OBSERVED, tool_call_ref="t1", tool_call_status="completed")
+            yield EngineEvent(kind=EngineEventKind.TURN_END, stop_reason=StopReason.END_TURN)
+
+        def cancel(self, session_ref):
+            cancels.append(session_ref)
+
+    adapter = _make_adapter(_LongToolManager())
+    adapter._STALL_NUDGE_SECONDS = 0.1
+    outcome = adapter.prompt("sess_1", "run it", threading.Event())
+    assert cancels == []
+    assert outcome.stop_reason == StopReason.END_TURN

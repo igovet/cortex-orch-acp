@@ -1,13 +1,17 @@
-"""Final ACP permission fence: native tools cannot be restored by approval.
+"""Final ACP permission fence.
 
-Only explicitly named MCP calls can proceed to their channel-bound gateway.
-Titles, descriptions and raw inputs never supply tool identity or authority.
+Engine processes run inside Cortex's engine jail, which bounds every native
+tool, so a native action is allowed; MCP calls are mediated again by their
+channel-bound gateway. Only a native subagent launch is refused. Titles,
+descriptions and raw inputs never supply tool identity.
 """
-import re
 import threading
 
 CANCELLED_OUTCOME = {'outcome': {'outcome': 'cancelled'}}
-COORDINATOR_EDIT_REFUSAL_REASON = 'Native tools are disabled. Use the advertised Cortex gateway.'
+# Claude's subagent tools and Codex's collaboration (multi-agent) tools.
+SUBAGENT_TOOLS = frozenset({'Agent','Task','Workflow','TeamCreate','TeamDelete','SendMessage',
+                            'spawn_agent','send_input','close_agent','resume_agent'})
+COORDINATOR_EDIT_REFUSAL_REASON = 'Native subagents are disabled. Do the work in this session.'
 COORDINATOR_MUTATION_REFUSAL_REASON = COORDINATOR_EDIT_REFUSAL_REASON
 COORDINATOR_PRIVATE_OR_CHECK_REFUSAL_REASON = COORDINATOR_EDIT_REFUSAL_REASON
 
@@ -18,10 +22,10 @@ def _tool_call(params) -> dict:
 
 
 def _auto_allow_option_id(params):
-    """Use an offered MCP allow option; gateway authorization still follows.
+    """Use an offered allow option; the jail or gateway still bounds the action.
 
-    Prefer a one-shot option. No native action reaches this helper and no
-    engine approval establishes a persistent Cortex authorization.
+    Prefer a one-shot option; no engine approval establishes a persistent
+    Cortex authorization.
     """
     options = (params or {}).get("options") if isinstance(params, dict) else None
     if not isinstance(options, list):
@@ -169,17 +173,18 @@ class PermissionBridge:
         if not binding.is_current(snapshot):
             self._observe("permission_denied_stale_binding", engine_session_id=engine_session_id)
             return dict(CANCELLED_OUTCOME)
-        # Native actions are absent from the engine registry. A permission
-        # request cannot restore one, even with host approval. MCP calls are
-        # mediated again by their channel-bound runtime gateway before effects.
+        # The engine jail bounds native actions and the gateway re-checks MCP
+        # calls, so both are allowed. Native subagents are excluded by the
+        # owner; they are also removed at launch, this is the backstop.
         call=_tool_call(params)
-        name=call.get('name')
-        mediated=isinstance(name,str) and re.fullmatch(r'mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+',name) is not None
-        if mediated:
+        meta=call.get('_meta') if isinstance(call.get('_meta'),dict) else {}
+        claude=meta.get('claudeCode') if isinstance(meta.get('claudeCode'),dict) else {}
+        name=call.get('name') or claude.get('toolName')
+        if name not in SUBAGENT_TOOLS:
             option=_auto_allow_option_id(params)
             if option is not None:
                 return dict(outcome=dict(outcome='selected',optionId=option))
         self._observe('native_tool_denied',engine_session_id=engine_session_id)
-        self._notify_refusal(engine_session_id,'Native tools are disabled. Use the advertised Cortex gateway.')
+        self._notify_refusal(engine_session_id,COORDINATOR_EDIT_REFUSAL_REASON)
         option=_auto_reject_option_id(params)
         return dict(outcome=dict(outcome='selected',optionId=option)) if option is not None else dict(CANCELLED_OUTCOME)

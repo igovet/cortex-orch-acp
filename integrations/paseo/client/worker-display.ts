@@ -57,3 +57,21 @@ export function workerAssignmentLine(assignment: WorkerAssignment, status: strin
   return workerLine(/^delegate:[0-9a-f-]+$/i.test(title) ? "" : title, workerDisplayName(assignment),
     [route?.provider, route?.model, route?.effort], status);
 }
+
+/** Claude Code's compact token count: 950, 84k, 1.2M. */
+export function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1000) return `${Math.round(n / 1000)}k`;
+  return String(n);
+}
+
+/** The latest attempt's context fill, as the chat's context indicator shows it. */
+export function contextSummary(context: { used: number; size: number } | null | undefined) {
+  if (!context || context.size <= 0) return null;
+  const percent = Math.min(100, Math.round((context.used / context.size) * 100));
+  return {
+    percent,
+    detail: `${formatTokens(context.used)} / ${formatTokens(context.size)}`,
+    level: percent >= 90 ? "danger" as const : percent >= 70 ? "warning" as const : "normal" as const,
+  };
+}

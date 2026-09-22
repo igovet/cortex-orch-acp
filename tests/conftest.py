@@ -161,3 +161,13 @@ def _no_leaked_acp_transport_threads():
         "Always call EngineClient.close() (or let EngineSessionManager.shutdown() "
         "do it) and/or EngineProcess.release() so both transport threads stop."
     )
+
+
+# The fake engine writes its logs and dumps under the test's /tmp directory,
+# which an engine jail replaces with private scratch. Plumbing tests run it
+# unjailed; tests/test_engine_jail.py exercises the jail itself.
+@pytest.fixture(autouse=True)
+def _fake_engines_run_unjailed(request, monkeypatch):
+    if request.node.get_closest_marker("engine_jail") is None:
+        from cortex_runtime.delegation import live_adapters
+        monkeypatch.setattr(live_adapters, "_jail_for", lambda store, credentials: None)

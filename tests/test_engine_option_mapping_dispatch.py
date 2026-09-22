@@ -46,7 +46,7 @@ def test_option_mapping_for_dispatches_by_engine_name():
     assert _option_mapping_for("some-future-engine") is None
 
 
-GATEWAY_ONLY = dict(disallowedTools=['Agent','Task'],strictMcpConfig=True,tools=[],settingSources=[],plugins=[],managedSettings=dict(disableAllHooks=True))
+GATEWAY_ONLY = dict(disallowedTools=['Agent','Task','Workflow','TeamCreate','TeamDelete','SendMessage'],strictMcpConfig=True,skills='all',plugins=[],managedSettings=dict(disableAllHooks=True))
 
 
 def test_session_new_meta_for_pinned_engines_builds_a_payload():
@@ -57,7 +57,7 @@ def test_session_new_meta_for_pinned_engines_builds_a_payload():
         assert _session_new_meta_for('claude-agent-acp','0.78.0',text) == dict(claudeCode=dict(options=GATEWAY_ONLY))
 
 
-def test_every_claude_role_disables_native_tools_settings_plugins_and_hooks():
+def test_every_claude_role_keeps_native_tools_but_not_subagents_mcp_plugins_or_hooks():
     for role in ['worker','coordinator']:
         meta=_session_new_meta_for('claude-agent-acp','0.78.0','Role instructions',role=role)
         assert meta['claudeCode']['options']==GATEWAY_ONLY

@@ -1,4 +1,4 @@
-"""Native permission requests cannot bypass the runtime gateway."""
+"""Native actions are allowed (the engine jail bounds them); native subagents never are."""
 import threading
 import pytest
 from cortex_runtime.engine.correlation import CorrelationTables
@@ -29,12 +29,23 @@ def test_binding_requires_complete_canonical_identity(tmp_path):
 
 
 @pytest.mark.parametrize('role',['worker','coordinator'])
-@pytest.mark.parametrize('name',['Bash','Read','Write','Edit','Glob','Grep','Agent','Task','Skill','apply_patch','exec_command',None,'unknown'])
-def test_every_native_action_is_denied_even_when_disguised_as_gateway(tmp_path,role,name):
+@pytest.mark.parametrize('name',['Bash','Read','Write','Edit','Glob','Grep','Skill','apply_patch','exec_command',None,'unknown'])
+def test_native_actions_are_allowed_without_asking_the_host(tmp_path,role,name):
+    bindings=BindingRegistry();bindings.bind(_binding(tmp_path,role=role));host=[]
+    bridge=_bridge(bindings=bindings,host_permission_requester=lambda *a: host.append(a) or {'outcome':{'outcome':'selected','optionId':'deny'}})
+    params=dict(PARAMS,toolCall=dict(name=name,kind='read',rawInput=dict(command='cat allowed')))
+    assert call(bridge,params)=={'outcome':{'outcome':'selected','optionId':'allow'}}
+    assert host==[]
+
+
+@pytest.mark.parametrize('role',['worker','coordinator'])
+@pytest.mark.parametrize('toolcall',[dict(name='Agent'),dict(name='Task'),dict(name='spawn_agent'),
+                                     dict(_meta=dict(claudeCode=dict(toolName='Workflow'))),
+                                     dict(_meta=dict(claudeCode=dict(toolName='TeamCreate')))])
+def test_native_subagents_are_denied(tmp_path,role,toolcall):
     bindings=BindingRegistry();bindings.bind(_binding(tmp_path,role=role));host=[]
     bridge=_bridge(bindings=bindings,host_permission_requester=lambda *a: host.append(a) or {'outcome':{'outcome':'selected','optionId':'allow'}})
-    params=dict(PARAMS,toolCall=dict(name=name,title='mcp__cortex__project_read',kind='read',rawInput=dict(name='mcp__cortex__project_read',command='cat allowed')))
-    assert call(bridge,params)=={'outcome':{'outcome':'selected','optionId':'deny'}}
+    assert call(bridge,dict(PARAMS,toolCall=dict(toolcall,title='Read')))=={'outcome':{'outcome':'selected','optionId':'deny'}}
     assert host==[]
 
 
@@ -86,4 +97,4 @@ def test_notifier_failure_cannot_turn_refusal_into_approval(tmp_path):
     bindings=BindingRegistry();bindings.bind(_binding(tmp_path))
     def broken(*args): raise RuntimeError('observer failed')
     bridge=PermissionBridge(correlation=CorrelationTables(),bindings=bindings,coordinator_refusal_notifier=broken)
-    assert call(bridge,dict(PARAMS,toolCall=dict(name='Bash')))['outcome']['optionId']=='deny'
+    assert call(bridge,dict(PARAMS,toolCall=dict(name='Agent')))['outcome']['optionId']=='deny'

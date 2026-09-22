@@ -184,7 +184,6 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                     emit_update(tail)
             def on_delta(text):
                 nonlocal answer_pending
-                turn_deadline.touch()
                 # Some adapters deliver text before the tool lifecycle callback.
                 # The committed proposal is the authority for suppressing its echo.
                 answer_pending = answer_pending or machine.context(task_id)['state'] == 'ANSWER_READY'
@@ -194,27 +193,25 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 return emit_update(safe) if safe else True
             def on_tool(*args):
                 nonlocal answer_pending
-                turn_deadline.touch()
                 answer_pending = machine.context(task_id)['state'] == 'ANSWER_READY'
                 flush()
                 if tool_emitter:
                     tool_emitter(*args)
             def on_display(update):
-                turn_deadline.touch()
-                flush()
+                # A context-fill update is not a message boundary: the
+                # redactor keeps holding back its tail.
+                if update.get('sessionUpdate') != 'usage_update':
+                    flush()
                 if emit_display_update:
                     return emit_display_update(update)
             try:
-                from .limits import Deadline, COORDINATOR_SECONDS
-                with Deadline(cancel_event,COORDINATOR_SECONDS,
-                              lambda: runtime._engine.terminate_owned(channel.attempt_id),idle_seconds=180) as turn_deadline:
-                    outcome = runtime._engine.prompt(
-                        session_ref, message, turn_deadline, on_delta=on_delta,
-                        on_tool_call=on_tool, on_display_update=on_display,
-                        **({'prompt_blocks': [dict(type='text',text=message),*prompt_blocks]} if prompt_blocks and runtime._engine_accepts_prompt_blocks else {}),
-                    )
-                if turn_deadline.expired.is_set():
-                    raise StoreError('coordinator_timeout')
+                # No clock bound: a silent engine is woken by the engine
+                # adapter's stall nudge, never killed (see live_adapters.prompt).
+                outcome = runtime._engine.prompt(
+                    session_ref, message, cancel_event, on_delta=on_delta,
+                    on_tool_call=on_tool, on_display_update=on_display,
+                    **({'prompt_blocks': [dict(type='text',text=message),*prompt_blocks]} if prompt_blocks and runtime._engine_accepts_prompt_blocks else {}),
+                )
                 from .. import _fault_injection as fault_injection
                 fault_injection.checkpoint('t023_after_continuation_prompt')
             except Exception as error:

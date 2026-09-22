@@ -153,36 +153,18 @@ no-paid startup-close regression; the transient live failure's discarded
 token bytes were not retained, so that individual case cannot be proved
 byte-for-byte after the fact.
 
-Every Cortex-created session at this pinned version sends
-`strictMcpConfig: true` and denies native `Agent`/`Task` launch tools. Worker
-sessions retain the Claude preset's built-ins and additionally send the
-managed `Bash(*)` ask rule, which routes Bash through `canUseTool` and
-Cortex's ACP permission bridge. Coordinator sessions instead send the SDK's
-documented `tools: ["Read", "Glob", "Grep", "Edit", "Write"]` allowlist and
-explicitly deny `Bash`, `NotebookEdit`, `Agent`, and `Task`. Managed `Edit` and
-`Write` ask rules force native edits through the owner-bound pipeline draft
-permission check; ordinary source edits are refused. The installed
-adapter passes these options into the Claude Agent SDK query before launch;
-the SDK forwards `tools`, `--disallowedTools`, and
-`--strict-mcp-config` to the CLI. `Skill` is omitted even though the SDK
-recognizes the name: the pinned SDK marks it deprecated in favor of its
-`skills` option, and native skill files are outside Cortex's authenticated
-`read_skill` surface.
+Every Cortex-created session at this pinned version, coordinator or worker,
+keeps Claude's native tool preset and sends `skills: "all"`,
+`strictMcpConfig: true`, empty `plugins`, `managedSettings.disableAllHooks`, and
+disallows `Agent`, `Task`, `Workflow`, `TeamCreate`, `TeamDelete` and
+`SendMessage`. `settingSources` is not sent, so the adapter default (`user`,
+`project`, `local`) applies and Claude Code loads `CLAUDE.md`/`AGENTS.md` and
+discovers skills natively. The process runs in Cortex's engine jail, which bounds
+native tools to the assignment scope (see
+[containment](permissions-and-containment.md)). A 2026-09-22 no-paid check started
+the installed adapter inside the jail and created a session; no model turn has
+yet been observed there.
 
-The coordinator allowlist is a native Claude built-in-tool restriction for
-role capability shaping. It is not an OS-level filesystem boundary and does
-not make arbitrary external MCP tools read-only. The SDK's declared
-`strictMcpConfig` behavior limits MCP discovery to the session's explicit
-`mcpServers`, excluding Claude's user/project settings, plugins, and on-disk
-agent frontmatter MCP servers. Static forwarding and fake-wire tests cover
-the option path. A paid Paseo run on 2026-09-21 observed native Bash/Write
-rejection under the former read-only allowlist, blocking pipeline publication.
-The corrected draft-edit policy requires fresh live verification.
-This matters because the adapter otherwise loads user/project/local settings
-and the discovered native-account connection uses the production
-`CLAUDE_CONFIG_DIR` for authentication. This option does not disable non-MCP
-plugin skills or hooks, and no live Claude call has yet verified the CLI's
-behavior on a Cortex session.
 `TaskCreate` and related plan tools are separate. This is a static and
 fake-wire-supported prevention mechanism, not a completed real-client
 observation; the existing post-event refusal remains a defense if an engine

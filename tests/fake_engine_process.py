@@ -486,7 +486,10 @@ class FakeEngine:
         if behavior == "late_reply":
             time.sleep(self.scenario.get("late_reply_delay", 1.5))
 
-        _result(request_id, dict(stopReason=stop_reason))
+        response = dict(stopReason=stop_reason)
+        if self.scenario.get("prompt_usage") is not None:
+            response["usage"] = self.scenario["prompt_usage"]
+        _result(request_id, response)
 
 
 def main() -> int:

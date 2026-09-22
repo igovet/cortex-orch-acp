@@ -171,14 +171,13 @@ def test_adapter_fails_closed_for_an_unknown_engine_session_id(tmp_path):
     assert fake_runtime.lookups == []
 
 
-def test_worker_deletion_reaches_the_registered_requester_end_to_end_via_real_fake_engine(tmp_path):
+def test_worker_native_edit_and_delete_are_allowed_without_the_requester_via_real_fake_engine(tmp_path):
     """Real ``EngineSessionManager``/``PermissionBridge`` machinery, a real
     fake-engine subprocess (never a stub bypassing the wire), routed through
     the exact production seam (``adapter.set_runtime`` ->
-    ``permission_requester_for_task``) this fix adds: an ordinary edit is
-    auto-approved locally (never reaching the registered requester at all),
-    a deletion reaches it, and the registered task's own decision is
-    relayed back to the engine verbatim."""
+    ``permission_requester_for_task``): native edits and deletions act
+    inside the engine jail, so both are allowed locally and the registered
+    requester is never consulted."""
     store, task_id, epoch = _bootstrap(tmp_path, "delete")
     environ = isolated_environ(tmp_path)
 
@@ -229,8 +228,8 @@ def test_worker_deletion_reaches_the_registered_requester_end_to_end_via_real_fa
         list(manager.prompt_turn(session_ref, "do it"))
         replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
         assert len(replies) == 2
-        assert replies[0]["result"] == {"outcome": {"outcome": "selected", "optionId": "deny"}}
-        assert replies[1]["result"] == {"outcome": {"outcome": "selected", "optionId": "deny"}}
+        assert replies[0]["result"] == {"outcome": {"outcome": "selected", "optionId": "allow"}}
+        assert replies[1]["result"] == {"outcome": {"outcome": "selected", "optionId": "allow"}}
         assert host_calls == []
         assert fake_runtime.lookups == []
     finally:

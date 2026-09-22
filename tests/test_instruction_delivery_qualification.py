@@ -120,7 +120,7 @@ def test_claude_agent_acp_pinned_plan_is_qualified_via_session_new_meta():
     # a distinct, session/new-level channel instead.
     assert plan.blocks == ()
     assert plan.session_new_meta['systemPrompt']=={'append':role.body_portable}
-    assert plan.session_new_meta['claudeCode']['options']['tools']==[]
+    assert 'tools' not in plan.session_new_meta['claudeCode']['options']
     assert plan.session_new_meta['claudeCode']['options']['strictMcpConfig'] is True
 
 

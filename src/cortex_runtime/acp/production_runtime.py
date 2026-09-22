@@ -149,8 +149,8 @@ class ProductionOrchestratingRuntime:
             self.last_reconcile = str(error)
         configuration_service = ConfigurationService(store)
         # The runtime reserves disjoint scopes transactionally across this
-        # project's tasks. Native tools are disabled; the action gateway
-        # supplies the filesystem boundary for every worker.
+        # project's tasks. Each engine process runs in the engine jail, which
+        # makes only its assignment's scopes writable.
         workspace_provisioner = DirectProjectWorkspaceProvisioner(store, str(project))
         def resolve_workspace(binding_id, launch):
             if binding_id == "shared_project_root":

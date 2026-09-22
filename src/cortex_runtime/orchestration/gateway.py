@@ -48,7 +48,7 @@ SCHEMAS = {
                             content=text('Complete Markdown including the required first line from create_draft.',1000000),
                             request_key=text('Unique action identity.',128))),
     'command_run': obj(dict(argv=array(text('Literal command argument. Only scoped workers may run commands; coordinators and consultants cannot execute them. No implicit shell.',16384), maximum=128, minimum=1),
-                            timeout_seconds=dict(type='integer', minimum=1, maximum=300, description='Maximum runtime, including child processes.'),
+                            timeout_seconds=dict(type='integer', minimum=1, description='Optional maximum runtime, including child processes. Omit to run until the command exits.'),
                             request_key=text('Unique action identity; ambiguous interrupted calls are never re-executed automatically.',128)), required=['argv','request_key']),
 }
 SCHEMAS['draft_write']['properties']['draft_id']['pattern'] = r'^d_[0-9a-f]{12}$'
@@ -175,10 +175,13 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                 proc=subprocess.Popen(command,stdout=output,stderr=subprocess.STDOUT,pass_fds=fds,env={'PATH':'/usr/bin:/bin'},start_new_session=True)
                 db.commit()
             failure=None
-            deadline=time.monotonic()+args.get('timeout_seconds',300)
+            # No default limit: a long build or backfill runs to completion;
+            # a stop/cancel still ends it through the authority check below.
+            limit=args.get('timeout_seconds')
+            deadline=None if limit is None else time.monotonic()+limit
             try:
                 while proc.poll() is None:
-                    if time.monotonic()>=deadline:
+                    if deadline is not None and time.monotonic()>=deadline:
                         failure='timeout'; break
                     with store.connection() as db:
                         try: _authority(db,channel)

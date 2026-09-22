@@ -33,7 +33,7 @@ class McpBroker:
     """Keep task-channel credentials in the runtime's MCP child process."""
 
     def __init__(self, channel_credentials, *, python_executable: str, server_script: str,
-                 observe=None, server_config=None):
+                 observe=None, server_config=None, socket_dir=None):
         if not channel_credentials or len(channel_credentials) != 3:
             raise ValueError("channel_credentials are required for an MCP broker")
         self._credentials = tuple(channel_credentials)
@@ -53,7 +53,7 @@ class McpBroker:
         # option: the relay exits 2 before it can connect. Prefix a literal
         # letter without reducing the random portion's entropy.
         self._token = "c" + secrets.token_urlsafe(32)
-        self._tmp = tempfile.TemporaryDirectory(prefix="cortex-mcp-")
+        self._tmp = tempfile.TemporaryDirectory(prefix="cortex-mcp-", dir=socket_dir)
         self.endpoint = os.path.join(self._tmp.name, "broker.sock")
         self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._listener.bind(self.endpoint)

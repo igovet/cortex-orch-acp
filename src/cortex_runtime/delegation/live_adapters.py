@@ -91,6 +91,37 @@ def _option_mapping_for(engine: str):
     return None
 
 
+def _jail_for(store, channel_credentials) -> dict:
+    """The engine jail for one channel: exactly the scopes its gateway grants.
+
+    The coordinator, reviewers and read-only roles get none, so their whole
+    project is read-only; so does a worker without a running assignment.
+    The process lives while the channel does.
+    """
+    from ..contracts import StoreError
+    from ..orchestration.gateway import _authority
+    from ..trusted_channel import resolve_channel
+
+    channel_id, secret, _ = channel_credentials
+    channel = resolve_channel(store, channel_id, secret)
+    scopes = []
+    if channel.role != "coordinator":
+        with store.connection() as db:
+            try:
+                scopes, _ = _authority(db, channel)
+            except StoreError:
+                scopes = []
+
+    def alive():
+        try:
+            resolve_channel(store, channel_id, secret)
+        except StoreError:
+            return False
+        return True
+
+    return {"scopes": list(scopes), "alive": alive}
+
+
 def _session_new_meta_for(
     engine: str, version: str, instructions: str | None, *, role: str = "worker",
 ):
@@ -695,6 +726,8 @@ class EngineSessionManagerAdapter:
             recipient = "worker" if launch.get("assignment_id") else "coordinator"
             if "mcp_role" not in manager_kwargs:
                 manager_kwargs["mcp_role"] = recipient
+            if "jail" not in manager_kwargs and self._store is not None and channel_credentials is not None:
+                manager_kwargs["jail"] = _jail_for(self._store, channel_credentials)
             manager = EngineSessionManager(
                 record, workspace_root, environ=self._environ,
                 channel_credentials=channel_credentials,
@@ -2176,6 +2209,18 @@ class EngineSessionManagerAdapter:
     # bounds how quickly a cancel gets *sent*, independent of whether the
     # engine ever emits another event.
     _CANCEL_WATCH_POLL_SECONDS = 0.05
+    # A turn is never killed for being quiet: a model may think silently
+    # for many minutes. After this much silence from a live engine the
+    # turn is interrupted with session/cancel and the same session is
+    # re-prompted to continue, context intact. Doubles after each nudge.
+    # ponytail: fixed first threshold; make it per-engine config if a
+    # provider routinely thinks longer than this without streaming.
+    _STALL_NUDGE_SECONDS = 900.0
+    _STALL_NUDGE_PROMPT = (
+        "Runtime liveness check: nothing was received from you for a long time, so your "
+        "previous step was interrupted. Continue the same work from where you stopped; "
+        "do not restart or repeat completed steps."
+    )
 
     def prompt(
         self, session_ref: str, message: str, cancel_event: threading.Event, *,
@@ -2239,6 +2284,15 @@ class EngineSessionManagerAdapter:
         # Whether a non-delta engine event has been seen since the last
         # delta -- the only observable message boundary inside one turn.
         _saw_non_delta = [False]
+        # Stall watchdog state: when the engine last said anything, the
+        # current silence limit, and whether this turn was nudged.
+        _last_event = [time.monotonic()]
+        _stall_limit = [self._STALL_NUDGE_SECONDS]
+        _nudged = threading.Event()
+        # Tool calls the engine started and has not finished: a shell or
+        # MCP call may legitimately run for hours in silence, and nudging
+        # would cancel it. Silence only counts while nothing is running.
+        _open_tools: set = set()
 
         def _watch_for_cancel() -> None:
             while not _stop_watch.is_set():
@@ -2247,127 +2301,159 @@ class EngineSessionManagerAdapter:
                         _cancel_sent.set()
                         manager.cancel(session_ref)
                     return
+                if (not _nudged.is_set() and not _open_tools
+                        and time.monotonic() - _last_event[0] >= _stall_limit[0]):
+                    _nudged.set()
+                    manager.cancel(session_ref)
 
         watcher = threading.Thread(target=_watch_for_cancel, name="engine-cancel-watch", daemon=True)
         watcher.start()
         try:
             instruction_delivery_observed = False
-            for event in manager.prompt_turn(session_ref, message, prompt_blocks=prompt_blocks):
-                if not instruction_delivery_observed and self._store is not None:
-                    instruction_delivery_observed = True
-                    with self._lock:
-                        bundle_id = (getattr(self, "_session_meta", {}).get(session_ref) or {}).get(
-                            "instruction_bundle_id"
-                        )
-                    if bundle_id:
-                        from ..portable.instruction_bundle import InstructionBundleLedger
-
-                        ledger = InstructionBundleLedger(self._store)
-                        bundle = ledger.get(bundle_id)
-                        if bundle is not None and not bundle.delivery_bound:
-                            ledger.record_sent(bundle, message, engine=bundle.engine,
-                                               engine_version=bundle.engine_version,
-                                               attempt_id=bundle.attempt_id, session_ref=session_ref)
-                if cancel_event.is_set() and not _cancel_sent.is_set():
-                    from .. import _fault_injection
-
-                    # T028: any event still arriving on this iteration
-                    # (including a TURN_END success) after cancel_event was
-                    # observed set is a "late success after cancel" -- the
-                    # caller (acp.agent.Agent._run_prompt_body) always
-                    # forces StopReason.CANCELLED regardless of what this
-                    # loop returns once cancel_event is set, so a late
-                    # success here is recorded (its own durable events/
-                    # deliveries still land normally) but never reported as
-                    # having completed the turn or used to revive it.
-                    _fault_injection.checkpoint("t028_late_event_after_cancel")
-                    _cancel_sent.set()
-                    manager.cancel(session_ref)
-                if event.kind != EngineEventKind.TURN_DELTA:
-                    # Any non-delta event ends the message the coordinator
-                    # was in the middle of saying -- see the delta branch.
-                    _saw_non_delta[0] = True
-                if event.kind == EngineEventKind.TURN_DELTA and event.delta_text:
-                    text_parts.append(event.delta_text)
-                    if on_delta is not None:
-                        try:
-                            # A model that speaks, calls a tool, then speaks
-                            # again has produced two messages, but
-                            # ``agent_message_chunk`` carries no message
-                            # identity at all (see
-                            # engine.session_manager._translate_update), so
-                            # the two arrive as one unbroken run of chunks
-                            # and render as "...verify the change.The Cortex
-                            # draft was created...". The tool call between
-                            # them IS the observable boundary: a delta that
-                            # is the first one after any non-delta event
-                            # starts a new message, and gets a blank line
-                            # ahead of it. Never before the turn's own first
-                            # delta -- the caller owns the separation
-                            # between turns (see
-                            # acp.orchestrating_runtime._continuation_loop's
-                            # rebound emit_update).
-                            if _saw_non_delta[0] and text_parts[:-1]:
-                                on_delta("\n\n")
-                            _saw_non_delta[0] = False
-                            on_delta(event.delta_text)
-                        except Exception:  # noqa: BLE001 - best-effort, never fails the turn
-                            pass
-                elif event.kind == EngineEventKind.TOOL_CALL_OBSERVED:
-                    # The same observation the durable evidence below
-                    # records, also handed to the caller so a person can
-                    # watch what the model is doing while it does it --
-                    # ref/kind/title/status only, exactly the portable
-                    # fields EngineEvent carries (never raw arguments,
-                    # output or result; see its own docstring for why
-                    # those are deliberately not portable concepts).
-                    if on_tool_call is not None and event.tool_call_ref:
-                        try:
-                            on_tool_call(
-                                event.tool_call_ref, event.tool_call_kind,
-                                event.tool_call_title, event.tool_call_status,
-                                event.tool_call_locations, event.tool_call_content,
-                                event.tool_call_raw_input, event.tool_call_raw_output,
+            turn_message, turn_blocks = message, prompt_blocks
+            while True:
+                _last_event[0] = time.monotonic()
+                _open_tools.clear()
+                for event in manager.prompt_turn(session_ref, turn_message, prompt_blocks=turn_blocks):
+                    _last_event[0] = time.monotonic()
+                    if not instruction_delivery_observed and self._store is not None:
+                        instruction_delivery_observed = True
+                        with self._lock:
+                            bundle_id = (getattr(self, "_session_meta", {}).get(session_ref) or {}).get(
+                                "instruction_bundle_id"
                             )
-                        except Exception:  # noqa: BLE001 - best-effort, never fails the turn
-                            pass
-                    # T017: durable evidence, never raw tool output/args --
-                    # see delegation.evidence module docstring.
-                    if self._store is not None and task_id is not None:
-                        from . import evidence as delegation_evidence
+                        if bundle_id:
+                            from ..portable.instruction_bundle import InstructionBundleLedger
 
-                        delegation_evidence.record_tool_result_observed(
-                            self._store, task_id, attempt_id, event.tool_call_ref,
-                            event.tool_call_kind, event.tool_call_title, event.tool_call_status,
-                        )
-                elif event.kind == EngineEventKind.DISPLAY_UPDATE:
-                    # Shown, never interpreted: this adapter attaches no
-                    # meaning to a thought or a plan, it only makes sure the
-                    # person watching sees what the engine said it is doing.
-                    if on_display_update is not None and event.display_update:
-                        try:
-                            on_display_update(dict(event.display_update))
-                        except Exception:  # noqa: BLE001 - best-effort, never fails the turn
-                            pass
-                elif event.kind == EngineEventKind.COMPACTION_SIGNAL:
-                    if self._store is not None:
-                        self._observe_compaction_signal(manager, session_ref, event)
-                elif event.kind == EngineEventKind.USAGE_UPDATE:
-                    # T029: the engine's own most-recent usage_update for
-                    # this call (cumulative counters, per
-                    # engine.session_manager) -- attributed below once the
-                    # call finishes, whether it succeeds or fails.
-                    usage_basis = event.usage_basis
-                    usage_values = dict(event.usage_values or {})
-                elif event.kind == EngineEventKind.ERROR:
-                    # T017: a yielded EngineEventKind.ERROR (transport_eof,
-                    # timeout_alive -- see engine.session_manager's
-                    # _prompt_turn_locked) must never be silently treated as
-                    # a normal end_turn; the caller (OrchestratingRuntime)
-                    # decides the durable outcome, never this adapter.
-                    raise EngineTurnFailed(event.error_message or "engine_error")
-                elif event.kind == EngineEventKind.TURN_END:
-                    stop_reason = event.stop_reason or StopReason.END_TURN
+                            ledger = InstructionBundleLedger(self._store)
+                            bundle = ledger.get(bundle_id)
+                            if bundle is not None and not bundle.delivery_bound:
+                                ledger.record_sent(bundle, message, engine=bundle.engine,
+                                                   engine_version=bundle.engine_version,
+                                                   attempt_id=bundle.attempt_id, session_ref=session_ref)
+                    if cancel_event.is_set() and not _cancel_sent.is_set():
+                        from .. import _fault_injection
+
+                        # T028: any event still arriving on this iteration
+                        # (including a TURN_END success) after cancel_event was
+                        # observed set is a "late success after cancel" -- the
+                        # caller (acp.agent.Agent._run_prompt_body) always
+                        # forces StopReason.CANCELLED regardless of what this
+                        # loop returns once cancel_event is set, so a late
+                        # success here is recorded (its own durable events/
+                        # deliveries still land normally) but never reported as
+                        # having completed the turn or used to revive it.
+                        _fault_injection.checkpoint("t028_late_event_after_cancel")
+                        _cancel_sent.set()
+                        manager.cancel(session_ref)
+                    if event.kind != EngineEventKind.TURN_DELTA:
+                        # Any non-delta event ends the message the coordinator
+                        # was in the middle of saying -- see the delta branch.
+                        _saw_non_delta[0] = True
+                    if event.kind == EngineEventKind.TURN_DELTA and event.delta_text:
+                        text_parts.append(event.delta_text)
+                        if on_delta is not None:
+                            try:
+                                # A model that speaks, calls a tool, then speaks
+                                # again has produced two messages, but
+                                # ``agent_message_chunk`` carries no message
+                                # identity at all (see
+                                # engine.session_manager._translate_update), so
+                                # the two arrive as one unbroken run of chunks
+                                # and render as "...verify the change.The Cortex
+                                # draft was created...". The tool call between
+                                # them IS the observable boundary: a delta that
+                                # is the first one after any non-delta event
+                                # starts a new message, and gets a blank line
+                                # ahead of it. Never before the turn's own first
+                                # delta -- the caller owns the separation
+                                # between turns (see
+                                # acp.orchestrating_runtime._continuation_loop's
+                                # rebound emit_update).
+                                if _saw_non_delta[0] and text_parts[:-1]:
+                                    on_delta("\n\n")
+                                _saw_non_delta[0] = False
+                                on_delta(event.delta_text)
+                            except Exception:  # noqa: BLE001 - best-effort, never fails the turn
+                                pass
+                    elif event.kind == EngineEventKind.TOOL_CALL_OBSERVED:
+                        if event.tool_call_status in ("completed", "failed"):
+                            _open_tools.discard(event.tool_call_ref)
+                        elif event.tool_call_ref:
+                            _open_tools.add(event.tool_call_ref)
+                        # The same observation the durable evidence below
+                        # records, also handed to the caller so a person can
+                        # watch what the model is doing while it does it --
+                        # ref/kind/title/status only, exactly the portable
+                        # fields EngineEvent carries (never raw arguments,
+                        # output or result; see its own docstring for why
+                        # those are deliberately not portable concepts).
+                        if on_tool_call is not None and event.tool_call_ref:
+                            try:
+                                on_tool_call(
+                                    event.tool_call_ref, event.tool_call_kind,
+                                    event.tool_call_title, event.tool_call_status,
+                                    event.tool_call_locations, event.tool_call_content,
+                                    event.tool_call_raw_input, event.tool_call_raw_output,
+                                )
+                            except Exception:  # noqa: BLE001 - best-effort, never fails the turn
+                                pass
+                        # T017: durable evidence, never raw tool output/args --
+                        # see delegation.evidence module docstring.
+                        if self._store is not None and task_id is not None:
+                            from . import evidence as delegation_evidence
+
+                            delegation_evidence.record_tool_result_observed(
+                                self._store, task_id, attempt_id, event.tool_call_ref,
+                                event.tool_call_kind, event.tool_call_title, event.tool_call_status,
+                            )
+                    elif event.kind == EngineEventKind.DISPLAY_UPDATE:
+                        # Shown, never interpreted: this adapter attaches no
+                        # meaning to a thought or a plan, it only makes sure the
+                        # person watching sees what the engine said it is doing.
+                        if on_display_update is not None and event.display_update:
+                            try:
+                                on_display_update(dict(event.display_update))
+                            except Exception:  # noqa: BLE001 - best-effort, never fails the turn
+                                pass
+                    elif event.kind == EngineEventKind.COMPACTION_SIGNAL:
+                        if self._store is not None:
+                            self._observe_compaction_signal(manager, session_ref, event)
+                    elif event.kind == EngineEventKind.USAGE_UPDATE:
+                        # T029: the engine's own most-recent usage_update for
+                        # this call (cumulative counters, per
+                        # engine.session_manager) -- attributed below once the
+                        # call finishes, whether it succeeds or fails.
+                        # A context-only update carries no counts and must not
+                        # erase counts already reported for this call.
+                        if event.usage_values or usage_basis is None:
+                            usage_basis = event.usage_basis
+                            usage_values = dict(event.usage_values or {})
+                        # The context fill is shown like any display update.
+                        if on_display_update is not None and event.display_update:
+                            try:
+                                on_display_update(dict(event.display_update))
+                            except Exception:  # noqa: BLE001 - best-effort, never fails the turn
+                                pass
+                    elif event.kind == EngineEventKind.ERROR:
+                        # T017: a yielded EngineEventKind.ERROR (transport_eof,
+                        # timeout_alive -- see engine.session_manager's
+                        # _prompt_turn_locked) must never be silently treated as
+                        # a normal end_turn; the caller (OrchestratingRuntime)
+                        # decides the durable outcome, never this adapter.
+                        raise EngineTurnFailed(event.error_message or "engine_error")
+                    elif event.kind == EngineEventKind.TURN_END:
+                        stop_reason = event.stop_reason or StopReason.END_TURN
+                if (_nudged.is_set() and not cancel_event.is_set()
+                        and stop_reason == StopReason.CANCELLED):
+                    # The engine answered the nudge's cancel, so it is alive:
+                    # wake it in the same session and keep waiting.
+                    _stall_limit[0] *= 2
+                    _nudged.clear()
+                    stop_reason = StopReason.END_TURN
+                    turn_message, turn_blocks = self._STALL_NUDGE_PROMPT, None
+                    continue
+                break
             call_failed = False
         except PortableError as error:
             if error.code == "engine_session_unusable":

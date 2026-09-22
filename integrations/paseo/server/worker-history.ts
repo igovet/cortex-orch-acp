@@ -3,19 +3,39 @@ import { spawnSync } from "node:child_process";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { readWorkerHistory } from "../shared/worker-history.js";
 
-const PYTHON = String.raw`
-import json, os, sqlite3, sys
-from urllib.parse import quote
-import re
-root, task_id, attempt_id, cursor, limit, assignment_cursor, assignment_ref = sys.argv[1], sys.argv[2], sys.argv[3] or None, int(sys.argv[4] or 0), min(max(int(sys.argv[5] or 200), 1), 200), sys.argv[6] or '', sys.argv[7] or None
-db_path = root + '/.cortex/cortex.sqlite3'
+/** Helpers shared by every Python store reader: the display scrubber (credentials
+ * and private absolute paths never reach the client) and token totals.
+ * Needs `import json, re`. */
+export const STORE_PYTHON_HELPERS = String.raw`
 def scrub(value):
     try:
         value = re.sub(r'(?i)(?:bearer|token|password|secret|api[_ -]?key)\s*[:=]\s*\S+', '[redacted]', value)
         return re.sub(r'(?<![A-Za-z0-9])/(?:home|tmp|private|Users)/[^\s,;]+', '[private path]', value)
     except re.error:
         return '[redacted]'
-def process_identity_absent(row):
+def sum_tokens(rows):
+    # Engine-reported ACP PromptResponse.usage rows; None when no call reported.
+    totals, seen = {'input': 0, 'output': 0, 'cachedRead': 0, 'total': 0}, False
+    for row in rows:
+        try: t = json.loads(row['tokens_json'] or '{}')
+        except (ValueError, TypeError): continue
+        if not isinstance(t, dict) or not t: continue
+        count = lambda key: t.get(key) if isinstance(t.get(key), int) and t.get(key) >= 0 else 0
+        seen = True
+        totals['input'] += count('inputTokens')
+        totals['output'] += count('outputTokens')
+        totals['cachedRead'] += count('cachedReadTokens')
+        totals['total'] += count('totalTokens') or count('inputTokens') + count('outputTokens')
+    return totals if seen else None
+`;
+
+const PYTHON = String.raw`
+import json, os, sqlite3, sys
+from urllib.parse import quote
+import re
+root, task_id, attempt_id, cursor, limit, assignment_cursor, assignment_ref = sys.argv[1], sys.argv[2], sys.argv[3] or None, int(sys.argv[4] or 0), min(max(int(sys.argv[5] or 200), 1), 200), sys.argv[6] or '', sys.argv[7] or None
+db_path = root + '/.cortex/cortex.sqlite3'
+${STORE_PYTHON_HELPERS}def process_identity_absent(row):
     """Return True only when the durable worker identity is provably gone."""
     if row['terminated_at'] is not None:
         return True
@@ -154,7 +174,9 @@ try:
                 if at['attempt_no'] == 1:
                     refs.extend((a['assignment_id'], a['idempotency_key']))
                 placeholders = ','.join('?' for _ in refs)
-                evs = db.execute(f'''select id,event_type,created_at,payload_json from task_events where task_id=? and assignment_ref in ({placeholders}) and id>? and (event_type in ('worker_result','worker_question','assignment_failed','assignment_cancelled','worker_activity') or (json_valid(payload_json) and json_extract(payload_json,'$.kind')='worker_activity')) order by id limit ?''', (task['id'], *refs, cursor, limit + 1)).fetchall()
+                # Context fill rows are status, not transcript; the latest one
+                # is read below independently of the event page.
+                evs = db.execute(f'''select id,event_type,created_at,payload_json from task_events where task_id=? and assignment_ref in ({placeholders}) and id>? and (event_type in ('worker_result','worker_question','assignment_failed','assignment_cancelled','worker_activity') or (json_valid(payload_json) and json_extract(payload_json,'$.kind')='worker_activity')) and not (json_valid(payload_json) and coalesce(json_extract(payload_json,'$.activity_ref'),'')='context' and coalesce(json_extract(payload_json,'$.kind'),'')='worker_activity') order by id limit ?''', (task['id'], *refs, cursor, limit + 1)).fetchall()
                 more = len(evs) > limit
                 if more: evs = evs[:limit]
                 truncated = truncated or more
@@ -284,6 +306,15 @@ try:
                     elif len(runtime_rows) > 1:
                         attempt_result['status'] = 'failed'
                         attempt_result['failureReason'] = 'Ambiguous runtime assignment identity; outcome is unverified.'
+                context_row = db.execute(f'''select payload_json from task_events where task_id=? and assignment_ref in ({placeholders}) and event_type='progress' and json_valid(payload_json) and json_extract(payload_json,'$.activity_ref')='context' and json_extract(payload_json,'$.kind')='worker_activity' order by id desc limit 1''', (task['id'], *refs)).fetchone()
+                if context_row is not None:
+                    content = json.loads(context_row['payload_json']).get('content')
+                    if isinstance(content, dict) and all(isinstance(content.get(k), int) and content.get(k) >= 0 for k in ('used', 'size')) and content['size'] > 0:
+                        attempt_result['context'] = {'used': content['used'], 'size': content['size']}
+                if 'usage_records' in tables and execution_attempt_refs:
+                    tokens = sum_tokens(db.execute('select tokens_json from usage_records where task_id=? and attempt_id in (%s)' % ','.join('?' for _ in execution_attempt_refs), (task['id'], *execution_attempt_refs)).fetchall())
+                    if tokens is not None:
+                        attempt_result['tokens'] = tokens
                 if completed_at is not None:
                     attempt_result['completedAt'] = completed_at
                 if attempt_route is not None:
@@ -366,24 +397,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export async function getWorkerHistory(input: { workspaceId: string; agentId: string; attemptId?: string; assignmentRef?: string; cursor?: number; limit?: number; assignmentCursor?: string }, context: PluginHandlerContext) {
+/** Resolve the exact Cortex task bound to this Paseo agent, or say why not. */
+export async function resolveAgentTask(input: { workspaceId: string; agentId: string }, context: PluginHandlerContext): Promise<{ projectRoot: string; taskId: string } | { message: string }> {
   const workspaceHandle = context.paseo.workspaces.ref(input.workspaceId);
   await workspaceHandle.refresh();
   const projectRoot = workspaceHandle.directory;
-  if (!projectRoot || !projectRoot.startsWith("/") || projectRoot.includes("\0")) {
-    return { assignments: [], available: false, truncated: false, nextCursor: null, nextAssignmentCursor: null, message: "Worker history is unavailable for this workspace." };
-  }
-  const dbPath = `${projectRoot}/.cortex/cortex.sqlite3`;
-  if (!existsSync(dbPath)) {
-    return { assignments: [], available: false, truncated: false, nextCursor: null, nextAssignmentCursor: null, message: "No Cortex store is present in this workspace." };
-  }
+  if (!projectRoot || !projectRoot.startsWith("/") || projectRoot.includes("\0")) return { message: "Worker history is unavailable for this workspace." };
+  if (!existsSync(`${projectRoot}/.cortex/cortex.sqlite3`)) return { message: "No Cortex store is present in this workspace." };
   const agentHandle = context.paseo.agents.ref(input.agentId);
   await agentHandle.refresh();
   const agent = agentHandle.current();
   const sessionId = parsePaseoRuntimeSessionId(agent?.runtimeInfo);
-  if (!sessionId || agent?.workspaceId !== input.workspaceId) return { assignments: [], available: false, truncated: false, nextCursor: null, nextAssignmentCursor: null, message: "Worker history is unavailable for this agent." };
+  if (!sessionId || agent?.workspaceId !== input.workspaceId) return { message: "Worker history is unavailable for this agent." };
   const taskId = await readTaskId(projectRoot, sessionId);
-  if (!taskId) return { assignments: [], available: false, truncated: false, nextCursor: null, nextAssignmentCursor: null, message: "No durable Cortex task is bound to this agent." };
+  if (!taskId) return { message: "No durable Cortex task is bound to this agent." };
+  return { projectRoot, taskId };
+}
+
+export async function getWorkerHistory(input: { workspaceId: string; agentId: string; attemptId?: string; assignmentRef?: string; cursor?: number; limit?: number; assignmentCursor?: string }, context: PluginHandlerContext) {
+  const resolved = await resolveAgentTask(input, context);
+  if ("message" in resolved) return { assignments: [], available: false, truncated: false, nextCursor: null, nextAssignmentCursor: null, message: resolved.message };
+  const { projectRoot, taskId } = resolved;
   const result = spawnSync("python3", ["-B", "-c", PYTHON, projectRoot, taskId, input.attemptId ?? "", String(input.cursor ?? 0), String(input.limit ?? 200), input.assignmentCursor ?? "", input.assignmentRef ?? ""], {
     encoding: "utf8",
     timeout: 5000,

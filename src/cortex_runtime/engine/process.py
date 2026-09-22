@@ -11,8 +11,10 @@ own environment).
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import hashlib
+import shutil
 import sys
 import signal
 import subprocess
@@ -114,15 +116,9 @@ _CODEX_SESSION_CONFIG_PATCHED = b'''function forceGitRootTurnDiffPaths(config2) 
     ["agents.enabled"]: ignoredAgentsEnabled,
     ["features.multi_agent"]: ignoredMultiAgent,
     ["features.multi_agent_v2"]: ignoredMultiAgentV2,
-    ["features.shell_tool"]: ignoredShell,
-    ["features.js_repl"]: ignoredJsRepl,
     ["features.hooks"]: ignoredHooks,
     ["features.apps"]: ignoredApps,
     ["features.plugins"]: ignoredPlugins,
-    ["features.view_image"]: ignoredViewImage,
-    ["features.image_generation"]: ignoredImageGen,
-    ["features.browser_use"]: ignoredBrowser,
-    ["features.computer_use"]: ignoredComputer,
     ...remainingConfig
   } = config2;
   return {
@@ -138,16 +134,9 @@ _CODEX_SESSION_CONFIG_PATCHED = b'''function forceGitRootTurnDiffPaths(config2) 
       multi_agent_v2: false,
       plugins: false,
       hooks: false,
-      apps: false,
-      shell_tool: false,
-      js_repl: false,
-      view_image: false,
-      image_generation: false,
-      browser_use: false,
-      computer_use: false
+      apps: false
     },
-    web_search: "disabled",
-    tools: { update_plan: { enabled: false }, experimental_request_user_input: { enabled: false } }
+    tools: { experimental_request_user_input: { enabled: false } }
   };
 }'''
 
@@ -161,14 +150,14 @@ _CODEX_MCP_DEDUP_SOURCE = b'''    let serversToConfigure = requestedServers;
     }'''
 _CODEX_MCP_DEDUP_PATCHED = b'''    const serversToConfigure = requestedServers;'''
 _CODEX_MCP_ENTRY_SOURCE = b'''"mcp_servers": Object.fromEntries(serversToConfigure.map((mcp) => [mcp.name, this.createMcpSeverConfig(mcp.server)]))'''
-_CODEX_MCP_ENTRY_PATCHED = b'''"mcp_servers": Object.fromEntries(serversToConfigure.map((mcp) => [mcp.name, { ...this.createMcpSeverConfig(mcp.server), enabled: true, default_tools_approval_mode: "approve" }]))'''
+# Codex bounds every MCP tools/call by tool_timeout_sec (60 s by default),
+# which would cut a long command_run short. One year is effectively
+# unbounded and stays inside tokio's timer range (~2 years).
+_CODEX_MCP_ENTRY_PATCHED = b'''"mcp_servers": Object.fromEntries(serversToConfigure.map((mcp) => [mcp.name, { ...this.createMcpSeverConfig(mcp.server), enabled: true, default_tools_approval_mode: "approve", tool_timeout_sec: 31536000 }]))'''
 
-# Keep every Cortex turn inside Codex's project workspace while excluding the
-# host temporary trees that native terminal tools can otherwise write
-# directly.  ``workspaceWrite`` still permits edits below the thread's cwd;
-# the empty writable-roots list deliberately adds no second project or host
-# directory.  These fields are part of the Codex App Server runTurn contract,
-# not an operating-system containment claim.
+# Codex runs inside Cortex's engine jail (orchestration.sandbox.engine_jail),
+# which is the boundary: its own sandbox cannot start in a nested user
+# namespace, so every turn is full access and never asks for approval.
 _CODEX_SEND_PROMPT_SOURCE = b'''    return await this.codexClient.runTurn({
       threadId: request.sessionId,
       input,
@@ -180,16 +169,12 @@ _CODEX_SEND_PROMPT_SOURCE = b'''    return await this.codexClient.runTurn({
       model: modelId.model,
       serviceTier
     }, onTurnStarted);'''
-_CODEX_SEND_PROMPT_PATCHED = b'''    const cortexSandboxPolicy = {
-      type: "readOnly",
-      networkAccess: false
-    };
-    return await this.codexClient.runTurn({
+_CODEX_SEND_PROMPT_PATCHED = b'''    return await this.codexClient.runTurn({
       threadId: request.sessionId,
       input,
-      approvalPolicy: agentMode.approvalPolicy,
-      approvalsReviewer: agentMode.approvalsReviewer,
-      sandboxPolicy: cortexSandboxPolicy,
+      approvalPolicy: "never",
+      approvalsReviewer: "user",
+      sandboxPolicy: { type: "dangerFullAccess" },
       summary: disableSummary ? "none" : "auto",
       effort,
       model: modelId.model,
@@ -508,13 +493,10 @@ import subprocess
 import sys
 
 BINARY = __BINARY__
-BASE = ["-c", "features.js_repl=false", "-c", "agents.enabled=false", "-c", "features.multi_agent=false",
+BASE = ["-c", "agents.enabled=false", "-c", "features.multi_agent=false",
         "-c", "features.multi_agent_v2=false", "-c", "features.plugins=false",
-        "-c", "features.hooks=false", "-c", "features.apps=false", "-c", "features.shell_tool=false",
-        "-c", "features.view_image=false", "-c", "features.image_generation=false",
-        "-c", "features.browser_use=false", "-c", "features.computer_use=false",
-        "-c", "tools.update_plan.enabled=false", "-c", "tools.experimental_request_user_input.enabled=false",
-        "-c", 'web_search="disabled"']
+        "-c", "features.hooks=false", "-c", "features.apps=false",
+        "-c", "tools.experimental_request_user_input.enabled=false"]
 
 def checked(args):
     response = subprocess.run([BINARY, *args], stdout=subprocess.PIPE,
@@ -545,30 +527,6 @@ try:
     if any(observed.get(name) != "false" for name in
            ("multi_agent", "multi_agent_v2", "plugins")):
         raise ValueError("Codex process features are not disabled")
-    # This installed CLI exposes startup model_catalog_json, shell_type=disabled
-    # and nullable apply_patch_tool_type. Preserve model identities, routing,
-    # context sizes and instructions; remove native action implementations.
-    version = checked(["--version"]).strip()
-    if version not in {"codex-cli 0.154.0", "codex-cli 0.155.1"}:
-        raise ValueError("Unqualified native Codex tool catalogue version")
-    catalogue = json.loads(checked(["debug", "models", "--bundled"]))
-    if not isinstance(catalogue.get("models"), list) or not catalogue["models"]:
-        raise ValueError("Native model catalogue is absent")
-    for model in catalogue["models"]:
-        if not isinstance(model, dict) or "slug" not in model or "shell_type" not in model or "apply_patch_tool_type" not in model:
-            raise ValueError("Native model catalogue shape changed")
-        model["tool_mode"] = "direct"
-        model["shell_type"] = "disabled"
-        model["apply_patch_tool_type"] = None
-        model["experimental_supported_tools"] = []
-    import tempfile
-    directory = os.path.dirname(os.path.realpath(__file__))
-    with tempfile.NamedTemporaryFile(mode="w", dir=directory, prefix="gateway-models-", suffix=".json", delete=False) as output:
-        json.dump(catalogue, output)
-        output.flush()
-        os.fsync(output.fileno())
-        catalogue_path = output.name
-    BASE += ["-c", "model_catalog_json=" + json.dumps(catalogue_path)]
     discovered = servers(BASE)
     overrides = [arg for item in discovered for arg in
                  ("-c", "mcp_servers." + item["name"] + ".enabled=false")]
@@ -629,7 +587,7 @@ class EngineProcess:
     """
 
     def __init__(self, record, cwd, *, environ=None, install=None, broker_mcp=False,
-                 project_root=None, channel_credentials=None):
+                 project_root=None, channel_credentials=None, jail=None):
         """``install`` -- a :class:`~.codex_install.CodexAcpInstall` for a
         ``codex-acp`` record, a :class:`~.claude_install.ClaudeAcpInstall`
         for a ``claude-agent-acp`` record, or ``None`` -- is re-verified
@@ -647,6 +605,12 @@ class EngineProcess:
         pinned-install guarantee must pass it explicitly (see
         ``engine.install_resolution.resolve_verified_install``, the
         production entry point for both engines).
+
+        ``jail`` -- ``{"scopes": [...], "alive": callable | None}`` -- runs
+        the process in ``orchestration.sandbox.engine_jail``: ``cwd`` is
+        read-only except ``scopes``, and every native tool the engine offers
+        acts inside that box. ``alive`` is polled; once it returns false the
+        process is terminated, so a revoked channel stops native effects.
         """
         if record.launch_command is None:
             raise _validation_error(
@@ -672,6 +636,13 @@ class EngineProcess:
         self.external_mcp_brokers = []
         self.engine_instance_id = "eirt_" + uuid.uuid4().hex[:12]
         self.logs = EngineLogs(self.engine_instance_id, environ)
+        self._jail_dir = self._socket_dir = None
+        self._jail_stack = contextlib.ExitStack()
+        if jail is not None:
+            self._jail_dir = Path(tempfile.mkdtemp(prefix="cortex-engine-"))
+            self._socket_dir = self._jail_dir / "sockets"
+            self._socket_dir.mkdir(mode=0o700)
+            (self._jail_dir / "tmp").mkdir(mode=0o700)
         if broker_mcp:
             if not project_root or channel_credentials is None:
                 raise _validation_error(
@@ -681,7 +652,7 @@ class EngineProcess:
             server_script = str(Path(__file__).resolve().parents[2] / "cortex.py")
             self.mcp_broker = McpBroker(
                 channel_credentials, python_executable=sys.executable, server_script=server_script,
-                observe=self.logs.observe,
+                observe=self.logs.observe, socket_dir=self._socket_dir,
             )
         pinned_engine_vars = None
         adapter_entry_override = None
@@ -735,6 +706,13 @@ class EngineProcess:
         # harmless for the Node-based Claude adapter and keeps the launch
         # contract independent of the caller's ambient environment.
         process_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        if record.engine == "claude-agent-acp":
+            # Claude aborts an MCP tools/call after 30 min (stdio) / 5 min
+            # (http) of silence and ~28 h overall. A long command_run is
+            # silent by nature: disable the idle bound and raise the hard one
+            # to Claude's own ceiling (2^31-1 ms, ~24.8 days).
+            process_env["CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT"] = "0"
+            process_env["MCP_TOOL_TIMEOUT"] = "2147483647"
         self.state = ProcessObservation.STARTING
         self._exit_code = None
         self._exited_event = threading.Event()
@@ -743,6 +721,16 @@ class EngineProcess:
             if adapter_entry_override is not None:
                 launch_command[1] = adapter_entry_override
             self.logs.observe(ProcessObservation.STARTING, command=list(launch_command), cwd=cwd)
+            fds = ()
+            if jail is not None:
+                from ..orchestration.sandbox import engine_jail
+                from ..connections.environment import _ISOLATION_ENV_VAR
+                state = process_env[_ISOLATION_ENV_VAR[record.engine]]
+                launch_command, fds = self._jail_stack.enter_context(engine_jail(
+                    cwd, self._jail_dir / "tmp", launch_command, jail["scopes"], env=process_env,
+                    state_dirs={state: record.engine}, writable=[self._socket_dir],
+                ))
+                process_env = {"PATH": "/usr/bin:/bin"}
             self.process = subprocess.Popen(
                 launch_command,
                 cwd=cwd,
@@ -751,10 +739,12 @@ class EngineProcess:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
+                pass_fds=fds,
             )
         except Exception:
             if self.mcp_broker is not None:
                 self.mcp_broker.close()
+            self._release_jail()
             raise
         self.state = "initialized"
 
@@ -762,6 +752,27 @@ class EngineProcess:
         self._stderr_thread.start()
         self._wait_thread = threading.Thread(target=self._wait_for_exit, name="engine-wait", daemon=True)
         self._wait_thread.start()
+        if jail is not None and jail.get("alive") is not None:
+            threading.Thread(target=self._watch_authority, args=(jail["alive"],),
+                             name="engine-authority", daemon=True).start()
+
+    def _watch_authority(self, alive) -> None:
+        # Native tools act without a per-call gateway check, so authority is
+        # enforced on the process: a revoked channel ends it.
+        while not self._exited_event.wait(1.0):
+            try:
+                current = alive()
+            except Exception:
+                current = False
+            if not current:
+                self.logs.observe("jail_authority_revoked")
+                self.terminate()
+                return
+
+    def _release_jail(self) -> None:
+        self._jail_stack.close()
+        if self._jail_dir is not None:
+            shutil.rmtree(self._jail_dir, ignore_errors=True)
 
     def _drain_stderr(self) -> None:
         stream = self.process.stderr
@@ -812,7 +823,7 @@ class EngineProcess:
                                     'Configure exact allowed_tools in the owner-only Cortex MCP registry.')
         broker=McpBroker(credentials,python_executable=sys.executable,
                          server_script=str(Path(__file__).with_name('external_proxy.py')),
-                         server_config=config,observe=self.logs.observe)
+                         server_config=config,observe=self.logs.observe,socket_dir=self._socket_dir)
         self.external_mcp_brokers.append(broker)
         return dict(name=config['name'],command=sys.executable,
                     args=['-B',str(MCP_RELAY_SCRIPT),'--relay',broker.endpoint,broker.relay_token],env=[])
@@ -847,3 +858,4 @@ class EngineProcess:
         self.state = "released"
         if self.mcp_broker is not None:
             self.mcp_broker.close()
+        self._release_jail()

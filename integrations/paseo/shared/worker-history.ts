@@ -30,6 +30,13 @@ const route = z.object({
   effort: z.string().min(1).nullable(),
 });
 
+export const tokenTotals = z.object({
+  input: z.number().int().nonnegative(),
+  output: z.number().int().nonnegative(),
+  cachedRead: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+});
+
 const attempt = z.object({
   id: z.string(),
   attemptNo: z.number().int().nonnegative(),
@@ -38,6 +45,10 @@ const attempt = z.object({
   completedAt: z.string().nullable().optional(),
   agentId: z.string().min(1).optional(),
   route: route.optional(),
+  // Latest ACP context fill of this attempt's engine session.
+  context: z.object({ used: z.number().int().nonnegative(), size: z.number().int().positive() }).optional(),
+  // Engine-reported token totals of this attempt's calls.
+  tokens: tokenTotals.optional(),
   events: z.array(workerEventSchema),
 });
 

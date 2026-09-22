@@ -17,15 +17,28 @@ a plan, review or implementation.
 
 ## Tool access and containment
 
-Native action implementations are disabled before a model turn. The private
-Codex adapter and startup wrapper pin Codex CLI 0.154.0 or 0.155.1, disable native agents,
-plugins, hooks, shell, patch, browser, image and web tools, and install a private
-model catalogue with disabled shell/patch implementations. Unknown versions or
-catalogue shapes refuse startup. Claude ACP 0.78.0 receives an empty native tool
-list, empty setting/plugin sources, managed hook disablement and strict MCP config.
-Native permission requests cannot restore a disabled tool through host approval.
-These settings govern model tools; the trusted engine process still uses the
-user's native account and is not itself an OS-contained untrusted executable.
+Each channel-bound engine process runs in a Linux `bwrap` engine jail, so its own
+native tools (shell, file edit, patch, search, skills) keep working and are bounded
+by the operating system rather than disabled. The host is mounted read-only with
+`/run/user` hidden (its session bus could start unconfined processes) and a private
+`/tmp`; the project is read-only except the assignment's scopes, `.cortex` is
+hidden and `.git`, `.codex`, `.claude` are read-only. The coordinator, reviewers and
+read-only roles get no writable scope. The engine's state directory (`CODEX_HOME`
+or `CLAUDE_CONFIG_DIR`, the owner's real one for a native account) stays writable
+except the files and directories that configure later sessions (settings, hooks,
+instructions, skills, agents, commands, rules); absent ones are first created
+neutral on the host so none can be planted, and installed plugins are hidden. A
+revoked or expired channel terminates the process. Inside the jail Codex runs with
+full access and no approvals, since its own sandbox cannot start there, and
+permission requests are allowed.
+
+Excluded regardless of the jail: native subagents (Claude `Agent`, `Task`,
+`Workflow` and team tools are disallowed and refused at the permission bridge;
+Codex agents and multi-agent features are forced off), user and project MCP
+servers (strict MCP config; native Codex MCP entries disabled), hooks and plugins.
+The host network is shared, which also exposes abstract Unix sockets of the host
+network namespace. The engine binary itself is trusted, runs as the owner and can
+read what the owner can read.
 
 Every supplied MCP endpoint is a runtime broker. Cortex operations check the
 current task, assignment, channel and owner epoch. External servers require an
@@ -121,8 +134,9 @@ Outbound updates are retained for replay before transport delivery. Retention
 proves an event was produced, not that a real client rendered it. No missing or
 unsupported host observation is counted as success. The focused replacement
 controller tests use fake model sessions with real storage and sandboxed check
-processes. The installed Codex native-dispatch test additionally uses the actual
-CLI with a loopback fake provider and observes rejection of native `apply_patch`.
+processes. The installed Codex native-dispatch test additionally runs the actual
+CLI inside the engine jail with a loopback fake provider and observes native
+`apply_patch` writing its granted scope and failing outside it.
 It is not a paid model or GUI qualification. See [current test evidence](docs/acp/runtime-rewrite-status.md);
 [real-client qualification](docs/acp/real-client-runbook.md) remains unverified for
 this rewrite. Read-only Git review observations use fixed sandboxed commands with

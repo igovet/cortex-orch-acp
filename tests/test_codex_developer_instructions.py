@@ -214,6 +214,7 @@ def test_installed_adapter_keeps_explicit_mcp_on_disabled_native_name(tmp_path):
         assert config["features"]["plugins"] is False
         assert config["mcp_servers"]["native"] == {
             "command": "/bin/true", "args": [], "env": {}, "enabled": True, "default_tools_approval_mode": "approve",
+            "tool_timeout_sec": 31536000,
         }
     finally:
         proc.terminate()
@@ -244,8 +245,8 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
     assert _CODEX_SESSION_CONFIG_PATCHED in copied.read_bytes()
     adapter_text = copied.read_bytes()
     assert _CODEX_SEND_PROMPT_PATCHED in adapter_text
-    assert b'type: "readOnly"' in adapter_text
-    assert b'networkAccess: false' in adapter_text
+    assert b'sandboxPolicy: { type: "dangerFullAccess" }' in adapter_text
+    assert b'approvalPolicy: "never"' in adapter_text
     assert original.read_bytes() == source
 
     fake_binary = tmp_path / "fake-codex"
@@ -302,8 +303,11 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
             assert "features.multi_agent" not in config
             assert "features.multi_agent_v2" not in config
             assert config["agents"] == {"enabled": False, "max_depth": 2}
-            for feature in ('multi_agent','multi_agent_v2','js_repl','shell_tool','hooks','apps','plugins','view_image','image_generation','browser_use','computer_use'):
+            for feature in ('multi_agent','multi_agent_v2','hooks','apps','plugins'):
                 assert config['features'][feature] is False
+            # Native action tools are the engine's own; the engine jail bounds them.
+            assert config['features']['js_repl'] is True
+            assert 'shell_tool' not in config['features'] and 'web_search' not in config
             assert config["model_reasoning_effort"] == "medium"
 
         proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 4, "method": "session/prompt", "params": {
@@ -315,9 +319,8 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
         traces_after_prompt = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
         turn_starts = [entry for entry in traces_after_prompt if entry["method"] == "turn/start"]
         assert len(turn_starts) == 1
-        assert turn_starts[0]["params"]["sandboxPolicy"] == {
-            "type": "readOnly", "networkAccess": False,
-        }
+        assert turn_starts[0]["params"]["sandboxPolicy"] == {"type": "dangerFullAccess"}
+        assert turn_starts[0]["params"]["approvalPolicy"] == "never"
 
     finally:
         proc.terminate()

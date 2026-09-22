@@ -14,7 +14,7 @@ Implemented production paths:
 - Fresh mandatory review, scoped fixes, three review cycles, contained verification
   and completion bound to report identity and the reviewed project revision.
 - Pre-execution gateway checks for files, commands, drafts and external MCP tools;
-  native action tools disabled in both supported pinned adapters. Unknown execution
+  native tools bounded by the engine jail in both supported pinned adapters. Unknown execution
   effects remain unresolved rather than replaying a possible mutation.
 - Durable user questions, exact answer resume, steering before renewed execution,
   cancellation fencing, bounded lost-worker retries and total/idle deadlines.
@@ -28,22 +28,24 @@ Implemented production paths:
 - Workers receive English-only communication instructions on every turn; the
   coordinator receives the selected message language after its context.
 
-## Installed capabilities and native-tool blocker
+## Installed capabilities and the engine jail
 
 Local inspection verified the production adapter’s bundled Codex CLI 0.154.0,
 the separately installed CLI 0.155.1, codex-acp 1.12.0 and the production
-pinned claude-agent-acp 0.78.0 (SDK 0.3.270). The implementation does not assume a
-universal native-action approval callback: the installed hosts expose no such
-boundary. Instead, verified private adapter copies disable native action tools
-and route permitted actions through the runtime MCP gateway. Unsupported versions
-or changed patch shapes fail closed. Production account configuration is unchanged.
+pinned claude-agent-acp 0.78.0 (SDK 0.3.270). The installed hosts expose no
+universal native-action approval callback, so native tools are not gated per
+call. Each engine process instead runs in the engine jail, which makes only the
+assignment's scopes writable; native subagents, user MCP, hooks and plugins stay
+disabled. Unsupported versions or changed patch shapes fail closed.
 
 `tests/test_engine_native_gateway.py`, explicitly enabled with
-`CORTEX_PINNED_CODEX_BINARY` pointing to each installed version, runs the CLI
-with the actual production wrapper and a loopback fake Responses provider. It
-observed successful MCP gateway dispatch and rejection of a forced native
-`apply_patch`; the target file was not created. This is executable installed-CLI
-evidence, not a paid-model or ACP GUI qualification.
+`CORTEX_PINNED_CODEX_BINARY`, runs the installed CLI through the production
+wrapper inside the engine jail with a loopback fake Responses provider. On
+2026-09-22 it observed MCP gateway dispatch, native `apply_patch` creating a file
+in the granted scope, and the same tool failing to write outside it. The
+installed Claude adapter was started in the jail and created a session without a
+model turn. This is executable installed-CLI evidence, not a paid-model or ACP
+GUI qualification.
 
 ## Verification boundary
 

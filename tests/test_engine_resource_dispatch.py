@@ -135,7 +135,7 @@ PY"""
         list(manager.prompt_turn(session_id, "run contrast check"))
         replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
         assert replies[0]["result"] == {
-            "outcome": {"outcome": "selected", "optionId": "deny"}
+            "outcome": {"outcome": "selected", "optionId": "allow"}
         }
         assert host_calls == []
     finally:
@@ -182,7 +182,7 @@ def test_coordinator_inline_ui_check_is_auto_approved_locally_on_fake_wire(tmp_p
         list(manager.prompt_turn(session_id, "run the UI check"))
         replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
         assert replies[0]["result"] == {
-            "outcome": {"outcome": "selected", "optionId": "deny"}
+            "outcome": {"outcome": "selected", "optionId": "allow"}
         }
         assert host_calls == []
     finally:
@@ -201,7 +201,7 @@ def test_duplicate_engine_request_id_gets_a_protocol_error(tmp_path):
         prompt_behavior="client_requests_sequence",
         client_requests=[
             dict(method="session/request_permission", id=555,
-                 params=dict(sessionId="sess-1", toolCall=dict(toolCallId="tc-1"),
+                 params=dict(sessionId="sess-1", toolCall=dict(toolCallId="tc-1", name="Agent"),
                              options=[dict(optionId="allow", kind="allow_once")]),
                  wait_timeout=0.05),
             dict(method="session/request_permission", id=555,
@@ -237,7 +237,7 @@ def test_unknown_option_id_from_host_is_never_relayed(tmp_path):
         prompt_behavior="client_requests_sequence",
         client_requests=[dict(
             method="session/request_permission",
-            params=dict(sessionId="sess-1", toolCall=dict(toolCallId="tc-1"),
+            params=dict(sessionId="sess-1", toolCall=dict(toolCallId="tc-1", name="Agent"),
                         options=[dict(optionId="allow", kind="allow_once")]),
         )],
         client_reply_log_path=str(reply_log),
@@ -258,35 +258,24 @@ def test_unknown_option_id_from_host_is_never_relayed(tmp_path):
         manager.shutdown(grace=2.0)
 
 
-def test_late_approval_after_session_release_never_relays_selected(tmp_path):
+def test_request_after_session_release_is_cancelled(tmp_path):
     reply_log = tmp_path / "replies.jsonl"
-    release_event = threading.Event()
-
-    def slow_requester(engine_session_id, params, timeout):
-        release_event.wait(3.0)
-        return {"outcome": {"outcome": "selected", "optionId": "allow"}}
-
     scenario = default_scenario(
         prompt_behavior="client_requests_sequence",
         client_requests=[dict(
             method="session/request_permission",
             params=dict(sessionId="sess-1", toolCall=dict(toolCallId="tc-1"),
                         options=[dict(optionId="allow", kind="allow_once")]),
-            wait_timeout=3.0,
         )],
         client_reply_log_path=str(reply_log),
     )
-    manager = _make_manager(tmp_path, scenario, host_permission_requester=slow_requester)
+    manager = _make_manager(tmp_path, scenario)
     try:
         manager.negotiate(REQUESTED_CAPABILITIES)
         session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
         manager.bind_resource(_binding_for(manager, session_id, tmp_path))
-        events_thread = threading.Thread(target=lambda: list(manager.prompt_turn(session_id, "hi")))
-        events_thread.start()
-        time.sleep(0.2)
-        manager.invalidate_session(session_id, "released_before_host_replied")
-        release_event.set()
-        events_thread.join(timeout=5.0)
+        manager.invalidate_session(session_id, "released_before_request")
+        list(manager.prompt_turn(session_id, "hi"))
         replies = [json.loads(line) for line in reply_log.read_text().splitlines() if line]
         assert replies[0]["result"] == {"outcome": {"outcome": "cancelled"}}
     finally:

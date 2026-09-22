@@ -2,9 +2,6 @@
 import threading
 import time
 
-COORDINATOR_SECONDS=600
-WORKER_SECONDS=1800
-REVIEW_SECONDS=600
 
 
 class Deadline:

@@ -1,31 +1,43 @@
 # Permissions and execution containment
 
-The runtime owns action authority. All model-originated project reads, writes,
-commands, draft edits and external MCP calls go through a channel-bound gateway.
+The runtime owns action authority. Each engine process runs in an OS jail that
+bounds its native tools; drafts, commands claimed as checks and external MCP calls
+go through a channel-bound gateway.
 A plan proposes scopes; it cannot grant privileges, choose a model or create a
 session. Coordinator and consultant are read-only. Reviewers cannot edit source.
 
 ## Native engines
 
+Every channel-bound engine process runs in the engine jail
+(`orchestration.sandbox.engine_jail`, Linux `bwrap`). The host is read-only with
+`/run/user` hidden and a private `/tmp`; the project is read-only except the
+assignment's scopes (none for the coordinator, reviewers and read-only roles);
+`.cortex` is hidden and `.git`, `.codex`, `.claude` are read-only; HOME is
+read-only. The engine's own state directory stays writable except its session
+configuration (settings, hooks, instructions, skills, agents, commands, rules),
+which is read-only and created neutral when absent; installed plugins are hidden.
+A revoked or expired channel terminates the process. Engines therefore keep their
+native tools, `AGENTS.md`/`CLAUDE.md` loading and skills.
+
 The supported Codex CLI is 0.155.1 with codex-acp 1.12.0. A verified private
-adapter and per-process launcher disable native shell, patch, browser, computer,
-image, web, plan, subagent, plugin, hook and app tools. The launcher verifies the
-installed CLI version and bundled catalogue, removes native action implementations
-from that catalogue, and disables each inherited MCP server before launching App
-Server. Only session-specific brokered servers are re-enabled. The user's account
-configuration and credentials are not rewritten.
+adapter and per-process launcher disable native agents, multi-agent, plugin,
+hook and app features and each inherited MCP server; only session-specific
+brokered servers are re-enabled. Every turn runs with `dangerFullAccess` and
+approval `never`: Codex's own sandbox cannot start in the jail's user namespace,
+and the jail is the boundary. The user's account configuration and credentials
+are not rewritten.
 
-Claude ACP 0.78.0 receives `tools: []`, `strictMcpConfig: true`, empty
-`settingSources` and `plugins`, disabled hooks, and disabled Agent/Task tools.
-The installed adapter forwards these supported options to its SDK. Every role
-uses the same native-tool restriction. There is no native pipeline-draft exception.
+Claude ACP 0.78.0 keeps its native tool preset and `settingSources` default and
+receives `skills: "all"`, `strictMcpConfig: true`, empty `plugins`, disabled
+hooks, and disallowed `Agent`, `Task`, `Workflow` and agent-team tools. Every role
+receives the same options; roles differ only in their jail scopes.
 
-ACP permission requests cannot restore a native tool. Only an explicitly named
-MCP call can receive an offered allow option; its gateway subsequently checks its
-actual channel and operation. Display titles and raw argument text are never an
-authority. Channeled engine sessions cannot enable ACP filesystem or terminal
-bridges. These restrictions govern tools offered to models; the trusted engine
-binary still runs as the local user and is not claimed to be hostile-code isolated.
+ACP permission requests for native tools are allowed, since the jail bounds them;
+a native subagent request is refused. Offered MCP allow options are used and the
+gateway then checks the actual channel and operation. Display titles and raw
+argument text are never an authority. Channeled engine sessions cannot enable ACP
+filesystem or terminal bridges, which would act outside the jail. The trusted
+engine binary runs as the local user and can read what that user can read.
 
 ## Channel and filesystem authority
 

@@ -6,8 +6,10 @@
 - Keep one project-local `.cortex` store and one newest-first `pipeline.md`.
 - Work directly in the selected project through the runtime gateway. Serialize
   overlapping scopes and reserve at most four workers per project store.
-- Disable native engine action tools. Contain commands and external MCP processes
-  with explicit grants; unknown effects block replay.
+- Keep each engine's native tools and bound them with an OS jail around the engine
+  process (scope-only writes); disable native subagents, user MCP, hooks and
+  plugins. Contain commands and external MCP processes with explicit grants;
+  unknown effects block replay.
 - Require a fresh reviewer, bounded fix cycles and actual command verification.
   Bind review and verification to the observed project revision.
 - Preserve all 23 specialist/consultant profiles and the shared report protocol.

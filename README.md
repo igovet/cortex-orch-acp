@@ -82,7 +82,20 @@ formats remain fail-closed and require the explicit migration procedure.
 For sessions recorded by the current runtime, clients supporting ACP `session/load` can reload text and
 worker/tool cards from this store after an editor restart. In Paseo 0.8, the
 agent-scoped composer Workers pill opens a bounded Workers popover for the
-current ACP session and task; the pill remains available with no current
+current ACP session and task. The Workers and Pipeline pills appear only on
+Cortex sessions. Pipeline opens a tab in the right-hand explorer sidebar that
+shows the task from top to bottom and refreshes as it runs: the request and
+follow-ups, the coordinator's requirements, each delegated worker with its
+status, reported checks and the coordinator's accept/revise verdict, then the
+final acceptance or the reason the task is waiting. The chat's context
+indicator shows the coordinator engine's context fill, forwarded from the
+engine's ACP `usage_update` (`used`/`size`). Each worker's latest context fill
+and its engine-reported tokens (`↑` input, `↓` output, cached reads) appear on
+its chat card, in the Workers popover and on its Workers tab; the Pipeline
+header totals the task's tokens and the coordinator's share. Tokens come from
+each ACP `session/prompt` response's `usage` and are recorded in
+`usage_records`; codex-acp reports only the turn's last model request there,
+so Codex totals are a lower bound. The Workers pill remains available with no current
 worker assignments and the popover shows an empty state. Selecting a worker records its assignment
 reference before opening the Workers workspace tab, so the exact worker is
 selected even when that tab was closed and must be created again. The panel
