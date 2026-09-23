@@ -41,6 +41,38 @@ def test_hyphenated_script_name_survives_character_by_character_streaming():
     assert output == source
 
 
+def test_coordinator_stream_preserves_path_embedded_script_names_character_by_character():
+    source = "includes/a1b2c3d4e5f6g7h8i9j0k1l2.php"
+    redactor = StreamingRedactor(max_chars=4000, preserve_paths=True)
+    output = "".join(redactor.push(character) for character in source)
+    output += redactor.flush()
+    assert output == source
+
+
+def test_coordinator_stream_preserves_hyphenated_underscored_and_digit_only_paths():
+    paths = (
+        "includes/acf-blocks-v2.php",
+        "includes/acf_blocks_v2.php",
+        "includes/123456789012345678901234567890.php",
+    )
+    for source in paths:
+        redactor = StreamingRedactor(max_chars=4000, preserve_paths=True)
+        output = "".join(redactor.push(character) for character in source)
+        output += redactor.flush()
+        assert output == source
+
+
+def test_coordinator_stream_still_redacts_credentials_across_chunk_boundaries():
+    secret = "abcde12345fghij67890klmno"
+    source = f"includes/a1b2c3d4e5f6g7h8i9j0k1l2.php api_key={secret}"
+    redactor = StreamingRedactor(max_chars=4000, preserve_paths=True)
+    output = "".join(redactor.push(character) for character in source)
+    output += redactor.flush()
+    assert "includes/a1b2c3d4e5f6g7h8i9j0k1l2.php" in output
+    assert secret not in output
+    assert "api_key=[REDACTED]" in output
+
+
 def test_split_key_value_and_private_path_preserve_exact_scrubbed_text():
     value = "api_key=123456789012345678901234567890 /private/12345678901234567890"
     emitted = _stream(["prefix ", value[:19], value[19:], " tail"])

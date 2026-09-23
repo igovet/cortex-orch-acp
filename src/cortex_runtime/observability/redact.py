@@ -64,8 +64,9 @@ class StreamingRedactor:
 
     _MAX_PENDING = 4096
 
-    def __init__(self, *, max_chars: int = MAX_TEXT_CHARS) -> None:
+    def __init__(self, *, max_chars: int = MAX_TEXT_CHARS, preserve_paths: bool = False) -> None:
         self.max_chars = max_chars
+        self.preserve_paths = preserve_paths
         self._pending = ""
         self._discarding = False
         self._overflowing = False
@@ -265,12 +266,14 @@ class StreamingRedactor:
             value,
         )
         if labelled and preserve_labeled_digests:
+            scrub = scrub_display_text if self.preserve_paths else scrub_text
             return (
-                scrub_text(labelled.group(1), max_chars=max_chars or self.max_chars)
+                scrub(labelled.group(1), max_chars=max_chars or self.max_chars)
                 + labelled.group(2)
-                + scrub_text(labelled.group(3) or "", max_chars=max_chars or self.max_chars)
+                + scrub(labelled.group(3) or "", max_chars=max_chars or self.max_chars)
             )
-        return scrub_text(value, max_chars=max_chars or self.max_chars)
+        scrub = scrub_display_text if self.preserve_paths else scrub_text
+        return scrub(value, max_chars=max_chars or self.max_chars)
 
     def _scrub_released(self, value: str) -> str:
         """Scrub text that is known to end at a lexical boundary.

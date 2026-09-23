@@ -216,7 +216,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 return StopReason.END_TURN
             streamed = []
             answer_pending = False
-            redactor = StreamingRedactor(max_chars=4000)
+            redactor = StreamingRedactor(max_chars=4000, preserve_paths=True)
             tool_emitter = runtime._engine_tool_call_emitter(emit_tool_call, id_scope=f'coordinator:{session_ref}',
                                                            task_id=task_id, cancel_event=cancel_event)
             def flush():

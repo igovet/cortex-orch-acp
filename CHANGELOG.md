@@ -2,6 +2,10 @@
 
 ## 1.0.0 (unreleased)
 
+Coordinator live-stream redaction now preserves path-embedded script names, including
+digit-only, hyphenated and underscored names, while continuing to redact credentials
+split across stream chunks.
+
 Cortex is an incoming ACP stdio agent with a project-local runtime and
 outgoing Codex and Claude ACP engines. The 1.0.0 release resets the package
 identity to a content-stamped ACP payload.
