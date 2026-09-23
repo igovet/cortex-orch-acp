@@ -114,9 +114,17 @@ def test_a_cancelled_turn_goes_stale_but_the_session_keeps_working(tmp_path):
 
 
 @pytest.mark.parametrize('command,deletes',[
-    ('rm src/probe.test.ts',True),('cd app && rm -rf build',True),('/bin/rm x',True),('git clean -fd',True),
-    ('find . -name "*.tmp" -delete',True),('xargs rm < list',True),('python3 -c "import os; os.remove(\'a\')"',True),
-    ('node -e "fs.rmSync(\'d\',{recursive:true})"',True),('git rm old.ts',True),('unlink a',True),
+    ('rm src/probe.test.ts',True),('cd app && rm -rf build',True),('/bin/rm x',True),
+    ('sudo rm x',True),('sudo -n rm x',True),('xargs rm < list',True),
+    ('ls; rm x',True),('ls && rm x',True),('ls || rm x',True),('cat file | rm x',True),
+    ('ls\nrm x',True),('find . -execdir rm {} \\;',True),
+    ('find . -name "*.tmp" -exec rm {} \\;',True),("sh -c 'rm old.txt'",True),
+    ('bash -c "rm old.txt"',True),
+    ('git commit -m "rm old debug code"',False),("echo 'rm this string'",False),
+    ('grep "rm pattern" file',False),('echo `rm`',False),
+    ('git clean -fd',False),('find . -name "*.tmp" -delete',False),
+    ('python3 -c "import os; os.remove(\'a\')"',False),('node -e "fs.rmSync(\'d\',{recursive:true})"',False),
+    ('git rm old.ts',False),('unlink a',False),('rmdir cache',False),('firmware-tool run',False),
     ('cat src/rm.ts',False),('npm run format',False),('grep -rn remove src',False),('ls 2>/dev/null',False),
     ('npx vitest run',False),('git status',False)])
 def test_deletions_are_recognized_from_the_declared_command(command,deletes):
@@ -135,4 +143,4 @@ def test_a_deletion_runs_only_when_the_user_allows_it(tmp_path,answer,expected):
     bridge=_bridge(bindings=bindings,host_permission_requester=host)
     params=dict(PARAMS,toolCall=dict(toolCallId='tc-9',name='Bash',kind='execute',rawInput=dict(command='rm src/probe.test.ts')))
     assert call(bridge,params)=={'outcome':{'outcome':'selected','optionId':expected}}
-    assert asked and 'rm src/probe.test.ts' in asked[0][0] and asked[0][1]>=600
+    assert asked and 'Removal blocked pending confirmation: rm src/probe.test.ts' in asked[0][0] and asked[0][1]>=600

@@ -1,5 +1,5 @@
 import type { Pipeline } from "../shared/pipeline.js";
-import { workerDisplayName } from "./worker-display.ts";
+import { workerDisplayName, workerModelDisplay } from "./worker-display.ts";
 import { workerPopoverStatus } from "./worker-popover-status.ts";
 
 export type StepStatus = "done" | "active" | "failed" | "blocked" | "cancelled" | "pending";
@@ -58,7 +58,7 @@ function workerStep(worker: Pipeline["workers"][number], pipeline: Pipeline): Pi
     status: status === "completed" ? "done" : status === "running" ? "active" : ["failed", "error"].includes(status) ? "failed"
       : ["cancelled", "canceled"].includes(status) ? "cancelled" : "pending",
     title,
-    subtitle: [workerDisplayName(worker), route?.model, route?.effort].filter(Boolean).join(" · "),
+    subtitle: [workerDisplayName(worker), workerModelDisplay(route), route?.effort].filter(Boolean).join(" · "),
     badges,
     body: delegation?.result?.summary ?? (status === "failed" || status === "error" ? failure ?? undefined : undefined),
     items: (delegation?.result?.checks ?? []).map((check) => ({

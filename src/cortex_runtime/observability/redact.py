@@ -15,14 +15,13 @@ Three independent redaction passes, applied to every string value:
 2. ``Bearer``/``token``-prefixed credentials.
 3. ``key=value``/``key: value`` pairs whose key name looks credential-shaped
    (reusing ``connections.environment.DENYLIST_PATTERN``'s vocabulary).
-4. Any remaining long opaque token-shaped run (24+ base64/hex-alphabet
-   characters, and containing at least one digit -- a plain English/
-   snake_case identifier such as an error code or event name never
-   matches, so "Keep ids, status, error category and counts" holds; this
-   runtime's own short generated ids, e.g. ``t_``/``eirt_`` + 12 hex chars,
-   are well under the 24-character floor) -- collapsed to a stable short
-   digest so a repeated value is still recognizable as "the same secret"
-   across log lines without ever exposing it.
+4. Any remaining long opaque alphanumeric run (24+ base64/hex-alphabet
+   characters, containing at least one digit, and with no identifier
+   separators) -- collapsed to a stable short digest.  Hyphenated and
+   underscored names are ordinary project or business identifiers until an
+   explicit credential form above identifies them as sensitive.  The marker
+   calls the value a hidden secret rather than presenting a digest as an
+   unexplained identifier.
 
 A command line is never logged verbatim: :func:`scrub_command` keeps only
 ``argv[0]`` (the fixed, non-secret launch binary path) plus a digest and
@@ -44,7 +43,10 @@ _BEARER = re.compile(r"(?i)\b(?:bearer|token)\s+[A-Za-z0-9._~+/=-]{8,}")
 _KEY_VALUE_SECRET = re.compile(
     r"(?i)\b([A-Za-z0-9_]*(?:api[_-]?key|token|secret|password|authorization)[A-Za-z0-9_]*)\s*[=:]\s*\S+"
 )
-_LONG_OPAQUE_TOKEN = re.compile(r"\b(?=[A-Za-z0-9_\-]*\d)[A-Za-z0-9_\-]{24,}\b")
+_SECRET_CLAIM = re.compile(
+    r"(?i)\b((?:api[_ -]?key|token|secret|password|authorization|credential)\s+(?:is|was))\s+\S+"
+)
+_LONG_OPAQUE_TOKEN = re.compile(r"\b(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{24,}\b")
 _LONG_LEXICAL_FIELD = re.compile(r"\S{4097,}")
 
 
@@ -237,7 +239,7 @@ class StreamingRedactor:
     def _finish_overflow(self) -> str:
         digest = self._overflow_hash.hexdigest()[:16]
         result = (
-            f"[REDACTED:{digest}]"
+            f"[HIDDEN_SECRET:{digest}]"
             if self._overflow_len >= 24 and self._overflow_allowed and self._overflow_has_digit
             else "[REDACTED_STREAM]"
         )
@@ -297,7 +299,8 @@ def scrub_text(value: Any, *, max_chars: int = MAX_TEXT_CHARS) -> str:
     text = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
     text = _BEARER.sub("[REDACTED_TOKEN]", text)
     text = _KEY_VALUE_SECRET.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
-    text = _LONG_OPAQUE_TOKEN.sub(lambda m: f"[REDACTED:{_digest(m.group(0))}]", text)
+    text = _SECRET_CLAIM.sub(lambda m: f"{m.group(1)} [REDACTED]", text)
+    text = _LONG_OPAQUE_TOKEN.sub(lambda m: f"[HIDDEN_SECRET:{_digest(m.group(0))}]", text)
     if len(text) > max_chars:
         text = text[:max_chars] + f"...[truncated_from:{original_len}_chars]"
     return text
@@ -329,14 +332,15 @@ def scrub_display_text(value: Any, *, max_chars: int = MAX_TEXT_CHARS) -> str:
     text = _URL_CREDENTIALS.sub(r"\1[REDACTED]@", text)
     text = _BEARER.sub("[REDACTED_TOKEN]", text)
     text = _KEY_VALUE_SECRET.sub(lambda m: f"{m.group(1)}=[REDACTED]", text)
+    text = _SECRET_CLAIM.sub(lambda m: f"{m.group(1)} [REDACTED]", text)
 
     pieces: list[str] = []
     last = 0
     for match in _PATHISH.finditer(text):
-        pieces.append(_LONG_OPAQUE_TOKEN.sub(lambda m: f"[REDACTED:{_digest(m.group(0))}]", text[last:match.start()]))
+        pieces.append(_LONG_OPAQUE_TOKEN.sub(lambda m: f"[HIDDEN_SECRET:{_digest(m.group(0))}]", text[last:match.start()]))
         pieces.append(match.group(0))
         last = match.end()
-    pieces.append(_LONG_OPAQUE_TOKEN.sub(lambda m: f"[REDACTED:{_digest(m.group(0))}]", text[last:]))
+    pieces.append(_LONG_OPAQUE_TOKEN.sub(lambda m: f"[HIDDEN_SECRET:{_digest(m.group(0))}]", text[last:]))
     text = "".join(pieces)
 
     if len(text) > max_chars:
@@ -380,7 +384,8 @@ def scrub_mapping(fields: Mapping[str, Any], *, _depth: int = 0) -> dict:
         if key in _COMMAND_KEYS and isinstance(value, (list, tuple)):
             result[key] = scrub_command(value)
         elif isinstance(value, str):
-            if DENYLIST_PATTERN.search(key):
+            if (DENYLIST_PATTERN.search(key)
+                    or re.search(r"(?i)(?:credential|api[_-]?key|token|secret|password|authorization)", key)):
                 result[key] = "[REDACTED]"
             else:
                 result[key] = scrub_text(value)

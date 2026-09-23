@@ -33,6 +33,14 @@ def test_split_opaque_token_is_never_emitted_before_completion():
     assert joined == scrub_text("ordinary " + secret + " tail", max_chars=4000)
 
 
+def test_hyphenated_script_name_survives_character_by_character_streaming():
+    source = "includes/acf-blocks-v2-iframe-compat.php"
+    redactor = StreamingRedactor(max_chars=4000)
+    output = "".join(redactor.push(character) for character in source)
+    output += redactor.flush()
+    assert output == source
+
+
 def test_split_key_value_and_private_path_preserve_exact_scrubbed_text():
     value = "api_key=123456789012345678901234567890 /private/12345678901234567890"
     emitted = _stream(["prefix ", value[:19], value[19:], " tail"])
@@ -138,7 +146,7 @@ def test_overlong_lexical_secret_is_partition_invariant_and_bounded():
     split, split_pending = _stream_with_metrics([source[i:i + 100] for i in range(0, len(source), 100)])
     assert "".join(one) == "".join(split)
     assert secret not in "".join(one)
-    assert "[REDACTED:" in "".join(one)
+    assert "[HIDDEN_SECRET:" in "".join(one)
     assert one_pending <= StreamingRedactor._MAX_PENDING
     assert split_pending <= StreamingRedactor._MAX_PENDING
 

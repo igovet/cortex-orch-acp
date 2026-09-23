@@ -1,224 +1,159 @@
 /**
- * ACP stdio compatibility shim for Paseo 0.8.
- *
- * Paseo's bundled ACP bridge filters session/update notifications against its
- * native session id before assigning that id after session/load returns. The
- * shim keeps the ACP agent wire protocol unchanged and delays only the
- * matching session/update notifications until the load response has crossed
- * the bridge. It is intentionally a dumb JSON-RPC relay: it never logs or
- * rewrites frame contents; only the client-facing order is changed for this
- * Paseo 0.8 compatibility path. During replay, Paseo 0.8 also discards
- * `user_message_chunk` updates. Those replay-only chunks are tagged and
- * carried as agent chunks so the provider wrapper can restore them as user
- * timeline items after the bridge has reduced them.
+ * Paseo 0.9.1 cannot reduce history until session/load returns. Stage privately,
+ * then replay in acknowledged windows. The provider withholds session.ready
+ * until its ordered notification lane consumes the checked final barrier.
  */
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
+import { ReplaySpool, readFrames } from "./replay-spool.mjs";
 
-const MAX_ITEMS = 4096;
-const MAX_BYTES = 16 * 1024 * 1024;
-const REPLAY_USER_MESSAGE_PREFIX = `__cortex_history_user__${randomUUID()}:`;
-
-function fail(message) {
-  process.stderr.write(`Cortex ACP Paseo shim: ${message}\n`);
-  process.exitCode = 1;
-  try { child?.kill("SIGTERM"); } catch {}
-}
-
-let child;
-try {
-  const raw = process.env.CORTEX_ACP_TARGET;
-  if (!raw) throw new Error("CORTEX_ACP_TARGET is missing");
-  const target = JSON.parse(raw);
-  if (!target || !Array.isArray(target.argv) || target.argv.length === 0 ||
-      target.argv.some((value) => typeof value !== "string" || value.length === 0) ||
-      (target.env !== undefined && (!target.env || typeof target.env !== "object" ||
-        Array.isArray(target.env) || Object.entries(target.env).some(([key, value]) =>
-          !/^(HOME|XDG_CONFIG_HOME|XDG_STATE_HOME)$/.test(key) ||
-          typeof value !== "string" || !value.startsWith("/"))))) {
-    throw new Error("CORTEX_ACP_TARGET is invalid");
-  }
-  child = spawn(target.argv[0], target.argv.slice(1), {
-    env: { ...process.env, ...(target.env ?? {}) },
-    stdio: ["pipe", "pipe", "inherit"],
-  });
-} catch (error) {
-  fail(error instanceof Error ? error.message : String(error));
-  throw error;
-}
-
-let pendingLoadId;
-let pendingLoadSessionId;
-let buffered = [];
-let bufferedBytes = 0;
-let closed = false;
-let replayUserMessageIndex = 0;
-let replayFlushPending = false;
-let postReplayQueue = [];
-let postReplayQueueBytes = 0;
-
-function stop(code = 1) {
-  if (closed) return;
-  closed = true;
-  if (!child.killed) child.kill("SIGTERM");
-  process.exitCode = code;
-}
-
-function encode(frame) {
-  return `${JSON.stringify(frame)}\n`;
-}
-
-function send(frame) {
-  if (closed || !child.stdin.writable) return;
-  child.stdin.write(encode(frame));
-}
-
-function emit(frame, callback) {
-  if (closed) return;
-  process.stdout.write(encode(frame), callback);
-}
-
-function flushReplayBatch(batch) {
-  setImmediate(() => {
-    try {
-      if (!closed) {
-        for (const frame of batch) emit(frame);
-        const queued = postReplayQueue;
-        postReplayQueue = [];
-        postReplayQueueBytes = 0;
-        for (const frame of queued) emit(frame);
-      }
-    } finally {
-      replayFlushPending = false;
-    }
-  });
-}
-
-function adaptReplayUserMessage(frame) {
-  const update = frame?.params?.update;
-  if (!update || update.sessionUpdate !== "user_message_chunk") return frame;
-  replayUserMessageIndex += 1;
-  return {
-    ...frame,
-    params: {
-      ...frame.params,
-      update: {
-        ...update,
-        sessionUpdate: "agent_message_chunk",
-        messageId: `${REPLAY_USER_MESSAGE_PREFIX}${replayUserMessageIndex}`,
-      },
-    },
-  };
-}
-
-function parseStream(stream, onFrame, name) {
-  let pending = "";
-  stream.on("data", (chunk) => {
-    pending += chunk.toString("utf8");
-    let newline;
-    while ((newline = pending.indexOf("\n")) >= 0) {
-      const line = pending.slice(0, newline).replace(/\r$/, "");
-      pending = pending.slice(newline + 1);
-      if (!line.trim()) continue;
-      let frame;
-      try { frame = JSON.parse(line); } catch {
-        stop(1); fail(`${name} emitted malformed JSON`); return;
-      }
-      onFrame(frame);
-      if (closed) return;
-    }
-    if (pending.length > MAX_BYTES) {
-      stop(1); fail(`${name} emitted an oversized unterminated frame`);
-    }
-  });
-  stream.on("end", () => {
-    if (pending.trim()) {
-      stop(1); fail(`${name} ended with a truncated JSON frame`);
-      return;
-    }
-    if (name === "client" && !child.stdin.destroyed) child.stdin.end();
-  });
-  stream.on("error", (error) => {
-    stop(1); fail(`${name} failed: ${error instanceof Error ? error.message : String(error)}`);
-  });
-}
-
-parseStream(process.stdin, (frame) => {
-  if (!frame || typeof frame !== "object" || Array.isArray(frame)) {
-    stop(1); fail("client emitted a non-object ACP frame"); return;
-  }
-  if (frame.method === "session/load" && frame.id !== undefined && frame.id !== null) {
-    if (pendingLoadId !== undefined || replayFlushPending) {
-      stop(1); fail("overlapping session/load requests are not supported"); return;
-    }
-    pendingLoadId = frame.id;
-    pendingLoadSessionId = frame.params?.sessionId;
-    buffered = [];
-    bufferedBytes = 0;
-  }
-  send(frame);
-}, "client");
-
-parseStream(child.stdout, (frame) => {
-  if (!frame || typeof frame !== "object" || Array.isArray(frame)) {
-    stop(1); fail("agent emitted a non-object ACP frame"); return;
-  }
-  const isResponse = frame.id !== undefined && frame.id !== null &&
-    (Object.prototype.hasOwnProperty.call(frame, "result") ||
-      Object.prototype.hasOwnProperty.call(frame, "error"));
-  if (pendingLoadId !== undefined && isResponse && frame.id === pendingLoadId) {
-    // Deliver the response before replay notifications. Paseo assigns its
-    // native session id in the response continuation; setImmediate prevents
-    // the next notification from being consumed in the same parser turn.
-    if (Object.prototype.hasOwnProperty.call(frame, "error")) {
-      buffered = [];
-      bufferedBytes = 0;
-      pendingLoadId = undefined;
-      pendingLoadSessionId = undefined;
-      emit(frame);
-      return;
-    }
-    // Close the capture window before writing the response. Notifications
-    // arriving after this point are live traffic; they are queued only for
-    // this one event-loop turn so replay order remains deterministic.
-    const replayBatch = buffered;
-    buffered = [];
-    bufferedBytes = 0;
-    pendingLoadId = undefined;
-    pendingLoadSessionId = undefined;
-    replayFlushPending = true;
-    emit(frame, () => flushReplayBatch(replayBatch));
-    return;
-  }
-  if (pendingLoadId !== undefined && frame.method === "session/update" &&
-      frame.params?.sessionId === pendingLoadSessionId) {
-    const size = Buffer.byteLength(JSON.stringify(frame), "utf8");
-    if (buffered.length >= MAX_ITEMS || bufferedBytes + size > MAX_BYTES) {
-      stop(1); fail("session/load history exceeded shim limits"); return;
-    }
-    buffered.push(adaptReplayUserMessage(frame));
-    bufferedBytes += size;
-    return;
-  }
-  if (replayFlushPending) {
-    const size = Buffer.byteLength(JSON.stringify(frame), "utf8");
-    if (postReplayQueue.length >= MAX_ITEMS || postReplayQueueBytes + size > MAX_BYTES) {
-      stop(1); fail("post-load notification queue exceeded limits"); return;
-    }
-    postReplayQueue.push(frame);
-    postReplayQueueBytes += size;
-  } else {
-    emit(frame);
-  }
-}, "agent");
-
-child.on("error", (error) => { stop(1); fail(`agent process failed: ${error.message}`); });
-child.on("close", (code) => {
-  if (!closed) stop(code === 0 ? 0 : 1);
-  // Paseo still holds our stdin open, so without an explicit exit a dead
-  // agent left every pending request (a session/load above all) unanswered
-  // forever instead of failing as a closed provider.
-  process.stdout.write("", () => process.exit());
+const acknowledged = process.env.CORTEX_REPLAY_ACK === "1";
+const target = JSON.parse(process.env.CORTEX_ACP_TARGET ?? "null");
+if (!target || !Array.isArray(target.argv) || !target.argv.length ||
+    target.argv.some(x => typeof x !== "string" || !x) ||
+    (target.env !== undefined && (!target.env || typeof target.env !== "object" ||
+      Array.isArray(target.env) || Object.entries(target.env).some(([key, value]) =>
+        !/^(HOME|XDG_CONFIG_HOME|XDG_STATE_HOME)$/.test(key) ||
+        typeof value !== "string" || !value.startsWith("/")))))
+  throw new Error("CORTEX_ACP_TARGET is invalid");
+const child = spawn(target.argv[0], target.argv.slice(1), {
+  env: { ...process.env, ...(target.env ?? {}) }, stdio: ["pipe", "pipe", "inherit"],
 });
-process.on("SIGTERM", () => { if (!child.killed) child.kill("SIGTERM"); });
-process.on("SIGINT", () => { if (!child.killed) child.kill("SIGINT"); });
+let load, spool, postReplay, replayTask, waiter, failed = false, childExited = false;
+const write = (stream, frame) => new Promise((resolve, reject) =>
+  stream.write(JSON.stringify(frame) + "\n", error => error ? reject(error) : resolve()));
+const emit = frame => write(process.stdout, frame);
+function fail(message) {
+  if (failed) return;
+  failed = true;
+  process.exitCode = 1;
+  process.stderr.write("Cortex ACP Paseo shim: " + message + "\n");
+  waiter?.reject(new Error(message));
+  waiter = undefined;
+  spool?.close();
+  postReplay?.close();
+  if (load && !load.responded) void emit({jsonrpc:"2.0", id:load.id,
+    error:{code:-32603,message:"Incomplete history: replay failed before completion"}}).catch(() => {});
+  child.kill("SIGTERM");
+}
+function waitForAck(count) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Incomplete history: replay acknowledgement timed out")), 30000);
+    waiter = { count, resolve: () => { clearTimeout(timer); waiter = undefined; resolve(); },
+      reject: error => { clearTimeout(timer); reject(error); } };
+    if (childExited) waiter.reject(new Error("Incomplete history: agent exited during replay"));
+  });
+}
+function adapt(frame, index) {
+  const update = frame.params?.update;
+  if (update?.sessionUpdate !== "user_message_chunk") return frame;
+  const identity = update.messageId ?? `replay:${load.sessionId}:${index}`;
+  return { ...frame, params: { ...frame.params, update: { ...update,
+    sessionUpdate: "agent_message_chunk",
+    messageId: "__cortex_history_user_v2__" + Buffer.from(identity).toString("base64url") } } };
+}
+async function replay(response) {
+  const batch = spool;
+  spool = undefined;
+  const manifest = batch.manifest();
+  load.responded = true;
+  try {
+    if (acknowledged) {
+      const ready = waitForAck(0);
+      await emit({ ...response, result: { ...response.result, _meta: {
+        ...response.result?._meta, cortexReplay: { token: load.token, ...manifest } } } });
+      await ready;
+    } else {
+      await emit(response);
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    let count = 0, bytes = 0, windowBytes = 0;
+    const hash = createHash("sha256");
+    const barrier = async (final) => {
+      const consumed = waitForAck(count);
+      await emit({jsonrpc:"2.0",method:"session/update",params:{sessionId:load.sessionId,
+        update:{sessionUpdate:"agent_message_chunk",
+          messageId:`__cortex_replay_barrier__${load.token}:${count}:${final ? "final" : "batch"}`,
+          content:{type:"text",text:JSON.stringify({count,bytes,sha256:hash.copy().digest("hex"),final})}}}});
+      await consumed;
+    };
+    for (const frame of batch.frames()) {
+      if (failed || (acknowledged && childExited)) throw new Error("Incomplete history: agent exited during replay");
+      const data = JSON.stringify(frame);
+      count++; bytes += Buffer.byteLength(data); windowBytes += Buffer.byteLength(data); hash.update(data);
+      await emit(frame);
+      if (acknowledged && (count % 64 === 0 || windowBytes >= 1024 * 1024)) {
+        await barrier(false); windowBytes = 0;
+      }
+    }
+    if (acknowledged) await barrier(true);
+  } finally { batch.close(); }
+  load = undefined;
+}
+child.stdin.on("error", () => fail("Incomplete history: agent input closed"));
+process.stdout.on("error", () => fail("Incomplete history: client output closed"));
+child.on("error", () => fail("Incomplete history: agent process failed"));
+child.on("exit", () => {
+  childExited = true;
+  // During a barrier wait there is no child stdout read to observe EOF.
+  waiter?.reject(new Error("Incomplete history: agent exited during replay"));
+});
+void (async () => {
+  try {
+    for await (const frame of readFrames(process.stdin)) {
+      if (frame.method === "_cortex/replayAck" && acknowledged) {
+        if (!load || frame.params?.token !== load.token || frame.params?.count !== waiter?.count)
+          throw new Error("Incomplete history: mismatched replay acknowledgement");
+        waiter.resolve();
+        continue;
+      }
+      if (frame.method === "session/load" && frame.id != null) {
+        if (load) throw new Error("Overlapping session/load requests");
+        load = {id:frame.id,sessionId:frame.params?.sessionId,token:randomUUID(),responded:false};
+        spool = new ReplaySpool();
+      }
+      await write(child.stdin, frame);
+    }
+    child.stdin.end();
+  } catch { fail("Incomplete history: client stream or replay staging failed"); }
+})();
+void (async () => {
+  try {
+    for await (const frame of readFrames(child.stdout)) {
+      if (failed) break;
+      if (load && frame.id === load.id && ("result" in frame || "error" in frame)) {
+        if ("error" in frame) {
+          spool.close(); spool = undefined; load = undefined;
+          await emit(frame);
+        } else {
+          // Keep reading configuration responses while open() applies initial
+          // settings before emitting session.opened. Notifications remain ordered.
+          replayTask = replay(frame).then(async () => {
+            while (postReplay) {
+              const pending = postReplay; postReplay = undefined;
+              try { for (const item of pending.frames()) await emit(item); }
+              finally { pending.close(); }
+            }
+          }).catch(() => fail("Incomplete history: replay acknowledgement or drain failed"));
+        }
+      } else if (load?.responded && !("id" in frame)) {
+        postReplay ??= new ReplaySpool();
+        postReplay.append(frame);
+      } else if (load && frame.method === "session/update" && frame.params?.sessionId === load.sessionId) {
+        spool.append(adapt(frame, spool.count));
+      } else { await emit(frame); }
+    }
+    await replayTask;
+    if (load) fail("Incomplete history: agent exited before replay completion");
+  } catch { fail("Incomplete history: agent stream or replay staging failed"); }
+  finally {
+    await replayTask;
+    spool?.close(); postReplay?.close();
+    // The client keeps stdin open after child failure. Do not leave a pending load hanging.
+    process.stdin.destroy();
+    child.kill("SIGTERM");
+    process.stdout.write("", () => process.exit(process.exitCode ?? (child.exitCode ? 1 : 0)));
+  }
+})();
+process.on("SIGTERM", () => { fail("Replay cancelled"); process.stdin.destroy(); });
+process.on("SIGINT", () => { fail("Replay cancelled"); process.stdin.destroy(); });

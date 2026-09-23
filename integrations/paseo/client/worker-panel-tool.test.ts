@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { presentTool } from "./worker-panel-tool.ts";
+import { groupWorkerEvents } from "./worker-panel-events.ts";
 import type { WorkerEvent } from "./worker-panel-events.js";
 
 const event = (changes: Partial<WorkerEvent>): WorkerEvent => ({ id: 1, type: "progress", createdAt: "now", text: "", ...changes });
@@ -29,6 +30,24 @@ assert.equal(gatewayCommand.command, "python3 -B -m unittest -q");
 
 const claudeCommand = presentTool(event({ title: "mcp__cortex__command_run", raw_input: { argv: ["python3", "-B"] }, raw_output: JSON.stringify({ exit_code: 0, output: "actual stdout" }) }));
 assert.equal(claudeCommand.output, "actual stdout");
+
+const claudeShell = presentTool(event({
+  id: 91, tool_kind: "execute", title: "Terminal",
+  raw_input: { command: "python3 -B -m pytest -q" },
+  raw_output: { formatted_output: "17 passed\n" },
+}));
+const codexShellUpdates = groupWorkerEvents([
+  event({ id: 92, activity_ref: "tool:exec-1", tool_kind: "execute", title: "exec", status: "in_progress",
+    raw_input: { name: "exec", input: { cmd: "python3 -B -m pytest -q", workdir: "/project" } } }),
+  event({ id: 93, activity_ref: "tool:exec-1", tool_kind: "execute", title: "exec", status: "completed",
+    raw_output: { output: { stdout: "17 passed\n", exit_code: 0 }, exit_code: 0 } }),
+]);
+assert.equal(codexShellUpdates.length, 1);
+const codexShell = presentTool(codexShellUpdates[0].event);
+assert.deepEqual(codexShell, claudeShell);
+assert.equal(codexShell.kind, "shell");
+assert.equal(codexShell.command, "python3 -B -m pytest -q");
+assert.equal(codexShell.output, "17 passed\n");
 
 const mcpTool = presentTool(event({ tool_kind: "execute", title: "mcp.codebase_memory.get_code_snippet",
   raw_input: { server: "codebase_memory", tool: "get_code_snippet", arguments: { qualified_name: "a.b" } },

@@ -19,6 +19,7 @@ assert.deepEqual(workerAssignmentLine({
   route: { provider: "codex", model: "gpt-5.6-sol", effort: "high" }, attempts: [],
 } as never, "running"), chat);
 assert.equal(workerCardMetadata("Worker: debugger — Audit", "canceled").subtitle, "debugger · cancelled");
+assert.deepEqual(workerCardMetadata("Worker: debugger · codex · Luna · medium · Completed with issues — Audit", "completed"), { workerName: "Audit", subtitle: "debugger · codex · Luna · medium · completed with issues" });
 
 // T035: realistic Claude and Codex configOptions shapes -- an alias
 // (`opus[1m]`, `haiku`, `default`) with the engine's own resolved name
@@ -58,6 +59,7 @@ assert.deepEqual(workerStatusPresentation("running"), { label: "working", tone: 
 assert.deepEqual(workerStatusPresentation("provisioning"), { label: "working", tone: "active", icon: "Loader2" });
 assert.deepEqual(workerStatusPresentation("completed"), { label: "completed", tone: "success", icon: "CircleCheck" });
 assert.deepEqual(workerStatusPresentation("reported"), { label: "completed", tone: "success", icon: "CircleCheck" });
+assert.deepEqual(workerStatusPresentation("completed_with_issues"), { label: "completed with issues", tone: "danger", icon: "CircleAlert" });
 assert.deepEqual(workerStatusPresentation("failed"), { label: "failed", tone: "danger", icon: "CircleAlert" });
 assert.deepEqual(workerStatusPresentation("error"), { label: "failed", tone: "danger", icon: "CircleAlert" });
 assert.deepEqual(workerStatusPresentation("cancelled"), { label: "cancelled", tone: "muted", icon: "CircleSlash" });

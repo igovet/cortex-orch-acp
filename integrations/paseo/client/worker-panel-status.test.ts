@@ -6,6 +6,7 @@ assert.equal(workerSection("running", 0), "active");
 assert.equal(workerStatus("provisioning", 0), "running");
 assert.equal(workerSection("reported", 0), "completed");
 assert.equal(workerStatus("reported", 0), "completed");
+assert.equal(workerStatus("completed_with_issues", 0), "completed with issues");
 assert.equal(workerSection("failed", 2), "completed");
 assert.equal(workerSection("unknown", 1), "active");
 console.log("worker-panel status tests passed");

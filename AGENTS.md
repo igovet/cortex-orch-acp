@@ -111,11 +111,10 @@ Default live/test model policy (`gpt-5.6-luna`, medium/high effort) still
 applies to real engine work under the ACP path — see
 `docs/acp/codex-acp-adapter.md`'s T035 live evidence for `gpt-5.6-luna`
 used through the production `cortex_acp.py` entry point. Heavy models stay
-prohibited in routine live qualification. Any subagent assigned to edit
-prompts or skills must still use only `gpt-5.6-sol` at `medium` reasoning
-effort, recorded as an explicit user-requested override in the assignment;
-this does not change the Luna-only policy for real live-qualification
-workloads.
+prohibited in routine live qualification. The orchestration runtime decides
+model routing for all work, including prompt and skill editing; do not
+override this decision outside of an explicit user authorization in the
+assignment.
 
 The no-paid default automated suite
 (`PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q`, see
@@ -136,3 +135,34 @@ be edited to claim one. Do not invent a substitute procedure or claim an unobser
 This release-verification obligation belongs to the owner of the Cortex
 change. Run live workloads against a separate isolated project, never
 against this checkout itself.
+
+## Paseo development and plugin safety
+
+Never update, reinstall, or otherwise modify the production Paseo installation,
+~/.paseo, or its cortex-acp plugin. All Paseo/plugin validation must use only the
+permanent dev instance at ~/.paseo-dev, its separate Electron profile
+~/.config/Paseo-dev, a distinct daemon endpoint, and a disposable project. Refresh
+that dev home only with python3 -B scripts/cortex_paseo_clone.py while its dev daemon
+is stopped; the production home is read-only to that utility. Before using an
+isolation flag or environment variable, verify it against the installed Paseo version
+and ACP bridge. Follow [the dev Paseo environment guide](docs/acp/dev-paseo-environment.md).
+For verified Linux 0.9.1 commands, invoke python3 -B scripts/cortex_paseo_dev.py --
+...; it defaults to ~/.paseo-dev, rejects ~/.paseo, and blocks command-level endpoint
+overrides. If the installed build cannot be shown to isolate every required state and
+the daemon endpoint, do not launch Paseo or install the plugin; report the missing
+evidence. Never send prompts or call paid models as part of this setup.
+
+
+### CLI-based dev-Paseo verification
+
+Use the persistent isolated dev home as the standard non-GUI Paseo validation mode.
+Run only through `python3 -B scripts/cortex_paseo_dev.py -- ...`, start and inspect
+only the dev daemon at 127.0.0.1:16767, and stop it after the check. The minimum
+recorded sequence is `status --json`, `plugin ls --json`, `logs <agent-id> --json`
+(without `--tail` when testing retained history), then `daemon stop --timeout 15
+--json`. Record exit status, byte/event counts, first and last safe event identities,
+and any error without publishing message bodies. This proves CLI retrieval from the
+isolated dev daemon only. It is not rendered-GUI evidence and cannot qualify a GUI
+or keyboard-focus claim. Paseo 0.9.1 exposes no documented log pagination or
+full-history flag; report an incomplete retrieval as unverified instead of inferring
+completeness.

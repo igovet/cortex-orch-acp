@@ -70,14 +70,25 @@ accounts for role instructions, tool schemas, chat/continuation history,
 the capsule, an expected-tool-output reserve, and a response reserve
 together — never only the capsule text — against a route's context window
 (`catalog.model.CatalogEntry.context_window_tokens` when a real evidenced
-value exists, otherwise a labeled conservative default). A real
-`usage_update` exact figure always supersedes the chat-history estimate.
-Three decisions: `"fits"`, `"needs_reference_mode"` (large *optional*
-evidence should be an addressable reference instead of inlined), or
-`"overflow"` — always reported with the concrete limit name and never
-resolved by truncating a constraint or narrowing scope on Cortex's own
-authority; the coordinator is asked to split the assignment or change
-approach instead.
+value exists, otherwise the window the engine itself reported as
+`usage_update.size` for this session or, earlier, for the same connection
+and route model — kept by `connections.context_window` under
+`<state_root>/context_windows/<connection_id>.json` — otherwise a labeled
+32 000-token default). A real `usage_update` exact figure always supersedes
+the chat-history estimate. Four decisions: `"fits"`,
+`"needs_reference_mode"` (large *optional* evidence should be an
+addressable reference instead of inlined), `"overflow"` against a real
+window — always reported with the concrete limit name and never resolved
+by truncating a constraint or narrowing scope on Cortex's own authority;
+the coordinator is asked to split the assignment or change approach
+instead — or `"unverified_window"`. The last one means mandatory content
+exceeds only the default because the route has not reported its window
+yet. When mandatory content exceeds the default, the runtime blocks delivery
+as a preflight guard, retains all content for bounded retry, and reports a
+localized `budget_window_unverified` message. This prevents an engine overflow
+when the real model window is unknown and the default budget is too small.
+Once the engine reports its real window via `usage_update`, that window is
+cached and used for subsequent retries.
 
 ## 5. Compaction-loop guard
 
@@ -87,7 +98,8 @@ table (new, additive schema group — see `recovery.budget_store`) recording
 whether each compaction attempt actually helped. It blocks (never loops)
 on any of: too many compactions within a recent window, a fresh
 generation's mandatory content already exceeding the usable budget right
-after compaction (immediate refill), or several consecutive attempts each
+after compaction (immediate refill; skipped when the route's real window is
+unknown), or several consecutive attempts each
 recovering less than a minimum ratio of space. A blocked result is
 localized via `acp.messages` (`compaction_blocked`) — the same mechanism
 `budget_overflow`/`summarizer_fallback` use for the other two explicit,

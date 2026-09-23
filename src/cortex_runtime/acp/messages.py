@@ -292,6 +292,14 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Context overflow on {limit_name} ({context_window_tokens} tokens, {context_window_basis}): {message} This is not yet a permanent failure -- will retry packaging (attempt {retry_count} of {max_retries}); the engine will NOT be prompted without this mandatory context in the meantime.",
         "ru": "Переполнение контекста по лимиту {limit_name} ({context_window_tokens} токенов, {context_window_basis}): {message} Это ещё не окончательный отказ -- будет предпринята повторная попытка упаковки (попытка {retry_count} из {max_retries}); до тех пор движку НЕ будет отправлен запрос без этого обязательного контекста.",
     },
+    "budget_window_unverified": {
+        "en": "Cortex did not send the recovery context because its estimated {mandatory_tokens}-token mandatory package exceeds the {context_window_tokens}-token default and this route has not reported its real context window. No content was dropped; delivery will retry only after an evidenced window or a smaller package is available.",
+        "ru": "Cortex не отправил контекст восстановления: обязательный пакет оценивается в {mandatory_tokens} токенов, что больше значения по умолчанию {context_window_tokens}, а маршрут ещё не сообщил реальный размер контекстного окна. Ничего не отброшено; доставка будет повторена только после появления подтверждённого размера окна или меньшего пакета.",
+    },
+    "budget_window_unverified_retry": {
+        "en": "Cortex did not send the recovery context because this route has not reported its real context window and the estimated {mandatory_tokens}-token mandatory package exceeds the {context_window_tokens}-token default. No content was dropped; it will retry packaging (attempt {retry_count} of {max_retries}) only after an evidenced window or a smaller package is available.",
+        "ru": "Cortex не отправил контекст восстановления: маршрут ещё не сообщил реальный размер контекстного окна, а обязательный пакет оценивается в {mandatory_tokens} токенов, что больше значения по умолчанию {context_window_tokens}. Ничего не отброшено; упаковка будет повторена (попытка {retry_count} из {max_retries}) только после появления подтверждённого размера окна или меньшего пакета.",
+    },
     "compaction_blocked": {
         "en": "Compaction stopped ({reason}): {message}",
         "ru": "Сжатие контекста остановлено ({reason}): {message}",

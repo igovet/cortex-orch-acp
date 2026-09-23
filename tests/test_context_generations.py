@@ -781,7 +781,7 @@ def test_budget_overflow_reports_the_concrete_limit_and_never_truncates_constrai
     # very generation's own mandatory content (role rules + capsule + tool
     # schemas) alone overflows it.
     engine.trigger_compaction(session_ref, "tc-overflow", phase="completed")
-    monkeypatch.setattr(token_budget, "DEFAULT_CONTEXT_WINDOW_TOKENS", 10)
+    monkeypatch.setattr(engine, "context_window", lambda _session_ref: 10, raising=False)
     prompt_calls_before_overflow = len(engine.prompt_calls)
     seen = []
     # EXT-01 #6: the very first redelivery attempt for this exact pending
@@ -887,7 +887,7 @@ def test_budget_overflow_never_prompts_the_engine_on_first_attempt_end_to_end(tm
     assert call_count == 1
 
     engine.trigger_compaction(session_ref, "tc-overflow-e2e", phase="completed")
-    monkeypatch.setattr(token_budget, "DEFAULT_CONTEXT_WINDOW_TOKENS", 10)
+    monkeypatch.setattr(engine, "context_window", lambda _session_ref: 10, raising=False)
 
     # First turn after the overflow condition exists: the engine must NOT
     # be prompted at all this turn.
@@ -896,6 +896,40 @@ def test_budget_overflow_never_prompts_the_engine_on_first_attempt_end_to_end(tm
     assert call_count == 1  # unchanged -- the engine was never prompted
     assert engine.pending_delivery(session_ref) is not None  # kept for retry
     assert _orchestration_row(store, task_id)["state"] != "blocked"  # not yet a permanent give-up
+
+
+def test_unknown_context_window_never_sends_an_oversized_recovery_package(tmp_path, monkeypatch):
+    """An unknown engine window must block before the engine can emit a raw
+    context-overflow error; the full mandatory package remains intact for retry."""
+    from cortex_runtime.recovery import token_budget
+
+    prompts = []
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        prompts.append(message)
+        return PromptOutcome(StopReason.END_TURN, "ok")
+
+    def router(store, channel, session_ref, launch, instructions):
+        return coordinator_behavior if channel is not None and channel.role == "coordinator" else None
+
+    store, task_id = _task_with_store(tmp_path)
+    runtime, engine = _make_runtime(store, router)
+    cancel_event = threading.Event()
+    runtime.start_prompt(task_id, "s1", "Build a page.", lambda text: True, cancel_event)
+    session_ref = runtime._coordinator_sessions[task_id]
+    engine.trigger_compaction(session_ref, "tc-unknown-window", phase="completed")
+    monkeypatch.setattr(token_budget, "DEFAULT_CONTEXT_WINDOW_TOKENS", 10)
+    monkeypatch.setattr(engine, "context_window", lambda _session_ref: None, raising=False)
+    seen = []
+    prompt_text, delivery_id, blocked = runtime._begin_generation_delivery(
+        task_id, session_ref, COORDINATOR_ROLE_ID, "continue", emit_update=seen.append,
+    )
+    assert blocked
+    assert delivery_id is None
+    assert "CORTEX_CAPSULE_DATA_BEGIN" not in prompt_text
+    assert len(engine.prompt_calls) == 1  # the initial prompt only; no recovery delivery occurred
+    assert any("did not send the recovery context" in text for text in seen)
+    assert _orchestration_row(store, task_id)["state"] != "blocked"
 
 
 def test_capsule_oversize_never_prompts_the_engine_on_first_attempt_end_to_end(tmp_path, monkeypatch):

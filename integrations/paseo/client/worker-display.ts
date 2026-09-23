@@ -26,6 +26,7 @@ export function workerStatusLabel(status: string | null | undefined): string {
   if (["running", "pending", "in_progress", "in-progress", "provisioning", "ready", "started"].includes(value)) return "working";
   if (["failed", "error"].includes(value)) return "failed";
   if (["canceled", "cancelled"].includes(value)) return "cancelled";
+  if (value === "completed_with_issues") return "completed with issues";
   if (["completed", "reported", "succeeded", "success"].includes(value)) return "completed";
   return value || "working";
 }
@@ -40,6 +41,7 @@ export type WorkerStatusTone = "active" | "success" | "danger" | "muted";
 export function workerStatusPresentation(status: string | null | undefined): { label: string; tone: WorkerStatusTone; icon: string } {
   const label = workerStatusLabel(status);
   if (label === "completed") return { label, tone: "success", icon: "CircleCheck" };
+  if (label === "completed with issues") return { label, tone: "danger", icon: "CircleAlert" };
   if (label === "failed") return { label, tone: "danger", icon: "CircleAlert" };
   if (label === "cancelled") return { label, tone: "muted", icon: "CircleSlash" };
   return { label, tone: "active", icon: "Loader2" };
@@ -62,7 +64,9 @@ export function workerCardMetadata(title: string, status: string) {
   const body = title.trim().replace(/^Worker:\s*/i, "");
   const [route, ...nameParts] = body.split(/\s+—\s+/, 2);
   const routeParts = route.split(/\s+·\s+/).map((part) => part.trim()).filter(Boolean);
-  return workerLine(nameParts.join(" — "), routeParts[0] || "worker", routeParts.slice(1), status);
+  const hasIssues = routeParts.at(-1)?.toLowerCase() === "completed with issues";
+  if (hasIssues) routeParts.pop();
+  return workerLine(nameParts.join(" — "), routeParts[0] || "worker", routeParts.slice(1), hasIssues ? "completed_with_issues" : status);
 }
 
 /**

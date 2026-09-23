@@ -3,7 +3,7 @@ import { buildPipeline } from "./pipeline-model.ts";
 
 const worker = (id: string, status: string, title: string) => ({
   taskId: "t", id, assignmentRef: `ref-${id}`, nodeKey: "delegate:x", title, role: "backend-dev", status,
-  route: { provider: "codex", model: "gpt-5.6-luna", effort: "medium" },
+  route: { provider: "codex", model: "gpt-5.6-luna", modelName: "Luna", effort: "medium" },
   attempts: [{ id: `a-${id}`, attemptNo: 1, status, failureReason: null, events: [] }],
 });
 const base = {
@@ -25,7 +25,14 @@ assert.deepEqual(view.steps.map((s) => [s.kind, s.status]), [
   ["request", "done"], ["plan", "done"], ["worker", "done"], ["worker", "active"], ["finish", "pending"],
 ]);
 assert.equal(view.steps[2].title, "Implement");
-assert.equal(view.steps[2].subtitle, "backend-dev · gpt-5.6-luna · medium");
+assert.equal(view.steps[2].subtitle, "backend-dev · Luna · medium");
+
+// When catalog evidence is missing, keep the actual route value visible and
+// mark it as an alias instead of presenting it as a concrete model name.
+const unresolvedWorker = worker("a", "reported", "Implement");
+unresolvedWorker.route.modelName = null;
+const unresolved = buildPipeline({ ...base, workers: [unresolvedWorker] });
+assert.equal(unresolved.steps[2].subtitle, "backend-dev · gpt-5.6-luna (alias) · medium");
 assert.deepEqual(view.steps[2].badges, [{ text: "Accepted", tone: "success" }]);
 assert.deepEqual(view.steps[2].items.map((i) => i.status), ["done", "failed"]);
 assert.deepEqual(view.steps[0].followUps, ["Continue"]);

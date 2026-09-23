@@ -27,7 +27,7 @@ import pytest
 
 from cortex_runtime.acp.orchestrating_runtime import (
     OrchestratingRuntime, PromptOutcome, _display_role, _worker_display_text,
-    _worker_tool_details,
+    _worker_tool_details, worker_card_outcome,
 )
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation import mcp_tools
@@ -310,6 +310,7 @@ def test_worker_result_summary_fallback_is_one_bounded_line():
     runtime._worker_final_response_seen = set()
     runtime._assignment_ref_for_attempt = lambda task_id, attempt: "assignment"
     runtime._close_assignment = lambda task_id, assignment: None
+    runtime._worker_card_outcome = lambda task_id, assignment: ("completed", None)
     cards = []
     result = SimpleNamespace(
         event_type="worker_result", assignment_ref="attempt",
@@ -324,6 +325,12 @@ def test_worker_result_summary_fallback_is_one_bounded_line():
     assert len(body.splitlines()) == 1
     assert len(body) <= 300
     assert "Checks:" not in body and "Report:" not in body
+
+
+def test_worker_card_outcome_distinguishes_clean_result_issues_and_execution_failure():
+    assert worker_card_outcome("completed", '{"checks":[]}') == ("completed", None)
+    assert worker_card_outcome("failed", '{"checks":[{"outcome":"failed"}]}') == ("completed", "Completed with issues")
+    assert worker_card_outcome("failed", None) == ("failed", None)
 
 
 

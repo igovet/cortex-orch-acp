@@ -60,19 +60,12 @@ def test_paseo_provider_repairs_only_null_failed_timeline_errors():
     assert 'return event;' in source
 
 
-def test_paseo_provider_replays_history_after_session_opened():
-    """Historical timeline events must not be dropped before session.opened."""
-    source = (PLUGIN / 'integrations' / 'paseo' / 'server' / 'provider.ts').read_text()
-    assert 'MAX_BUFFERED_TIMELINE_ITEMS = 4096' in source
-    assert 'MAX_BUFFERED_TIMELINE_BYTES = 16 * 1024 * 1024' in source
-    assert 'const bufferedTimeline = new Map<string, ProviderEvent[]>()' in source
-    assert 'event.type === "timeline.item" && !openedSessions.has(event.sessionId)' in source
-    assert 'for (const historical of pending ?? [])' in source
-    assert 'listener(event);' in source
-    assert 'bufferedTimeline.clear();' in source
-    assert 'bufferedTimelineBytes.clear();' in source
-    assert 'event.type === "session.closed" || event.type === "session.runtime_failed"' in source
-
+def test_paseo_replay_transport_is_packaged():
+    """The relay runs out-of-process and needs its spool dependency shipped."""
+    server = PLUGIN / 'integrations' / 'paseo' / 'server'
+    assert (server / 'acp-load-shim.mjs').is_file()
+    assert (server / 'replay-spool.mjs').is_file()
+    assert (server / 'replay-connector.ts').is_file()
 
 
 def test_acp_profiles_keep_roles_and_use_mcp_task_documents():
@@ -301,16 +294,6 @@ def test_packaged_skills_deliver_profiles_and_progressive_references():
         skill_body=body.decode().split('---\n',2)[2].lstrip()
         profile_body=skill_body.removesuffix('\n<!-- END OF COMPLETE CORTEX WORKER SKILL -->\n')
         assert profile_body==profile['developer_instructions']
-
-
-
-def test_prompt_and_skill_editing_subagents_use_the_explicit_sol_medium_override():
-    instructions = (ROOT / 'AGENTS.md').read_text()
-    assert 'Any subagent assigned to edit prompts or skills must still use only `gpt-5.6-sol` at' in ' '.join(instructions.split())
-    assert '`medium` reasoning effort' in ' '.join(instructions.split())
-    protocol = (PLUGIN / 'agent-sources/worker-protocol.md').read_text()
-    assert 'These role instructions are delivered' in protocol
-    assert 'through the advertised skill reader' in protocol
 
 
 

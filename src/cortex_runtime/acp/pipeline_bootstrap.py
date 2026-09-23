@@ -26,6 +26,8 @@ import os
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..catalog.labels import engine_short_name, model_display_name
+
 _NOT_DETERMINED_SECTION = (
     "Not yet determined: this section is model-owned guidance the runtime "
     "does not fill in; the coordinator has not yet run."
@@ -44,8 +46,11 @@ def _request_summary(text: str | None, limit: int = 3600) -> str:
 def _route_line(route_info: Mapping[str, Any] | None) -> str:
     if not route_info:
         return "The bound engine, model and effort for this task's coordinator route are not yet determined."
-    engine = route_info.get("engine") or "not yet determined"
-    model = route_info.get("model") or "not yet determined"
+    engine = engine_short_name(str(route_info.get("engine") or "not yet determined"))
+    model_id = str(route_info.get("model") or "not yet determined")
+    model = route_info.get("model_name") or model_display_name(model_id)
+    if model == model_id and model_id != "not yet determined":
+        model = f"{model_id} (alias)"
     effort = route_info.get("effort") or "not recorded for this route"
     return f"Bound coordinator route: engine `{engine}`, model `{model}`, effort `{effort}`."
 

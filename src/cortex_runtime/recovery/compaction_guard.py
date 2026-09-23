@@ -60,9 +60,13 @@ def _recent_events(store, engine_session_ref: str, limit: int) -> list[dict]:
 def evaluate_compaction(
     store, *, task_id: str, engine_session_ref: str, generation_id: str | None,
     before_tokens: int, before_basis: str, after_tokens: int, after_basis: str,
-    mandatory_tokens_after: int, usable_window_tokens: int,
+    mandatory_tokens_after: int, usable_window_tokens: int | None,
 ) -> dict:
     """Evaluate one just-completed compaction attempt and record it.
+
+    ``usable_window_tokens`` is ``None`` when the route's real window is
+    unknown; the immediate-refill check then has no limit to compare against
+    and is skipped rather than run against a guessed window.
 
     Returns ``{"status": "ok"}`` or ``{"status": "blocked", "reason": ...,
     "message": ...}``. Always records exactly one
@@ -83,7 +87,7 @@ def evaluate_compaction(
             f"{WINDOW_SIZE}-attempt window (limit {MAX_COMPACTIONS_PER_WINDOW}); stopping rather "
             "than looping. Ask the coordinator to split the assignment or change the execution approach."
         )
-    elif mandatory_tokens_after > usable_window_tokens:
+    elif usable_window_tokens is not None and mandatory_tokens_after > usable_window_tokens:
         status = "blocked"
         reason = "immediate_refill"
         message = (

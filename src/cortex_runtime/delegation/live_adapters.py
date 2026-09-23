@@ -1607,15 +1607,22 @@ class EngineSessionManagerAdapter:
             return
         from ..routing import auto_route
 
-        from ..orchestration.state import attempt_routing
+        from ..orchestration.state import attempt_routing, review_provider_preference
 
         escalate, complexity, provider = (attempt_routing(self._store, launch['task_id'], launch['attempt_id'])
                                           if launch.get('task_id') and launch.get('attempt_id')
                                           else (False, 'normal', None))
+        review_reason = None
+        if role == "worker-code-reviewer" and launch.get('task_id') and launch.get('attempt_id'):
+            provider, review_reason = review_provider_preference(
+                self._store, launch["task_id"], launch["attempt_id"],
+            )
         choice = auto_route.choose(role, project_root, self._environ, escalate=escalate, complexity=complexity,
                                    unavailable=unavailable, preference=provider)
         if choice is None:
             return
+        if review_reason and choice.decision is not None:
+            choice.decision["cross_provider_review"] = review_reason
         launch["resolved_connection_id"] = choice.connection_id
         launch["resolved_model"] = choice.model
         # What authorized this route, recorded with the attempt. The task's
@@ -1726,13 +1733,7 @@ class EngineSessionManagerAdapter:
         # (the coordinator's own route, unoverridden) does the source
         # revision's own stored ``route_model`` -- correct for that case,
         # since source and target are the same route -- apply.
-        model = (route_override or {}).get("model") or launch.get("resolved_model")
-        if model is None:
-            model = "unknown"
-            if config_revision:
-                extras = routing_store.get_route_extras(self._store, config_revision)
-                if extras is not None:
-                    model = extras["route_model"]
+        model = self._launch_model(launch) or "unknown"
         fingerprint = routing_authorization.fingerprint_params(launch.get("parameters") or {})
         is_fallback = launch.get("route_override") is not None
         detail = dict(role=role, route_connection_id=record.id)
@@ -1773,6 +1774,21 @@ class EngineSessionManagerAdapter:
             config_revision_id=config_revision, decision="fallback" if is_fallback else "authorized",
             detail=detail, predecessor_attempt_id=launch.get("fallback_of"),
         )
+
+    def _launch_model(self, launch) -> str | None:
+        """The route model this attempt actually targets: a fallback's own
+        ``route_override["model"]``, a mixed-team attempt's
+        ``resolved_model``, else the coordinator revision's stored
+        ``route_model``; ``None`` when none is recorded."""
+        from ..routing import store as routing_store
+
+        model = (launch.get("route_override") or {}).get("model") or launch.get("resolved_model")
+        config_revision = launch.get("config_revision")
+        if model is None and config_revision and self._store is not None:
+            extras = routing_store.get_route_extras(self._store, config_revision)
+            if extras is not None:
+                model = extras["route_model"]
+        return model
 
     def _open_generation(self, manager, record, session_id, task_id, attempt_id, launch, *, instructions: str, cause: str) -> None:
         from . import generations as delegation_generations
@@ -1854,6 +1870,7 @@ class EngineSessionManagerAdapter:
                 task_id=task_id, attempt_id=attempt_id, engine=record.engine, version=version,
                 recipient=recipient, assignment_ref=assignment_ref, tier=tier.tier,
                 instructions=instructions, connection_id=record.id, instruction_bundle_id=bundle.bundle_id,
+                model=self._launch_model(launch),
             )
             self._pending_generation[session_id] = generation
 
@@ -2355,6 +2372,38 @@ class EngineSessionManagerAdapter:
                 self._pending_generation[session_ref] = generation
             manager.invalidate_generation(session_ref, generation["id"])
 
+    def _observe_context_window(self, session_ref: str, size: object) -> None:
+        """Keep the context window the engine just reported (``usage_update
+        .size``) for this session and, durably, for its connection's route
+        model -- see :mod:`connections.context_window`."""
+        from ..connections import context_window
+
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            return
+        sessions = getattr(self, "_session_meta", None)
+        if sessions is None:
+            return
+        with self._lock:
+            meta = sessions.get(session_ref)
+            if meta is None or not meta.get("connection_id"):
+                return
+            meta["context_window"] = size
+        context_window.observe(meta["connection_id"], meta.get("model"), size, self._environ)
+
+    def context_window(self, session_ref: str) -> int | None:
+        """The real context window for ``session_ref``: what this session's
+        engine last reported, else what the same connection's engine last
+        reported for the same route model. ``None`` when never reported."""
+        from ..connections import context_window
+
+        with self._lock:
+            meta = dict(self._session_meta.get(session_ref) or {})
+        if not meta.get("connection_id"):
+            return None
+        if meta.get("context_window"):
+            return meta["context_window"]
+        return context_window.observed(meta["connection_id"], meta.get("model"), self._environ)
+
     def pending_delivery(self, session_ref: str) -> Mapping[str, object] | None:
         """T022 (optional ``SessionRuntime`` extension, checked via
         ``getattr`` by ``acp.orchestrating_runtime`` -- never required):
@@ -2661,6 +2710,8 @@ class EngineSessionManagerAdapter:
                         if event.usage_values or usage_basis is None:
                             usage_basis = event.usage_basis
                             usage_values = dict(event.usage_values or {})
+                        if event.display_update:
+                            self._observe_context_window(session_ref, event.display_update.get("size"))
                         # The context fill is shown like any display update.
                         if on_display_update is not None and event.display_update:
                             try:

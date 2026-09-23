@@ -111,7 +111,7 @@ def test_a_tool_call_titles_path_survives_redaction():
     from cortex_runtime.observability.redact import scrub_display_text, scrub_text
 
     title = "Read file '/p/.cortex/workspaces/coordinator_7093afe9d3ff3a61/work/calc.py'"
-    assert "REDACTED" in scrub_text(title), "the durable scrubber is unchanged"
+    assert scrub_text(title) == title
     assert scrub_display_text(title) == title
 
     # Everything else it catches, it still catches -- inside a path or not.

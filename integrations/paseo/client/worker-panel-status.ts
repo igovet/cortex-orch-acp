@@ -10,6 +10,7 @@ export function workerSection(status: string | undefined, eventCount: number): W
 }
 
 export function workerStatus(status: string | undefined, eventCount: number): string {
+  if ((status ?? "").toLowerCase() === "completed_with_issues") return "completed with issues";
   const section = workerSection(status, eventCount);
   if (section === "completed") return (status ?? "completed").toLowerCase() === "reported" ? "completed" : (status ?? "error").toLowerCase();
   if (section === "active") return "running";

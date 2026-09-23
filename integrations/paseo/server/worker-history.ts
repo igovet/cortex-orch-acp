@@ -302,19 +302,23 @@ try:
                     if not attempt_result['failureReason']:
                         attempt_result['failureReason'] = 'Worker process exited before reporting a result.'
                 # Runtime verdict outranks report publication. A submitted
-                # report may contain failed/unverified checks; its existence
-                # must never turn that exact attempt into a displayed success.
+                # report with rejected checks is a completed worker turn with
+                # issues, while a failed node without a result is an execution
+                # failure. This is the same distinction as the coordinator
+                # ACP card; both derive it from runtime_nodes.
                 if 'runtime_nodes' in tables and execution_attempt_refs:
                     runtime_rows = db.execute(
                         'select n.status,n.result_json from runtime_nodes n join delegation_provisioning p on p.task_id=n.task_id and p.idempotency_key=n.assignment_ref where n.task_id=? and p.attempt_id in (%s)' % ','.join('?' for _ in execution_attempt_refs),
                         (task['id'], *execution_attempt_refs),
                     ).fetchall()
                     if len(runtime_rows) == 1:
-                        attempt_result['status'] = runtime_rows[0]['status']
+                        runtime_status, runtime_result = runtime_rows[0]['status'], runtime_rows[0]['result_json']
+                        attempt_result['status'] = 'completed_with_issues' if runtime_status == 'failed' and runtime_result is not None else runtime_status
                         if runtime_rows[0]['status'] == 'failed':
-                            result = json.loads(runtime_rows[0]['result_json'] or '{}')
+                            result = json.loads(runtime_result or '{}')
                             unresolved = [check.get('name', 'check') + ': ' + check.get('outcome', 'unverified') for check in result.get('checks', []) if check.get('outcome') != 'passed']
-                            attempt_result['failureReason'] = scrub('Runtime did not accept worker checks. ' + '; '.join(unresolved))
+                            prefix = 'Completed with issues. Runtime did not accept worker checks. ' if runtime_result is not None else 'Worker failed. '
+                            attempt_result['failureReason'] = scrub(prefix + '; '.join(unresolved))
                     elif len(runtime_rows) > 1:
                         attempt_result['status'] = 'failed'
                         attempt_result['failureReason'] = 'Ambiguous runtime assignment identity; outcome is unverified.'

@@ -134,7 +134,9 @@ def test_coordinator_expanded_io_survives_redaction_and_session_replay(tmp_path)
     )["params"]["update"]
     append_host_update(store, "session-io", update)
     replayed = replay_session(store, "session-io")
-    assert replayed == [{"kind": "update", "update": update}]
+    assert len(replayed) == 1
+    assert replayed[0]["update"] == update
+    assert replayed[0]["source_sequences"] == [0]
 
 
 def test_delegate_is_represented_only_by_worker_card_in_coordinator_stream():

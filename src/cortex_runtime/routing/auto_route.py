@@ -79,21 +79,22 @@ from ..portable.errors import PortableError, PortableErrorCategory
 
 ENV_VAR = "CORTEX_ROUTING"
 HOT_PERCENT = 85.0
-TIERS = ("deep", "standard", "light")
+TIERS = ("flagship", "deep", "standard", "light")
 _FALLBACK_ORDER = {
+    "flagship": ("flagship", "deep", "standard", "light"),
     "deep": ("deep", "standard", "light"),
     "standard": ("standard", "deep", "light"),
     "light": ("light", "standard", "deep"),
 }
-EFFORT_BY_TIER = {"deep": "high", "standard": "medium", "light": "low"}
+EFFORT_BY_TIER = {"flagship": "high", "deep": "high", "standard": "medium", "light": "low"}
 # Claude lists current models first and older generations after them, so
 # its list order is not strength order; its family names are.
-FAMILY_TIERS = {"opus": "deep", "fable": "deep", "sonnet": "standard", "haiku": "light"}
+FAMILY_TIERS = {"opus": "deep", "fable": "flagship", "sonnet": "standard", "haiku": "light"}
 # Codex lists its newest generation first (gpt-6-luna before gpt-5.6-sol),
 # so its list order is not strength order either. Astra > Sol > Terra >
 # Luna within a generation; gpt-5.5 is the oldest and cheapest.
 KNOWN_MODEL_TIERS = {
-    "gpt-6-astra": "deep", "gpt-6-sol": "deep",
+    "gpt-6-astra": "flagship", "gpt-6-sol": "deep",
     "gpt-5.6-sol": "standard", "gpt-5.6-terra": "standard",
     "gpt-6-luna": "light", "gpt-5.6-luna": "light", "gpt-5.5": "light",
 }
@@ -298,9 +299,19 @@ _COMPLEXITY_SHIFT = {"low": 1, "normal": 0, "high": -1}
 
 
 def tier_for(role: str, escalate: bool = False, complexity: str = "normal") -> str:
-    """The role's tier, one step cheaper for ``low`` work, one step
-    stronger for ``high`` work, and one more step stronger when escalated."""
-    index = TIERS.index(ROLE_TIERS.get(role, "standard")) + _COMPLEXITY_SHIFT.get(complexity, 0) - bool(escalate)
+    """Return an economical role tier.
+
+    Complexity moves ordinary work only between light, standard and deep.
+    ``flagship`` is reserved for an explicit escalation after an earlier
+    attempt falls short; explorer stays light even then.
+    """
+    if role == "worker-explorer":
+        return "light"
+    index = TIERS.index(ROLE_TIERS.get(role, "standard")) + _COMPLEXITY_SHIFT.get(complexity, 0)
+    if not escalate:
+        index = max(TIERS.index("deep"), index)
+    else:
+        index -= 1
     return TIERS[min(len(TIERS) - 1, max(0, index))]
 
 
@@ -393,7 +404,7 @@ def model_tiers(entries: Sequence, tier_overrides: Mapping[str, str]) -> dict[st
             by_connection.setdefault(entry.connection_id, []).append(entry)
     for group in by_connection.values():
         for index, entry in enumerate(group):
-            tiers[entry.route.id] = TIERS[min(2, index * 3 // len(group))]
+            tiers[entry.route.id] = ("deep", "standard", "light")[min(2, index * 3 // len(group))]
     return tiers
 
 

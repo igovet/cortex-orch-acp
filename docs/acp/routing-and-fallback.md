@@ -237,12 +237,36 @@ coordinator's own selection changes mid-task.
 the planned `complexity` and by escalation), then a model of that tier (the
 nearest other tier when none is usable), then an effort.
 
+### Economy policy
+
+Automatic routing uses four tiers: `light`, `standard`, `deep`, and
+`flagship`. Astra and Fable are the only named flagship families. They are
+never selected for a role's default tier or because a plan merely says
+`complexity: high`; high complexity tops out at `deep` (Sol/Opus class).
+The flagship tier requires an explicit runtime escalation after a prior
+attempt fell short. A user `routing.json` pin is also an explicit route
+choice and remains strict.
+
+Explorer stays `light` for low, normal, high, and escalated attempts. It can
+therefore select only an engine-confirmed light-tier model such as Luna or
+Haiku; it never falls back upward to strong or flagship models. Unknown catalog
+models are assigned only among deep, standard, and light, so an unrecognized
+model is never inferred to be flagship.
+
+Independent review derives the completed execution engines from the immutable
+attempt-route audit. If every completed worker used Claude, it prefers Codex
+for the reviewer; if they all used Codex, it prefers Claude. Availability,
+quota, provider restrictions, and pins can prevent that preference from being
+honored. The audit records both `preference_status` and
+`cross_provider_review`; mixed execution engines record
+`no_single_opposite_provider:mixed_execution` and use normal ranking.
+
 A model's tier comes from, first match wins:
 
 1. `tiers` in `routing.json`;
-2. a Claude family name (`FAMILY_TIERS`: opus/fable `deep`, sonnet
+2. a Claude family name (`FAMILY_TIERS`: fable `flagship`, opus `deep`, sonnet
    `standard`, haiku `light`);
-3. a known Codex model (`KNOWN_MODEL_TIERS`: `gpt-6-astra`, `gpt-6-sol`
+3. a known Codex model (`KNOWN_MODEL_TIERS`: `gpt-6-astra` `flagship`, `gpt-6-sol`
    `deep`; `gpt-5.6-sol`, `gpt-5.6-terra` `standard`; `gpt-6-luna`,
    `gpt-5.6-luna`, `gpt-5.5` `light`);
 4. only for a model none of these names: its position among its

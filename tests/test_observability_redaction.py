@@ -47,6 +47,25 @@ def test_scrub_text_does_not_redact_ordinary_error_codes_or_event_names():
         assert redact.scrub_text(value) == value
 
 
+def test_scrub_text_preserves_ordinary_hyphenated_and_underscored_names():
+    """Names and paths must remain usable in coordinator-facing prose."""
+    names = (
+        "acf-blocks-v2-iframe-compatibility",
+        "acf_blocks_v2_iframe_compatibility",
+        "includes/acf-blocks-v2-iframe-compat.php",
+        "js/admin/acf-blocks-v2-iframe-compatibility.js",
+    )
+    for value in names:
+        assert redact.scrub_text(value) == value
+
+
+def test_scrub_text_labels_an_uncontextualized_opaque_secret():
+    secret = "abcde12345fghij67890klmno"
+    scrubbed = redact.scrub_text(secret)
+    assert secret not in scrubbed
+    assert scrubbed.startswith("[HIDDEN_SECRET:")
+
+
 def test_scrub_command_never_logs_full_argv():
     command = ["/usr/bin/codex-acp", "--api-key", FAKE_SECRET, "--project", "/home/user/work"]
     result = redact.scrub_command(command)

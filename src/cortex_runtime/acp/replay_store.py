@@ -868,6 +868,11 @@ def replay_session(store, session_id: str) -> list[dict]:
     must never ..." acceptance line -- verified in tests by DB row-count
     assertions around the call).
     """
+    return _merge_replay_entries(_validated_replay_rows(_read_replay_rows(store, session_id)))
+
+
+def _read_replay_rows(store, session_id):
+    """One ordered SELECT snapshot; do not materialize cumulative card payloads."""
     with store.connection() as db:
         try:
             rows = db.execute(
@@ -875,7 +880,7 @@ def replay_session(store, session_id: str) -> list[dict]:
                 "FROM host_transcript WHERE session_id=? "
                 "UNION ALL SELECT seq, 'update' AS kind, NULL AS text, '[]' AS attachments_json, NULL AS message_id, update_json "
                 "FROM host_updates WHERE session_id=? ORDER BY seq", (session_id, session_id),
-            ).fetchall()
+            )
         except Exception as exc:
             # A pre-messageId store can still be loaded read-only.  Its old
             # rows have no exact grouping evidence, so the caller assigns a
@@ -887,68 +892,63 @@ def replay_session(store, session_id: str) -> list[dict]:
                 "FROM host_transcript WHERE session_id=? "
                 "UNION ALL SELECT seq, 'update' AS kind, NULL AS text, '[]' AS attachments_json, NULL AS message_id, update_json "
                 "FROM host_updates WHERE session_id=? ORDER BY seq", (session_id, session_id),
-            ).fetchall()
+            )
+        yield from rows
+
+
+def _validated_replay_rows(rows):
     from .read_history import ReadHistoryFilter
     read_filter = ReadHistoryFilter()
-    result = []
     for row in rows:
+        sequences = [row["seq"]]
         if row["kind"] == "update":
             try:
                 update = json.loads(row["update_json"])
             except (TypeError, ValueError):
-                # Never fabricate a malformed host event during replay.
-                continue
-            if isinstance(update, dict) and isinstance(update.get("sessionUpdate"), str):
-                result.append(dict(kind="update", update=read_filter.project(update)))
+                raise ValueError("Incomplete history: malformed saved update.") from None
+            if not isinstance(update, dict) or not isinstance(update.get("sessionUpdate"), str):
+                raise ValueError("Incomplete history: invalid saved update.")
+            yield dict(kind="update", update=read_filter.project(update), source_sequences=sequences)
             continue
         try:
             attachments = json.loads(row["attachments_json"] or "[]")
         except (TypeError, ValueError):
-            # A damaged legacy transcript row must never make session/load
-            # fail after it has already replayed earlier entries.  Dropping
-            # this one row is the only honest outcome: inventing an empty
-            # attachment list would claim evidence that is not available.
-            continue
-        if not isinstance(attachments, list):
-            continue
-        result.append(dict(kind=row["kind"], text=row["text"], attachments=attachments, message_id=row["message_id"]))
-    return _merge_tool_call_updates(result)
+            raise ValueError("Incomplete history: malformed saved attachments.") from None
+        if (row["kind"] not in ("user_message", "agent_message") or
+                not isinstance(row["text"], str) or not isinstance(attachments, list) or
+                any(not isinstance(item, dict) for item in attachments)):
+            raise ValueError("Incomplete history: invalid saved transcript.")
+        yield dict(kind=row["kind"], text=row["text"], attachments=attachments,
+                           message_id=row["message_id"], source_sequences=sequences,
+                           source_text_bytes=[len(row["text"].encode("utf-8"))])
 
 
-def _merge_tool_call_updates(history: list[dict]) -> list[dict]:
-    """Fold each card's run of ``tool_call_update``s into its final state.
+def _merge_replay_entries(history: list[dict]) -> list[dict]:
+    """Fold adjacent compatible entries only, retaining ordered source membership.
 
-    An ACP ``tool_call_update`` replaces every field it carries (``content``
-    included), so the merged update renders exactly what the whole run did.
-    A worker card resends its full cumulative log on every update: replaying
-    each one grew quadratically (883 updates, 17.7 MB for one card) and
-    overflowed the client's history buffer, so the chat could not reopen.
-    The merged update takes the run's last position; a new ``tool_call`` for
-    the same id starts a new run.
+    Never move a card update across another card or text. Legacy rows without
+    message identity remain distinct. The durable rows are never rewritten.
     """
-    run_of: dict[int, tuple[str, int]] = {}
-    last_of: dict[tuple[str, int], int] = {}
-    generation: dict[str, int] = {}
-    for index, entry in enumerate(history):
-        update = entry.get("update") if entry["kind"] == "update" else None
-        card = update.get("toolCallId") if update else None
-        if not isinstance(card, str):
-            continue
-        if update["sessionUpdate"] == "tool_call":
-            generation[card] = generation.get(card, 0) + 1
-        elif update["sessionUpdate"] == "tool_call_update":
-            run_of[index] = (card, generation.get(card, 0))
-            last_of[run_of[index]] = index
-    merged: dict[tuple[str, int], dict] = {}
     result = []
-    for index, entry in enumerate(history):
-        run = run_of.get(index)
-        if run is None:
-            result.append(entry)
+    for entry in history:
+        previous = result[-1] if result else None
+        if previous and entry["kind"] == previous["kind"] == "update":
+            update, prior = entry["update"], previous["update"]
+            if (update.get("sessionUpdate") == prior.get("sessionUpdate") == "tool_call_update"
+                    and isinstance(update.get("toolCallId"), str)
+                    and update["toolCallId"] == prior.get("toolCallId")):
+                previous["update"] = {**prior, **update}
+                previous["source_sequences"].extend(entry["source_sequences"])
+                continue
+        elif (previous and entry["kind"] == previous["kind"] and entry["kind"] != "update"
+              and entry.get("message_id") and entry["message_id"] == previous.get("message_id")
+              and not entry["attachments"] and not previous["attachments"]
+              and sum(previous["source_text_bytes"]) + sum(entry["source_text_bytes"]) <= 64 * 1024):
+            previous["text"] += entry["text"]
+            previous["source_sequences"].extend(entry["source_sequences"])
+            previous["source_text_bytes"].extend(entry["source_text_bytes"])
             continue
-        merged.setdefault(run, {}).update(entry["update"])
-        if last_of[run] == index:
-            result.append(dict(kind="update", update=merged.pop(run)))
+        result.append(dict(entry))
     return result
 
 

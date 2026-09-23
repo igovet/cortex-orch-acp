@@ -40,17 +40,18 @@ def _pick(tier, codex=None, claude=None, overrides=None):
 
 def test_known_models_have_named_tiers_and_only_unknown_ones_are_positional():
     tiers = auto_route.model_tiers(ENTRIES + UNKNOWN, {})
-    assert [tiers[e.route.id] for e in CODEX] == ["deep", "deep", "light", "standard", "standard", "light", "light"]
+    assert [tiers[e.route.id] for e in CODEX] == ["flagship", "deep", "light", "standard", "standard", "light", "light"]
     # Claude lists older generations last; its family names decide instead.
     assert [tiers[e.route.id] for e in CLAUDE] == ["deep", "standard", "light", "deep"]
     assert [tiers[e.route.id] for e in UNKNOWN] == ["deep", "deep", "standard", "standard", "light"]
 
 
-def test_every_tier_has_a_candidate_from_both_providers():
+def test_each_ordinary_tier_has_a_candidate_from_both_providers():
     tiers = auto_route.model_tiers(ENTRIES, {})
-    for tier in auto_route.TIERS:
+    for tier in ("deep", "standard", "light"):
         engines = {e.route.engine for e in ENTRIES if tiers[e.route.id] == tier}
         assert engines == {"codex-acp", "claude-agent-acp"}, tier
+    assert {e.route.model for e in ENTRIES if tiers[e.route.id] == "flagship"} == {"gpt-6-astra"}
 
 
 def test_tier_override_moves_one_model():
@@ -59,7 +60,7 @@ def test_tier_override_moves_one_model():
 
 def test_heavy_work_avoids_an_account_above_the_threshold():
     assert _pick("deep", codex=90, claude=40) == "claude-opus-5[1m]"
-    assert _pick("deep", codex=40, claude=90) == "gpt-6-astra"
+    assert _pick("deep", codex=40, claude=90) == "gpt-6-sol"
     assert _pick("standard", codex=90, claude=40) == "sonnet"
 
 
@@ -104,9 +105,10 @@ def test_unavailable_reasons_name_each_record_and_exhausted_account():
     ]
 
 
-def test_missing_tier_falls_back_to_the_nearest():
-    only_deep = [CODEX[0]]
-    assert auto_route.pick("light", only_deep, _usage()).route.model == "gpt-6-astra"
+def test_non_explicit_routing_never_falls_back_to_a_flagship():
+    only_flagship = [CODEX[0]]
+    assert auto_route.pick("light", only_flagship, _usage()) is None
+    assert auto_route.pick("flagship", only_flagship, _usage()).route.model == "gpt-6-astra"
 
 
 ALL = ("low", "medium", "high", "xhigh", "max", "ultra")
@@ -217,11 +219,14 @@ def test_claude_usage_keeps_the_latest_window_per_kind_and_scopes_model_windows(
     assert quota.used_percent(record, "sonnet", environ) == 100.0
 
 
-def test_debugging_starts_standard_and_escalates_one_tier():
+def test_explicit_escalation_is_the_only_automatic_flagship_path():
     assert auto_route.tier_for("worker-debugger") == "standard"
+    assert auto_route.tier_for("worker-debugger", complexity="high") == "deep"
     assert auto_route.tier_for("worker-debugger", escalate=True) == "deep"
-    assert auto_route.tier_for("worker-explorer", escalate=True) == "standard"
-    assert auto_route.tier_for("worker-security-auditor", escalate=True) == "deep"
+    assert auto_route.tier_for("worker-debugger", escalate=True, complexity="high") == "flagship"
+    assert auto_route.tier_for("worker-explorer", escalate=True, complexity="high") == "light"
+    assert auto_route.tier_for("worker-security-auditor", complexity="high") == "deep"
+    assert auto_route.tier_for("worker-security-auditor", escalate=True) == "flagship"
 
 
 def test_planned_complexity_shifts_the_role_tier_one_step():
@@ -229,6 +234,7 @@ def test_planned_complexity_shifts_the_role_tier_one_step():
     assert auto_route.tier_for("worker-debugger", complexity="low") == "light"
     assert auto_route.tier_for("worker-security-auditor", complexity="low") == "standard"
     assert auto_route.tier_for("worker-explorer", complexity="low") == "light"
+    assert auto_route.tier_for("worker-explorer", complexity="high") == "light"
     assert auto_route.tier_for("worker-debugger", escalate=True, complexity="low") == "standard"
 
 
@@ -261,12 +267,12 @@ def test_quota_still_outranks_the_role():
 
 def test_a_preference_is_honoured_among_the_tiers_candidates():
     picked, decision = _rank("deep", "worker-security-auditor", preference="codex-acp")
-    assert picked.route.model == "gpt-6-astra"
+    assert picked.route.model == "gpt-6-sol"
     assert decision["tier"] == "deep" and decision["preference_status"] == "honoured"
-    assert decision["candidates"][0] == dict(route="codex-acp/gpt-6-astra", connection_id="codex", used_percent=None,
+    assert decision["candidates"][0] == dict(route="codex-acp/gpt-6-sol", connection_id="codex", used_percent=None,
                                              hot=False, suitability=0, preferred=True)
     assert {c["route"] for c in decision["candidates"]} == {
-        "codex-acp/gpt-6-astra", "codex-acp/gpt-6-sol", "claude-agent-acp/claude-opus-5[1m]",
+        "codex-acp/gpt-6-sol", "claude-agent-acp/claude-opus-5[1m]",
         "claude-agent-acp/claude-opus-4-6"}
 
 
@@ -282,7 +288,7 @@ def test_a_preference_for_an_unavailable_provider_is_ignored():
     picked, decision = _rank("deep", "worker-backend-dev", preference="codex-acp", excluded=codex)
     assert picked.route.engine == "claude-agent-acp"
     assert decision["preference_status"] == "ignored:provider_unavailable"
-    assert "codex-acp/gpt-6-astra" in decision["unavailable"]
+    assert "codex-acp/gpt-6-sol" in decision["unavailable"]
 
 
 def test_a_preference_never_spends_a_nearly_exhausted_plan_on_heavy_work():

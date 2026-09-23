@@ -84,13 +84,14 @@ same OS user and racing filesystem changes.
 
 Each task has an access mode (`configuration.access_mode`). **Guarded** is the
 default and the behaviour described above: the runtime asks the user on a
-permission card before a native deletion the engine reports (`delete`/`move`
-tool kinds and lexically recognized `rm`, `git rm`/`clean`, `unlink`, `find
--delete` and similar command text), before `project_delete`, and before every
-`outside_write` and `outside_command`; no answer, a timeout, a disconnect or a
-refusal means the action does not happen. Workers run in the engine mode that
-routes each mutating tool call through `session/request_permission` (Claude
-`default`, Codex `agent`).
+permission card before native deletion of declared `rm` invocations (including
+direct `rm`, `sudo rm`, `xargs rm`, and similar forms), before `project_delete`,
+and before every `outside_write` and `outside_command`; no answer, a timeout, a
+disconnect or a refusal means the action does not happen. Non-`rm` commands such
+as `git clean`, `git commit`, `docker`, `python`, and `pytest` continue without
+a permission card in Guarded mode. Workers run in the engine mode that routes
+each mutating tool call through `session/request_permission` (Claude `default`,
+Codex `agent`).
 
 **Auto** changes exactly two things:
 

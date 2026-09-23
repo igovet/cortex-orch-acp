@@ -39,6 +39,13 @@ card). It returns one of three decisions:
   truncating a constraint or by Cortex itself deciding to narrow scope --
   see ``docs/acp/summaries-and-budgets.md`` and INVARIANTS.md: "no runtime-
   owned scope decisions".
+- ``"unverified_window"`` -- mandatory content exceeds only the labeled
+  default window because the route's real window is unknown (no catalog
+  value and no engine ``usage_update.size`` observed yet). The default is a
+  Cortex guess, not a limit of the engine, so the caller must not transmit
+  an oversized recovery package: it records an explicit retryable preflight
+  block until a real window is available rather than allowing an engine-side
+  context-overflow error.
 """
 from __future__ import annotations
 
@@ -106,7 +113,7 @@ class BudgetComponent:
 
 @dataclass(frozen=True)
 class BudgetDecision:
-    decision: str  # "fits" | "needs_reference_mode" | "overflow"
+    decision: str  # "fits" | "needs_reference_mode" | "overflow" | "unverified_window"
     context_window_tokens: int
     context_window_basis: str
     total_tokens: int
@@ -194,6 +201,18 @@ def plan_budget(
                 f"{usable_window} of context_window_tokens={window_tokens} ({window_basis}); "
                 f"the {reference_tokens}-token evidence candidate should be delivered as an "
                 "addressable reference (see recovery.large_output_store) instead of inlined."
+            ),
+        )
+    if window_basis == ESTIMATED_BASIS:
+        return BudgetDecision(
+            decision="unverified_window", context_window_tokens=window_tokens, context_window_basis=window_basis,
+            total_tokens=total_tokens, mandatory_tokens=mandatory_tokens,
+            reference_candidate_tokens=reference_tokens, components=tuple(components),
+            limit_name="context_window_tokens",
+            message=(
+                f"Mandatory content is estimated at {mandatory_tokens} tokens, above the default "
+                f"budget {usable_window} of context_window_tokens={window_tokens} ({window_basis}); "
+                "this route has not reported its real context window yet, so the fit is unverified."
             ),
         )
     return BudgetDecision(

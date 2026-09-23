@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import re
-from pathlib import PurePosixPath, Path
+from pathlib import Path
 
 from ..connections.model import SUPPORTED_ENGINES
 from ..contracts import StoreError
@@ -195,15 +195,49 @@ def attempt_routing(store, task_id, attempt_id):
     return bool(fix) or retried, task.get('complexity', 'normal'), task.get('provider')
 
 
+
+def review_provider_preference(store, task_id, attempt_id):
+    """Prefer an independent reviewer from the other engine when determinable.
+
+    The preference comes only from immutable audit rows for completed execution
+    nodes in this review's revision. A mixed-provider implementation has no
+    single opposite provider, so ordinary ranking remains in effect and the
+    returned reason makes that limitation explicit.
+    """
+    with store.connection() as db:
+        reviewer = db.execute(
+            "SELECT n.stage,n.revision FROM delegation_provisioning p "
+            "JOIN runtime_nodes n ON n.task_id=p.task_id AND n.assignment_ref=p.idempotency_key "
+            "WHERE p.task_id=? AND p.attempt_id=?",
+            (task_id, attempt_id),
+        ).fetchone()
+        if reviewer is None or reviewer["stage"] != "review":
+            return None, "not_review"
+        rows = db.execute(
+            "SELECT DISTINCT a.engine FROM attempt_route_audit a "
+            "JOIN delegation_provisioning p ON p.task_id=a.task_id AND p.attempt_id=a.attempt_id "
+            "JOIN runtime_nodes n ON n.task_id=p.task_id AND n.assignment_ref=p.idempotency_key "
+            "WHERE a.task_id=? AND n.revision=? AND n.stage='execution' AND n.status='completed'",
+            (task_id, reviewer["revision"]),
+        ).fetchall()
+    engines = {row["engine"] for row in rows}
+    if engines == {"claude-agent-acp"}:
+        return "codex-acp", "prefer_codex_after_claude_execution"
+    if engines == {"codex-acp"}:
+        return "claude-agent-acp", "prefer_claude_after_codex_execution"
+    if len(engines) > 1:
+        return None, "no_single_opposite_provider:mixed_execution"
+    return None, "no_audited_execution_provider"
+
+
 def validate_scope(scope):
     if not isinstance(scope, list) or not scope or len(scope) > 64:
         raise StoreError('invalid_assignment_scope')
     for value in scope:
         if not isinstance(value, str) or not value or len(value) > 512:
             raise StoreError('invalid_assignment_scope')
-        path = PurePosixPath(value)
-        if (path.is_absolute() or '..' in path.parts or '\\' in value
-                or any(part in {'.cortex', '.git', '.codex', '.claude'} for part in path.parts)):
+        from .project_paths import permitted_path
+        if not permitted_path(value):
             raise StoreError('forbidden_assignment_scope')
     return scope
 

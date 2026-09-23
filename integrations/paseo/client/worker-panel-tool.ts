@@ -18,6 +18,22 @@ function stringField(value: Record<string, unknown>, ...names: string[]): string
   for (const name of names) if (typeof value[name] === "string") return value[name] as string;
   return null;
 }
+function nativeInput(value: unknown): Record<string, unknown> {
+  const envelope = fields(value);
+  // codex-acp forwards custom tools as { name, input }, while Claude sends
+  // the command fields directly. Only unwrap the documented custom-tool
+  // envelope so arbitrary tool arguments keep their original meaning.
+  return typeof envelope.name === "string" && Object.keys(fields(envelope.input)).length > 0
+    ? fields(envelope.input)
+    : envelope;
+}
+function outputText(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  const output = fields(value);
+  const direct = stringField(output, "content", "output", "text", "formatted_output", "stdout");
+  if (direct !== null) return direct;
+  return stringField(fields(output.output), "content", "output", "text", "formatted_output", "stdout");
+}
 function basename(path: string | null): string | null {
   return path?.split(/[\\/]/).filter(Boolean).pop() ?? null;
 }
@@ -35,13 +51,14 @@ function contentText(content: unknown): string | null {
 /** A visual projection of fields actually retained in the ACP event. */
 export function presentTool(event: WorkerEvent): ToolPresentation {
   const gateway = gatewayPresentation(event.title ?? "", event.raw_input ?? event.input, event.raw_output ?? event.output);
-  const input = fields(gateway?.input ?? event.raw_input ?? event.input);
+  const rawInput = gateway?.input ?? event.raw_input ?? event.input;
+  const input = nativeInput(rawInput);
   const path = stringField(input, "file_path", "filePath", "path", "absolutePath");
-  const command = stringField(input, "command");
+  const command = stringField(input, "command", "cmd");
   const oldText = stringField(input, "old_string", "oldString", "oldText");
   const newText = stringField(input, "new_string", "newString", "newText", "content");
   const outputValue = gateway?.output ?? event.raw_output ?? event.output;
-  const output = typeof outputValue === "string" ? outputValue : stringField(fields(outputValue), "content", "output", "text") ?? contentText(event.content);
+  const output = outputText(outputValue) ?? contentText(event.content);
   const kind = gateway?.kind === "shell" ? "execute" : gateway?.kind ?? event.tool_kind?.toLowerCase();
   const title = event.title ?? "";
   const read = kind === "read" || (kind == null && path !== null && /^Read(?:\s|$)/i.test(title));

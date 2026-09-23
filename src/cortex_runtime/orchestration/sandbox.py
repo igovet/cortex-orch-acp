@@ -221,6 +221,18 @@ def compact_argv(command, fds):
     return [command[0], '--args', str(fd), *command[split:]], (*fds, fd)
 
 
+def readonly_test_cache(command, scratch, environ):
+    """Keep pytest's cache writable without granting writes to reviewed sources.
+
+    Preserve owner options; explicit command-line options still take precedence.
+    """
+    import shlex
+    options = environ.get('PYTEST_ADDOPTS', '')
+    options += ' ' + shlex.join(['-o', f'cache_dir={scratch}/pytest-cache'])
+    at = command.index('--chdir')
+    command[at:at] = ['--setenv', 'PYTEST_ADDOPTS', options.strip()]
+
+
 def as_owner(command, environ):
     """Run a sandbox command as the owner would in their terminal, in place.
 
@@ -407,6 +419,7 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
     git configuration paths removed when the command ends.
     """
     from .gateway import PRIVATE, _parts, _parent, _matches
+    from .project_paths import PROJECT_NOTES
     root = Path(root).resolve(strict=True)
     git = None
     if git_writable and any(scope in {'.', '**', '**/*'} for scope in scopes):
@@ -493,6 +506,10 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
         # Read-only on top of the writable binds: demoted directories and the
         # user's deny-write paths.
         overlays=sorted(demoted|{path for path in denied_exact if path and (root/path).exists()}|set(denied_found))
+        # Engine directories are already protected; note denials are applied
+        # when notes are mounted after their private parent below.
+        overlays = [p for p in overlays if p not in {'.claude', '.codex'} and p not in PROJECT_NOTES]
+        candidates -= PROJECT_NOTES
         for relative in sorted(candidates,key=lambda p:(len(PurePath(p).parts),p)):
             path=root/relative
             if not path.exists(): continue
@@ -537,6 +554,12 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
                 command+=['--bind',f'/proc/self/fd/{pinned}',str(directory)]
             # Guarded entries after the writable binds, so these win.
             command+=[arg for path in readonly_git for arg in ('--ro-bind',str(path),str(path))]
+        if git is None and '.git' in reveal:
+            # Also pin a linked worktree's common metadata read-only, including
+            # when it lives in the host's shared writable /tmp.
+            from ..delegation.revision import git_metadata_dirs
+            for directory in git_metadata_dirs(str(root)) or ():
+                command += ['--ro-bind', directory, directory]
         for original in sorted(private_paths):
             if git is not None and original == root/'.git':
                 if original.is_file():
@@ -552,7 +575,30 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
             elif path.is_file():
                 command+=['--ro-bind','/dev/null',str(path)]
             elif path.exists():
-                command+=['--tmpfs',str(path),'--remount-ro',str(path)]
+                command+=['--tmpfs',str(path)]
+            # These exact project notes are data. Never follow an engine
+            # directory symlink or expose another private directory's content.
+            if original == root / original.name and original.name in {'.claude', '.codex'} and not original.is_symlink():
+                for relative in sorted(PROJECT_NOTES):
+                    if relative.split('/')[0] != original.name:
+                        continue
+                    try:
+                        parent = os.open(original.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[0])
+                        try:
+                            pinned = os.open(relative.split('/')[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                        finally:
+                            os.close(parent)
+                    except OSError:
+                        continue
+                    info = os.fstat(pinned)
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        os.close(pinned)
+                        continue
+                    fds.append(pinned)
+                    writable = _matches(relative, scopes) and not _matches(relative, readonly)
+                    command += ['--bind' if writable else '--ro-bind', f'/proc/self/fd/{pinned}', str(root / relative)]
+            if path.is_dir() and original.name not in reveal:
+                command += ['--remount-ro', str(path)]
         yield command+['--chdir',str(root),'--',*argv],tuple(fds)
     finally:
         for fd in fds: os.close(fd)
@@ -642,6 +688,8 @@ def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(
             extra += ['--ro-bind', str(path), str(path)]
         at = command.index('--chdir')
         command[at:at] = extra
+        if not scopes:
+            readonly_test_cache(command, scratch, env)
         launch, launch_fds = compact_argv(command, fds)
         try:
             yield launch, launch_fds

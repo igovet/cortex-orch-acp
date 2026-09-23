@@ -7,6 +7,7 @@ Cortex is an incoming ACP v1 stdio agent at src/cortex_acp.py. It runs its own p
 - [Zed Custom Agent setup](zed-custom-agent.md)
 - [codeg recipe and current limits](codeg-custom-agent.md)
 - [Packaging, onboarding and diagnostics](packaging-and-onboarding.md)
+- [Isolated dev Paseo environment and plugin safety](dev-paseo-environment.md) — current Paseo isolation remains unverified until the installed 0.9.1 build is inspected
 - [Google Drive and Docs MCP setup](google-drive-mcp.md)
 - [Figma MCP setup](figma-mcp.md)
 - [No-paid test matrix and live-only cases](test-matrix-and-ci.md)

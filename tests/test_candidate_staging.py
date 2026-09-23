@@ -89,6 +89,9 @@ def test_candidate_snapshots_direct_project_root_result(tmp_path):
     """A Zed-backed worker result is already in the user's project root."""
     project, store, task = _fixture(tmp_path)
     (project / "base.txt").write_text("worker result\n")
+    (project / "direct-nested").mkdir()
+    os.chmod(project / "direct-nested", 0o755)
+    (project / "direct-nested" / "keep.txt").write_text("keep\n")
     manifest = _manifest(str(project))
     with store.connection() as db:
         db.execute(
@@ -101,6 +104,8 @@ def test_candidate_snapshots_direct_project_root_result(tmp_path):
     stage = project / ".cortex" / "candidates" / "candidate-direct" / "stage"
     assert candidate["status"] == "ready"
     assert (stage / "base.txt").read_text() == "worker result\n"
+    assert (stage / "direct-nested" / "keep.txt").read_text() == "keep\n"
+    assert (stage / "direct-nested").stat().st_mode & 0o777 == 0o755
     assert candidate["project_base_digest"] == _digest_manifest(manifest)
     assert (project / "base.txt").read_text() == "worker result\n"
 
@@ -181,6 +186,7 @@ def test_candidate_conflict_is_retained_until_explicit_task_retention(tmp_path):
 def test_candidate_directory_mode_change_preserves_unchanged_children(tmp_path):
     project, store, task = _fixture(tmp_path)
     (project / "nested").mkdir()
+    os.chmod(project / "nested", 0o700)
     (project / "nested" / "keep.txt").write_text("keep\n")
     _attempt(tmp_path, store, task, project, "mode", lambda root: os.chmod(root / "nested", 0o755))
 

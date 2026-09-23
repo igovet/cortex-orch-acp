@@ -8,8 +8,8 @@ channel-bound gateway. A native subagent launch is refused. Titles,
 descriptions and raw inputs never supply tool identity.
 
 Deletion is recognized lexically from what the engine declares: ACP's
-``delete``/``move`` kinds and the command text of a shell/interpreter call.
-Code that hides a deletion from that text is outside this fence.
+``delete``/``move`` kinds and declared ``rm`` shell invocations. Code that
+hides an ``rm`` invocation from that text is outside this fence.
 """
 import re
 import threading
@@ -25,15 +25,13 @@ COORDINATOR_PRIVATE_OR_CHECK_REFUSAL_REASON = COORDINATOR_EDIT_REFUSAL_REASON
 
 _DELETION_KINDS = frozenset({"delete", "move"})
 _DELETION_COMMAND = re.compile(
-    r"(?:^|[;&|(`]\s*|\bxargs\s+(?:-\S+\s+)*|\bexec\s+|\bsudo\s+)"
-    r"(?:\S*/)?(?:rm|rmdir|unlink|shred)\b"
-    r"|\bgit\s+(?:-\S+\s+)*(?:clean|rm)\b"
-    r"|\bfind\b[^;&|]*\s-delete\b"
-    r"|\bos\s*\.\s*(?:remove|unlink|rmdir|removedirs)\s*\("
-    r"|\bshutil\s*\.\s*rmtree\s*\("
-    r"|\.\s*(?:unlink|rmdir)\s*\(\s*\)"
-    r"|\bfs\s*\.\s*(?:rm|rmdir|unlink|rmSync|rmdirSync|unlinkSync)\s*\(",
+    r"(?:^|[;&|\n]\s*|\b(?:sudo|xargs|exec)\s+(?:-\S+\s+)*)"
+    r"(?:\S*/)?rm\b",
 )
+_SHELL_SCRIPT_ARGUMENT = re.compile(
+    r"\b(?:sh|bash)\s+-c\s+(?:'([^']*)'|\"([^\"]*)\"|([^\s;&|]+))"
+)
+_FIND_EXEC_RM = re.compile(r"\bfind\b[^;&|]*\s-exec(?:dir)?\s+(?:\S*/)?rm\b")
 #: A deletion waits for a person, not a host round trip.
 DELETION_CONFIRM_TIMEOUT_SECONDS = 1800.0
 
@@ -56,11 +54,21 @@ def _command_text(tool_call: dict) -> str:
 
 
 def is_deletion(params) -> bool:
-    """True when this permission request would delete project content."""
+    """True for ACP deletion tools or a declared ``rm`` invocation.
+
+    Guarded command policy intentionally does not treat other commands that
+    can remove content as removal requests: only ``rm`` is blocked there.
+    """
     call = _tool_call(params)
     if call.get("kind") in _DELETION_KINDS:
         return True
-    return bool(_DELETION_COMMAND.search(_command_text(call)))
+    command = _command_text(call)
+    if _DELETION_COMMAND.search(command) or _FIND_EXEC_RM.search(command):
+        return True
+    return any(
+        _DELETION_COMMAND.search(next(script for script in match.groups() if script is not None))
+        for match in _SHELL_SCRIPT_ARGUMENT.finditer(command)
+    )
 
 
 def _tool_call(params) -> dict:
@@ -217,7 +225,8 @@ class PermissionBridge:
             return refused
         call = dict(_tool_call(params))
         command = _command_text(call).strip()
-        call["title"] = f"Confirm: {command[:300]}" if command else f"Confirm: {call.get('title') or 'file'}"
+        call["title"] = (f"Removal blocked pending confirmation: {command[:300]}" if command
+                         else f"Removal blocked pending confirmation: {call.get('title') or 'file'}")
         try:
             response = self._host_permission_requester(
                 engine_session_id, dict(params, toolCall=call), DELETION_CONFIRM_TIMEOUT_SECONDS)

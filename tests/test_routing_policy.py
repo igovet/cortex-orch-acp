@@ -21,6 +21,7 @@ from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.portable.errors import PortableError
 from cortex_runtime.routing import authorization as routing_authorization
 from cortex_runtime.routing import store as routing_store
+from cortex_runtime.orchestration.state import review_provider_preference
 from cortex_runtime.store import Store
 
 
@@ -338,3 +339,42 @@ def test_fingerprint_params_stable_and_order_independent():
     c = routing_authorization.fingerprint_params({"effort": "low", "mode": "default"})
     assert a == b
     assert a != c
+
+
+def test_review_provider_preference_uses_completed_execution_audit(tmp_path):
+    store, task_id = _task(tmp_path)
+    with store.connection() as db:
+        revision = 1
+        db.execute("INSERT INTO runtime_tasks VALUES(?,?,?,? ,NULL,NULL,0,NULL,?,?)",
+                   (task_id, "REVIEWING", revision, "objective", "now", "now"))
+        for node_id, assignment, attempt, role, stage, status in (
+            ("implementation", "as_execution", "xa_execution", "worker-backend-dev", "execution", "completed"),
+            ("review", "as_review", "xa_review", "worker-code-reviewer", "review", "pending"),
+        ):
+            db.execute(
+                "INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (task_id, revision, node_id, role, "objective", "[]", "[\".\"]", stage, status, assignment, None),
+            )
+            db.execute(
+                "INSERT INTO delegation_provisioning "
+                "(idempotency_key,task_id,assignment_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,'ready','ready',1,'now','now')",
+                (assignment, task_id, assignment, attempt, role),
+            )
+        db.commit()
+    routing_store.record_attempt_audit(
+        store, attempt_id="xa_execution", task_id=task_id, role="worker-backend-dev",
+        engine="claude-agent-acp", connection_id="cn_claude", model="sonnet",
+        params_fingerprint="fp", config_revision_id=None, decision="authorized", detail={},
+    )
+    assert review_provider_preference(store, task_id, "xa_review") == (
+        "codex-acp", "prefer_codex_after_claude_execution",
+    )
+    routing_store.record_attempt_audit(
+        store, attempt_id="xa_other", task_id=task_id, role="worker-qa-engineer",
+        engine="codex-acp", connection_id="cn_codex", model="gpt-5.6-luna",
+        params_fingerprint="fp", config_revision_id=None, decision="authorized", detail={},
+    )
+    assert review_provider_preference(store, task_id, "xa_review") == (
+        "codex-acp", "prefer_codex_after_claude_execution",
+    )

@@ -1152,13 +1152,8 @@ def test_session_load_unknown_session_errors(tmp_path):
     assert excinfo.value.code == -32602
 
 
-def test_replay_skips_corrupt_transcript_row_without_fabricating_history(tmp_path):
-    """A damaged attachment payload cannot take the whole reconnect down.
-
-    The text body is not replayed with invented attachment metadata: the
-    malformed row is omitted and the surrounding valid updates remain
-    available.
-    """
+def test_replay_rejects_corrupt_transcript_before_any_partial_replay(tmp_path):
+    """An incomplete saved transcript must never look like a successful load."""
     agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
     transport = _RecordingTransport()
     agent.bind_transport(transport)
@@ -1174,8 +1169,12 @@ def test_replay_skips_corrupt_transcript_row_without_fabricating_history(tmp_pat
         )
         db.commit()
     replay_store.append_host_transcript(store, session_id, "agent_message", "valid after")
-    history = replay_store.replay_session(store, session_id)
-    assert [item["text"] for item in history] == ["valid after"]
+    with pytest.raises(ValueError, match="Incomplete history"):
+        replay_store.replay_session(store, session_id)
+    transport.notifications.clear()
+    with pytest.raises(RpcError, match="Incomplete history"):
+        agent._session_load(2, dict(sessionId=session_id, cwd=str(tmp_path), mcpServers=[]))
+    assert transport.notifications == []
 
 
 def test_replayed_assistant_text_never_becomes_user_input(tmp_path):
@@ -1451,8 +1450,56 @@ def test_replay_folds_each_card_update_run_into_its_final_state(tmp_path):
     history = replay_store.replay_session(store, sid)
     shapes = [(e["kind"], e.get("update", {}).get("sessionUpdate")) for e in history]
     assert shapes == [
-        ("update", "tool_call"), ("agent_message", None), ("update", "tool_call_update"),
+        ("update", "tool_call"), ("update", "tool_call_update"), ("agent_message", None), ("update", "tool_call_update"),
         ("update", "tool_call"), ("update", "tool_call_update"),
     ]
-    assert history[2]["update"] == dict(sessionUpdate="tool_call_update", toolCallId="worker:a", rawInput=log, status="completed")
-    assert history[4]["update"]["status"] == "failed" and "rawInput" not in history[4]["update"]
+    assert history[1]["update"] == dict(sessionUpdate="tool_call_update", toolCallId="worker:a", rawInput=log)
+    assert history[1]["source_sequences"] == list(range(1, 51))
+    assert history[3]["update"]["status"] == "completed"
+    assert history[5]["update"]["status"] == "failed" and "rawInput" not in history[5]["update"]
+
+
+@pytest.mark.parametrize("count", [4095, 4096, 4097])
+def test_long_history_reloads_with_stable_identity_and_no_durable_changes(tmp_path, count):
+    agent = Agent(_CountingFakeRuntime(), environ=_isolated_environ())
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    sid = agent._session_new(dict(cwd=str(tmp_path), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(tmp_path))
+    with store.connection() as db:
+        db.executemany(
+            "INSERT INTO host_transcript(session_id,seq,kind,text,attachments_json,message_id,created_at) VALUES (?,?,?,?,?,?,?)",
+            [(sid, i, "agent_message", f"🙂я {i}", "[]", f"m:{i}", "2026-09-23") for i in range(count)],
+        )
+        db.commit()
+        before = list(map(tuple, db.execute("SELECT * FROM host_transcript WHERE session_id=? ORDER BY seq", (sid,))))
+    deliveries = []
+    for request_id in (40, 41):
+        transport.notifications.clear()
+        agent._session_load(request_id, dict(sessionId=sid, cwd=str(tmp_path), mcpServers=[]))
+        updates = [n["params"]["update"] for n in transport.notifications
+                   if n.get("method") == "session/update" and n["params"]["update"]["sessionUpdate"] == "agent_message_chunk"]
+        assert len(updates) == count
+        assert [u["messageId"] for u in updates] == [f"m:{i}" for i in range(count)]
+        assert [u["_meta"]["cortexReplay"]["sequences"] for u in updates] == [[i] for i in range(count)]
+        deliveries.append(updates)
+    assert deliveries[0] == deliveries[1]
+    with store.connection() as db:
+        assert list(map(tuple, db.execute("SELECT * FROM host_transcript WHERE session_id=? ORDER BY seq", (sid,)))) == before
+
+
+def test_text_coalescing_keeps_boundaries_sequences_and_byte_lengths():
+    def text(seq, body, identity="m", attachments=None, kind="agent_message"):
+        return dict(kind=kind, text=body, message_id=identity, attachments=attachments or [],
+                    source_sequences=[seq], source_text_bytes=[len(body.encode("utf-8"))])
+    rows = [text(0, "🙂"), text(1, "я"),
+            dict(kind="update", update=dict(sessionUpdate="tool_call", toolCallId="card"), source_sequences=[2]),
+            text(3, "after"), text(4, "no-id", None), text(5, "no-id", None),
+            text(6, "attached", attachments=[dict(name="note")]), text(7, "x" * 65536), text(8, "end")]
+    result = replay_store._merge_replay_entries(rows)
+    assert result[0]["text"] == "🙂я"
+    assert result[0]["source_sequences"] == [0, 1]
+    assert result[0]["source_text_bytes"] == [4, 2]
+    assert len(result) == 8
+    assert [seq for entry in result for seq in entry["source_sequences"]] == list(range(9))

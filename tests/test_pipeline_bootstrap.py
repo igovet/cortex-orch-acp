@@ -52,6 +52,18 @@ def _pipeline_body(store, task_id):
     return (task_dir / report["filename"]).read_text(encoding="utf-8")
 
 
+def test_route_line_uses_readable_model_names_and_marks_unresolved_aliases():
+    assert pipeline_bootstrap._route_line(dict(
+        engine="codex-acp", model="claude-opus-5-5[1m]", effort="medium",
+    )) == "Bound coordinator route: engine `codex`, model `Opus 5.5 (1M)`, effort `medium`."
+    assert pipeline_bootstrap._route_line(dict(
+        engine="codex-acp", model="gpt-5.6-luna", effort="medium",
+    )) == "Bound coordinator route: engine `codex`, model `gpt-5.6-luna (alias)`, effort `medium`."
+    assert pipeline_bootstrap._route_line(dict(
+        engine="codex-acp", model="gpt-5.6-luna", model_name="Luna", effort="medium",
+    )) == "Bound coordinator route: engine `codex`, model `Luna`, effort `medium`."
+
+
 def test_publish_creates_pipeline_report(tmp_path):
     store, task_id = _task(tmp_path)
     channel = _coordinator_channel(store, task_id)

@@ -20,7 +20,7 @@ def obj(properties, required=None):
 NODE = obj(dict(id=text('Unique plan node name: a letter, then letters, digits, \'_\' or \'-\', at most 64 characters.', 64), role=text('Specialist role. Runtime resolves its profile and route.', 80),
                 objective=text('One bounded implementation or investigation objective. The runtime automatically adds mandatory independent code review and final verification after all proposed tasks; do not duplicate those stages in this plan. Put any scope note or rationale here: a task has no other free-text field.'),
                 dependencies=array(text('Predecessor node name.', 64)),
-                scope=array(text('Requested project-relative path or glob; \'.\' is the whole project. Never absolute, never containing \'..\' or a backslash, and never inside .cortex, .git, .codex or .claude. Runtime policy decides access.', 512), minimum=1),
+                scope=array(text('Requested project-relative path or glob; \'.\' is the whole project. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write. Runtime policy decides access.', 512), minimum=1),
                 complexity=dict(type='string', enum=['low', 'normal', 'high'],
                                 description='How hard this task is, judged from the work itself: low for a narrow lookup or mechanical change, '
                                             'high for cross-cutting root-cause analysis, production incidents, concurrency, security or data-loss risk; '
@@ -56,7 +56,7 @@ RESULT = obj(dict(
 RESULT['properties']['report_ref']['pattern'] = r'^r_[0-9a-f]{12}$'
 REQUESTS = {
     'replan_request': obj(dict(reason=text('Evidence requiring a new decomposition or additional investigation.'),request_key=text('Unique proposal identity.',128))),
-    'scope_request': obj(dict(reason=text('Why the current scope prevents completion.'),scope=array(text('Requested project-relative path or glob; \'.\' is the whole project. Never absolute, never containing \'..\' or a backslash, and never inside .cortex, .git, .codex or .claude.',512),minimum=1),request_key=text('Unique proposal identity.',128))),
+    'scope_request': obj(dict(reason=text('Why the current scope prevents completion.'),scope=array(text('Requested project-relative path or glob; \'.\' is the whole project. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write.',512),minimum=1),request_key=text('Unique proposal identity.',128))),
     'escalation_request': obj(dict(reason=text('Problem requiring independent senior consultation. Runtime retains configured model/effort policy.'),request_key=text('Unique proposal identity.',128))),
 }
 COORDINATOR['verification_submit'] = obj(dict(

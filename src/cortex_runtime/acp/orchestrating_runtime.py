@@ -199,6 +199,16 @@ def _acp_tool_call_status(status: str | None) -> str:
     return status if status in _ACP_TOOL_CALL_STATUSES else "in_progress"
 
 
+def worker_card_outcome(node_status: str | None, result_json: str | None) -> tuple[str, str | None]:
+    """Map the authoritative runtime node to an ACP card state and label."""
+    # ACP has no ``completed_with_issues`` status. A worker whose result was
+    # rejected for failed checks is complete, but must visibly retain that
+    # outcome; a failed node without a result is an execution failure.
+    if node_status == "failed":
+        return ("completed", "Completed with issues") if result_json is not None else ("failed", None)
+    return (_acp_tool_call_status(node_status), None)
+
+
 # A worker's card carries the one thing it is doing right now, not its
 # whole feed -- so this bounds a single line, not a transcript.
 _WORKER_ACTIVITY_MAX_CHARS = 300
@@ -1554,7 +1564,22 @@ class OrchestratingRuntime:
             return None
         return _json.loads(row["payload_json"]).get("role")
 
-    def _resolve_context_window_tokens(self, task_id: str, preview: Mapping[str, Any]) -> int | None:
+    def _resolve_context_window_tokens(self, task_id: str, preview: Mapping[str, Any], session_ref: str | None = None) -> int | None:
+        """The route's real context window: the catalog's evidenced value,
+        else the window the engine itself reported for this session (or for
+        the same connection and route model earlier) on ``usage_update``.
+        ``None`` only when neither source ever said."""
+        window = self._catalog_context_window_tokens(task_id, preview)
+        if window is None and session_ref is not None:
+            reported = getattr(self._engine, "context_window", None)
+            if reported is not None:
+                try:
+                    window = reported(session_ref)
+                except Exception:
+                    window = None
+        return window
+
+    def _catalog_context_window_tokens(self, task_id: str, preview: Mapping[str, Any]) -> int | None:
         """T024: the real, evidenced context-window budget for this task's
         currently selected route, when the catalog actually recorded one
         (``catalog.model.CatalogEntry.context_window_tokens`` -- see that
@@ -1797,7 +1822,7 @@ class OrchestratingRuntime:
             tool_schemas_bytes = len(json.dumps(delegation_contracts.schemas_for(recipient), sort_keys=True).encode("utf-8"))
         except StoreError:
             tool_schemas_bytes = 0
-        context_window_tokens = self._resolve_context_window_tokens(task_id, preview)
+        context_window_tokens = self._resolve_context_window_tokens(task_id, preview, session_ref)
         decision = token_budget.plan_budget(
             context_window_tokens=context_window_tokens,
             role_instructions_bytes=len(role_blocks_text.encode("utf-8")),
@@ -1812,6 +1837,16 @@ class OrchestratingRuntime:
                 "budget_overflow", dict(
                     limit_name=decision.limit_name, context_window_tokens=decision.context_window_tokens,
                     context_window_basis=decision.context_window_basis, message=decision.message,
+                ),
+                emit_update, language,
+            )
+            return prompt_text, None, blocked
+        if decision.decision == "unverified_window":
+            blocked = self._block_generation_delivery(
+                task_id, session_ref, generation, capsule["capsule_revision"], "budget_window_unverified",
+                "budget_window_unverified", dict(
+                    mandatory_tokens=decision.mandatory_tokens,
+                    context_window_tokens=decision.context_window_tokens,
                 ),
                 emit_update, language,
             )
@@ -1837,7 +1872,10 @@ class OrchestratingRuntime:
                 before_tokens, before_basis = usage["tokens"], usage.get("basis", token_budget.ENGINE_REPORTED_BASIS)
             else:
                 before_tokens, before_basis = token_budget.estimate_tokens(total_capsule_bytes), token_budget.ESTIMATED_BASIS
-            usable_window = int(decision.context_window_tokens * token_budget.SAFETY_MARGIN_FRACTION)
+            usable_window = (
+                int(decision.context_window_tokens * token_budget.SAFETY_MARGIN_FRACTION)
+                if decision.context_window_basis != token_budget.ESTIMATED_BASIS else None
+            )
             guard_result = compaction_guard.evaluate_compaction(
                 self._store, task_id=task_id, engine_session_ref=session_ref, generation_id=generation["id"],
                 before_tokens=before_tokens, before_basis=before_basis,
@@ -2760,14 +2798,22 @@ class OrchestratingRuntime:
                 if worker_in_flight:
                     continue
                 self._close_assignment(task_id, assignment_ref)
-                checks = event.payload.get("checks") or []
                 lines = [event.payload.get("summary", "")]
                 with self._lock:
                     has_final_response = assignment_ref in self._worker_final_response_seen
+                status, outcome_label = self._worker_card_outcome(task_id, assignment_ref)
+                fields: dict[str, Any] = {"status": status}
+                if outcome_label:
+                    with self._lock:
+                        base_title = getattr(self, "_worker_card_title", {}).get(assignment_ref)
+                    if base_title:
+                        fields["title"] = f"{base_title} · {outcome_label}"
                 self._emit_worker_card(
-                    emit_tool_call, assignment_ref, status="completed",
-                    entry=("Result: " + _compact_text(lines[0], _WORKER_ACTIVITY_MAX_CHARS - 8)
+                    emit_tool_call, assignment_ref,
+                    entry=((outcome_label + ": " if outcome_label else "") + "Result: " +
+                           _compact_text(lines[0], _WORKER_ACTIVITY_MAX_CHARS - 8)
                            if lines[0] and not has_final_response else None),
+                    **fields,
                 )
             elif event.event_type == "assignment_failed" and event.assignment_ref:
                 self._close_assignment(task_id, event.assignment_ref)
@@ -2801,6 +2847,22 @@ class OrchestratingRuntime:
             # has been observed.  The terminal fence in _emit_worker_card
             # also handles an already-snapshotted tick racing this cleanup.
             self._worker_activity.pop(assignment_ref, None)
+
+    def _worker_card_outcome(self, task_id: str, assignment_ref: str) -> tuple[str, str | None]:
+        """Read the same runtime node state used by pipeline and worker history."""
+        try:
+            with self._store.connection() as db:
+                row = db.execute(
+                    "SELECT status,result_json FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+                    (task_id, assignment_ref),
+                ).fetchone()
+        except (sqlite3.Error, StoreError):
+            row = None
+        if row is None:
+            # A result event is terminal. This compatibility fallback only
+            # applies to pre-runtime or already-pruned rows.
+            return "completed", None
+        return worker_card_outcome(row["status"], row["result_json"])
 
     def _clamp_attempt_context_size(self, attempt_id: str | None, size: Any) -> int | None:
         """The largest context-window ``size`` reported so far for this

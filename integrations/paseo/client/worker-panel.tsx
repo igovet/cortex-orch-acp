@@ -11,7 +11,7 @@ import { groupWorkerEvents, type WorkerEvent } from "./worker-panel-events.js";
 import { presentTool } from "./worker-panel-tool.js";
 import { diffBlocks, diffLines, type DiffRow } from "./worker-panel-diff.js";
 import { chatToolIcon, groupToolRuns, isToolEvent, nativeRow, toolSemantics, type TranscriptItem } from "./worker-panel-groups.ts";
-import { workerAssignmentLine, workerDisplayName } from "./worker-display.js";
+import { workerAssignmentLine, workerDisplayName, workerModelDisplay } from "./worker-display.js";
 import { workerPopoverStatus } from "./worker-popover-status.js";
 import { openWorkspaceFile } from "./open-workspace-file.ts";
 import { UsageMeter } from "./usage-meter.tsx";
@@ -392,7 +392,7 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
           <Text style={[styles.title, { color: theme.colors.foreground }]}>{selectedAssignment?.title?.trim() || "Worker"}</Text>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 7, alignItems: "center" }}>
             <Text style={[styles.muted, { color: selectedAttempt.status === "failed" ? theme.colors.statusDanger : theme.colors.foregroundMuted }]}>{selectedAssignment ? workerDisplayName(selectedAssignment) : "worker"}</Text>
-            {route && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.provider}</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.model}</Text>{route.effort && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.effort} effort</Text></>}</>}
+            {route && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.provider}</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{workerModelDisplay(route)}</Text>{route.effort && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.effort} effort</Text></>}</>}
             <Text style={[styles.muted, { color: selectedAttempt.status === "failed" ? theme.colors.statusDanger : theme.colors.foregroundMuted }]}>· {workerStatus(selectedAttempt.status, selectedAttempt.events.length)}</Text>
           </View>
           <UsageMeter context={selectedAttempt.context} tokens={selectedAttempt.tokens} theme={theme} />

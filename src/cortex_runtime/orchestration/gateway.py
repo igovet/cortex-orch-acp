@@ -21,7 +21,7 @@ from ..ownership import current_owner_epoch
 from .contracts import obj, text, array, validate
 from .state import encoded, event, TERMINAL
 
-PRIVATE = {'.cortex', '.git', '.codex', '.claude'}
+from .project_paths import PRIVATE, permitted_path
 READ_ONLY = {'worker-architect', 'worker-ux-designer', 'worker-code-reviewer', 'worker-senior-consultant', 'senior-consultant',
              'worker-explorer', 'worker-planner', 'worker-security-auditor', 'worker-accessibility-auditor'}
 
@@ -55,7 +55,7 @@ SCHEMAS = {
                                request_key=text('Unique action identity.',128))),
     'project_mkdir': obj(dict(path=text('New project-relative directory within the assignment scope. Parent must exist.',512),
                               request_key=text('Unique action identity.',128))),
-    'project_read': obj(dict(path=text('Project-relative regular file or directory; \'.\' is the project root. Never absolute, never containing \'..\' or a backslash, and never inside .cortex, .git, .codex or .claude.',512),
+    'project_read': obj(dict(path=text('Project-relative regular file or directory; \'.\' is the project root. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write.',512),
                              offset=integer('UTF-8 character offset for file reads.',1000000000),
                              limit=integer('Maximum characters or directory entries; response supplies the next offset.',65536)), required=['path']),
     'project_write': obj(dict(path=text('Project-relative file inside this assignment scope. Symlinks are rejected.',512),
@@ -84,7 +84,7 @@ SCHEMAS['project_write']['properties']['content']['minLength'] = 0
 
 def _parts(value):
     path = PurePosixPath(value)
-    if path.is_absolute() or '..' in path.parts or '\\' in value or '\x00' in value or PRIVATE.intersection(path.parts):
+    if not permitted_path(value):
         raise StoreError('gateway_path_denied')
     return path.parts
 
@@ -216,6 +216,9 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                              reveal=frozenset({'.git'}),git_writable=True,git_guard=planted) as (command,fds):
             # A worker's shell is the owner's shell, still scope-confined.
             as_owner(command,os.environ)
+            if not scopes:
+                from .sandbox import readonly_test_cache
+                readonly_test_cache(command, scratch, os.environ)
             # Opt-in: ssh asks for a password in a desktop dialog.
             ssh_askpass.apply(command,os.environ,Path(askpass_dir))
             with store.connection() as db:

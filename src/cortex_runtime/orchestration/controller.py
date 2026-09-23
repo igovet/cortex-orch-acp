@@ -59,12 +59,14 @@ def _verification(runtime, task_id, machine, emit_tool_call, cancel):
             # node_modules) are writable, so sources stay untouched and the
             # revision (which skips ignored paths) cannot drift. No access to
             # the real private store, even from an interpreter.
-            from .sandbox import as_owner, gateway_command, with_umask
+            from .sandbox import as_owner, gateway_command, with_umask, readonly_test_cache
             try:
                 scopes = [path + '/**' for path in revision.ignored_directories(str(root))]
                 command, fds = stack.enter_context(
-                    gateway_command(root, scratch, with_umask(argv), scopes, system_root=True))
+                    gateway_command(root, scratch, with_umask(argv), scopes, system_root=True,
+                                    reveal=frozenset({'.git'})))
                 as_owner(command, os.environ)
+                readonly_test_cache(command, scratch, os.environ)
             except StoreError as error:
                 machine.move(task_id, 'BLOCKED', blocker=str(error))
                 return

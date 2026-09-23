@@ -110,3 +110,24 @@ def test_confirming_g1_delivery_does_not_clear_a_pending_g2_delivery(tmp_path):
     delegation_deliveries.mark_transmitted(store, d2["id"], "test")
     adapter.mark_delivery_confirmed(session_ref, d2["id"])
     assert adapter.pending_delivery(session_ref) is None
+
+
+def test_adapter_reports_the_engine_context_window_for_fresh_sessions(tmp_path):
+    from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter
+
+    environ = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(tmp_path / "state")}
+    adapter = EngineSessionManagerAdapter(
+        connection_record_factory=lambda task_id: (_ for _ in ()).throw(AssertionError("not exercised")),
+        workspace_root_factory=lambda task_id: (_ for _ in ()).throw(AssertionError("not exercised")),
+        environ=environ,
+    )
+    adapter._session_meta["es_old"] = dict(connection_id="conn-1", model="sonnet")
+    adapter._session_meta["es_new"] = dict(connection_id="conn-1", model="sonnet")
+    adapter._session_meta["es_other"] = dict(connection_id="conn-1", model="opus")
+    assert adapter.context_window("es_new") is None
+    adapter._observe_context_window("es_old", 1_000_000)
+    assert adapter.context_window("es_old") == 1_000_000
+    # A fresh session on the same connection and model uses the reported window.
+    assert adapter.context_window("es_new") == 1_000_000
+    assert adapter.context_window("es_other") is None
+    assert adapter.context_window("es_unknown") is None

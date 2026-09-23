@@ -266,9 +266,22 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
         capture_output=True, text=True, check=True,
     )
     failed_assignment = json.loads(failed.stdout)['assignments'][0]
-    assert failed_assignment['status'] == 'failed'
-    assert failed_assignment['attempts'][0]['status'] == 'failed'
+    assert failed_assignment['status'] == 'completed_with_issues'
+    assert failed_assignment['attempts'][0]['status'] == 'completed_with_issues'
+    assert failed_assignment['attempts'][0]['failureReason'].startswith('Completed with issues.')
     assert 'actual check: unverified' in failed_assignment['attempts'][0]['failureReason']
+
+    # A failed node without a retained worker result is a real execution
+    # failure, rather than a completed result with rejected checks.
+    db = sqlite3.connect(db_path)
+    db.execute("update runtime_nodes set result_json=null where task_id=? and assignment_ref=?", (task, 'delegate_hash'))
+    db.commit()
+    db.close()
+    execution_failed = subprocess.run(
+        ["python3", "-B", "-c", query, str(project), task, "xa_revision", "8", "1", "", "delegate_hash"],
+        capture_output=True, text=True, check=True,
+    )
+    assert json.loads(execution_failed.stdout)['assignments'][0]['status'] == 'failed'
 
     # Existing worker reads lose document bodies on projection; paths/status survive.
     db = sqlite3.connect(db_path)

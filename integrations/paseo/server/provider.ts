@@ -1,3 +1,5 @@
+import { ReplayController } from "./replay-connector.ts";
+import { ReplaySpool } from "./replay-spool.mjs";
 import { isHiddenOperation } from "../shared/timeline-visibility.ts";
 import { presentToolSemantics } from "../shared/tool-presentation.ts";
 import { gatewayPresentation } from "../shared/gateway-presentation.ts";
@@ -26,8 +28,6 @@ type LaunchConfig = {
   shim?: string;
 };
 
-const MAX_BUFFERED_TIMELINE_ITEMS = 4096;
-const MAX_BUFFERED_TIMELINE_BYTES = 16 * 1024 * 1024;
 const REPLAY_USER_MESSAGE_ID = /^__cortex_history_user__[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:[1-9][0-9]*$/;
 
 function repairFailedTimelineError(event: ProviderEvent): ProviderEvent {
@@ -53,10 +53,13 @@ function restoreReplayUserMessage(event: ProviderEvent): ProviderEvent {
     event.type === "timeline.item" &&
     event.item.type === "assistant_message" &&
     typeof event.item.messageId === "string" &&
-    REPLAY_USER_MESSAGE_ID.test(event.item.messageId)
+    (REPLAY_USER_MESSAGE_ID.test(event.item.messageId) || event.item.messageId.startsWith("__cortex_history_user_v2__"))
   ) {
     const { messageId: _messageId, ...item } = event.item;
-    return { ...event, item: { ...item, type: "user_message" } };
+    const id = _messageId.startsWith("__cortex_history_user_v2__")
+      ? Buffer.from(_messageId.slice("__cortex_history_user_v2__".length), "base64url").toString("utf8")
+      : item.id;
+    return { ...event, item: { ...item, id, type: "user_message" } };
   }
   return event;
 }
@@ -421,7 +424,7 @@ export function withAccessModeVisuals<T extends { modes: ReadonlyArray<{ id: str
 
 export function createCortexProvider(): ProviderRegistration {
   const command = cortexCommand();
-  const base = runAcpProvider({
+  const makeBase = (replay: ReplayController) => runAcpProvider({
     // Register the native provider under `cortex` for new chats. The setup
     // command removes only the exact owned generic registration; old generic
     // chats may therefore become inaccessible. The plugin manifest remains
@@ -429,7 +432,7 @@ export function createCortexProvider(): ProviderRegistration {
     id: "cortex",
     label: "Cortex",
     description: "Cortex ACP orchestration",
-    command,
+    connector: replay.connect,
     // Cortex advertises its slash commands immediately after session/new.
     // Paseo otherwise emits session.ready and asks the composer for its
     // command list before that asynchronous notification arrives, caching an
@@ -464,10 +467,12 @@ export function createCortexProvider(): ProviderRegistration {
     }],
   });
 
+  const base = makeBase(new ReplayController(command));
   return {
     ...base,
     async connect(request) {
-      return wrapCortexConnection(await base.connect(request), request.capabilities);
+      const replay = new ReplayController(command);
+      return wrapCortexConnection(replay.wrap(await makeBase(replay).connect(request)), request.capabilities);
     },
   };
 }
@@ -530,9 +535,9 @@ export function wrapCortexConnection(
     await connection.send({ ...input, response: { behavior: "deny" } });
   }
   const openedSessions = new Set<string>();
-  const bufferedTimeline = new Map<string, ProviderEvent[]>();
-  const bufferedTimelineBytes = new Map<string, number>();
+  const bufferedTimeline = new Map<string, ReplaySpool>();
   const listeners = new Set<(event: ProviderEvent) => void>();
+  let unsubscribe: (() => void) | undefined;
   return {
     ...connection,
     capabilities,
@@ -598,14 +603,16 @@ export function wrapCortexConnection(
       questionIds.clear();
       answerRequests.clear();
       openedSessions.clear();
+      for (const spool of bufferedTimeline.values()) spool.close();
       bufferedTimeline.clear();
-      bufferedTimelineBytes.clear();
       listeners.clear();
+      unsubscribe?.();
       return connection.close();
     },
-    onEvent(listener) {
-      listeners.add(listener);
-      const unsubscribe = connection.onEvent((event) => {
+    onEvent(subscriber) {
+      listeners.add(subscriber);
+      const listener = (event: ProviderEvent) => listeners.forEach(callback => callback(event));
+      unsubscribe ??= connection.onEvent((event) => {
         if (!visibleTimeline(event)) return;
         if ((event.type === "request.completed" || event.type === "request.failed")
           && event.requestId.startsWith(ANSWER_REQUEST_PREFIX)) return;
@@ -616,33 +623,31 @@ export function wrapCortexConnection(
             : event);
           const pending = bufferedTimeline.get(event.sessionId);
           bufferedTimeline.delete(event.sessionId);
-          bufferedTimelineBytes.delete(event.sessionId);
-          for (const historical of pending ?? []) {
-            if (visibleTimeline(historical)) listener(presentTimeline(historical));
-          }
+          try {
+            for (const item of pending?.frames() ?? []) {
+              const historical = item as ProviderEvent;
+              if (visibleTimeline(historical)) listener(presentTimeline(historical));
+            }
+          } finally { pending?.close(); }
           return;
         }
         if (event.type === "timeline.item" && !openedSessions.has(event.sessionId)) {
-          const pending = bufferedTimeline.get(event.sessionId) ?? [];
-          const eventBytes = JSON.stringify(event).length;
-          const pendingBytes = bufferedTimelineBytes.get(event.sessionId) ?? 0;
-          if (
-            pending.length >= MAX_BUFFERED_TIMELINE_ITEMS ||
-            pendingBytes + eventBytes > MAX_BUFFERED_TIMELINE_BYTES
-          ) {
-            throw new Error(
-              `Paseo timeline history buffer exceeded limits for ${event.sessionId}`,
-            );
+          const pending = bufferedTimeline.get(event.sessionId) ?? new ReplaySpool();
+          try { pending.append(event); }
+          catch {
+            pending.close();
+            bufferedTimeline.delete(event.sessionId);
+            listener({ type: "session.runtime_failed", sessionId: event.sessionId,
+              error: { message: "Incomplete history: provider replay staging failed" } });
+            return;
           }
-          pending.push(event);
           bufferedTimeline.set(event.sessionId, pending);
-          bufferedTimelineBytes.set(event.sessionId, pendingBytes + eventBytes);
           return;
         }
         if (event.type === "session.closed" || event.type === "session.runtime_failed") {
           openedSessions.delete(event.sessionId);
+          bufferedTimeline.get(event.sessionId)?.close();
           bufferedTimeline.delete(event.sessionId);
-          bufferedTimelineBytes.delete(event.sessionId);
           listener(event);
           return;
         }
@@ -705,8 +710,7 @@ export function wrapCortexConnection(
         listener(presentTimeline(event));
       });
       return () => {
-        listeners.delete(listener);
-        unsubscribe();
+        listeners.delete(subscriber);
       };
     },
   };

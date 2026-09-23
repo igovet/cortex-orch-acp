@@ -2345,11 +2345,17 @@ class Agent:
         durable = acp_sessions.get_session(store, session_id)
         if durable is None or durable["project_root"] != project:
             raise RpcError(-32602, "Unknown sessionId.")
-        history = acp_replay_store.replay_session(store, session_id)
+        try:
+            history = acp_replay_store.replay_session(store, session_id)
+        except ValueError as exc:
+            raise RpcError(-32603, str(exc)) from None
         for replay_index, entry in enumerate(history):
             if entry["kind"] == "update":
                 queued = self.transport.send_notification(
-                    protocol.notification("session/update", dict(sessionId=session_id, update=entry["update"]))
+                    protocol.notification("session/update", dict(sessionId=session_id, update={
+                        **entry["update"], "_meta": {**entry["update"].get("_meta", {}),
+                            "cortexReplay": {"sessionId": session_id, "sequences": entry["source_sequences"]}},
+                    }))
                 )
                 if not queued:
                     raise RpcError(-32603, "Cannot enqueue complete session history.")
@@ -2360,11 +2366,15 @@ class Agent:
                     f"\n[attachment: {attachment.get('name') or attachment.get('uri') or attachment.get('kind')} "
                     f"({attachment.get('availability')}) source_ref={attachment.get('source_ref')}]"
                 )
-            message_id = entry.get("message_id") or f"replay:{session_id}:{replay_index}"
-            if entry["kind"] == "user_message":
-                queued = self.transport.send_notification(protocol.user_message_chunk(session_id, text, message_id))
-            else:
-                queued = self.transport.send_notification(protocol.agent_message_chunk(session_id, text, message_id))
+            message_id = entry.get("message_id") or f"replay:{session_id}:{entry['source_sequences'][0]}"
+            notification = (protocol.user_message_chunk(session_id, text, message_id)
+                            if entry["kind"] == "user_message"
+                            else protocol.agent_message_chunk(session_id, text, message_id))
+            notification["params"]["update"]["_meta"] = {"cortexReplay": {
+                "sessionId": session_id, "sequences": entry["source_sequences"],
+                "textBytes": entry["source_text_bytes"],
+            }}
+            queued = self.transport.send_notification(notification)
             if not queued:
                 raise RpcError(-32603, "Cannot enqueue complete session history.")
         # A result/cancellation can win the race with a worker turn's final

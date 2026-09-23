@@ -213,6 +213,19 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
+def _restore_directory_modes(root: Path, manifest: dict, *, changed_paths=()) -> None:
+    """Restore unchanged directory permissions after copying into a private stage."""
+    changed = set(changed_paths)
+    directories = [
+        (root / Path(rel), entry["mode"])
+        for rel, entry in manifest.items()
+        if entry.get("kind") == "d" and rel not in changed
+    ]
+    for path, mode in sorted(directories, key=lambda item: len(item[0].parts), reverse=True):
+        if path.is_dir() and not path.is_symlink():
+            os.chmod(path, mode)
+
+
 def _apply_change(stage: Path, source_root: Path, rel: str, entry: dict | None) -> None:
     destination = _ensure_parent(stage, rel)
     if entry is None:
@@ -424,6 +437,7 @@ def prepare_candidate(store, task_id: str, attempt_ids, *, candidate_id: str | N
             capture_and_copy_workspace(project_root, str(stage))
             if _manifest(project_root) != project_before:
                 raise CandidateError("project_changed_during_candidate_capture")
+            _restore_directory_modes(stage, project_before)
             source_bindings = _source_bindings(rows)
             base_identity = [{
                 "attempt_id": row["attempt_id"], "base_kind": row["base_kind"],
@@ -562,6 +576,8 @@ def prepare_candidate(store, task_id: str, attempt_ids, *, candidate_id: str | N
         for attempt_id, root, _ in changes:
             if _manifest(root) != source_manifests[attempt_id]:
                 raise CandidateError(f"attempt_workspace_changed:{attempt_id}")
+        changed_paths = {rel for _, _, change in changes for rel in change}
+        _restore_directory_modes(stage, project_base_manifest, changed_paths=changed_paths)
         manifest = _manifest(str(stage))
         with store.connection() as db:
             db.execute("UPDATE candidate_staging SET source_bindings_json=?,base_identity_json=?,lineage_candidate_id=?,project_base_manifest_json=?,project_base_digest=?,content_digest=?,status=?,conflict_paths_json=? WHERE candidate_id=?",

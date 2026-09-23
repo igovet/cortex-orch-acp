@@ -9,6 +9,7 @@ const assignment = (status: string, events: Array<{ type: string }>) => ({
 assert.equal(workerPopoverStatus(assignment("running", [{ type: "assignment_cancelled" }])), "cancelled");
 assert.equal(workerPopoverStatus(assignment("running", [{ type: "assignment_failed" }])), "failed");
 assert.equal(workerPopoverStatus(assignment("running", [{ type: "worker_result" }])), "completed");
+assert.equal(workerPopoverStatus(assignment("completed_with_issues", [{ type: "worker_result" }])), "completed_with_issues");
 assert.equal(workerPopoverStatus(assignment("cancelled", [{ type: "worker_result" }])), "cancelled");
 assert.equal(workerPopoverStatus(assignment("running", [])), "running");
 console.log("worker popover status tests passed");

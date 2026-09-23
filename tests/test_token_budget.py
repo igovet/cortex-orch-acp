@@ -101,3 +101,29 @@ def test_plan_budget_prefers_exact_usage_over_estimate_for_chat_history():
 def test_estimate_tokens_for_text_matches_byte_estimate():
     text = "abc" * 100
     assert estimate_tokens_for_text(text) == estimate_tokens(len(text.encode("utf-8")))
+
+
+def test_plan_budget_unknown_window_is_unverified_not_overflow():
+    decision = plan_budget(
+        context_window_tokens=None,
+        role_instructions_bytes=50_000,
+        tool_schemas_bytes=50_000,
+        chat_history_bytes=50_000,
+        capsule_bytes=50_000,
+    )
+    assert decision.decision == "unverified_window"
+    assert decision.context_window_basis == ESTIMATED_BASIS
+    assert "not reported its real context window" in decision.message
+
+
+def test_observed_context_window_is_kept_per_connection_and_model(tmp_path):
+    from cortex_runtime.connections import context_window
+
+    environ = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(tmp_path / "state")}
+    assert context_window.observed("conn-1", "gpt-5.6-luna", environ) is None
+    context_window.observe("conn-1", "gpt-5.6-luna", 272_000, environ)
+    context_window.observe("conn-1", "gpt-5.6-luna", 0, environ)
+    context_window.observe("conn-1", "other", True, environ)
+    assert context_window.observed("conn-1", "gpt-5.6-luna", environ) == 272_000
+    assert context_window.observed("conn-1", "other", environ) is None
+    assert context_window.observed("conn-2", "gpt-5.6-luna", environ) is None
