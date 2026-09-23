@@ -17,13 +17,23 @@ on a second dedicated thread behind a bounded queue:
 """
 from __future__ import annotations
 
+import codecs
 import json
 import queue
 import sys
 import threading
 import time
 
-MAX_FRAME_BYTES = 2_000_000
+# One inbound line. A session/prompt carries its images inline as base64, and
+# Cortex accepts up to 4 MiB of decoded attachments per prompt (see
+# acp.replay_store.MAX_PROMPT_ATTACHMENT_BYTES), about 5.6 MB once encoded,
+# plus the prompt text. The Paseo relay drops the whole stream above 16 MiB,
+# so this stays below that and answers an oversized request itself.
+MAX_FRAME_BYTES = 8 * 1024 * 1024
+OVERSIZED_FRAME_MESSAGE = (
+    "Request exceeds Cortex's 8 MiB message limit; attach fewer or smaller images.")
+# How much of an oversized frame's head is scanned for its top-level "id".
+ID_RECOVERY_PREFIX_BYTES = 64 * 1024
 MAX_JSON_DEPTH = 64
 OUTBOUND_QUEUE_MAXSIZE = 1024
 DEFAULT_UPDATE_TIMEOUT = 5.0
@@ -96,10 +106,68 @@ def _exceeds_json_depth(text, max_depth):
     return False
 
 
+def recover_request_id(head: bytes):
+    """Return the top-level JSON-RPC ``id`` of a frame from its first bytes.
+
+    Used only for a frame too large to parse, so the error can answer the
+    client's own request instead of ``id: null`` (which leaves e.g. a
+    ``session/prompt`` pending forever). The head is read as a JSON object
+    member by member; the id is returned only when it is an integer or a
+    string found at depth one before any member that cannot be read whole
+    from the head. Anything else yields ``None`` -- the id is never guessed.
+    """
+    try:
+        # A multi-byte character cut by the head boundary is left undecoded.
+        text = codecs.getincrementaldecoder("utf-8")().decode(head[:ID_RECOVERY_PREFIX_BYTES], final=False)
+    except UnicodeDecodeError:
+        return None
+    decoder = json.JSONDecoder()
+    position = _skip_ws(text, 0)
+    if not text.startswith("{", position):
+        return None
+    position += 1
+    while True:
+        position = _skip_ws(text, position)
+        if not text.startswith('"', position):
+            return None
+        try:
+            key, position = decoder.raw_decode(text, position)
+        except ValueError:
+            return None
+        position = _skip_ws(text, position)
+        if not text.startswith(":", position):
+            return None
+        position = _skip_ws(text, position + 1)
+        if _exceeds_json_depth(text[position:], MAX_JSON_DEPTH):
+            return None
+        try:
+            value, position = decoder.raw_decode(text, position)
+        except (ValueError, RecursionError):
+            return None
+        if key == "id":
+            if isinstance(value, str) or (isinstance(value, int) and not isinstance(value, bool)):
+                return value
+            return None
+        position = _skip_ws(text, position)
+        if not text.startswith(",", position):
+            return None
+        position += 1
+
+
+def _skip_ws(text, position):
+    while position < len(text) and text[position] in " \t\r\n":
+        position += 1
+    return position
+
+
+def oversized_frame_error(head: bytes):
+    return FrameError(-32700, OVERSIZED_FRAME_MESSAGE, recover_request_id(head))
+
+
 def parse_frame(raw_line: bytes):
     """Parse one newline-stripped inbound frame. Never echoes its content."""
     if len(raw_line) > MAX_FRAME_BYTES:
-        raise FrameError(-32700, "Frame exceeds the maximum size of 2,000,000 bytes.")
+        raise oversized_frame_error(raw_line)
     try:
         text = raw_line.decode("utf-8")
     except UnicodeDecodeError:
@@ -277,13 +345,14 @@ class StdioTransport:
                 if not raw_line:
                     break
                 if not raw_line.endswith(b"\n"):
-                    # Oversized (or final unterminated) frame: drain forward
-                    # without ever accumulating the offending bytes, then
-                    # reply without echoing any content, id unknown (null).
+                    # Oversized (or final unterminated) frame: keep only its
+                    # head to recover the request id, drain forward without
+                    # accumulating the rest, then reply without echoing any
+                    # content (id null when the head does not show one).
+                    error = oversized_frame_error(raw_line[:ID_RECOVERY_PREFIX_BYTES])
                     while raw_line and not raw_line.endswith(b"\n"):
                         raw_line = self._raw_stdin.readline(MAX_FRAME_BYTES + 1)
-                    self._inbound_handler(
-                        None, FrameError(-32700, "Frame exceeds the maximum size of 2,000,000 bytes."))
+                    self._inbound_handler(None, error)
                     continue
                 line = raw_line[:-1]
                 if not line:

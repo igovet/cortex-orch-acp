@@ -12,7 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from cortex_runtime.acp.transport import FrameError, StdioTransport, parse_frame, MAX_FRAME_BYTES, MAX_JSON_DEPTH
+from cortex_runtime.acp.transport import (
+    FrameError, StdioTransport, parse_frame, recover_request_id, MAX_FRAME_BYTES, MAX_JSON_DEPTH,
+    ID_RECOVERY_PREFIX_BYTES,
+)
 from acp_fakes import spawn_fake_agent, spawn_flooding_agent, spawn_production_agent
 
 
@@ -110,6 +113,38 @@ def test_oversized_frame_rejected():
     with pytest.raises(FrameError) as excinfo:
         parse_frame(raw)
     assert excinfo.value.code == -32700
+    assert excinfo.value.request_id == 1
+
+
+def test_frame_limit_fits_a_prompt_with_its_full_attachment_budget():
+    from cortex_runtime.acp.replay_store import MAX_PROMPT_ATTACHMENT_BYTES
+    encoded = ((MAX_PROMPT_ATTACHMENT_BYTES + 2) // 3) * 4
+    assert MAX_FRAME_BYTES >= encoded + 1024 * 1024
+    # The Paseo relay drops the whole stream above 16 MiB; Cortex must answer first.
+    assert MAX_FRAME_BYTES < 16 * 1024 * 1024
+
+
+@pytest.mark.parametrize("head, expected", [
+    (b'{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"prompt":[{"data":"AAAA', 7),
+    (b'{ "jsonrpc" : "2.0" , "id" : "req-\\u00e9" , "params":{"x', "req-\u00e9"),
+    (b'{"method":"session/prompt","jsonrpc":"2.0","id":3,"params":{', 3),
+    (b'{"jsonrpc":"2.0","method":"session/prompt","params":{"prompt":"xxx', None),
+    (b'{"params":{"id":5,"prompt":"xxx', None),
+    (b'{"jsonrpc":"2.0","id":null,"method":"x","params":{', None),
+    (b'{"jsonrpc":"2.0","id":true,"method":"x","params":{', None),
+    (b'{"jsonrpc":"2.0","id":1.5,"method":"x","params":{', None),
+    (b'{"jsonrpc":"2.0","id":"unterminated', None),
+    (b'["jsonrpc","id",1]', None),
+    (b'\xff{"id":1,', None),
+    (b"not json at all", None),
+])
+def test_recover_request_id_reads_only_a_top_level_id(head, expected):
+    assert recover_request_id(head) == expected
+
+
+def test_recover_request_id_ignores_an_id_beyond_the_scanned_head():
+    head = ('{"jsonrpc":"2.0","method":"x","pad":"' + "x" * ID_RECOVERY_PREFIX_BYTES + '","id":9}').encode()
+    assert recover_request_id(head) is None
 
 
 def test_missing_jsonrpc_field_rejected():
@@ -246,9 +281,39 @@ def test_oversized_frame_over_subprocess_no_echo_no_hang():
             proc.kill()
     lines = [json.loads(line) for line in out.splitlines()]
     assert len(lines) == 2
-    assert lines[0]["id"] is None and lines[0]["error"]["code"] == -32700
+    assert lines[0]["id"] == 1 and lines[0]["error"]["code"] == -32700
     assert secret not in out
     assert lines[1]["result"]["protocolVersion"] == 1
+    assert proc.returncode == 0
+
+
+def test_oversized_prompt_over_subprocess_is_answered_on_its_own_id():
+    """A session/prompt too large to read (e.g. several inline screenshots)
+    must get an error on its own id so the client ends the turn, instead of
+    an id-null reply that leaves the prompt pending forever."""
+    proc = spawn_production_agent()
+    try:
+        init = json.dumps(dict(jsonrpc="2.0", id=1, method="initialize",
+                               params=dict(protocolVersion=1, clientCapabilities={},
+                                           clientInfo=dict(name="t", version="1")))) + "\n"
+        image = dict(type="image", mimeType="image/png", data="A" * (MAX_FRAME_BYTES + 10))
+        prompt = json.dumps(dict(jsonrpc="2.0", id=2, method="session/prompt",
+                                 params=dict(sessionId="acps_missing", prompt=[image]))) + "\n"
+        proc.stdin.write(init)
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+        out = proc.stdout.read()
+        proc.stderr.read()
+        proc.wait(timeout=15)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    lines = [json.loads(line) for line in out.splitlines()]
+    assert len(lines) == 2
+    assert lines[0]["id"] == 1 and "result" in lines[0]
+    assert lines[1]["id"] == 2 and lines[1]["error"]["code"] == -32700
+    assert "images" in lines[1]["error"]["message"]
+    assert len(out) < 4096
     assert proc.returncode == 0
 
 

@@ -136,6 +136,15 @@ owner-private bytes with their exact MIME type, and forwarded unchanged in
 the engine's ACP `session/prompt` content array. `audio` remains rejected
 with `-32602` because it is unadvertised.
 
+Images travel inline as base64, so the whole `session/prompt` line must fit
+the transport's 8 MiB inbound frame limit (`acp.transport.MAX_FRAME_BYTES`):
+room for the full 4 MiB attachment budget once encoded, plus the prompt text,
+and below the Paseo relay's 16 MiB per-frame ceiling. A larger line is drained
+without being buffered or echoed and answered with `-32700` ("attach fewer or
+smaller images"). The reply carries the request's own `id` when the frame's
+first 64 KiB show it as a top-level integer or string member, so the client
+ends that turn instead of waiting forever; otherwise the id is `null`.
+
 ## Trust labels
 
 Vocabulary: `user_direct`, `file_content`, `worker_report`,
