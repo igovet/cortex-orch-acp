@@ -232,6 +232,34 @@ def _sdk_effort_for(record, launch) -> str | None:
     return effort if effort in SDK_EFFORTS else None
 
 
+def _offered_values(observed_config_options, option_id: str) -> set:
+    """The values a session's ``option_id`` select currently offers."""
+    return {
+        choice.get("value")
+        for entry in observed_config_options or () if isinstance(entry, Mapping) and entry.get("id") == option_id
+        for choice in (entry.get("options") or []) if isinstance(choice, Mapping)
+    }
+
+
+def _effort_within(effort: str | None, offered) -> str | None:
+    """``effort`` if the session offers it, else the strongest offered
+    effort below it, else the weakest above it -- lowered before raised,
+    and ``None`` (leave the session's own default) when nothing offered is
+    comparable."""
+    from ..routing.auto_route import EFFORT_ORDER
+
+    if not effort:
+        return None
+    if effort in offered:
+        return effort
+    if effort not in EFFORT_ORDER:
+        return None
+    ranked = [value for value in EFFORT_ORDER if value in offered]
+    target = EFFORT_ORDER.index(effort)
+    below = [value for value in ranked if EFFORT_ORDER.index(value) < target]
+    return below[-1] if below else (ranked[0] if ranked else None)
+
+
 def _session_new_meta_for(
     engine: str, version: str, instructions: str | None, *, role: str = "worker", project_root: str | None = None,
     effort: str | None = None,
@@ -276,6 +304,33 @@ def _session_new_meta_for(
     if engine == "codex-acp" and version == "1.12.0" and meta is not None:
         return {**meta, "cortexRole": role}
     return meta
+
+
+def _resolve_route_model_name(connection_id: str, model: str, environ: dict[str, str] | None) -> str | None:
+    """T035: this route's real, engine-observed model display name -- the
+    identical resolution ``acp.config_options.presented_entries`` applies to
+    a fresh ``session/new``'s own ``configOptions`` -- read from this
+    connection's latest cached catalog snapshot
+    (``catalog.store.latest_connection_entries``, never a fresh live probe:
+    a route audit runs long after the session that dispatched it opened).
+
+    ``None`` when no snapshot has ever been cached for this connection, no
+    cached entry's ``route.model`` matches ``model``, or the matching entry
+    carries no evidence beyond the bare alias/id itself
+    (``labels.presented_model_name``) -- callers must then show the alias
+    explicitly marked as an alias, never fabricate a version.
+    """
+    from ..catalog import store as catalog_store
+    from ..catalog.labels import presented_model_name
+
+    entries = catalog_store.latest_connection_entries(connection_id, environ)
+    if not entries:
+        return None
+    listed = {entry.route.model for entry in entries}
+    for entry in entries:
+        if entry.route.model == model:
+            return presented_model_name(entry.route.model, entry.model_name, entry.model_description, listed)
+    return None
 
 
 class _InstructionsOnlyRole:
@@ -546,6 +601,9 @@ class EngineSessionManagerAdapter:
         self._session_to_attempt: dict[str, str] = {}
         self._reservations: dict[str, str] = {}
         self._attempt_task: dict[str, str] = {}
+        # The (connection record, model) each worker attempt opened on, so
+        # a later turn refused for the route can name it (routing.availability).
+        self._attempt_routes: dict[str, tuple[object, str | None]] = {}
         self._workspace_locks: dict[str, object] = {}
         # T017 (fresh review, MEDIUM): a queued open must observe
         # cancellation promptly instead of polling forever.
@@ -719,8 +777,14 @@ class EngineSessionManagerAdapter:
         # session (``launch`` carries no ``assignment_id``) and whenever a
         # fallback ``route_override`` is already present (fallback always
         # wins, unchanged).
+        is_worker = bool(launch.get("assignment_id")) and self._store is not None
+        unavailable = ()
+        if is_worker:
+            from ..routing import availability
+
+            unavailable = availability.active(self._store)
         if self._store is not None:
-            self._resolve_runtime_route(launch, project_root)
+            self._resolve_runtime_route(launch, project_root, unavailable)
         # EXT-01 carried item: exactly one resolved connection id for this
         # attempt, from exactly one of two sources, both already-authorized
         # or already-role-resolved *before* open() ever runs -- never both,
@@ -757,6 +821,9 @@ class EngineSessionManagerAdapter:
                 )
         else:
             record = self._connection_record_factory(task_id)
+        route_model = self._launch_model(launch) if is_worker else None
+        if is_worker:
+            self._refuse_unavailable_route(record, route_model, unavailable)
         if self._store is not None:
             self._authorize_dispatch(record, task_id, launch, project_root=project_root)
         reservation_id = None
@@ -866,16 +933,20 @@ class EngineSessionManagerAdapter:
             # advertised set from here on -- never blocking/failing the engine
             # session itself on a capture problem.
             self._capture_catalog_observation(manager, record, session_id)
-        except BaseException:
+        except BaseException as error:
             if workspace_lock is not None:
                 workspace_lock.__exit__(None, None, None)
             self._cleanup_failed_open(manager, reservation_id)
+            if is_worker and manager is not None:
+                self._record_dispatch_route_failure(error, record, route_model, task_id, attempt_id)
             raise
         with self._lock:
             self._managers[attempt_id] = manager
             self._sessions[attempt_id] = session_id
             self._session_to_attempt[session_id] = attempt_id
             self._attempt_task[attempt_id] = task_id
+            if is_worker:
+                self._attempt_routes[attempt_id] = (record, route_model)
             if reservation_id is not None:
                 self._reservations[attempt_id] = reservation_id
             if workspace_lock is not None:
@@ -919,8 +990,9 @@ class EngineSessionManagerAdapter:
                 # session/process torn down rather than leaked.
                 try:
                     self._apply_worker_mode_floor(manager, task_id, session_id, launch, record)
-                except WorkerModeNotConfirmed:
+                except WorkerModeNotConfirmed as error:
                     self.terminate_owned(attempt_id)
+                    self._record_dispatch_route_failure(error, record, route_model, task_id, attempt_id)
                     raise
         return session_id
 
@@ -1215,8 +1287,9 @@ class EngineSessionManagerAdapter:
 
         Raises :class:`WorkerModeNotConfirmed` -- never silently continues
         with an unverified mode -- when: the floor value is not among this
-        session's own observed ``mode`` options at all, or the wire
-        confirm-or-fail call itself rejects/only partially applies it. This
+        session's own observed ``mode`` options at all (before or after its
+        model is switched), the model switch itself is not confirmed, or the
+        wire confirm-or-fail call itself rejects/only partially applies it. This
         is a different judgement call than ``COORDINATOR_MODE_FLOOR``'s own
         "must not run" (which blocks the entire task's configuration from
         ever becoming active): blocking *all* delegated work over one
@@ -1230,6 +1303,7 @@ class EngineSessionManagerAdapter:
         config_revision = launch.get("config_revision")
         if not config_revision:
             return
+        from ..configuration import access_mode as configuration_access_mode
         from ..configuration import store as configuration_store
         from ..configuration.policy import WORKER_MODE_FLOOR
 
@@ -1250,14 +1324,14 @@ class EngineSessionManagerAdapter:
         mode_floor = WORKER_MODE_FLOOR.get(record.engine)
         if mode_floor is None:
             return
-        observed = manager.observed_config_options(session_id) or []
-        offered_modes = {
-            option.get("value")
-            for entry in observed if isinstance(entry, dict) and entry.get("id") == "mode"
-            for option in (entry.get("options") or [])
-            if isinstance(option, dict)
-        }
-        if mode_floor not in offered_modes:
+        # The user's access mode (configuration.access_mode): in Auto the
+        # worker is confirmed in the most permissive mode its session
+        # offers instead of the floor -- still confirm-or-fail below.
+        access = configuration_access_mode.current(self._store, task_id)
+        mode_floor = configuration_access_mode.worker_mode(
+            record.engine, _offered_values(manager.observed_config_options(session_id), "mode"),
+            access=access, floor=mode_floor)
+        if mode_floor not in _offered_values(manager.observed_config_options(session_id), "mode"):
             raise WorkerModeNotConfirmed(
                 f"this worker's own engine session never offered mode {mode_floor!r} "
                 f"(engine {record.engine!r}); its mode cannot be confirmed, "
@@ -1265,36 +1339,69 @@ class EngineSessionManagerAdapter:
             )
         route_override = launch.get("route_override")
         resolved_model = (route_override or {}).get("model") or launch.get("resolved_model")
-        # This worker's own parameters, not the coordinator's. The model
-        # already reached its own session (``route_model_override`` below);
-        # the effort did not -- it stayed in the coordinator's revision, so
-        # "which effort this role may use" was a rule with nothing applying
-        # it. The same in-memory revision copy that carries the mode floor
-        # carries it, under whichever of the two parameter names this
-        # revision already uses (see configuration.resolution's own set),
-        # so nothing invents a key the engine's option mapping does not
-        # know.
-        worker_parameters = dict(revision["parameters"], mode=mode_floor)
+        revision = dict(revision, route_engine=record.engine, route_connection_id=record.id)
+        adapter = _PortableRevisionConfigureAdapter(self._store, manager, route_model_override=resolved_model)
+        # session/new describes the engine's default model, and which effort
+        # values a session offers depends on its model: claude-agent-acp
+        # drops its effort option entirely once the model is Haiku. Judged
+        # against the default model, the effort below would be sent after
+        # the model switch had already removed it, refusing the worker. So
+        # the model is switched on its own first, and everything after it
+        # judged against the options the switched session actually offers.
+        target_model = resolved_model
+        if target_model is None:
+            from ..routing import store as routing_store
+
+            extras = routing_store.get_route_extras(self._store, revision["id"])
+            target_model = extras["route_model"] if extras is not None else None
+        current_model = next(
+            (entry.get("currentValue") for entry in manager.observed_config_options(session_id) or ()
+             if isinstance(entry, Mapping) and entry.get("id") == "model"),
+            None,
+        )
+        if target_model is not None and current_model != target_model:
+            try:
+                adapter.configure(session_id, dict(revision, parameters={}))
+            except Exception as rejected:  # noqa: BLE001 - see the confirm call below
+                raise WorkerModeNotConfirmed(
+                    f"the engine did not confirm this worker's model {target_model!r}, "
+                    f"so its mode {mode_floor!r} was never set: {rejected}"
+                ) from rejected
+        observed = manager.observed_config_options(session_id) or []
+        mode_floor = configuration_access_mode.worker_mode(
+            record.engine, _offered_values(observed, "mode"), access=access,
+            floor=WORKER_MODE_FLOOR.get(record.engine))
+        if mode_floor not in _offered_values(observed, "mode"):
+            raise WorkerModeNotConfirmed(
+                f"this worker's engine session stopped offering mode {mode_floor!r} once its model "
+                f"was set to {target_model!r}; its mode cannot be confirmed."
+            )
+        # This worker's own parameters, not the coordinator's: its own
+        # effort (else the coordinator's), carried by the same in-memory
+        # revision copy as the mode floor, under whichever of the two
+        # parameter names this revision already uses (see
+        # configuration.resolution's own set), so nothing invents a key the
+        # engine's option mapping does not know.
+        effort_keys = ("thought_level", "effort")
+        worker_parameters = {key: value for key, value in revision["parameters"].items() if key not in effort_keys}
+        worker_parameters["mode"] = mode_floor
         launched_parameters = launch.get("parameters") or {}
-        worker_effort = launched_parameters.get("effort") or launched_parameters.get("thought_level")
-        # Only when this session actually offers an effort option. The
+        worker_effort = (launched_parameters.get("effort") or launched_parameters.get("thought_level")
+                         or revision["parameters"].get("thought_level") or revision["parameters"].get("effort"))
+        # Only an effort this session offers for its model now. The
         # configure call below is confirm-or-fail by design (an unconfirmed
         # mode must never run), so asking an engine for an option it does
         # not have would refuse the worker outright -- a policy about which
         # effort a role may use must narrow what it runs with, never stop
-        # it running on an engine that has no such setting.
-        offered = {
-            option.get("id") for option in (manager.observed_config_options(session_id) or ())
-            if isinstance(option, Mapping)
-        }
-        if worker_effort and offered & {"reasoning_effort", "thought_level", "effort"}:
+        # it running on an engine or model that has no such setting.
+        offered_efforts = set().union(*(
+            _offered_values(observed, option_id) for option_id in ("reasoning_effort", "thought_level", "effort")
+        ))
+        effort = _effort_within(worker_effort, offered_efforts)
+        if effort is not None:
             key = "thought_level" if "thought_level" in revision["parameters"] else "effort"
-            worker_parameters[key] = worker_effort
-        revision = dict(
-            revision, route_engine=record.engine, route_connection_id=record.id,
-            parameters=worker_parameters,
-        )
-        adapter = _PortableRevisionConfigureAdapter(self._store, manager, route_model_override=resolved_model)
+            worker_parameters[key] = effort
+        revision = dict(revision, parameters=worker_parameters)
         try:
             adapter.configure(session_id, revision)
         except Exception as rejected:  # noqa: BLE001 - ConfigurationRejected,
@@ -1419,10 +1526,79 @@ class EngineSessionManagerAdapter:
             route_engine=record.engine, route_connection_id=record.id, resource_policy=policy,
         )
 
-    def _resolve_runtime_route(self, launch, project_root) -> None:
+    def _launch_model(self, launch) -> str | None:
+        """This attempt's model: a fallback's override, an auto/mixed-team
+        resolution, else the configuration revision's own route model."""
+        model = (launch.get("route_override") or {}).get("model") or launch.get("resolved_model")
+        if model is None and launch.get("config_revision") and self._store is not None:
+            from ..routing import store as routing_store
+
+            extras = routing_store.get_route_extras(self._store, launch["config_revision"])
+            if extras is not None:
+                model = extras["route_model"]
+        return model
+
+    def _refuse_unavailable_route(self, record, model, unavailable) -> None:
+        """A worker is never opened on a route ``routing.availability``
+        still records as unavailable -- whichever way the route was fixed
+        (the coordinator's own route, a mixed-team profile, a fallback)."""
+        from ..portable.errors import PortableError, PortableErrorCategory
+        from ..routing import availability
+
+        blocked = availability.blocking(unavailable, record.id, model)
+        if blocked is not None:
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION, code="no_available_route",
+                remediation=(f"The route this worker would open on is unavailable ({availability.describe(blocked)}) "
+                             "and no other route was chosen for it; wait for it, connect another account, "
+                             "or change routing.json."),
+                retry_eligible=False,
+            )
+
+    def _record_dispatch_route_failure(self, error, record, model, task_id, attempt_id) -> None:
+        """Record the route as unavailable when opening a worker on it
+        failed for a reason about the route: the engine would not start or
+        answer (``engine_start_failed``, the whole connection), would not
+        confirm the worker's configuration (``configuration_not_confirmed``,
+        this model), or refused it with a structured quota/rate-limit/model
+        error. Anything else -- a cancellation, a policy refusal, a
+        workspace or channel problem -- records nothing. Never raises."""
+        from ..engine import failure_classification
+        from ..engine.client import EngineProtocolError, EngineTimeout, EngineTransportClosed
+
+        if attempt_id in self._cancelled_attempts or task_id in self._cancelled_tasks:
+            return
+        if isinstance(error, WorkerModeNotConfirmed):
+            failure = ("configuration_not_confirmed", "model", "WorkerModeNotConfirmed")
+        elif isinstance(error, EngineProtocolError):
+            failure = failure_classification.route_failure(error)
+        elif isinstance(error, (EngineTransportClosed, EngineTimeout, OSError)):
+            failure = ("engine_start_failed", "connection", type(error).__name__)
+        else:
+            failure = None
+        if failure is not None:
+            self._record_route_failure(failure, record, model, task_id, attempt_id)
+
+    def _record_route_failure(self, failure, record, model, task_id, attempt_id) -> None:
+        from ..connections import quota
+        from ..routing import availability
+
+        reason, scope, evidence = failure
+        try:
+            resets = (quota.resets_at(record, model, self._environ)
+                      if reason in (availability.QUOTA_EXHAUSTED, availability.RATE_LIMITED) else None)
+            availability.record(
+                self._store, task_id, engine=record.engine, connection_id=record.id, model=model,
+                reason=reason, scope=scope, evidence=evidence, attempt_id=attempt_id, resets_at=resets,
+            )
+        except Exception:  # noqa: BLE001 - the original failure is what the caller reports
+            pass
+
+    def _resolve_runtime_route(self, launch, project_root, unavailable=()) -> None:
         """Choose this worker's connection, model and effort automatically
         (``routing.auto_route``): the role's tier, the models the engines
-        actually advertised, and how much of each account's plan is left.
+        actually advertised, how much of each account's plan is left, and
+        which routes ``routing.availability`` records as unavailable.
         An already-resolved route (mixed-team profile, fallback) wins."""
         if not launch.get('assignment_id') or launch.get('route_override') or launch.get('resolved_connection_id'):
             return
@@ -1433,9 +1609,11 @@ class EngineSessionManagerAdapter:
 
         from ..orchestration.state import attempt_routing
 
-        escalate, complexity = (attempt_routing(self._store, launch['task_id'], launch['attempt_id'])
-                                if launch.get('task_id') and launch.get('attempt_id') else (False, 'normal'))
-        choice = auto_route.choose(role, project_root, self._environ, escalate=escalate, complexity=complexity)
+        escalate, complexity, provider = (attempt_routing(self._store, launch['task_id'], launch['attempt_id'])
+                                          if launch.get('task_id') and launch.get('attempt_id')
+                                          else (False, 'normal', None))
+        choice = auto_route.choose(role, project_root, self._environ, escalate=escalate, complexity=complexity,
+                                   unavailable=unavailable, preference=provider)
         if choice is None:
             return
         launch["resolved_connection_id"] = choice.connection_id
@@ -1444,6 +1622,8 @@ class EngineSessionManagerAdapter:
         # own route profile did not: absent an explicit mixed-team profile
         # it authorizes only the coordinator's route.
         launch["route_basis"] = choice.basis
+        if choice.decision:
+            launch["route_decision"] = dict(choice.decision)
         if choice.effort:
             launch["parameters"] = dict(launch.get("parameters") or {}, effort=choice.effort)
             launch["effort_source"] = "auto_route"
@@ -1559,6 +1739,21 @@ class EngineSessionManagerAdapter:
         route_basis = launch.get("route_basis")
         if route_basis:
             detail["route_basis"] = route_basis
+        # Why automatic routing chose this route among the tier's
+        # candidates (``auto_route.rank``): tier, ranked candidates with
+        # their quota/suitability, and the coordinator's provider preference.
+        if launch.get("route_decision"):
+            detail["route_decision"] = launch["route_decision"]
+        # T035: this attempt's real, engine-observed model name (never a
+        # guessed version) alongside the routing id already recorded in
+        # ``model`` above -- see ``_resolve_route_model_name``. Absent when
+        # this connection's own cached catalog snapshot has no matching
+        # entry, or that entry gives no evidence more concrete than the
+        # bare alias/id itself: every reader must then show the alias
+        # explicitly marked as an alias, never fabricate a name.
+        model_name = _resolve_route_model_name(record.id, model, self._environ)
+        if model_name:
+            detail["model_name"] = model_name
         # The effort this attempt actually ran with. It exists nowhere else
         # in the store: ``configuration_revisions`` holds the coordinator's
         # parameters, and this attempt's own value lives only in ``launch``
@@ -2272,6 +2467,8 @@ class EngineSessionManagerAdapter:
         callback is best-effort like ``emit_update`` itself: an exception
         never aborts an otherwise successful engine turn."""
         from ..acp.orchestrating_runtime import EngineTurnFailed, PromptOutcome
+        from ..engine import failure_classification
+        from ..engine.client import EngineProtocolError
         from ..portable.engine_contract import EngineEventKind, StopReason
         from ..portable.errors import PortableError
 
@@ -2490,6 +2687,20 @@ class EngineSessionManagerAdapter:
                     continue
                 break
             call_failed = False
+        except EngineProtocolError as error:
+            # The engine refused this turn for the route itself (exhausted
+            # or rate-limited account, model unavailable -- only its own
+            # structured error fields decide, see
+            # engine.failure_classification.route_failure): record the
+            # route so the node's retry is routed elsewhere, and fail the
+            # turn under a name that says so. Any other protocol error
+            # propagates exactly as before.
+            failure = failure_classification.route_failure(error)
+            route = self._attempt_routes.get(attempt_id)
+            if failure is None or route is None or self._store is None or task_id is None:
+                raise
+            self._record_route_failure(failure, route[0], route[1], task_id, attempt_id)
+            raise EngineTurnFailed(f"route_unavailable:{failure[0]}") from error
         except PortableError as error:
             if error.code == "engine_session_unusable":
                 # session_manager marks a session "poisoned" after an

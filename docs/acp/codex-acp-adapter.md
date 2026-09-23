@@ -219,6 +219,12 @@ kept invalid model, never a silently dropped choice. See
 `acp.config_options.build_provider_option`/`build_model_option` and
 `acp.agent.Agent._apply_config_selection`.
 
+Independently of the route, every client also receives the user's access
+mode: Zed as the `access_mode` config option, Paseo as ACP `modes` (its mode
+control) — see
+[permissions](permissions-and-containment.md#access-mode-guarded-and-auto).
+`session/set_mode` sets only that mode.
+
 The `/cortex-model <route label or route id>` slash command still selects
 a whole route (any provider) at once, for a host with no
 `SessionConfigOption` support — see `commands.py`'s own docstring.

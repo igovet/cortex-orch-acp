@@ -15,7 +15,7 @@ plain, JSON-serializable dict with nine sections (``identity``,
 ``route_and_config``, ``constraints``, ``pipeline_and_assignments``,
 ``publications_and_checks``, ``drafts_and_open_actions``,
 ``newer_events``, ``role_and_tool_access``, ``continuation_intent``) plus a
-top-level ``capsule_format_version``, ``task_id``, ``recipient``,
+top-level ``capsule_format_version``, ``for_task_id``, ``recipient``,
 ``source_high_watermark`` and a deterministic ``capsule_revision`` --
 sha256 over the canonical (sorted-key) JSON encoding of everything except
 the revision digest itself. No wall-clock timestamp is folded into the
@@ -54,6 +54,7 @@ import json
 from typing import Any, Mapping
 
 from ..contracts import StoreError
+from ..acp import questions_store
 from ..channeled_tools import channeled_base_tool_names
 from ..store import digest as _sha256_hex
 from ..store import encode as _canonical_json
@@ -160,9 +161,15 @@ def _high_watermark(db, task_id: str) -> dict:
     ).fetchone()
     config_revision = active_config["revision"] if active_config is not None else None
     owner = db.execute("SELECT epoch FROM task_owners WHERE task_id=?", (task_id,)).fetchone()
+    answered_questions = db.execute(
+        "SELECT COUNT(*) FROM pending_questions WHERE task_id=? AND status='answered' "
+        "AND answer_source IN ('text','elicitation') AND answer_text IS NOT NULL",
+        (task_id,),
+    ).fetchone()[0]
     return dict(
         max_task_event_id=max_event,
         max_source_revision=max_source_rev,
+        answered_question_count=answered_questions,
         max_pipeline_edition_sequence=max_edition,
         requirement_revision=requirement_revision,
         active_config_revision=config_revision,
@@ -317,6 +324,13 @@ def _section_constraints(store, db, task_id: str, at_revision: int | None) -> di
     documented, deliberate choice (lead decision 4): never silently drop a
     critical constraint from a worker's capsule just because no attachment
     mechanism exists to narrow it.
+
+    ``answered_questions`` (see ``acp.questions_store.answered_questions``)
+    carries every question a real user answer resolved -- the question as
+    asked and the user's verbatim answer, with its exact question id,
+    timestamps and answering session. An answer is not a source revision,
+    so ``at_revision`` does not bound this list: it always reflects every
+    answer recorded so far.
     """
     query = "SELECT revision, thread_id, message_id, report_id, attachments FROM source_revisions WHERE task_id=?"
     params: list = [task_id]
@@ -369,7 +383,8 @@ def _section_constraints(store, db, task_id: str, at_revision: int | None) -> di
             for block in blocks
         ] if blocks else ([dict(descriptor=item, availability="unresolved_legacy_descriptor") for item in attachments] if attachments else [])
         items.append(entry)
-    return dict(count=len(items), items=items)
+    answered = questions_store.answered_questions(db, task_id)
+    return dict(count=len(items), items=items, answered_question_count=len(answered), answered_questions=answered)
 
 
 # --------------------------------------------------------------------
@@ -863,6 +878,9 @@ def _known_refs_for_summary(sections: Mapping[str, Any]) -> set[str]:
         report_id = item.get("report_id")
         if report_id:
             refs.add(report_id)
+    for answer in constraints.get("answered_questions", []) if isinstance(constraints, dict) else ():
+        refs.add(answer["question_id"])
+        refs.add(answer["source_ref"])
     pipeline_and_assignments = sections.get("pipeline_and_assignments") or {}
     if isinstance(pipeline_and_assignments, dict):
         pipeline = pipeline_and_assignments.get("current_pipeline")
@@ -1097,6 +1115,24 @@ def render_capsule(capsule: Mapping[str, Any]) -> str:
                     lines.append("  " + _render_data_block(item["trust_label"], item["report_id"], text).replace("\n", "\n  "))
                 for attachment in item.get("attachments", []):
                     lines.append(f"  attachment: {json.dumps(attachment, sort_keys=True)}")
+            lines.append(f"answered_questions: {section.get('answered_question_count', 0)}")
+            for answer in section.get("answered_questions", []):
+                lines.append(
+                    f"- question_id={answer['question_id']} source_ref={answer['source_ref']} "
+                    f"asked_by={answer['asked_by']} asked_at={answer['asked_at']} "
+                    f"answered_at={answer['answered_at']} answer_source={answer['answer_source']} "
+                    f"origin={answer['origin']} session_binding={answer['session_binding']}"
+                )
+                # The question was written by whoever asked it; only the
+                # answer is the user's own text.
+                lines.append("  question: " + _render_data_block(
+                    "derived_summary", answer["question_id"] + ":question", answer["question_text"],
+                ).replace("\n", "\n  "))
+                if answer.get("options"):
+                    lines.append("  options: " + _defang(json.dumps(answer["options"], ensure_ascii=False)))
+                lines.append("  answer: " + _render_data_block(
+                    answer["trust_label"], answer["source_ref"], answer["answer_text"],
+                ).replace("\n", "\n  "))
         else:
             lines.append(_render_json_with_data_blocks(section))
         lines.append("")

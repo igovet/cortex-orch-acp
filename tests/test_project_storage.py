@@ -239,6 +239,60 @@ def test_representative_operations_create_exactly_one_project_store(tmp_path):
     assert not (project/'.codex').exists()
 
 
+def _run_cortex_clear(argv):
+    old_argv = sys.argv
+    sys.argv = ['cortex_clear.py', *argv]
+    try:
+        cortex_clear.main()
+    finally:
+        sys.argv = old_argv
+
+
+def test_keep_thread_flag_protects_a_bound_task_but_codex_env_no_longer_does(tmp_path, monkeypatch):
+    """B5/S3,N1: the only accepted protection route is the real, repeatable
+    ``--keep-thread <id>`` flag matched against ``thread_bindings``. The
+    Codex-plugin-harness-era ``CODEX_THREAD_ID``/``CODEX_SESSION_ID``
+    environment fallback is gone -- setting either must no longer protect
+    a task, even when its value is the task's own real thread id."""
+    project = tmp_path / 'project'
+    project.mkdir()
+    store, result = bootstrap(project)
+    with store.connection() as db:
+        task_id = db.execute('SELECT id FROM tasks').fetchone()[0]
+        thread_id = db.execute(
+            'SELECT thread_id FROM thread_bindings WHERE task_id=?', (task_id,)).fetchone()[0]
+
+    monkeypatch.setenv('CODEX_THREAD_ID', thread_id)
+    monkeypatch.setenv('CODEX_SESSION_ID', thread_id)
+    import json as _json
+    import io
+    import contextlib
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        _run_cortex_clear(['--project-root', str(project), '--days', '0'])
+    unprotected = _json.loads(out.getvalue())
+    assert unprotected == dict(deleted_tasks=1, retention_days=0, skipped_protected=0)
+    with store.connection() as db:
+        assert db.execute('SELECT id FROM tasks').fetchall() == []
+
+    monkeypatch.delenv('CODEX_THREAD_ID', raising=False)
+    monkeypatch.delenv('CODEX_SESSION_ID', raising=False)
+    store2, result2 = bootstrap(project, owner='owner-2')
+    with store2.connection() as db:
+        task_id2 = db.execute('SELECT id FROM tasks').fetchone()[0]
+        thread_id2 = db.execute(
+            'SELECT thread_id FROM thread_bindings WHERE task_id=?', (task_id2,)).fetchone()[0]
+
+    out2 = io.StringIO()
+    with contextlib.redirect_stdout(out2):
+        _run_cortex_clear(['--project-root', str(project), '--days', '0',
+                            '--keep-thread', thread_id2])
+    protected = _json.loads(out2.getvalue())
+    assert protected == dict(deleted_tasks=0, retention_days=0, skipped_protected=1)
+    with store2.connection() as db:
+        assert [row[0] for row in db.execute('SELECT id FROM tasks')] == [task_id2]
+
+
 def test_the_real_launcher_creates_exactly_one_project_store(tmp_path):
     """SEC-11/T034: bootstrap a task the way a real host actually does --
     through the shipped launcher entry point (``cortex_acp.py``, spawned as

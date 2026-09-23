@@ -33,18 +33,21 @@ from engine_fakes import default_scenario, fake_launch_command, isolated_environ
 from test_mixed_team_ordinary_delegation import _bootstrap, _FakeConfigAdapter, _MODE_BY_ENGINE, _read_log
 
 
-def _make_connection(tmp_path, environ, *, engine, model, request_log):
+def _make_connection(tmp_path, environ, *, engine, model, request_log, mode=True, **scenario):
     """Like ``test_mixed_team_ordinary_delegation._make_connection``, plus
-    an offered effort option, so the auto-chosen effort reaches the wire."""
+    an offered effort option, so the auto-chosen effort reaches the wire.
+    ``mode=False`` offers no mode option (the worker's mode can never be
+    confirmed); ``scenario`` overrides the fake engine's own behaviour."""
     effort_option_id = "reasoning_effort" if engine == "codex-acp" else "effort"
     config_options = [
         dict(id="model", currentValue=model, options=[dict(value=model, name=model)]),
-        dict(id="mode", currentValue=_MODE_BY_ENGINE[engine][0]["value"], options=_MODE_BY_ENGINE[engine]),
+        *([dict(id="mode", currentValue=_MODE_BY_ENGINE[engine][0]["value"], options=_MODE_BY_ENGINE[engine])]
+          if mode else []),
         dict(id=effort_option_id, currentValue="medium", options=[
             dict(value=v, name=v) for v in ("low", "medium", "high")
         ]),
     ]
-    scenario = default_scenario(config_options=config_options, request_log_path=str(request_log))
+    scenario = default_scenario(config_options=config_options, request_log_path=str(request_log), **scenario)
     scenario_path = write_scenario(tmp_path, scenario)
     connection = make_connection_record(new_connection_id(), fake_launch_command(scenario_path), engine=engine, environ=environ)
     # A signed-in native account, so the connection is actually selectable.
@@ -67,12 +70,14 @@ def _snapshot(connection, model):
     return build_catalog({connection.id: connection}, {connection.id: parse_observation(options)})
 
 
-def _setup(tmp_path, *, observed=True):
+def _setup(tmp_path, *, observed=True, a=None, b=None):
     store, task_id, channel, epoch, project = _bootstrap(tmp_path)
     environ = isolated_environ(tmp_path)
     log_a, log_b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
-    connection_a = _make_connection(tmp_path, environ, engine="codex-acp", model="coordinator-model", request_log=log_a)
-    connection_b = _make_connection(tmp_path, environ, engine="claude-agent-acp", model="reviewer-model", request_log=log_b)
+    connection_a = _make_connection(tmp_path, environ, engine="codex-acp", model="coordinator-model", request_log=log_a,
+                                    **(a or {}))
+    connection_b = _make_connection(tmp_path, environ, engine="claude-agent-acp", model="reviewer-model", request_log=log_b,
+                                    **(b or {}))
     snapshot_a = _snapshot(connection_a, "coordinator-model")
     if observed:
         catalog_store.save_snapshot(snapshot_a, environ)
@@ -195,6 +200,43 @@ def test_denied_models_are_never_chosen(tmp_path):
     adapter.terminate_owned(result.attempt_id)
 
 
+def test_providers_restrict_auto_routing_to_the_listed_engine(tmp_path):
+    """Codex is hot and would normally lose the deep-work pick to Claude,
+    but 'providers' excludes Claude, so the work stays on Codex instead."""
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _codex_used(connection_a, 90.0)
+    _routing(project, {"providers": ["codex-acp"]})
+    result = provisioning.delegate(channel, "Audit", "Audit it.", "security-auditor", "Report.", "req-1")
+    assert result.status == "ready"
+    assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
+    assert _read_log(log_b) == []
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_a_pin_to_an_excluded_provider_is_refused(tmp_path):
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _routing(project, {"providers": ["codex-acp"], "pin": {"planner": "claude-agent-acp/reviewer-model"}})
+    with pytest.raises(PortableError) as refused:
+        provisioning.delegate(channel, "Plan", "Plan it.", "planner", "Planned.", "req-1")
+    assert refused.value.code == "pinned_route_unavailable"
+    assert "providers" in refused.value.remediation
+    assert _read_log(log_a) == [] and _read_log(log_b) == []
+
+
+def test_providers_excluding_every_route_fails_closed(tmp_path):
+    """Both connections are engine-confirmed but neither engine is allowed:
+    refused, never silently falls back to the coordinator's (excluded) route."""
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _routing(project, {"providers": ["claude-agent-acp"]})
+    with connection_registry.transaction(environ) as state:
+        state.connections = {connection_a.id: connection_a}
+    with pytest.raises(PortableError) as refused:
+        provisioning.delegate(channel, "Audit", "Audit it.", "security-auditor", "Report.", "req-1")
+    assert refused.value.code == "no_available_route"
+    assert "providers" in refused.value.remediation
+    assert _read_log(log_a) == [] and _read_log(log_b) == []
+
+
 def test_connection_without_launch_command_is_skipped(tmp_path):
     """A discovery placeholder must not shadow a launchable ACP connection."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
@@ -253,4 +295,256 @@ def test_a_signed_out_engine_is_never_chosen(tmp_path):
     result = provisioning.delegate(channel, "Audit", "Audit it.", "security-auditor", "Report.", "req-1")
     assert result.status == "ready"
     assert _read_log(log_a) and _read_log(log_b) == []
+    adapter.terminate_owned(result.attempt_id)
+
+
+# --- choosing among one tier's candidates (auto_route.rank) -----------------
+
+def _planned_provider(monkeypatch, provider):
+    """The node's planned ``provider``, as ``attempt_routing`` reads it from the plan."""
+    from cortex_runtime.orchestration import state
+
+    monkeypatch.setattr(state, "attempt_routing", lambda store, task_id, attempt_id: (False, "normal", provider))
+
+
+def _decision(store, result):
+    return routing_store.list_audit_for_attempt(store, result.attempt_id)[0]["decision_detail"]["route_decision"]
+
+
+@pytest.mark.parametrize("role, engine", [("backend-dev", "codex-acp"), ("security-auditor", "claude-agent-acp")])
+def test_idle_accounts_are_split_by_the_kind_of_work_not_the_listing_order(tmp_path, role, engine):
+    """Neither account reports usage: implementation goes to Codex, review to
+    Claude, whichever connection is listed first."""
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    result = provisioning.delegate(channel, "Work", "Do it.", role, "Done.", "req-1")
+    assert result.status == "ready"
+    chosen, other = (log_a, log_b) if engine == "codex-acp" else (log_b, log_a)
+    assert "session/new" in [entry["method"] for entry in _read_log(chosen)] and _read_log(other) == []
+    decision = _decision(store, result)
+    assert decision["chosen"].startswith(engine + "/") and decision["preference_status"] == "none"
+    assert {c["route"].split("/")[0] for c in decision["candidates"]} == {"codex-acp", "claude-agent-acp"}
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_the_coordinators_provider_preference_is_honoured(tmp_path, monkeypatch):
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _planned_provider(monkeypatch, "codex-acp")
+    result = provisioning.delegate(channel, "Audit", "Audit it.", "security-auditor", "Report.", "req-1")
+    assert result.status == "ready"
+    assert _read_log(log_a) and _read_log(log_b) == []
+    decision = _decision(store, result)
+    assert decision["preference"] == "codex-acp" and decision["preference_status"] == "honoured"
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_a_preference_outside_providers_is_ignored_and_recorded(tmp_path, monkeypatch):
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _routing(project, {"providers": ["codex-acp"]})
+    _planned_provider(monkeypatch, "claude-agent-acp")
+    result = provisioning.delegate(channel, "Audit", "Audit it.", "security-auditor", "Report.", "req-1")
+    assert result.status == "ready"
+    assert _read_log(log_a) and _read_log(log_b) == []
+    assert _decision(store, result)["preference_status"] == "ignored:provider_not_allowed"
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_a_preference_never_overrides_a_pin(tmp_path, monkeypatch):
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _routing(project, {"pin": {"planner": "codex-acp/coordinator-model"}})
+    _planned_provider(monkeypatch, "claude-agent-acp")
+    result = provisioning.delegate(channel, "Plan", "Plan it.", "planner", "Planned.", "req-1")
+    assert result.status == "ready"
+    assert _read_log(log_a) and _read_log(log_b) == []
+    decision = _decision(store, result)
+    assert decision["basis"] == "pin" and decision["preference_status"] == "ignored:pinned"
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_a_preference_never_takes_an_exhausted_provider(tmp_path, monkeypatch):
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _unavailable(store, channel, connection_a)
+    _planned_provider(monkeypatch, "codex-acp")
+    result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-1")
+    assert result.status == "ready"
+    assert _read_log(log_a) == [] and _read_log(log_b)
+    assert _decision(store, result)["preference_status"] == "ignored:provider_unavailable"
+    adapter.terminate_owned(result.attempt_id)
+
+
+# --- routes that just failed are skipped (routing.availability) ------------
+
+def _runtime_task(store, channel):
+    """Unavailability is recorded on the failed attempt's runtime task."""
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    TaskMachine(store).create(channel.task_id, "Do work.")
+
+
+def _unavailable(store, channel, connection, *, reason="quota_exhausted", scope="connection", model=None, **kwargs):
+    from cortex_runtime.routing import availability
+
+    _runtime_task(store, channel)
+    return availability.record(
+        store, channel.task_id, engine=connection.engine, connection_id=connection.id, model=model,
+        reason=reason, scope=scope, evidence="test", **kwargs,
+    )
+
+
+def test_an_exhausted_provider_is_skipped(tmp_path):
+    """Light work would spend the hot Codex account; its recorded
+    exhaustion sends the work to the other provider instead."""
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _codex_used(connection_a, 90.0)
+    _unavailable(store, channel, connection_a)
+    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    assert result.status == "ready"
+    assert _read_log(log_a) == []
+    assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_a_model_scoped_record_leaves_the_rest_of_the_account_usable(tmp_path):
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _codex_used(connection_a, 90.0)
+    _unavailable(store, channel, connection_a, reason="model_unavailable", scope="model", model="another-model")
+    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    assert result.status == "ready"
+    assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_an_expired_record_no_longer_blocks(tmp_path):
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _codex_used(connection_a, 90.0)
+    # A rate limit with no reported reset keeps a route out for 15 minutes.
+    _unavailable(store, channel, connection_a, reason="rate_limited", now=time.time() - 3600)
+    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    assert result.status == "ready"
+    assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_nothing_available_is_refused_naming_every_route(tmp_path):
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _unavailable(store, channel, connection_a, resets_at=time.time() + 7200)
+    _unavailable(store, channel, connection_b, reason="rate_limited")
+    with pytest.raises(PortableError) as refused:
+        provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    assert refused.value.code == "no_available_route"
+    assert refused.value.retry_eligible is False
+    assert connection_a.id in refused.value.remediation and connection_b.id in refused.value.remediation
+    assert "quota_exhausted" in refused.value.remediation and "rate_limited" in refused.value.remediation
+    # Refused before any engine was started -- never the coordinator's route.
+    assert _read_log(log_a) == [] and _read_log(log_b) == []
+
+
+def test_deny_is_never_lifted_to_make_room(tmp_path):
+    """Codex exhausted and the only other model denied: refused, not the denied model."""
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _routing(project, {"deny": ["reviewer-model"]})
+    _unavailable(store, channel, connection_a)
+    with pytest.raises(PortableError) as refused:
+        provisioning.delegate(channel, "Audit", "Audit it.", "security-auditor", "Report.", "req-1")
+    assert refused.value.code == "no_available_route"
+    assert _read_log(log_a) == [] and _read_log(log_b) == []
+
+
+def test_an_unavailable_pin_is_never_substituted(tmp_path):
+    """The pinned account is exhausted and the other one is free: still refused."""
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _routing(project, {"pin": {"planner": "codex-acp/coordinator-model"}})
+    _unavailable(store, channel, connection_a)
+    with pytest.raises(PortableError) as refused:
+        provisioning.delegate(channel, "Plan", "Plan it.", "planner", "Planned.", "req-1")
+    assert refused.value.code == "pinned_route_unavailable"
+    assert "quota_exhausted" in refused.value.remediation
+    assert _read_log(log_a) == [] and _read_log(log_b) == []
+
+
+def test_the_coordinators_route_is_refused_when_it_is_unavailable(tmp_path):
+    """No engine-confirmed catalog: the worker would inherit the
+    coordinator's route, which is recorded exhausted -- refused, not opened."""
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
+        tmp_path, observed=False)
+    _unavailable(store, channel, connection_a)
+    with pytest.raises(PortableError) as refused:
+        provisioning.delegate(channel, "Do it", "Do the work.", "backend-dev", "Passes.", "req-1")
+    assert refused.value.code == "no_available_route"
+    assert _read_log(log_a) == []
+
+
+def test_a_dispatch_failure_records_the_route_and_the_retry_uses_another_provider(tmp_path):
+    """The Codex engine never offers a worker mode: WorkerModeNotConfirmed.
+    That route is recorded and the next delegation opens on Claude."""
+    from cortex_runtime.delegation.live_adapters import WorkerModeNotConfirmed
+    from cortex_runtime.routing import availability
+
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
+        tmp_path, a=dict(mode=False))
+    _runtime_task(store, channel)
+    _codex_used(connection_a, 90.0)
+    with pytest.raises(WorkerModeNotConfirmed):
+        provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    [record] = availability.active(store)
+    assert record["connection_id"] == connection_a.id and record["model"] == "coordinator-model"
+    assert (record["reason"], record["scope"], record["expiry_basis"]) == ("configuration_not_confirmed", "model", "default")
+    with store.connection() as db:
+        attempt_id = db.execute("SELECT attempt_id FROM delegation_provisioning WHERE task_id=?",
+                                (channel.task_id,)).fetchone()[0]
+        assert availability.for_attempt(db, channel.task_id, attempt_id)["reason"] == "configuration_not_confirmed"
+    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-2")
+    assert result.status == "ready"
+    assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_an_exhausted_plan_during_a_turn_records_the_account_until_its_reset(tmp_path):
+    """codex-acp 1.13.0 refuses a turn on an exhausted plan with -32603 and
+    data.codexErrorInfo="usageLimitExceeded"; the reset comes from the
+    engine's own rate_limits."""
+    import threading
+
+    from cortex_runtime.acp.orchestrating_runtime import EngineTurnFailed
+    from cortex_runtime.routing import availability
+
+    refusal = dict(code=-32603, message="Internal error",
+                   data=dict(message="You've hit your usage limit.", codexErrorInfo="usageLimitExceeded"))
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
+        tmp_path, a=dict(prompt_behavior="error", prompt_error=refusal))
+    _runtime_task(store, channel)
+    _codex_used(connection_a, 97.0)
+    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
+    with pytest.raises(EngineTurnFailed) as failed:
+        adapter.prompt(result.engine_session_ref, "Find it.", threading.Event())
+    assert failed.value.kind == "route_unavailable:quota_exhausted"
+    [record] = availability.active(store)
+    assert (record["connection_id"], record["scope"], record["model"]) == (connection_a.id, "connection", None)
+    assert record["evidence"] == "codexErrorInfo=usageLimitExceeded"
+    assert record["expiry_basis"] == "engine_reported" and record["attempt_id"] == result.attempt_id
+    # The recorded account now stays out; nothing in it is credential-like.
+    assert set(record) == {"engine", "connection_id", "model", "scope", "reason", "evidence", "attempt_id",
+                           "expires_at", "expiry_basis"}
+    adapter.terminate_owned(result.attempt_id)
+    retry = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-2")
+    assert retry.status == "ready"
+    assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
+    adapter.terminate_owned(retry.attempt_id)
+
+
+def test_an_unrelated_turn_error_records_nothing(tmp_path):
+    import threading
+
+    from cortex_runtime.engine.client import EngineProtocolError
+    from cortex_runtime.routing import availability
+
+    refusal = dict(code=-32603, message="Internal error: usage limit exceeded", data=dict(codexErrorInfo="other"))
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
+        tmp_path, a=dict(prompt_behavior="error", prompt_error=refusal))
+    _runtime_task(store, channel)
+    _codex_used(connection_a, 90.0)
+    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    with pytest.raises(EngineProtocolError):
+        adapter.prompt(result.engine_session_ref, "Find it.", threading.Event())
+    assert availability.active(store) == []
     adapter.terminate_owned(result.attempt_id)

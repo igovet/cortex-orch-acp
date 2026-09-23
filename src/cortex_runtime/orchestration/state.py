@@ -11,6 +11,7 @@ import json
 import re
 from pathlib import PurePosixPath, Path
 
+from ..connections.model import SUPPORTED_ENGINES
 from ..contracts import StoreError
 from ..portable.roles import resolve_role
 
@@ -167,26 +168,31 @@ def released_by_user(db, task):
 
 
 def attempt_routing(store, task_id, attempt_id):
-    """What routing needs to know about this attempt's node: the planned
-    ``complexity`` and whether it is escalated -- a retry of its node or a
-    fix after review requested changes, i.e. a weaker run already fell short."""
+    """What routing needs to know about this attempt's node, as
+    ``(escalate, complexity, provider)``: whether it is escalated -- a retry
+    of its node or a fix after review requested changes, i.e. a weaker run
+    already fell short -- the planned ``complexity`` and the planned
+    ``provider`` preference (``None`` when not set). A fix keeps its
+    node's plan fields. A retry because the route itself was unavailable
+    (``route_failure``) does not escalate: no model fell short, the next
+    route is simply used."""
     with store.connection() as db:
         provision = db.execute('SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
                                (task_id, attempt_id)).fetchone()
         node = provision and db.execute('SELECT node_id,revision FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
                                         (task_id, provision['idempotency_key'])).fetchone()
         if not node:
-            return False, 'normal'
+            return False, 'normal', None
         plan = db.execute('SELECT plan_json FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
         retries = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'",
                              (task_id,)).fetchall()
     fix = re.fullmatch(r'_fix_\d+_(.+)', node['node_id'])
     planned = fix.group(1) if fix else node['node_id']
     tasks = json.loads(plan['plan_json'])['tasks'] if plan and plan['plan_json'] else []
-    complexity = next((t.get('complexity', 'normal') for t in tasks if t['id'] == planned), 'normal')
-    retried = any(json.loads(r[0]).get('node') == node['node_id'] and json.loads(r[0]).get('revision') == node['revision']
-                  for r in retries)
-    return bool(fix) or retried, complexity
+    task = next((t for t in tasks if t['id'] == planned), {})
+    retried = any(p.get('node') == node['node_id'] and p.get('revision') == node['revision'] and not p.get('route_failure')
+                  for p in (json.loads(r[0]) for r in retries))
+    return bool(fix) or retried, task.get('complexity', 'normal'), task.get('provider')
 
 
 def validate_scope(scope):
@@ -211,8 +217,9 @@ def validate_plan(plan):
     ids = set()
     for node in nodes:
         if (not isinstance(node, dict) or not {'id', 'role', 'objective', 'dependencies', 'scope'} <= set(node)
-                or set(node) - {'id', 'role', 'objective', 'dependencies', 'scope', 'complexity'}
-                or node.get('complexity', 'normal') not in {'low', 'normal', 'high'}):
+                or set(node) - {'id', 'role', 'objective', 'dependencies', 'scope', 'complexity', 'provider'}
+                or node.get('complexity', 'normal') not in {'low', 'normal', 'high'}
+                or node.get('provider', SUPPORTED_ENGINES[0]) not in SUPPORTED_ENGINES):
             raise StoreError('invalid_plan_node')
         key = node['id']
         if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,63}', key) or key in ids:

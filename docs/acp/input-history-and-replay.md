@@ -175,6 +175,32 @@ whether it exists elsewhere. A coordinator continuation prompt
 coordinator the exact stored user text plus attachment descriptors
 (name/kind/availability/`source_ref`) -- never an inlined large body.
 
+### Answered questions
+
+Every `list_sources` page also returns `answered_questions` (with
+`answered_questions_total` and `answered_questions_complete`, bounded to
+200 entries): each question of this task that a real user answer resolved
+-- by elicitation card, a typed reply, or `/cortex-answer` -- with its
+`question_id`, `source_ref` (`<question_id>:answer`), `asked_by`, question
+text and options, the user's verbatim answer (`trust_label='user_direct'`),
+`answer_source`, `asked_at`/`answered_at` and the answering session
+(`session_id`, `origin` as `acp:<session>`, `session_binding`). Question and
+answer texts over 1000 characters are previewed there with a
+`*_truncated` flag. `read_source(<question_id>:answer)` returns the whole
+record, with `chunk`/`offset`/`next_offset` paging over the answer text.
+
+The view is derived from `pending_questions` (`acp.questions_store.
+answered_questions`): only the runtime marks a question answered, on a real
+host answer, and never updates it afterwards, so no model tool can create
+or change such a record; an open, superseded or cancelled question and a
+late answer are never listed. Since this view was added every runtime answer
+path records the answering `session_id` on its `question_answered` progress
+event. An older elicitation or `/cortex-answer` answer is bound through its
+session-origin `user_message` event. An older typed answer never recorded its
+session and is listed with `session_binding='unavailable'`.
+The answer text is stored and shown as the user typed it, exactly like
+captured prompt text; no redaction pass applies to ACP-captured user input.
+
 ## `session/load`: display-only replay
 
 `protocolVersion` 1's `loadSession` capability is now `true` and

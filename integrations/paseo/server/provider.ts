@@ -401,6 +401,24 @@ export function withModelEfforts<T extends { models: ReadonlyArray<{ id: string 
   };
 }
 
+/**
+ * Cortex's access modes (see configuration/access_mode.py): Paseo draws a
+ * mode's own icon and colour in its composer mode control, so Guarded reads
+ * as a safe shield and Auto as an open, dangerous one. Neither is marked
+ * unattended: Paseo must never pick Auto on its own.
+ */
+const ACCESS_MODE_VISUALS: Record<string, { icon: string; colorTier: string }> = {
+  guarded: { icon: "ShieldCheck", colorTier: "safe" },
+  auto: { icon: "ShieldOff", colorTier: "dangerous" },
+};
+
+export function withAccessModeVisuals<T extends { modes: ReadonlyArray<{ id: string }> }>(state: T): T {
+  return {
+    ...state,
+    modes: state.modes.map((mode) => ({ ...mode, ...(ACCESS_MODE_VISUALS[mode.id] ?? {}) })),
+  };
+}
+
 export function createCortexProvider(): ProviderRegistration {
   const command = cortexCommand();
   const base = runAcpProvider({
@@ -428,9 +446,10 @@ export function createCortexProvider(): ProviderRegistration {
     transformers: [{
       async discover(catalog) {
         try {
-          return withModelEfforts(catalog, await modelEfforts(command));
+          return withAccessModeVisuals(withModelEfforts(catalog, await modelEfforts(command)));
         } catch {
-          return catalog; // Cortex unavailable: the bridge's own catalog, unchanged
+          // Cortex unavailable: the bridge's own catalog, only the mode visuals added
+          return withAccessModeVisuals(catalog);
         }
       },
       toolCall(snapshot) {
@@ -677,6 +696,10 @@ export function wrapCortexConnection(
               ),
             },
           });
+          return;
+        }
+        if (event.type === "session.config") {
+          listener({ ...event, config: withAccessModeVisuals(event.config) });
           return;
         }
         listener(presentTimeline(event));

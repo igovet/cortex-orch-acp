@@ -269,7 +269,19 @@ try:
                         except Exception:
                             detail = {}
                         effort = detail.get('effort') if isinstance(detail, dict) else None
-                        attempt_route = {'provider': route_row['engine'], 'model': route_row['model'], 'effort': effort if isinstance(effort, str) and effort else None}
+                        # This route's real, engine-observed model name
+                        # (live_adapters._resolve_route_model_name's own
+                        # evidence, written into the audit's own detail) --
+                        # absent when the engine gave no evidence beyond the
+                        # bare alias/id in 'model' itself; the client then
+                        # shows 'model' explicitly marked as an alias rather
+                        # than presenting it as the concrete model.
+                        model_name = detail.get('model_name') if isinstance(detail, dict) else None
+                        attempt_route = {
+                            'provider': route_row['engine'], 'model': route_row['model'],
+                            'modelName': model_name if isinstance(model_name, str) and model_name else None,
+                            'effort': effort if isinstance(effort, str) and effort else None,
+                        }
                         latest_route = attempt_route
                 failure = at['failure_reason']
                 if isinstance(failure, str):
@@ -342,6 +354,95 @@ except (sqlite3.Error, OSError) as exc:
     print(json.dumps({'assignments': [], 'available': False, 'truncated': False, 'nextCursor': None, 'message': 'Worker history could not be read.'}))
 `;
 
+/** The runtime keys its one store by the logical project root of the session
+ * cwd (cortex_runtime.project_storage.logical_project_root): a verified linked
+ * Git worktree shares its main repository's `.cortex`, so a worktree workspace
+ * directory has no store of its own. This mirrors that resolution read-only;
+ * any ambiguous, forged or unsafe layout exits nonzero instead of guessing. */
+export const PROJECT_ROOT_PYTHON = String.raw`
+import os, re, stat, sys
+from pathlib import Path
+class Conflict(Exception):
+    pass
+def canonical(value):
+    project = Path(value)
+    if not project.is_absolute() or not project.is_dir() or str(project.resolve(strict=True)) != str(project):
+        raise Conflict
+    return project
+def read_line(path):
+    # One small owner-private regular file, never following a symlink.
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+        raise Conflict
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        data = os.read(fd, 4097)
+    finally:
+        os.close(fd)
+    lines = data.decode('utf-8').splitlines()
+    if len(data) > 4096 or len(lines) != 1:
+        raise Conflict
+    return lines[0]
+def within_uid(base, raw):
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    resolved = candidate.resolve(strict=True)
+    current = Path(resolved.anchor)
+    for part in resolved.parts[1:-1]:
+        current = current / part
+        info = current.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise Conflict
+    info = resolved.lstat()
+    if stat.S_ISLNK(info.st_mode) or info.st_uid != os.getuid():
+        raise Conflict
+    return resolved
+def logical_root(value):
+    candidate = canonical(value)
+    marker = candidate / '.git'
+    try:
+        info = marker.lstat()
+    except FileNotFoundError:
+        return candidate
+    if stat.S_ISLNK(info.st_mode):
+        raise Conflict
+    if stat.S_ISDIR(info.st_mode):
+        if info.st_uid != os.getuid():
+            raise Conflict
+        return candidate
+    match = re.fullmatch(r'gitdir: (.+)', read_line(marker))
+    if match is None:
+        raise Conflict
+    gitdir = within_uid(candidate, match.group(1))
+    if not gitdir.is_dir():
+        raise Conflict
+    common = within_uid(gitdir, read_line(gitdir / 'commondir'))
+    if not common.is_dir() or not (common / 'HEAD').exists() or not (common / 'worktrees').is_dir():
+        raise Conflict
+    # The worktree metadata must point back to this exact ".git" file and
+    # live directly under the common directory's own "worktrees/".
+    if within_uid(gitdir, read_line(gitdir / 'gitdir')) != marker.resolve():
+        raise Conflict
+    if gitdir.parent.name != 'worktrees' or gitdir.parent.parent != common:
+        raise Conflict
+    project = within_uid(common, '..')
+    if within_uid(project, '.git') != common:
+        raise Conflict
+    return canonical(str(project))
+try:
+    print(logical_root(sys.argv[1]))
+except (Conflict, OSError, RuntimeError, ValueError):
+    raise SystemExit(1)
+`;
+
+/** The runtime's logical project root for one workspace directory, or null. */
+function resolveProjectRoot(directory: string): string | null {
+  const result = spawnSync("python3", ["-B", "-c", PROJECT_ROOT_PYTHON, directory], { encoding: "utf8", timeout: 5000 });
+  const root = result.status === 0 && result.stdout.endsWith("\n") ? result.stdout.slice(0, -1) : "";
+  return root.startsWith("/") && !root.includes("\0") && !root.includes("\n") ? root : null;
+}
+
 const MAX_RUNTIME_SESSION_WRAPPER_LENGTH = 512;
 const MAX_RUNTIME_SESSION_PAYLOAD_LENGTH = 480;
 const ACP_SESSION_ID = /^acps_[0-9a-f]{12}$/;
@@ -401,8 +502,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export async function resolveAgentTask(input: { workspaceId: string; agentId: string }, context: PluginHandlerContext): Promise<{ projectRoot: string; taskId: string } | { message: string }> {
   const workspaceHandle = context.paseo.workspaces.ref(input.workspaceId);
   await workspaceHandle.refresh();
-  const projectRoot = workspaceHandle.directory;
-  if (!projectRoot || !projectRoot.startsWith("/") || projectRoot.includes("\0")) return { message: "Worker history is unavailable for this workspace." };
+  const directory = workspaceHandle.directory;
+  if (!directory || !directory.startsWith("/") || directory.includes("\0")) return { message: "Worker history is unavailable for this workspace." };
+  const projectRoot = resolveProjectRoot(directory);
+  if (!projectRoot) return { message: "Worker history is unavailable for this workspace." };
   if (!existsSync(`${projectRoot}/.cortex/cortex.sqlite3`)) return { message: "No Cortex store is present in this workspace." };
   const agentHandle = context.paseo.agents.ref(input.agentId);
   await agentHandle.refresh();

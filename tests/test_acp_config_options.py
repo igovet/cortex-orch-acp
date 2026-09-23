@@ -673,11 +673,16 @@ def test_session_new_omits_model_options_with_no_connections_but_offers_language
     agent, transport = _new_agent(tmp_path, environ)
     result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
     ids = {option["id"] for option in result["configOptions"]}
-    assert ids == {"language"}
-    assert result["configOptions"][0]["currentValue"] == "auto"
+    assert ids == {"access_mode", "language"}
+    language = next(option for option in result["configOptions"] if option["id"] == "language")
+    assert language["currentValue"] == "auto"
 
 
-def test_paseo_exposes_coordinator_language_as_a_selectable_mode(tmp_path, monkeypatch):
+def test_paseo_access_mode_is_the_session_mode_and_language_stays_an_option(tmp_path, monkeypatch):
+    """Paseo's mode control (the composer shield) shows the access mode:
+    ``modes`` carries guarded/auto, ``session/set_mode`` switches it, and
+    the coordinator language remains a config option set through
+    ``session/set_config_option``."""
     environ = _isolate(tmp_path, monkeypatch)
     project = tmp_path / "project"
     project.mkdir()
@@ -685,23 +690,29 @@ def test_paseo_exposes_coordinator_language_as_a_selectable_mode(tmp_path, monke
     agent.client_info = {"name": "Paseo"}
     result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
     session_id = result["sessionId"]
+    assert result["modes"]["currentModeId"] == "guarded"
+    assert [mode["id"] for mode in result["modes"]["availableModes"]] == ["guarded", "auto"]
+    assert [mode["name"] for mode in result["modes"]["availableModes"]] == ["Guarded mode", "Auto mode"]
+    # One control only: no duplicate access option for Paseo.
+    assert "access_mode" not in {option["id"] for option in result["configOptions"]}
     language = next(option for option in result["configOptions"] if option["id"] == "language")
-    assert language["category"] == "mode"
     assert [item["value"] for item in language["options"]] == ["auto", "en", "ru"]
 
-    agent._session_set_mode(41, dict(sessionId=session_id, modeId="ru"))
+    agent._session_set_mode(41, dict(sessionId=session_id, modeId="auto"))
     response = next(item for item in transport.responses if item.get("id") == 41)
     assert response["result"] == {}
-    assert configuration_store.read_user_defaults(environ)["defaults"]["language"] == "ru"
-    update = transport.notifications[-1]["params"]["update"]
-    language = next(option for option in update["configOptions"] if option["id"] == "language")
-    assert language["category"] == "mode"
-    assert language["currentValue"] == "ru"
+    updates = [item["params"]["update"] for item in transport.notifications if item.get("method") == "session/update"]
+    assert {"sessionUpdate": "current_mode_update", "currentModeId": "auto"} in updates
+    assert agent.sessions[session_id]["pending_access_mode"] == "auto"
+    # Never persisted as a user default: the language default is untouched
+    # and a new session starts Guarded.
+    assert "access_mode" not in configuration_store.read_user_defaults(environ)["defaults"]
+    assert agent._session_new(dict(cwd=str(project), mcpServers=[]))["modes"]["currentModeId"] == "guarded"
 
-    agent._session_set_mode(42, dict(sessionId=session_id, modeId="invalid"))
+    agent._session_set_mode(42, dict(sessionId=session_id, modeId="ru"))
     response = next(item for item in transport.responses if item.get("id") == 42)
     assert response["error"]["code"] == -32602
-    assert configuration_store.read_user_defaults(environ)["defaults"]["language"] == "ru"
+    assert agent.sessions[session_id]["pending_access_mode"] == "auto"
 
 
 def test_session_new_after_client_created_global_home_session(tmp_path):
@@ -870,7 +881,7 @@ def test_session_new_includes_model_and_thought_level_options(tmp_path, monkeypa
     agent, _transport = _new_agent(tmp_path, environ)
     result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
     ids = {option["id"] for option in result["configOptions"]}
-    assert ids == {"provider", "model", "thought_level", "language"}
+    assert ids == {"provider", "model", "thought_level", "language", "access_mode"}
     validator = _schema_validator("SessionConfigOption")
     for option in result["configOptions"]:
         validator.validate(option)

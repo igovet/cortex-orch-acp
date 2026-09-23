@@ -9,6 +9,7 @@ store retains task metadata, immutable reports and newest-first pipeline edition
 - [Decisions](decisions.md)
 - [Gotchas](gotchas.md)
 - [Storage](storage.md)
+- [Verification](verification.md)
 - [Markdown reports](../features/markdown-reports/index.md)
 - [Knowledge routing](../features/knowledge-routing/index.md)
 - [Senior consultant](../features/senior-consultant/index.md)

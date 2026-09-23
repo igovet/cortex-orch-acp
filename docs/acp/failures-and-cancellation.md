@@ -36,6 +36,17 @@ host-connection-level markers (`broken_pipe`, `connection_reset`,
 `writer_closed`) this codebase does not currently raise as an
 `EngineTurnFailed` kind.
 
+Separately, `engine.failure_classification.route_failure(error)` decides
+whether an engine's JSON-RPC error is about the route rather than the work.
+It reads only the adapters' own structured `data` fields, never message text:
+codex-acp 1.13.0's `codexErrorInfo` (`usageLimitExceeded`, `rateLimitExceeded`)
+and claude-agent-acp 0.81.0's `errorKind` (`rate_limit`, `billing_error`,
+`account_on_hold`, `model_not_found`). A worker turn refused this way fails
+as `EngineTurnFailed("route_unavailable:<reason>")`. That classifies as
+`rate_limited` or `provider_restriction`, so it is still never fallback-eligible,
+and the route is recorded unavailable for automatic routing (see
+[routing and fallback](routing-and-fallback.md#automatic-worker-routing-unavailable-routes)).
+
 ## 2. Retry policy and reconciliation
 
 `engine.retry_policy.decide(operation, attempt_number, reconciled=...)`

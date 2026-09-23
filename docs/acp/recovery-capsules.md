@@ -23,7 +23,8 @@ returns a plain JSON-serializable dict:
   "recipient": {"role": "coordinator"} | {"role": "worker", "assignment_ref": ..., "attempt_id": ...},
   "at_revision": null | int,
   "source_high_watermark": {...},  # max task_events id, max source_revisions
-                                    # revision, max pipeline edition sequence,
+                                    # revision, answered_question_count,
+                                    # max pipeline edition sequence,
                                     # requirement_revision, active config
                                     # revision, owner_epoch -- every "how
                                     # current is this" fact, never a timestamp
@@ -87,6 +88,23 @@ an explicit `{"status": "unavailable"|"unknown", "reason": "..."}` marker
    `user_direct` constraint is therefore included for **both** coordinator
    and worker recipients, rather than silently narrowing (and possibly
    dropping) a critical constraint a worker actually needs.
+   The same section also carries `answered_questions` (with
+   `answered_question_count`): every question a real user answer resolved
+   (`pending_questions` rows with `status='answered'` and `answer_source`
+   `text`/`elicitation`, see `acp.questions_store.answered_questions`), in
+   the order asked, each with its exact `question_id`, `source_ref`
+   (`<question_id>:answer`), `asked_by` (`runtime`/`coordinator`/`worker`),
+   the question text and options as asked, the user's verbatim
+   `answer_text` (`trust_label='user_direct'`), `asked_at`/`answered_at`,
+   `answer_source`, and the answering ACP session (`session_id`, `origin`
+   in the same `acp:<session>` form as captured sources) or
+   `session_binding='unavailable'` with a reason when no runtime row
+   recorded it. The view is derived on every build: answers recorded
+   before it existed appear unchanged, nothing is migrated or synthesized,
+   and an answered row is never updated again. An answer is not a source
+   revision, so `at_revision` does not bound this list. `render_capsule`
+   wraps the question in a `derived_summary` block (the asker wrote it)
+   and the answer in a `user_direct` block.
 4. **pipeline_and_assignments** — coordinator: the current pipeline
    report/edition ref+digest plus every assignment (title/role/
    brief/acceptance/state, computed from `task_events` + the

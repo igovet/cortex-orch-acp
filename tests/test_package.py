@@ -236,9 +236,16 @@ def test_orchestrator_routes_conditional_procedures_with_valid_links():
     assert len(set(links)) >= 7
     for link in links:
         assert (root/link).is_file()
+    from cortex_runtime.orchestration.contracts import NODE
+    from cortex_runtime.portable.roles import WORKER_ALIASES
     routing = (root/'references/worker-routing.md').read_text()
-    for profile in json.loads((PLUGIN/'profiles.json').read_text())['profiles']:
-        assert '`'+profile['name']+'`' in routing
+    plannable = set(NODE['properties']['role']['enum'])
+    reserved = {'code-reviewer', 'build-verification'}
+    catalogue = set(re.findall(r'^- `([^`]+)`:', routing, re.M))
+    assert catalogue == plannable
+    assert plannable == set(WORKER_ALIASES) - reserved
+    assert '## Runtime-reserved (not plannable)' in routing
+    assert all('`'+role+'`' in routing for role in reserved)
 
 
 

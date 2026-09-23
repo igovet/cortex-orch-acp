@@ -310,6 +310,44 @@ def model_display_name(model: str) -> str:
     return f"{name} ({context.upper()})" if context else name
 
 
+def presented_model_name(
+    model: str, model_name: str | None, model_description: str | None, listed: Iterable[str],
+) -> str | None:
+    """A worker's real, engine-observed model display name for one route --
+    never a guess. Only three sources ever produce a non-``None`` result,
+    all of them evidence this engine itself already gave through its own
+    ``configOptions`` (see :func:`config_options.presented_entries`, this
+    function's original inline form, now shared with route-audit display so
+    a worker card/history row/ACP title resolves the identical name a
+    fresh ``session/new`` would show):
+
+    1. ``model`` is the engine's own ``default`` alias and ``model_description``
+       names the concrete model it resolves to (T035 convention: claude-agent-acp
+       describes ``default`` by a listed model's name, or by the bare resolved id
+       otherwise) -- see :func:`resolved_default_model`.
+    2. The engine itself named this option (``model_name``, e.g. a Zed/Paseo
+       ``configOptions`` entry's own ``name``/``description`` field) -- used
+       verbatim, never reformatted, since it is already the engine's own words.
+    3. Neither of the above, but ``model``'s own id already encodes an exact
+       version deterministically decodable without ambiguity (e.g.
+       ``claude-opus-5-5[1m]`` -> ``Opus 5.5 (1M)`` -- see
+       :func:`model_display_name`). An alias that omits the version
+       (``opus[1m]``, ``haiku``) never matches this decode and stays
+       unresolved rather than guessed.
+
+    ``None`` means: no engine-observed evidence beyond the bare id/alias
+    itself exists -- callers must show the alias explicitly marked as an
+    alias, never fabricate a version.
+    """
+    if model.casefold() == "default":
+        resolved = resolved_default_model(model, model_description, listed)
+        return model_display_name(resolved) if resolved is not None else None
+    if model_name and model_name != model:
+        return model_name
+    derived = model_display_name(model)
+    return derived if derived != model else None
+
+
 def resolved_default_model(model: str, description: str | None, listed: Iterable[str]) -> str | None:
     """The model an engine's ``default`` alias stands for, iff that model is
     not also listed on its own (claude-agent-acp describes ``default`` by a

@@ -12,7 +12,8 @@ RUNTIME_SOURCE = (ROOT / "src/cortex_runtime/acp/orchestrating_runtime.py").read
 
 def test_worker_history_uses_authoritative_workspace_handle_directory():
     assert "workspaces.ref(input.workspaceId)" in SOURCE
-    assert "const projectRoot = workspaceHandle.directory" in SOURCE
+    assert "const directory = workspaceHandle.directory" in SOURCE
+    assert "const projectRoot = resolveProjectRoot(directory)" in SOURCE
     assert "input.projectRoot" not in SOURCE
 
 
@@ -142,7 +143,8 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
                    [(i, t, typ, ref, created, json.dumps(payload)) for i, t, typ, ref, created, payload in rows])
     db.execute("insert into delegation_provisioning values (?,?,?)", ("a_fixture", task, "exec_revision"))
     db.execute("insert into attempt_route_audit values (?,?,?,?,?,?,?)",
-               ("audit_revision", "exec_revision", task, "codex", "model-fixture", json.dumps({"effort": "high"}), "7"))
+               ("audit_revision", "exec_revision", task, "codex", "model-fixture",
+                json.dumps({"effort": "high", "model_name": "Model Fixture Resolved"}), "7"))
     db.commit()
     db.close()
 
@@ -162,7 +164,7 @@ def test_embedded_history_query_binds_lifecycle_and_worker_events_to_one_attempt
     assert output["assignments"][0]["status"] == "completed"
     assert output["assignments"][0]["attempts"][0]["status"] == "completed"
     assert output["assignments"][0]["attempts"][0]["route"] == {
-        "provider": "codex", "model": "model-fixture", "effort": "high",
+        "provider": "codex", "model": "model-fixture", "modelName": "Model Fixture Resolved", "effort": "high",
     }
     assert output["assignments"][0]["attempts"][0]["completedAt"] == "6"
     assert events[0]["input"] == {"path": "src/app.py"}

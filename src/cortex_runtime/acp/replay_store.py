@@ -57,6 +57,7 @@ from typing import Any, Mapping, Sequence
 import uuid
 
 from ..contracts import StoreError
+from . import questions_store
 
 REPLAY_SCHEMA = '''
 CREATE TABLE IF NOT EXISTS source_blocks (
@@ -610,7 +611,38 @@ def list_sources(store, task_id: str, after: int = 0, limit: int = 50) -> dict:
                     sha256=block["sha256"], size_bytes=block["size_bytes"], created_at=block["created_at"],
                 ))
         next_cursor = page[-1]["revision"] if len(rows) > len(page) else after
-    return dict(entries=entries, next_cursor=next_cursor)
+        answered = questions_store.answered_questions(db, task_id)
+    return dict(
+        entries=entries, next_cursor=next_cursor,
+        answered_questions=[_answer_listing(record) for record in answered[:MAX_LISTED_ANSWERS]],
+        answered_questions_total=len(answered),
+        answered_questions_complete=len(answered) <= MAX_LISTED_ANSWERS,
+    )
+
+
+# Every page of ``list_sources`` repeats the task's answered questions (they
+# carry no source revision to paginate by); bounded so a page stays small.
+MAX_LISTED_ANSWERS = 200
+ANSWER_PREVIEW_CHARS = 1000
+
+
+def _preview(text: str | None) -> tuple[str | None, bool]:
+    if text is None or len(text) <= ANSWER_PREVIEW_CHARS:
+        return text, False
+    return text[:ANSWER_PREVIEW_CHARS], True
+
+
+def _answer_listing(record: Mapping[str, Any]) -> dict:
+    """One answered question as a ``list_sources`` entry: ids, timestamps,
+    session binding and bounded previews; ``read_source`` returns it whole."""
+    question, question_truncated = _preview(record["question_text"])
+    answer, answer_truncated = _preview(record["answer_text"])
+    listing = {key: value for key, value in record.items() if key not in ("question_text", "answer_text")}
+    listing.update(
+        question_text=question, question_text_truncated=question_truncated,
+        answer_text=answer, answer_text_truncated=answer_truncated,
+    )
+    return listing
 
 
 def _parse_ref(source_ref: str) -> tuple[str, int]:
@@ -625,6 +657,28 @@ def _record_read_observation(db, report_id: str, block_index: int, availability:
     db.execute(
         "INSERT INTO source_block_reads(report_id,block_index,observed_at,availability,reason) VALUES (?,?,?,?,?)",
         (report_id, block_index, _now(), availability, reason),
+    )
+
+
+def _read_answered_question(store, task_id: str, source_ref: str, question_id: str, offset: int, limit: int) -> dict:
+    """One answered question of this task, whole: the question as asked
+    (``asked_by`` wrote it) and the user's verbatim answer, paged as
+    ``chunk`` over the answer text exactly like a source text read."""
+    with store.connection() as db:
+        record = next(
+            (item for item in questions_store.answered_questions(db, task_id) if item["question_id"] == question_id),
+            None,
+        )
+    if record is None:
+        raise StoreError("unknown_source_ref", "source_ref", source_ref, "a source_ref for this task")
+    data = record["answer_text"].encode("utf-8")
+    total = len(data)
+    chunk_bytes = data[offset: offset + limit]
+    return dict(
+        record, block_index=None, availability="stored", reason=None,
+        sha256=hashlib.sha256(data).hexdigest(), total_size=total, offset=offset,
+        chunk=chunk_bytes.decode("utf-8", errors="replace"), encoding="utf-8",
+        next_offset=offset + len(chunk_bytes) if offset + len(chunk_bytes) < total else None,
     )
 
 
@@ -643,6 +697,9 @@ def read_source(store, task_id: str, source_ref: str, offset: int = 0, limit: in
     """
     limit = max(1, min(int(limit), READ_CHUNK_LIMIT))
     offset = max(0, int(offset))
+    question_id = questions_store.question_id_from_ref(source_ref)
+    if question_id is not None:
+        return _read_answered_question(store, task_id, source_ref, question_id, offset, limit)
     report_id, block_index = _parse_ref(source_ref)
     with store.connection() as db:
         report = db.execute("SELECT id FROM reports WHERE id=? AND task_id=?", (report_id, task_id)).fetchone()

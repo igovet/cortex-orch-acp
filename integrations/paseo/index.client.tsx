@@ -9,7 +9,7 @@ import { PipelinePanel } from "./client/pipeline-panel.js";
 import { selectWorker } from "./client/worker-selection.js";
 import { WorkerPopover } from "./client/worker-popover.js";
 import { isWorkerTimelineRunning } from "./client/worker-timeline-status.js";
-import { workerCardMetadata } from "./client/worker-display.ts";
+import { workerCardMetadata, workerStatusPresentation, type WorkerStatusTone } from "./client/worker-display.ts";
 import { coalesced } from "./client/coalesce.ts";
 import { UsageMeter, useWorkerUsage } from "./client/usage-meter.tsx";
 
@@ -30,8 +30,19 @@ const CATALOGUE_REFRESH_MS = 5000;
 
 type WorkerTimelineData = z.output<typeof workerTimelineSchema>;
 
+/** Each status tone maps to one of the host's own status colours, never a
+ * one-off hex, so the card matches the theme's light/dark contrast. */
+function statusToneColor(tone: WorkerStatusTone, colors: PluginTimelineItemProps<never>["theme"]["colors"]): string {
+  if (tone === "success") return colors.statusSuccess;
+  if (tone === "danger") return colors.statusDanger;
+  if (tone === "muted") return colors.foregroundMuted;
+  return colors.accent;
+}
+
 function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }: PluginTimelineItemProps<z.output<typeof workerTimelineSchema>> & { workspaceId: string | null; onOpen: () => void }) {
   const metadata = workerCardMetadata(item.data.title, item.data.status);
+  const presentation = workerStatusPresentation(item.data.status);
+  const statusColor = statusToneColor(presentation.tone, theme.colors);
   const opacity = useRef(new Animated.Value(1)).current;
   const isWorking = isWorkerTimelineRunning(item.data.status);
   const usage = useWorkerUsage(workspaceId, agentId, item.data.assignmentRef, isWorking);
@@ -64,14 +75,19 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
       accessibilityRole="button"
       accessibilityLabel={`Open worker ${metadata.workerName}`}
       onPress={() => workspaceId && (selectWorker(agentId, item.data.assignmentRef), onOpen())}
-      style={{ marginVertical: layout.compact ? 6 : 8, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8,
+      style={{ marginVertical: layout.compact ? 6 : 8, borderWidth: 1, borderColor: theme.colors.border, borderLeftWidth: 3,
+        borderLeftColor: statusColor, borderRadius: 8,
         backgroundColor: theme.colors.surface1, paddingHorizontal: 12, paddingVertical: 10, gap: 6 }}
     >
       <Animated.View style={{ opacity, gap: 6 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
           <Icon name="Bot" size={12} color={theme.colors.foregroundMuted} />
           <Text style={{ flex: 1, color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600", letterSpacing: 0.6, textTransform: "uppercase" }}>Worker</Text>
-          <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>Open ›</Text>
+          {/* Colour plus an icon and a text label, so status is never carried by colour alone. */}
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+            <Icon name={presentation.icon} size={12} color={statusColor} />
+            <Text style={{ color: statusColor, fontSize: 11, fontWeight: "600", textTransform: "capitalize" }}>{presentation.label}</Text>
+          </View>
         </View>
         <Text numberOfLines={2} ellipsizeMode="tail" style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>{metadata.workerName}</Text>
         <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{metadata.subtitle}</Text>

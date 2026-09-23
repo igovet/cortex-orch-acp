@@ -42,8 +42,8 @@ def test_unsupported_session_lifecycle_methods_return_method_not_found():
     try:
         _initialize(proc)
         for index, method in enumerate((
-            # session/set_config_option, session/set_mode (Paseo language
-            # selector), and session/load are implemented, so
+            # session/set_config_option, session/set_mode (the access
+            # mode), and session/load are implemented, so
             # none is in protocol.UNSUPPORTED_METHODS.
             "session/resume",
             "session/list", "session/fork", "session/close",

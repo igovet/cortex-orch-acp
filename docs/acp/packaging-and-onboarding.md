@@ -195,6 +195,26 @@ entirely separate: they refuse to run at all without both
 code path that reaches them — see `tests/test_cortex_diagnose.py`'s static
 and dynamic (no-subprocess) guards.
 
+## Retention maintenance
+
+`src/cortex_clear.py` is a user-run maintenance tool, not part of the ACP
+agent runtime and not something the coordinator or a worker ever executes
+for you. When the coordinator's `cortex-control` skill is loaded for a
+taskless `clear N days` request, it only tells you the exact command to run
+yourself:
+
+```
+python3 src/cortex_clear.py --project-root <path> --days N [--keep-thread <id>]
+```
+
+`--project-root` is the canonical project directory, `--days` a nonnegative
+retention window (tasks with no activity inside it are deleted, along with
+their project task directories and unambiguously-associated draft files),
+and the repeatable `--keep-thread <id>` protects any task bound to that
+exact thread ID. It prints only a JSON summary
+(`deleted_tasks`/`retention_days`/`skipped_protected`) and never a model
+call.
+
 ## Uninstall
 
 `scripts/cortex_uninstall.py` is dry-run by default (prints exactly what

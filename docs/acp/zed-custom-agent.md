@@ -95,6 +95,11 @@ anything.
   **Thought level** selector (see `session/new`'s `configOptions` and
   `session/set_config_option`, T010). With no connection configured yet,
   neither selector is shown at all — never an empty/fake selector.
+- An **Access** selector (config option `access_mode`, category `mode`)
+  is always offered: **Guarded mode** (default for every new session) or
+  **Auto mode** — see
+  [permissions](permissions-and-containment.md#access-mode-guarded-and-auto).
+  Its rendering in Zed has not been observed live yet.
 - `/cortex-status`, `/cortex-model`, `/cortex-effort`, `/cortex-setup` are
   available as slash commands (Zed's `available_commands_update`
   fallback path) regardless of whether Zed's own config-option UI renders.

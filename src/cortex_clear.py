@@ -17,10 +17,9 @@ def main():
     os.umask(0o077)
     try:
         if not 0<=args.days<=36500:raise ValueError('invalid retention')
-        threads=args.keep_thread+[value for name in ('CODEX_THREAD_ID','CODEX_SESSION_ID') if (value:=os.environ.get(name))]
         project=canonical_project(args.project_root)
         directory=project_store_directory(project)
-        result=(clear_tasks(Store(directory,initialize=False,project_root=project),project,args.days,threads)
+        result=(clear_tasks(Store(directory,initialize=False,project_root=project),project,args.days,args.keep_thread)
                 if (directory/'cortex.sqlite3').exists()
                 else dict(deleted_tasks=0,retention_days=args.days,skipped_protected=0))
         print(json.dumps(result))

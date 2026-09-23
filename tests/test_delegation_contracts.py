@@ -61,6 +61,13 @@ def test_plan_accepts_only_the_bounded_complexity_hint():
     with pytest.raises(StoreError,match='invalid_arguments'): dc.validate('coordinator','plan_submit',args)
 
 
+def test_plan_accepts_only_a_known_provider_preference():
+    args=deepcopy(PLAN); args['plan']['tasks'][0]['provider']='codex-acp'
+    dc.validate('coordinator','plan_submit',args)
+    args['plan']['tasks'][0]['provider']='gpt-6-astra'
+    with pytest.raises(StoreError,match='invalid_arguments'): dc.validate('coordinator','plan_submit',args)
+
+
 def test_report_identity_and_verdict_are_structured():
     args=dict(report_ref='r_'+'a'*12,summary='Observed',checks=[],request_key='result')
     dc.validate('worker','result_submit',args)

@@ -162,6 +162,15 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
                     provision = db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',
                                            (channel.attempt_id,)).fetchone()
                 args = dict(report_ref=report_id, summary='Observed result', checks=[], request_key='result')
+                if provision['role_id'] == 'worker-code-reviewer' and scenario in {'elicitation', 'text_question', 'worker_question'}:
+                    # The reviewer sees the user's answer, bound to the session it came from.
+                    answers = mcp_tools.dispatch(store, channel, 'list_sources', {})['answered_questions']
+                    assert [(a['question_text'], a['answer_text'], a['session_id'], a['asked_by']) for a in answers] == [
+                        ('Which target?', 'Small target', 'incoming',
+                         'worker' if scenario == 'worker_question' else 'coordinator')]
+                    capsule = mcp_tools.dispatch(store, channel, 'read_capsule', {})
+                    assert [a['question_id'] for a in capsule['sections']['constraints']['answered_questions']] == [
+                        answers[0]['question_id']]
                 if provision['role_id'] == 'worker-code-reviewer':
                     args['verdict'] = ('BLOCK' if scenario == 'review_block' else 'REQUEST_CHANGES' if scenario == 'fix' and not reviews else 'APPROVE')
                     reviews.append(args['verdict'])
@@ -476,14 +485,36 @@ def test_only_retries_and_review_fixes_escalate_the_route(machine):
     with state.store.connection() as db:
         db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                    (node['assignment_ref'], channel.task_id, 'xa_first', 'worker-debugger', 'ready', 'ready', 0, 'now', 'now')); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (False, 'high')
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (False, 'high', None)
     with state.store.connection() as db:
         event(db, channel.task_id, 'ASSIGNMENT_RETRIED', dict(node=node['node_id'], revision=1, retry=1)); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high')
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', None)
     with state.store.connection() as db:
         db.execute("UPDATE runtime_nodes SET node_id='_fix_0_N0' WHERE task_id=?", (channel.task_id,))
         db.execute("DELETE FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'"); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high')  # a fix keeps its node's complexity
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', None)  # a fix keeps its node's complexity
+
+
+def test_a_planned_provider_preference_reaches_routing(machine):
+    from cortex_runtime.orchestration.state import attempt_routing
+    state, channel = machine
+    preferred = plan(); preferred['tasks'][0]['provider'] = 'codex-acp'
+    state.submit_plan(channel, preferred, 'p'); state.move(channel.task_id, 'EXECUTING')
+    node = state.claim_ready(channel.task_id, channel.channel_id)[0]
+    with state.store.connection() as db:
+        db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                   (node['assignment_ref'], channel.task_id, 'xa_first', 'worker-debugger', 'ready', 'ready', 0, 'now', 'now')); db.commit()
+        db.execute("UPDATE runtime_nodes SET node_id='_fix_0_N0' WHERE task_id=?", (channel.task_id,)); db.commit()
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'normal', 'codex-acp')  # a fix keeps it too
+
+
+def test_plan_provider_is_optional_and_bounded(machine):
+    state, channel = machine
+    bad = plan(); bad['tasks'][0]['provider'] = 'gpt-6-astra'
+    with pytest.raises(StoreError, match='invalid_plan_node'):
+        state.submit_plan(channel, bad, 'bad')
+    ok = plan(); ok['tasks'][0]['provider'] = 'claude-agent-acp'
+    state.submit_plan(channel, ok, 'ok')
 
 
 def test_plan_complexity_is_optional_and_bounded(machine):

@@ -16,7 +16,7 @@ import tempfile
 import time
 import uuid
 
-from ..contracts import StoreError
+from ..contracts import StoreError, storage_failure
 from ..ownership import current_owner_epoch
 from .contracts import obj, text, array, validate
 from .state import encoded, event, TERMINAL
@@ -28,6 +28,24 @@ READ_ONLY = {'worker-architect', 'worker-ux-designer', 'worker-code-reviewer', '
 
 def integer(description, maximum):
     return dict(type='integer', description=description, minimum=0, maximum=maximum)
+
+
+# Internal ceiling for a computed deadline/timeout: any advertised value above
+# this (the schema itself is unbounded above 1, so the runtime is unbounded by
+# default) is clamped here instead, so an enormous integer never overflows the
+# monotonic-clock deadline arithmetic or subprocess timeout math after the
+# command already started. ~68 years; effectively unbounded for any real run.
+TIMEOUT_CEILING_SECONDS = 2 ** 31 - 1
+
+
+def clamp_timeout(value):
+    if value is None:
+        return None
+    return min(value, TIMEOUT_CEILING_SECONDS)
+
+
+def timeout(description):
+    return dict(type='integer', description=description, minimum=1)
 
 
 SCHEMAS = {
@@ -48,14 +66,14 @@ SCHEMAS = {
                             content=text('Complete Markdown including the required first line from create_draft.',1000000),
                             request_key=text('Unique action identity.',128))),
     'command_run': obj(dict(argv=array(text('Literal command argument. Only scoped workers may run commands; coordinators and consultants cannot execute them. No implicit shell.',16384), maximum=128, minimum=1),
-                            timeout_seconds=dict(type='integer', minimum=1, description='Optional maximum runtime in seconds (at least 1), including child processes. Omit to run until the command exits.'),
+                            timeout_seconds=timeout('Optional maximum runtime in seconds, including child processes. Omit to run until the command exits.'),
                             request_key=text('Unique action identity; ambiguous interrupted calls are never re-executed automatically.',128)), required=['argv','request_key']),
     'outside_write': obj(dict(path=text('Absolute path OUTSIDE the project (inside it, write with your own tools). The user confirms first; the parent directory must exist.',4096),
                               content=text('Complete new UTF-8 file content.',1000000),
                               request_key=text('Unique action identity.',128))),
     'outside_command': obj(dict(argv=array(text('Literal command argument, run as the user outside the sandbox after the user confirms (e.g. a global install, a change in HOME). No implicit shell.',16384), maximum=128, minimum=1),
                                 cwd=text('Absolute working directory; defaults to the project root.',4096),
-                                timeout_seconds=dict(type='integer', minimum=1, description='Optional maximum runtime in seconds (at least 1); default 600.'),
+                                timeout_seconds=timeout('Optional maximum runtime in seconds; default 600.'),
                                 request_key=text('Unique action identity.',128)), required=['argv','request_key']),
 }
 SCHEMAS['outside_write']['properties']['content']['minLength'] = 0
@@ -185,13 +203,17 @@ def _write(root,args):
 
 
 def _command(store,channel,root,scopes,args,ref,owner,effects):
-    from .sandbox import as_owner, gateway_command
+    from .sandbox import as_owner, gateway_command, with_umask
     from . import ssh_askpass
     with tempfile.TemporaryDirectory(prefix='cortex-command-') as scratch, tempfile.TemporaryFile() as output, \
             tempfile.TemporaryDirectory(prefix='cortex-askpass-') as askpass_dir:
         # The whole host read-only, as the worker's own jailed shell sees it.
         with store.connection() as db: denied=write_denials(db,channel.task_id)
-        with gateway_command(root,scratch,args['argv'],scopes,system_root=True,readonly=denied) as (command,fds):
+        # Git sees the project's repository: read-only, or with a writing
+        # grant updatable except its configuration and hooks (see sandbox).
+        planted=[]
+        with gateway_command(root,scratch,with_umask(args['argv']),scopes,system_root=True,readonly=denied,
+                             reveal=frozenset({'.git'}),git_writable=True,git_guard=planted) as (command,fds):
             # A worker's shell is the owner's shell, still scope-confined.
             as_owner(command,os.environ)
             # Opt-in: ssh asks for a password in a desktop dialog.
@@ -210,7 +232,7 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
             failure=None
             # No default limit: a long build or backfill runs to completion;
             # a stop/cancel still ends it through the authority check below.
-            limit=args.get('timeout_seconds')
+            limit=clamp_timeout(args.get('timeout_seconds'))
             deadline=None if limit is None else time.monotonic()+limit
             try:
                 while proc.poll() is None:
@@ -227,6 +249,12 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                 code=proc.wait()
         output.seek(0)
         data=output.read()
+    if planted:
+        # Removed again: git configuration, hooks or a repository pointer the
+        # command created would otherwise run code later, outside the sandbox.
+        failure=failure or 'git_configuration_protected'
+        data+=('\n[cortex] removed git configuration the command created (protected: it would run '
+               'code outside the sandbox later): '+', '.join(planted)+'\n').encode()
     from ..recovery.large_output_store import persist_output
     retained=persist_output(store,task_id=channel.task_id,owner_scope=owner,source_kind='terminal',
                      source_ref=ref,data=data,exit_code=code,failure=failure)
@@ -265,7 +293,7 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
     with tempfile.TemporaryFile() as output:
         try:
             done=subprocess.run(args['argv'],cwd=str(resolved),stdout=output,stderr=subprocess.STDOUT,
-                                timeout=args.get('timeout_seconds') or 600)
+                                timeout=clamp_timeout(args.get('timeout_seconds')) or 600)
             code,failure=done.returncode,None
         except subprocess.TimeoutExpired:
             code,failure=None,'timeout'
@@ -384,6 +412,9 @@ def dispatch(store,channel,operation,args):
             db.commit()
         raise
     except (OSError,UnicodeError) as error:
+        if effects['possible']:
+            # The command may have run: an uncertain outcome, never "nothing changed".
+            raise storage_failure(error) from error
         raise StoreError('gateway_io_failure', 'operation', operation) from error
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')

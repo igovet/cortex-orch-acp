@@ -625,8 +625,8 @@ def test_language_option_present_pre_task_and_settable_via_set_config_option(tmp
     result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
     session_id = result["sessionId"]
     ids = {opt["id"] for opt in result["configOptions"]}
-    assert ids == {"language"}
-    assert result["configOptions"][0]["currentValue"] == "auto"
+    assert ids == {"language", "access_mode"}
+    assert next(o for o in result["configOptions"] if o["id"] == "language")["currentValue"] == "auto"
 
     agent._session_set_config_option(1, dict(sessionId=session_id, configId="language", value="ru"))
     response = next(message for message in transport.responses if message.get("id") == 1)

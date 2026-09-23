@@ -19,6 +19,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping, Protocol
 
+from ..configuration import access_mode as configuration_access_mode
 from ..configuration.policy import BENIGN_CONFIGURATION_ERROR_CODES
 from ..connections.environment import DENYLIST_PATTERN
 from ..contracts import StoreError
@@ -2023,7 +2024,8 @@ class OrchestratingRuntime:
         if answering_question is not None:
             delegation_events.append_event(
                 self._store, task_id, "progress", f"question_answered:{answering_question.id}",
-                dict(kind="question_answered", question_id=answering_question.id, answer_text=answer_text),
+                dict(kind="question_answered", question_id=answering_question.id, answer_text=answer_text,
+                     session_id=session_id),
                 origin="runtime",
             )
         elif pre_existing:
@@ -2100,7 +2102,8 @@ class OrchestratingRuntime:
                 self._emit_localized(task_id, emit_update, language, "coordinator_recovery_new_session")
         delegation_events.append_event(
             self._store, task_id, "progress", f"question_answered:{question.id}",
-            dict(kind="question_answered", question_id=question.id, answer_text=answer_text), origin="runtime",
+            dict(kind="question_answered", question_id=question.id, answer_text=answer_text, session_id=session_id),
+            origin="runtime",
         )
         # A user_message (meaningful) event, distinct from the informative
         # progress row above, so the continuation loop's claim/coalesce
@@ -2571,7 +2574,20 @@ class OrchestratingRuntime:
         parts = [catalog_labels.engine_short_name(engine)]
         model = (audit["model"] if audit else None) or parameters.get("model")
         if model and model != "unknown":
-            parts.append(str(model))
+            # T035: the routing id (``model``, used for pin/deny) stays the
+            # audited column value above; the *display* text here prefers
+            # ``live_adapters._resolve_route_model_name``'s real,
+            # engine-observed name (``detail["model_name"]``) over it.
+            # Absent that evidence, the id is shown explicitly marked as an
+            # alias rather than presented as though it were the concrete
+            # model -- never a guessed version.
+            model_name = None
+            if audit is not None:
+                try:
+                    model_name = json.loads(audit["decision_detail_json"] or "{}").get("model_name")
+                except Exception:  # noqa: BLE001 - a label never fails a card
+                    model_name = None
+            parts.append(str(model_name) if model_name else f"{model} (alias)")
         # The attempt's own effort when it was audited with one -- for a
         # worker that is the only place it exists; the revision's own
         # parameters are the coordinator's. Each engine names its own
@@ -3308,7 +3324,8 @@ class OrchestratingRuntime:
                 if questions_store.answer(self._store, question.id, answer_text, "elicitation"):
                     delegation_events.append_event(
                         self._store, task_id, "progress", f"question_answered:{question.id}",
-                        dict(kind="question_answered", question_id=question.id, answer_text=answer_text),
+                        dict(kind="question_answered", question_id=question.id, answer_text=answer_text,
+                             session_id=session_id),
                         origin="runtime",
                     )
                     # A user_message (meaningful) event, distinct from the
@@ -5114,7 +5131,22 @@ class OrchestratingRuntime:
         ``set_runtime``) after it has already resolved
         ``engine_session_id -> task_id`` itself -- this method never sees
         or needs an ``engine_session_id``, only the ``task_id`` that lookup
-        already produced."""
+        already produced.
+
+        In the task's Auto access mode (``configuration.access_mode``) the
+        runtime answers instead of the user: the returned callable selects
+        the request's own allow option without asking any host, so it is
+        returned even when no connection is live. Every caller of this
+        method is a user-approval prompt (a native deletion via
+        ``engine.permissions``, and ``orchestration.consent``'s outside
+        write/command and project deletion); refusals that are not the
+        user's to give -- a native subagent, a stale binding, a gateway
+        scope or role rule -- are decided before any requester is reached
+        and are unchanged by the mode."""
+        if configuration_access_mode.current(self._store, task_id) == configuration_access_mode.AUTO:
+            store = self._store
+            return lambda _engine_session_id, params, _timeout: configuration_access_mode.auto_approve(
+                store, task_id, params)
         with self._lock:
             return self._task_permission_requesters.get(task_id)
 

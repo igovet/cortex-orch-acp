@@ -1,19 +1,28 @@
-# Decisions
+## 2026-09-23 audit remediation (user-approved)
 
-- Cortex is an incoming ACP stdio agent; the Codex-plugin harness is removed.
-- The runtime owns lifecycle, scheduling, routes, permissions and completion.
-  Models propose structured plans and submit immutable reports.
-- Keep one project-local `.cortex` store and one newest-first `pipeline.md`.
-- Work directly in the selected project through the runtime gateway. Serialize
-  overlapping scopes and reserve at most four workers per project store.
-- Keep each engine's native tools and bound them with an OS jail around the engine
-  process (scope-only writes); disable native subagents, user MCP, hooks and
-  plugins. Contain commands and external MCP processes with explicit grants;
-  unknown effects block replay.
-- Require a fresh reviewer, bounded fix cycles and actual command verification.
-  Bind review and verification to the observed project revision.
-- Preserve all 23 specialist/consultant profiles and the shared report protocol.
-  Runtime escalation selects a read-only consultant; models cannot choose routes.
-- Compaction and session replacement reconstruct context from durable state.
-  Absence of evidence never establishes success.
-- Use semantic version `1.0.0` and regenerate the full payload hash after changes.
+- D1 build-verification profile: keep it (all 23 profiles are required);
+  document it as runtime-reserved — not plannable, not dispatched — since the
+  runtime itself executes command verification. Approved in
+  `list_sources`/`read_source(pq_d977d180d44f:answer)`, re-confirmed in
+  `read_source(pq_d4502996482e:answer)`.
+- D2 retention: ship a user-run maintenance CLI, `python3 src/cortex_clear.py
+  --project-root <path> --days N [--keep-thread <id>]`; the coordinator only
+  explains it. Codex-era `CODEX_*` env protection is removed. Approved in
+  `read_source(pq_d977d180d44f:answer)`, re-confirmed in
+  `read_source(pq_d4502996482e:answer)`.
+- D3 `docs/project/verification.md` is produced by a knowledge-harvest
+  refresh rather than hand-written, per the user, in
+  `read_source(pq_d977d180d44f:answer)`, re-confirmed in
+  `read_source(pq_d4502996482e:answer)`.
+- Worker routing: a route-caused failure (quota/rate limit, model
+  unavailable, engine start failure, unconfirmed worker mode) is recorded
+  unavailable with an expiry and retried on another available route; routing
+  refusals (pin/deny/malformed `routing.json`/no available route) are named,
+  non-retried blockers. Haiku workers configure only options their own
+  session offers. Required by the user in
+  `read_source(pq_d9fa85b27e5c:answer)`.
+- Live checks for this remediation are user-authorized paid Claude-only runs
+  in an isolated dev setup; the production plugin and the user's real
+  configuration are never touched. Requested via
+  `read_source(pq_bc3b03c3f491:answer)` (runtime fix to make answers visible
+  to reviewers, which this citation form now reflects).

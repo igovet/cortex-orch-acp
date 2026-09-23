@@ -199,17 +199,19 @@ def _own_role_id(store, channel: ChannelContext | None) -> str | None:
 def _shared_read_skill(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
     """Read a shared skill or a declared reference for this channel's role."""
     from ..portable.roles import (
-        COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS, SHARED_ROLE_IDS,
-        WORKER_REFERENCE_IDS, load_role, read_reference,
+        COORDINATOR_ONLY_SHARED_ROLE_IDS, COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS,
+        SHARED_ROLE_IDS, WORKER_REFERENCE_IDS, load_role, read_reference,
     )
 
     requested = args.get("skill")
     skill_id = requested if isinstance(requested, str) else ""
-    # Skills link their references as `references/<id>.md`; accept the link too.
-    skill_id = skill_id.strip().removeprefix("cortex:").removeprefix("references/").removesuffix(".md")
+    # Skills link their references as `references/<id>.md`; accept that link form.
+    skill_id = skill_id.strip().removeprefix("references/").removesuffix(".md")
     role_kind = "coordinator" if channel is not None and channel.role == "coordinator" else "worker"
     references = (COORDINATOR_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS if role_kind == "coordinator"
                   else WORKER_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS)
+    allowed_shared = (SHARED_ROLE_IDS if role_kind == "coordinator"
+                      else SHARED_ROLE_IDS - COORDINATOR_ONLY_SHARED_ROLE_IDS)
     if skill_id in references:
         return dict(skill=skill_id, title=skill_id.replace("-", " ").capitalize(),
                     body=read_reference(skill_id, role_kind=role_kind))
@@ -220,10 +222,10 @@ def _shared_read_skill(store, channel: ChannelContext, args: Mapping[str, Any]) 
         # every such session (live, 2026-09-22).
         role_set = load_role(skill_id)
         return dict(skill=skill_id, title=role_set.title, body=role_set.body_portable)
-    if skill_id not in SHARED_ROLE_IDS:
+    if skill_id not in allowed_shared:
         raise StoreError(
             "unknown_skill", "skill", str(requested),
-            ", ".join(sorted(SHARED_ROLE_IDS | references)),
+            ", ".join(sorted(allowed_shared | references)),
             "Read a shared skill or a reference declared for this role.",
         )
     role_set = load_role(skill_id)
@@ -349,10 +351,13 @@ _OPERATION_DESCRIPTIONS = dict(
         "skill='documentation-sync' or skill='knowledge-harvest'). Do not send `topic`, "
         "`name`, or `id`; those fields are invalid."
     ),
-    list_sources="List durable source references (user text and resolved attachments) for this task, cursor-paginated.",
-    read_source="Bounded, addressable read of one source_ref (text or attachment) with provenance and trust label.",
+    list_sources="List durable source references (user text and resolved attachments) for this task, cursor-paginated. "
+                 "Every page also carries answered_questions: each question a real user answer resolved, with its "
+                 "question_id, question as asked, the user's verbatim answer, timestamps and answering session.",
+    read_source="Bounded, addressable read of one source_ref (text, attachment, or an answered question's "
+                "<question_id>:answer) with provenance and trust label.",
     read_capsule="Read this channel's own deterministic recovery capsule: identity, applied config, exact "
-                 "constraints with origins, own assignments/pipeline, confirmed publications/checks, open/"
+                 "constraints with origins (including answered user questions), own assignments/pipeline, confirmed publications/checks, open/"
                  "uncertain actions, newer events, role/tool access, and continuation intent.",
     read_large_output="Page through an output too large to return inline (a command_run or project_git result), by its large_output_id, byte offset and limit.",
     project_read="Read a project file (UTF-8 text, paged by offset/limit; returns its sha256 for a later write or delete) or list a directory. Read-only and always available.",
@@ -435,10 +440,13 @@ def _enumerate_skills(schema: dict, role_kind: str, role_id: str | None) -> dict
     before its own role became readable)."""
     from ..acp.orchestrating_runtime import COORDINATOR_ROLE_ID
     from ..portable.roles import (
-        COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS, SHARED_ROLE_IDS, WORKER_REFERENCE_IDS,
+        COORDINATOR_ONLY_SHARED_ROLE_IDS, COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS,
+        SHARED_ROLE_IDS, WORKER_REFERENCE_IDS,
     )
 
     ids = set(SHARED_ROLE_IDS) | EXAMPLE_REFERENCE_IDS
+    if role_kind != "coordinator":
+        ids -= COORDINATOR_ONLY_SHARED_ROLE_IDS
     ids |= COORDINATOR_REFERENCE_IDS if role_kind == "coordinator" else WORKER_REFERENCE_IDS
     own = COORDINATOR_ROLE_ID if role_kind == "coordinator" else role_id
     if own:

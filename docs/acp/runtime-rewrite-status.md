@@ -90,3 +90,24 @@ inspected in Paseo: direct overview without workers and a completed Luna/Haiku
 implementation/review cycle. Read bodies are omitted from new display history,
 read rows never expand, and raw data is hidden in both chat and worker panels. See the [observations and
 limits](evidence/paseo-2026-09-21/chat-presentation-follow-up.md).
+
+## Direct-driver Claude live check (no Paseo/Zed)
+
+On 2026-09-23, a disposable-project, ad hoc ACP stdio driver (not part of this
+checkout; see the evidence note) drove the real `src/cortex_acp.py` entry point
+directly against the installed `claude-agent-acp` 0.81.0, with a referenced
+(no-login, no-credential-copy) connection to the user's existing native Claude
+account and a project-local `routing.json` pin. A one-worker plan routed by
+`routing.auto_route.choose` (`route_basis: auto:pin`) to Claude `haiku`
+completed end to end: implementation worker, independent code-reviewer,
+runtime-executed verification commands (both exit 0) and `Runtime: COMPLETED`,
+with no `WorkerModeNotConfirmed`. Separately, pinning every worker role to a
+nonexistent Claude model id produced, on every one of four delegation attempts
+across four coordinator-initiated plan revisions, the identical named
+`pinned_route_unavailable` refusal with zero `ASSIGNMENT_RETRIED` events — the
+runtime never looped — and the task ended cleanly in `WAITING_USER`, not stuck.
+This did not exercise the separate "runtime moves the retry to another
+available route" fallback case (would need a second failing route; Codex was
+out of scope for this run), and remains a single-connection, two-task check,
+not a Zed/Paseo/codeg qualification or a real quota-exhaustion trigger. See the
+[exact commands, retained identities and limits](evidence/claude-live-qual-2026-09-23/direct-driver-run.md).

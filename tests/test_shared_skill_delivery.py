@@ -1,7 +1,7 @@
 """Shared skills actually reach the models.
 
 The role text has always said things like "load/apply
-`cortex:documentation-sync`" -- an instruction from when a Codex plugin host
+`documentation-sync`" -- an instruction from when a Codex plugin host
 could load a skill by name. In an ACP session nothing can: `load_role` reads
 exactly one `SKILL.md`, and no tool read a skill. So every shared skill --
 tool discipline, content safety, how to talk to the user -- was unreachable,
@@ -21,10 +21,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from cortex_runtime.contracts import StoreError  # noqa: E402
-from cortex_runtime.delegation.mcp_tools import _shared_read_skill  # noqa: E402
+from cortex_runtime.delegation.mcp_tools import _enumerate_skills, _shared_read_skill  # noqa: E402
 from cortex_runtime.portable.roles import (  # noqa: E402
-    NAMED_SKILLS, SHARED_ROLE_IDS, composed_instructions, load_role,
-    read_reference,
+    COORDINATOR_ONLY_SHARED_ROLE_IDS, NAMED_SKILLS, SHARED_ROLE_IDS, composed_instructions,
+    load_role, read_reference,
 )
 from cortex_runtime.portable.errors import PortableError  # noqa: E402
 
@@ -90,8 +90,10 @@ def test_a_situational_skill_can_be_read_by_name():
     result = _shared_read_skill(None, None, {"skill": "documentation-sync"})
     assert result["skill"] == "documentation-sync"
     assert result["body"] == load_role("documentation-sync").body_portable
-    # The `cortex:` prefix the role text uses is accepted.
-    assert _shared_read_skill(None, None, {"skill": "cortex:knowledge-harvest"})["skill"] == "knowledge-harvest"
+    # Codex-plugin-era namespace aliases are not part of the ACP contract.
+    with pytest.raises(StoreError) as error:
+        _shared_read_skill(None, None, {"skill": "cortex:knowledge-harvest"})
+    assert "unknown_skill" in str(error.value)
 
 
 def test_only_shared_skills_are_readable():
@@ -111,6 +113,33 @@ def test_every_named_skill_is_readable_by_its_role():
     assert "cortex-control" not in NAMED_SKILLS["worker"]
 
 
+def test_coordinator_only_shared_skills_are_hidden_from_a_worker_and_the_consultant():
+    """`cortex-control` and `coordinator-communication` are coordinator-only:
+    a worker or the consultant (also a "worker"-kind channel) may never see
+    them advertised, nor read them, even though the coordinator still can."""
+    from types import SimpleNamespace
+
+    assert COORDINATOR_ONLY_SHARED_ROLE_IDS <= SHARED_ROLE_IDS
+    for skill_id in COORDINATOR_ONLY_SHARED_ROLE_IDS:
+        assert skill_id not in NAMED_SKILLS["worker"]
+        with pytest.raises(StoreError) as error:
+            _shared_read_skill(None, None, {"skill": skill_id})
+        assert "unknown_skill" in str(error.value)
+        # The coordinator channel still reads it fine.
+        coordinator_channel = SimpleNamespace(role="coordinator")
+        result = _shared_read_skill(None, coordinator_channel, {"skill": skill_id})
+        assert result["skill"] == skill_id
+
+    schema = {"properties": {"skill": {"type": "string"}}}
+    worker_schema = _enumerate_skills(schema, "worker", "worker-backend-dev")
+    consultant_schema = _enumerate_skills(schema, "worker", "worker-senior-consultant")
+    coordinator_schema = _enumerate_skills(schema, "coordinator", None)
+    for skill_id in COORDINATOR_ONLY_SHARED_ROLE_IDS:
+        assert skill_id not in worker_schema["properties"]["skill"]["enum"]
+        assert skill_id not in consultant_schema["properties"]["skill"]["enum"]
+        assert skill_id in coordinator_schema["properties"]["skill"]["enum"]
+
+
 def test_reference_inventory_is_bounded_and_role_scoped():
     assert "# Assignment planning" in read_reference("worker-routing", role_kind="coordinator")
     assert "# Report publication" in read_reference("report-publication", role_kind="worker")
@@ -124,29 +153,30 @@ def test_reference_inventory_is_bounded_and_role_scoped():
             read_reference(reference_id, role_kind=role_kind)
 
 
-def test_every_skill_name_the_instructions_write_resolves_through_the_reader():
-    """A live worker asked for `shared-report-publication` because its
-    protocol called the references "shared"; skills link references as
-    `references/<id>.md`. Every name a prompt writes must reach the reader."""
+def test_every_read_skill_target_in_shipped_instructions_is_advertised():
+    """Every explicit read_skill target uses an id the reader advertises."""
     import re
-    from types import SimpleNamespace
 
-    coordinator = SimpleNamespace(role="coordinator")
-    links = {
-        "coordinator": [REPO_ROOT / "skills/orchestrator/SKILL.md", REPO_ROOT / "skills/cortex-control/SKILL.md",
-                        REPO_ROOT / "skills/cortex-control/references/index.md"],
-        "worker": [REPO_ROOT / "skills/cortex-control/references/index.md"],
+    role_enums = {
+        "coordinator": set(NAMED_SKILLS["coordinator"]),
+        "worker": set(NAMED_SKILLS["worker"]),
     }
-    for role, paths in links.items():
-        channel = coordinator if role == "coordinator" else None
+    paths_by_role = {
+        "coordinator": [REPO_ROOT / "skills/orchestrator/SKILL.md"],
+        "worker": [
+            *REPO_ROOT.glob("skills/**/SKILL.md"),
+            *REPO_ROOT.glob("skills/**/references/*.md"),
+            *REPO_ROOT.glob("agent-sources/**/*.md"),
+        ],
+    }
+    target_pattern = re.compile(
+        r"(?<!not )(?:load|read) (?:skill )?`([a-z][a-z0-9-]*)`[^\n]{0,80}`read_skill`"
+    )
+
+    for role, paths in paths_by_role.items():
         for path in paths:
-            for target in re.findall(r"\]\((references/[a-z-]+\.md|[a-z-]+-example\.md)\)", path.read_text()):
-                if role == "worker" and not target.endswith("-example.md") and target != "references/index.md":
-                    continue
-                assert _shared_read_skill(None, channel, {"skill": target})["body"], (path, target)
-    for protocol in ("agent-sources/worker-protocol.md", "agent-sources/consultant-protocol.md"):
-        text = (REPO_ROOT / protocol).read_text()
-        assert "shared\nreport-publication" not in text and "shared report-publication" not in text
-        for skill_id in ("report-publication", "code-and-evidence", "interactive-resources"):
-            assert f"`{skill_id}`" in text
-            assert _shared_read_skill(None, None, {"skill": skill_id})["body"]
+            for skill_id in target_pattern.findall(path.read_text()):
+                target_role = (
+                    "coordinator" if skill_id == "coordinator-communication" else role
+                )
+                assert skill_id in role_enums[target_role], (target_role, path, skill_id)

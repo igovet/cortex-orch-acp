@@ -365,3 +365,158 @@ def test_an_engine_without_an_effort_setting_still_runs_the_worker(tmp_path):
     mode_option = next(o for o in observed if o.get("id") == "mode")
     assert mode_option["currentValue"] == "agent"
     adapter.terminate_owned("xa_eff")
+
+
+# claude-agent-acp's own shape (see tests/fixtures/catalog/
+# claude_agent_acp_config_options.json for the ids): session/new starts on
+# the default model, which offers an effort selector; once the session's
+# model is set to Haiku, the engine drops that selector entirely (the live
+# catalog records Haiku with no effort values at all).
+_CLAUDE_MODES = [dict(value=v, name=v) for v in ("default", "acceptEdits", "plan", "auto", "bypassPermissions")]
+_CLAUDE_EFFORTS = [dict(value=v, name=v) for v in ("default", "low", "medium", "high", "xhigh", "max")]
+
+
+def _claude_haiku_connection(tmp_path, request_log, *, drop_on_model_switch=("effort",)):
+    environ = isolated_environ(tmp_path)
+    config_options = [
+        dict(id="mode", category="mode", type="select", currentValue="acceptEdits", options=_CLAUDE_MODES),
+        dict(id="model", category="model", type="select", currentValue="default",
+             options=[dict(value="default", name="Default (recommended)"), dict(value="haiku", name="Haiku 4.5")]),
+        dict(id="effort", category="thought_level", type="select", currentValue="default", options=_CLAUDE_EFFORTS),
+    ]
+    scenario = default_scenario(
+        config_options=config_options, request_log_path=str(request_log),
+        remove_options_on_apply={"model": list(drop_on_model_switch)},
+    )
+    connection = make_connection_record(
+        new_connection_id(), fake_launch_command(write_scenario(tmp_path, scenario)),
+        engine="claude-agent-acp", environ=environ,
+    )
+    with connection_registry.transaction(environ) as state:
+        state.connections[connection.id] = connection
+    return environ, connection
+
+
+def _claude_coordinator_revision(store, task_id, epoch, connection):
+    """The coordinator runs on the default model at medium effort."""
+    options = [
+        {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "default",
+         "options": [{"value": "default", "name": "Default (recommended)"}]},
+        {"id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": "default",
+         "options": _CLAUDE_EFFORTS},
+    ]
+    entry = build_catalog({connection.id: connection}, {connection.id: parse_observation(options)}).entries[0]
+    service = ConfigurationService(store)
+    row = service.propose(
+        task_id, entry, ConfigurationInputs(route=entry.route, parameters={"thought_level": "medium"}),
+        expected_revision=0, current_epoch=epoch,
+    )
+    service.apply(task_id, row["id"], _FakeConfigAdapter(), "es_" + "a" * 12, epoch)
+    return row
+
+
+def _set_config_calls(request_log):
+    import json
+
+    return [
+        (entry["params"]["configId"], entry["params"]["value"])
+        for entry in map(json.loads, request_log.read_text(encoding="utf-8").splitlines())
+        if entry.get("method") == "session/set_config_option"
+    ]
+
+
+def test_a_haiku_worker_whose_model_drops_the_effort_option_still_runs(tmp_path):
+    """User-reported: every Haiku worker failed with WorkerModeNotConfirmed.
+    Its session opened on the default model, which offers an effort; the
+    coordinator's medium effort was judged against that, then sent after
+    the switch to Haiku had already removed the effort option. The worker
+    now runs with only what its Haiku session offers, and its mode is still
+    confirmed over the wire."""
+    store, task_id, epoch = _bootstrap(tmp_path)
+    request_log = tmp_path / "requests.jsonl"
+    environ, connection = _claude_haiku_connection(tmp_path, request_log)
+    row = _claude_coordinator_revision(store, task_id, epoch, connection)
+
+    adapter = EngineSessionManagerAdapter(
+        lambda t: connection, lambda t: str(tmp_path), environ=environ, call_timeout=10.0, store=store,
+    )
+    session_ref = adapter.open(
+        "shared_project_root",
+        dict(task_id=task_id, attempt_id="xa_haiku", assignment_id="asg-haiku", config_revision=row["id"],
+             resolved_model="haiku"),
+        "instructions",
+    )
+    try:
+        observed = adapter._managers["xa_haiku"].observed_config_options(session_ref)
+        assert next(o for o in observed if o["id"] == "model")["currentValue"] == "haiku"
+        assert next(o for o in observed if o["id"] == "mode")["currentValue"] == "default"
+        calls = _set_config_calls(request_log)
+        assert ("effort", "medium") not in calls
+        assert [option_id for option_id, _ in calls if option_id == "effort"] == []
+        assert calls[-1] == ("mode", "default")
+    finally:
+        adapter.terminate_owned("xa_haiku")
+
+
+def test_a_model_switch_that_drops_the_mode_option_still_refuses_the_worker(tmp_path):
+    """Applying the model first never weakens the floor: a model whose
+    session offers no mode leaves the worker unconfirmed, and nothing runs."""
+    store, task_id, epoch = _bootstrap(tmp_path)
+    request_log = tmp_path / "requests.jsonl"
+    environ, connection = _claude_haiku_connection(tmp_path, request_log, drop_on_model_switch=("effort", "mode"))
+    row = _claude_coordinator_revision(store, task_id, epoch, connection)
+
+    adapter = EngineSessionManagerAdapter(
+        lambda t: connection, lambda t: str(tmp_path), environ=environ, call_timeout=10.0, store=store,
+    )
+    with pytest.raises(WorkerModeNotConfirmed):
+        adapter.open(
+            "shared_project_root",
+            dict(task_id=task_id, attempt_id="xa_haiku", assignment_id="asg-haiku", config_revision=row["id"],
+                 resolved_model="haiku"),
+            "instructions",
+        )
+    assert capacity.count_active(store, connection.id) == 0
+    assert "xa_haiku" not in adapter._managers
+    assert ("mode", "default") not in _set_config_calls(request_log)
+
+
+def test_a_worker_on_the_default_model_keeps_its_effort(tmp_path):
+    """The neighbouring case: a model that does offer an effort still gets
+    the requested one, with no extra model switch."""
+    store, task_id, epoch = _bootstrap(tmp_path)
+    request_log = tmp_path / "requests.jsonl"
+    environ, connection = _claude_haiku_connection(tmp_path, request_log, drop_on_model_switch=())
+    row = _claude_coordinator_revision(store, task_id, epoch, connection)
+
+    adapter = EngineSessionManagerAdapter(
+        lambda t: connection, lambda t: str(tmp_path), environ=environ, call_timeout=10.0, store=store,
+    )
+    session_ref = adapter.open(
+        "shared_project_root",
+        dict(task_id=task_id, attempt_id="xa_def", assignment_id="asg-def", config_revision=row["id"],
+             resolved_model="default", parameters=dict(effort="high")),
+        "instructions",
+    )
+    try:
+        assert _set_config_calls(request_log) == [("model", "default"), ("effort", "high"), ("mode", "default")]
+        observed = adapter._managers["xa_def"].observed_config_options(session_ref)
+        assert next(o for o in observed if o["id"] == "mode")["currentValue"] == "default"
+    finally:
+        adapter.terminate_owned("xa_def")
+
+
+@pytest.mark.parametrize("requested, offered, expected", [
+    ("medium", {"low", "medium", "high"}, "medium"),
+    ("xhigh", {"default", "low", "medium", "high", "max"}, "high"),
+    ("low", {"medium", "high"}, "medium"),
+    ("medium", set(), None),
+    ("medium", {"default"}, None),
+    ("default", {"default", "low"}, "default"),
+    ("custom", {"low"}, None),
+    (None, {"low"}, None),
+])
+def test_a_worker_effort_is_lowered_before_raised_to_what_its_session_offers(requested, offered, expected):
+    from cortex_runtime.delegation.live_adapters import _effort_within
+
+    assert _effort_within(requested, offered) == expected

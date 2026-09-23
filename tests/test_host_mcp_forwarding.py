@@ -175,7 +175,7 @@ def test_production_runtime_forwards_owner_registry_to_task_and_role_filters(tmp
     assert not (tmp_path / ".cortex").exists()
 
 
-def test_cortex_registry_supplies_servers_when_client_sends_none(tmp_path):
+def test_cortex_registry_supplies_servers_when_client_sends_none(tmp_path, tmp_path_factory):
     """Paseo sends an empty session/new list; Cortex config still works."""
     import json
 
@@ -189,7 +189,10 @@ def test_cortex_registry_supplies_servers_when_client_sends_none(tmp_path):
         },
     }}), encoding="utf-8")
     project_file.chmod(0o600)
-    root = Path("/var/tmp") / f"cortex-mcp-test-home-{tmp_path.name}"
+    # HOME must sit outside the project workspace (`tmp_path` here carries a
+    # `.cortex` marker): a HOME nested under it trips the registry's own
+    # "connection storage under project" guard, same as a real project root.
+    root = tmp_path_factory.mktemp("home")
     config = root / "config" / "cortex"
     config.mkdir(parents=True, exist_ok=True)
     global_file = config / "mcp-servers.json"
@@ -215,10 +218,12 @@ def test_cortex_registry_supplies_servers_when_client_sends_none(tmp_path):
     }]
 
 
-def test_global_registry_wins_over_client_and_project_files_are_ignored(tmp_path):
+def test_global_registry_wins_over_client_and_project_files_are_ignored(tmp_path, tmp_path_factory):
     import json
 
-    root = "/var/tmp/cortex-mcp-test-home-duplicate"
+    # Same "HOME outside the project workspace" constraint as above: this
+    # test's project file lives under `tmp_path/.cortex`.
+    root = str(tmp_path_factory.mktemp("home"))
     config = Path(root) / "config" / "cortex"
     config.mkdir(parents=True, exist_ok=True)
     (config / "mcp-servers.json").write_text(json.dumps({"servers": {
@@ -396,7 +401,7 @@ def test_engine_session_filters_external_mcp_and_records_bounded_inventory(tmp_p
 def _registry(tmp_path, spec):
     import json
 
-    root = Path("/var/tmp") / f"cortex-mcp-runtime-home-{tmp_path.name}"
+    root = tmp_path / "home"
     config = root / "config" / "cortex"
     config.mkdir(parents=True, exist_ok=True)
     registry_file = config / "mcp-servers.json"

@@ -35,7 +35,7 @@ def report_digest(store, task_id, filename):
 
 
 def project_git_evidence(store, task_id, owner_scope, root, kind):
-    """Observe fixed read-only git commands; never expose .git to model commands.
+    """Observe fixed read-only git commands, outside the model's own sandbox.
 
     The diff is the entire working tree against HEAD, including pre-existing
     edits. It is review context, never evidence of a particular worker's authorship.

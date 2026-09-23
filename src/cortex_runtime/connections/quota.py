@@ -48,6 +48,22 @@ def used_percent(record, model: str | None, environ: Mapping[str, str] | None = 
     return max(live) if live else None
 
 
+def resets_at(record, model: str | None, environ: Mapping[str, str] | None = None,
+              now: float | None = None) -> float | None:
+    """When the most-used still-open window that applies to ``model``
+    resets (epoch seconds), as the engine reported it; ``None`` when the
+    engine never said."""
+    now = time.time() if now is None else now
+    windows = _codex_windows(record) if record.engine == "codex-acp" else _load(record.id, environ)
+    model = (model or "").casefold()
+    live = [
+        (float(window["used"]), float(window["resets_at"])) for name, window in windows.items()
+        if _applies(name, model) and isinstance(window.get("used"), (int, float))
+        and isinstance(window.get("resets_at"), (int, float)) and window["resets_at"] > now
+    ]
+    return max(live)[1] if live else None
+
+
 def observe(connection_id: str, info: object, environ: Mapping[str, str] | None = None) -> None:
     """Record one Claude ``rate_limit_info``. Never raises."""
     try:

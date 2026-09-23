@@ -54,6 +54,7 @@ Documentation impact is reviewed after verified changes. The coordinator may
 propose a documentation assignment when the change affects public or durable project
 knowledge, then evaluates that worker's report and evidence. The runtime schedules the accepted plan and enforces review and verification.
 
-The knowledge skill and current ACP documentation are the authoritative
-instructions. Historical plugin-era census and host-qualification procedures
-are not part of the route.
+Repository instructions in `AGENTS.md`, the current `docs/acp/*` pages and
+`SECURITY.md` are authoritative for this product. The knowledge-harvest skill
+governs only the harvest workflow. Historical plugin-era census and
+host-qualification procedures are not part of the route.

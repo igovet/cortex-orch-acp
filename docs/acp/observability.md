@@ -212,6 +212,16 @@ to its provisioned engine attempt. Explicit plan IDs are not interchangeable
 with delegation references. Switching workers uses that attempt’s own event
 cursor; structured native tool errors remain visible as text details.
 
+Paseo's worker history and pipeline read the store the runtime used for the
+session. The runtime keys that store by the logical project root of the session
+cwd (`logical_project_root`), so a session opened in a linked `git worktree`
+writes to the main repository's `.cortex/cortex.sqlite3`, not to one under the
+worktree. The plugin resolves the workspace directory the same way, read-only,
+before it opens the store. A forged, ambiguous or unsafe worktree layout gets
+"unavailable". The plugin never guesses a different store and never creates
+one. `tests/test_paseo_worktree_store.py` checks that the plugin resolves the
+same root as the runtime.
+
 Worker recovery does not replay terminal requests or provision an old request
 under a new coordinator channel. Worker history filters displayable events
 before bounding each page, and selected completed transcripts continue loading

@@ -372,7 +372,7 @@ def test_a_worker_card_names_the_workers_own_model_not_the_coordinators(tmp_path
         decision="authorized", detail={},
     )
 
-    assert runtime._delegation_route_label(task_id, "a_ref") == "codex · gpt-5-codex · medium"
+    assert runtime._delegation_route_label(task_id, "a_ref") == "codex · gpt-5-codex (alias) · medium"
 
 
 def test_a_worker_card_header_names_the_effort_the_attempt_actually_ran_with(tmp_path):
@@ -412,7 +412,48 @@ def test_a_worker_card_header_names_the_effort_the_attempt_actually_ran_with(tmp
     )
 
     # "low" is the coordinator's own; this worker ran at "high".
-    assert runtime._delegation_route_label(task_id, "e_ref") == "codex · gpt-5.6-luna · high"
+    assert runtime._delegation_route_label(task_id, "e_ref") == "codex · gpt-5.6-luna (alias) · high"
+
+
+def test_a_worker_card_shows_the_engine_observed_model_name_not_the_bare_alias(tmp_path):
+    """T035: ``opus[1m]`` is a routing alias, not a version -- when
+    ``live_adapters._resolve_route_model_name`` already wrote real,
+    engine-observed evidence into the audit's own ``detail["model_name"]``
+    at dispatch time, the card shows that resolved name (``Opus 5.5
+    (1M)``) instead of the bare alias. The routing id itself (used for
+    pin/deny) is unchanged in the audit's own ``model`` column -- only the
+    displayed text differs."""
+    import json as _json
+
+    from cortex_runtime.routing import store as routing_store
+
+    store, task_id = _task(tmp_path)
+    runtime = OrchestratingRuntime(
+        store, FakeSessionRuntime(store, lambda *a, **k: None), FakeWorkspace(), FakeConfigSnapshotSource(),
+    )
+    now = "2026-09-19T00:00:00+00:00"
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO configuration_revisions "
+            "(id, task_id, revision, route_id, route_engine, route_connection_id, parameters, "
+            " ceiling_snapshot, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("cfg-m", task_id, 1, "route-1", "claude-agent-acp", "conn-1",
+             _json.dumps({"effort": "medium"}), "{}", "confirmed", now, now),
+        )
+        db.execute(
+            "INSERT INTO delegation_provisioning "
+            "(idempotency_key, task_id, attempt_id, role_id, step, status, config_revision, "
+            " owner_epoch, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("m_ref", task_id, "att-m", "worker-backend-dev", "engine_session", "done", "cfg-m", 1, now, now),
+        )
+        db.commit()
+    routing_store.record_attempt_audit(
+        store, attempt_id="att-m", task_id=task_id, role="worker-backend-dev", engine="claude-agent-acp",
+        connection_id="conn-1", model="opus[1m]", params_fingerprint="fp", config_revision_id="cfg-m",
+        decision="authorized", detail={"effort": "medium", "model_name": "Opus 5.5 (1M)"},
+    )
+
+    assert runtime._delegation_route_label(task_id, "m_ref") == "claude · Opus 5.5 (1M) · medium"
 
 
 def test_a_workers_action_is_shown_under_its_attribution_not_beside_it():

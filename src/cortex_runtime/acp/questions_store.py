@@ -151,6 +151,108 @@ def answer(store, question_id: str, text: str, source: str) -> bool:
     return True
 
 
+# A worker/reviewer-visible answered-question record is addressed as
+# ``<question_id>:answer`` in ``list_sources``/``read_source`` -- disjoint
+# from every source report ref (``r_<hex>:<block_index>``).
+ANSWER_REF_SUFFIX = ":answer"
+_ANSWER_SOURCES = ("text", "elicitation")
+
+
+def answer_ref(question_id: str) -> str:
+    return question_id + ANSWER_REF_SUFFIX
+
+
+def question_id_from_ref(source_ref: str) -> str | None:
+    """The question id an answered-question ref names, or ``None`` when
+    ``source_ref`` is not of that shape."""
+    if not isinstance(source_ref, str) or not source_ref.startswith("pq_") or not source_ref.endswith(ANSWER_REF_SUFFIX):
+        return None
+    question_id = source_ref[: -len(ANSWER_REF_SUFFIX)]
+    return question_id if len(question_id) > 3 and ":" not in question_id else None
+
+
+def _asked_by(db, dedup_key: str, assignment_ref: str | None) -> str:
+    """Who authored the question text: ``runtime`` (a runtime stop
+    question), ``coordinator``/``worker`` (a channel's
+    ``user_question_request``/``ask_question``), or ``unknown``."""
+    if dedup_key.startswith("runtime:stop:"):
+        return "runtime"
+    if dedup_key.startswith("runtime:"):
+        channel_id = dedup_key.split(":", 2)[1]
+        row = db.execute("SELECT role FROM trusted_channels WHERE channel_id=?", (channel_id,)).fetchone()
+        if row is not None and row["role"] in ("coordinator", "worker"):
+            return row["role"]
+        return "unknown"
+    return "worker" if assignment_ref else "coordinator"
+
+
+def _answer_session(db, task_id: str, question_id: str) -> tuple[str | None, str | None]:
+    """The ACP session the answer arrived on, from runtime-written rows
+    only: the ``question_answered:<id>`` progress event (``origin='runtime'``,
+    ``session_id`` recorded since answered questions became worker-visible),
+    else the older ``elicitation_answer:<id>``/``cortex_answer:<id>``
+    ``user_message`` event, whose ``origin`` is the session. Returns
+    ``(session_id, None)`` or ``(None, reason)`` -- never a guess."""
+    row = db.execute(
+        "SELECT payload_json FROM task_events WHERE task_id=? AND dedup_key=? AND event_type='progress' AND origin='runtime'",
+        (task_id, f"question_answered:{question_id}"),
+    ).fetchone()
+    if row is not None:
+        session_id = json.loads(row["payload_json"]).get("session_id")
+        if isinstance(session_id, str) and session_id:
+            return session_id, None
+    for prefix in ("elicitation_answer", "cortex_answer"):
+        message = db.execute(
+            "SELECT origin FROM task_events WHERE task_id=? AND dedup_key=? AND event_type='user_message'",
+            (task_id, f"{prefix}:{question_id}"),
+        ).fetchone()
+        if message is not None and message["origin"]:
+            return message["origin"], None
+    return None, "answer_session_not_recorded"
+
+
+def answered_questions(db, task_id: str) -> list[dict]:
+    """Every question of ``task_id`` a real user answer resolved, in the
+    order they were asked, as a derived read-only view for workers and the
+    reviewer (``list_sources``/``read_source`` and the recovery capsule).
+
+    Authoritative source: ``pending_questions`` rows with
+    ``status='answered'`` and ``answer_source`` in {``text``,
+    ``elicitation``}. Only the runtime writes that transition, on a real
+    host answer (:func:`answer`, ``replay_store.
+    record_user_message_answer_event``); no model tool can, and an answered
+    row is never updated again (supersession/cancellation only touch
+    ``open`` rows), so each record is immutable and needs no migration --
+    answers recorded before this view existed appear exactly as stored.
+    Late answers (``pending_question_late_answers``) never resolved their
+    question and are excluded. ``answer_text`` is verbatim user text
+    (``user_direct``: data, not instructions); ``question_text`` was
+    written by the model or runtime that asked (``asked_by``).
+    """
+    rows = db.execute(
+        "SELECT id, assignment_ref, dedup_key, text, options_json, answer_text, answer_source, created_at, answered_at "
+        "FROM pending_questions WHERE task_id=? AND status='answered' AND answer_source IN (?,?) "
+        "AND answer_text IS NOT NULL ORDER BY created_at, id",
+        (task_id, *_ANSWER_SOURCES),
+    ).fetchall()
+    records = []
+    for row in rows:
+        session_id, session_reason = _answer_session(db, task_id, row["id"])
+        records.append(dict(
+            source_ref=answer_ref(row["id"]), kind="question_answer", question_id=row["id"],
+            asked_by=_asked_by(db, row["dedup_key"], row["assignment_ref"]), assignment_ref=row["assignment_ref"],
+            question_text=row["text"], options=json.loads(row["options_json"]) if row["options_json"] else None,
+            answer_text=row["answer_text"], answer_source=row["answer_source"], trust_label="user_direct",
+            asked_at=row["created_at"], answered_at=row["answered_at"],
+            # ``origin`` uses the same ``acp:<session>`` form as the task's
+            # captured user sources, so both bind to one session visibly.
+            session_id=session_id, origin=f"acp:{session_id}" if session_id else None,
+            session_binding="recorded" if session_id else "unavailable",
+            session_binding_reason=session_reason,
+        ))
+    return records
+
+
 def record_late_answer(store, question_id: str, task_id: str, text: str, source: str) -> None:
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")

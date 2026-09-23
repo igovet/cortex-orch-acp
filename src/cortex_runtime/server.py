@@ -18,7 +18,7 @@ import time
 import traceback
 from collections import OrderedDict
 
-from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, error_help, outcome_uncertain, validate, clip_summary_preview
+from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, error_help, outcome_uncertain, storage_failure, validate, clip_summary_preview
 from .channeled_tools import channeled_base_tools
 from .delegation import contracts as delegation_contracts
 from .delegation import mcp_tools as delegation_mcp_tools
@@ -233,7 +233,7 @@ class Server:
             except StoreError as exc:
                 observe(name, str(exc), meta=params.get('_meta'), arguments=params.get('arguments'))
                 return self.error(exc)
-            except Exception:
+            except Exception as exc:
                 # A delegation/gateway op that raised something other than a
                 # StoreError (e.g. a raw sqlite3.OperationalError from lock
                 # contention) must never escape to the opaque -32603 catch-all:
@@ -242,7 +242,7 @@ class Server:
                 # does. Its request_key dedup makes an exact retry idempotent.
                 _log_unexpected(f'tools/call:{name}')
                 observe(name, 'storage_error', meta=params.get('_meta'), arguments=params.get('arguments'))
-                return self.error(StoreError('storage_error'))
+                return self.error(storage_failure(exc))
         if name in {'create_task','set_governance'} or (name == 'create_draft' and params.get('arguments',{}).get('template') == 'pipeline'):
             return self.error(StoreError('runtime_owned_operation'))
         if name not in BY_NAME:
@@ -264,10 +264,10 @@ class Server:
         except StoreError as exc:
             code = str(exc)
             failure = exc
-        except Exception:
+        except Exception as exc:
             _log_unexpected(f'tools/call:{name}')
             code = 'storage_error'
-            failure = StoreError(code)
+            failure = storage_failure(exc)
         observe(name,code,meta=params.get('_meta'),arguments=params.get('arguments'))
         return self.error(failure)
 

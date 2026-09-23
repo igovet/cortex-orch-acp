@@ -220,6 +220,38 @@ def load_connection_snapshot(
     )
 
 
+def latest_connection_entries(
+    connection_id: str, environ: dict[str, str] | None = None
+) -> tuple[CatalogEntry, ...] | None:
+    """This connection's most recently cached *genuine* snapshot entries, or
+    ``None`` when it has never been observed. Skips a placeholder file (no
+    entries, an ``unavailable_reason``) written into this connection's own
+    directory by an unrelated ``build_catalog`` call for a sibling
+    connection (see ``acp.config_options._is_cross_connection_placeholder``,
+    the identical rule applied here for the same reason: a newer placeholder
+    must never hide an older real observation). Used to resolve a route's
+    real, engine-observed model display name after the fact (e.g. for a
+    worker's route audit), never to decide selectability -- that stays
+    ``acp.config_options.selectable_entries_from_snapshots``'s job.
+    """
+    directory = _snapshot_dir(connection_id, environ)
+    if not directory.is_dir():
+        return None
+    files = sorted(
+        (path for path in directory.glob("cs_*.json") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in files:
+        view = load_connection_snapshot(connection_id, path.stem, environ)
+        if view is None:
+            continue
+        if not view.entries and view.unavailable_reason is not None:
+            continue
+        return view.entries
+    return None
+
+
 # --- route selection history (project-scoped, SQLite) -----------------------
 
 def record_task_route(store, task_id: str, entry: CatalogEntry) -> dict[str, object]:

@@ -6,6 +6,13 @@ from ..contracts import StoreError
 from .state import TaskMachine, encoded, event
 
 MAX_ATTEMPT_RETRIES = 2
+# Retries after a failure routing.availability recorded against the route
+# (exhausted account, model unavailable, engine would not start) go to
+# another route and do not use up MAX_ATTEMPT_RETRIES; this bounds them.
+MAX_ROUTE_RETRIES = 6
+# Refusals of routing itself: retrying the same request cannot change them.
+ROUTING_REFUSALS = frozenset({'no_available_route', 'pinned_route_unavailable', 'invalid_routing_overrides',
+                              'route_denied'})
 
 
 def release_observed(runtime, task_id, attempt_id):
@@ -45,12 +52,25 @@ def retry_lost(runtime,task_id,node):
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
         failure=db.execute("SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref=? AND event_type='assignment_failed' AND superseded=0 ORDER BY id DESC LIMIT 1",(task_id,assignment)).fetchone()
-        reason=json.loads(failure[0]).get('error','') if failure else ''
+        payload=json.loads(failure[0]) if failure else {}
+        reason=payload.get('error','')
         if reason in {'refusal','authorization_loss','provider_restriction','cancellation'} or reason.startswith('fallback_refused:'):
             raise StoreError('worker_failure_not_retryable:'+reason)
+        if reason in ROUTING_REFUSALS:
+            # Named with the routes and why, so the coordinator and the user
+            # see what to change instead of "the worker could not finish".
+            detail=str(payload.get('detail') or '')[:600]
+            raise StoreError('worker_failure_not_retryable:'+reason+(': '+detail if detail else ''))
+        from ..routing import availability
+        unavailable=availability.for_attempt(db,task_id,provision['attempt_id']) if provision else None
         attempts=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'",(task_id,)).fetchall()
-        count=sum(json.loads(row[0]).get('node')==node['node_id'] and json.loads(row[0]).get('revision')==node['revision'] for row in attempts)
-        if count>=MAX_ATTEMPT_RETRIES:
+        retried=[p for p in map(lambda row: json.loads(row[0]),attempts)
+                 if p.get('node')==node['node_id'] and p.get('revision')==node['revision']]
+        count=sum(not p.get('route_failure') for p in retried)
+        if unavailable is not None:
+            if sum(bool(p.get('route_failure')) for p in retried)>=MAX_ROUTE_RETRIES:
+                raise StoreError('worker_retry_limit'+(':'+reason if reason else ''))
+        elif count>=MAX_ATTEMPT_RETRIES:
             # Carry the last cause, so the user is asked about what failed.
             raise StoreError('worker_retry_limit'+(':'+reason if reason else ''))
         if provision:
@@ -65,8 +85,11 @@ def retry_lost(runtime,task_id,node):
                            (task_id,assignment)).rowcount
         if changed!=1:
             raise StoreError('lost_worker_result_changed')
-        event(db,task_id,'ASSIGNMENT_RETRIED',dict(node=node['node_id'],revision=node['revision'],retry=count+1,
-                                                 previous_assignment=assignment,observed_session='absent' if provision else 'not_provisioned'))
+        retry=dict(node=node['node_id'],revision=node['revision'],retry=len(retried)+1,
+                   previous_assignment=assignment,observed_session='absent' if provision else 'not_provisioned')
+        if unavailable is not None:
+            retry.update(route_failure=True,unavailable_route=availability.describe(unavailable))
+        event(db,task_id,'ASSIGNMENT_RETRIED',retry)
         db.commit()
 
 

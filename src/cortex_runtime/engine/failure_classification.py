@@ -62,13 +62,14 @@ NEVER_FALLBACK_ELIGIBLE = frozenset({
 # arbitrary engine stdout/stderr -- callers pass bounded, already-captured
 # text). The first matching class wins; nothing here is a regex, so there is
 # no backtracking-cost concern for an adversarial string.
-_RATE_LIMIT_MARKERS = ("rate_limit", "rate limit", "too many requests", "429", "quota_exceeded", "quota exceeded")
+_RATE_LIMIT_MARKERS = ("rate_limit", "rate limit", "too many requests", "429", "quota_exceeded", "quota exceeded",
+                       "quota_exhausted")
 _AUTH_LOSS_MARKERS = (
     "unauthorized", "auth_required", "auth required", "authentication_failed", "authentication failed",
     "token_expired", "token expired", "invalid_api_key", "invalid api key", "401", "403", "permission_denied_no_binding",
 )
 _PROVIDER_RESTRICTION_MARKERS = (
-    "region_restricted", "region restricted", "model_not_available", "model not available",
+    "region_restricted", "region restricted", "model_not_available", "model not available", "model_unavailable",
     "provider_restricted", "provider restricted", "unsupported_region", "not_available_in_region",
 )
 _REFUSAL_MARKERS = ("refusal", "refused_by_model", "content_policy", "safety_refusal")
@@ -146,6 +147,49 @@ def classify(kind: str | None, *, message: str | None = None, exit_code: int | N
     if signal is not None or (exit_code is not None and exit_code != 0):
         return ENGINE_FAILURE
     return INDETERMINATE
+
+
+# -- route unavailability (structured engine evidence only) -----------------
+# What each pinned adapter itself puts in a JSON-RPC error's ``data`` when a
+# turn or session is refused for a reason that is about the route (account,
+# model), not the work. Read from the installed adapters, never guessed:
+# codex-acp 1.13.0 sends ``data.codexErrorInfo`` (Codex's own enum, e.g.
+# ``usageLimitExceeded`` for "You've hit your usage limit"), claude-agent-acp
+# 0.81.0 sends ``data.errorKind`` (the Claude SDK's own error kind). Only
+# these exact values count; free text is never matched, so an unrelated
+# error can never read as an exhausted account.
+QUOTA_EXHAUSTED = "quota_exhausted"
+ROUTE_RATE_LIMITED = "rate_limited"
+MODEL_UNAVAILABLE = "model_unavailable"
+
+_CODEX_ROUTE_ERRORS = {
+    "usageLimitExceeded": (QUOTA_EXHAUSTED, "connection"),
+    "rateLimitExceeded": (ROUTE_RATE_LIMITED, "connection"),
+}
+_CLAUDE_ROUTE_ERRORS = {
+    "rate_limit": (ROUTE_RATE_LIMITED, "connection"),
+    "billing_error": (QUOTA_EXHAUSTED, "connection"),
+    "account_on_hold": (QUOTA_EXHAUSTED, "connection"),
+    "model_not_found": (MODEL_UNAVAILABLE, "model"),
+}
+
+
+def route_failure(error: BaseException) -> tuple[str, str, str] | None:
+    """``(reason, scope, evidence)`` when ``error`` is an engine's own
+    structured statement that this route cannot serve the work right now,
+    else ``None``. ``scope`` is ``"connection"`` (the whole account) or
+    ``"model"`` (this model on this account); ``evidence`` names the exact
+    field and value that decided it (no engine prose, no credential)."""
+    data = getattr(error, "data", None)
+    if not isinstance(data, dict):
+        return None
+    codex = data.get("codexErrorInfo")
+    if isinstance(codex, str) and codex in _CODEX_ROUTE_ERRORS:
+        return (*_CODEX_ROUTE_ERRORS[codex], f"codexErrorInfo={codex}")
+    kind = data.get("errorKind")
+    if isinstance(kind, str) and kind in _CLAUDE_ROUTE_ERRORS:
+        return (*_CLAUDE_ROUTE_ERRORS[kind], f"errorKind={kind}")
+    return None
 
 
 def is_fallback_eligible(failure_class: str) -> bool:

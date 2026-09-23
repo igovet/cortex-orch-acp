@@ -20,17 +20,27 @@ a plan, review or implementation.
 Each channel-bound engine process runs in a Linux `bwrap` engine jail, so its own
 native tools (shell, file edit, patch, search, skills) keep working and are bounded
 by the operating system rather than disabled. The host is mounted read-only with
-`/run/user` hidden (its session bus could start unconfined processes) and a private
-`/tmp`; the project is read-only except the assignment's scopes, `.cortex` is
-hidden and `.git`, `.codex`, `.claude` are read-only. The coordinator, reviewers and
+`/run/user` hidden (its session bus could start unconfined processes); `/tmp`
+stays the host's real, writable `/tmp` deliberately (a screenshot the owner
+points at, a file the process leaves for the owner both need the same real
+path on both sides of the jail), while `/var/tmp` -- which has no such
+interop use, and can be a read-only mount or absent entirely once the whole
+host is bound read-only -- is instead a private, writable, per-run directory
+backed by the process's own scratch, never the host's shared one; `HOME` and
+`TMPDIR`/`TMP`/`TEMP` are that same private scratch. The project is read-only
+except the assignment's scopes, `.cortex` is
+hidden and `.codex`, `.claude` are read-only; `.git` is read-only except the
+repository data git needs for a writing worker (see
+[Git and tool state in the project](#git-and-tool-state-in-the-project)). The coordinator, reviewers and
 read-only roles get no writable scope. The engine's state directory (`CODEX_HOME`
 or `CLAUDE_CONFIG_DIR`, the owner's real one for a native account) stays writable
 except the files and directories that configure later sessions (settings, hooks,
 instructions, skills, agents, commands, rules); absent ones are first created
 neutral on the host so none can be planted, and installed plugins are hidden. A
 revoked or expired channel terminates the process. Inside the jail Codex runs with
-full access and no approvals, since its own sandbox cannot start there, and
-permission requests are allowed.
+full access, since its own sandbox cannot start there; its approval policy is
+pinned to `untrusted` so each command still reaches the permission bridge, which
+allows it unless it deletes (see [Access mode](#access-mode-guarded-and-auto)).
 
 Excluded regardless of the jail: native subagents (Claude `Agent`, `Task`,
 `Workflow` and team tools are disallowed and refused at the permission bridge;
@@ -52,12 +62,14 @@ MCP entries are disabled. Server-initiated sampling/elicitation is refused.
 
 File writes use scope checks, no-follow descriptors, expected-content hashes and
 atomic replacement. Commands run under Linux `bwrap`: project read-only by default,
-only granted files/directories writable, and private `.cortex`, `.git`, `.codex` and
-`.claude` paths masked. A worker's `command_run` runs as the owner: their user and
+only granted files/directories writable (the whole project for a writing worker),
+private `.cortex`, `.codex` and `.claude` paths masked, and the project's `.git`
+visible as described below. A worker's `command_run` runs as the owner: their user and
 group names resolve, their real HOME is mounted read-only (so its dotfiles and
 credentials are readable by the command), the runtime's environment is passed on
 except `CORTEX_*` and credential-like variables (token, secret, password, API key,
-auth, cookie, session), and the host network is shared. Supplementary groups show
+auth, cookie, session; a commit author's `GIT_AUTHOR_NAME`/`_EMAIL`/`_DATE` are
+identity and pass), and the host network is shared. Supplementary groups show
 as `nogroup` inside the user namespace, `/run` (and so the Docker socket) is not
 mounted, and `sudo` does not work. External MCP
 servers and automatic verification get no HOME, network or inherited environment
@@ -67,6 +79,62 @@ File actions and command starts recheck authority at the transaction boundary;
 running commands and external servers are terminated on observed revocation.
 This does not claim protection against a separate hostile process running as the
 same OS user and racing filesystem changes.
+
+### Access mode (Guarded and Auto)
+
+Each task has an access mode (`configuration.access_mode`). **Guarded** is the
+default and the behaviour described above: the runtime asks the user on a
+permission card before a native deletion the engine reports (`delete`/`move`
+tool kinds and lexically recognized `rm`, `git rm`/`clean`, `unlink`, `find
+-delete` and similar command text), before `project_delete`, and before every
+`outside_write` and `outside_command`; no answer, a timeout, a disconnect or a
+refusal means the action does not happen. Workers run in the engine mode that
+routes each mutating tool call through `session/request_permission` (Claude
+`default`, Codex `agent`).
+
+**Auto** changes exactly two things:
+
+- Those user-approval prompts are answered by the runtime instead of the user:
+  it selects the request's own offered allow option (one-shot preferred), for
+  the coordinator and for every worker, whether or not a client is connected.
+  A request that offers no allow option is still cancelled. Each automatic
+  answer is recorded in the task's `access_mode_events` table by tool-call id
+  and kind only, never the command or path text.
+- A worker opened while the task is in Auto is confirmed in the most permissive
+  engine mode its own session offers: Claude `bypassPermissions` (else
+  `acceptEdits`, else `default`), Codex `agent-full-access` (else `agent`).
+  The mode is confirmed over the wire or the worker does not run. With Claude
+  `bypassPermissions` the engine stops sending permission requests at all, so
+  the permission bridge no longer sees that worker's native tool calls. Codex's
+  per-turn approval policy stays pinned by Cortex's adapter patch, so a Codex
+  worker still sends its requests, which Auto answers.
+
+Auto does **not** bypass anything that is not a user approval. In both modes:
+the engine jail and `command_run` sandbox (read-only host, scope-bound project
+writes, hidden `.cortex`, read-only `.codex`/`.claude`, read-only `.git`
+config/hooks/pointers with the `GitGuard` sweep); the channel-verified MCP
+gateway (task state, ownership epoch, channel revocation, assignment scopes,
+write denials, role rules such as no `command_run` for a coordinator or
+consultant, no-follow file operations, expected-content hashes, receipts);
+the native-subagent ban (removed at launch, and refused at the bridge whenever
+a request reaches it); a stale engine binding is refused; the coordinator's own
+engine mode floor; the external MCP allowlist; the paid probes' explicit
+`--i-authorize-paid-call`/`--approval-ref` flags; credential-free command
+environments and display/log redaction. The ssh password dialog is a secret
+entry, not an approval, and is not answered by Auto.
+
+Only the user changes the mode, through their ACP client: Paseo's composer mode
+control (ACP `modes`/`session/set_mode`) or the `access_mode` config option
+(Zed and others). No MCP tool reads or writes it, so a model cannot switch it.
+Every switch is an append-only revision in `access_mode_events` with its origin
+and ACP session; anything missing or unreadable reads as Guarded. The mode is
+never stored as a user default: every new ACP session starts Guarded, and a
+choice made before the first prompt becomes the new task's first revision.
+Switching back to Guarded applies at once to new prompts and new workers; a
+worker already confirmed in a permissive engine mode keeps it until it ends.
+The client's rendering of the shield and the Auto path against a paid engine
+have not been observed live; see the
+[real-client runbook](docs/acp/real-client-runbook.md).
 
 ### Optional ssh password dialog
 
@@ -87,10 +155,59 @@ dialog program is available, nothing is added. `sudo` still fails: bubblewrap
 sets no_new_privs, which setuid programs refuse.
 
 Automatic verification has the same private-path isolation and a completely
-read-only project. Only its private `/tmp` is writable. Sandbox absence is a hard
+read-only project except its scratch (`HOME`/`TMPDIR`/`TMP`/`TEMP`) and private
+`/var/tmp`. Sandbox absence is a hard
 failure. Complete command bytes, exit status, timeout/cancellation and project
 digest are retained. A successful MCP envelope alone cannot certify a check: a
 passed worker check requires its own complete successful gateway-command receipt.
+
+### Git and tool state in the project
+
+With a whole-project grant, git run by a worker (`command_run`, or its native
+shell in the engine jail) may update the project's own repository: the `.git`
+directory, or a linked worktree's own `worktrees/<name>/` plus the shared common
+directory even when that lies outside the project. Its data (objects, refs,
+logs, index, HEAD, packed-refs, locks, merge/rebase/stash state, `info/`) is
+writable. What configures or redirects git runs the owner makes later, outside
+any sandbox, stays read-only in each of those directories: `config`,
+`config.worktree`, `hooks/`, `commondir`, a worktree's `gitdir`, legacy
+`remotes/` and `branches/`, plus other worktrees' metadata, `modules/`
+(submodule repositories) and a `core.hooksPath` directory inside the project.
+Such an entry that does not exist yet cannot be mounted over without creating it
+in the owner's repository; instead a guard checks every half second while the
+sandbox lives and once more when it ends, and removes any that appeared
+(`command_run` then fails with `git_configuration_protected`, naming them).
+Residual risk: a process that deliberately detaches from its `command_run` and
+outlives it is no longer swept, and could still plant one of those absent entries
+-- the same class as the racing same-user process this document already excludes.
+A writing worker can also leave an interactive rebase or cherry-pick in progress;
+git shows that state and runs its todo list only when the owner continues it.
+Reviewers and read-only roles see `.git` read-only; automatic verification does
+not see it. `project_read`/`project_write`/`project_delete` still refuse every
+path through `.git`, `.cortex`, `.codex` or `.claude`, and plan scopes cannot name
+them. Tool state inside the project (`.venv`, `node_modules/.cache`,
+`.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, build caches) is
+writable because a writing worker's grant is the whole project, with no list of
+tools; multiply hard-linked files stay read-only, and so does a directory with
+more than 256 of them (pnpm `node_modules`, a hardlinked uv `.venv`). `.cortex`
+stays hidden.
+
+### Sandboxed command umask
+
+`command_run`/`outside_command` and automatic verification checks run under an
+explicit `umask 022`, set by the sandboxed process itself right before it execs
+the real command (`bwrap` has no `--umask` option). This is a deliberate choice,
+not an oversight: left alone, such a command would instead inherit whatever the
+Cortex runtime process itself set for its own private store (`umask 0077`,
+still used everywhere the runtime creates its own files/directories directly --
+`.cortex/cortex.sqlite3`, engine state, recovery capsules), which made git,
+npm, make and similar tools a worker or a check runs create files with
+unexpectedly restrictive permissions with no security benefit: everything such
+a command can write is already inside the project tree or its own scratch
+directory, both already scoped to the running command. A whole engine process
+(`engine_jail`) is not covered by this and keeps the runtime's stricter
+default, since its own state directory can hold real credentials (a native
+account's session tokens) that should stay owner-only.
 
 ## Store and identity
 
@@ -113,14 +230,26 @@ observed check result.
 
 A question and its durable identity commit before elicitation. Missing, timed-out
 or cancelled answers cannot resume work. Worker questions revoke old grants and
-resume planning after the actual answer. User steering and replan/scope/escalation
+resume planning after the actual answer. Workers and the reviewer see every
+answered question (question text, the user's verbatim answer, ids, timestamps and
+answering session) through `list_sources`/`read_source` and the capsule; the view
+is derived from rows only the runtime writes on a real host answer, so a model
+cannot create or alter one, and the answer is rendered as `user_direct` data, not
+instructions. User steering and replan/scope/escalation
 proposals revoke old worker channels before a replacement plan is delivered.
 Explicit path denials are enforced on new scopes. Natural-language policy parsing
 supports documented path-denial forms; arbitrary prose is passed to replanning,
 not claimed to be a complete semantic permission parser.
 
 Lost assignments receive at most two retries after confirmed session absence;
-ambiguous unfinished action receipts prevent replay. Review/fix cycles and model
+ambiguous unfinished action receipts prevent replay. A failure the runtime
+recorded against the route itself (engine-reported quota, rate limit or
+unavailable model, or an engine that would not start or confirm the worker's
+mode) is retried on a different available route instead, at most six times.
+Routing refusals (`no_available_route`, `pinned_route_unavailable`,
+`invalid_routing_overrides`, `route_denied`) are never retried. These records
+come only from the engine's structured error fields and carry no credentials.
+They never lift a `deny` or substitute a pin. Review/fix cycles and model
 replan requests are bounded. Coordinator, worker, review and command deadlines
 are runtime-owned. Recovery capsules include the current durable graph and policy;
 a compacted model summary cannot change either. Live replacement-session and

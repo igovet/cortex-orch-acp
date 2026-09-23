@@ -126,6 +126,21 @@ file:line citations behind each id/category/value below):
 | `mode` | `mode` | `mode` | `default`, `acceptEdits`, `plan`, `auto`, `bypassPermissions` |
 | *(never mapped)* | `fast` | `model_config` | boolean — same excluded category as codex-acp's own `fast-mode` |
 
+The `effort` option depends on the session's current model. `session/new`
+describes the default model, which offers `effort`. Setting the model to
+`haiku` removes both `effort` and `fast` from the returned `configOptions`,
+and a later `effort` set is rejected (`-32603`). `mode` stays offered.
+This was observed on 2026-09-23 against the installed 0.78.0 without sending
+any prompt. A worker session therefore sets its model on its own first. It
+then picks its effort from what the switched session offers: the requested
+effort if offered, otherwise the nearest lower one, otherwise the nearest
+higher one. When the session offers no comparable effort, no effort is sent.
+Next, it confirms the `default` mode floor on the wire. That step is still
+confirm-or-fail: if the switched session no longer offers `mode`, the worker
+is refused. See `delegation.live_adapters
+.EngineSessionManagerAdapter._apply_worker_mode_floor` and
+`tests/test_delegation_worker_mode_floor.py`.
+
 ## Evidence status
 
 `engine.claude_adapter_acp.build_claude_evidence_status` returns a

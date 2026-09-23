@@ -1,30 +1,41 @@
 ---
 name: cortex-control
-description: Cortex retention command and optional report-writing examples. Load only for an explicitly assigned clear command or when a worker is explicitly asked to consult a report example.
+description: Cortex retention command, coordinator-only. Load only for an explicitly assigned clear command.
 ---
 
 # Cortex control
 
 ## Loading boundary
 
-Read this skill with `read_skill` only for one of the
-declared purposes. Workers receive their role instructions at engine-session
-creation; they do not load this skill. Its named examples are available through
-`read_skill` when relevant. Do not
+Read this skill with `read_skill` only for the coordinator's declared clear-command
+purpose. Only the coordinator can read this skill; a worker's or the consultant's
+`read_skill` never advertises or accepts this id. A worker or the consultant reaches
+the optional report-example catalogue and its named examples through the separate
+`index` id (physically under `references/` here), not by reading this skill. Do not
 read agent TOML, manifests, databases or server internals, or enumerate the installation.
 
 ## Explicit retention maintenance
 
-When the coordinator assigns the user's taskless `clear N days` command, run only
-the bundled [retention command](../../src/cortex_clear.py). Obtain its current
-CLI syntax with `--help`; do not read the script implementation. Supply the canonical
-project, exact retention and any protected active session or thread IDs established by the
-coordinator. This route creates no task, governance choice, pipeline, or report.
+The bundled [retention command](../../src/cortex_clear.py) is a user-run
+maintenance tool, not something the coordinator executes. When the user's
+taskless `clear N days` request reaches the coordinator, explain the exact
+command for the user to run by hand in their own shell:
+
+```
+python3 src/cortex_clear.py --project-root <path> --days N [--keep-thread <id>]
+```
+
+`--project-root` is the canonical project directory and `--days` the
+retention window (a nonnegative integer). `--keep-thread <id>` is repeatable
+and protects any task bound to that exact thread ID; omit it when the user
+names no thread to keep. Do not invent other flags. This route creates no
+task, governance choice, pipeline, or report, and the coordinator never runs
+it with `command_run` or any other tool on the user's behalf.
 
 The command removes matching old task records and project task directories. It also
 removes only project draft files whose stored task relationship and SHA-256 make the
 association unambiguous. Never remove the whole project `draft-reports` directory or
-unknown drafts. Return only deletion and protection counts.
+unknown drafts. Its JSON output reports only deletion and protection counts.
 
 ## Optional report examples
 

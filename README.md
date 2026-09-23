@@ -146,7 +146,8 @@ as metadata on replay. Long worker titles use two lines and a fixed-size icon.
 Workers communicate in English; the coordinator uses the language selected for
 the current message. Simple informational questions can be answered after relevant
 read-only inspection without creating workers, review or verification jobs. Planned
-work still requires independent review and verification.
+work still requires independent review and verification. Your answers to Cortex's
+questions reach every later worker and the reviewer with the question they answer.
 
 ## Setting it up in Zed
 
@@ -243,10 +244,12 @@ schema — and never makes a model call.
 ### Choose the model for a task
 
 In Zed, the selectors expose **engine and account** → **model of that
-engine** → **effort of that model** → **language**. Paseo exposes one
+engine** → **effort of that model** → **language** → **access**. Paseo exposes one
 model picker, so Cortex puts the engine-provided model name first and its
 description, engine, account and catalog evidence below it. Paseo's mode
-picker selects the coordinator language (Auto, English or Russian). The
+picker (the shield) selects the [access mode](#access-mode-guarded-or-auto);
+the coordinator language (Auto, English or Russian) reaches Paseo as a
+session setting and through `/cortex-language`. The
 literal engine alias `default` is omitted from effort choices, and from model
 choices when it only duplicates a listed model. When it is the only way to reach
 its model (Claude with an `availableModels` list in `~/.claude/settings.json`
@@ -277,21 +280,67 @@ Equivalent commands, for a client without those selectors:
 | `/cortex-stop` | stop the active task, close its bound ACP host sessions, and terminate its owned coordinator and worker attempts, including workers with terminal events still awaiting process exit |
 | `/cortex-answer <n> <text>` | answer one open coordinator question |
 
+### Access mode: Guarded or Auto
+
+Every session starts in **Guarded mode**: a deletion (a native `rm`, `git rm`,
+`unlink` and the like, or `project_delete`), a write outside the project
+(`outside_write`) and a command outside the sandbox (`outside_command`) each
+wait for your answer on a permission card.
+
+**Auto mode** answers those cards itself: Cortex selects the engine's own
+allow option instead of asking, for the coordinator and every worker, and a
+worker opened while the task is in Auto runs with the most permissive engine
+mode its session actually offers (Claude `bypassPermissions`, Codex
+`agent-full-access`), confirmed by the engine or the worker does not run.
+Auto does not lift anything that is not your approval: the engine jail, the
+hidden `.cortex` store, the read-only `.git` config/hooks, the MCP gateway's
+scope and role checks, the native-subagent ban, the paid-probe flags and
+secret redaction all stay. See
+[SECURITY.md](SECURITY.md#access-mode-guarded-and-auto) for the exact list.
+
+Switch it with the shield in Paseo's composer or the **Access** selector in
+Zed. Only you can: no model tool changes it. Each switch is recorded for the
+task with where it came from; a new session always starts Guarded, even if
+the last one used Auto. Switching back to Guarded applies at once to every
+new card and every worker opened afterwards; a worker already running in the
+engine's permissive mode keeps that mode until it ends (stop the task to end
+it sooner).
+
 ### Which model a worker gets
 
 The coordinator's own route is your choice in the editor. Workers are routed
 automatically, from what your engines actually advertise:
 
-- **Role tier.** Architecture, security, performance, debugging and the
+- **Role tier.** Architecture, database architecture, security and the
   senior consultant are `deep`; exploration, planning, general work and
-  writing are `light`; everything else is `standard`.
-- **Model tier.** Each engine lists its models strongest first; that list is
-  split into thirds. A new model gets a tier without any configuration.
+  writing are `light`; everything else, debugging and performance included,
+  is `standard`. A task's planned `complexity` moves it one tier, and a
+  retry or a fix after review one tier stronger.
+- **Model tier.** Claude models by family (Opus/Fable `deep`, Sonnet
+  `standard`, Haiku `light`); known Codex models by name (`gpt-6-astra`,
+  `gpt-6-sol` `deep`; `gpt-5.6-sol`, `gpt-5.6-terra` `standard`;
+  `gpt-6-luna`, `gpt-5.6-luna`, `gpt-5.5` `light`). So each tier has a model
+  from both providers. Only a model neither list names is placed by its
+  position in its engine's list, split into thirds, so a new model still gets
+  a tier without any configuration.
 - **Plan usage.** Codex's own rate limits (from `~/.codex/sessions`) and
   Claude's (reported during each turn). Deep and standard work goes to an
   account below 85% first; light work goes to an account *above* 85% first,
   spending the rest of a nearly used-up plan on cheap work. An exhausted
   window is never chosen.
+- **Kind of work.** Between candidates of the tier on the same side of 85%,
+  the provider that suits the role wins: Codex for implementation,
+  debugging, testing, operations and exploration; Claude for review,
+  design, writing, planning and general analysis. Then the account with more
+  plan left. Which connection is listed first no longer decides.
+- **Coordinator preference.** A plan task may name a preferred provider
+  (`codex-acp` or `claude-agent-acp`), never a model. It is honoured only
+  among the tier's available candidates that `providers` allows, never over a
+  `pin`, and not for deep or standard work on an account above 85% while
+  another is below it. Otherwise it is ignored.
+- **Audit.** Each worker attempt's route audit records the tier, the ranked
+  candidates (plan used, suitability, preference), the preference and whether
+  it was honoured, and the chosen route (`route_decision`).
 - **Effort** follows the role tier (`high` / `medium` / `low`), clamped to
   what the model supports. `ultra` is never used; `max` only on a model in
   the `light` tier (e.g. Luna); flagship models (Astra, Fable) never above
@@ -308,23 +357,54 @@ automatically, from what your engines actually advertise:
 Only engine-confirmed model lists are used. Until a connection's models have
 been observed, a worker stays on the coordinator's route.
 
+**When a route fails.** If an engine refuses a worker because the account's
+plan is used up or rate-limited, or because the account cannot run the model,
+Cortex records that route as unavailable. Only the engine's own structured
+error field counts: `codexErrorInfo` from Codex, `errorKind` from Claude. The
+same happens when a worker's engine will not start, or will not confirm the
+worker's mode for that model. The failed work is then retried on the next
+available route, which may be another provider. A quota or rate limit makes
+the whole account unavailable; the other failures affect only that model. A
+record lasts until the reset time the engine reported, or a bounded default
+of 15–60 minutes, and never past 8 days. A retry like this does not count
+against the two ordinary retries and does not escalate the model tier (it has
+its own limit of six). If no configured route is usable, the work stops with
+`no_available_route`, naming each unavailable route, the reason and the
+expiry. It never falls back to a route known to fail. Records live in the
+project's `.cortex` store and hold no credentials or engine text.
+
 To override, add an optional `routing.json` (first found wins:
 `<project>/.cortex/routing.json`, `$CORTEX_ROUTING`,
 `~/.config/cortex/routing.json`):
 
 ```json
 {
-  "pin":   {"security-auditor": "claude-agent-acp/opus:high", "*": "codex-acp/gpt-5.6-luna"},
-  "deny":  ["gpt-5.5", "claude-agent-acp/haiku"],
-  "tiers": {"gpt-5.6-luna": "light"}
+  "pin":       {"security-auditor": "claude-agent-acp/opus:high", "*": "codex-acp/gpt-5.6-luna"},
+  "deny":      ["gpt-5.5", "claude-agent-acp/haiku"],
+  "tiers":     {"gpt-5.6-luna": "light"},
+  "providers": ["claude-agent-acp", "codex-acp"]
 }
 ```
 
-A pin is strict: if the pinned route is not available the delegation is
-refused, never substituted. `deny` also removes a model from the editor's
-selector and refuses it when chosen explicitly. Routing never widens the
-permission ceiling. A malformed file fails closed with
-`invalid_routing_overrides`.
+A pin is strict: if the pinned route is not offered, or is recorded
+unavailable, the delegation is refused (`pinned_route_unavailable`, with the
+reason), never substituted. `deny` also removes a model from the editor's
+selector and refuses it when chosen explicitly; an unavailable route never
+lifts a `deny`. Routing never widens the permission ceiling. A malformed file
+fails closed with `invalid_routing_overrides`. All four routing refusals
+(`pinned_route_unavailable`, `invalid_routing_overrides`, `route_denied`,
+`no_available_route`) stop the work with the refusal named in the stop
+reason; none is retried.
+
+`providers` limits *automatic* worker routing and route-failover (never an
+explicitly chosen route) to the listed engine ids (each must be a supported
+engine, e.g. `"claude-agent-acp"` or `"codex-acp"`); omit it and every
+configured provider is still considered, as before. A `pin` naming an
+engine outside `providers` is refused the same way
+(`pinned_route_unavailable`), naming the restriction; if no allowed
+provider currently has a usable route, the delegation still fails closed
+with `no_available_route`, it never silently opens the coordinator's route
+on an excluded provider instead.
 
 ### MCP servers
 
@@ -412,6 +492,13 @@ Cortex gateway. Coordinator and consultant cannot run commands or edit source.
 Workers can write only their runtime-assigned paths. The scheduler serializes
 overlapping scopes and reserves at most four workers per project store.
 
+A writing worker's git (its shell or `command_run`) can commit, branch, stash and
+merge in the project's own repository, a linked worktree's common directory
+included; git's `config`, hooks and repository pointers stay read-only, and one
+the command creates is removed. Tool caches and virtualenvs inside the project
+are writable. The file tools never touch `.git` or `.cortex`. See
+[SECURITY.md](SECURITY.md#git-and-tool-state-in-the-project).
+
 Reports are filled through `draft_write` using an owned draft ID and published as
 immutable Markdown. There is no native-file exception for pipeline/report edits.
 The runtime owns all pipeline editions. Verification sees a read-only project,
@@ -427,6 +514,19 @@ See [permissions and containment](docs/acp/permissions-and-containment.md) and
 [the security boundary](SECURITY.md). The complete rewrite remains under test;
 [the status page](docs/acp/runtime-rewrite-status.md) distinguishes automated
 checks from real-client qualification.
+
+## Retention maintenance
+
+```bash
+python3 src/cortex_clear.py --project-root /path/to/project --days N [--keep-thread <id>]
+```
+
+A user-run maintenance command, not something the coordinator or a worker
+executes on your behalf; the coordinator only explains the exact command
+when you ask for `clear N days`. `--days` is a nonnegative retention window;
+tasks with no activity in that window are deleted along with their project
+task directories and unambiguously-associated draft files. `--keep-thread`
+(repeatable) protects any task bound to that exact thread ID.
 
 ## Removing it
 

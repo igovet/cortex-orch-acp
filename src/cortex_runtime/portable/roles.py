@@ -55,6 +55,20 @@ SHARED_ROLE_IDS = frozenset({
     "documentation-sync",
     "context-compaction",
 })
+#: Shared skills restricted to the coordinator: a worker or the consultant
+#: (also a "worker"-kind channel) may never see or read these by
+#: `read_skill`, even though their bodies are loadable RoleInstructionSet
+#: entries like any other shared skill. `cortex-control` is the retention
+#: command and reserved report-example catalogue root; `coordinator-communication`
+#: is user-facing wording guidance a worker never sends to the user directly.
+#: Workers still reach the report-example catalogue and its named examples
+#: through the separate `EXAMPLE_REFERENCE_IDS` (`index`, `*-example`),
+#: physically under `skills/cortex-control/references/` but not gated by
+#: this set.
+COORDINATOR_ONLY_SHARED_ROLE_IDS = frozenset({
+    "cortex-control",
+    "coordinator-communication",
+})
 
 # Agent-profile short names (agents/*.toml stems, one per T001 specialist)
 # accepted as aliases for their skill id ("worker-" + stem). Hand-maintained;
@@ -139,7 +153,7 @@ def _role_kind(role_id: str) -> str:
 
 
 def known_role_ids() -> tuple[str, ...]:
-    """Every loadable role id: 23 workers + orchestrator + 7 shared skills."""
+    """Every loadable role id: 22 specialists + consultant + orchestrator + 7 shared skills."""
     worker_ids = tuple(sorted(
         path.name for path in SKILLS_ROOT.glob("worker-*") if (path / "SKILL.md").is_file()
     ))
@@ -353,6 +367,19 @@ NAMED_SKILLS: dict[str, tuple[str, ...]] = {
     "shared": (),
 }
 
+#: The consultant cannot run commands, tests or project checks, or implement
+#: changes (its "Access boundary" is analysis and recommendations only), so
+#: it is never named `interactive-resources` (a browser/device/port/server
+#: session), `documentation-sync` (fixing docs the change broke) or
+#: `knowledge-harvest` (collecting a codebase's knowledge into project
+#: artifacts) -- each assumes a mutation the consultant is not permitted to
+#: make. This narrows only which ids the consultant is *told about*; it does
+#: not add or remove access checked elsewhere.
+CONSULTANT_ROLE_ID = "worker-senior-consultant"
+CONSULTANT_EXCLUDED_NAMED_SKILLS = frozenset({
+    "interactive-resources", "documentation-sync", "knowledge-harvest",
+})
+
 
 #: Why a model would reach for each one. Named with its occasion, because
 #: "load these skills" is a ritual and a model that performs it spends its
@@ -379,8 +406,8 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
     body, then the always-on shared skills for its kind.
 
     Until this existed nothing delivered a shared skill at all. The role
-    text says things like "load/apply `cortex:documentation-sync`" -- an
-    instruction from when a plugin host could load a skill by name. In an
+    text tells models to load shared skills by their bare `read_skill` ids.
+    In an
     ACP session there is no such host: this runtime *is* the agent, and an
     engine only ever receives the text handed to it. So the rules that
     always apply are handed over with the role, and the situational ones
@@ -392,6 +419,9 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
     visible in what was delivered.
     """
     loadable = NAMED_SKILLS.get(role_set.kind, ())
+    if role_set.role_id == CONSULTANT_ROLE_ID:
+        loadable = tuple(skill_id for skill_id in loadable
+                          if skill_id not in CONSULTANT_EXCLUDED_NAMED_SKILLS)
     parts = [role_set.body_portable]
     if loadable:
         # Named, not pasted. Handing every shared skill over with the role

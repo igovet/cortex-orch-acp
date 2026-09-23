@@ -26,7 +26,14 @@ export const workerEventSchema = z.object({
 
 const route = z.object({
   provider: z.string().min(1),
+  // The routing id/alias (e.g. `opus[1m]`) -- used for pin/deny and as the
+  // record identity; never itself presented as the concrete model.
   model: z.string().min(1),
+  // The real, engine-observed model name (e.g. `Opus 5.5 (1M)`) resolved
+  // from this route's cached catalog evidence -- absent when the engine
+  // never gave evidence more concrete than the bare alias/id itself; the
+  // client then shows `model` explicitly marked as an alias.
+  modelName: z.string().min(1).nullable().optional(),
   effort: z.string().min(1).nullable(),
 });
 

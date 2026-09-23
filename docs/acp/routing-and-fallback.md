@@ -64,6 +64,27 @@ see `cleanup.finish_deletions`). `routing.store.list_audit_for_task`/
 surface (T021 extension) is the natural next consumer — not added here to
 stay within this task's own scope.
 
+T035: the audited `model` column stays the routing id/alias (`opus[1m]`,
+`default`, `gpt-5.6-luna`, ...) — it is the value pin/deny and every other
+routing decision key on, and it is never replaced. Alongside it,
+`_record_route_audit` calls the new
+`live_adapters._resolve_route_model_name(connection_id, model, environ)`,
+which reads this connection's latest cached catalog snapshot
+(`catalog.store.latest_connection_entries`) and resolves the identical
+real, engine-observed display name `acp.config_options.presented_entries`
+would show for a fresh `session/new` (`catalog.labels.presented_model_name`:
+the engine's own named `configOptions` entry, `default`'s own resolved
+description, or a deterministically decodable versioned id such as
+`claude-opus-5-5[1m]` → `Opus 5.5 (1M)`). When resolved, it is written into
+the audit's own `detail["model_name"]`; every display reader
+(`acp.orchestrating_runtime._delegation_route_label` for worker cards/ACP
+titles, and Paseo's `worker-history.ts`/`worker-display.ts` for the
+Workers popover and panel) prefers this resolved name over the bare id and,
+when it is absent (no cached snapshot, no matching entry, or no evidence
+beyond the alias itself), shows the routing id explicitly marked as an
+alias (`opus[1m] (alias)`) rather than presenting it as though it were the
+concrete model. Never a guessed version string.
+
 ## Pre-dispatch enforcement
 
 `EngineSessionManagerAdapter.open` calls `_authorize_dispatch` (via
@@ -209,6 +230,196 @@ cross-provider fallback refused before any session for the target
 connection is ever opened; an exhausted attempt budget refusing fallback;
 and a running worker keeping its already-recorded route/revision when the
 coordinator's own selection changes mid-task.
+
+## Automatic worker routing: tiers and the choice within a tier
+
+`routing.auto_route.choose` picks the role's tier (`ROLE_TIERS`, shifted by
+the planned `complexity` and by escalation), then a model of that tier (the
+nearest other tier when none is usable), then an effort.
+
+A model's tier comes from, first match wins:
+
+1. `tiers` in `routing.json`;
+2. a Claude family name (`FAMILY_TIERS`: opus/fable `deep`, sonnet
+   `standard`, haiku `light`);
+3. a known Codex model (`KNOWN_MODEL_TIERS`: `gpt-6-astra`, `gpt-6-sol`
+   `deep`; `gpt-5.6-sol`, `gpt-5.6-terra` `standard`; `gpt-6-luna`,
+   `gpt-5.6-luna`, `gpt-5.5` `light`);
+4. only for a model none of these names: its position among its
+   connection's other unnamed models, split into thirds.
+
+codex-acp lists its newest generation first (`gpt-6-luna` before
+`gpt-5.6-sol`), so its list order is not strength order. With both
+providers configured, every tier has a candidate from each.
+
+`auto_route.rank` orders the usable candidates of the chosen tier (not
+recorded unavailable, plan window below 100%). The first difference wins:
+
+1. **Provider preference.** The plan task's optional `provider`, when
+   honoured (see below).
+2. **Quota band.** For `deep`/`standard` work, accounts below `HOT_PERCENT`
+   (85%) come first. For `light` work, accounts above it come first.
+3. **Suitability.** The engine that suits the role's kind of work
+   (`ROLE_WORK_KINDS` → `WORK_KIND_ENGINES`) comes first. Codex takes
+   implementation, debugging, testing, operations and investigation; Claude
+   takes review, design, writing, planning and analysis. This is a
+   judgement, not a benchmark.
+4. **Used percentage.** Lower first. An unknown reading counts as 0.
+5. **Engine order.** The final tiebreak.
+
+Before this change the order was only quota band, then used percentage, then
+engine order. Codex's rollout window had reset and Claude reports usage only
+during a turn, so both readings were usually unknown and tied. The tie then
+went to whichever connection the registry listed first.
+
+The coordinator's `provider` preference is set per plan task through
+`plan_submit`. It names an engine id, never a model, and a review fix
+(`_fix_N_<node>`) keeps its node's preference
+(`orchestration.state.attempt_routing`). It never changes the tier, and the
+runtime still owns routing, deny, strict pin and failover. It is ignored,
+with the reason recorded, in these cases:
+
+| `preference_status` | When |
+| --- | --- |
+| `ignored:pinned` | a `pin` applies to the role |
+| `ignored:provider_not_allowed` | `providers` in `routing.json` excludes it |
+| `ignored:provider_not_configured` | no engine-confirmed, non-denied route of that engine exists |
+| `ignored:provider_unavailable` | its routes in the tier are recorded unavailable or at 100% |
+| `ignored:no_candidate_in_tier` | it offers no model in the chosen tier |
+| `ignored:provider_near_quota_limit` | `deep`/`standard` work, every preferred candidate at or above 85% while another candidate is below |
+
+Otherwise the status is `honoured`, or `none` when no preference was given.
+
+The decision basis is stored in the attempt's route audit as
+`decision_detail.route_decision`
+(`live_adapters._record_route_audit`). It holds the role, the role tier, the
+chosen tier, the basis (`rank` or `pin`), the preference and its status,
+every candidate of the tier in rank order (route, connection,
+`used_percent`, `hot`, `suitability`, `preferred`), the tier's routes that
+were skipped as unavailable, and the chosen route.
+
+See `tests/test_auto_route.py` (both providers in every tier, suitability
+between idle accounts, quota outranking suitability, preference honoured and
+ignored) and `tests/test_auto_route_delegation.py` (the same through real
+provisioning: the audit's `route_decision`, preference outside `providers`,
+under a pin, and on an exhausted provider).
+
+## Automatic worker routing: unavailable routes
+
+Automatic worker routing (`routing.auto_route.choose`, called from
+`EngineSessionManagerAdapter._resolve_runtime_route` for every worker attempt
+that no mixed-team profile or fallback has already routed) skips any route
+that `routing.availability` records as unavailable. This is separate from the
+T027 fallback above: nothing here re-opens a *running* attempt on another
+route. A failed worker's node is retried through the ordinary
+`orchestration.recovery.retry_lost` path, and its **next** attempt is routed
+without the failed route.
+
+What is recorded, and only from real evidence:
+
+| Where it fails | Evidence | Reason | Scope |
+| --- | --- | --- | --- |
+| `session/prompt` or `session/new` JSON-RPC error | `data.codexErrorInfo="usageLimitExceeded"` (codex-acp 1.13.0) or `data.errorKind` `billing_error`/`account_on_hold` (claude-agent-acp 0.81.0) | `quota_exhausted` | whole connection |
+| same | `codexErrorInfo="rateLimitExceeded"` or `errorKind="rate_limit"` | `rate_limited` | whole connection |
+| same | `errorKind="model_not_found"` | `model_unavailable` | that model |
+| worker `open()` | `WorkerModeNotConfirmed` (see `claude-agent-acp-adapter.md`) | `configuration_not_confirmed` | that model |
+| worker `open()`, engine launch/`initialize`/`session/new` | `EngineTransportClosed`, `EngineTimeout` or `OSError` | `engine_start_failed` | whole connection |
+
+`engine.failure_classification.route_failure` decides the first three rows
+from the structured fields alone. Message text such as "You've hit your
+usage limit" is never matched, so an unrelated error can't read as
+exhaustion. A cancellation, a capacity wait, a policy refusal, an
+authentication failure, and a failure before the engine process is created
+record nothing.
+
+Each record is one `ROUTE_UNAVAILABLE` row in `runtime_events` on the failed
+attempt's task (no schema change). It holds the engine, connection, model (for
+model-scoped records), reason, the structured evidence
+(e.g. `codexErrorInfo=usageLimitExceeded`), the attempt id and `expires_at`.
+It never holds credentials, prompts or engine prose. `availability.active`
+reads every unexpired record in the project store, so all tasks of the project
+see an exhausted account.
+
+Expiry works like this:
+
+- For quota and rate limits, the reset time the engine itself reported is used
+  (`connections.quota.resets_at`: the most-used open window's `resets_at`).
+  Codex reads it from its rollouts, Claude from its `rate_limit_event`.
+- Otherwise a default applies: 60 minutes for quota exhaustion and an
+  unavailable model, 30 for an unconfirmed configuration, 15 for a rate limit
+  or an engine start failure.
+- Every expiry is capped at 8 days.
+
+Expiry is the only way a record stops counting. The route is tried again after
+it, not before.
+
+Choosing and refusing:
+
+- A recorded route is excluded from `auto_route.pick` without moving any other
+  model's tier. Selection otherwise follows the usual tier fallback order, so
+  the next usable route may be another provider.
+- The existing rule still applies: a route whose engine-reported plan window
+  is at 100% is never chosen.
+- When routes are configured but none is usable, `choose` raises
+  `no_available_route` (non-retryable). Its remediation names every
+  unavailable route, with the reason and expiry. It never silently falls
+  back to the coordinator's route.
+- A worker is also refused with `no_available_route` when its fixed route is
+  recorded unavailable. "Fixed" means the coordinator's inherited route when no
+  catalog is engine-confirmed, a mixed-team route or a fallback target
+  (`_refuse_unavailable_route`).
+- `routing.json` keeps its meaning:
+  - `deny` is applied before availability and is never lifted to make room.
+  - A strict `pin` whose route is recorded unavailable is refused as
+    `pinned_route_unavailable` with the reason, never substituted.
+  - `providers` (a list of engine ids, e.g. `["claude-agent-acp"]`) limits
+    which engines `auto_route.choose`/`pick` and failover consider; an
+    explicitly chosen route is unaffected. A `pin` naming an engine outside
+    `providers` is refused as `pinned_route_unavailable`. When `providers`
+    excludes every engine-confirmed route, `choose` fails closed with
+    `no_available_route` rather than falling back to the coordinator's
+    (possibly excluded) route -- that fallback only applies when nothing is
+    engine-confirmed at all.
+
+Retries (`orchestration.recovery.retry_lost`):
+
+- A routing refusal (`no_available_route`, `pinned_route_unavailable`,
+  `invalid_routing_overrides`, `route_denied`) is never retried. It becomes the
+  named blocker `worker_failure_not_retryable:<code>: <remediation>`, which the
+  coordinator and the stop question show.
+- A failure whose attempt has a `ROUTE_UNAVAILABLE` record (matched by attempt
+  id, not by error text) is retried with `route_failure=true` on the
+  `ASSIGNMENT_RETRIED` event. Such a retry:
+  - does not use up the two ordinary retries (`MAX_ATTEMPT_RETRIES`);
+  - does not escalate the model tier (`orchestration.state.attempt_routing`),
+    because no model fell short;
+  - is bounded by `MAX_ROUTE_RETRIES` (6).
+
+Known limits:
+
+- An engine that reports exhaustion only as chat text and then ends its turn
+  normally, with no structured error, is not recorded. That turn ends as
+  `worker_ended_without_result` and is retried like any other.
+- codex-acp 1.13.0 puts `codexErrorInfo` on the prompt's JSON-RPC error
+  because Cortex does not advertise typed session failures. A client that did
+  advertise them would get the failure as a session update instead, which
+  nothing here reads.
+- A Claude usage-limit turn whose SDK reports no error kind carries no
+  `errorKind`, so it is not recorded. The adapter's `rate_limit_event` with
+  `status: rejected` still sets that window to 100% (`connections.quota.observe`),
+  which already keeps the account from being chosen.
+- Records are per project store: another project's first attempt on an
+  exhausted account still fails once before it records the route.
+
+See `tests/test_route_availability.py` (classification, expiry, retry
+accounting, named refusals), `tests/test_auto_route.py` (exclusion without
+tier movement, cross-provider pick, the reset of the most-used window,
+`providers` validation and filtering) and `tests/test_auto_route_delegation.py`
+(real provisioning over fake engines: exhausted provider skipped, a dispatch
+failure recorded and the next delegation opened on the other provider, a
+codex-shaped `usageLimitExceeded` turn recorded until its engine-reported
+reset, an unrelated error recording nothing, everything unavailable refused
+with each route named, deny/pin/providers interaction, expiry).
 
 ## Anti-bypass invariants
 

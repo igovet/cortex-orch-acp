@@ -12,7 +12,8 @@ def test_coordinator_has_proposals_and_questions_but_no_lifecycle_or_route_contr
     assert not {'delegate','decide','cancel','complete_task','set_task_state','integrate'} & tools.keys()
     plan=tools['plan_submit']['inputSchema']['properties']['plan']
     node=plan['properties']['tasks']['items']
-    assert set(node['properties'])=={'id','role','objective','dependencies','scope','complexity'}  # a bounded work estimate, never a route
+    assert set(node['properties'])=={'id','role','objective','dependencies','scope','complexity','provider'}  # bounded hints, never a route
+    assert node['properties']['provider']['enum']==['codex-acp','claude-agent-acp']  # a provider preference, never a model
     assert node['additionalProperties'] is False
     assert 'question' in tools['user_question_request']['inputSchema']['required']
 
@@ -31,8 +32,15 @@ def test_instruction_sources_do_not_recreate_retired_model_authority():
 def test_all_specialists_remain_discoverable_and_reports_remain_selective():
     assert len(WORKER_ALIASES)==23
     routing=(ROOT/'skills/orchestrator/references/worker-routing.md').read_text()
-    for role in WORKER_ALIASES:
-        assert '`'+role.replace('-','_')+'`' in routing
+    from cortex_runtime.orchestration.contracts import NODE
+    import re
+    plannable = set(NODE['properties']['role']['enum'])
+    reserved = {'code-reviewer', 'build-verification'}
+    catalogue = set(re.findall(r'^- `([^`]+)`:', routing, re.M))
+    assert plannable == set(WORKER_ALIASES) - reserved
+    assert catalogue == plannable
+    assert '## Runtime-reserved (not plannable)' in routing
+    assert all('`'+role+'`' in routing for role in reserved)
     assert 'bounded report reads' in routing
     assert 'structured result' in routing
 

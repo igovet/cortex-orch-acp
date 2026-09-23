@@ -414,6 +414,10 @@ def test_rollback_requires_private_backup_parent(tmp_path):
     _downgrade_to_v10(store)
     backup = tmp_path / "shared-backup" / "backup.sqlite3"
     backup.parent.mkdir(mode=0o755)
+    # ``mkdir(mode=...)`` is itself masked by the ambient umask (0o755 under
+    # a 0o077 umask silently becomes 0o700, the very thing this test needs
+    # to *not* be true) -- chmod sets the exact bits regardless of umask.
+    backup.parent.chmod(0o755)
     migrate(tmp_path / "private", backup, access_stopped=True)
     with pytest.raises(StoreError, match="unsafe_storage"):
         rollback(tmp_path / "private", backup, access_stopped=True, confirm=True)

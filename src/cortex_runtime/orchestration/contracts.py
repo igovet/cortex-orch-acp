@@ -1,4 +1,5 @@
 """Advertised model proposal API. Execution handles are runtime-owned."""
+from ..connections.model import SUPPORTED_ENGINES
 from ..contracts import StoreError
 import re
 
@@ -23,7 +24,12 @@ NODE = obj(dict(id=text('Unique plan node name: a letter, then letters, digits, 
                 complexity=dict(type='string', enum=['low', 'normal', 'high'],
                                 description='How hard this task is, judged from the work itself: low for a narrow lookup or mechanical change, '
                                             'high for cross-cutting root-cause analysis, production incidents, concurrency, security or data-loss risk; '
-                                            'omit for normal. The runtime turns it into a stronger or cheaper route; it never names a model.')),
+                                            'omit for normal. The runtime turns it into a stronger or cheaper route; it never names a model.'),
+                provider=dict(type='string', enum=list(SUPPORTED_ENGINES),
+                              description='Optional provider preference for this task when the work clearly suits one: codex-acp (Codex) or '
+                                          'claude-agent-acp (Claude). The runtime still chooses the tier, model and effort, and honours the '
+                                          'preference only among available candidates of that tier that routing.json allows and not over a pin '
+                                          'or a nearly exhausted plan; otherwise it records why it was ignored. Omit to let the runtime decide.')),
            required=['id', 'role', 'objective', 'dependencies', 'scope'])
 NODE['properties']['id']['pattern'] = r'^[A-Za-z][A-Za-z0-9_-]{0,63}$'
 from ..portable.roles import WORKER_ALIASES
@@ -79,8 +85,13 @@ def validate(schema, value, field='arguments'):
         for index, child in enumerate(value):
             validate(schema['items'], child, f'{field}[{index}]')
     elif kind == 'integer':
-        if type(value) is not int or not schema['minimum'] <= value <= schema['maximum']:
-            target = f"integer from {schema['minimum']} to {schema['maximum']}"
+        # A bound the schema does not advertise is not checked (reading it
+        # raised KeyError, which reached the model as storage_error).
+        low, high = schema.get('minimum'), schema.get('maximum')
+        if type(value) is not int or (low is not None and value < low) or (high is not None and value > high):
+            target = (f'integer from {low} to {high}' if low is not None and high is not None else
+                      f'integer of at least {low}' if low is not None else
+                      f'integer of at most {high}' if high is not None else 'integer')
             raise StoreError('invalid_arguments', field, repr(value)[:40], target, f'Send {field} as an {target}.')
     elif kind == 'string':
         if not isinstance(value,str):

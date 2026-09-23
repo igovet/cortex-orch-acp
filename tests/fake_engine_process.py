@@ -382,6 +382,16 @@ class FakeEngine:
                 _error(request_id,-32603,'Scripted MCP peer failed: '+str(error))
             return
 
+        if behavior == "error":
+            # A JSON-RPC error reply to session/prompt, with the scenario's
+            # own code/message/data -- e.g. codex-acp 1.13.0's refusal of a
+            # turn on an exhausted plan: -32603 with
+            # data.codexErrorInfo="usageLimitExceeded".
+            scripted = self.scenario.get("prompt_error") or {}
+            _write_json(dict(jsonrpc="2.0", id=request_id, error=dict(
+                code=scripted.get("code", -32603), message=scripted.get("message", "Internal error"),
+                data=scripted.get("data"))))
+            return
         if behavior == "hang":
             return  # never reply, never emit -- caller times out
         if behavior == "silent_until_cancel":

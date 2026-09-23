@@ -56,6 +56,7 @@ def verification_command(root, scratch, argv, system_root=False):
     command = [binary, '--die-with-parent', *namespaces, '--unshare-net',
                '--clearenv', '--setenv', 'PATH', '/usr/local/bin:/usr/bin:/bin',
                '--setenv', 'HOME', str(scratch), '--setenv', 'TMPDIR', str(scratch),
+               '--setenv', 'TMP', str(scratch), '--setenv', 'TEMP', str(scratch),
                '--setenv', 'LANG', 'C.UTF-8', '--setenv', 'PYTHONDONTWRITEBYTECODE', '1']
     if system_root:
         command += ['--ro-bind', '/', '/']
@@ -71,11 +72,20 @@ def verification_command(root, scratch, argv, system_root=False):
     # The real /tmp (a screenshot the user points at, a file the worker leaves
     # for the user) and this process's own scratch as TMPDIR. A private /tmp
     # hid both directions.
+    # /var/tmp has no such interop story (nothing points a real user at it),
+    # and on some hosts it is a read-only mount or absent entirely once the
+    # whole host is bound read-only (``system_root``) -- code that hardcodes
+    # it (some tools do) still needs a real, writable, per-run-private
+    # directory there, so it gets its own scratch-backed subdirectory rather
+    # than the host's actual (possibly read-only, always shared) /var/tmp.
+    var_tmp = Path(scratch) / 'var-tmp'
+    var_tmp.mkdir(mode=0o700, exist_ok=True)
     # With the whole host visible, its real devices too (a USB phone for
     # adb, a GPU); /run/user stays visible (session bus, audio, display,
     # keyring): everything that works on the host works here.
     command += ['--proc', '/proc', *(['--dev-bind', '/dev', '/dev'] if system_root else ['--dev', '/dev']),
                 '--bind', '/tmp', '/tmp', '--bind', str(scratch), str(scratch),
+                '--bind', str(var_tmp), '/var/tmp',
                 '--ro-bind', str(root), str(root)]
     from .gateway import PRIVATE
     for current, dirs, files in os.walk(root,followlinks=False):
@@ -101,8 +111,10 @@ def verification_command(root, scratch, argv, system_root=False):
 _NETWORK_FILES = ('/etc/resolv.conf', '/etc/hosts', '/etc/nsswitch.conf',
                   '/etc/gai.conf', '/etc/ssl/certs/ca-certificates.crt')
 # Runtime channel credentials and anything that looks like a credential never
-# reach a command, even the owner's own shell.
-_SECRET_ENV = re.compile(r'(?i)^CORTEX_|TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|PRIVATE_?KEY|AUTH|COOKIE|SESSION')
+# reach a command, even the owner's own shell. A commit author's name, email
+# and date (GIT_AUTHOR_*) are identity, not credentials.
+_SECRET_ENV = re.compile(r'(?i)^CORTEX_|TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|PRIVATE_?KEY|'
+                         r'AUTH(?!OR_(?:NAME|EMAIL|DATE)$)|COOKIE|SESSION')
 
 
 def allow_network(command):
@@ -242,8 +254,146 @@ def as_owner(command, environ):
     allow_network(command)
 
 
+# A one-shot sandboxed command (a worker's own shell, a verification check)
+# runs with an explicit umask rather than inheriting whatever the Cortex
+# runtime process itself set (0077, deliberately restrictive for the
+# runtime's own private store -- see server.py/split.py/agent.py): 022 is
+# what git, npm, make and every other tool such a command runs expect from
+# a normal shell, and nothing it creates is more sensitive than the project
+# tree and scratch directory it already has full read/write access to (see
+# SECURITY.md, "Sandboxed command umask"). bwrap itself has no ``--umask``
+# option, so the umask is set by the sandboxed process itself, right before
+# it execs the real command -- never applied to a whole engine process
+# (``engine_jail``), whose own state directories (credentials included)
+# keep the runtime's stricter default.
+COMMAND_UMASK = 0o022
+
+
+def with_umask(argv, mode=COMMAND_UMASK):
+    """Wrap ``argv`` to run under an explicit umask inside the sandbox."""
+    return ['/bin/sh', '-c', f'umask {mode:04o}; exec "$@"', 'sh', *argv]
+
+
+# What in a git metadata directory configures or redirects git runs the owner
+# makes later, outside any sandbox: settings (hooks path, fsmonitor, editor,
+# pager, filters, credential helpers, includes), hooks, the pointer to a
+# repository's common directory (a planted ``commondir`` swaps in another
+# config), a linked worktree's back-pointer, and legacy remote definitions.
+# Everything else a sandboxed git writes (objects, refs, logs, index, HEAD,
+# packed-refs, locks, merge/rebase state) is data.
+GIT_GUARDED = ('config', 'config.worktree', 'commondir', 'gitdir', 'hooks', 'remotes', 'branches')
+# Other linked worktrees' metadata and submodule repositories.
+GIT_GUARDED_COMMON = ('worktrees', 'modules')
+_GIT_SWEEP_SECONDS = 0.5
+
+
+def git_metadata_mounts(root: Path):
+    """How a sandboxed git in ``root`` may update its repository, or ``None``
+    when ``root`` itself is not a git checkout (a repository above the
+    project stays read-only like the rest of the host).
+
+    Returns ``(writable, readonly, watched)``: the git directory (and, for a
+    linked worktree, its common directory) mounted writable; then read-only
+    on top the other worktrees' metadata and submodules, every existing
+    GIT_GUARDED entry and the effective hooks directory when it lies in the
+    project (``core.hooksPath``, e.g. husky); ``watched`` the absent
+    GIT_GUARDED paths, which a mount cannot cover without creating them, so
+    GitGuard removes any that appear."""
+    from ..delegation.revision import git_metadata_dirs
+    dirs = git_metadata_dirs(str(root))
+    if dirs is None:
+        return None
+    writable = [Path(directory) for directory in dirs]
+    gitdir, common = writable[0], writable[-1]
+    readonly, watched = [], []
+    for name in GIT_GUARDED_COMMON:
+        path = common / name
+        if path.is_dir() and not path.is_symlink() and path != gitdir and path not in gitdir.parents:
+            readonly.append(path)
+        elif path.is_dir() and not path.is_symlink():
+            # A linked worktree: its own gitdir (below) stays writable, its
+            # siblings do not.
+            readonly += [child for child in path.iterdir() if child != gitdir]
+    for directory in writable:
+        for name in GIT_GUARDED:
+            path = directory / name
+            if name == 'gitdir' and directory == common:
+                continue  # only a linked worktree's gitdir holds this pointer
+            (readonly if path.exists() or path.is_symlink() else watched).append(path)
+    hooks = _configured_hooks_dir(root)
+    if hooks is not None:
+        readonly.append(hooks)
+    return writable, readonly, watched
+
+
+def _configured_hooks_dir(root: Path) -> Path | None:
+    """``core.hooksPath`` when it names an existing directory inside the
+    project (otherwise it is already read-only, or absent)."""
+    import subprocess
+    try:
+        done = subprocess.run(['git', '-C', str(root), '--no-optional-locks', 'config', '--get', 'core.hooksPath'],
+                              capture_output=True, timeout=10,
+                              env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': os.environ.get('HOME', '/'),
+                                   'GIT_TERMINAL_PROMPT': '0'})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = done.stdout.decode('utf-8', 'surrogateescape').strip()
+    if done.returncode != 0 or not value:
+        return None
+    path = Path(os.path.expanduser(value))
+    path = Path(os.path.normpath(path if path.is_absolute() else root / path))
+    if path == root or root not in path.parents or not path.is_dir():
+        return None
+    return path
+
+
+class GitGuard:
+    """Removes GIT_GUARDED entries planted where none existed, while the
+    sandbox lives and once more when it ends. ``removed`` lists them."""
+
+    def __init__(self, watched):
+        import threading
+        self.watched = list(watched)
+        self.removed = []
+        self._stop = threading.Event()
+        self._thread = None
+        if self.watched:
+            self._thread = threading.Thread(target=self._run, name='cortex-git-guard', daemon=True)
+            self._thread.start()
+
+    def _run(self):
+        while not self._stop.wait(_GIT_SWEEP_SECONDS):
+            self.sweep()
+
+    def sweep(self):
+        for path in self.watched:
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                continue
+            try:
+                if stat.S_ISDIR(info.st_mode):
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                continue
+            self.removed.append(str(path))
+
+    def close(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+        self.sweep()
+
+
 @contextmanager
-def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root=False, readonly=()):
+def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root=False, readonly=(),
+                    git_writable=False, git_guard=None):
     """Pin mount sources to no-follow descriptors, then constrain writes.
 
     ``.`` (or ``**``) grants the whole project, new top-level files included.
@@ -251,14 +401,22 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
     children; explicit new files are first created with project_write.
     ``readonly`` (the user's deny-write paths) stays read-only on top of any
     grant. Private names in ``reveal`` are mounted read-only instead of hidden.
+    ``git_writable`` with a whole-project grant lets git update the project's
+    own repository (``git_metadata_mounts``); without that grant the root
+    ``.git`` follows ``reveal``. ``git_guard`` (a list) receives the planted
+    git configuration paths removed when the command ends.
     """
     from .gateway import PRIVATE, _parts, _parent, _matches
     root = Path(root).resolve(strict=True)
+    git = None
+    if git_writable and any(scope in {'.', '**', '**/*'} for scope in scopes):
+        git = git_metadata_mounts(root)
     command = verification_command(root, scratch, argv, system_root)
     # Replace project bind and build scoped grants before masking private data.
     start = command.index('--ro-bind', _dev_index(command) + 1)
     command = command[:start]
     fds = []
+    guard = GitGuard(git[2] if git else ())
     try:
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         fds.append(fd)
@@ -371,7 +529,20 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
                 os.close(pinned); continue
             fds.append(pinned)
             command+=['--ro-bind',f'/proc/self/fd/{pinned}',str(root/relative)]
+        if git is not None:
+            writable_git, readonly_git, _ = git
+            for directory in writable_git:
+                pinned=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+                fds.append(pinned)
+                command+=['--bind',f'/proc/self/fd/{pinned}',str(directory)]
+            # Guarded entries after the writable binds, so these win.
+            command+=[arg for path in readonly_git for arg in ('--ro-bind',str(path),str(path))]
         for original in sorted(private_paths):
+            if git is not None and original == root/'.git':
+                if original.is_file():
+                    # A linked worktree's gitdir pointer, visible read-only.
+                    command+=['--ro-bind',str(original),str(original)]
+                continue
             # Never mount through a private symlink: mask its in-project target.
             path = _private_target(original, root)
             if path is None:
@@ -385,6 +556,9 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
         yield command+['--chdir',str(root),'--',*argv],tuple(fds)
     finally:
         for fd in fds: os.close(fd)
+        guard.close()
+        if git_guard is not None:
+            git_guard.extend(guard.removed)
 
 
 # What an engine state directory holds that configures later sessions, the
@@ -407,7 +581,9 @@ def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(
     """Run a whole engine process the way a worker's shell runs.
 
     The project is read-only except the granted scopes, `.cortex` is hidden
-    and the other private names are read-only. HOME is read-only; each engine
+    and the other private names are read-only -- except that with a
+    whole-project grant git may update the project's own repository
+    (``git_metadata_mounts``). HOME is read-only; each engine
     state directory (``state_dirs``: path -> engine) is writable except its
     ENGINE_CONFIG entries, which are created neutral when absent so none can
     be planted. `writable` adds plain
@@ -417,7 +593,7 @@ def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(
     """
     from .gateway import PRIVATE
     with gateway_command(root, scratch, argv, scopes, reveal=frozenset(PRIVATE) - {'.cortex'},
-                         system_root=True, readonly=readonly) as (command, fds):
+                         system_root=True, readonly=readonly, git_writable=True) as (command, fds):
         as_owner(command, {'HOME': env.get('HOME', '')})
         extra = [arg for name, value in env.items() if name != 'PATH' for arg in ('--setenv', name, value)]
         extra += ['--setenv', 'TMPDIR', str(scratch)]

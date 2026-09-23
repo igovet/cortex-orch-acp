@@ -58,10 +58,10 @@ harvest scope.
 
 ## Shared skills and reporting
 
-Apply skill `cortex:tool-discipline` to calls. Draft creator guidance and the worker
+Apply skill `tool-discipline` to calls. Draft creator guidance and the worker
 profile supply the report requirements. Load a declared example only for an assigned
 content question; do not read `cortex-control` with `read_skill` merely for ordinary reporting.
-After context loss, load skill `cortex:context-compaction` and follow its rereading procedure.
+After context loss, load skill `context-compaction` and follow its rereading procedure.
 
 ## Scale the assignment to the repository
 
@@ -166,7 +166,7 @@ parallel progress elsewhere, or an honest residual-risk statement.
 
 A material user decision is reported clearly to the coordinator, who presents
 it through the normal user interaction boundary. Internal storage and worker coordination conditions alone are not user questions.
-For a genuine question, load skill `cortex:coordinator-communication` with
+For a genuine question, load skill `coordinator-communication` with
 `read_skill` and follow it: detailed chat context and
 answer alternatives and their consequences as ordinary chat text.
 

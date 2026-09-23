@@ -21,8 +21,9 @@ deliberately absent from ``UNSUPPORTED_METHODS`` below -- see
 ``agent.Agent._session_set_config_option`` and ``acp.config_options``/
 ``acp.commands`` for the truthful configuration-option/selector logic
 itself (this module only shapes/validates the wire messages).
-``session/set_mode`` is supported for Paseo's coordinator-language selector;
-Zed keeps the ordinary ``language`` config option.
+``session/set_mode`` sets the user's Guarded/Auto access mode
+(``configuration.access_mode``), which Paseo shows as its mode control; Zed
+reaches the same choice through the ``access_mode`` config option.
 """
 from __future__ import annotations
 
@@ -350,14 +351,19 @@ def validate_load_session_params(params):
     return params["sessionId"], params["cwd"], mcp_servers
 
 
-def load_session_response(config_options=None):
+def load_session_response(config_options=None, modes=None):
     """T035 FINDING-08 fix: ``configOptions`` mirrors ``session/new``'s
     -- the reloaded session's own selection surface (see
     ``agent.Agent._session_load``/``_config_options_for_session``), not
-    always ``None``. ``modes`` stays ``None``: ``session/new`` never
-    reports it either (Cortex has no ACP "modes" concept, only
-    ``configOptions``), so there is nothing session/load should add."""
-    return dict(modes=None, configOptions=config_options if config_options else None)
+    always ``None``. ``modes`` likewise mirrors ``session/new``: the access
+    mode state for Paseo, ``None`` for every other client."""
+    return dict(modes=modes, configOptions=config_options if config_options else None)
+
+
+def current_mode_update(session_id, mode_id):
+    """``session/update`` ``current_mode_update`` after an access mode switch."""
+    return notification("session/update", dict(
+        sessionId=session_id, update=dict(sessionUpdate="current_mode_update", currentModeId=mode_id)))
 
 
 def prompt_result(stop_reason):

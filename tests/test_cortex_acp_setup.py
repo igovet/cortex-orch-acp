@@ -331,7 +331,8 @@ def test_add_connection_reuse_is_idempotent(tmp_path, monkeypatch):
     assert first["connection_id"] == second["connection_id"]
 
 
-def test_add_connection_api_key_requires_reader():
+def test_add_connection_api_key_requires_reader(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
     with pytest.raises(SystemExit):
         setup.add_connection(name="work", engine="codex-acp", provider="openai", auth_mode=AuthMode.API_KEY,
                               key_kind="openai_api_key", api_key_reader=None)

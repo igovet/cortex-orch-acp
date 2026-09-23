@@ -12,7 +12,7 @@ def integer(description, minimum=0, maximum=1000000000):
 SHARED = {
     'list_sources': obj(dict(after=integer('Exact cursor returned by the preceding source page.'),
                              limit=integer('Maximum page size.',1,200)), required=[]),
-    'read_source': obj(dict(source_ref=text('Exact source_ref from list_sources.',64),
+    'read_source': obj(dict(source_ref=text('Exact source_ref from list_sources: an entry source_ref or an answered_questions source_ref.',64),
                             offset=integer('Character offset.',0,100000000),
                             limit=integer('Maximum chunk size.',1,65536)), required=['source_ref']),
     'read_skill': obj(dict(skill=text('Exact shared skill or role-scoped reference id.',80))),

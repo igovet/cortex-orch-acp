@@ -51,6 +51,7 @@ from ..catalog.model import CatalogEntry
 from ..catalog.evidence import Fact, ProvenanceSource
 from ..configuration.resolution import ConfigurationInputs, resolve_saved_route
 from ..configuration.service import ConfigurationService
+from ..configuration import access_mode as configuration_access_mode
 from ..configuration import store as configuration_store
 from ..configuration.mcp_servers import load_mcp_servers
 from ..connections import registry as connection_registry
@@ -513,7 +514,17 @@ class Agent:
                     options = question.options or []
                     index = int(choice) if choice.strip().isdigit() else 0
                     value = options[index - 1] if 1 <= index <= len(options) else choice
-                    acp_questions_store.answer(store, question.id, value, "elicitation")
+                    if acp_questions_store.answer(store, question.id, value, "elicitation"):
+                        # Same runtime record every other answer path writes,
+                        # so workers see which session answered.
+                        from ..delegation import events as delegation_events
+
+                        delegation_events.append_event(
+                            store, question.task_id, "progress", f"question_answered:{question.id}",
+                            dict(kind="question_answered", question_id=question.id, answer_text=value,
+                                 session_id=session_id),
+                            origin="runtime",
+                        )
                 return
             session["active"] = cancel_event
             session["background"] = True
@@ -712,7 +723,8 @@ class Agent:
         session = dict(
             project=project, task_id=None, channel=None, active=None, lock=threading.Lock(),
             owner_epoch=None, pending_selection=None, default_selection=None,
-            pending_language=None, client_capabilities=dict(self.client_capabilities),
+            pending_language=None, pending_access_mode=None,
+            client_capabilities=dict(self.client_capabilities),
             # The client's own MCP servers, kept whole and in memory only so
             # the engines this session drives are offered the same tools the
             # user configured in their editor. Storage keeps the stripped
@@ -738,6 +750,9 @@ class Agent:
         result = dict(sessionId=session_id)
         if options:
             result["configOptions"] = options
+        modes = self._access_modes_for_session(session, store)
+        if modes is not None:
+            result["modes"] = modes
         return result
 
     def _post_session_new_notifications(self, session_id):
@@ -1207,8 +1222,42 @@ class Agent:
         return acp_config_options.build_config_options(
             entries, connections, current, include_language=True, language_current=language_current,
             language_as_mode=self._combined_model_picker(),
+            # Paseo shows the access mode as its mode (shield) control from
+            # ``modes`` (see _access_modes_for_session); a second, option
+            # copy would render as a duplicate setting there.
+            include_access_mode=not self._combined_model_picker(),
+            access_mode_current=self._current_access_mode_for_session(store, session),
             environ=self.environ, project_root=session["project"],
             combined_model_picker=self._combined_model_picker())
+
+    def _current_access_mode_for_session(self, store, session):
+        """The task's recorded access mode once a task exists, else this
+        session's own not-yet-applied choice, else Guarded. Never read from
+        user defaults: every new session starts Guarded."""
+        if session["task_id"] is not None:
+            return configuration_access_mode.current(store, session["task_id"])
+        return configuration_access_mode.normalize(session.get("pending_access_mode"))
+
+    def _access_modes_for_session(self, session, store):
+        """ACP ``modes`` for Paseo, whose composer mode control (the access
+        shield) is built from them; ``None`` for other clients, which get
+        the ``access_mode`` config option instead."""
+        if not self._combined_model_picker():
+            return None
+        return acp_config_options.access_mode_state(self._current_access_mode_for_session(store, session))
+
+    def _apply_access_mode_selection(self, store, session, session_id, value, origin):
+        """``value`` is already validated against the offered modes. Before
+        a task exists the choice waits in this session (applied as the
+        task's first revision on the first prompt); afterwards it is the
+        task's next recorded revision, read by the runtime at every
+        permission request and worker open."""
+        if session["task_id"] is None:
+            session["pending_access_mode"] = value
+        else:
+            configuration_access_mode.switch(store, session["task_id"], value, origin=origin, session_id=session_id)
+        observe(self.environ, "access_mode", f"switched:{value}")
+        return True, self._config_options_for_session(session, store), None
 
     def _combined_model_picker(self):
         """Paseo currently renders the model selector but not the provider selector.
@@ -1372,6 +1421,7 @@ class Agent:
                 # brand-new task's own (empty) override instead of the
                 # choice the session is carrying.
                 session_language = self._current_language_for_session(store, session)
+                session_access_mode = session.get("pending_access_mode")
                 result = bootstrap_task(store, source_event, text, owner_ref=origin, blocks=staged_blocks, meta=meta)
                 session["task_id"] = result.task_id
                 session["owner_epoch"] = result.owner_epoch
@@ -1391,6 +1441,14 @@ class Agent:
                 # English.
                 if session_language is not None:
                     acp_steering.set_language_override(store, result.task_id, session_language)
+                # Likewise the access mode the user picked before the
+                # first prompt; a session that never picked one leaves the
+                # new task Guarded.
+                if session_access_mode is not None:
+                    configuration_access_mode.switch(
+                        store, result.task_id, session_access_mode,
+                        origin="acp_pre_task_selection", session_id=session_id)
+                    session["pending_access_mode"] = None
             else:
                 result = append_source_event(store, source_event, text, session["task_id"], blocks=staged_blocks, meta=meta)
                 if result.owner_epoch is not None:
@@ -2039,6 +2097,10 @@ class Agent:
         if value not in allowed_values:
             return False, previous_options, RpcError(-32602, f"{value!r} is not a valid value for configId {config_id!r}.")
 
+        if config_id == acp_config_options.ACCESS_MODE_OPTION_ID:
+            session_id = next((key for key, known in self.sessions.items() if known is session), None)
+            return self._apply_access_mode_selection(store, session, session_id, value, "acp_config_option")
+
         if config_id == acp_config_options.LANGUAGE_OPTION_ID:
             # T020: an independent settings axis -- never a route/parameter
             # override, never gated on model selectability, and (unlike
@@ -2236,28 +2298,28 @@ class Agent:
         self.transport.send_response(protocol.result_response(request_id, protocol.set_config_option_response(options)))
 
     def _session_set_mode(self, request_id, params):
-        """Paseo renders ACP modes but hides generic ``other`` options.
-
-        In that client only, Cortex presents its existing coordinator-language
-        choice as a mode and maps the standard ``session/set_mode`` request to
-        the same durable language selection used by Zed's config option and
-        ``/cortex-language``. No engine execution mode is changed.
+        """The standard ACP mode switch sets the user's access mode
+        (``guarded``/``auto``, see ``configuration.access_mode``) -- the
+        modes Cortex reports to Paseo, whose composer shows them as its
+        access shield. Zed and other clients reach the same choice through
+        the ``access_mode`` config option. No other setting is reachable
+        here; an unknown mode id is refused and changes nothing.
         """
         session_id, mode_id = protocol.validate_set_mode_params(params)
-        if not self._combined_model_picker():
-            raise RpcError(-32601, "session/set_mode is not available for this client.")
         session = self.sessions.get(session_id)
         if session is None:
             raise RpcError(-32602, "Unknown sessionId.")
+        if mode_id not in configuration_access_mode.MODES:
+            self.transport.send_response(protocol.error_response(request_id, RpcError(
+                -32602, f"{mode_id!r} is not a valid mode; expected one of "
+                        f"{list(configuration_access_mode.MODES)}.")))
+            return
         with session["lock"]:
             store = self._store_for(session["project"])
-            _accepted, options, error = self._apply_config_selection(
-                store, session, acp_config_options.LANGUAGE_OPTION_ID, "value_id", mode_id,
-            )
-        if error is not None:
-            self.transport.send_response(protocol.error_response(request_id, error))
-            return
+            _accepted, options, _error = self._apply_access_mode_selection(
+                store, session, session_id, mode_id, "acp_set_mode")
         self.transport.send_response(protocol.result_response(request_id, {}))
+        self.transport.send_notification(protocol.current_mode_update(session_id, mode_id))
         self.transport.send_notification(protocol.config_option_update(session_id, options))
 
     def _session_load(self, request_id, params):
@@ -2340,7 +2402,8 @@ class Agent:
             self.sessions[session_id] = dict(
                 project=project, task_id=durable["task_id"], channel=None, active=None, lock=threading.Lock(),
                 owner_epoch=restored_epoch, pending_selection=None, default_selection=None,
-                pending_language=None, client_capabilities=dict(self.client_capabilities),
+                pending_language=None, pending_access_mode=None,
+                client_capabilities=dict(self.client_capabilities),
                 # ``session/load`` is a reconnect, not a new client identity.
                 # The incoming client still supplies the current session's
                 # MCP configuration, and that configuration must reach the
@@ -2370,7 +2433,8 @@ class Agent:
         # ``build_config_options`` reports with nothing marked as current --
         # itself distinguishable from a task with a real selection.
         options = self._config_options_for_session(session, store)
-        response = protocol.load_session_response(config_options=options)
+        response = protocol.load_session_response(
+            config_options=options, modes=self._access_modes_for_session(session, store))
         self.transport.send_response(protocol.result_response(request_id, response))
 
     def _session_cancel(self, params):

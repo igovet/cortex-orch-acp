@@ -30,6 +30,21 @@ export function workerStatusLabel(status: string | null | undefined): string {
   return value || "working";
 }
 
+export type WorkerStatusTone = "active" | "success" | "danger" | "muted";
+
+/**
+ * The at-a-glance treatment for a worker card: the same status word as
+ * `workerStatusLabel`, plus a tone (mapped to a theme status colour by the
+ * caller) and an icon, so status is never carried by colour alone.
+ */
+export function workerStatusPresentation(status: string | null | undefined): { label: string; tone: WorkerStatusTone; icon: string } {
+  const label = workerStatusLabel(status);
+  if (label === "completed") return { label, tone: "success", icon: "CircleCheck" };
+  if (label === "failed") return { label, tone: "danger", icon: "CircleAlert" };
+  if (label === "cancelled") return { label, tone: "muted", icon: "CircleSlash" };
+  return { label, tone: "active", icon: "Loader2" };
+}
+
 /** One worker line: its task as the name, then `profile · provider · model · effort · status`. */
 export function workerLine(name: string, profile: string, route: readonly (string | null | undefined)[], status: string | null | undefined) {
   return {
@@ -50,12 +65,23 @@ export function workerCardMetadata(title: string, status: string) {
   return workerLine(nameParts.join(" — "), routeParts[0] || "worker", routeParts.slice(1), status);
 }
 
+/**
+ * The route's real, engine-observed model display text: its resolved name
+ * when the engine gave evidence for one, otherwise its routing id/alias
+ * explicitly marked as an alias -- never a guessed version. `undefined`
+ * when there is no route model at all.
+ */
+export function workerModelDisplay(route: { model?: string | null; modelName?: string | null } | null | undefined): string | undefined {
+  if (!route?.model) return undefined;
+  return route.modelName || `${route.model} (alias)`;
+}
+
 /** The popover's line for a history assignment, identical to its chat row. */
 export function workerAssignmentLine(assignment: WorkerAssignment, status: string) {
   const route = assignment.route ?? assignment.attempts[assignment.attempts.length - 1]?.route;
   const title = assignment.title?.trim() ?? "";
   return workerLine(/^delegate:[0-9a-f-]+$/i.test(title) ? "" : title, workerDisplayName(assignment),
-    [route?.provider, route?.model, route?.effort], status);
+    [route?.provider, workerModelDisplay(route), route?.effort], status);
 }
 
 /** Claude Code's compact token count: 950, 84k, 1.2M. */

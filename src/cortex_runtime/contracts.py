@@ -296,9 +296,9 @@ ERROR_HELP = {
     "stale_assignment_result": "This assignment belongs to an earlier plan revision or a finished task; its result is no longer accepted. Stop.",
     "invalid_plan_fields": "A plan has exactly two fields: tasks and verification. Remove any other field and resubmit.",
     "invalid_plan_size": "plan.tasks must be a list of 1 to the advertised maximum tasks.",
-    "invalid_plan_node": "Each task has exactly id, role, objective, dependencies and scope, plus optional complexity (low, normal or high). Put any note or rationale in objective.",
+    "invalid_plan_node": "Each task has exactly id, role, objective, dependencies and scope, plus optional complexity (low, normal or high) and provider (codex-acp or claude-agent-acp). Put any note or rationale in objective.",
     "duplicate_or_invalid_node": "A task id starts with a letter, uses only letters, digits, '_' and '-', is at most 64 characters, and is unique within the plan.",
-    "runtime_reserved_role": "A task role must be a worker role (worker-...). Review and build verification are added by the runtime; do not plan worker-code-reviewer or worker-build-verification.",
+    "runtime_reserved_role": "A task role must be a worker role (worker-...). Review and build verification are added by the runtime; the runtime inserts the independent review (worker-code-reviewer) and executes command verification itself, so worker-code-reviewer and worker-build-verification are runtime-reserved and must not be planned.",
     "invalid_node_objective": "A task objective is a non-empty string of at most 8000 characters.",
     "invalid_assignment_scope": "scope is a non-empty list of at most 64 project-relative path globs, each a non-empty string of at most 512 characters. Use '.' for the whole project.",
     "forbidden_assignment_scope": "A scope entry is a project-relative glob: not absolute, no '..' or backslash, and never naming .cortex, .git, .codex or .claude. Correct that entry and resubmit.",
@@ -413,6 +413,15 @@ def validate(name, args):
             if not valid:raise StoreError("invalid_arguments",key,"invalid bounded metadata list","array matching its advertised items schema")
         elif type(value) is not int or value<rule["minimum"] or value>rule["maximum"]:
             raise StoreError("invalid_arguments",key,_received(value),f"integer {rule['minimum']}..{rule['maximum']}",f"Use a JSON integer from {rule['minimum']} through {rule['maximum']}.")
+
+
+def storage_failure(exc):
+    """storage_error naming what failed: the exception class, and for an
+    OSError its reason -- never its message or file name, which may carry
+    paths or data. A bare storage_error hid a validator KeyError behind
+    "check disk space" for a whole task; the traceback goes to the log."""
+    reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else None
+    return StoreError("storage_error", "cause", type(exc).__name__ + (f": {reason}" if reason else ""))
 
 
 # Codes that mean an action may already have happened: never "rejected".

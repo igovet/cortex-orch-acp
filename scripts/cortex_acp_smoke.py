@@ -127,7 +127,7 @@ def _safe_tmp_base():
             continue
         path = Path(candidate)
         try:
-            if not path.is_dir():
+            if not path.is_dir() or not os.access(path, os.W_OK):
                 continue
             if any((path / marker).exists() for marker in (".git", ".cortex")):
                 continue
@@ -375,13 +375,22 @@ def run_smoke(*, fixture_connection, report):
                            detail=config_options)
         else:
             # T020: model/thought_level stay gated on connection/model
-            # selectability (absent here), but "language" is never gated
-            # on either -- it is always offered, even with zero
-            # connections.
+            # selectability (absent here), but "language" and "access_mode"
+            # are never gated on either -- both are always offered, even
+            # with zero connections.
             report.record(
                 "session/new:no_model_option_without_connections",
-                "model" not in ids and "thought_level" not in ids and ids == {"language"},
+                "model" not in ids and "thought_level" not in ids and ids == {"language", "access_mode"},
                 detail=config_options)
+            access_mode_option = next(
+                (opt for opt in (config_options or []) if opt.get("id") == "access_mode"), None)
+            access_mode_values = {opt.get("value") for opt in (access_mode_option or {}).get("options", [])}
+            report.record(
+                "session/new:access_mode_option_shape",
+                access_mode_option is not None
+                and access_mode_values == {"guarded", "auto"}
+                and access_mode_option.get("currentValue") == "guarded",
+                detail=access_mode_option)
 
         _line, commands_notification = session.recv()
         _validate(report, validators, "notification", commands_notification, "available_commands_update")

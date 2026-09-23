@@ -43,8 +43,10 @@ Choosing provider+model always resolves to one concrete
 -- see ``acp.agent._apply_config_selection``); an unsupported value is
 refused, never silently accepted.
 
-None of these are ever emitted for team/permission/spend/summarizer
-settings; those are out of scope for this task (T010).
+``access_mode`` (category ``mode``) carries the user's Guarded/Auto access
+mode (``configuration.access_mode``); Paseo receives the same choice as ACP
+``modes`` instead (see ``access_mode_state``). None of these are ever
+emitted for team/spend/summarizer settings.
 """
 from __future__ import annotations
 
@@ -58,6 +60,7 @@ from ..catalog.labels import (
     resolved_default_model,
 )
 from ..catalog.model import CatalogEntry
+from ..configuration import access_mode as configuration_access_mode
 from ..connections import account_identity as connection_account_identity
 from ..connections import onboarding as connection_onboarding
 from ..connections import registry as connection_registry
@@ -99,6 +102,8 @@ _ENGINE_DEFAULT_VALUE = "default"
 # set_language_override (per-task) and acp.commands.CORTEX_LANGUAGE (the
 # slash-command equivalent for a host without SessionConfigOption support).
 LANGUAGE_OPTION_ID = "language"
+# The user's Guarded/Auto access mode (configuration.access_mode).
+ACCESS_MODE_OPTION_ID = "access_mode"
 _LANGUAGE_VALUES = ("auto", "en", "ru")
 _LANGUAGE_NAMES = {"auto": "Auto (detect from your messages)", "en": "English", "ru": "Russian"}
 
@@ -574,12 +579,45 @@ def build_language_option(current_value: str | None, *, as_mode: bool = False) -
     )
 
 
+def build_access_mode_option(current_value: str | None) -> dict:
+    """The ``access_mode`` SessionConfigOption (category ``mode``):
+    ``guarded`` (the default) or ``auto`` -- see
+    ``configuration.access_mode``. An unknown stored value is shown as
+    ``guarded``, never as ``auto``."""
+    current = configuration_access_mode.normalize(current_value)
+    return dict(
+        id=ACCESS_MODE_OPTION_ID, name="Access", type="select", category="mode",
+        currentValue=current,
+        description=configuration_access_mode.DESCRIPTIONS[current],
+        options=[
+            dict(value=mode, name=configuration_access_mode.LABELS[mode],
+                 description=configuration_access_mode.DESCRIPTIONS[mode])
+            for mode in configuration_access_mode.MODES
+        ],
+    )
+
+
+def access_mode_state(current_value: str | None) -> dict:
+    """The same choice as an ACP ``SessionModeState``, for a client whose
+    mode control reads ``modes`` rather than a mode-category option (Paseo's
+    plugin bridge, whose composer shows it as the access shield)."""
+    return dict(
+        currentModeId=configuration_access_mode.normalize(current_value),
+        availableModes=[
+            dict(id=mode, name=configuration_access_mode.LABELS[mode],
+                 description=configuration_access_mode.DESCRIPTIONS[mode])
+            for mode in configuration_access_mode.MODES
+        ],
+    )
+
+
 def build_config_options(
     selectable_entries: Sequence[CatalogEntry],
     connections: Mapping[str, ConnectionRecord],
     current: Mapping[str, object] | None = None,
     *, include_language: bool = False, language_current: str | None = None,
     language_as_mode: bool = False,
+    include_access_mode: bool = False, access_mode_current: str | None = None,
     environ: Mapping[str, str] | None = None,
     project_root: str | None = None,
     combined_model_picker: bool = False,
@@ -606,12 +644,16 @@ def build_config_options(
     provider/model/thought_level, the language option is appended even when
     ``selectable_entries`` is empty (no model is selectable yet): language
     is never gated on route/connection availability.
+
+    ``include_access_mode`` appends the ``access_mode`` option last,
+    likewise regardless of selectability.
     """
     # An engine's literal ``default`` alias is shown only when it is the one
     # way to reach its model (see presented_entries); catalog evidence is untouched.
     selectable_entries = presented_entries(selectable_entries)
     current = current or {}
     options: list[dict] = []
+    access = [build_access_mode_option(access_mode_current)] if include_access_mode else []
     current_route_id = current.get("route_id")
     current_state = current.get("state")
     current_revision = current.get("revision")
@@ -636,7 +678,7 @@ def build_config_options(
     if not selectable_entries:
         if include_language:
             options.append(build_language_option(language_current, as_mode=language_as_mode))
-        return options
+        return options + access
     if combined_model_picker:
         provider_effective_state = current_state
         chosen_connection_id = (
@@ -650,7 +692,7 @@ def build_config_options(
         if provider_option is None:
             if include_language:
                 options.append(build_language_option(language_current, as_mode=language_as_mode))
-            return options
+            return options + access
         options.append(provider_option)
         provider_effective_state = provider_option.get("_meta", {}).get("_cortex", {}).get("state", current_state)
         chosen_connection_id = provider_option["currentValue"]
@@ -693,7 +735,7 @@ def build_config_options(
             options.append(thought_option)
     if include_language:
         options.append(build_language_option(language_current, as_mode=language_as_mode))
-    return options
+    return options + access
 
 
 def most_recent_live_selection(history: Iterable[Mapping[str, object]]) -> dict | None:

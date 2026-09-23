@@ -18,7 +18,7 @@ The no-paid startup smoke in scripts/cortex_acp_smoke.py launches the production
 ## Orchestration and state
 
 - [Current orchestration contract](orchestration.md): requirements, assignments, attempts, direct project writers, checks, decisions and instruction delivery
-- [Roles and delegation](roles-and-delegation.md)
+- [Roles, delegation and instruction delivery](roles-and-delegation.md)
 - [Completion and resource lifecycle](completion-and-lifecycle.md)
 - [Steering, stop and questions](steering-and-questions.md)
 - [Failures, cancellation and disconnects](failures-and-cancellation.md)
@@ -37,7 +37,7 @@ The no-paid startup smoke in scripts/cortex_acp_smoke.py launches the production
 
 - [Codex ACP adapter](codex-acp-adapter.md)
 - [Claude ACP adapter](claude-agent-acp-adapter.md)
-- [Permissions and containment](permissions-and-containment.md)
+- [Permissions and containment](permissions-and-containment.md) (including the Guarded/Auto access mode)
 - [Security boundary audit](security-boundaries.md)
 
 A client must explicitly select or launch Cortex as its agent. Finding a .cortex directory does not activate orchestration. Every project has one .cortex store; work must be qualified in a separate disposable project. Real Zed, Codex and Claude end-to-end operation cannot be inferred from fake-engine tests or the no-paid smoke; use the runbook and mark unobserved scenarios unverified.

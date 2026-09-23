@@ -56,8 +56,18 @@ receipts. See [permissions and containment](permissions-and-containment.md).
 
 Steering fences existing workers before replanning. Worker questions persist an
 exact pending question and pause execution; only a real matching answer resumes
-it. Lost workers are retried at most twice after confirmed absence, and uncertain
-action receipts prevent replay. Coordinator, worker and review turns have total
+it. Every answered question, with its question text, the user's verbatim answer,
+ids, timestamps and answering session, is visible to later workers and the
+reviewer through `list_sources`/`read_source` and the recovery capsule's
+constraints (see [input history](input-history-and-replay.md#answered-questions)).
+Lost workers are retried at most twice after confirmed absence, and uncertain
+action receipts prevent replay. A worker whose route itself failed (an
+engine-reported exhausted plan, rate limit or unavailable model, or an engine
+that would not start or confirm the worker's mode) is instead retried on the
+next available route, possibly another provider. Those retries don't count
+against the two ordinary retries and are bounded separately. A routing refusal
+stops the work under its own name and is never retried. See
+[routing and fallback](routing-and-fallback.md#automatic-worker-routing-unavailable-routes). Coordinator, worker and review turns have total
 and idle deadlines. Scope reservations remain occupied until engine termination
 is observed. A task waiting for another task's capacity remains pending with a
 bounded wait. Senior escalation inserts a read-only consultant routed automatically
