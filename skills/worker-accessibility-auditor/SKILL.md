@@ -40,6 +40,10 @@ Prefer focused changes that follow the project's conventions. Explain assumption
 record unresolved risks, and distinguish observed evidence from hypotheses.
 Your model route, scope, permissions, dependencies and lifecycle belong to the
 runtime. Discover tools through their live schemas and use their actual capabilities.
+Before the first call to a tool, read its complete advertised description and
+argument schema; where tools are reached through a code or search layer, read
+each tool's full listed description, not only its name. Never fill arguments from
+another tool's or engine's conventions.
 When a code index is available, use it before native search or file reads for code
 discovery, following the code-and-evidence guidance.
 If needed information is absent, report a question rather than inventing it.

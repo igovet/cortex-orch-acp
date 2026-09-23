@@ -62,6 +62,7 @@ from ..portable.errors import PortableError, PortableErrorCategory
 from ..portable.identity import new_id
 from ..project_storage import canonical_project, logical_project_root, migrate_legacy_project_storage, project_store_directory
 from ..store import Store, private_directory
+from .. import task_workspace
 
 PLUGIN = Path(__file__).resolve().parents[3]
 _PROMPT_JOIN_TIMEOUT = 5.0
@@ -698,10 +699,23 @@ class Agent:
         self.client_capabilities = params.get("clientCapabilities") or {}
         return protocol.initialize_result(self.version)
 
+    def _session_workspace(self, session):
+        """The tree this session's files live in: its task's recorded
+        working tree once there is a task, else the tree it was opened in."""
+        if session.get("task_id"):
+            try:
+                return task_workspace.store_task_root(self._store_for(session["project"]), session["task_id"])
+            except StoreError:
+                pass
+        return session.get("workspace") or session["project"]
+
     def _session_new(self, params):
         cwd, raw_mcp_servers = protocol.validate_session_new_params(params)
         try:
-            project = logical_project_root(canonical_project(cwd))
+            # A linked worktree shares its main repository's store but is
+            # its own working tree (see ``task_workspace``).
+            workspace = canonical_project(cwd)
+            project = logical_project_root(workspace)
         except StoreError:
             raise RpcError(-32602, "cwd must be an absolute, canonical, existing directory.") from None
         migrate_legacy_project_storage(project)
@@ -719,9 +733,10 @@ class Agent:
         effective_mcp_servers = load_mcp_servers(project, client_servers=raw_mcp_servers, environ=self.environ)
         stripped_servers = protocol.strip_mcp_servers(effective_mcp_servers)
         session_id = new_id("acps_")
-        acp_sessions.create_session(store, session_id, project, self.client_info, self.client_capabilities, stripped_servers)
+        acp_sessions.create_session(store, session_id, project, self.client_info, self.client_capabilities, stripped_servers,
+                                    workspace_root=workspace)
         session = dict(
-            project=project, task_id=None, channel=None, active=None, lock=threading.Lock(),
+            project=project, workspace=workspace, task_id=None, channel=None, active=None, lock=threading.Lock(),
             owner_epoch=None, pending_selection=None, default_selection=None,
             pending_language=None, pending_access_mode=None,
             client_capabilities=dict(self.client_capabilities),
@@ -1378,7 +1393,7 @@ class Agent:
         # bodies instead of recording anything new).
         staged_blocks = []
         if raw_blocks:
-            resolved_blocks = acp_replay_store.resolve_prompt_blocks(raw_blocks, session["project"])
+            resolved_blocks = acp_replay_store.resolve_prompt_blocks(raw_blocks, self._session_workspace(session))
             image_failures = [
                 capture for capture in resolved_blocks
                 if capture.kind == "image" and capture.availability != "stored"
@@ -1422,7 +1437,8 @@ class Agent:
                 # choice the session is carrying.
                 session_language = self._current_language_for_session(store, session)
                 session_access_mode = session.get("pending_access_mode")
-                result = bootstrap_task(store, source_event, text, owner_ref=origin, blocks=staged_blocks, meta=meta)
+                result = bootstrap_task(store, source_event, text, owner_ref=origin, blocks=staged_blocks, meta=meta,
+                                        workspace_root=session.get("workspace"))
                 session["task_id"] = result.task_id
                 session["owner_epoch"] = result.owner_epoch
                 if result.channel_id is not None:
@@ -2010,7 +2026,8 @@ class Agent:
         origin = f"acp-new-task:{session_id}"
         source_event = SimpleNamespace(origin=origin, event_id=str(uuid.uuid4()))
         try:
-            result = bootstrap_task(store, source_event, text, owner_ref=origin)
+            result = bootstrap_task(store, source_event, text, owner_ref=origin,
+                                    workspace_root=session.get("workspace"))
         except StoreError:
             self._reply_error(request_id, -32603, "Durable capture failed; the new task was not created.")
             observe(self.environ, "session/prompt", "capture_failed")
@@ -2338,12 +2355,18 @@ class Agent:
         """
         session_id, cwd, raw_mcp_servers = protocol.validate_load_session_params(params)
         try:
-            project = logical_project_root(canonical_project(cwd))
+            workspace = canonical_project(cwd)
+            project = logical_project_root(workspace)
         except StoreError:
             raise RpcError(-32602, "cwd must be an absolute, canonical, existing directory.") from None
         store = self._store_for(project)
         durable = acp_sessions.get_session(store, session_id)
         if durable is None or durable["project_root"] != project:
+            raise RpcError(-32602, "Unknown sessionId.")
+        # A session belongs to the worktree it was opened in; another
+        # worktree of the same repository does not own it.
+        recorded_workspace = task_workspace.session_root(store, session_id)
+        if recorded_workspace is not None and recorded_workspace != workspace:
             raise RpcError(-32602, "Unknown sessionId.")
         try:
             history = acp_replay_store.replay_session(store, session_id)
@@ -2410,7 +2433,7 @@ class Agent:
             with store.connection() as db:
                 restored_epoch = _current_owner_epoch_obj(db, durable["task_id"])
             self.sessions[session_id] = dict(
-                project=project, task_id=durable["task_id"], channel=None, active=None, lock=threading.Lock(),
+                project=project, workspace=workspace, task_id=durable["task_id"], channel=None, active=None, lock=threading.Lock(),
                 owner_epoch=restored_epoch, pending_selection=None, default_selection=None,
                 pending_language=None, pending_access_mode=None,
                 client_capabilities=dict(self.client_capabilities),

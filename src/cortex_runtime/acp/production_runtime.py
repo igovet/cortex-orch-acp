@@ -28,6 +28,7 @@ from ..contracts import StoreError
 from ..portable.errors import PortableError
 from ..project_storage import canonical_project, migrate_legacy_project_storage, project_store_directory
 from ..store import Store
+from .. import task_workspace
 
 
 class RouteUnresolved(OrchestrationUnavailable):
@@ -152,16 +153,22 @@ class ProductionOrchestratingRuntime:
         # project's tasks. Each engine process runs in the engine jail, which
         # makes only its assignment's scopes writable.
         workspace_provisioner = DirectProjectWorkspaceProvisioner(store, str(project))
+
+        def task_tree(task_id):
+            # A task opened in a linked worktree works there; the store
+            # (and the MCP server's project root below) stays the project.
+            return task_workspace.store_task_root(store, task_id)
+
         def resolve_workspace(binding_id, launch):
             if binding_id == "shared_project_root":
-                return workspace_provisioner.coordinator_root_for(launch["task_id"])[0]
+                return task_tree(launch["task_id"])
             root = workspace_provisioner.root_for(binding_id)
             if not root:
                 raise StoreError("workspace_snapshot_unavailable")
             return root
 
         adapter = EngineSessionManagerAdapter(
-            self._connection_record_factory(configuration_service), lambda task_id: str(project),
+            self._connection_record_factory(configuration_service), task_tree,
             environ=self._environ,
             # T035 fix: production was never passing ``store=`` here, so
             # every ``self._store is not None``-gated feature in
@@ -177,13 +184,13 @@ class ProductionOrchestratingRuntime:
             # docstring); this project's real store is exactly that.
             store=store,
             # ``shared_project_root`` is the literal sentinel used for the
-            # coordinator and direct-project workers. Resolve it through the
-            # project-bound provisioner so the engine cwd is always the exact
-            # Zed project, never a stale coordinator snapshot.
+            # coordinator and direct-project workers. It resolves to the
+            # task's own working tree (the exact directory the client opened,
+            # a linked worktree included), never a stale coordinator snapshot.
             workspace_resolver=resolve_workspace,
             broker_mcp=True,
-            # The Cortex MCP server and both engine roles use the exact
-            # project root opened by the ACP client.
+            # The Cortex MCP server opens the store by the logical project
+            # root; its file tools resolve the task's tree themselves.
             project_root_factory=lambda task_id: str(project),
         )
         # T028: bounded owned-resource reaper sweep, once per project at

@@ -36,7 +36,7 @@ def _verification(runtime, task_id, machine, emit_tool_call, cancel):
     Missing OS isolation is a failure, never an unsandboxed fallback.
     """
     context = machine.context(task_id)
-    root = Path(runtime._task_project_root(task_id))
+    root = Path(runtime._task_workspace_root(task_id))
     before = revision.capture_revision(str(root))
     digest = before.get('dirty_digest') or before.get('digest')
     if not digest:
@@ -338,7 +338,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                         ref = f"review:{node['assignment_ref']}:{kind}"
                         if emit_tool_call:
                             emit_tool_call(dict(tool_call_id=ref,new=True,title='Read project '+kind,kind='read',status='in_progress',raw_input=dict(kind=kind)))
-                        observed = project_git_evidence(runtime._store,task_id,node['assignment_ref'],runtime._task_project_root(task_id),kind)
+                        observed = project_git_evidence(runtime._store,task_id,node['assignment_ref'],runtime._task_workspace_root(task_id),kind)
                         review_evidence.append(observed)
                         if emit_tool_call:
                             emit_tool_call(dict(tool_call_id=ref,new=False,status='completed' if observed['available'] else 'failed',raw_output=observed))

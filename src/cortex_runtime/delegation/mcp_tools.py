@@ -11,6 +11,7 @@ import sqlite3
 from typing import Any, Mapping
 
 from ..acp import replay_store
+from .. import task_workspace
 from ..contracts import StoreError
 from ..trusted_channel import ChannelContext
 from . import contracts as delegation_contracts
@@ -105,10 +106,11 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
             (channel.task_id, assignment_ref),
         ).fetchone() is not None
         direct_workspace = db.execute(
-            "SELECT p.workspace_binding_id, t.project_root FROM delegation_provisioning p "
-            "JOIN tasks t ON t.id=p.task_id WHERE p.task_id=? AND p.attempt_id=?",
+            "SELECT p.workspace_binding_id FROM delegation_provisioning p "
+            "WHERE p.task_id=? AND p.attempt_id=?",
             (channel.task_id, assignment_ref),
         ).fetchone()
+        direct_root = task_workspace.task_root(db, channel.task_id) if direct_workspace is not None else None
     # A direct worker can change the project while the coordinator's prompt
     # is still running. Observe the tree *before* making its result event
     # visible, so the coordinator can distinguish that completed worker
@@ -125,7 +127,7 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
             ).fetchone()
         if captured is None:
             delegation_revision.record_attempt_revision(
-                store, assignment_ref, phase, direct_workspace["project_root"],
+                store, assignment_ref, phase, direct_root,
             )
     # T017: each claimed check is stored as claimed; 'observed'/'contradicted'
     # is resolved strictly against this exact attempt's own durable

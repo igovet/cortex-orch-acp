@@ -138,7 +138,8 @@ def test_automatic_verification_can_inspect_git_but_cannot_write(tmp_path, repo,
     machine = SimpleNamespace(context=lambda _: context,
                               move=lambda *args, **kwargs: pytest.fail(str(kwargs)),
                               record_verification=lambda *args: recorded.append(args))
-    runtime = SimpleNamespace(_store=store, _task_project_root=lambda _: str(root))
+    runtime = SimpleNamespace(_store=store, _task_project_root=lambda _: str(root),
+                              _task_workspace_root=lambda _: str(root))
     _verification(runtime, task.task_id, machine, None, threading.Event())
     assert len(recorded) == 1
     assert len(recorded[0][1]) == 3

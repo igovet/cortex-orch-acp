@@ -16,6 +16,7 @@ import tempfile
 import time
 import uuid
 
+from .. import task_workspace
 from ..contracts import StoreError, storage_failure
 from ..ownership import current_owner_epoch
 from .contracts import obj, text, array, validate
@@ -317,7 +318,8 @@ def dispatch(store,channel,operation,args):
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
         scopes,owner=_authority(db,channel)
-        root=db.execute('SELECT project_root FROM tasks WHERE id=?',(channel.task_id,)).fetchone()[0]
+        # The task's working tree: its session's worktree, else the project.
+        root=task_workspace.task_root(db,channel.task_id)
         if operation=='project_read':
             try: return _read(root,args)
             except FileNotFoundError as error:

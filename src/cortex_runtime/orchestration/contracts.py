@@ -1,6 +1,6 @@
 """Advertised model proposal API. Execution handles are runtime-owned."""
 from ..connections.model import SUPPORTED_ENGINES
-from ..contracts import StoreError
+from ..contracts import StoreError, expected_fields
 import re
 
 
@@ -67,14 +67,22 @@ RESULT['properties']['checks']['description'] = 'Automated checks this attempt a
 WORKER = {'result_submit': RESULT, **REQUESTS}
 
 
+def _received_fields(schema, value):
+    if not isinstance(value, dict):
+        return 'not an object'
+    missing = sorted(set(schema['required']) - set(value))
+    unexpected = sorted(set(value) - set(schema['properties']))
+    return '; '.join(part for part in (
+        'missing: ' + ', '.join(missing) if missing else '',
+        'unexpected: ' + ', '.join(unexpected) if unexpected else '') if part)
+
+
 def validate(schema, value, field='arguments'):
     kind = schema.get('type', 'object' if 'properties' in schema else None)
     if kind == 'object':
         if not isinstance(value, dict) or set(value) - set(schema['properties']) or set(schema['required']) - set(value):
-            raise StoreError('invalid_arguments', field,
-                ('missing: ' + ', '.join(sorted(set(schema['required']) - set(value))) +
-                 '; unexpected: ' + ', '.join(sorted(set(value) - set(schema['properties'])))) if isinstance(value, dict) else 'not an object',
-                'required fields: ' + ', '.join(schema['required']), 'Use the advertised fields exactly.')
+            raise StoreError('invalid_arguments', field, _received_fields(schema, value),
+                             expected_fields(schema), 'Use the advertised fields exactly.')
         for name, child in value.items():
             validate(schema['properties'][name], child, f'{field}.{name}')
     elif kind == 'array':

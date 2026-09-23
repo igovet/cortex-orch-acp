@@ -167,3 +167,97 @@ def test_unsafe_layout_never_falls_back_to_another_store(tmp_path, name):
     (tmp_path / "main" / ".cortex").mkdir()
     (tmp_path / "main" / ".cortex" / "cortex.sqlite3").write_bytes(b"")
     assert _paseo_project_root(directory) is None
+
+
+def test_worktree_session_task_works_in_its_worktree_not_the_main_checkout(tmp_path):
+    """Variant A: the store is shared at the main repository, but the task a
+    worktree session creates is bound to that worktree for all file work."""
+    from cortex_runtime.store import Store
+    from cortex_runtime.task_workspace import store_task_root, session_root
+
+    repo, worktree = _repo_with_worktree(tmp_path)
+    session_id = _open_worktree_session(worktree)
+    store = Store(repo / ".cortex", project_root=str(repo))
+    with store.connection() as db:
+        task_id, project_root = db.execute(
+            "select task_id, project_root from acp_host_sessions where session_id=?", (session_id,)).fetchone()
+    assert project_root == str(repo)
+    assert session_root(store, session_id) == str(worktree)
+    assert store_task_root(store, task_id) == str(worktree)
+
+
+def test_gateway_file_tools_resolve_the_task_worktree(tmp_path):
+    from cortex_runtime.bootstrap import bootstrap_task
+    from cortex_runtime.orchestration.gateway import dispatch
+    from cortex_runtime.orchestration.state import TaskMachine
+    from cortex_runtime.portable.identity import SourceEvent
+    from cortex_runtime.store import Store
+    from cortex_runtime.trusted_channel import resolve_channel
+
+    repo, worktree = _repo_with_worktree(tmp_path)
+    (worktree / "only-in-worktree.txt").write_text("worktree")
+    (repo / "only-in-main.txt").write_text("main")
+    store = Store(repo / ".cortex", project_root=str(repo))
+    boot = bootstrap_task(store, SourceEvent(origin="wt", event_id="one"), "Implement", "owner",
+                          workspace_root=str(worktree))
+    TaskMachine(store).create(boot.task_id, "Implement")
+    channel = resolve_channel(store, boot.channel_id, boot.secret)
+    assert dispatch(store, channel, "project_read", dict(path="only-in-worktree.txt"))["content"] == "worktree"
+    with pytest.raises(StoreError, match="gateway_path_not_found"):
+        dispatch(store, channel, "project_read", dict(path="only-in-main.txt"))
+
+
+def test_task_worktree_binding_is_permanent(tmp_path):
+    from cortex_runtime.store import Store
+    from cortex_runtime.task_workspace import record_task
+
+    repo, worktree = _repo_with_worktree(tmp_path)
+    store = Store(repo / ".cortex", project_root=str(repo))
+    with store.connection() as db:
+        db.execute("INSERT INTO tasks VALUES ('t_000000000001', ?, '2026-01-01')", (str(repo),))
+        record_task(db, "t_000000000001", str(worktree))
+        record_task(db, "t_000000000001", str(worktree))
+        with pytest.raises(StoreError, match="task_workspace_conflict"):
+            record_task(db, "t_000000000001", str(repo))
+        db.rollback()
+
+
+def test_worktree_sandbox_hides_the_main_repository_store(tmp_path):
+    from cortex_runtime.orchestration.sandbox import _outside_store, verification_command
+    from cortex_runtime.store import Store
+
+    repo, worktree = _repo_with_worktree(tmp_path)
+    Store(repo / ".cortex", project_root=str(repo))
+    assert _outside_store(worktree.resolve()) == repo / ".cortex"
+    assert _outside_store(repo.resolve()) is None
+    scratch = tmp_path / "scratch"; scratch.mkdir()
+    try:
+        command = verification_command(worktree, scratch, ["true"], system_root=True)
+    except StoreError as error:
+        pytest.skip(f"no bubblewrap sandbox: {error}")
+    at = command.index(str(repo / ".cortex"))
+    assert command[at - 1] == "--tmpfs"
+
+
+def test_session_load_from_another_worktree_is_refused(tmp_path):
+    repo, worktree = _repo_with_worktree(tmp_path)
+    other = tmp_path / "other"
+    _git(repo, tmp_path / "home", "worktree", "add", "-q", str(other), "-b", "feature-other")
+    session_id = _open_worktree_session(worktree)
+    agent = spawn_fake_agent()
+    try:
+        def send(request_id, method, params):
+            agent.stdin.write(json.dumps(dict(jsonrpc="2.0", id=request_id, method=method, params=params)) + "\n")
+            agent.stdin.flush()
+            while True:
+                message = json.loads(agent.stdout.readline())
+                if message.get("id") == request_id:
+                    return message
+        send(1, "initialize", dict(protocolVersion=1, clientCapabilities={"loadSession": True}))
+        refused = send(2, "session/load", dict(sessionId=session_id, cwd=str(other), mcpServers=[]))
+        assert refused["error"]["code"] == -32602
+        accepted = send(3, "session/load", dict(sessionId=session_id, cwd=str(worktree), mcpServers=[]))
+        assert "result" in accepted, accepted
+    finally:
+        agent.stdin.close()
+        agent.wait(timeout=10)

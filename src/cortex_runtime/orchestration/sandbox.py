@@ -103,7 +103,25 @@ def verification_command(root, scratch, argv, system_root=False):
                     command += ['--ro-bind','/dev/null',str(target)]
             elif name in dirs and path.is_symlink():
                 dirs.remove(name)
+    if system_root:
+        # A linked worktree's runtime store lives in its main repository,
+        # outside root, where the host-wide read-only mount would show it.
+        store = _outside_store(root)
+        if store is not None:
+            command += ['--tmpfs', str(store), '--remount-ro', str(store)]
     return command + ['--chdir', str(root), '--', *argv]
+
+
+def _outside_store(root: Path) -> Path | None:
+    from ..project_storage import logical_project_root
+    try:
+        project = Path(logical_project_root(str(root)))
+    except StoreError:
+        return None
+    store = project / '.cortex'
+    if project == root or store.is_symlink() or not store.is_dir():
+        return None
+    return store
 
 
 # Sharing the network namespace alone leaves DNS and TLS broken in the

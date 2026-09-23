@@ -776,8 +776,8 @@ def read_source(store, task_id: str, source_ref: str, offset: int = 0, limit: in
             from urllib.parse import urlsplit
 
             if urlsplit(block["uri"]).scheme == "file":
-                proj_row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
-                observed_availability, observed_reason, _resolved = _resolve_file_uri(block["uri"], proj_row["project_root"])
+                from ..task_workspace import task_root
+                observed_availability, observed_reason, _resolved = _resolve_file_uri(block["uri"], task_root(db, task_id))
                 if observed_availability != "reference_only":
                     db.execute("BEGIN IMMEDIATE")
                     try:

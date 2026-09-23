@@ -2076,7 +2076,7 @@ class OrchestratingRuntime:
             emit_display_update=emit_display_update,
             prompt_blocks=prompt_blocks,
             initial_project_docs_context=(
-                render_project_docs_catalog(self._task_project_root(task_id))
+                render_project_docs_catalog(self._task_workspace_root(task_id))
                 if not pre_existing else None
             ),
         )
@@ -3642,6 +3642,12 @@ class OrchestratingRuntime:
             row = db.execute("SELECT project_root FROM tasks WHERE id=?", (task_id,)).fetchone()
         return row["project_root"]
 
+    def _task_workspace_root(self, task_id: str) -> str:
+        """The tree this task's files live in (its session's worktree, else
+        the project); the store stays at ``_task_project_root``."""
+        from ..task_workspace import store_task_root
+        return store_task_root(self._store, task_id)
+
 
 
 
@@ -4080,7 +4086,7 @@ class OrchestratingRuntime:
                 # brief fixed; neither an old catalog nor an earlier capsule
                 # is silently carried into the replacement session.
                 worker_prompt = recovery_prompt or (
-                    f"{render_worker_catalog(self._task_project_root(task_id))}\n\n---\n\n{brief}"
+                    f"{render_worker_catalog(self._task_workspace_root(task_id))}\n\n---\n\n{brief}"
                 )
                 recovery_prompt = None
                 worker_prompt = (
@@ -4240,7 +4246,7 @@ class OrchestratingRuntime:
                     action = _worker_tool_details(
                         str(title), status, locations, safe_content,
                         _client_safe_raw(raw_input) if raw_input is not None else None,
-                        None, self._task_project_root(task_id),
+                        None, self._task_workspace_root(task_id),
                     )
                     with self._lock:
                         self._worker_activity[_ref] = action
@@ -4256,7 +4262,7 @@ class OrchestratingRuntime:
                         visible_title = visible_title or "Worker observable tool call"
                         self._emit_worker_card(
                             feed, _ref, status="in_progress",
-                            _project_root=self._task_project_root(task_id),
+                            _project_root=self._task_workspace_root(task_id),
                         )
                         _emit_worker_tool_update(
                             feed=feed, ref=ref, kind=kind, title=title,
@@ -4298,10 +4304,11 @@ class OrchestratingRuntime:
                                               locations, content, raw_input,
                                               raw_output=None) -> None:
                     """Append one worker project/MCP call to its lifecycle card."""
-                    from .read_history import metadata_only_read
+                    from .read_history import failed_read_output, metadata_only_read
                     if metadata_only_read(title, kind, raw_input):
+                        raw_output = (failed_read_output(raw_output, content)
+                                      if _acp_tool_call_status(status) == 'failed' else None)
                         content = None
-                        raw_output = {'status': 'failed'} if _acp_tool_call_status(status) == 'failed' else None
                     # The call is recorded for the worker panel only. It is
                     # never a sibling card in the coordinator's timeline.
                     if feed is None or not ref:
@@ -4317,7 +4324,7 @@ class OrchestratingRuntime:
                     line = _worker_tool_details(
                         visible_title, status, locations, _client_safe_content(content),
                         safe_input, _client_safe_raw(raw_output) if raw_output is not None else None,
-                        self._task_project_root(task_id),
+                        self._task_workspace_root(task_id),
                     )
                     attempt_id = str(getattr(result, "attempt_id", None) or result.engine_session_ref)
                     if not self._record_worker_activity(

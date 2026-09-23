@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 from ..connections.model import SUPPORTED_ENGINES
+from .. import task_workspace
 from ..contracts import StoreError
 from ..portable.roles import resolve_role
 
@@ -529,7 +530,7 @@ class TaskMachine:
                 raise StoreError('review_verdict_required')
             if node['stage'] == 'review':
                 from ..delegation.revision import capture_revision
-                observed = capture_revision(str(self.store.project_root))
+                observed = capture_revision(task_workspace.task_root(db, task_id))
                 started = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED' ORDER BY id DESC", (task_id,)).fetchall()
                 binding = next((json.loads(r[0]) for r in started if json.loads(r[0]).get('assignment_ref') == assignment_ref), None)
                 if observed['kind'] != 'observed' or binding is None or binding['revision_digest'] != observed['dirty_digest']:
@@ -545,7 +546,7 @@ class TaskMachine:
         from ..delegation.revision import capture_revision
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
-            observed = capture_revision(str(self.store.project_root))
+            observed = capture_revision(task_workspace.task_root(db, task_id))
             if observed['kind'] != 'observed':
                 raise StoreError('review_revision_unavailable')
             event(db, task_id, 'REVIEW_STARTED', dict(assignment_ref=assignment_ref,
@@ -730,7 +731,7 @@ class TaskMachine:
         if not evidence or json.loads(evidence['payload_json'])['revision'] != task['revision']:
             raise StoreError('completion_verification_missing')
         from ..delegation.revision import capture_revision
-        observed = capture_revision(str(self.store.project_root))
+        observed = capture_revision(task_workspace.task_root(db, task_id))
         if observed['kind'] != 'observed' or observed['dirty_digest'] != json.loads(evidence['payload_json'])['revision_digest']:
             raise StoreError('completion_project_revision_changed')
         if task['blocker'] or not task['synthesis']:

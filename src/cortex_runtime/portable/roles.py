@@ -431,8 +431,8 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
         # the skills are one call away, by the names given here.
         parts.append(
             "## Skills, and when to read one\n\n"
-            "The `read_skill` tool on the `cortex` MCP server returns one by the exact id "
-            "below; use it, not an engine-native skill loader. Read one only when its case "
+            "The `read_skill` tool on the `cortex` MCP server returns one skill by its exact "
+            "name from the list below; use it, not an engine-native skill loader. Read one only when its case "
             "arises -- text you do not need costs room for the work:\n"
             + "\n".join(f"- `{skill_id}` -- {_SKILL_TRIGGERS[skill_id]}"
                         for skill_id in loadable if skill_id in _SKILL_TRIGGERS)

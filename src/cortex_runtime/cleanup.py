@@ -169,7 +169,9 @@ def finish_deletions(store,db,task):
         # not tasks(id) directly -- must go before acp_host_sessions.
         _delete_if_present("host_transcript","session_id IN (SELECT session_id FROM acp_host_sessions WHERE task_id=?)",(task,))
         _delete_if_present("host_updates","session_id IN (SELECT session_id FROM acp_host_sessions WHERE task_id=?)",(task,))
+        _delete_if_present("acp_session_workspaces","session_id IN (SELECT session_id FROM acp_host_sessions WHERE task_id=?)",(task,))
         db.execute("DELETE FROM acp_host_sessions WHERE task_id=?",(task,))
+        _delete_if_present("task_workspaces","task_id=?",(task,))
         db.execute("DELETE FROM task_route_selections WHERE task_id=?",(task,))
         # T027 configuration_route_extras references configuration_revisions(id)
         # -- must go before that table's own delete.

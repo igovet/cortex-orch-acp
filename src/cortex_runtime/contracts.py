@@ -360,6 +360,14 @@ def clip_summary_preview(name, args):
     return dict(args, summary=summary[:limit - len(marker)].rstrip() + marker)
 
 
+def expected_fields(schema):
+    """The whole advertised field list of one object schema, for an
+    ``invalid_arguments`` error's ``expected``."""
+    optional=[key for key in schema["properties"] if key not in schema["required"]]
+    return ("required field(s): "+", ".join(schema["required"])
+            +("; optional field(s): "+", ".join(optional) if optional else ""))
+
+
 def validate(name, args):
     import json
     import re
@@ -368,9 +376,10 @@ def validate(name, args):
     if not isinstance(args,dict):
         raise StoreError("invalid_arguments","arguments",_received(args),"JSON object","Send one object matching the advertised inputSchema.")
     unknown=set(args)-set(schema["properties"])
+    missing=set(schema["required"])-set(args)
     if unknown:
         fields=", ".join(sorted(unknown))
-        if name == "read_report" and unknown == {"report_ref"}:
+        if name == "read_report" and unknown == {"report_ref"} and not missing:
             raise StoreError(
                 "invalid_arguments", "report_ref", "unadvertised field(s)",
                 "report_id (optional)",
@@ -378,11 +387,14 @@ def validate(name, args):
                 "result_submit.report_ref into read_report.report_id and omit report_ref. "
                 "No report was read by this rejected call.",
             )
-        raise StoreError("invalid_arguments",fields,"unadvertised field(s)",", ".join(schema["properties"]),"Remove unadvertised fields and derive the call from tools/list.")
-    missing=set(schema["required"])-set(args)
+        # Name every problem at once, with the whole advertised field list,
+        # so a single corrected retry can succeed.
+        received="unadvertised field(s)"+("; missing: "+", ".join(sorted(missing)) if missing else "")
+        correction="Remove unadvertised fields"+(" and add every missing required field" if missing else "")
+        raise StoreError("invalid_arguments",fields,received,expected_fields(schema),correction+"; derive the call from the tool's advertised schema.")
     if missing:
         fields=", ".join(sorted(missing))
-        raise StoreError("invalid_arguments",fields,"missing","required field(s)","Add every named field using its advertised description.")
+        raise StoreError("invalid_arguments",fields,"missing",expected_fields(schema),"Add every named field using its advertised description.")
     try: encoded=json.dumps(args,ensure_ascii=False).encode("utf-8")
     except UnicodeError:
         raise StoreError("invalid_arguments","arguments","invalid Unicode","valid Unicode","Remove unpaired surrogate code points.") from None

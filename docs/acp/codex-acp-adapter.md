@@ -412,7 +412,22 @@ authenticated channel.
 
 Installed Codex CLI 0.155.1 reports native `tool_search` as removed, so Cortex
 cannot rely on dynamic, names-first schema retrieval through the current Codex
-ACP adapter. As additional MCP servers are configured, keep the Codex-visible
+ACP adapter. Every model in its catalogue (`gpt-5.6-luna`/`terra`/`sol`,
+`gpt-6-astra`) is `tool_mode: code_mode_only`, and
+`tool_search_always_defer_mcp_tools` is fixed on. The model therefore sees one
+JavaScript `exec` tool; the `cortex` MCP tools are nested behind it as
+`tools.mcp__cortex__<name>(...)` and listed in `ALL_TOOLS` as
+`{ name, description }`. A live 2026-09-23 worker read only the names there and
+guessed every tool's first arguments (`command`/`cwd`, `patch`, `id`), so each
+first call was refused with `invalid_arguments` and retried. Cortex does not
+turn code mode off: Codex warns that these models degrade without it. Instead
+the worker protocol tells a worker to read a tool's full listed description
+before its first call, and every `invalid_arguments` refusal names all missing
+and unadvertised fields together with the complete required/optional field
+list, so one corrected retry succeeds. A failed `project_read`/`read_skill`
+keeps that value-free reason (`error`, `field`, `expected`, `correction`, never
+`received` or the body) in the worker's display history. Whether a live worker
+now reads descriptions first has not been observed yet. As additional MCP servers are configured, keep the Codex-visible
 set bounded to those required for the assignment. Cortex filters whole servers
 by role and engine, but neither filters tools within a server nor observes the
 aggregate `tools/list` count. The inventory's 64-name bound truncates only

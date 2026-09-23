@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 import json
 
 from ..contracts import StoreError
+from ..task_workspace import TASK_WORKSPACE_SCHEMA, record_session
 
 ACP_SESSION_SCHEMA = '''
 CREATE TABLE IF NOT EXISTS acp_host_sessions (
@@ -38,7 +39,7 @@ CREATE TRIGGER IF NOT EXISTS acp_host_sessions_task_immutable
 BEFORE UPDATE OF task_id ON acp_host_sessions
 WHEN OLD.task_id IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'immutable'); END;
-'''
+''' + TASK_WORKSPACE_SCHEMA
 
 ACP_SESSION_TABLES = frozenset({"acp_host_sessions"})
 
@@ -51,8 +52,10 @@ def _encode(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
-def create_session(store, session_id, project_root, client_info, client_capabilities, mcp_servers):
-    """Insert one fresh, task-less session row."""
+def create_session(store, session_id, project_root, client_info, client_capabilities, mcp_servers,
+                   workspace_root=None):
+    """Insert one fresh, task-less session row, with the verified working
+    tree it was opened in (see ``task_workspace``)."""
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
@@ -60,6 +63,8 @@ def create_session(store, session_id, project_root, client_info, client_capabili
                 "INSERT INTO acp_host_sessions VALUES (?,?,NULL,?,?,?,?,NULL)",
                 (session_id, project_root, _encode(client_info), _encode(client_capabilities),
                  _encode(mcp_servers), _now()))
+            if workspace_root is not None:
+                record_session(db, session_id, workspace_root)
             db.commit()
         except BaseException:
             db.rollback(); raise

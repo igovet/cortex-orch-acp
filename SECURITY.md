@@ -29,7 +29,9 @@ host is bound read-only -- is instead a private, writable, per-run directory
 backed by the process's own scratch, never the host's shared one; `HOME` and
 `TMPDIR`/`TMP`/`TEMP` are that same private scratch. The project is read-only
 except the assignment's scopes, `.cortex` is
-hidden and `.codex`, `.claude` are read-only; `.git` is read-only except the
+hidden (for a task bound to a linked worktree, the jail root is that worktree
+and the main repository's shared `.cortex` is masked too) and `.codex`,
+`.claude` are read-only; `.git` is read-only except the
 repository data git needs for a writing worker (see
 [Git and tool state in the project](#git-and-tool-state-in-the-project)). The coordinator, reviewers and
 read-only roles get no writable scope. The engine's state directory (`CODEX_HOME`

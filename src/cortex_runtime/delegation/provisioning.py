@@ -616,11 +616,13 @@ class ProvisioningService:
         # being provisioned.  Unavailable captures remain durable evidence of
         # uncertainty and therefore fail closed at attribution time.
         if binding_ref in {"shared_project_root", "serialized_shared_root"}:
+            from .. import task_workspace
             with self._store.connection() as db:
-                project = db.execute(
-                    "SELECT project_root FROM tasks WHERE id=?", (row["task_id"],)
-                ).fetchone()
-            if project is not None:
+                try:
+                    tree = task_workspace.task_root(db, row["task_id"])
+                except StoreError:
+                    tree = None
+            if tree is not None:
                 with self._store.connection() as db:
                     already_started = db.execute(
                         "SELECT 1 FROM attempt_revisions WHERE attempt_id=? AND phase=? LIMIT 1",
@@ -628,7 +630,7 @@ class ProvisioningService:
                     ).fetchone()
                 if already_started is None:
                     delegation_revision.record_attempt_revision(
-                        self._store, attempt_id, f"worker_start:{attempt_id}", project["project_root"]
+                        self._store, attempt_id, f"worker_start:{attempt_id}", tree
                     )
         with self._store.connection() as db:
             db.execute("BEGIN IMMEDIATE")

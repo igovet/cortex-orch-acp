@@ -17,15 +17,64 @@ def metadata_only_read(title=None, kind=None, raw_input=None):
     return name.lower() in {'project_read','read_skill'} or bool(re.match(r'^(read|view|cat)(?:\s|$)',name,re.I)) or kind == 'read'
 
 
+# Fields of a Cortex tool error that never carry a submitted value; ``received``
+# can quote part of one and is left out.
+_SAFE_ERROR_FIELDS = ('error', 'field', 'expected', 'correction')
+_MAX_ERROR_TEXT = 4000
+_MAX_ERROR_FIELD = 300
+
+
+def _cortex_error(value, depth=0):
+    """The first Cortex tool-error object inside a tool output, reduced to
+    its value-free fields, or None."""
+    if depth > 6:
+        return None
+    if isinstance(value, str):
+        if len(value) > _MAX_ERROR_TEXT or not value.lstrip().startswith('{'):
+            return None
+        try:
+            import json
+            parsed = json.loads(value)
+        except ValueError:
+            return None
+        if isinstance(parsed, Mapping) and isinstance(parsed.get('error'), str):
+            return {key: parsed[key][:_MAX_ERROR_FIELD] for key in _SAFE_ERROR_FIELDS
+                    if isinstance(parsed.get(key), str)}
+        return None
+    if isinstance(value, Mapping):
+        items = value.values()
+    elif isinstance(value, list):
+        items = value
+    else:
+        return None
+    for item in items:
+        found = _cortex_error(item, depth + 1)
+        if found:
+            return found
+    return None
+
+
 def compact_read(update):
     result = {k:v for k,v in update.items() if k not in {
         'content','text','raw_output','rawOutput','output','error','diff',
     }}
     # A failed read keeps its observed status, without copying a potentially
-    # large response/error envelope back into the display transcript.
+    # large response/error envelope back into the display transcript. A
+    # Cortex refusal keeps its value-free reason so the card says why.
     if update.get('status') == 'failed':
-        result['rawOutput' if 'toolCallId' in update else 'raw_output'] = {'status':'failed'}
+        result['rawOutput' if 'toolCallId' in update else 'raw_output'] = failed_read_output(
+            *(update.get(key) for key in ('rawOutput','raw_output','content','output')))
     return result
+
+
+def failed_read_output(*outputs):
+    """What a failed metadata-only read keeps: its status, plus the
+    value-free reason when the output is a Cortex tool refusal."""
+    failed = {'status':'failed'}
+    reason = _cortex_error(list(outputs))
+    if reason:
+        failed['error'] = reason
+    return failed
 
 
 class ReadHistoryFilter:

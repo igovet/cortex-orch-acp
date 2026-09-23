@@ -222,6 +222,20 @@ before it opens the store. A forged, ambiguous or unsafe worktree layout gets
 one. `tests/test_paseo_worktree_store.py` checks that the plugin resolves the
 same root as the runtime.
 
+Only the store is shared. The session records the worktree it was opened in
+(`acp_session_workspaces`), and the task it creates is bound to that worktree in
+the same transaction (`task_workspaces`, see `cortex_runtime/task_workspace.py`).
+The binding is permanent. Every file-side consumer uses the task's tree: the
+coordinator and worker engines' cwd, the gateway's `project_read`/`project_write`/
+`project_delete`/`project_mkdir`/`command_run`/`project_git`, verification,
+review/completion revision captures, project docs catalogues and `resource_link`
+containment. `tasks.project_root` and every store key stay the main repository.
+A task without a binding (created before this existed, or opened directly in the
+main checkout) works in the project root. `session/load` from a different
+worktree of the same repository is refused as an unknown session. When the
+engine jail's root is a worktree, the main repository's `.cortex` (otherwise
+visible through the host-wide read-only mount) is masked with a read-only tmpfs.
+
 Worker recovery does not replay terminal requests or provision an old request
 under a new coordinator channel. Worker history filters displayable events
 before bounding each page, and selected completed transcripts continue loading

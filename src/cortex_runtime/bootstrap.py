@@ -13,6 +13,7 @@ import uuid
 
 from .acp import replay_store
 from .contracts import StoreError
+from . import task_workspace
 from .store import unique_identifier, project_draft_directory
 from .ownership import acquire_task_owner_tx, current_owner_epoch
 from .portable.identity import OwnershipEpoch
@@ -56,7 +57,7 @@ def _bounded_text(value, field_name):
     return value
 
 
-def bootstrap_task(store, source_event, user_input, owner_ref, *, blocks=None, meta=None):
+def bootstrap_task(store, source_event, user_input, owner_ref, *, blocks=None, meta=None, workspace_root=None):
     """Create (or recover) exactly one task for ``source_event``.
 
     ``store`` must already be constructed against the target project root.
@@ -78,6 +79,11 @@ def bootstrap_task(store, source_event, user_input, owner_ref, *, blocks=None, m
     crash after commit has both together. On replay, every staged block is
     unlinked (``acp.replay_store.cleanup_staged``) rather than recorded --
     nothing new is ever written for an already-recorded source event.
+
+    ``workspace_root``: the verified tree (the project or one of its linked
+    worktrees, see ``task_workspace.verified_workspace``) this new task's
+    file work happens in, recorded in the same transaction as the task. A
+    replayed event keeps the tree its task was created with.
 
     ``meta`` (T018): the raw ``_meta`` object from the originating
     ``PromptRequest`` (or ``None``), recorded forensically only
@@ -107,6 +113,8 @@ def bootstrap_task(store, source_event, user_input, owner_ref, *, blocks=None, m
             project_draft_directory(project, "pipeline")
             task = unique_identifier(db, "t_")
             db.execute("INSERT INTO tasks VALUES (?,?,?)", (task, project, store._now()))
+            if workspace_root is not None:
+                task_workspace.record_task(db, task, workspace_root)
             principal = str(uuid.uuid4())
             db.execute("INSERT INTO thread_bindings VALUES (?,NULL,?)", (principal, task))
             rollbacks, staged = [], []

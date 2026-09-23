@@ -168,6 +168,7 @@
     "src/cortex_runtime/server.py",
     "src/cortex_runtime/split.py",
     "src/cortex_runtime/store.py",
+    "src/cortex_runtime/task_workspace.py",
     "src/cortex_runtime/trusted_channel.py",
     "src/cortex_split.py"
   ]
