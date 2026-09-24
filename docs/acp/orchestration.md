@@ -10,12 +10,12 @@ and the separate real-client qualification boundary.
 nodes, structured results, events and request receipts in `.cortex/cortex.sqlite3`.
 State changes and their events commit together. A plan is validated for exact fields,
 known roles, unique node names, existing dependencies, cycles, bounded scope and
-verification commands. Each new plan node requires a `model` recommendation (`auto`, engine id, or `engine/model`) and may include `model_reason`; neither field grants dispatch authority. The runtime computes tier and effort and revalidates policy and availability. See [automatic routing](routing-and-fallback.md#automatic-worker-routing-tiers-model-hints-and-ranking).
+verification commands. Verification commands run as literal argv without a shell, so plan submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses; use a documented project command or script instead. Each new plan node requires a `model` recommendation (`auto`, engine id, or `engine/model`) and may include `model_reason`; neither field grants dispatch authority. The runtime computes tier and effort and revalidates policy and availability. See [automatic routing](routing-and-fallback.md#automatic-worker-routing-tiers-model-hints-and-ranking).
 
 `orchestration/controller.py` drives planning, execution, independent review,
 verification and synthesis. Only dependency-ready nodes are reserved for execution.
 Reservations commit before provisioning, and concurrent claims share the same
-four-worker ceiling. Runtime routing resolves model and effort from the current tier, policy, catalog and audit balance; plan hints remain advisory. All
+four-worker ceiling. Runtime routing resolves model and effort from the current tier, policy, catalog and plan usage; plan hints remain advisory. All
 23 specialist/consultant profiles remain available.
 
 The runtime inserts an independent code reviewer after execution whenever the
@@ -73,7 +73,9 @@ checks current channel authority and assignment scope before each operation,
 contains commands and external MCP servers with bubblewrap, and retains exact
 receipts. See [permissions and containment](permissions-and-containment.md).
 
-Steering fences existing workers before replanning. Worker questions persist an
+Steering fences existing workers before replanning. A scope, replan or escalation
+request enters `RECOVERING`; the coordinator ends that turn and does not submit a
+plan until the runtime has stopped workers and asks for the replacement plan. Worker questions persist an
 exact pending question and pause execution; only a real matching answer resumes
 it. Every answered question, with its question text, the user's verbatim answer,
 ids, timestamps and answering session, is visible to later workers and the

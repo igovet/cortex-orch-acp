@@ -1,8 +1,9 @@
 # Automatic routing, mixed teams, and authorized fallback
 
 Cortex automatically selects worker engine, model, and effort from the runtime's
-current model catalog, task tier, routing policy, quota observations, and recent
-project-local route history. The model may submit a routing recommendation in
+current model catalog, task tier, work kind, routing policy and each engine's
+observed subscription plan usage; how often an engine was chosen before is not
+an input. The model may submit a routing recommendation in
 its plan; only the runtime decides and dispatches. A plan hint never grants a
 route or raises effort/tier beyond runtime policy. `list_route_options` is a
 read-only snapshot for coordinators; dispatch validates current eligibility
@@ -265,6 +266,19 @@ apply. Setup writes the default user `routing.json`, `{"deny": ["gpt-5.5",
 everywhere (see [configuration](../configuration.md#routing-rules)). A pin is
 strict and has priority over automatic selection.
 
+Weaker models do light work and stronger models do hard work: a task never
+runs on a stronger tier than its own because another engine lacks a model in
+that tier. With Haiku auto-excluded, the light tier has only Codex Luna, so
+light work (explorer, planner, technical writer, general, and low-complexity
+work) runs on Luna even when a Claude plan has more room. This single-engine
+light tier is accepted; `auto_allow` for Haiku in `routing.json` is the
+owner's lever for letting Claude take light work. The rank falls back to
+another tier only when **no** engine has a usable model in the task's tier
+(`_FALLBACK_ORDER`). Rank version 3 briefly added a stronger model from the
+other engine as a `cross_tier` candidate; that was removed in rank version 4,
+and older audit rows that carry `cross_tier`/`chosen_cross_tier` stay
+readable.
+
 Only the newest version of each model family per engine is routed
 automatically (`routing.auto_route.superseded_routes`). Family and version
 come from the engine-confirmed model id (`gpt-6-luna` → luna 6,
@@ -282,44 +296,65 @@ hand its place to an older one.
 an exact `engine/model` route label from `list_route_options`. A non-`auto`
 recommendation requires a short `model_reason`; it is optional for `auto`. This is a recommendation only. A model hint is
 considered only within the runtime-computed tier and cannot override pin, deny,
-providers, availability, the 100% quota exclusion, or the 85% deep/standard
-quota rule. A hint from another tier is recorded as `ignored:tier_mismatch`;
+providers, availability, the 100% quota exclusion, or the 85% quota band. A hint from another tier is recorded as `ignored:tier_mismatch`;
 using `auto` delegates all selection to ranking. Legacy stored plans without
 `model` retain their old `provider` preference behavior; new plans use `model`.
 
 On escalation, the previous hint is not inherited. The runtime ranks the new
 tier and prefers a different engine from the failed attempt when candidates
-otherwise tie. A hinted engine exceeding the eight-attempt balance tolerance
-gets `ignored:engine_overused`. Other hint statuses include
+otherwise tie. A hint is honoured unless the hinted route is excluded,
+unavailable or exhausted, or every hinted route's plan is at or above 85%
+(`HINT_TOLERANCE`, equal to `HOT_PERCENT`) while another candidate's is
+below it (`ignored:near_quota_limit`). How often an engine was chosen
+before never affects a hint. Other hint statuses include
 `ignored:provider_not_allowed`, `ignored:not_offered`,
 `ignored:tier_mismatch`, `ignored:superseded`, `ignored:auto_excluded`, `ignored:no_candidate_in_tier`,
-`ignored:unavailable`, `ignored:near_quota_limit`, `ignored:escalated`, and
-`ignored:pinned`; the audit includes the reason and status.
+`ignored:unavailable`, `ignored:escalated`, and
+`ignored:pinned`; the audit includes the reason and status. Older audit rows
+may carry `ignored:engine_overused` from the removed count balance.
 
 ### Within-tier rank order
 
-Hard exclusions are applied before ranking: unavailable routes, `deny`,
-`providers`, superseded older versions, strict pins, and quota at 100%. For deep/standard work the 85%
-threshold affects preference/hint eligibility and quota-band ordering. Among eligible candidates the rank criteria are:
+Route choice depends on the task (role tier, complexity, work-kind engine
+affinity, coordinator hint) and on each engine's subscription plan usage.
+How often an engine was chosen before is **not** an input: frequency is not
+evidence of fit, so there is no count-based balance, window or in-flight
+count. Hard exclusions are applied before ranking: unavailable routes, `deny`,
+`providers`, superseded older versions, strict pins, and quota at 100%. Among
+eligible candidates the rank criteria are, first difference wins:
 
-1. Honoured legacy provider preference for a stored pre-model plan.
-2. Honoured model hint for a new plan.
-3. Quota band: for deep/standard, known usage at or above 85% ranks behind
-   candidates below 85%; unknown quota is neutral. Light-tier ranking does not
-   apply the 85% band.
-4. Per-tier project balance: compare each engine's recent count in the bounded
-   history window, including in-flight choices. Differences within the four
-   attempt tolerance are treated equally; larger excess favors the less-used
-   engine. The window uses up to 20 recent worker attempts from at most 256
-   audited rows.
-5. Role suitability as a soft final tiebreak.
-6. Known usage percentage only when every candidate has a known value.
-7. Stable engine order.
+1. Honoured legacy provider preference for a stored pre-model plan (ignored
+   when every preferred route is at or above 85% while another is below).
+2. Honoured model hint for a new plan (see above).
+3. Quota band, in every tier: known usage at or above 85% (`HOT_PERCENT`)
+   ranks behind candidates below 85%. Unknown quota is not hot. Light work
+   used to spend a hot plan first (commit 7b7aca22); that was dropped because
+   `used_percent` is the most-used open window (often a weekly one) and the
+   rank never sees its reset time, so it could push cheap work into a plan
+   about to run out.
+4. On escalation, an engine other than the one whose attempt fell short.
+5. Plan usage, only when every candidate's usage is known: each full 10
+   points (`USAGE_MARGIN`) above the least-used candidate ranks a candidate
+   one step behind (`usage_band`). The plan with clearly more remaining quota
+   takes the work; a smaller difference is left to the task.
+6. Engine affinity (role suitability). Built-in defaults
+   (`WORK_KIND_ENGINES`): implementation and operations lean to `codex-acp`;
+   investigation, review, design, writing, planning and analysis lean to
+   `claude-agent-acp`; debugging and testing are neutral. `routing.json`
+   `engine_affinity` overrides it per work kind (see
+   [configuration](../configuration.md#routing-rules)).
+7. Exact used percentage, only when every candidate has a known value.
+8. Stable engine order.
+
+`decided_by` names the first of these keys (`preference`, `hint`, `quota`,
+`diversify`, `usage`, `affinity`, `used_percent`, `engine_order`) that
+separated the chosen candidate from the runner-up, or `only_candidate`; a pin
+records `pin`. It is never `balance`. The runner-up can be another model on
+the same engine, in which case `engine_order` is the usual answer.
 
 Unknown quota remains neutral and is never coerced to zero for percentage
-comparison. In-flight reservations prevent concurrent assignments in this
-process from all seeing the same pre-dispatch balance snapshot. Reservations
-are released after audit or failed-open cleanup.
+comparison: when any candidate's usage is unknown, steps 5 and 7 compare
+nothing and affinity decides.
 
 Effort is derived from the runtime-selected tier, task complexity/escalation,
 and each model's supported effort list. `effort_basis` records whether it came
@@ -335,11 +370,28 @@ advertises `listChanged: false`, so clients must call the menu again when they
 need a fresh snapshot; there is no push refresh contract.
 
 Audit rows retain the decision under `decision_detail.route_decision`,
-including `rank_version`, tier and effort basis, `model_hint`,
-`model_hint_status`, `model_hint_reason`, `diversify_from`, balance window,
-counts and in-flight counts, candidate `quota_state`/`balance_excess`,
-`excluded_by_policy`, and whether usage percentages were comparable. These
-fields are evidence of runtime decisions, not proof of real-client qualification.
+including `rank_version`, `role_tier`, tier and effort basis, `model_hint`,
+`model_hint_status`, `model_hint_reason`, `diversify_from`, `usage`
+(`compared`, `margin`, `least_used_percent`), `affinity` (work kind, engine,
+`default` or `routing.json` source), candidates with `used_percent`, `hot`,
+`quota_state`, `usage_band`, `suitability` and `preferred`, `decided_by`,
+`excluded_by_policy`, `unavailable`, `superseded`, and whether usage
+percentages were comparable. `rank_version` history: 2 ranked by quota band,
+count balance (tolerance 4) and suitability; 3 added plan usage, engine
+affinity, cross-tier stand-ins and a two-attempt balance; 4 removed attempt
+counts and cross-tier stand-ins. Older rows keep their own fields
+(`balance`, `balance_excess`, `cross_tier`, `chosen_cross_tier`) and still
+render. These fields are evidence of runtime decisions, not proof of
+real-client qualification.
+
+The worker card title and each `pipeline.md` assignment line show a one-line
+summary of the recorded decision (`routing.decision_display`): engine, model,
+effort, tier (`light→standard` when the routed model's tier differs from the
+task's), hint status when a hint was given, `by <decided_by>`, and the chosen
+plan's usage (`usage 42%` or `usage unknown`). On a card the line is at most
+80 characters (`CARD_SUMMARY_MAX`): the alias marker, then the hint, then
+part of the model name are dropped before anything is clipped;
+`pipeline.md` keeps the full line. Count balance is never shown.
 
 ## Automatic worker routing: unavailable routes
 

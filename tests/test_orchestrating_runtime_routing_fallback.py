@@ -638,3 +638,57 @@ def test_late_engine_failure_does_not_sync_reported_worker_as_failed(tmp_path):
     assert status == "reported"
     assert sync_events == []
     assert failure_events == []
+
+
+def test_recancelling_an_interrupted_worker_keeps_the_graph_in_sync(tmp_path):
+    """Live: Paseo's cancel-and-replace sent session/cancel while a worker
+    ran. The interrupted turn cancelled the assignment (``turn_interrupted``),
+    then the next prompt resumed RECOVERING and cancelled it again
+    (``replanning``). The second mirror reused ``work-cancelled:<ref>`` with
+    another reason and recorded ``work_attempt_sync_failed``
+    (``idempotency_request_changed``) although the graph already showed
+    the cancelled attempt as failed."""
+    store, task_id, _epoch = _bootstrap(tmp_path)
+    graph = WorkGraph(store)
+    assignment = graph.add_assignment(task_id, "implementation", idempotency_key="graph-assignment")
+    attempt = graph.create_attempt(assignment["assignment_id"], idempotency_key="graph-attempt")
+    graph.transition_attempt(attempt["attempt_id"], "running", idempotency_key="graph-running")
+
+    class _Engine:
+        def terminate_owned(self, attempt_id):
+            return None
+
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._store = store
+    runtime._engine = _Engine()
+    runtime._lock = threading.Lock()
+    runtime._worker_card_emitters = {}
+    assignment_ref = "b" * 64
+    now = "2026-09-24T20:11:37+00:00"
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO delegation_provisioning "
+            "(idempotency_key, task_id, attempt_id, role_id, step, status, owner_epoch, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (assignment_ref, task_id, "worker-attempt-1", "worker-backend-dev", "ready", "ready", 1, now, now),
+        )
+        db.commit()
+    delegation_events.append_event(
+        store, task_id, "delegation_requested", "delegation-requested:recancel",
+        {"work_attempt_ref": attempt["attempt_id"]}, origin="runtime", assignment_ref=assignment_ref,
+    )
+
+    runtime._cancel_assignment(task_id, assignment_ref, "turn_interrupted")
+    runtime._cancel_assignment(task_id, assignment_ref, "replanning")
+
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT status, failure_reason FROM work_assignment_attempts WHERE attempt_id=?",
+            (attempt["attempt_id"],),
+        ).fetchone()
+        sync_events = db.execute(
+            "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='progress' "
+            "AND json_extract(payload_json, '$.kind')='work_attempt_sync_failed'", (task_id,),
+        ).fetchall()
+    assert (row["status"], row["failure_reason"]) == ("failed", "turn_interrupted")
+    assert [r["payload_json"] for r in sync_events] == []

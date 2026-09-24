@@ -63,19 +63,29 @@ queued `user_message` events unclaimed for that coordinator turn rather than
 consuming their text as a worker-card update. Repeated delivery of the same
 message identity does not create another requirement revision.
 
-Paseo 0.9.1's installed ACP bridge has no native `prompt.steer`. The Cortex
+The ACP bridge in Paseo 0.9.1 and 0.9.2 (the same code) has no native
+`prompt.steer`. The Cortex
 provider sends a text steer through the bridge's concurrent configuration
 channel as `cortex_queued_steer`, waits for durable capture, then acknowledges
 the steer for the still-active turn. If capture races with the end of that
-turn, the agent starts a background continuation using the same source identity
-so the queued message is still processed once. Unsupported non-text steer content
-produces a visible warning and leaves the current turn running; it is not silently
-accepted or passed to Paseo's cancel-and-replace fallback. A failed config
-acknowledgment is reported the same way. An explicit Stop
+turn, the provider still acknowledges the steer for that turn, and the agent
+starts a background continuation using the same source identity so the queued
+message is still processed once. Paseo accepts a steer only as a `steer` result
+for the turn it expects. Any other result makes it cancel that turn
+(`session/cancel`) and resend the text as a new prompt. Cortex cannot tell that
+cancel from a Stop, so the task pauses and its running workers are cancelled.
+So when the provider cannot queue a steer, it fails the send instead of
+returning a result. Unsupported non-text content and a failed config
+acknowledgment both do this. The chat shows a "Steering was not queued"
+warning with the reason, Paseo reports the send as failed, and nothing reaches
+Cortex. The current turn and its workers keep running, and the user can send
+the text again. An explicit Stop
 (`session/cancel`) or `/cortex-stop` remains an interruption: the former
 moves the task to RECOVERING and fences unfinished work; the latter
 permanently cancels it. Worker questions enter the persisted question protocol;
-scope requests and replans retain their three-revision bound. See
+scope, replan and escalation requests retain their three-revision bound. Each enters
+`RECOVERING`; the coordinator ends its turn and waits for the runtime to stop workers
+and request the replacement plan before submitting it. See
 [qualification status](runtime-rewrite-status.md).
 
 The coordinator uses the language selected for the submitted message, including

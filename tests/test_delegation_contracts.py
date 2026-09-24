@@ -41,6 +41,12 @@ def test_plan_contract_accepts_valid_dag_proposal():
     assert dc.validate('coordinator','plan_submit',PLAN)==PLAN
 
 
+def test_plan_contract_explains_that_verification_uses_literal_argv():
+    description = COORDINATOR['plan_submit']['properties']['plan']['properties']['verification']['items']['items']['description']
+    assert 'without a shell' in description
+    assert 'command substitution' in description
+
+
 @pytest.mark.parametrize('mutation',['unknown','missing','wrong_type','engine','model','effort','empty_tasks','empty_verification','reserved_role'])
 def test_plan_schema_rejects_invalid_or_runtime_owned_fields(mutation):
     args=deepcopy(PLAN)

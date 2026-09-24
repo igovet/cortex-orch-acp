@@ -99,8 +99,11 @@ nothing during the call, persists `basis='unknown'` with empty
 Automatic worker routing writes its full choice into the existing
 `attempt_route_audit.decision_detail_json` field. The `route_decision` object
 identifies its ranking algorithm with `rank_version` and records model-hint
-status/reason, quota state, same-tier balance (including in-flight counts),
-policy exclusions, and effort basis. These are decision inputs and outcomes,
+status/reason, quota state and plan usage (`usage`, per-candidate
+`usage_band`), engine affinity, `decided_by`, policy exclusions, and effort
+basis. Rows written before rank version 4 may also carry count-based
+`balance` and `cross_tier` fields; they are kept and read, but no longer
+written. These are decision inputs and outcomes,
 not usage measurements. Unknown quota is retained as unknown, never reported as
 zero usage. The recovery capsule exposes this detail only when the exact
 attempt's audit row is available.

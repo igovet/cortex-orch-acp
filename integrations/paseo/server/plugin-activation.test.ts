@@ -59,7 +59,7 @@ test("Paseo CJS loader activates a directory plugin with explicit source root", 
   }
 });
 
-test("Paseo CJS loader activates a Git plugin from its private launch record", async () => {
+test("an explicit source root wins over an XDG launch record", async () => {
   const isolated = mkdtempSync(join(tmpdir(), "cortex-plugin-git-"));
   const saved = new Map(
     ["HOME", "XDG_CONFIG_HOME", "CORTEX_PASEO_SOURCE_ROOT", "CORTEX_ACP_COMMAND"]
@@ -70,12 +70,12 @@ test("Paseo CJS loader activates a Git plugin from its private launch record", a
     const cortexConfig = join(configHome, "cortex");
     mkdirSync(cortexConfig, { recursive: true });
     writeFileSync(join(cortexConfig, "paseo-plugin-launch.json"), JSON.stringify({
-      argv: ["python3", "-B", join(repoRoot, "src", "cortex_acp.py")],
-      shim: join(pluginRoot, "server", "acp-load-shim.mjs"),
+      argv: ["/missing/cortex-acp.py"],
+      shim: "/missing/acp-load-shim.mjs",
     }));
     process.env.HOME = isolated;
     process.env.XDG_CONFIG_HOME = configHome;
-    process.env.CORTEX_PASEO_SOURCE_ROOT = join(isolated, "missing-worktree");
+    process.env.CORTEX_PASEO_SOURCE_ROOT = repoRoot;
     delete process.env.CORTEX_ACP_COMMAND;
     await evaluateLikePaseo();
   } finally {

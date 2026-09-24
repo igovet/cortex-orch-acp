@@ -64,9 +64,11 @@ def test_heavy_work_avoids_an_account_above_the_threshold():
     assert _pick("standard", codex=90, claude=40) == "sonnet"
 
 
-def test_light_work_prefers_the_account_above_the_threshold():
-    assert _pick("light", codex=90, claude=40) == "gpt-6-luna"
-    assert _pick("light", codex=40, claude=90) == "haiku"
+def test_light_work_also_avoids_the_account_above_the_threshold():
+    """Light work no longer spends a hot plan first: every tier prefers the
+    plan with more room (the rank never sees when a window resets)."""
+    assert _pick("light", codex=90, claude=40) == "haiku"
+    assert _pick("light", codex=40, claude=90) == "gpt-6-luna"
 
 
 def test_both_hot_still_picks_the_one_with_more_left():
@@ -283,8 +285,10 @@ def test_the_role_decides_between_equally_placed_providers():
     for entries in (ENTRIES, CLAUDE + CODEX):
         assert _rank("standard", "worker-backend-dev", entries=entries)[0].route.engine == "codex-acp"
         assert _rank("deep", "worker-security-auditor", entries=entries)[0].route.engine == "claude-agent-acp"
-        assert _rank("light", "worker-explorer", entries=entries)[0].route.model == "gpt-6-luna"
+        # Investigation is reading: it leans to Claude (it leaned to Codex before).
+        assert _rank("light", "worker-explorer", entries=entries)[0].route.model == "haiku"
         assert _rank("light", "worker-technical-writer", entries=entries)[0].route.model == "haiku"
+        assert _rank("light", "worker-backend-dev", entries=entries)[0].route.model == "gpt-6-luna"
 
 
 def test_every_plannable_role_has_a_known_work_kind():
@@ -296,7 +300,7 @@ def test_every_plannable_role_has_a_known_work_kind():
 
 def test_quota_still_outranks_the_role():
     assert _rank("standard", "worker-backend-dev", codex=90, claude=40)[0].route.model == "sonnet"
-    assert _rank("light", "worker-technical-writer", codex=90, claude=40)[0].route.engine == "codex-acp"
+    assert _rank("light", "worker-backend-dev", codex=90, claude=40)[0].route.engine == "claude-agent-acp"
     assert _rank("standard", "worker-backend-dev", codex=100, claude=40)[0].route.model == "sonnet"
 
 
@@ -305,7 +309,7 @@ def test_a_preference_is_honoured_among_the_tiers_candidates():
     assert picked.route.model == "gpt-6-sol"
     assert decision["tier"] == "deep" and decision["preference_status"] == "honoured"
     assert decision["candidates"][0] == dict(route="codex-acp/gpt-6-sol", connection_id="codex", used_percent=None,
-                                             hot=False, quota_state="unknown", balance_excess=0, suitability=0, preferred=True)
+                                             hot=False, quota_state="unknown", usage_band=None, suitability=0, preferred=True)
     assert {c["route"] for c in decision["candidates"]} == {
         "codex-acp/gpt-6-sol", "claude-agent-acp/claude-opus-5[1m]",
         "claude-agent-acp/claude-opus-4-6"}
@@ -336,32 +340,48 @@ def test_a_preference_never_spends_a_nearly_exhausted_plan_on_heavy_work():
 
 
 def test_without_a_preference_the_decision_says_so():
-    picked, decision = _rank("standard", "worker-backend-dev", codex=30, claude=10)
+    picked, decision = _rank("standard", "worker-backend-dev", codex=30, claude=25)
     assert picked.route.model == "gpt-5.6-sol"
     assert decision["preference"] is None and decision["preference_status"] == "none"
     assert [c["suitability"] for c in decision["candidates"]] == [1, 1, 0]
 
 
-def test_balance_overrides_role_suitability_only_beyond_tolerance():
-    recent = {"standard": {"codex-acp": 5, "claude-agent-acp": 0}}
-    picked, decision = auto_route.rank(
-        "standard", ENTRIES, _usage(), role="worker-backend-dev", recent=recent,
-    )
-    assert picked.route.engine == "claude-agent-acp"
-    assert decision["rank_version"] == 2
-    assert decision["balance"]["counts"] == recent["standard"]
-    assert next(c for c in decision["candidates"] if c["route"] == "codex-acp/gpt-5.6-sol")["balance_excess"] == 1
+def test_plan_usage_decides_between_suitable_engines_before_affinity():
+    """Implementation leans to Codex, but a Claude plan with at least
+    USAGE_MARGIN points more room takes the work; a smaller gap is left to
+    the kind of work."""
+    assert auto_route.USAGE_MARGIN == 10.0
+    picked, decision = _rank("standard", "worker-backend-dev", codex=30, claude=10)
+    assert picked.route.model == "sonnet" and decision["decided_by"] == "usage"
+    assert decision["rank_version"] == 4
+    assert decision["usage"] == dict(compared=True, margin=10.0, least_used_percent=10)
+    assert {c["route"]: c["usage_band"] for c in decision["candidates"]} == {
+        "claude-agent-acp/sonnet": 0, "codex-acp/gpt-5.6-sol": 2, "codex-acp/gpt-5.6-terra": 2}
+    assert "balance" not in decision
+    assert all("balance_excess" not in c for c in decision["candidates"])
+    # 9.9 points is inside the margin: affinity decides.
+    picked, decision = _rank("standard", "worker-backend-dev", codex=19.9, claude=10,
+                             entries=[CODEX[4], CLAUDE[1]])
+    assert picked.route.engine == "codex-acp" and decision["decided_by"] == "affinity"
+    # The same holds the other way round for review work.
+    picked, decision = _rank("deep", "worker-security-auditor", codex=5, claude=40)
+    assert picked.route.engine == "codex-acp" and decision["decided_by"] == "usage"
 
-    recent["standard"]["codex-acp"] = 4
-    picked, decision = auto_route.rank(
-        "standard", ENTRIES, _usage(), role="worker-backend-dev", recent=recent,
-    )
-    assert picked.route.engine == "codex-acp"
-    assert all(c["balance_excess"] == 0 for c in decision["candidates"])
+
+def test_rank_has_no_attempt_count_input():
+    """How often an engine was chosen before is not evidence of fit."""
+    import inspect
+
+    for function in (auto_route.rank, auto_route.pick, auto_route.choose):
+        assert not {"recent", "inflight"} & set(inspect.signature(function).parameters)
+    assert "balance" not in auto_route.RANK_KEYS
+    assert not hasattr(auto_route, "BALANCE_TOLERANCE")
+    first = _rank("standard", "worker-backend-dev", codex=20, claude=20)
+    assert all(_rank("standard", "worker-backend-dev", codex=20, claude=20)[1] == first[1] for _ in range(5))
 
 
 def test_unknown_quota_never_wins_the_percentage_tiebreak():
-    # Same suitability (role omitted) and balance. The list order decides
+    # Same suitability (role omitted). The list order decides
     # when either quota is unknown, regardless of the known percentage.
     entries = [CODEX[4], CLAUDE[1]]
     picked, decision = auto_route.rank("standard", entries, _usage(codex=50, claude=None))
@@ -372,12 +392,17 @@ def test_unknown_quota_never_wins_the_percentage_tiebreak():
     assert picked is entries[1] and decision["used_percent_compared"] is True
 
 
-def test_unknown_quota_is_neutral_in_light_hot_band():
+def test_unknown_quota_is_not_hot_and_never_compared():
     entries = [CLAUDE[2], CODEX[2]]
     picked, decision = auto_route.rank("light", entries, _usage(codex=None, claude=None))
     assert picked is entries[0] and decision["used_percent_compared"] is False
-    picked, _ = auto_route.rank("light", entries, _usage(codex=90, claude=None))
-    assert picked is entries[1]
+    assert decision["usage"] == dict(compared=False, margin=10.0, least_used_percent=None)
+    picked, decision = auto_route.rank("light", entries, _usage(codex=90, claude=None))
+    assert picked is entries[0] and decision["decided_by"] == "quota"
+    # Below the hot band, a known low usage never beats an unknown one.
+    picked, decision = auto_route.rank("light", [CODEX[2], CLAUDE[2]], _usage(codex=60, claude=None),
+                                       role="worker-explorer")
+    assert picked is CLAUDE[2] and decision["decided_by"] == "affinity"
 
 
 def test_policy_exclusion_is_distinct_from_unavailable():
@@ -439,18 +464,17 @@ def test_escalated_explorer_raises_effort_without_raising_tier(tmp_path, monkeyp
     assert choice.decision["effort_basis"] == "escalation_step"
 
 
-def test_quota_and_unavailability_still_dominate_balance():
-    recent = {"deep": {"codex-acp": 0, "claude-agent-acp": 20}}
+def test_quota_and_unavailability_dominate_affinity():
     picked, decision = auto_route.rank(
-        "deep", ENTRIES, _usage(codex=90, claude=40),
-        role="worker-backend-dev", recent=recent,
+        "deep", ENTRIES, _usage(codex=90, claude=40), role="worker-backend-dev",
     )
     assert picked.route.engine == "claude-agent-acp"
-    assert decision["candidates"][0]["balance_excess"] == 16
+    # The runner-up is the older Opus on the same account, not Codex.
+    assert decision["decided_by"] == "engine_order"
     blocked = frozenset(e.route.id for e in CLAUDE)
     picked, decision = auto_route.rank(
         "deep", ENTRIES, _usage(codex=30, claude=40),
-        excluded=blocked, role="worker-security-auditor", recent=recent,
+        excluded=blocked, role="worker-security-auditor",
     )
     assert picked.route.engine == "codex-acp"
     assert "claude-agent-acp/claude-opus-5[1m]" in decision["unavailable"]
@@ -472,22 +496,20 @@ def test_model_hint_honour_and_tier_guard():
     assert decision["model_hint_status"] == "ignored:tier_mismatch"
 
 
-@pytest.mark.parametrize("hint,excluded,policy,usage,recent,expected", [
-    ("unknown-acp/model", frozenset(), frozenset(), _usage(20, 20), None, "ignored:not_offered"),
+@pytest.mark.parametrize("hint,excluded,policy,usage,expected", [
+    ("unknown-acp/model", frozenset(), frozenset(), _usage(20, 20), "ignored:not_offered"),
     ("claude-agent-acp/sonnet", frozenset({"claude:sonnet"}), frozenset(),
-     _usage(20, 20), None, "ignored:unavailable"),
+     _usage(20, 20), "ignored:unavailable"),
     ("claude-agent-acp/sonnet", frozenset({"claude:sonnet"}),
-     frozenset({"claude:sonnet"}), _usage(20, 20), None, "ignored:auto_excluded"),
-    ("codex-acp/gpt-5.6-terra", frozenset(), frozenset(), _usage(90, 20), None,
+     frozenset({"claude:sonnet"}), _usage(20, 20), "ignored:auto_excluded"),
+    ("codex-acp/gpt-5.6-terra", frozenset(), frozenset(), _usage(90, 20),
      "ignored:near_quota_limit"),
-    ("codex-acp/gpt-5.6-terra", frozenset(), frozenset(), _usage(20, 20),
-     {"standard": {"codex-acp": 20, "claude-agent-acp": 0}}, "ignored:engine_overused"),
 ])
-def test_model_hint_rejection_reasons(hint, excluded, policy, usage, recent, expected):
+def test_model_hint_rejection_reasons(hint, excluded, policy, usage, expected):
     entries = [CODEX[4], CLAUDE[1]]
     _, decision = auto_route.rank(
         "standard", entries, usage, excluded=excluded, policy_excluded=policy,
-        role="worker-backend-dev", model_hint=hint, recent=recent)
+        role="worker-backend-dev", model_hint=hint)
     assert decision["model_hint_status"] == expected
 
 
@@ -614,7 +636,8 @@ def _live_choose(monkeypatch, tmp_path, entries, routing=None):
 def test_choose_routes_only_the_newest_non_denied_version(tmp_path, monkeypatch):
     entries = LIVE_CODEX + LIVE_CLAUDE
     project, environ = _live_choose(monkeypatch, tmp_path, entries)
-    choice = auto_route.choose("worker-explorer", project, environ)
+    # Light implementation work leans to Codex, so the newest Luna is chosen.
+    choice = auto_route.choose("worker-backend-dev", project, environ, complexity="low")
     assert choice.model == "gpt-6-luna"
     assert choice.decision["superseded"]["codex-acp/gpt-5.6-luna"] == "codex-acp/gpt-6-luna"
     assert "codex-acp/gpt-5.6-luna" not in choice.decision["excluded_by_policy"]
@@ -624,7 +647,7 @@ def test_choose_routes_only_the_newest_non_denied_version(tmp_path, monkeypatch)
         "codex-acp/gpt-6-sol", "claude-agent-acp/opus[1m]"}
     # Deny removes the newest version: the newest non-denied one is routed.
     project, environ = _live_choose(monkeypatch, tmp_path, entries, {"deny": ["gpt-6-luna"]})
-    assert auto_route.choose("worker-explorer", project, environ).model == "gpt-5.6-luna"
+    assert auto_route.choose("worker-backend-dev", project, environ, complexity="low").model == "gpt-5.6-luna"
 
 
 def test_an_explicit_pin_of_an_older_version_is_honoured(tmp_path, monkeypatch):
@@ -636,7 +659,8 @@ def test_an_explicit_pin_of_an_older_version_is_honoured(tmp_path, monkeypatch):
 
 def test_a_model_hint_for_a_superseded_version_is_ignored(tmp_path, monkeypatch):
     project, environ = _live_choose(monkeypatch, tmp_path, LIVE_CODEX + LIVE_CLAUDE)
-    choice = auto_route.choose("worker-explorer", project, environ, model_hint="codex-acp/gpt-5.6-luna")
+    choice = auto_route.choose("worker-backend-dev", project, environ, complexity="low",
+                               model_hint="codex-acp/gpt-5.6-luna")
     assert choice.model == "gpt-6-luna"
     assert choice.decision["model_hint_status"] == "ignored:superseded"
 
@@ -681,3 +705,179 @@ def test_the_default_deny_removes_haiku_from_automatic_routing_and_the_selector(
     with pytest.raises(PortableError) as refused:
         auto_route.refuse_if_denied("claude-agent-acp", "haiku", project, environ)
     assert refused.value.code == "route_denied"
+
+
+# --- engine affinity, no cross-tier promotion, plan usage, decided_by -------
+
+def test_default_engine_affinity_leans_only_implementation_and_operations_to_codex():
+    codex_kinds = {kind for kind, engine in auto_route.WORK_KIND_ENGINES.items() if engine == "codex-acp"}
+    assert codex_kinds == {"implementation", "operations"}
+    assert auto_route.WORK_KIND_ENGINES["debugging"] is None
+    assert auto_route.WORK_KIND_ENGINES["testing"] is None
+    assert auto_route.WORK_KIND_ENGINES["investigation"] == "claude-agent-acp"
+    assert auto_route.suitability("worker-debugger", "codex-acp") == 0
+    assert auto_route.suitability("worker-debugger", "claude-agent-acp") == 0
+    assert auto_route.suitability("worker-explorer", "claude-agent-acp") == 1
+    # An unlisted role is implementation work.
+    assert auto_route.affinity_engine("worker-unknown") == "codex-acp"
+
+
+def test_engine_affinity_override_per_kind_then_star():
+    affinity = {"implementation": "claude-agent-acp", "*": None}
+    assert auto_route.affinity_engine("worker-backend-dev", affinity) == "claude-agent-acp"
+    # "*" replaces every built-in kind the file does not name.
+    assert auto_route.affinity_engine("worker-security-auditor", affinity) is None
+    assert auto_route.affinity_engine("worker-devops-engineer", {"*": "claude-agent-acp"}) == "claude-agent-acp"
+    assert auto_route.affinity_engine("worker-devops-engineer", {"review": None}) == "codex-acp"
+    entries = [CODEX[4], CLAUDE[1]]
+    picked, decision = auto_route.rank("standard", entries, _usage(), role="worker-backend-dev")
+    assert picked is CODEX[4] and decision["affinity"] == dict(
+        work_kind="implementation", engine="codex-acp", source="default")
+    picked, decision = auto_route.rank("standard", entries, _usage(), role="worker-backend-dev",
+                                       affinity={"implementation": "claude-agent-acp"})
+    assert picked is CLAUDE[1] and decision["decided_by"] == "affinity"
+    assert decision["affinity"]["source"] == "routing.json"
+
+
+def test_engine_affinity_validation(tmp_path):
+    project = tmp_path / "project"
+    (project / ".cortex").mkdir(parents=True)
+    environ = {"HOME": str(tmp_path)}
+    route_file = project / ".cortex" / "routing.json"
+    valid = {"engine_affinity": {"implementation": "claude-agent-acp", "debugging": None, "*": "codex-acp"}}
+    route_file.write_text(json.dumps(valid))
+    assert auto_route.load_overrides(project, environ) == valid
+    for bad, needle in (({"engine_affinity": ["codex-acp"]}, "must map"),
+                        ({"engine_affinity": {"coding": "codex-acp"}}, "unknown work kind 'coding'"),
+                        ({"engine_affinity": {"review": "gemini-acp"}}, "unknown engine 'gemini-acp'"),
+                        ({"engine_affinity": {"review": ""}}, "unknown engine ''")):
+        route_file.write_text(json.dumps(bad))
+        with pytest.raises(PortableError) as refused:
+            auto_route.load_overrides(project, environ)
+        assert refused.value.code == "invalid_routing_overrides" and needle in refused.value.remediation
+
+
+def test_engine_affinity_from_routing_json_reaches_choose(tmp_path, monkeypatch):
+    project, environ = _live_choose(monkeypatch, tmp_path, LIVE_CODEX + LIVE_CLAUDE,
+                                    {"engine_affinity": {"implementation": "claude-agent-acp"}})
+    choice = auto_route.choose("worker-backend-dev", project, environ)
+    assert choice.model == "claude-sonnet-5"
+    assert choice.decision["affinity"]["source"] == "routing.json"
+
+
+# The observed deployment: Haiku auto-excluded, so light has only Codex.
+NO_HAIKU = frozenset({"claude:haiku"})
+
+
+def test_a_single_engine_light_tier_is_never_widened_with_a_stronger_model():
+    """Light work stays on a light model even when only one engine has one:
+    another engine lacking a light model is no reason to spend a stronger
+    tier. ``auto_allow`` Haiku is the lever for Claude on light work."""
+    assert not hasattr(auto_route, "cross_tier_candidates")
+    for role in ("worker-technical-writer", "worker-explorer", "worker-planner", "worker-backend-dev"):
+        picked, decision = auto_route.rank("light", ENTRIES, _usage(), excluded=NO_HAIKU,
+                                           policy_excluded=NO_HAIKU, role=role)
+        assert picked.route.engine == "codex-acp" and decision["tier"] == "light", role
+        assert {c["route"] for c in decision["candidates"]} == {
+            "codex-acp/gpt-6-luna", "codex-acp/gpt-5.6-luna", "codex-acp/gpt-5.5"}
+        assert "cross_tier" not in decision and "chosen_cross_tier" not in decision
+        assert all("cross_tier" not in c for c in decision["candidates"])
+    # Even a Claude plan with far more room does not pull light work up to Sonnet.
+    picked, decision = auto_route.rank("light", ENTRIES, _usage(codex=80, claude=0), excluded=NO_HAIKU,
+                                       policy_excluded=NO_HAIKU, role="worker-technical-writer")
+    assert picked.route.model == "gpt-6-luna" and decision["tier"] == "light"
+
+
+def test_no_task_is_promoted_above_its_tier_while_the_tier_has_a_usable_model():
+    tiers = auto_route.model_tiers(ENTRIES, {})
+    # Standard work with only Codex in standard never gets Claude's deep model.
+    live = [e for e in LIVE_CODEX + LIVE_CLAUDE if "sonnet" not in e.route.model]
+    superseded = auto_route.superseded_routes(live)
+    live_tiers = auto_route.model_tiers(live, {})
+    _, decision = auto_route.rank("standard", live, _usage(), excluded=frozenset(superseded),
+                                  policy_excluded=frozenset(superseded), superseded=superseded,
+                                  role="worker-code-reviewer")
+    assert decision["tier"] == "standard"
+    assert {live_tiers[c["connection_id"] + ":" + c["route"].split("/", 1)[1]] for c in decision["candidates"]} == {
+        "standard"}
+    # A Claude hint or preference cannot lift light work to a stronger Claude model.
+    for kwargs in (dict(model_hint="claude-agent-acp"), dict(model_hint="claude-agent-acp/sonnet"),
+                   dict(preference="claude-agent-acp")):
+        picked, decision = auto_route.rank("light", ENTRIES, _usage(), excluded=NO_HAIKU,
+                                           policy_excluded=NO_HAIKU, role="worker-technical-writer", **kwargs)
+        assert tiers[picked.route.id] == "light" and picked.route.engine == "codex-acp", kwargs
+    # Only when no engine has a usable model in the tier does it fall back.
+    no_light = frozenset(e.route.id for e in ENTRIES if tiers[e.route.id] == "light")
+    picked, decision = auto_route.rank("light", ENTRIES, _usage(), excluded=no_light, role="worker-technical-writer")
+    assert decision["tier"] == "standard" and decision["role_tier"] == "light"
+
+
+def test_light_work_runs_on_the_light_model_at_the_light_effort(tmp_path, monkeypatch):
+    project, environ = _live_choose(monkeypatch, tmp_path, LIVE_CODEX + LIVE_CLAUDE)
+    choice = auto_route.choose("worker-technical-writer", project, environ)
+    assert (choice.model, choice.effort) == ("gpt-6-luna", "low")
+    assert choice.decision["effort_basis"] == "role_tier:light"
+    assert choice.decision["tier"] == "light" and choice.decision["decided_by"] == "only_candidate"
+    # Allowing Haiku is the owner's lever for Claude on light work.
+    haiku = _named("claude", "claude-haiku-4-5-20251001", "Haiku 4.5")
+    project, environ = _live_choose(monkeypatch, tmp_path, LIVE_CODEX + LIVE_CLAUDE + [haiku],
+                                    {"auto_allow": ["haiku"]})
+    choice = auto_route.choose("worker-technical-writer", project, environ)
+    assert choice.model == "claude-haiku-4-5-20251001" and choice.decision["decided_by"] == "affinity"
+
+
+def test_hint_is_honoured_unless_the_hinted_plan_is_near_its_quota_band():
+    assert auto_route.HINT_TOLERANCE == auto_route.HOT_PERCENT == 85.0
+    entries = [CODEX[4], CLAUDE[1]]
+    for codex, claude, status, chosen in (
+            (84, 10, "honoured", "codex-acp/gpt-5.6-terra"),
+            (85, 10, "ignored:near_quota_limit", "claude-agent-acp/sonnet"),
+            # Every plan near its limit: nothing better to protect.
+            (95, 90, "honoured", "codex-acp/gpt-5.6-terra")):
+        _, decision = auto_route.rank("standard", entries, _usage(codex, claude),
+                                      role="worker-code-reviewer", model_hint="codex-acp")
+        assert (decision["model_hint_status"], decision["chosen"]) == (status, chosen), (codex, claude)
+    # An honoured hint outranks plan usage.
+    _, decision = auto_route.rank("standard", entries, _usage(84, 10),
+                                  role="worker-code-reviewer", model_hint="codex-acp")
+    assert decision["decided_by"] == "hint"
+
+
+
+def test_a_preference_near_its_quota_band_is_ignored_in_every_tier():
+    picked, decision = _rank("light", "worker-backend-dev", preference="codex-acp", codex=90, claude=10)
+    assert picked.route.engine == "claude-agent-acp"
+    assert decision["preference_status"] == "ignored:provider_near_quota_limit"
+
+
+def test_every_tier_orders_a_hot_account_last():
+    """Light work used to spend a hot plan first (7b7aca22); plan usage is
+    now the primary signal in every tier."""
+    assert auto_route._order_key(10.0) < auto_route._order_key(90.0)
+    assert auto_route._order_key(None) == auto_route._order_key(0.0)
+    entries = [CODEX[2], CLAUDE[2]]  # gpt-6-luna, Claude haiku (both light)
+    picked, decision = auto_route.rank("light", entries, _usage(codex=10, claude=90), role="worker-explorer")
+    assert picked is CODEX[2] and decision["decided_by"] == "quota"
+    picked, decision = auto_route.rank("light", entries, _usage(codex=90, claude=10), role="worker-backend-dev")
+    assert picked is CLAUDE[2] and decision["decided_by"] == "quota"
+
+
+@pytest.mark.parametrize("kwargs,expected", [
+    (dict(preference="claude-agent-acp"), "preference"),
+    (dict(model_hint="claude-agent-acp/sonnet"), "hint"),
+    (dict(usage=_usage(codex=90, claude=10)), "quota"),
+    (dict(escalated=True, previous_engine="codex-acp"), "diversify"),
+    (dict(usage=_usage(codex=40, claude=20)), "usage"),
+    (dict(), "affinity"),
+    (dict(usage=_usage(codex=25, claude=20)), "affinity"),
+    (dict(role=None, usage=_usage(codex=25, claude=20)), "used_percent"),
+    (dict(role=None), "engine_order"),
+])
+def test_decided_by_names_the_first_separating_key(kwargs, expected):
+    entries = [CODEX[4], CLAUDE[1]]
+    kwargs = dict(dict(role="worker-backend-dev", usage=_usage()), **kwargs)
+    usage = kwargs.pop("usage")
+    _, decision = auto_route.rank("standard", entries, usage, **kwargs)
+    assert decision["decided_by"] == expected
+    _, decision = auto_route.rank("standard", [CODEX[4]], usage, **kwargs)
+    assert decision["decided_by"] == "only_candidate"

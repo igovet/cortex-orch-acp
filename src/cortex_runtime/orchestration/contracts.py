@@ -26,7 +26,7 @@ NODE = obj(dict(id=text('Unique plan node name: a letter, then letters, digits, 
                                             'high for cross-cutting root-cause analysis, production incidents, concurrency, security or data-loss risk; '
                                             'omit for normal. The runtime turns it into a stronger or cheaper route; it never names a model.'),
                 model=dict(type='string', minLength=1, maxLength=160,
-                           description='Required routing recommendation. Use auto to let the runtime choose, an engine id to prefer that engine, or an exact engine/model route from list_route_options. The runtime computes tier and effort; a hint never raises tier or overrides pin, deny, providers, availability or quota. Flagship is escalation-only; retries and fixes ignore the hint.'),
+                           description='Required routing recommendation. Use auto when no work-specific engine reason applies; otherwise recommend an engine id and supply model_reason. Use claude-agent-acp for code analysis, root-cause debugging, large-context reading, review-like judgement, design or prose; use codex-acp for mechanical edits and fast run-fix loops. An exact engine/model route must come from list_route_options. The runtime computes tier and effort; a hint never raises tier or overrides pin, deny, providers, availability or quota. Flagship is escalation-only; retries and fixes ignore the hint.'),
                 model_reason=dict(type='string', minLength=1, maxLength=300,
                                   description='One short sentence explaining a non-auto model recommendation; required for every non-auto hint.')),
            required=['id', 'role', 'objective', 'dependencies', 'scope', 'model'])
@@ -38,7 +38,7 @@ NODE['properties']['model']['pattern'] = (
 NODE['properties']['id']['pattern'] = r'^[A-Za-z][A-Za-z0-9_-]{0,63}$'
 from ..portable.roles import WORKER_ALIASES
 NODE['properties']['role']['enum'] = sorted(role for role in WORKER_ALIASES if role not in {'code-reviewer','build-verification'})
-PLAN = obj(dict(tasks=array(NODE, minimum=1), verification=array(array(text('Literal argument of a verification command copied exactly from the project\'s own documented verification (docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json scripts), interpreter path included; set environment variables with ["env", "NAME=value", ...]. Runs with the owner\'s tools; only git-ignored paths are writable.', 4096), minimum=1), maximum=16, minimum=1)))
+PLAN = obj(dict(tasks=array(NODE, minimum=1), verification=array(array(text('Literal argument of a verification command copied exactly from the project\'s own documented verification (docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json scripts), interpreter path included; set environment variables with ["env", "NAME=value", ...]. Runs as argv without a shell: do not use command substitution, backticks, redirection, pipes, shell operators or standalone parentheses. Runs with the owner\'s tools; only git-ignored paths are writable.', 4096), minimum=1), maximum=16, minimum=1)))
 COORDINATOR = {
     'task_get_context': obj({}),
     'list_route_options': obj({}),

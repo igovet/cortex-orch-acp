@@ -105,7 +105,7 @@ Access mode is a separate task-scoped user choice, not a JSON option: new tasks 
 
 ## Routing rules
 
-The routing loader reads five keys: `pin`, `deny`, `auto_allow`, `tiers`, and `providers`; additional JSON keys are currently ignored. Its validation and selection logic are in `routing.auto_route`. This is the complete supported shape:
+The routing loader reads six keys: `pin`, `deny`, `auto_allow`, `tiers`, `providers`, and `engine_affinity`; additional JSON keys are currently ignored. Its validation and selection logic are in `routing.auto_route`. This is the complete supported shape:
 
 ```json
 {
@@ -119,7 +119,12 @@ The routing loader reads five keys: `pin`, `deny`, `auto_allow`, `tiers`, and `p
     "gpt-5.6-luna": "light",
     "gpt-5.6-sol": "standard"
   },
-  "providers": ["codex-acp", "claude-agent-acp"]
+  "providers": ["codex-acp", "claude-agent-acp"],
+  "engine_affinity": {
+    "implementation": "claude-agent-acp",
+    "testing": null,
+    "*": "codex-acp"
+  }
 }
 ```
 
@@ -128,6 +133,7 @@ The routing loader reads five keys: `pin`, `deny`, `auto_allow`, `tiers`, and `p
 - `auto_allow`: tokens of the same form that may enter automatic selection despite the built-in Haiku exclusion. It does not override `deny`, `providers`, catalog availability or quota limits.
 - `tiers`: object mapping model names to `flagship`, `deep`, `standard`, or `light`. Built-in known families/models are classified automatically; this key overrides that classification.
 - `providers`: array restricted to `codex-acp` and/or `claude-agent-acp`. When absent, every configured provider is considered. A disallowed pin is refused.
+- `engine_affinity`: object mapping a work kind or `*` to `codex-acp`, `claude-agent-acp`, or `null` (no lean). Work kinds are `implementation`, `operations`, `debugging`, `testing`, `investigation`, `review`, `design`, `writing`, `planning`, and `analysis` (each worker role's kind is `routing.auto_route.ROLE_WORK_KINDS`; an unlisted role is `implementation`). A kind named here wins, then `*`, then the built-in default: `implementation` and `operations` lean to `codex-acp`; `investigation`, `review`, `design`, `writing`, `planning` and `analysis` lean to `claude-agent-acp`; `debugging` and `testing` are neutral. Affinity breaks ties only after the quota band and plan usage (a plan at least 10 points less used wins first) and never overrides a pin, `deny`, `providers`, availability or quota. An unknown kind or engine makes the file invalid.
 
 Precedence is first existing routing file: project `<project>/.cortex/routing.json`, then `CORTEX_ROUTING`, then user `routing.json`. The files do not merge, so a project file that should keep the defaults must list them itself. An existing malformed file fails closed. If no file exists, built-in automatic routing applies.
 
@@ -135,9 +141,9 @@ Default user file: `scripts/cortex_acp_setup.py init-storage`, `apply-routing-de
 
 Latest version only: automatic routing uses only the newest engine-confirmed version of each model family on an engine. Codex `gpt-6-luna` supersedes `gpt-5.6-luna`; Claude `opus[1m]` ("Opus 5.5") supersedes `claude-opus-5[1m]` and `claude-opus-4-8`, and `claude-sonnet-5` supersedes `claude-sonnet-4-6`. Family and version are parsed from the model id, or for a versionless alias from the engine's own display name for the same family, so a new release takes over without configuration. `deny` is applied first, so if it removes the newest version, the newest non-denied version is routed. A model whose version cannot be parsed, such as a bare `sonnet` alias, is never treated as older. A superseded version stays in the model selector. It is reported with `auto_eligible: false` and `superseded_by` in `list_route_options`, and under `superseded` in the route decision. A plan hint naming it is recorded as `ignored:superseded`. An explicit `pin` of an older version is still honoured. Supersession does not depend on availability: an older version does not take over while the newest is exhausted or recorded unavailable.
 
-Haiku policy: the default user `routing.json` denies `haiku`, which removes every Claude Haiku model from automatic routing, pins and the selector. Independently of any file, Claude Haiku is also excluded from automatic worker model selection (`routing.auto_route.DEFAULT_AUTO_DENY_FAMILIES`). When a suitable confirmed Codex Luna route is available, it can be selected for light work according to role, quota, provider preference, and availability. This is not a blanket substitution guarantee: if Luna is unavailable, other eligible routes may be selected; if no route is usable, dispatch refuses. A matching explicit pin may select Haiku despite the default automatic exclusion. An explicit `deny` entry blocks it everywhere, including pins. Routing decisions are made by the runtime; models do not choose their own models.
+Haiku policy: the default user `routing.json` denies `haiku`, which removes every Claude Haiku model from automatic routing, pins and the selector. Independently of any file, Claude Haiku is also excluded from automatic worker model selection (`routing.auto_route.DEFAULT_AUTO_DENY_FAMILIES`). The light tier then has only Codex Luna, so light work runs on Luna: a task is never moved to a stronger tier (such as Claude Sonnet) because another engine lacks a model in its tier. To let Claude take light work, add Haiku to `auto_allow` (and remove it from `deny`). Only when no engine has a usable light model does light work fall back to the nearest other tier; if no route is usable, dispatch refuses. A matching explicit pin may select Haiku despite the default automatic exclusion. An explicit `deny` entry blocks it everywhere, including pins. Routing decisions are made by the runtime; models do not choose their own models.
 
-Automatic routing uses engine-observed catalog routes, excludes exhausted/unavailable routes and chooses among tiers based on role, task complexity, prior retry/escalation, provider constraints and current plan usage. Recent same-tier project attempts are balanced across engines within a four-attempt tolerance; currently active attempts are recorded separately. Tier names do not guarantee that a specific model is installed or selectable. See [routing and fallback](acp/routing-and-fallback.md).
+Automatic routing uses engine-observed catalog routes, excludes exhausted/unavailable routes and chooses among tiers based on role, task complexity, prior retry/escalation, provider constraints and current plan usage. Within the tier, the plan with clearly more remaining quota (at least 10 points less used, and below the 85% band) takes the work; otherwise the work kind's engine affinity, then engine order decides. How often an engine was chosen before is not an input. Tier names do not guarantee that a specific model is installed or selectable. See [routing and fallback](acp/routing-and-fallback.md).
 
 Each new plan node includes a `model` recommendation: `auto`, an engine ID, or an exact `engine/model` label returned by `list_route_options`. A non-`auto` recommendation requires `model_reason`. It does not choose effort or tier and cannot bypass a pin, deny rule, provider rule, availability, or quota limit. The route menu is a read-only snapshot; plan submission and dispatch validate current policy. Older stored plans without `model` keep their provider hint.
 

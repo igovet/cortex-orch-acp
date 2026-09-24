@@ -2,6 +2,27 @@
 from pathlib import Path
 import json
 
+from ..routing.decision_display import route_decision_summary
+
+
+def _recorded_route_summary(store, task_id, assignment_ref):
+    if not assignment_ref:
+        return None
+    with store.connection() as db:
+        audit = db.execute(
+            "SELECT a.engine, a.model, a.decision_detail_json "
+            "FROM delegation_provisioning p JOIN attempt_route_audit a ON a.attempt_id=p.attempt_id "
+            "WHERE p.task_id=? AND p.idempotency_key=? ORDER BY a.recorded_at DESC LIMIT 1",
+            (task_id, assignment_ref),
+        ).fetchone()
+    if audit is None:
+        return None
+    try:
+        detail = json.loads(audit["decision_detail_json"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return route_decision_summary(audit["engine"], audit["model"], detail)
+
 
 def publish(store, channel, context):
     state = context['state']
@@ -16,9 +37,11 @@ def publish(store, channel, context):
                 '> ' + context['goal'].replace('\n','\n> '), '', '## Assignments', '']
         for node in context['nodes']:
             result = node['result'] or {}
+            route = _recorded_route_summary(store, context["task_id"], node.get("assignment_ref"))
             rows.append(f"- {node['node_id']} ({node['role']}): {node['status']}; "
                         f"dependencies: {', '.join(node['dependencies']) or 'none'}; "
-                        f"report: {result.get('report_ref', 'not published')}")
+                        f"report: {result.get('report_ref', 'not published')}"
+                        + (f"; routing: {route}" if route else ""))
         waiver = context.get('review_not_required')
         if waiver:
             reference = ('the project as observed before the planned work' if waiver['reference'] == 'execution_baseline'

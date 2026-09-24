@@ -17,13 +17,27 @@ available -- replaces the hand-maintained per-role ``route-policy.json``.
    version is the one routed. A model whose version cannot be parsed is
    never treated as older.
 3. Among models of the role's tier (nearest other tier when none is usable),
-   rank by honoured provider preference, quota band, recent same-tier engine
-   balance, role suitability as a soft tiebreak, known quota percentage only
-   when all candidates are known, and engine order. A project-local audit
-   window and in-flight choices supply balance counts. Haiku is excluded
-   by default unless routing.json opts it in with ``auto_allow``.
-   Exhausted (100%) and recorded-unavailable routes never enter the rank.
-   The decision records rank inputs and exclusions for later comparison.
+   rank by honoured provider preference, honoured model hint, quota band
+   (every tier avoids an account at or above :data:`HOT_PERCENT` while
+   another is below it), a different engine on escalation, subscription
+   plan usage (a plan more than :data:`USAGE_MARGIN` points more used than
+   the least-used candidate's ranks behind it; compared only when every
+   candidate's usage is known), engine affinity, exact used percent, and
+   engine order (:func:`rank`). How often an engine was chosen recently
+   never counts: frequency is not evidence of fit. A model of a stronger
+   tier never stands in for the role's tier because one engine lacks a model
+   there: with Haiku excluded the light tier is Codex-only, and light work
+   stays on it (``auto_allow`` Haiku to let Claude take light work). Only
+   when no engine has a usable model in the tier does the rank fall back to
+   the nearest other tier (:data:`_FALLBACK_ORDER`). Haiku is excluded by
+   default unless routing.json opts it in with ``auto_allow``. Exhausted
+   (100%) and recorded-unavailable routes never enter the rank. The decision records rank inputs, exclusions and
+   ``decided_by`` (the first key that separated the choice from the
+   runner-up) for later comparison.
+   Engine affinity (:data:`WORK_KIND_ENGINES`) by default leans only
+   implementation and operations to Codex; investigation, review, design,
+   writing, planning and analysis to Claude; debugging and testing are
+   neutral. routing.json ``engine_affinity`` overrides it per kind.
 4. Effort follows the role's tier, clamped to what that model supports.
    ``ultra`` is never used; ``max`` only on a ``light`` model (Luna-class:
    the cheapest model is the one worth running at its maximum); flagship
@@ -50,7 +64,8 @@ Optional overrides, first existing file wins (never merged):
       "deny":      ["gpt-5.5", "haiku"],
       "auto_allow": ["claude-agent-acp/haiku"],
       "tiers":     {"gpt-5.6-luna": "light"},
-      "providers": ["claude-agent-acp", "codex-acp"]
+      "providers": ["claude-agent-acp", "codex-acp"],
+      "engine_affinity": {"implementation": "claude-agent-acp", "testing": null, "*": "codex-acp"}
     }
 
 ``pin`` is strict: a pinned route that is not available (not offered, or
@@ -65,6 +80,12 @@ bare family name that covers every version and alias of that family
 global file (:mod:`routing.defaults`).
 The built-in Haiku exclusion applies only to automatic worker selection;
 a matching ``pin`` or ``auto_allow`` can opt into Haiku, while ``deny`` still wins.
+
+``engine_affinity`` maps a work kind (a key of :data:`WORK_KIND_ENGINES`)
+or ``"*"`` to an engine id, or ``null`` for no lean; a named kind wins,
+then ``"*"``, then the built-in default. It only breaks ties after quota
+and plan usage and never overrides a pin, deny, providers or availability.
+Unknown kinds or engines are refused.
 
 ``providers`` restricts automatic routing and failover to connections whose
 engine is in the list (each id must be one of
@@ -83,8 +104,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
-
-from .balance import BALANCE_WINDOW, BALANCE_TOLERANCE
 
 from ..catalog.evidence import ProvenanceSource
 from ..portable.errors import PortableError, PortableErrorCategory
@@ -140,16 +159,19 @@ ROLE_TIERS = {
     "worker-technical-writer": "light",
 }
 
-# Which engine is the better fit for a kind of work, used among candidates
-# of one tier after quota. A judgement, not a benchmark: Codex models are
-# tuned for agentic terminal coding (write, run, fix), Claude models for
-# reading, judging and writing prose. Unlisted roles are "implementation".
+# Which engine is the better fit for a kind of work (engine affinity), used
+# among candidates of one tier after quota and plan usage. A judgement, not a
+# benchmark: Codex models are tuned for agentic terminal coding (write, run,
+# fix), Claude models for reading, judging and writing prose. Debugging and
+# testing are both, so they are neutral (``None``: no engine bonus, plan
+# usage and engine order decide); investigation is reading. Unlisted roles are
+# "implementation". routing.json ``engine_affinity`` overrides this per kind.
 WORK_KIND_ENGINES = {
     "implementation": "codex-acp",
-    "debugging": "codex-acp",
-    "testing": "codex-acp",
     "operations": "codex-acp",
-    "investigation": "codex-acp",
+    "debugging": None,
+    "testing": None,
+    "investigation": "claude-agent-acp",
     "review": "claude-agent-acp",
     "design": "claude-agent-acp",
     "writing": "claude-agent-acp",
@@ -194,14 +216,41 @@ class Choice:
     decision: Mapping | None = None
 
 
-def suitability(role: str | None, engine: str) -> int:
+def work_kind(role: str | None) -> str | None:
+    return None if role is None else ROLE_WORK_KINDS.get(role, "implementation")
+
+
+def affinity_engine(role: str | None, affinity: Mapping[str, str | None] | None = None) -> str | None:
+    """The engine ``role``'s kind of work leans to, or ``None`` (neutral).
+    ``affinity`` is routing.json ``engine_affinity``: a kind it names wins,
+    then its ``"*"``, then :data:`WORK_KIND_ENGINES`."""
+    kind = work_kind(role)
+    if kind is None:
+        return None
+    affinity = affinity or {}
+    if kind in affinity:
+        return affinity[kind]
+    if "*" in affinity:
+        return affinity["*"]
+    return WORK_KIND_ENGINES[kind]
+
+
+def suitability(role: str | None, engine: str, affinity: Mapping[str, str | None] | None = None) -> int:
     """1 when ``engine`` is the better fit for ``role``'s kind of work."""
-    if role is None:
-        return 0
-    return int(WORK_KIND_ENGINES[ROLE_WORK_KINDS.get(role, "implementation")] == engine)
+    preferred = affinity_engine(role, affinity)
+    return int(preferred is not None and preferred == engine)
 
 
-HINT_TOLERANCE = 8
+# A model hint is honoured while a hinted route's plan is used below this
+# percentage, or every candidate's plan is at or above it: a hint never
+# spends a nearly exhausted plan while another has room. It is independent
+# of how often an engine was chosen before. Excluded, unavailable and
+# exhausted (100%) routes are never honoured at all.
+HINT_TOLERANCE = HOT_PERCENT
+# Plan usage ranks candidates in steps of this many percentage points above
+# the least-used candidate: a smaller difference is not a meaningful
+# difference in remaining quota, so the task (engine affinity) decides it.
+USAGE_MARGIN = 10.0
 
 
 def route_menu(project_root=None, environ=None, unavailable=()):
@@ -243,9 +292,7 @@ def route_menu(project_root=None, environ=None, unavailable=()):
 def choose(role: str, project_root=None, environ: Mapping[str, str] | None = None, *,
            escalate: bool = False, complexity: str = "normal", unavailable: Sequence[Mapping] = (),
            preference: str | None = None, model_hint: str = "auto",
-           model_reason: str | None = None, previous_engine: str | None = None,
-           recent: Mapping[str, Mapping[str, int]] | None = None,
-           inflight: Mapping[str, Mapping[str, int]] | None = None) -> Choice | None:
+           model_reason: str | None = None, previous_engine: str | None = None) -> Choice | None:
     """The route this worker role should open on, or ``None`` when nothing
     engine-confirmed is configured (keep the coordinator's route).
     See :func:`tier_for` for ``escalate`` and ``complexity``, and
@@ -280,6 +327,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         if record is not None:
             blocked[entry.route.id] = record
     role_tier = tier_for(role, escalate, complexity)
+    affinity = overrides.get("engine_affinity") or {}
     pin = _pin_for(overrides, role)
     if pin is not None:
         engine, model, effort = pin
@@ -310,13 +358,13 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                              f"({reasons}); wait until then, or change or remove the pin."),
                 retry_eligible=False, field="pin",
             )
-        ranked = sorted(open_matches, key=lambda e: _order_key("deep", usage(e)))
+        ranked = sorted(open_matches, key=lambda e: _order_key(usage(e)))
         best = ranked[0]
         decision = dict(
             role=role, role_tier=role_tier, tier=tiers.get(best.route.id), basis="pin",
             preference=preference, preference_status="ignored:pinned" if preference else "none",
-            rank_version=2, effort_basis="pin",
-            candidates=[_candidate(e, usage, role, False) for e in ranked],
+            rank_version=RANK_VERSION, effort_basis="pin", decided_by="pin",
+            candidates=[_candidate(e, usage, role, False, affinity=affinity) for e in ranked],
             chosen=_route_label(best), chosen_connection_id=best.connection_id,
         )
         decision.update(model_hint=model_hint, model_hint_status=(
@@ -340,8 +388,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                             role=role, preference=None if status else preference,
                             model_hint=model_hint, model_reason=model_reason,
                             escalated=escalate, previous_engine=previous_engine,
-                            all_entries=entries, providers=providers,
-                            recent=recent, inflight=inflight)
+                            all_entries=entries, providers=providers, affinity=affinity)
     if decision is not None and status:
         decision.update(preference=preference, preference_status=status)
     if picked is None:
@@ -406,11 +453,19 @@ def tier_for(role: str, escalate: bool = False, complexity: str = "normal") -> s
 
 def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, str] | None = None,
          excluded: frozenset = frozenset(), *, role: str | None = None, preference: str | None = None,
-         recent: Mapping[str, Mapping[str, int]] | None = None,
-         inflight: Mapping[str, Mapping[str, int]] | None = None):
+         affinity: Mapping[str, str | None] | None = None):
     """The best entry for ``role_tier`` (see :func:`rank`), or ``None``."""
     return rank(role_tier, entries, usage, tier_overrides, excluded, role=role, preference=preference,
-                recent=recent, inflight=inflight)[0]
+                affinity=affinity)[0]
+
+
+# 2: quota band, recent-count balance (tolerance 4), suitability.
+# 3: plus plan usage, engine affinity and cross-tier stand-ins (tolerance 2).
+# 4: no attempt counts and no cross-tier stand-ins -- the task and plan usage
+# alone decide.
+RANK_VERSION = 4
+# The rank key's parts in order, named for the decision's ``decided_by``.
+RANK_KEYS = ("preference", "hint", "quota", "diversify", "usage", "affinity", "used_percent", "engine_order")
 
 
 def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, str] | None = None,
@@ -419,33 +474,45 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
          model_hint: str = "auto", model_reason: str | None = None,
          escalated: bool = False, previous_engine: str | None = None,
          all_entries: Sequence | None = None, providers: Sequence[str] | None = None,
-         recent: Mapping[str, Mapping[str, int]] | None = None,
-         inflight: Mapping[str, Mapping[str, int]] | None = None):
+         affinity: Mapping[str, str | None] | None = None):
     """``(best entry, decision)`` for ``role_tier``, or ``(None, None)``.
 
     ``entries`` are in engine order; ``excluded`` route ids are skipped
     without moving any model's tier. The tier is the first of
-    :data:`_FALLBACK_ORDER` with a usable candidate; within it candidates
-    are ordered by, first difference wins:
+    :data:`_FALLBACK_ORDER` with a usable candidate; a tier whose usable
+    candidates are all on one engine is not widened with another engine's
+    stronger models. Within the tier candidates are ordered by, first
+    difference wins (:data:`RANK_KEYS`):
 
     1. ``preference`` (an engine id) when honoured: the engine has a usable
-       candidate in this tier and, for ``deep``/``standard`` work, is not
-       above :data:`HOT_PERCENT` while another candidate is below it.
-       Otherwise it is ignored and the reason recorded.
-    2. the quota band (unknown is not hot);
-    3. recent same-tier balance excess beyond a four-attempt tolerance;
-    4. :func:`suitability` as a soft tiebreak;
-    5. lower used percent, only if every candidate has known quota;
-    6. engine order.
+       candidate in this tier and is not at or above :data:`HOT_PERCENT`
+       while another candidate is below it. Otherwise it is ignored and the
+       reason recorded.
+    2. an honoured model hint (see :data:`HINT_TOLERANCE`);
+    3. the quota band (unknown is not hot): an account at or above
+       :data:`HOT_PERCENT` ranks last in every tier (:func:`_order_key`);
+    4. on escalation, an engine other than the one that fell short;
+    5. subscription plan usage, only if every candidate's usage is known:
+       each full :data:`USAGE_MARGIN` points above the least-used candidate
+       ranks a candidate one step behind (``usage_band``);
+    6. engine affinity (:func:`suitability`), the task's fit;
+    7. lower exact used percent, only if every candidate's usage is known;
+    8. engine order.
+
+    How many attempts each engine received before never enters the rank:
+    it says nothing about which engine fits the work.
 
     ``decision`` records the tier, every candidate of it in rank order with
-    what ranked it, the preference and whether it was honoured.
+    what ranked it, the preference and whether it was honoured, and
+    ``decided_by``: the first key that separated the chosen candidate from
+    the runner-up (``only_candidate`` when there was none).
     ``superseded`` maps an older route id to the newer route that replaces
     it (see :func:`superseded_routes`); those ids should also be in
     ``excluded`` and ``policy_excluded``."""
     superseded = superseded or {}
     tiers = model_tiers(entries, tier_overrides or {})
     usable = [e for e in entries if e.route.id not in excluded and (usage(e) or 0.0) < 100.0]
+    order = {e.route.id: index for index, e in enumerate(entries)}
     for tier in _FALLBACK_ORDER[role_tier]:
         candidates = [e for e in usable if tiers[e.route.id] == tier]
         if not candidates:
@@ -456,19 +523,17 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             if not preferred:
                 offered = any(e.route.engine == preference and tiers[e.route.id] == tier for e in entries)
                 status = "ignored:provider_unavailable" if offered else "ignored:no_candidate_in_tier"
-            elif (role_tier != "light" and all(_hot(usage(e)) for e in preferred)
-                  and not all(_hot(usage(e)) for e in candidates)):
+            elif all(_hot(usage(e)) for e in preferred) and not all(_hot(usage(e)) for e in candidates):
                 status = "ignored:provider_near_quota_limit"
             else:
                 status = "honoured"
         honoured = preference if status == "honoured" else None
-        order = {e.route.id: index for index, e in enumerate(entries)}
-        engines = {e.route.engine for e in candidates}
-        counts = {engine: int((recent or {}).get(tier, {}).get(engine, 0)) for engine in sorted(engines)}
-        inflight_counts = {engine: int((inflight or {}).get(tier, {}).get(engine, 0)) for engine in sorted(engines)}
-        minimum = min(counts.values())
-        excess = {engine: max(0, count - minimum - BALANCE_TOLERANCE)
-                  for engine, count in counts.items()}
+        used_percent_compared = all(usage(e) is not None for e in candidates)
+        least_used = min(usage(e) for e in candidates) if used_percent_compared else None
+
+        def usage_band(e):
+            return int((usage(e) - least_used) // USAGE_MARGIN) if used_percent_compared else None
+
         hint_status = "auto"
         hinted = []
         if model_hint != "auto":
@@ -495,32 +560,40 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                 hint_status = ("ignored:no_candidate_in_tier" if not slash and
                                not any(e.route.engine == hint_engine and tiers[e.route.id] == tier
                                        for e in entries) else "ignored:unavailable")
-            elif (tier in ("deep", "standard") and all(_hot(usage(e)) for e in hinted)
-                  and not all(_hot(usage(e)) for e in candidates)):
+            elif (all((usage(e) or 0.0) >= HINT_TOLERANCE for e in hinted)
+                  and not all((usage(e) or 0.0) >= HINT_TOLERANCE for e in candidates)):
                 hint_status = "ignored:near_quota_limit"
-            elif counts[hint_engine] - minimum > HINT_TOLERANCE:
-                hint_status = "ignored:engine_overused"
             else:
                 hint_status = "honoured"
-        used_percent_compared = all(usage(e) is not None for e in candidates)
-        ranked = sorted(candidates, key=lambda e: (
-            e.route.engine != honoured,
-            not (hint_status == "honoured" and e in hinted),
-            _order_key(role_tier, usage(e))[0],
-            not (escalated and previous_engine and e.route.engine != previous_engine),
-            excess[e.route.engine], -suitability(role, e.route.engine),
-            usage(e) if used_percent_compared else 0.0, order[e.route.id]))
+
+        def key(e):
+            return (e.route.engine != honoured,
+                    not (hint_status == "honoured" and e in hinted),
+                    _order_key(usage(e))[0],
+                    not (escalated and previous_engine and e.route.engine != previous_engine),
+                    usage_band(e) or 0, -suitability(role, e.route.engine, affinity),
+                    usage(e) if used_percent_compared else 0.0, order[e.route.id])
+
+        ranked = sorted(candidates, key=key)
         best = ranked[0]
+        if len(ranked) == 1:
+            decided_by = "only_candidate"
+        else:
+            first, second = key(best), key(ranked[1])
+            decided_by = next(name for name, a, b in zip(RANK_KEYS, first, second) if a != b)
+        affinity_kind = work_kind(role)
         decision = dict(
-            role=role, role_tier=role_tier, tier=tier, basis="rank", rank_version=2,
+            role=role, role_tier=role_tier, tier=tier, basis="rank", rank_version=RANK_VERSION,
             preference=preference, preference_status=status,
             model_hint=model_hint, model_hint_status=hint_status,
             model_hint_reason=model_reason, diversify_from=previous_engine if escalated else None,
-            balance=dict(window=BALANCE_WINDOW, tolerance=BALANCE_TOLERANCE,
-                         counts=counts, inflight=inflight_counts),
+            usage=dict(compared=used_percent_compared, margin=USAGE_MARGIN, least_used_percent=least_used),
+            affinity=dict(work_kind=affinity_kind, engine=affinity_engine(role, affinity),
+                          source=("routing.json" if affinity_kind is not None and affinity
+                                  and (affinity_kind in affinity or "*" in affinity) else "default")),
             used_percent_compared=used_percent_compared,
-            candidates=[_candidate(e, usage, role, e.route.engine == honoured,
-                                   excess[e.route.engine]) for e in ranked],
+            candidates=[_candidate(e, usage, role, e.route.engine == honoured, usage_band(e),
+                                   affinity=affinity) for e in ranked],
             unavailable=sorted(_route_label(e) for e in entries
                                if tiers[e.route.id] == tier and e.route.id not in policy_excluded
                                and (e.route.id in excluded or (usage(e) or 0.0) >= 100.0)),
@@ -528,6 +601,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                                       if tiers[e.route.id] == tier and e.route.id in policy_excluded
                                       and e.route.id not in superseded),
             superseded={_route_label(e): superseded[e.route.id] for e in entries if e.route.id in superseded},
+            decided_by=decided_by,
             chosen=_route_label(best), chosen_connection_id=best.connection_id,
         )
         return best, decision
@@ -542,12 +616,13 @@ def _route_label(entry) -> str:
     return f"{entry.route.engine}/{entry.route.model}"
 
 
-def _candidate(entry, usage, role, preferred: bool, balance_excess: int = 0) -> dict:
+def _candidate(entry, usage, role, preferred: bool, usage_band: int | None = None, *,
+               affinity: Mapping[str, str | None] | None = None) -> dict:
     """One ranked candidate as the route audit records it."""
     return dict(route=_route_label(entry), connection_id=entry.connection_id, used_percent=usage(entry),
                 hot=_hot(usage(entry)), quota_state="unknown" if usage(entry) is None else "known",
-                balance_excess=balance_excess,
-                suitability=suitability(role, entry.route.engine), preferred=preferred)
+                usage_band=usage_band,
+                suitability=suitability(role, entry.route.engine, affinity), preferred=preferred)
 
 
 def model_tiers(entries: Sequence, tier_overrides: Mapping[str, str]) -> dict[str, str]:
@@ -581,9 +656,15 @@ def _unavailable_reasons(entries: Sequence, blocked: Mapping, usage) -> list[str
     return sorted(reasons)
 
 
-def _order_key(role_tier: str, used: float | None):
-    hot = _hot(used)
-    return (not hot, used or 0.0) if role_tier == "light" else (hot, used or 0.0)
+def _order_key(used: float | None):
+    """Quota-band order: every tier ranks an account at or above
+    :data:`HOT_PERCENT` last, so work goes to the plan with more room.
+    Light work used to spend a hot account first (7b7aca22); that assumed
+    the window resets soon, but ``used_percent`` is the most-used open
+    window (often a weekly one) and the rank never sees its reset time, so
+    it could push cheap work into an exhausting plan and fail it mid-run.
+    Unknown quota is never hot; 100% never gets here."""
+    return (_hot(used), used or 0.0)
 
 
 def permitted_efforts(entry, tier: str) -> tuple[str, ...]:
@@ -816,6 +897,18 @@ def _validate(data) -> None:
                 or not all(isinstance(v, str) and v in SUPPORTED_ENGINES for v in providers)):
             raise ValueError(
                 f"'providers' must be a nonempty list drawn from {', '.join(SUPPORTED_ENGINES)}")
+    if "engine_affinity" in data:
+        affinity = data["engine_affinity"]
+        if not isinstance(affinity, dict):
+            raise ValueError("'engine_affinity' must map a work kind (or \"*\") to an engine id or null")
+        kinds = (*WORK_KIND_ENGINES, "*")
+        for kind, engine in affinity.items():
+            if kind not in kinds:
+                raise ValueError(f"'engine_affinity' names unknown work kind {kind!r}; "
+                                 f"use one of {', '.join(kinds)}")
+            if engine is not None and engine not in SUPPORTED_ENGINES:
+                raise ValueError(f"'engine_affinity' maps {kind!r} to unknown engine {engine!r}; "
+                                 f"use one of {', '.join(SUPPORTED_ENGINES)} or null")
 
 
 def _candidate_paths(project_root, environ) -> list[Path]:

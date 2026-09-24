@@ -113,7 +113,7 @@ an explicit `{"status": "unavailable"|"unknown", "reason": "..."}` marker
    `attempt_route_audit` row (engine, connection, model, effort, audit
    identity and decision detail), or an explicit unavailable marker. For
    automatic routes, the detail can include `rank_version`, model-hint status,
-   quota state, balance counts, policy exclusions and effort basis; capsules
+   quota state, plan usage, policy exclusions and effort basis; capsules
    expose only retained audit data and do not recompute a route. The coordinator's active
    configuration revision does not establish a mixed-team worker's route;
    worker: only its **own** assignment

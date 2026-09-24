@@ -170,6 +170,8 @@ Before testing, install plugin dev dependencies and pass type-check:
 ~~~bash
 npm --prefix integrations/paseo ci
 npm --prefix integrations/paseo run typecheck
+npm --prefix integrations/paseo run test:activation
+npm --prefix integrations/paseo run test:steer
 ~~~
 
 Type-check failures block GUI testing. Always supply the plugin directory as a
@@ -190,9 +192,14 @@ python3 -B scripts/cortex_paseo_dev.py gui --xvfb
 ~~~
 
 The `gui` helper selects ~/.paseo-dev, the separate ~/.config/Paseo-dev Electron
-profile, binds remote debugging to 127.0.0.1, and removes ELECTRON_RUN_AS_NODE
-before launch. The wrapper passes the current worktree root to the dev daemon for
-the local plugin runtime. After the GUI check, stop the dev daemon:
+profile, binds remote debugging to 127.0.0.1 on a free port it selects by default
+(or the explicit `--port`), and removes ELECTRON_RUN_AS_NODE before launch. A
+busy explicit port fails before launch. It prints the selected DevTools URL and
+private DISPLAY when using --xvfb. With `--xvfb`, it starts a private Xvfb on a free display, sets that
+display only for the Electron child, and stops the Xvfb when the GUI exits; it never
+inherits the user desktop display in that mode. The wrapper passes the current
+worktree root to the dev daemon for the local plugin runtime. After the GUI check,
+stop the dev daemon:
 
 ~~~bash
 python3 -B scripts/cortex_paseo_dev.py -- daemon stop --timeout 15 --json

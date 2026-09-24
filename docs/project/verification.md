@@ -127,6 +127,8 @@ npm --prefix integrations/paseo run typecheck
 **Automated unit tests** (from `integrations/paseo/package.json`):
 
 ```
+npm --prefix integrations/paseo run test:activation # server/plugin-activation.test.ts
+npm --prefix integrations/paseo run test:steer      # server/provider-steer.test.ts
 npm run test:diff      # node --experimental-strip-types client/worker-panel-diff.test.ts
 npm run test:status    # node --experimental-strip-types client/worker-panel-status.test.ts
 npm run test:coalesce  # node --experimental-strip-types client/coalesce.test.ts

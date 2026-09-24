@@ -596,8 +596,6 @@ class EngineSessionManagerAdapter:
         self._capacity_limit = capacity_limit
         self._queue_timeout_seconds = capacity_queue_timeout_seconds
         self._lock = threading.Lock()
-        self._route_balance_lock = threading.Lock()
-        self._route_inflight: dict[str, tuple[str, str]] = {}
         self._managers: dict[str, object] = {}
         self._sessions: dict[str, str] = {}
         self._session_to_attempt: dict[str, str] = {}
@@ -780,62 +778,57 @@ class EngineSessionManagerAdapter:
         # fallback ``route_override`` is already present (fallback always
         # wins, unchanged).
         is_worker = bool(launch.get("assignment_id")) and self._store is not None
-        try:
-            unavailable = ()
-            if is_worker:
-                from ..routing import availability
+        unavailable = ()
+        if is_worker:
+            from ..routing import availability
 
-                unavailable = availability.active(self._store)
-            if self._store is not None:
-                self._resolve_runtime_route(launch, project_root, unavailable)
-            # EXT-01 carried item: exactly one resolved connection id for this
-            # attempt, from exactly one of two sources, both already-authorized
-            # or already-role-resolved *before* open() ever runs -- never both,
-            # never neither re-derived independently downstream. A fallback
-            # attempt's ``route_override`` (already authorized by
-            # ``routing.authorization.authorize_fallback``, see
-            # :meth:`attempt_fallback`) always wins when present; an ordinary
-            # mixed-team delegation's own ``resolved_connection_id`` (T027
-            # stored route profile, resolved once by
-            # ``configuration.service.ConfigurationService.resolve_worker_route``
-            # and threaded through unchanged by
-            # ``delegation.provisioning.ProvisioningService``) is used only when
-            # no fallback override is present. Neither is authorized here --
-            # ``_authorize_dispatch`` below still enforces deny-by-default
-            # against this exact same id via ``launch["resolved_route_id"]``.
-            # Absent both (every non-mixed-team, non-fallback attempt -- the
-            # overwhelming majority), the task's own validated
-            # ``connection_record_factory`` (live login/credential state, T009
-            # finding 09) resolves the connection exactly as before this fix.
-            route_override = launch.get("route_override")
-            override_connection_id = (
-                route_override["connection_id"] if route_override is not None
-                else launch.get("resolved_connection_id")
-            )
-            if override_connection_id is not None:
-                from ..connections import registry as connection_registry
+            unavailable = availability.active(self._store)
+        if self._store is not None:
+            self._resolve_runtime_route(launch, project_root, unavailable)
+        # EXT-01 carried item: exactly one resolved connection id for this
+        # attempt, from exactly one of two sources, both already-authorized
+        # or already-role-resolved *before* open() ever runs -- never both,
+        # never neither re-derived independently downstream. A fallback
+        # attempt's ``route_override`` (already authorized by
+        # ``routing.authorization.authorize_fallback``, see
+        # :meth:`attempt_fallback`) always wins when present; an ordinary
+        # mixed-team delegation's own ``resolved_connection_id`` (T027
+        # stored route profile, resolved once by
+        # ``configuration.service.ConfigurationService.resolve_worker_route``
+        # and threaded through unchanged by
+        # ``delegation.provisioning.ProvisioningService``) is used only when
+        # no fallback override is present. Neither is authorized here --
+        # ``_authorize_dispatch`` below still enforces deny-by-default
+        # against this exact same id via ``launch["resolved_route_id"]``.
+        # Absent both (every non-mixed-team, non-fallback attempt -- the
+        # overwhelming majority), the task's own validated
+        # ``connection_record_factory`` (live login/credential state, T009
+        # finding 09) resolves the connection exactly as before this fix.
+        route_override = launch.get("route_override")
+        override_connection_id = (
+            route_override["connection_id"] if route_override is not None
+            else launch.get("resolved_connection_id")
+        )
+        if override_connection_id is not None:
+            from ..connections import registry as connection_registry
 
-                state = connection_registry.read_registry(self._environ)
-                record = state.connections.get(override_connection_id)
-                if record is None:
-                    raise RuntimeError(
-                        f"EngineSessionManagerAdapter.open: resolved connection "
-                        f"{override_connection_id!r} no longer exists."
-                    )
-            else:
-                record = self._connection_record_factory(task_id)
-            route_model = self._launch_model(launch) if is_worker else None
-            if is_worker:
-                self._refuse_unavailable_route(record, route_model, unavailable)
-            if self._store is not None:
-                self._authorize_dispatch(record, task_id, launch, project_root=project_root)
-            reservation_id = None
-            if self._store is not None:
-                reservation_id = self._reserve_capacity_blocking(record.id, task_id, attempt_id, launch)
-        except BaseException:
-            with self._route_balance_lock:
-                self._route_inflight.pop(attempt_id, None)
-            raise
+            state = connection_registry.read_registry(self._environ)
+            record = state.connections.get(override_connection_id)
+            if record is None:
+                raise RuntimeError(
+                    f"EngineSessionManagerAdapter.open: resolved connection "
+                    f"{override_connection_id!r} no longer exists."
+                )
+        else:
+            record = self._connection_record_factory(task_id)
+        route_model = self._launch_model(launch) if is_worker else None
+        if is_worker:
+            self._refuse_unavailable_route(record, route_model, unavailable)
+        if self._store is not None:
+            self._authorize_dispatch(record, task_id, launch, project_root=project_root)
+        reservation_id = None
+        if self._store is not None:
+            reservation_id = self._reserve_capacity_blocking(record.id, task_id, attempt_id, launch)
         # EXT-01 #8 ("startup cleanup"): from here on a real process may
         # exist (``EngineSessionManager._ensure_started`` spawns it lazily,
         # inside ``negotiate()``) before this method ever reaches its own
@@ -944,8 +937,6 @@ class EngineSessionManagerAdapter:
             if workspace_lock is not None:
                 workspace_lock.__exit__(None, None, None)
             self._cleanup_failed_open(manager, reservation_id)
-            with self._route_balance_lock:
-                self._route_inflight.pop(attempt_id, None)
             if is_worker and manager is not None:
                 self._record_dispatch_route_failure(error, record, route_model, task_id, attempt_id)
             raise
@@ -963,13 +954,9 @@ class EngineSessionManagerAdapter:
             replacement = attempt_id in self._ever_opened_attempts or bool(launch.get("recovery"))
             self._ever_opened_attempts.add(attempt_id)
         if self._store is not None:
-            try:
-                self._record_process_identity(record, session_id, task_id, attempt_id, launch)
-                self._record_effective_context(record, task_id, attempt_id, launch)
-                self._record_route_audit(record, task_id, attempt_id, launch)
-            finally:
-                with self._route_balance_lock:
-                    self._route_inflight.pop(attempt_id, None)
+            self._record_process_identity(record, session_id, task_id, attempt_id, launch)
+            self._record_effective_context(record, task_id, attempt_id, launch)
+            self._record_route_audit(record, task_id, attempt_id, launch)
             self._open_generation(
                 manager, record, session_id, task_id, attempt_id, launch,
                 instructions=instructions,
@@ -1635,31 +1622,13 @@ class EngineSessionManagerAdapter:
             provider, review_reason = review_provider_preference(
                 self._store, launch["task_id"], launch["attempt_id"],
             )
-        from ..routing import balance
-        from collections import Counter
-
-        # Serialize the audit snapshot, choice and reservation within this
-        # process. Deduplicate an attempt that has already reached the audit.
-        with self._route_balance_lock:
-            recent = {}
-            inflight = {}
-            for tier in auto_route.TIERS:
-                rows = balance.recent_engine_attempts(self._store, tier)
-                pending = Counter(engine for attempt, (engine, pending_tier) in self._route_inflight.items()
-                                  if pending_tier == tier and attempt not in rows)
-                counts = Counter(rows.values()) + pending
-                recent[tier] = dict(counts)
-                inflight[tier] = dict(pending)
-            choice = auto_route.choose(
-                role, project_root, self._environ, escalate=escalate, complexity=complexity,
-                unavailable=unavailable, preference=provider, model_hint=model_hint,
-                model_reason=model_reason, previous_engine=previous_engine,
-                recent=recent, inflight=inflight,
-            )
-            if choice is not None:
-                self._route_inflight[launch["attempt_id"]] = (
-                    choice.decision["chosen"].split("/", 1)[0], choice.decision["tier"],
-                )
+        # The choice depends only on the work and each plan's current usage,
+        # never on how many attempts an engine received before.
+        choice = auto_route.choose(
+            role, project_root, self._environ, escalate=escalate, complexity=complexity,
+            unavailable=unavailable, preference=provider, model_hint=model_hint,
+            model_reason=model_reason, previous_engine=previous_engine,
+        )
         if choice is None:
             return
         if review_reason and choice.decision is not None:
@@ -1783,7 +1752,8 @@ class EngineSessionManagerAdapter:
             detail["route_basis"] = route_basis
         # Why automatic routing chose this route among the tier's
         # candidates (``auto_route.rank``): tier, ranked candidates with
-        # their quota/suitability, and the coordinator's provider preference.
+        # their plan usage/affinity, cross-tier stand-ins, what decided it, and
+        # the coordinator's provider preference.
         if launch.get("route_decision"):
             detail["route_decision"] = launch["route_decision"]
         # T035: this attempt's real, engine-observed model name (never a

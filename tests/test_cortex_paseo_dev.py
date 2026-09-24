@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import socket
+import time
 from pathlib import Path
 
 
@@ -73,29 +76,142 @@ def test_gui_sets_environment_correctly(tmp_path):
     assert f"PASEO_HOME={dev_home}" in result.stdout
     assert "PASEO_ELECTRON_USER_DATA_DIR=" in result.stdout
     assert "--remote-debugging-address=127.0.0.1" in result.stdout
-    assert "--remote-debugging-port=9222" in result.stdout
+    port_line = next(line for line in result.stdout.splitlines() if "Chrome DevTools Protocol:" in line)
+    selected_port = int(port_line.rsplit(":", 1)[1])
+    assert 1 <= selected_port <= 65535
+    assert f"--remote-debugging-port={selected_port}" in result.stdout
 
 
-def test_gui_adds_xvfb_flag_when_requested(tmp_path):
-    """The gui subcommand must add --ozone-platform=x11 when --xvfb is specified."""
+def test_gui_uses_a_private_xvfb_display_when_requested(tmp_path):
+    """--xvfb must replace an inherited display with a short-lived private one."""
     dev_home = tmp_path / "test-paseo-dev"
     dev_home.mkdir()
+
+    xvfb_args = tmp_path / "xvfb-args"
+    fake_xvfb = tmp_path / "Xvfb"
+    fake_xvfb.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$@" > "$XVFB_ARGS_FILE"\n'
+        "printf '123\\n'\n"
+        "trap 'exit 0' TERM INT\n"
+        "while :; do sleep 1; done\n"
+    )
+    fake_xvfb.chmod(0o755)
 
     fake_paseo = tmp_path / "Paseo"
     fake_paseo.write_text(
         "#!/bin/sh\n"
         'echo "PASEO_ELECTRON_FLAGS=$PASEO_ELECTRON_FLAGS"\n'
+        'echo "DISPLAY=$DISPLAY"\n'
     )
     fake_paseo.chmod(0o755)
 
+    environment = dict(os.environ)
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "XVFB_ARGS_FILE": str(xvfb_args),
+        "DISPLAY": ":user-desktop",
+    })
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo),
          "--home", str(dev_home), "--xvfb"],
-        capture_output=True, text=True, cwd=str(ROOT)
+        capture_output=True, text=True, cwd=str(ROOT), env=environment,
     )
 
     assert result.returncode == 0
     assert "--ozone-platform=x11" in result.stdout
+    assert "DISPLAY=:123" in result.stdout
+    assert "Chrome DevTools Protocol: http://127.0.0.1:" in result.stdout
+    assert "DISPLAY=:user-desktop" not in result.stdout
+    assert xvfb_args.read_text().splitlines() == [
+        "-displayfd", "1", "-screen", "0", "1440x900x24", "-nolisten", "tcp",
+    ]
+
+
+def test_gui_terminates_xvfb_and_electron_children_on_sigterm(tmp_path):
+    """Sending SIGTERM to the wrapper must not leak its Xvfb/Electron children."""
+    dev_home = tmp_path / "test-paseo-dev"
+    dev_home.mkdir()
+
+    xvfb_pid_file = tmp_path / "xvfb.pid"
+    paseo_pid_file = tmp_path / "paseo.pid"
+
+    fake_xvfb = tmp_path / "Xvfb"
+    fake_xvfb.write_text(
+        "#!/bin/sh\n"
+        'echo $$ > "$XVFB_PID_FILE"\n'
+        "printf '123\\n'\n"
+        "while :; do sleep 1; done\n"
+    )
+    fake_xvfb.chmod(0o755)
+
+    fake_paseo = tmp_path / "Paseo"
+    fake_paseo.write_text(
+        "#!/bin/sh\n"
+        'echo $$ > "$PASEO_PID_FILE"\n'
+        "while :; do sleep 1; done\n"
+    )
+    fake_paseo.chmod(0o755)
+
+    environment = dict(os.environ)
+    environment.update({
+        "PATH": f"{tmp_path}:{environment['PATH']}",
+        "XVFB_PID_FILE": str(xvfb_pid_file),
+        "PASEO_PID_FILE": str(paseo_pid_file),
+    })
+
+    wrapper = subprocess.Popen(
+        [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo),
+         "--home", str(dev_home), "--xvfb"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        cwd=str(ROOT), env=environment,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not paseo_pid_file.exists():
+            time.sleep(0.05)
+        assert paseo_pid_file.exists(), "fake Paseo never started"
+
+        wrapper.send_signal(signal.SIGTERM)
+        wrapper.communicate(timeout=10)
+    finally:
+        if wrapper.poll() is None:
+            wrapper.kill()
+            wrapper.communicate()
+
+    xvfb_pid = int(xvfb_pid_file.read_text().strip())
+    paseo_pid = int(paseo_pid_file.read_text().strip())
+
+    def _alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and (_alive(xvfb_pid) or _alive(paseo_pid)):
+        time.sleep(0.05)
+
+    assert not _alive(paseo_pid), "fake Paseo child survived wrapper SIGTERM"
+    assert not _alive(xvfb_pid), "fake Xvfb child survived wrapper SIGTERM"
+
+
+def test_gui_xvfb_fails_closed_when_xvfb_is_unavailable(tmp_path):
+    dev_home = tmp_path / "test-paseo-dev"
+    dev_home.mkdir()
+    fake_paseo = tmp_path / "Paseo"
+    fake_paseo.write_text("#!/bin/sh\nexit 99\n")
+    fake_paseo.chmod(0o755)
+    environment = dict(os.environ)
+    environment["PATH"] = "/nonexistent"
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo),
+         "--home", str(dev_home), "--xvfb"],
+        capture_output=True, text=True, cwd=str(ROOT), env=environment,
+    )
+    assert result.returncode == 2
+    assert "requires Xvfb" in result.stderr
 
 
 def test_gui_custom_port(tmp_path):
@@ -118,6 +234,26 @@ def test_gui_custom_port(tmp_path):
 
     assert result.returncode == 0
     assert "--remote-debugging-port=8888" in result.stdout
+    assert "Chrome DevTools Protocol: http://127.0.0.1:8888" in result.stdout
+
+
+def test_gui_refuses_busy_explicit_port_before_starting_xvfb(tmp_path):
+    dev_home = tmp_path / "dev-home"
+    dev_home.mkdir()
+    fake_paseo = tmp_path / "Paseo"
+    fake_paseo.write_text("#!/bin/sh\nexit 0\n")
+    fake_paseo.chmod(0o755)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        port = occupied.getsockname()[1]
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo),
+             "--home", str(dev_home), "--port", str(port), "--xvfb"],
+            capture_output=True, text=True, cwd=str(ROOT),
+        )
+    assert result.returncode == 2
+    assert f"--port {port} is unavailable on 127.0.0.1" in result.stderr
 
 
 def test_cli_refuses_home_override(tmp_path):
@@ -179,11 +315,13 @@ def test_cli_requires_command(tmp_path):
     assert "provide a Paseo command" in result.stderr
 
 
-def test_cli_passes_current_source_root(tmp_path):
+def test_cli_uses_private_cortex_xdg_paths_and_current_source_root(tmp_path):
     fake_paseo = tmp_path / "paseo"
     fake_paseo.write_text(
         "#!/bin/sh\n"
         'echo "CORTEX_PASEO_SOURCE_ROOT=$CORTEX_PASEO_SOURCE_ROOT"\n'
+        'echo "XDG_CONFIG_HOME=$XDG_CONFIG_HOME"\n'
+        'echo "XDG_STATE_HOME=$XDG_STATE_HOME"\n'
     )
     fake_paseo.chmod(0o755)
     dev_home = tmp_path / "dev-home"
@@ -195,13 +333,17 @@ def test_cli_passes_current_source_root(tmp_path):
     )
     assert result.returncode == 0
     assert f"CORTEX_PASEO_SOURCE_ROOT={ROOT}" in result.stdout
+    assert f"XDG_CONFIG_HOME={dev_home}/cortex-xdg/config" in result.stdout
+    assert f"XDG_STATE_HOME={dev_home}/cortex-xdg/state" in result.stdout
 
 
-def test_gui_passes_current_source_root(tmp_path):
+def test_gui_uses_private_cortex_xdg_paths_and_current_source_root(tmp_path):
     fake_paseo = tmp_path / "Paseo"
     fake_paseo.write_text(
         "#!/bin/sh\n"
         'echo "CORTEX_PASEO_SOURCE_ROOT=$CORTEX_PASEO_SOURCE_ROOT"\n'
+        'echo "XDG_CONFIG_HOME=$XDG_CONFIG_HOME"\n'
+        'echo "XDG_STATE_HOME=$XDG_STATE_HOME"\n'
     )
     fake_paseo.chmod(0o755)
     dev_home = tmp_path / "dev-home"
@@ -213,3 +355,5 @@ def test_gui_passes_current_source_root(tmp_path):
     )
     assert result.returncode == 0
     assert f"CORTEX_PASEO_SOURCE_ROOT={ROOT}" in result.stdout
+    assert f"XDG_CONFIG_HOME={dev_home}/cortex-xdg/config" in result.stdout
+    assert f"XDG_STATE_HOME={dev_home}/cortex-xdg/state" in result.stdout

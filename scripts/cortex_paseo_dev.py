@@ -7,6 +7,11 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
+import select
+import shutil
+import signal
+import socket
 import subprocess
 import sys
 
@@ -18,14 +23,92 @@ def resolved(path: str) -> Path:
     return candidate.resolve(strict=False)
 
 
+def cortex_xdg_paths(home: Path) -> tuple[Path, Path]:
+    """Return the Cortex-only XDG roots for one isolated Paseo home."""
+    root = home / "cortex-xdg"
+    return root / "config", root / "state"
+
+
+def isolated_environment(home: Path) -> dict[str, str]:
+    """Keep a dev Paseo process out of the user's normal Cortex XDG state."""
+    config_home, state_home = cortex_xdg_paths(home)
+    env = os.environ.copy()
+    env["XDG_CONFIG_HOME"] = str(config_home)
+    env["XDG_STATE_HOME"] = str(state_home)
+    env["CORTEX_PASEO_SOURCE_ROOT"] = str(Path(__file__).resolve().parent.parent)
+    return env
+
+
+def _stop_xvfb(process: subprocess.Popen[str]) -> None:
+    """Stop an Xvfb process started for one GUI invocation."""
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def _start_xvfb() -> tuple[subprocess.Popen[str], str]:
+    """Start a private Xvfb and return its process and display name."""
+    xvfb = shutil.which("Xvfb")
+    if xvfb is None:
+        raise RuntimeError("--xvfb requires Xvfb with -displayfd support; install Xvfb or run without --xvfb")
+    process = subprocess.Popen(
+        [xvfb, "-displayfd", "1", "-screen", "0", "1440x900x24", "-nolisten", "tcp"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    assert process.stdout is not None
+    ready, _, _ = select.select([process.stdout], [], [], 5)
+    if not ready:
+        _stop_xvfb(process)
+        raise RuntimeError("Xvfb did not report a private display within 5 seconds")
+    display = process.stdout.readline().strip()
+    if not re.fullmatch(r"[0-9]+", display):
+        _stop_xvfb(process)
+        raise RuntimeError("Xvfb did not report a valid private display")
+    return process, f":{display}"
+
+
+def _terminate_process_group(process: subprocess.Popen, timeout: float = 5) -> None:
+    """Terminate a process started with start_new_session, escalating to SIGKILL."""
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        process.wait(timeout=timeout)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    process.wait()
+
+
+def _select_debug_port(requested_port: int | None) -> int:
+    """Choose a loopback port and reject explicitly requested ports already in use."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", requested_port or 0))
+        return int(probe.getsockname()[1])
+
+
 def main(argv: list[str]) -> int:
     # Check if this is a gui subcommand invocation
     if argv and argv[0] == "gui":
         parser = argparse.ArgumentParser(description=__doc__, add_help=True)
         parser.add_argument("--paseo", default="/opt/Paseo/Paseo", help="Paseo Electron executable path")
         parser.add_argument("--home", default=str(Path.home() / ".paseo-dev"), help="isolated Paseo home")
-        parser.add_argument("--port", type=int, default=9222, help="Chrome DevTools Protocol port (default: 9222)")
-        parser.add_argument("--xvfb", action="store_true", help="Use --ozone-platform=x11 for Xvfb")
+        parser.add_argument("--port", type=int, help="Chrome DevTools Protocol port (default: choose a free port)")
+        parser.add_argument("--xvfb", action="store_true", help="launch a private Xvfb display for this GUI invocation")
 
         args = parser.parse_args(argv[1:])
         return _run_gui(args)
@@ -63,26 +146,63 @@ def _run_gui(args) -> int:
         print(f"cortex_paseo_dev gui: --paseo must name an executable absolute path (got {args.paseo})", file=sys.stderr)
         return 2
 
-    if args.port < 1 or args.port > 65535:
+    if args.port is not None and (args.port < 1 or args.port > 65535):
         print(f"cortex_paseo_dev gui: --port must be 1-65535 (got {args.port})", file=sys.stderr)
         return 2
 
-    flags = [f"--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={args.port}"]
+    try:
+        port = _select_debug_port(args.port)
+    except OSError as error:
+        if args.port is None:
+            print(f"cortex_paseo_dev gui: could not select a free loopback port: {error}", file=sys.stderr)
+        else:
+            print(f"cortex_paseo_dev gui: --port {args.port} is unavailable on 127.0.0.1: {error}", file=sys.stderr)
+        return 2
+
+    flags = ["--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={port}"]
     if args.xvfb:
         flags.append("--ozone-platform=x11")
 
-    env = os.environ.copy()
+    env = isolated_environment(home)
     env["PASEO_HOME"] = str(home)
-    env["CORTEX_PASEO_SOURCE_ROOT"] = str(Path(__file__).resolve().parent.parent)
     env["PASEO_ELECTRON_USER_DATA_DIR"] = str(Path.home() / ".config" / "Paseo-dev")
     env["PASEO_ELECTRON_FLAGS"] = " ".join(flags)
 
     # Do not set ELECTRON_RUN_AS_NODE; it interferes with isolation
     env.pop("ELECTRON_RUN_AS_NODE", None)
 
+    xvfb_process = None
+    if args.xvfb:
+        try:
+            xvfb_process, display = _start_xvfb()
+        except RuntimeError as error:
+            print(f"cortex_paseo_dev gui: {error}", file=sys.stderr)
+            return 2
+        env["DISPLAY"] = display
+
     print(f"cortex_paseo_dev gui: launching isolated Paseo at {home}")
-    print(f"  Chrome DevTools Protocol: http://127.0.0.1:{args.port}")
-    return subprocess.run([str(paseo)], env=env, check=False).returncode
+    print(f"  Chrome DevTools Protocol: http://127.0.0.1:{port}")
+    if xvfb_process is not None:
+        print(f"  Private Xvfb display: {env['DISPLAY']}")
+
+    electron_process: subprocess.Popen | None = None
+
+    def _handle_termination(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    previous_handlers = {
+        sig: signal.signal(sig, _handle_termination) for sig in (signal.SIGTERM, signal.SIGINT)
+    }
+    try:
+        electron_process = subprocess.Popen([str(paseo)], env=env, start_new_session=True)
+        return electron_process.wait()
+    finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
+        if electron_process is not None:
+            _terminate_process_group(electron_process)
+        if xvfb_process is not None:
+            _stop_xvfb(xvfb_process)
 
 
 def _run_cli(args) -> int:
@@ -121,7 +241,7 @@ def _run_cli(args) -> int:
         print("cortex_paseo_dev: provide a Paseo command after --", file=sys.stderr)
         return 2
 
-    env = os.environ.copy()
+    env = isolated_environment(home)
     # Paseo bundles server plugins as CJS and does not expose their source path.
     # Pass this worktree root explicitly to the isolated daemon for directory plugins.
     env["CORTEX_PASEO_SOURCE_ROOT"] = str(Path(__file__).resolve().parent.parent)

@@ -90,7 +90,11 @@ npm --prefix integrations/paseo run typecheck
 Type-check failures block GUI testing. Always give the plugin directory as a full absolute path when installing it. The plugin is edited in isolated git worktrees,
 so the path changes between sessions. Resolve it from the current worktree root.
 The guarded wrapper passes that root as `CORTEX_PASEO_SOURCE_ROOT` to the isolated
-daemon for local directory-plugin loading.
+daemon for local directory-plugin loading. It also sets `XDG_CONFIG_HOME` and
+`XDG_STATE_HOME` to `~/.paseo-dev/cortex-xdg/config` and
+`~/.paseo-dev/cortex-xdg/state` (or equivalent paths below an explicit dev home).
+This prevents a user-level Cortex launch record from selecting a packaged runtime;
+the explicit source root takes precedence for this dev-only path.
 
 Start the isolated daemon, install or inspect the explicitly addressed local plugin,
 then launch Electron Desktop:
@@ -114,8 +118,17 @@ python3 -B scripts/cortex_paseo_dev.py gui --xvfb
 
 The `gui` helper selects `~/.paseo-dev`, the separate
 `~/.config/Paseo-dev` Electron profile, binds remote debugging to
-`127.0.0.1`, and removes `ELECTRON_RUN_AS_NODE` before launch. Do not pass direct
+`127.0.0.1`, and removes `ELECTRON_RUN_AS_NODE` before launch. By default it
+asks the operating system for a free loopback port; pass `--port <port>` to
+choose one explicitly. An explicit port already in use fails before launch.
+The selected DevTools URL and, with `--xvfb`, the private `DISPLAY` are printed
+so a caller can attach. Do not pass direct
 Chromium arguments to the Paseo executable; the app daemon manager rejects them.
+With `--xvfb`, it starts its own Xvfb using its supported `-displayfd`, `-screen`,
+and `-nolisten` flags, gives only the Electron child that new `DISPLAY`, and stops
+that Xvfb when the GUI exits. It never inherits a desktop `DISPLAY` in this mode.
+The command fails before launching Paseo when Xvfb is absent or cannot provide a
+private display.
 After a GUI check, stop the isolated daemon:
 
 ~~~bash

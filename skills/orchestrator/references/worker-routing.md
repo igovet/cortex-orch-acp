@@ -7,18 +7,16 @@ do not describe it as an enforced capability without retained runtime evidence.
 Read the exact reports returned in task context through bounded report reads.
 A worker's chat text is not its structured result and does not finish an assignment.
 
-Leave a task's provider preference unset by default: the runtime already
-weighs each provider's fit for the role, plan usage and availability. Set it
-only when you have evidence that one provider suits this particular task
-better, for example after it failed or fell short on the same work, when the
-user asked for one, or when a review should run on a different provider from
-the implementation it checks. It is a preference, not a guarantee.
-
-Prefer `auto` for a node's model. When you do name an exact route, copy one that
-`list_route_options` marks `auto_eligible`. The runtime routes only the newest
-version of each model family and never a denied model (by default Haiku and
-`gpt-5.5`). A hint naming an older, superseded version or an excluded model is
-recorded as ignored.
+Use `auto` only when there is no work-specific engine reason. Otherwise
+recommend an engine id and include `model_reason`: recommend `claude-agent-acp`
+for code analysis, root-cause debugging, large-context reading, review-like
+judgement, design, and prose; recommend `codex-acp` for mechanical edits and
+fast run-fix loops. The runtime still decides availability, tier, effort and
+the exact model. A hint never raises the task's tier: light work stays on a
+light model even if the hinted engine has none there. A hint is ignored when
+the hinted route is excluded, exhausted, or its plan is at least 85% used
+while another candidate's is not. When you name an exact route, copy one that
+`list_route_options` marks `auto_eligible`.
 
 ## Specialist catalogue
 

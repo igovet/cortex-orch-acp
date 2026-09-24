@@ -78,7 +78,10 @@ Paseo steer, which uses a concurrent configuration request and does not call
 `USER_STEERING`; `turn_interrupted` classifies as `cancellation` even when
 an adapter prefixes it with `engine_error`, and a cancelled worker never
 enters fallback routing. A later user
-prompt can resume planning from durable state. It does not cancel unrelated tasks.
+prompt can resume planning from durable state. That RECOVERING pass cancels
+the same assignments again (reason `replanning`); the work graph keeps an
+attempt that is already failed with its first reason and records no
+`work_attempt_sync_failed` for the repeat. It does not cancel unrelated tasks.
 
 `/cortex-stop` permanently marks the task CANCELLED before cleanup. It closes
 pending questions, fences late publications and cancels capacity-queued opens.

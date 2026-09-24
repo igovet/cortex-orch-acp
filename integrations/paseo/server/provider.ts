@@ -262,6 +262,13 @@ function cortexCommand(): CommandArgv {
     return undefined;
   };
 
+  // The guarded dev wrapper supplies this only for a directory plugin in an
+  // isolated dev daemon. It is an explicit request to run this checkout, so
+  // it must win over any inherited launch record or command from another
+  // Cortex installation. Production launches leave it unset.
+  const source = sourceTreeLaunch();
+  if (source) return shimmedCommand(source.shim, ["python3", "-B", source.entry]);
+
   if (command?.startsWith("[")) {
     const parsed = parseArgv(command);
     if (
@@ -275,16 +282,13 @@ function cortexCommand(): CommandArgv {
     return shimmedCommand(bundledShimPath(), [command]);
   }
 
-  // Prefer a launch record in this XDG profile. An isolated source-tree
-  // profile uses the matching local entry point when it has no record, so a
-  // stale record in the user's normal profile cannot redirect the dev session.
-  // Other profiles can still use the normal HOME/.config record.
+  // Prefer a launch record in this XDG profile. Production profiles can still
+  // use the normal HOME/.config record when no XDG location is supplied.
   const isolatedConfigHome = process.env.XDG_CONFIG_HOME;
   const regularConfigHome = join(homedir(), ".config");
-  const explicitSource = Boolean(process.env.CORTEX_PASEO_SOURCE_ROOT?.trim());
   const configHomes = [
     isolatedConfigHome,
-    ...(!explicitSource ? [regularConfigHome] : []),
+    regularConfigHome,
   ].filter((value, index, values): value is string =>
     Boolean(value) && values.indexOf(value) === index,
   );
@@ -328,8 +332,6 @@ function cortexCommand(): CommandArgv {
     throw new Error(`Invalid Cortex Paseo launch configuration: ${launchConfig}`);
   }
 
-  const source = sourceTreeLaunch();
-  if (source) return shimmedCommand(source.shim, ["python3", "-B", source.entry]);
   throw new Error("Cortex ACP launch unavailable; configure a Paseo launch record or CORTEX_PASEO_SOURCE_ROOT");
 }
 
@@ -519,9 +521,13 @@ export function wrapCortexConnection(
   const answerRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   const steerRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   const activeTurns = new Map<string, string>();
+  const lastTurns = new Map<string, string>();
   connection.onEvent((event) => {
     if (event.type === "session.turn") {
-      if (event.state === "started") activeTurns.set(event.sessionId, event.turnId);
+      if (event.state === "started") {
+        activeTurns.set(event.sessionId, event.turnId);
+        lastTurns.set(event.sessionId, event.turnId);
+      }
       else if (activeTurns.get(event.sessionId) === event.turnId) activeTurns.delete(event.sessionId);
     }
     if (event.type !== "request.completed" && event.type !== "request.failed") return;
@@ -564,20 +570,20 @@ export function wrapCortexConnection(
     input: Extract<Parameters<typeof connection.send>[0], { type: "session.prompt" }>,
   ) {
     const text = steerText(input);
-    const warnWithoutInterrupting = (description: string) => {
+    // Paseo accepts a steer only as a `steer` result for the turn it
+    // expects; any other result makes it cancel that turn and resend the
+    // text as a new prompt. A refused steer therefore fails the send, which
+    // Paseo reports without touching the running turn.
+    const refuse = (description: string): never => {
       listeners.forEach((listener) => listener({
         type: "session.notice", sessionId: input.sessionId,
         notice: { id: `cortex-steer:${input.prompt.clientMessageId}`,
           severity: "warning", title: "Steering was not queued", description },
       }));
-      listeners.forEach((listener) => listener({
-        type: "session.prompt_result", sessionId: input.sessionId,
-        clientMessageId: input.prompt.clientMessageId, result: { type: "completed" },
-      }));
+      throw new Error(`Steering was not queued. ${description}`);
     };
     if (text === null) {
-      warnWithoutInterrupting("Only text steering is supported during an active turn. Current work is continuing.");
-      return;
+      refuse("Only text steering is supported during an active turn. Nothing was sent; current work is continuing.");
     }
     const requestId = `${STEER_REQUEST_PREFIX}${randomUUID()}`;
     const delivered = new Promise<void>((resolve, reject) => {
@@ -591,21 +597,26 @@ export function wrapCortexConnection(
         }) } },
       });
       await delivered;
-      listeners.forEach((listener) => listener({
-        type: "timeline.item", sessionId: input.sessionId,
-        item: { type: "user_message", id: input.prompt.clientMessageId,
-          clientMessageId: input.prompt.clientMessageId, text },
-      }));
-      const turnId = activeTurns.get(input.sessionId);
-      listeners.forEach((listener) => listener({
-        type: "session.prompt_result", sessionId: input.sessionId,
-        clientMessageId: input.prompt.clientMessageId,
-        result: turnId ? { type: "steer", turnId } : { type: "completed" },
-      }));
-    } catch {
+    } catch (error) {
       steerRequests.delete(requestId);
-      warnWithoutInterrupting("Cortex did not confirm durable capture. Current work is continuing; send the instruction again.");
+      const reason = error instanceof Error ? error.message.trim().slice(0, 300) : "";
+      refuse(`Cortex did not confirm durable capture${reason ? ` (${reason})` : ""}. `
+        + "Nothing was sent; current work is continuing. Send the instruction again.");
     }
+    listeners.forEach((listener) => listener({
+      type: "timeline.item", sessionId: input.sessionId,
+      item: { type: "user_message", id: input.prompt.clientMessageId,
+        clientMessageId: input.prompt.clientMessageId, text: text! },
+    }));
+    // A turn that ended while Cortex captured the steer is still the one
+    // Paseo expects; Cortex processes the captured text in a background
+    // continuation, so the steer is accepted for that turn.
+    const turnId = activeTurns.get(input.sessionId) ?? lastTurns.get(input.sessionId);
+    listeners.forEach((listener) => listener({
+      type: "session.prompt_result", sessionId: input.sessionId,
+      clientMessageId: input.prompt.clientMessageId,
+      result: turnId ? { type: "steer", turnId } : { type: "completed" },
+    }));
   }
   const openedSessions = new Set<string>();
   const bufferedTimeline = new Map<string, ReplaySpool>();
@@ -675,6 +686,7 @@ export function wrapCortexConnection(
       answerRequests.clear();
       steerRequests.clear();
       activeTurns.clear();
+      lastTurns.clear();
       openedSessions.clear();
       for (const spool of bufferedTimeline.values()) spool.close();
       bufferedTimeline.clear();

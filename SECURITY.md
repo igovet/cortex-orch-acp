@@ -18,8 +18,7 @@ that decision as `REVIEW_NOT_REQUIRED` and binds verification to the same digest
 Any project change, every fix cycle, or an unobservable project still requires
 independent review. No model hint can waive review. A model tool call cannot
 select a task state, accept the task or directly create an engine session.
-Structural validation does not prove semantic correctness of a plan, review or
-implementation.
+Plan verification commands execute as literal argv without a shell. Submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses, so a plan cannot defer that syntax error until verification. Structural validation does not prove semantic correctness of a plan, review or implementation.
 
 ## Tool access and containment
 
@@ -254,6 +253,11 @@ commands, the current project digest, synthesis identity and absence of live
 sessions. Workers cannot choose the reviewed revision, weaken check contracts or
 write outside their scope. Runtime and independent reviewer effects are separate
 from the worker who proposes the implementation.
+
+The runtime creates its project `.cortex` directory owner-only (`0700`) and
+refuses a pre-existing directory with broader permissions. The refusal keeps the
+path and expected mode and tells the local owner the exact `chmod 700` command;
+it does not weaken the check or repair a pre-existing directory automatically.
 
 ## Attack-surface review and limits
 

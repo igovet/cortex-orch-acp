@@ -70,6 +70,10 @@ MAX_REVIEW_CYCLES = 3
 MAX_VERIFICATION_REPAIRS = 3
 # Automatic returns of a failed worker result to the coordinator, per task.
 MAX_COORDINATOR_RETURNS = 3
+# Verification uses exec-style argv, never a shell. These are only tokens that
+# acquire shell control meaning when separated from an argument; embedded
+# characters remain valid literal arguments (for example pytest -k expressions).
+_VERIFICATION_SHELL_TOKENS = frozenset({"<", ">", ">>", "|", "&&", "||", ";", "(", ")"})
 
 
 def now():
@@ -396,6 +400,14 @@ def validate_plan(plan):
         if not isinstance(argv, list) or not 1 <= len(argv) <= 64 or any(
                 not isinstance(arg, str) or not arg or len(arg) > 4096 or '\x00' in arg for arg in argv):
             raise StoreError('invalid_verification_command')
+        shell_token = next((arg for arg in argv
+                            if arg in _VERIFICATION_SHELL_TOKENS or "$(" in arg or "`" in arg), None)
+        if shell_token is not None:
+            raise StoreError(
+                'verification_shell_syntax', 'plan.verification', shell_token,
+                'literal argv without shell syntax',
+                'Use a documented project command or script. Verification executes argv directly without a shell.',
+            )
     return plan
 
 

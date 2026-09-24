@@ -28,9 +28,9 @@
 
 ## What Cortex is
 
-Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory.
+Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts.
 
-Worker routes and effort are selected from observed models by task tier, quota and recent same-tier balance. Plan model hints are constrained recommendations; explicit routing rules remain authoritative.
+Worker routes and effort are selected from observed models by the task (role tier, complexity, work-kind engine affinity configurable with `engine_affinity` in `routing.json`, and the coordinator's hint) and each engine's subscription plan usage; how often an engine was used before is not a factor. Light work stays on light models and hard work gets stronger ones. Plan model hints are constrained recommendations; explicit routing rules remain authoritative.
 
 ## Install
 

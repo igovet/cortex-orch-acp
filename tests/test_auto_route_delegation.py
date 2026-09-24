@@ -135,23 +135,53 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     assert detail["decision_detail"]["route_basis"] == "auto"
     assert detail["decision_detail"]["effort"] == "high"
     decision = detail["decision_detail"]["route_decision"]
-    assert decision["rank_version"] == 2
-    assert decision["balance"]["window"] == 20 and decision["balance"]["tolerance"] == 4
+    assert decision["rank_version"] == 4
+    assert "balance" not in decision
     assert decision["used_percent_compared"] is False
+    assert decision["usage"] == dict(compared=False, margin=10.0, least_used_percent=None)
     assert {c["quota_state"] for c in decision["candidates"]} == {"known", "unknown"}
-    assert adapter._route_inflight == {}
+    assert not hasattr(adapter, "_route_inflight")
     adapter.terminate_owned(result.attempt_id)
 
 
-def test_light_work_spends_the_account_above_the_threshold(tmp_path):
+def test_light_work_also_moves_off_the_account_above_the_threshold(tmp_path):
+    """Light work no longer spends a hot plan first, even against affinity."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _routing(project, {"engine_affinity": {"*": "codex-acp"}})
     _codex_used(connection_a, 90.0)
     result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
     assert result.status == "ready"
-    assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
-    assert _read_log(log_b) == []
-    assert _effort_calls(log_a)[-1]["params"]["value"] == "low"
+    assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
+    assert _read_log(log_a) == []
+    assert _effort_calls(log_b)[-1]["params"]["value"] == "low"
+    decision = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]["decision_detail"]["route_decision"]
+    assert decision["decided_by"] == "quota"
     adapter.terminate_owned(result.attempt_id)
+
+
+def test_earlier_attempt_counts_never_move_the_choice(tmp_path, monkeypatch):
+    """Many recorded Codex attempts in the tier do not hand implementation
+    work to Claude: only the work and plan usage decide."""
+    from cortex_runtime.orchestration import state
+
+    store, channel, provisioning, adapter, *_rest = _setup(tmp_path)
+    project = _rest[-2]
+    monkeypatch.setattr(state, "attempt_routing", lambda *_: state.AttemptRouting(False, "normal", "auto", None, None))
+    decisions = []
+    for index in range(6):
+        launch = {"task_id": channel.task_id, "attempt_id": f"repeat-{index}",
+                  "assignment_id": f"repeat-assignment-{index}", "role_id": "worker-backend-dev"}
+        adapter._resolve_runtime_route(launch, str(project))
+        decision = launch["route_decision"]
+        decisions.append(decision)
+        routing_store.record_attempt_audit(
+            store, attempt_id=launch["attempt_id"], task_id=channel.task_id, role="worker-backend-dev",
+            engine=decision["chosen"].split("/", 1)[0], connection_id=launch["resolved_connection_id"],
+            model=launch["resolved_model"], params_fingerprint="fp", config_revision_id=None,
+            decision="authorized", detail={"route_decision": decision},
+        )
+    assert {d["chosen"].split("/", 1)[0] for d in decisions} == {"codex-acp"}
+    assert {d["decided_by"] for d in decisions} == {"affinity"}
 
 
 def test_claude_usage_reported_by_the_engine_steers_the_choice(tmp_path):
@@ -413,24 +443,23 @@ def _unavailable(store, channel, connection, *, reason="quota_exhausted", scope=
 
 
 def test_an_exhausted_provider_is_skipped(tmp_path):
-    """Light work would spend the hot Codex account; its recorded
-    exhaustion sends the work to the other provider instead."""
+    """Implementation work leans to the Codex account with room; its
+    recorded exhaustion sends the work to the other provider instead."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
-    _codex_used(connection_a, 90.0)
+    _codex_used(connection_a, 10.0)
     _unavailable(store, channel, connection_a)
-    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-1")
     assert result.status == "ready"
     assert _read_log(log_a) == []
     assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
-    assert adapter._route_inflight == {}
     adapter.terminate_owned(result.attempt_id)
 
 
 def test_a_model_scoped_record_leaves_the_rest_of_the_account_usable(tmp_path):
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
-    _codex_used(connection_a, 90.0)
+    _codex_used(connection_a, 10.0)
     _unavailable(store, channel, connection_a, reason="model_unavailable", scope="model", model="another-model")
-    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-1")
     assert result.status == "ready"
     assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
     adapter.terminate_owned(result.attempt_id)
@@ -438,10 +467,10 @@ def test_a_model_scoped_record_leaves_the_rest_of_the_account_usable(tmp_path):
 
 def test_an_expired_record_no_longer_blocks(tmp_path):
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
-    _codex_used(connection_a, 90.0)
+    _codex_used(connection_a, 10.0)
     # A rate limit with no reported reset keeps a route out for 15 minutes.
     _unavailable(store, channel, connection_a, reason="rate_limited", now=time.time() - 3600)
-    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-1")
     assert result.status == "ready"
     assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
     adapter.terminate_owned(result.attempt_id)
@@ -505,10 +534,9 @@ def test_a_dispatch_failure_records_the_route_and_the_retry_uses_another_provide
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
         tmp_path, a=dict(mode=False))
     _runtime_task(store, channel)
-    _codex_used(connection_a, 90.0)
+    _codex_used(connection_a, 10.0)
     with pytest.raises(WorkerModeNotConfirmed):
-        provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
-    assert adapter._route_inflight == {}
+        provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-1")
     [record] = availability.active(store)
     assert record["connection_id"] == connection_a.id and record["model"] == "coordinator-model"
     assert (record["reason"], record["scope"], record["expiry_basis"]) == ("configuration_not_confirmed", "model", "default")
@@ -516,7 +544,7 @@ def test_a_dispatch_failure_records_the_route_and_the_retry_uses_another_provide
         attempt_id = db.execute("SELECT attempt_id FROM delegation_provisioning WHERE task_id=?",
                                 (channel.task_id,)).fetchone()[0]
         assert availability.for_attempt(db, channel.task_id, attempt_id)["reason"] == "configuration_not_confirmed"
-    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-2")
+    result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-2")
     assert result.status == "ready"
     assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
     adapter.terminate_owned(result.attempt_id)
@@ -536,11 +564,11 @@ def test_an_exhausted_plan_during_a_turn_records_the_account_until_its_reset(tmp
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
         tmp_path, a=dict(prompt_behavior="error", prompt_error=refusal))
     _runtime_task(store, channel)
-    _codex_used(connection_a, 97.0)
-    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    _codex_used(connection_a, 10.0)
+    result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-1")
     assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
     with pytest.raises(EngineTurnFailed) as failed:
-        adapter.prompt(result.engine_session_ref, "Find it.", threading.Event())
+        adapter.prompt(result.engine_session_ref, "Build it.", threading.Event())
     assert failed.value.kind == "route_unavailable:quota_exhausted"
     [record] = availability.active(store)
     assert (record["connection_id"], record["scope"], record["model"]) == (connection_a.id, "connection", None)
@@ -550,7 +578,7 @@ def test_an_exhausted_plan_during_a_turn_records_the_account_until_its_reset(tmp
     assert set(record) == {"engine", "connection_id", "model", "scope", "reason", "evidence", "attempt_id",
                            "expires_at", "expiry_basis"}
     adapter.terminate_owned(result.attempt_id)
-    retry = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-2")
+    retry = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-2")
     assert retry.status == "ready"
     assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
     adapter.terminate_owned(retry.attempt_id)
@@ -566,10 +594,10 @@ def test_an_unrelated_turn_error_records_nothing(tmp_path):
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
         tmp_path, a=dict(prompt_behavior="error", prompt_error=refusal))
     _runtime_task(store, channel)
-    _codex_used(connection_a, 90.0)
-    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    _codex_used(connection_a, 10.0)
+    result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-1")
     with pytest.raises(EngineProtocolError):
-        adapter.prompt(result.engine_session_ref, "Find it.", threading.Event())
+        adapter.prompt(result.engine_session_ref, "Build it.", threading.Event())
     assert availability.active(store) == []
     adapter.terminate_owned(result.attempt_id)
 

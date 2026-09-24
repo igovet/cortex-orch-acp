@@ -118,7 +118,9 @@ def channel_authority(db, channel):
 
 def _authority(db, channel):
     task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
-    if not task or task['state'] in TERMINAL | {'BLOCKED','RECOVERING','WAITING_USER'}:
+    if task and task['state'] == 'RECOVERING':
+        raise StoreError('gateway_task_recovering')
+    if not task or task['state'] in TERMINAL | {'BLOCKED','WAITING_USER'}:
         raise StoreError('gateway_task_inactive')
     channel_authority(db, channel)
     if channel.role == 'coordinator':

@@ -42,7 +42,6 @@ from ..recovery.capsule import build_capsule, render_capsule
 from ..trusted_channel import ChannelContext, issue_channel_tx
 from . import messages as acp_messages
 from . import sessions as acp_sessions
-from ..catalog import labels as catalog_labels
 from . import pipeline_bootstrap
 from . import questions_store
 from ..routing.store import get_route_extras
@@ -2609,42 +2608,30 @@ class OrchestratingRuntime:
         except Exception:  # noqa: BLE001 - a label is never worth failing a card over
             return None
         engine = (audit["engine"] if audit else None) or revision["route_engine"]
-        parts = [catalog_labels.engine_short_name(engine)]
         model = (audit["model"] if audit else None) or parameters.get("model")
-        if model and model != "unknown":
-            # T035: the routing id (``model``, used for pin/deny) stays the
-            # audited column value above; the *display* text here prefers
-            # ``live_adapters._resolve_route_model_name``'s real,
-            # engine-observed name (``detail["model_name"]``) over it.
-            # Absent that evidence, the id is shown explicitly marked as an
-            # alias rather than presented as though it were the concrete
-            # model -- never a guessed version.
-            model_name = None
-            if audit is not None:
-                try:
-                    model_name = json.loads(audit["decision_detail_json"] or "{}").get("model_name")
-                except Exception:  # noqa: BLE001 - a label never fails a card
-                    model_name = None
-            parts.append(str(model_name) if model_name else f"{model} (alias)")
-        # The attempt's own effort when it was audited with one -- for a
-        # worker that is the only place it exists; the revision's own
-        # parameters are the coordinator's. Each engine names its own
-        # effort knob (see configuration.policy).
-        audited_effort = None
+        # T035: the routing id (``model``, used for pin/deny) stays the
+        # audited column value; the summary prefers ``live_adapters
+        # ._resolve_route_model_name``'s real, engine-observed name
+        # (``detail["model_name"]``) and otherwise marks the id an alias --
+        # never a guessed version. The attempt's own audited effort wins; the
+        # revision's parameters are the coordinator's, used only without it.
+        detail = {}
         if audit is not None:
             try:
-                audited_effort = json.loads(audit["decision_detail_json"] or "{}").get("effort")
+                detail = json.loads(audit["decision_detail_json"] or "{}")
             except Exception:  # noqa: BLE001 - a label never fails a card
-                audited_effort = None
-        if audited_effort:
-            parts.append(str(audited_effort))
-        else:
+                detail = {}
+            if not isinstance(detail, dict):
+                detail = {}
+        if not detail.get("effort"):
+            # Each engine names its own effort knob (see configuration.policy).
             for key in ("effort", "reasoning_effort", "thought_level"):
                 value = parameters.get(key)
                 if value:
-                    parts.append(str(value))
+                    detail["effort"] = value
                     break
-        return " · ".join(parts)
+        from ..routing.decision_display import route_decision_summary
+        return route_decision_summary(engine, model, detail, compact=True)
 
     def _delegation_provisioning_role(self, task_id: str, assignment_ref: str) -> str | None:
         """Best-effort resolved role id for a delegation, once
@@ -3700,12 +3687,15 @@ class OrchestratingRuntime:
             # same assignment as ``failed``.  ``reported`` is terminal for
             # this compatibility mirror: do not turn a successful result
             # into a synthetic sync error (or a second failure event).
+            # Likewise an attempt already failed stays failed with its first
+            # reason: an interrupted turn cancels a worker, and the RECOVERING
+            # pass that follows cancels the same assignment again.
             with self._store.connection() as db:
                 attempt_row = db.execute(
                     "SELECT status FROM work_assignment_attempts WHERE attempt_id=?",
                     (work_attempt_ref,),
                 ).fetchone()
-            if attempt_row is not None and attempt_row["status"] == "reported":
+            if attempt_row is not None and attempt_row["status"] in ("reported", "failed", "needs_revision"):
                 return
             try:
                 WorkGraph(self._store).transition_attempt(

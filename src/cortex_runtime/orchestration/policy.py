@@ -178,7 +178,8 @@ def propose_replan(store,channel,operation,args):
         db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')",(channel.task_id,))
         db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",(now(),channel.task_id))
         revision=db.execute('SELECT revision FROM runtime_tasks WHERE task_id=?',(channel.task_id,)).fetchone()[0]
-        receipt=dict(accepted=True,state='RECOVERING',decision='senior_consultation' if operation=='escalation_request' else 'replan',scope_granted=False)
+        receipt=dict(accepted=True,state='RECOVERING',decision='senior_consultation' if operation=='escalation_request' else 'replan',scope_granted=False,
+                     next='End this turn. The runtime will stop workers and request the new plan.')
         event(db,channel.task_id,'REPLAN_REQUEST_ACCEPTED',dict(operation=operation,proposal=args,decision=receipt,revision=revision),channel.channel_id)
         db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
                    (channel.task_id,args['request_key'],channel.channel_id,operation,digest,encoded(receipt)))

@@ -11,6 +11,8 @@ from cortex_runtime.trusted_channel import resolve_channel, issue_channel
 from cortex_runtime.orchestration.state import TaskMachine
 from cortex_runtime.orchestration.gateway import dispatch, _write, _read
 from cortex_runtime.orchestration.sandbox import gateway_command
+from cortex_runtime.orchestration.policy import resume_planning
+from cortex_runtime.delegation import mcp_tools
 
 
 @pytest.fixture
@@ -65,6 +67,31 @@ def test_registered_draft_gateway_preserves_publication(context):
 def test_inactive_task_fences_actions(context):
     store,ch,machine,root=context
     machine.cancel(ch.task_id)
+    with pytest.raises(StoreError,match='gateway_task_inactive'):
+        dispatch(store,ch,'project_read',dict(path='.'))
+
+
+def test_replan_recovery_explains_the_next_turn_and_preserves_receipts(context):
+    store,ch,machine,_=context
+    replan_args=dict(reason='Need another plan.',request_key='replan')
+    receipt=mcp_tools.dispatch(store,ch,'replan_request',replan_args)
+    assert receipt['next']=='End this turn. The runtime will stop workers and request the new plan.'
+    assert mcp_tools.dispatch(store,ch,'replan_request',replan_args)==receipt
+    plan=dict(tasks=[dict(id='retry',role='backend-dev',objective='Retry with new evidence.',
+                         dependencies=[],scope=['.'],model='auto')],verification=[['true']])
+    with pytest.raises(StoreError,match='gateway_task_recovering') as error:
+        mcp_tools.dispatch(store,ch,'plan_submit',dict(plan=plan,request_key='same-turn-plan'))
+    assert str(error.value)=='gateway_task_recovering'
+    resume_planning(store,ch.task_id)
+    assert mcp_tools.dispatch(store,ch,'plan_submit',dict(plan=plan,request_key='resumed-plan'))['state']=='PLAN_READY'
+
+
+@pytest.mark.parametrize('state',['BLOCKED','WAITING_USER'])
+def test_blocked_and_waiting_tasks_remain_inactive(context,state):
+    store,ch,_,_=context
+    with store.connection() as db:
+        db.execute("UPDATE runtime_tasks SET state=? WHERE task_id=?",(state,ch.task_id))
+        db.commit()
     with pytest.raises(StoreError,match='gateway_task_inactive'):
         dispatch(store,ch,'project_read',dict(path='.'))
 

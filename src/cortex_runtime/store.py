@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -212,7 +213,10 @@ def private_directory(path):
             raise StoreError("unsafe_storage","storage_path",str(current),"owned directory without symlinks")
     info=path.stat()
     if info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)&0o077:
-        raise StoreError("unsafe_storage","storage_path",str(path),"owner-only directory mode 0700")
+        raise StoreError(
+            "unsafe_storage", "storage_path", str(path), "owner-only directory mode 0700",
+            f"run chmod 700 {shlex.quote(str(path))}",
+        )
     return path
 
 

@@ -57,6 +57,36 @@ def test_invalid_plans_do_not_change_state(machine):
     assert state.context(channel.task_id)['state'] == 'PLANNING'
 
 
+@pytest.mark.parametrize('argv', [
+    ['test', '$(wc', '-c', '<', 'README.md', ')', '-eq', '41'],
+    ['printf', '`date`'],
+    ['printf', 'ok', '|', 'cat'],
+    ['true', '&&', 'false'],
+    ['echo', 'ok', ';', 'false'],
+    ['echo', '('],
+    ['echo', '>'],
+    ['echo', '>>'],
+])
+def test_plan_rejects_shell_syntax_in_verification_argv(machine, argv):
+    state, channel = machine
+    proposal = plan()
+    proposal['verification'] = [argv]
+    with pytest.raises(StoreError, match='verification_shell_syntax') as error:
+        state.submit_plan(channel, proposal, 'shell-syntax')
+    assert error.value.field == 'plan.verification'
+    assert 'documented project command or script' in error.value.correction
+    assert state.context(channel.task_id)['state'] == 'PLANNING'
+
+
+@pytest.mark.parametrize('argv', [
+    ['pytest', '-k', 'not (slow or integration)'],
+    ['env', 'NAME=value', 'python3', '-m', 'pytest', 'tests/*.py'],
+])
+def test_plan_allows_literal_verification_arguments(machine, argv):
+    proposal = plan()
+    proposal['verification'] = [argv]
+    assert validate_plan(proposal) == proposal
+
 
 def test_synthesis_discloses_retained_gap_with_blocker(machine):
     state, channel = machine
