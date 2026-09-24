@@ -22,7 +22,7 @@ export function shouldShowWorkerHistoryLoader(history: WorkerHistory | null): bo
 }
 
 const TERMINAL_STATUSES = new Set([
-  "reported", "completed", "succeeded", "success", "failed", "cancelled", "canceled", "error",
+  "reported", "completed", "completed_with_issues", "succeeded", "success", "failed", "cancelled", "canceled", "error",
 ]);
 
 /** Continue refreshing until at least one assignment is visible and all of its

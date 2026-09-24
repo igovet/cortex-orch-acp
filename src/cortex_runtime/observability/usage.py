@@ -113,28 +113,33 @@ def usage_summary(store, task_id: str) -> dict:
     figures, grouped by whether the engine actually reported usage for
     that call. Unknown-basis calls are counted separately and are never
     folded into ``tokens_reported`` as zero."""
-    records = list_usage(store, task_id, limit=2000)
+    # The public list read is deliberately bounded, but a task total must
+    # include every call. Aggregate from the complete task cursor.
     by_connection: dict[str, dict[str, Any]] = {}
     total_calls = 0
     unknown_calls = 0
     failed_calls = 0
-    for entry in records:
-        total_calls += 1
-        if entry["failed"]:
-            failed_calls += 1
-        connection_key = entry["connection_id"] or "unattributed"
-        bucket = by_connection.setdefault(
-            connection_key, dict(calls=0, failed_calls=0, unknown_basis_calls=0, tokens_reported={}),
-        )
-        bucket["calls"] += 1
-        if entry["failed"]:
-            bucket["failed_calls"] += 1
-        if entry["basis"] == "unknown":
-            unknown_calls += 1
-            bucket["unknown_basis_calls"] += 1
-        else:
-            for token_key, token_value in entry["tokens"].items():
-                bucket["tokens_reported"][token_key] = bucket["tokens_reported"].get(token_key, 0) + token_value
+    with store.connection() as db:
+        for row in db.execute(
+            "SELECT attempt_id, basis, tokens_json, failed FROM usage_records "
+            "WHERE task_id=? ORDER BY created_at, id", (task_id,),
+        ):
+            total_calls += 1
+            if row["failed"]:
+                failed_calls += 1
+            connection_key = _route_for_attempt(db, row["attempt_id"])["connection_id"] or "unattributed"
+            bucket = by_connection.setdefault(
+                connection_key, dict(calls=0, failed_calls=0, unknown_basis_calls=0, tokens_reported={}),
+            )
+            bucket["calls"] += 1
+            if row["failed"]:
+                bucket["failed_calls"] += 1
+            if row["basis"] == "unknown":
+                unknown_calls += 1
+                bucket["unknown_basis_calls"] += 1
+            else:
+                for token_key, token_value in json.loads(row["tokens_json"]).items():
+                    bucket["tokens_reported"][token_key] = bucket["tokens_reported"].get(token_key, 0) + token_value
     return dict(
         task_id=task_id, total_calls=total_calls, unknown_basis_calls=unknown_calls,
         failed_calls=failed_calls, by_connection=by_connection,

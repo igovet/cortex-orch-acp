@@ -60,6 +60,26 @@ test("maps Claude Bash raw input/output to Paseo shell detail", () => {
   });
 });
 
+test("maps Codex shell argv to Paseo detail without its bash -lc wrapper", () => {
+  const event = nativeToolDetail({
+    type: "timeline.item",
+    sessionId: "s",
+    item: {
+      type: "tool_call", id: "shell-argv-1", callId: "shell-argv-1", name: "Shell",
+      status: "completed", error: null,
+      detail: {
+        type: "unknown",
+        input: { input: { argv: ["bash", "-lc", "rg --files src"] } },
+        output: { stdout: "src/cortex_acp.py\\\\n", exit_code: 0 },
+      },
+    },
+  });
+  if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
+  assert.deepEqual(event.item.detail, {
+    type: "shell", command: "rg --files src", output: "src/cortex_acp.py\\\\n", exitCode: 0,
+  });
+});
+
 test("maps Claude Edit aliases to Paseo inline diff detail", () => {
   const event = nativeToolDetail({
     type: "timeline.item",

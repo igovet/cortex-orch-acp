@@ -1,11 +1,12 @@
 import type { Pipeline } from "../shared/pipeline.js";
-import { workerDisplayName, workerModelDisplay } from "./worker-display.ts";
+import { workerDisplayName, workerModelDisplay, workerTerminalState } from "./worker-display.ts";
 import { workerPopoverStatus } from "./worker-popover-status.ts";
+import { workerResultItems } from "./worker-result-model.ts";
 
-export type StepStatus = "done" | "active" | "failed" | "blocked" | "cancelled" | "pending";
+export type StepStatus = "done" | "active" | "issues" | "failed" | "blocked" | "cancelled" | "pending";
 export type Tone = "success" | "warning" | "danger" | "muted" | "accent";
 
-export interface StepItem { text: string; status: "done" | "failed" | "open" }
+export interface StepItem { text: string; status: "done" | "failed" | "open"; blocker?: string }
 
 export interface PipelineStep {
   key: string;
@@ -52,19 +53,21 @@ function workerStep(worker: Pipeline["workers"][number], pipeline: Pipeline): Pi
   else if (decision === "revise") badges.push({ text: "Sent back", tone: "warning" });
   else if (decision) badges.push({ text: decision, tone: "muted" });
   const failure = worker.attempts[worker.attempts.length - 1]?.failureReason;
+  const checks = delegation?.result?.checks ?? [];
+  const terminal = workerTerminalState(status, checks);
+  if (terminal.issueCount > 0) {
+    badges.push({ text: `${terminal.issueCount} issue${terminal.issueCount === 1 ? "" : "s"}`, tone: "warning" });
+  }
   return {
     key: `worker:${worker.id}`,
     kind: "worker",
-    status: status === "completed" ? "done" : status === "running" ? "active" : ["failed", "error"].includes(status) ? "failed"
+    status: status === "completed" ? "done" : status === "completed_with_issues" ? "issues" : status === "running" ? "active" : ["failed", "error"].includes(status) ? "failed"
       : ["cancelled", "canceled"].includes(status) ? "cancelled" : "pending",
     title,
     subtitle: [workerDisplayName(worker), workerModelDisplay(route), route?.effort].filter(Boolean).join(" · "),
     badges,
     body: delegation?.result?.summary ?? (status === "failed" || status === "error" ? failure ?? undefined : undefined),
-    items: (delegation?.result?.checks ?? []).map((check) => ({
-      text: check.name,
-      status: check.outcome === "passed" ? "done" : check.outcome === "failed" ? "failed" : "open",
-    })),
+    items: workerResultItems(checks),
     assignmentRef: ref,
     usage: worker.attempts[worker.attempts.length - 1],
   };
@@ -78,16 +81,19 @@ const NODE_STATUS: Record<string, StepStatus> = {
 function nodeStep(node: NonNullable<Pipeline["plan"]>["nodes"][number]): PipelineStep {
   const firstLine = node.objective.split(/(?<=[.!?])\s|\n/, 1)[0].trim();
   const role = node.role.replace(/^worker-/i, "");
+  const checks = node.result?.checks ?? [];
+  const issues = checks.filter((check) => check.outcome !== "passed");
+  const status: StepStatus = node.status === "failed" && node.result ? "issues" : NODE_STATUS[node.status] ?? "pending";
   return {
     key: `node:${node.id}`,
     kind: "worker",
-    status: NODE_STATUS[node.status] ?? "pending",
+    status,
     title: (firstLine.length > 120 ? `${firstLine.slice(0, 119)}…` : firstLine) || node.id,
     subtitle: [role, node.stage === "review" ? "review" : null, node.waiting ?? (node.status === "running" ? "Starting" : null)]
       .filter(Boolean).join(" · "),
-    badges: [],
-    body: node.objective || undefined,
-    items: [],
+    badges: status === "issues" && issues.length > 0 ? [{ text: `${issues.length} issue${issues.length === 1 ? "" : "s"}`, tone: "warning" }] : [],
+    body: node.result?.summary ?? (node.objective || undefined),
+    items: workerResultItems(checks),
     assignmentRef: node.assignmentRef ?? undefined,
   };
 }

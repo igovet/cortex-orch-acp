@@ -41,7 +41,10 @@ export const tokenTotals = z.object({
   input: z.number().int().nonnegative(),
   output: z.number().int().nonnegative(),
   cachedRead: z.number().int().nonnegative(),
+  cachedWrite: z.number().int().nonnegative(),
   total: z.number().int().nonnegative(),
+  knownCalls: z.number().int().nonnegative(),
+  unknownCalls: z.number().int().nonnegative(),
 });
 
 const attempt = z.object({
@@ -52,6 +55,9 @@ const attempt = z.object({
   completedAt: z.string().nullable().optional(),
   agentId: z.string().min(1).optional(),
   route: route.optional(),
+  // Runtime-retained result checks let the worker tab mirror the chat card
+  // and Pipeline's terminal issue count without parsing an error string.
+  checks: z.array(z.object({ name: z.string(), outcome: z.string(), blocker: z.string().optional() })).optional(),
   // Latest ACP context fill of this attempt's engine session.
   context: z.object({ used: z.number().int().nonnegative(), size: z.number().int().positive() }).optional(),
   // Engine-reported token totals of this attempt's calls.

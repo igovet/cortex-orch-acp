@@ -41,11 +41,15 @@ scripts) and copy them exactly, with the documented interpreter path and its
 limits (one test file per command where the project says so). Follow the live
 proposal schema for verification command argument encoding. Never invent a test
 command the project does not document.
+Plan real verification for every changed surface and request needed authorizations
+early; see [verification coverage](references/verification-coverage.md).
 The runtime validates the proposal and schedules the work.
 
 When the runtime requests reconciliation, read the relevant immutable reports,
 compare results with the original goal, distinguish observed checks from claims,
-and submit a synthesis. If the results show the plan no longer fits the goal,
+close verifiable gaps through a replan request, and submit a synthesis whose
+not-verified items each state their concrete blocker. If the results show the
+plan no longer fits the goal,
 submit the advertised replan request with that evidence instead of a synthesis.
 A model response does not mark the task complete.
 If information is missing, request a user question through the advertised API.
@@ -61,5 +65,6 @@ Read relevant situational guidance as needed:
 [Cortex releases](references/cortex-release.md),
 [risk and constraints](references/governance.md),
 [live qualification](references/live-qualification.md),
+[verification coverage](references/verification-coverage.md),
 [recovery](references/recovery.md), and
 [host compatibility](references/host-compatibility.md).

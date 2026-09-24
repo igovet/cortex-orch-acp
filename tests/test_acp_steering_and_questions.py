@@ -114,6 +114,87 @@ class FakeElicitor:
         return self.answer
 
 
+def test_interrupted_engine_error_cannot_trigger_fallback():
+    from cortex_runtime.engine.failure_classification import classify, is_fallback_eligible
+    failure_class = classify("engine_error:turn_interrupted")
+    assert failure_class == "cancellation"
+    assert not is_fallback_eligible(failure_class)
+
+
+def test_queued_steer_waits_for_worker_and_reaches_next_plan(tmp_path):
+    from cortex_runtime.orchestration.state import TaskMachine
+    from runtime_scenarios import propose_inspection, publish_result
+
+    store, task_id = _task(tmp_path)
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+    first_worker = []
+    planning_messages = []
+
+    def router(store, channel, *_):
+        def behavior(store, channel, _ref, message, _index):
+            if channel.role == "coordinator":
+                context = mcp_tools.dispatch(store, channel, "task_get_context", {})
+                if context["state"] == "PLANNING":
+                    planning_messages.append(message)
+                    propose_inspection(store, channel)
+                else:
+                    mcp_tools.dispatch(
+                        store, channel, "synthesis_submit", dict(text="Reviewed and verified"),
+                    )
+                return PromptOutcome(StopReason.END_TURN, "Coordinator text")
+            if not first_worker:
+                first_worker.append(channel)
+                worker_entered.set()
+                assert release_worker.wait(10)
+            return publish_result(store, channel)
+        return behavior
+
+    runtime, _engine = _make_runtime(store, router)
+    outcomes = []
+    turn = threading.Thread(target=lambda: outcomes.append(
+        runtime.start_prompt(task_id, "s1", "Inspect", lambda _: True, threading.Event()),
+    ))
+    turn.start()
+    try:
+        assert worker_entered.wait(5)
+        acp_replay_store.record_user_message_event(
+            store, task_id, "user_message:s1:queued-1", "s1",
+            dict(content="Also check the title", session_id="s1"),
+        )
+        assert acp_steering.record_steering(
+            store, task_id, "s1", "queued-1", "Also check the title",
+        ) == 1
+        context = TaskMachine(store).context(task_id)
+        assert context["state"] == "EXECUTING"
+        assert context["nodes"][0]["status"] == "running"
+        # The already-authorized worker channel remains usable while queued.
+        mcp_tools.dispatch(store, first_worker[0], "project_read", dict(path="."))
+        release_worker.set()
+        turn.join(20)
+        assert not turn.is_alive()
+        assert outcomes == [StopReason.END_TURN]
+        assert TaskMachine(store).context(task_id)["state"] == "COMPLETED"
+        assert len(planning_messages) >= 2
+        assert "Also check the title" in planning_messages[1]
+        assert "user_message" in planning_messages[1]
+        with store.connection() as db:
+            event_types = [row[0] for row in db.execute(
+                "SELECT event_type FROM task_events WHERE task_id=?", (task_id,),
+            )]
+            errors = [row[0] for row in db.execute(
+                "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='assignment_failed'",
+                (task_id,),
+            )]
+        assert "worker_result" in event_types
+        assert "assignment_cancelled" not in event_types
+        assert not any("fallback_refused" in error for error in errors)
+    finally:
+        release_worker.set()
+        turn.join(5)
+        runtime.shutdown()
+
+
 # -- commands.py -------------------------------------------------------
 
 def test_recognize_new_commands():
@@ -618,6 +699,69 @@ def _agent_for_language_tests(tmp_path, monkeypatch):
     return agent, transport, environ
 
 
+def test_paseo_steer_config_is_durable_and_idempotent(tmp_path, monkeypatch):
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    agent, transport, environ = _agent_for_language_tests(tmp_path, monkeypatch)
+    environ["CORTEX_PASEO_QUESTION_UI"] = "1"
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(project))
+    result = bootstrap_task(
+        store, SourceEvent(origin="test", event_id=str(uuid.uuid4())),
+        "Inspect", "owner-1",
+    )
+    agent.sessions[session_id]["task_id"] = result.task_id
+    agent.sessions[session_id]["owner_epoch"] = result.owner_epoch
+    continued = threading.Event()
+    continuation_calls = []
+    def resumed(task_id, session_id, text, emit_update, cancel_event):
+        continuation_calls.append((task_id, session_id, text))
+        continued.set()
+        return StopReason.END_TURN
+    agent.runtime.start_prompt = resumed
+    acp_sessions.bind_task(store, session_id, result.task_id)
+    TaskMachine(store).create(result.task_id, "Inspect")
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO task_orchestration (task_id,state,updated_at,requirement_revision) "
+            "VALUES (?,?,?,0)", (result.task_id, "running", "now"),
+        )
+        db.commit()
+
+    params = dict(sessionId=session_id, configId="cortex_queued_steer",
+                  value=json.dumps(dict(clientMessageId="msg-1", text="Also inspect title")))
+    agent._session_set_config_option(101, params)
+    assert continued.wait(5)
+    agent._session_set_config_option(102, params)
+    agent.join_workers()
+    assert continuation_calls == [(result.task_id, session_id, "Also inspect title")]
+    assert all("result" in response for response in transport.responses if response.get("id") in (101, 102))
+    with store.connection() as db:
+        source_count = db.execute(
+            "SELECT COUNT(*) FROM source_events WHERE task_id=? AND origin=?",
+            (result.task_id, f"paseo-steer:{session_id}"),
+        ).fetchone()[0]
+        message_count = db.execute(
+            "SELECT COUNT(*) FROM task_events WHERE task_id=? AND event_type='user_message'",
+            (result.task_id,),
+        ).fetchone()[0]
+        steer_count = db.execute(
+            "SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='USER_STEERING'",
+            (result.task_id,),
+        ).fetchone()[0]
+    assert source_count == message_count == steer_count == 1
+    assert TaskMachine(store).context(result.task_id)["state"] == "PLANNING"
+    from cortex_runtime.acp.protocol import RpcError
+    agent.sessions[session_id]["owner_epoch"] = None
+    with pytest.raises(RpcError, match="no longer owns"):
+        agent._session_set_config_option(103, dict(
+            sessionId=session_id, configId="cortex_queued_steer",
+            value=json.dumps(dict(clientMessageId="msg-2", text="Stale steer")),
+        ))
+
+
 def test_language_option_present_pre_task_and_settable_via_set_config_option(tmp_path, monkeypatch):
     agent, transport, _environ = _agent_for_language_tests(tmp_path, monkeypatch)
     project = tmp_path / "project"
@@ -884,7 +1028,7 @@ def test_the_language_chosen_before_a_task_reaches_the_task(tmp_path, monkeypatc
     assert steering_module.get_language_override(store, task_id) == "ru"
 
 
-@pytest.mark.parametrize('action',['cancel','stop','steer'])
+@pytest.mark.parametrize('action',['cancel','stop'])
 def test_runtime_worker_in_flight_is_fenced_before_new_work(tmp_path,action):
     from cortex_runtime.orchestration.state import TaskMachine
     from cortex_runtime.contracts import StoreError
@@ -900,7 +1044,7 @@ def test_runtime_worker_in_flight_is_fenced_before_new_work(tmp_path,action):
                 return PromptOutcome(StopReason.END_TURN,'Coordinator text')
             if not worker_channels:
                 worker_channels.append(channel);entered.set();release.wait(5)
-                # Revoked channel must never publish after cancel/steering.
+                # Explicit cancel/stop revokes this worker channel.
                 try: return publish_result(store,channel)
                 except StoreError: return PromptOutcome(StopReason.CANCELLED,'Interrupted')
             return publish_result(store,channel)
@@ -915,16 +1059,10 @@ def test_runtime_worker_in_flight_is_fenced_before_new_work(tmp_path,action):
             runtime.start_prompt(task_id,'s2','Concurrent',lambda _:True,threading.Event())
         if action=='stop': runtime.stop_task(task_id,'s1',lambda _:True)
         elif action=='cancel': runtime.cancel('s1')
-        else: acp_steering.record_steering(store,task_id,'s2','steer','Не меняй database')
-        if action=='steer':
-            context=TaskMachine(store).context(task_id)
-            assert context['state']=='RECOVERING'
-            assert any('database' in p for p in context['policy']['deny_write'])
-            with pytest.raises(StoreError): mcp_tools.dispatch(store,worker_channels[0],'project_read',dict(path='.'))
         release.set();thread.join(10)
         assert not thread.is_alive()
         state=TaskMachine(store).context(task_id)['state']
-        assert state=={'cancel':'RECOVERING','stop':'CANCELLED','steer':'COMPLETED'}[action]
-        if action!='steer': assert outcomes==[StopReason.CANCELLED]
+        assert state=={'cancel':'RECOVERING','stop':'CANCELLED'}[action]
+        assert outcomes==[StopReason.CANCELLED]
     finally:
         release.set();cancelled.set();thread.join(10);runtime.shutdown()

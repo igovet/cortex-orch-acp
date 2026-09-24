@@ -2,5 +2,8 @@
   "id": "cortex-acp",
   "requirements": {
     "paseo": ">=0.9.0"
-  }
+  },
+  "build": [
+    ["python3", "-B", "../../scripts/cortex_acp_setup.py", "bootstrap-paseo-git-install"]
+  ]
 }

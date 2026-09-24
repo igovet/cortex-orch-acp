@@ -50,6 +50,12 @@ about every 750 ms. Exact lifecycle updates for one logical tool coalesce in
 the panel, while worker deltas are held until a tool boundary or turn end and
 persisted as complete message blocks. Each block carries a durable segment
 identity across all runtime tools, so live and replay views preserve ordering.
+Usage and thought updates can arrive between text chunks of one sentence;
+they do not insert paragraph breaks into worker prose. Tool calls remain
+observable message boundaries. Paseo compares the terminal response with complete
+streamed prose blocks, allowing whitespace trimmed only at block boundaries;
+it suppresses repeated text while preserving paragraph breaks inside the stream
+and any new final content on both live display and history replay.
 Meaningful Cortex MCP, native, external MCP and private-store operations remain
 visible with readable action names. File and skill reads are static target/status
 rows; their result bodies are excluded from new display history, including worker

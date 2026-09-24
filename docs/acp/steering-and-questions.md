@@ -50,13 +50,33 @@ idempotent, fences late runtime results and prevents completion. Engine process
 termination and ownership checks remain necessary; a cancellation event by itself
 does not prove that an external process is gone.
 
-User steering fences active worker channels and terminates owned sessions before
-replanning. The original goal, additions, denials and prior evidence remain durable.
-Worker questions enter the same persisted question protocol; execution resumes
-with a new plan after the exact answer. Scope requests and replans are bounded to
-three accepted automatic revisions. A blocked task can resume on real user input.
-`session/cancel` pauses into RECOVERING and revokes active work; `/cortex-stop`
-permanently cancels the task. See [qualification status](runtime-rewrite-status.md).
+User steering is durably queued by message identity and requirement revision. It
+does not cancel the coordinator turn, change an executing plan, revoke worker
+channels, or classify a worker interruption as an engine failure. The controller
+finishes the current workers, independent review and verification before applying
+queued steering at a planning or reconciliation boundary. Application and the
+transition back to planning commit together. A queued `deny_write` restriction
+takes effect at that boundary; workers already running under their original
+grants may finish. The coordinator receives the retained steering and completed
+worker evidence in its next planning turn. The execution scheduler leaves
+queued `user_message` events unclaimed for that coordinator turn rather than
+consuming their text as a worker-card update. Repeated delivery of the same
+message identity does not create another requirement revision.
+
+Paseo 0.9.1's installed ACP bridge has no native `prompt.steer`. The Cortex
+provider sends a text steer through the bridge's concurrent configuration
+channel as `cortex_queued_steer`, waits for durable capture, then acknowledges
+the steer for the still-active turn. If capture races with the end of that
+turn, the agent starts a background continuation using the same source identity
+so the queued message is still processed once. Unsupported non-text steer content
+produces a visible warning and leaves the current turn running; it is not silently
+accepted or passed to Paseo's cancel-and-replace fallback. A failed config
+acknowledgment is reported the same way. An explicit Stop
+(`session/cancel`) or `/cortex-stop` remains an interruption: the former
+moves the task to RECOVERING and fences unfinished work; the latter
+permanently cancels it. Worker questions enter the persisted question protocol;
+scope requests and replans retain their three-revision bound. See
+[qualification status](runtime-rewrite-status.md).
 
 The coordinator uses the language selected for the submitted message, including
 when reports and context are English. Workers receive an English communication

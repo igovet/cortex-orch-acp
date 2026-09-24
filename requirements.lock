@@ -1,4 +1,0 @@
-# No third-party runtime dependencies (see requirements.txt). Kept empty,
-# not deleted, so scripts/cortex_package.py's dependency_identity() still
-# has a manifest to hash for the isolated dev-candidate flow.
---only-binary=:all:

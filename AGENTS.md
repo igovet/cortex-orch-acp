@@ -153,16 +153,99 @@ the daemon endpoint, do not launch Paseo or install the plugin; report the missi
 evidence. Never send prompts or call paid models as part of this setup.
 
 
-### CLI-based dev-Paseo verification
+### GUI-based dev-Paseo verification
 
-Use the persistent isolated dev home as the standard non-GUI Paseo validation mode.
-Run only through `python3 -B scripts/cortex_paseo_dev.py -- ...`, start and inspect
-only the dev daemon at 127.0.0.1:16767, and stop it after the check. The minimum
-recorded sequence is `status --json`, `plugin ls --json`, `logs <agent-id> --json`
-(without `--tail` when testing retained history), then `daemon stop --timeout 15
---json`. Record exit status, byte/event counts, first and last safe event identities,
-and any error without publishing message bodies. This proves CLI retrieval from the
-isolated dev daemon only. It is not rendered-GUI evidence and cannot qualify a GUI
-or keyboard-focus claim. Paseo 0.9.1 exposes no documented log pagination or
-full-history flag; report an incomplete retrieval as unverified instead of inferring
-completeness.
+Use the persistent isolated dev home with the Electron desktop GUI as the standard validation mode—this
+most closely mirrors the production Paseo experience and is the primary method for developer
+testing. The Paseo Desktop application connects to the dev daemon at 127.0.0.1:16767 via
+WebSocket and renders the agent timeline, worker results, and tool output exactly as users see it.
+
+Before starting: ensure integrations/paseo dev dependencies are installed and type-check passes:
+
+~~~bash
+npm --prefix integrations/paseo ci
+npm --prefix integrations/paseo run typecheck
+~~~
+
+Type-check failures block developer testing. **The plugin path must always be given explicitly
+during testing** because the plugin code is edited in isolated git worktrees and its path
+changes between worktree sessions; use the full absolute path from the current worktree's
+integrations/paseo directory.
+
+**Starting the dev daemon and Electron desktop:**
+
+Start the daemon first:
+
+~~~bash
+python3 -B scripts/cortex_paseo_dev.py -- start --timeout 60 --json
+python3 -B scripts/cortex_paseo_dev.py -- plugin install "$PWD/integrations/paseo" --json
+~~~
+
+**Option 1: Using the helper subcommand (recommended for safety)**
+
+~~~bash
+python3 -B scripts/cortex_paseo_dev.py gui
+~~~
+
+For Xvfb environments:
+
+~~~bash
+python3 -B scripts/cortex_paseo_dev.py gui --xvfb
+~~~
+
+**Option 2: Manual environment setup**
+
+If the calling shell inherited `ELECTRON_RUN_AS_NODE` (e.g. from a Node-based
+tool), unset it first; Option 1's `gui` subcommand already does this for you,
+but a manual launch that leaves it set makes the Paseo executable reject its
+own flags as Node arguments and exit non-zero:
+
+~~~bash
+unset ELECTRON_RUN_AS_NODE
+PASEO_HOME=$HOME/.paseo-dev PASEO_ELECTRON_USER_DATA_DIR=$HOME/.config/Paseo-dev PASEO_ELECTRON_FLAGS="--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222" /opt/Paseo/Paseo
+~~~
+
+For Xvfb environments, add `--ozone-platform=x11` to PASEO_ELECTRON_FLAGS:
+
+~~~bash
+PASEO_HOME=$HOME/.paseo-dev PASEO_ELECTRON_USER_DATA_DIR=$HOME/.config/Paseo-dev PASEO_ELECTRON_FLAGS="--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --ozone-platform=x11" /opt/Paseo/Paseo
+~~~
+
+**Important:** Do not pass direct Chromium argv to the Paseo executable; it is rejected by the app.asar daemon manager. Use PASEO_ELECTRON_FLAGS only.
+
+The desktop window connects to the dev daemon. You can now create or open cortex agents
+and verify plugin behavior rendered in the UI: worker cards, results display, tool output,
+shell commands, form input handling, and timeline updates—all GUI surfaces users interact with.
+
+**Debugging with Chrome DevTools Protocol (CDP):**
+
+The PASEO_ELECTRON_FLAGS setting includes `--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222`, which enables Chrome DevTools Protocol inspection. Connect to `http://127.0.0.1:9222` to inspect the Paseo window, capture screenshots, and verify GUI rendering programmatically using tools like Playwright or the Chrome DevTools client.
+
+After testing, stop the daemon:
+
+~~~bash
+python3 -B scripts/cortex_paseo_dev.py -- daemon stop --timeout 15 --json
+~~~
+
+**Secondary CLI verification (when GUI evidence is not required):**
+
+For diagnostic checks that do not require visual confirmation, use CLI-only access to the dev
+daemon. This is faster and suitable for checking daemon health, plugin registration, and
+agent metadata, but does not prove GUI rendering or user-facing behavior. **Use the explicit plugin
+path here as well:**
+
+~~~bash
+python3 -B scripts/cortex_paseo_dev.py -- start --timeout 60 --json
+python3 -B scripts/cortex_paseo_dev.py -- plugin install "$PWD/integrations/paseo" --json
+python3 -B scripts/cortex_paseo_dev.py -- status --json
+python3 -B scripts/cortex_paseo_dev.py -- plugin ls --json
+python3 -B scripts/cortex_paseo_dev.py -- logs <agent-id> --json
+python3 -B scripts/cortex_paseo_dev.py -- daemon stop --timeout 15 --json
+~~~
+
+For retained-history checks via CLI, omit `--tail` and retain the command exit status,
+output byte count, structural event count, safe first/last event identities, and any
+explicit error. Do not put message bodies in documentation or reports. Paseo 0.9.1 documents
+`--tail`, `--filter`, and `--since` for `logs`, but no pagination or full-history flag; if an
+untailed response cannot be independently shown complete, mark the check unverified rather
+than inferring completeness.

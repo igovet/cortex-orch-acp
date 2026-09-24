@@ -60,7 +60,6 @@ observations; no retired native CLI/Desktop harness is a current reference.
 | `HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | `cortex_runtime.connections.registry` and everything built on it (connections, catalog, user defaults) | ACP path, stays |
 | `CORTEX_OBSERVATION_DIR` | `cortex_runtime.observability`/diagnostics logging sink | ACP path, stays |
 | `CODEX_HOME` | Native codex-acp/codex CLI isolation directory | ACP path (isolation) stays; the native-profile-registration use (`cortex_setup.py`) was Codex-harness-era and was removed at T033 |
-| `CORTEX_DEPENDENCY_DIR` | Was `marketplace_bootstrap.py`'s pinned pip-install target | Codex-harness-era (gateway only); removed at T033 |
 
 ## Pinned dependencies
 
@@ -252,6 +251,37 @@ Run one explicit setup command:
 
 ```bash
 python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
+```
+
+#### Install from GitHub
+
+The plugin lives below the repository root, so its GitHub source must include
+the Paseo subdirectory suffix. Paseo stages the complete Git checkout before it
+runs the manifest's supported `build` argv. Cortex uses that preparation phase
+to copy its launch-critical runtime and load shim into the current user's
+private Cortex state directory, then writes a launch record for that stable
+copy. The server bundle has no usable `import.meta.url` in Paseo 0.9.1;
+activation resolves this launch record directly. Install it with one command:
+
+```bash
+paseo plugin install github:igovet/cortex-orch-acp:integrations/paseo
+```
+
+The complete repository, including `src/cortex_acp.py`, is available in the
+staged Git checkout; the `:integrations/paseo` suffix selects the plugin entry
+directory rather than limiting the checkout to that subdirectory. The build
+step retains only the launch-critical runtime under
+`$XDG_STATE_HOME/cortex/paseo-runtime/` and writes a `0600` launch record at
+`~/.config/cortex/paseo-plugin-launch.json`. It never copies credentials,
+modify another user's configuration, or log in to an engine. Add a Codex or
+Claude connection separately when needed.
+
+For an isolated development daemon, use the guarded wrapper and the equivalent
+Git source form:
+
+```bash
+python3 -B scripts/cortex_paseo_dev.py -- \
+  plugin install file:///absolute/path/to/cortex-orch-acp:integrations/paseo
 ```
 
 After changing the plugin, use the repository helper while Paseo is already

@@ -64,6 +64,35 @@ def resets_at(record, model: str | None, environ: Mapping[str, str] | None = Non
     return max(live)[1] if live else None
 
 
+def visible_windows(record, environ: Mapping[str, str] | None = None,
+                    now: float | None = None) -> list[dict]:
+    """Read engine-reported plan windows for display, without estimating spend.
+
+    An expired window is unknown until the engine reports its replacement.
+    Cache reads, token totals and context occupancy are not subscription use.
+    """
+    now = time.time() if now is None else now
+    if record.engine == "codex-acp":
+        source = _codex_windows(record)
+    elif record.engine == "claude-agent-acp":
+        source = _load(record.id, environ)
+    else:
+        return []
+    result = []
+    for name, window in source.items():
+        if not isinstance(name, str) or not isinstance(window, Mapping) or "overage" in name.casefold():
+            continue
+        used, reset = window.get("used"), window.get("resets_at")
+        if isinstance(used, bool) or not isinstance(used, (int, float)) or not 0 <= used <= 100:
+            continue
+        if isinstance(reset, bool) or not isinstance(reset, (int, float)):
+            reset = None
+        elif reset <= now:
+            continue
+        result.append({"name": name, "usedPercent": float(used), "resetsAt": reset})
+    return sorted(result, key=lambda item: item["name"])
+
+
 def observe(connection_id: str, info: object, environ: Mapping[str, str] | None = None) -> None:
     """Record one Claude ``rate_limit_info``. Never raises."""
     try:

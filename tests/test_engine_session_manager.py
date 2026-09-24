@@ -6,11 +6,16 @@ from __future__ import annotations
 import base64
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
+from cortex_runtime.connections import quota
+from cortex_runtime.engine.claude_adapter_acp import claude_option_mapping
+from cortex_runtime.engine.codex_adapter_acp import codex_option_mapping
 from cortex_runtime.engine.session_manager import EngineSessionManager
 from cortex_runtime.portable.engine_contract import EngineCapability, EngineEventKind, StopReason, UsageBasis
+from cortex_runtime.portable.identity import ConfigurationRevision, ExecutionRoute
 
 from engine_fakes import default_scenario, fake_launch_command, isolated_environ, make_connection_record, new_connection_id, write_scenario
 
@@ -22,13 +27,14 @@ REQUESTED_CAPABILITIES = (
 )
 
 
-def _make_manager(tmp_path, scenario, *, call_timeout=5.0, abandon_wait_seconds=5.0):
+def _make_manager(tmp_path, scenario, *, call_timeout=5.0, abandon_wait_seconds=5.0, engine="codex-acp", option_mapping=None):
     environ = isolated_environ(tmp_path)
     connection_id = new_connection_id()
     scenario_path = write_scenario(tmp_path, scenario)
-    record = make_connection_record(connection_id, launch_command=fake_launch_command(scenario_path), environ=environ)
+    record = make_connection_record(connection_id, launch_command=fake_launch_command(scenario_path), engine=engine, environ=environ)
     return EngineSessionManager(
-        record, str(tmp_path), environ=environ, call_timeout=call_timeout, abandon_wait_seconds=abandon_wait_seconds,
+        record, str(tmp_path), environ=environ, call_timeout=call_timeout,
+        abandon_wait_seconds=abandon_wait_seconds, option_mapping=option_mapping,
     )
 
 
@@ -46,6 +52,54 @@ def test_negotiate_create_session_and_prompt(tmp_path):
         assert events[-1].stop_reason == StopReason.END_TURN
     finally:
         manager.shutdown(grace=2.0)
+
+
+@pytest.mark.parametrize(
+    ("engine", "effort_option_id", "option_mapping"),
+    [
+        ("codex-acp", "reasoning_effort", codex_option_mapping),
+        ("claude-agent-acp", "effort", claude_option_mapping),
+    ],
+)
+def test_configure_sends_the_effective_coordinator_default_effort(tmp_path, engine, effort_option_id, option_mapping):
+    """The first-task revision's effective default reaches each adapter's wire.
+
+    ``test_pending_pre_task_selection_is_proposed_on_first_prompt`` proves
+    the ACP selector persists this exact ``thought_level=medium`` in the
+    coordinator revision.  This integration check proves the two adapter
+    mappings issue the matching ``session/set_config_option`` RPC.
+    """
+    request_log = tmp_path / "requests.jsonl"
+    scenario = default_scenario(
+        config_options=[
+            dict(id="model", type="select", currentValue="model-a",
+                 options=[dict(value="model-a", name="Model A")]),
+            dict(id=effort_option_id, type="select", currentValue="low",
+                 options=[dict(value=value, name=value) for value in ("low", "medium", "high")]),
+        ],
+        request_log_path=str(request_log),
+    )
+    manager = _make_manager(tmp_path, scenario, engine=engine, option_mapping=option_mapping)
+    revision = ConfigurationRevision(
+        id="cr_aaaaaaaaaaaa", task_id="t_aaaaaaaaaaaa", revision=1,
+        route=ExecutionRoute(
+            engine=engine, connection_id=manager._record.id, model="model-a",
+            supported_parameters=(("thought_level", "medium"),),
+        ),
+    )
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        manager.configure(session_id, revision)
+    finally:
+        manager.shutdown(grace=2.0)
+
+    calls = [json.loads(line) for line in request_log.read_text(encoding="utf-8").splitlines()]
+    applied = [
+        (call["params"]["configId"], call["params"]["value"])
+        for call in calls if call.get("method") == "session/set_config_option"
+    ]
+    assert (effort_option_id, "medium") in applied
 
 
 def test_image_blocks_forward_unchanged_on_initial_and_followup_turns(tmp_path):
@@ -122,6 +176,46 @@ def test_acp_context_fill_and_prompt_response_usage_are_carried(tmp_path):
     assert usage_events[-1].usage_basis == UsageBasis.ENGINE_REPORTED
     assert usage_events[-1].usage_values == dict(inputTokens=1200, outputTokens=300, cachedReadTokens=900, totalTokens=1500)
     assert events[-1].kind == EngineEventKind.TURN_END
+
+
+
+def test_claude_rate_limit_and_per_turn_tokens_use_installed_adapter_shapes(tmp_path):
+    """A Claude context notification carries no billable counts; its final
+    PromptResponse does, and the forwarded rate limit updates the plan window.
+    """
+    reset = int(time.time()) + 3600
+    scenario = default_scenario(
+        prompt_updates=[
+            dict(delay=0.0, sessionUpdate="usage_update", used=80, size=200000),
+            dict(delay=0.0, sessionUpdate="usage_update", used=80, size=200000,
+                 _meta={"_claude/rateLimit": {
+                     "status": "allowed", "rateLimitType": "five_hour",
+                     "utilization": 0.35, "resetsAt": reset,
+                 }}),
+        ],
+        prompt_usage=dict(inputTokens=12, outputTokens=3, cachedReadTokens=50,
+                          cachedWriteTokens=4, totalTokens=69),
+    )
+    manager = _make_manager(tmp_path, scenario, engine="claude-agent-acp")
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        events = list(manager.prompt_turn(session_id, "hello"))
+        usage_events = [event for event in events if event.kind == EngineEventKind.USAGE_UPDATE]
+        assert len(usage_events) == 3
+        assert [event.usage_basis for event in usage_events] == [
+            UsageBasis.UNKNOWN, UsageBasis.UNKNOWN, UsageBasis.ENGINE_REPORTED,
+        ]
+        assert usage_events[-1].usage_values == {
+            "inputTokens": 12, "outputTokens": 3, "cachedReadTokens": 50,
+            "cachedWriteTokens": 4, "totalTokens": 69,
+        }
+        assert quota.visible_windows(
+            SimpleNamespace(engine="claude-agent-acp", id=manager._record.id),
+            manager._environ,
+        ) == [{"name": "five_hour", "usedPercent": 35.0, "resetsAt": reset}]
+    finally:
+        manager.shutdown(grace=2.0)
 
 
 def test_usage_update_with_no_recognized_token_fields_is_unknown_not_engine_reported(tmp_path):

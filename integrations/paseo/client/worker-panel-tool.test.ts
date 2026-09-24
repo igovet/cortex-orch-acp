@@ -49,6 +49,14 @@ assert.equal(codexShell.kind, "shell");
 assert.equal(codexShell.command, "python3 -B -m pytest -q");
 assert.equal(codexShell.output, "17 passed\n");
 
+const codexArgvShell = presentTool(event({
+  tool_kind: "execute", title: "Shell",
+  raw_input: { input: { argv: ["bash", "-lc", "python3 -B -m pytest -q"] } },
+}));
+assert.equal(codexArgvShell.kind, "shell");
+assert.equal(codexArgvShell.command, "python3 -B -m pytest -q");
+assert.equal(codexArgvShell.label, "Shell  python3 -B -m pytest -q");
+
 const mcpTool = presentTool(event({ tool_kind: "execute", title: "mcp.codebase_memory.get_code_snippet",
   raw_input: { server: "codebase_memory", tool: "get_code_snippet", arguments: { qualified_name: "a.b" } },
   raw_output: { error: null, result: { content: [{ type: "text", text: "def b(): pass" }] } } }));

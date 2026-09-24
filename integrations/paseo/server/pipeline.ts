@@ -61,7 +61,8 @@ if task is not None:
                     where e.task_id=? and e.event_type='worker_result' order by e.id''', (task_id,)):
                 if row['ref'] not in delegations: continue
                 payload = load(row['payload_json'])
-                checks = [{'name': clip(c.get('name'), 300) or 'check', 'outcome': str(c.get('outcome') or 'unverified')}
+                checks = [{'name': clip(c.get('name'), 300) or 'check', 'outcome': str(c.get('outcome') or 'unverified'),
+                    **({'blocker': clip(c.get('blocker'), 600)} if isinstance(c.get('blocker'), str) and c.get('blocker').strip() else {})}
                     for c in payload.get('checks') or [] if isinstance(c, dict)]
                 delegations[row['ref']]['result'] = {'summary': clip(payload.get('summary'), 600), 'checks': checks[:30]}
         for row in db.execute("select assignment_ref, payload_json from task_events where task_id=? and event_type='coordinator_decision' and assignment_ref is not null order by id", (task_id,)):
@@ -75,7 +76,7 @@ if task is not None:
     if 'runtime_tasks' in tables and 'runtime_nodes' in tables:
         runtime = db.execute('select state, revision, blocker from runtime_tasks where task_id=?', (task_id,)).fetchone()
         if runtime is not None:
-            rows = db.execute('''select node_id, role, objective, stage, status, assignment_ref, dependencies_json
+            rows = db.execute('''select node_id, role, objective, stage, status, assignment_ref, dependencies_json, result_json
                 from runtime_nodes where task_id=? and revision=? order by rowid''', (task_id, runtime['revision'])).fetchall()
             finished = {r['node_id'] for r in rows if r['status'] == 'completed'}
             nodes = []
@@ -86,11 +87,16 @@ if task is not None:
                 if r['status'] == 'pending':
                     unmet = [d for d in dependencies if d not in finished]
                     waiting = 'Waiting for ' + ', '.join(unmet) if unmet else 'Waiting to start'
+                result = load(r['result_json'])
+                checks = [{'name': clip(c.get('name'), 300) or 'check', 'outcome': str(c.get('outcome') or 'unverified'),
+                    **({'blocker': clip(c.get('blocker'), 600)} if isinstance(c.get('blocker'), str) and c.get('blocker').strip() else {})}
+                    for c in result.get('checks') or [] if isinstance(c, dict)]
+                node_result = {'summary': clip(result.get('summary'), 600), 'checks': checks[:30]} if r['result_json'] is not None else None
                 nodes.append({'id': r['node_id'], 'role': r['role'] or '', 'objective': clip(r['objective'], 2000) or '',
-                    'stage': r['stage'] or '', 'status': r['status'] or 'pending', 'assignmentRef': r['assignment_ref'], 'waiting': waiting})
+                    'stage': r['stage'] or '', 'status': r['status'] or 'pending', 'assignmentRef': r['assignment_ref'], 'waiting': waiting, 'result': node_result})
             out['plan'] = {'state': runtime['state'], 'blocker': clip(runtime['blocker'], 600), 'nodes': nodes}
     if 'usage_records' in tables:
-        rows = db.execute('select attempt_id, tokens_json from usage_records where task_id=?', (task_id,)).fetchall()
+        rows = db.execute('select attempt_id, basis, tokens_json from usage_records where task_id=?', (task_id,)).fetchall()
         out['tokens'] = {'total': sum_tokens(rows), 'coordinator': sum_tokens([r for r in rows if (r['attempt_id'] or '').startswith('co_')])}
 print(json.dumps(out, ensure_ascii=False))
 `;

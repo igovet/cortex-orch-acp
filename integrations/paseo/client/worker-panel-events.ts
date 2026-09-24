@@ -8,7 +8,7 @@ const MESSAGE_MARKER = "[worker message] ";
 const FINAL_RESPONSE_MARKER = "[final response] ";
 
 function messageChunk(event: WorkerEvent): string | null {
-  if (event.tool_kind != null || event.type !== "progress") return null;
+  if (event.tool_kind != null || (event.type !== "progress" && event.type !== "worker_activity")) return null;
   const marker = event.text.indexOf(MESSAGE_MARKER);
   return marker < 0 ? null : event.text.slice(marker + MESSAGE_MARKER.length);
 }
@@ -32,6 +32,22 @@ function groupingRef(event: WorkerEvent): string | undefined {
   // Runtime's tool-error observation names the same exact tool call with
   // this distinct prefix. Fold it into that call's row, retaining the row.
   return ref?.startsWith("tool-error:") ? `tool:${ref.slice("tool-error:".length)}` : ref;
+}
+
+function finalResponseRemainder(body: string, segments: string[]): string {
+  if (!segments.length) return body;
+  let offset = 0;
+  for (const segment of segments) {
+    // The terminal response can trim the boundaries of each streamed prose
+    // block independently. Chunks within a block have already been joined, so
+    // whitespace inside the block is still compared exactly.
+    const text = segment.trim();
+    if (!text) continue;
+    while (offset < body.length && /\s/.test(body[offset])) offset++;
+    if (!body.startsWith(text, offset)) return body;
+    offset += text.length;
+  }
+  return body.slice(offset).trimStart();
 }
 
 /** One visible row per exact durable activity ref, at its first occurrence.
@@ -58,13 +74,10 @@ export function groupWorkerEvents(events: WorkerEvent[]): TranscriptEntry[] {
     if (ref) byRef.set(ref, row);
   }
   const transcript: TranscriptEntry[] = [];
-  // The engine's authoritative final-response text sometimes restates every
-  // worker-message segment shown so far verbatim, glued together with no
-  // separators (see orchestrating_runtime._flush_worker_message_block). Track
-  // that same concatenation here so a final-response row never repeats what
-  // is already on screen; it clears each time a final-response is emitted,
-  // matching the server's own buffer reset.
-  let shownMessageText = "";
+  // A terminal response may repeat the streamed prose after trimming each
+  // message boundary. Keep complete logical blocks, rather than a single raw
+  // concatenation, so replay and live updates compare the same text.
+  const shownMessageSegments: string[] = [];
   for (const row of rows) {
     const chunk = messageChunk(row.event);
     const previous = transcript[transcript.length - 1];
@@ -76,17 +89,15 @@ export function groupWorkerEvents(events: WorkerEvent[]): TranscriptEntry[] {
     if (chunk !== null && previous && previous.updates.every((update) => messageChunk(update) !== null) && sameMessage) {
       previous.event = { ...previous.event, text: previous.event.text + chunk };
       previous.updates.push(...row.updates);
-      shownMessageText += chunk;
+      shownMessageSegments[shownMessageSegments.length - 1] += chunk;
     } else if (chunk !== null) {
       transcript.push({ event: { ...row.event, text: chunk }, updates: row.updates });
-      shownMessageText += chunk;
+      shownMessageSegments.push(chunk);
     } else if (row.event.activity_ref === "final-response") {
       const marker = row.event.text.indexOf(FINAL_RESPONSE_MARKER);
       const body = marker < 0 ? row.event.text : row.event.text.slice(marker + FINAL_RESPONSE_MARKER.length);
-      const remainder = body.startsWith(shownMessageText.trim()) && shownMessageText.trim()
-        ? body.slice(shownMessageText.trim().length).trim()
-        : body;
-      shownMessageText = "";
+      const remainder = finalResponseRemainder(body, shownMessageSegments);
+      shownMessageSegments.length = 0;
       if (remainder) transcript.push({ event: { ...row.event, text: marker < 0 ? remainder : `${row.event.text.slice(0, marker + FINAL_RESPONSE_MARKER.length)}${remainder}` }, updates: row.updates });
     } else {
       transcript.push(row);

@@ -26,7 +26,7 @@ def dispatch(store, channel, operation, args):
     if operation == 'verification_submit':
         return machine.submit_verification(channel, args['verification'], args['request_key'], authorization=lambda db: _authority(db,channel))
     if operation == 'synthesis_submit':
-        return machine.submit_synthesis(channel, args['text'], authorization=lambda db: _authority(db,channel))
+        return machine.submit_synthesis(channel, args['text'], args.get('not_verified') or [], authorization=lambda db: _authority(db,channel))
     if operation == 'user_question_request':
         from .questions import request
         return request(store, channel, args)
@@ -57,6 +57,14 @@ def dispatch(store, channel, operation, args):
                 from .gateway import verified_check
                 _authority(db, channel)
                 for index, check in enumerate(args['checks']):
+                    gap = check['outcome'] in {'not_run', 'unverified'}
+                    if gap and not (check.get('blocker') or '').strip():
+                        raise StoreError('check_blocker_required', f'arguments.checks[{index}].blocker', 'missing',
+                                         'the concrete blocker that made this check impossible',
+                                         'Run the check and report its real outcome, or give the concrete blocker.')
+                    if not gap and 'blocker' in check:
+                        raise StoreError('check_blocker_unexpected', f'arguments.checks[{index}].blocker', check['outcome'],
+                                         'no blocker on a passed or failed check', 'Remove blocker from checks that passed or failed.')
                     if check['outcome'] == 'passed' and not verified_check(
                         db, channel.task_id, channel.attempt_id, check.get('tool_call_ref')
                     ):
