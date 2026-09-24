@@ -92,6 +92,9 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 _ROOT = SCRIPTS.parent
+# acp-load-shim.mjs and every local module it imports; the staged runtime
+# must carry all of them or the ACP child exits before initialize.
+_PASEO_SHIM_MODULES = ("acp-load-shim.mjs", "replay-spool.mjs")
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(SCRIPTS.parent / "src"))
 
@@ -295,10 +298,25 @@ def bootstrap_paseo_git_install(environ=None):
     if not isinstance(version, str) or not version or any(part in version for part in ("/", "\\\\", "..")):
         raise SystemExit("error: package identity has an unsafe version for Paseo bootstrap.")
     runtime = runtime_parent / version
+    shim_source = _ROOT / "integrations" / "paseo" / "server"
+    shim_target = runtime / "integrations" / "paseo" / "server"
     required = (runtime / "src" / "cortex_acp.py", runtime / "pinned-dependencies.json",
-                runtime / "integrations" / "paseo" / "server" / "acp-load-shim.mjs")
+                *(shim_target / name for name in _PASEO_SHIM_MODULES))
     if runtime.exists():
         _ensure_private_directory(runtime)
+        # A runtime staged by an older bootstrap of this same version can lack
+        # a shim module added later; the version pins identical source, so
+        # restore only the missing shim modules before checking completeness.
+        for name in _PASEO_SHIM_MODULES:
+            target = shim_target / name
+            if shim_target.is_dir() and not shim_target.is_symlink() and not os.path.lexists(target):
+                try:
+                    handle, temporary = tempfile.mkstemp(prefix=f".{name}-", dir=str(shim_target))
+                    os.close(handle)
+                    shutil.copy2(shim_source / name, temporary)
+                    os.replace(temporary, target)
+                except OSError as error:
+                    raise SystemExit(f"error: cannot repair Paseo runtime shim {target}: {error}") from None
         if not all(path.is_file() and not path.is_symlink() for path in required):
             raise SystemExit(f"error: incomplete existing Paseo runtime: {runtime}")
     else:
@@ -309,7 +327,8 @@ def bootstrap_paseo_git_install(environ=None):
             shutil.copy2(_ROOT / "pinned-dependencies.json", stage / "pinned-dependencies.json")
             shim = stage / "integrations" / "paseo" / "server"
             shim.mkdir(parents=True, mode=0o700)
-            shutil.copy2(_ROOT / "integrations" / "paseo" / "server" / "acp-load-shim.mjs", shim / "acp-load-shim.mjs")
+            for name in _PASEO_SHIM_MODULES:
+                shutil.copy2(shim_source / name, shim / name)
             os.replace(stage, runtime)
         except OSError as error:
             shutil.rmtree(stage, ignore_errors=True)
