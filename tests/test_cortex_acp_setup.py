@@ -46,6 +46,38 @@ def test_paseo_manifest_bootstraps_git_installation():
     ]
 
 
+def test_paseo_shim_modules_cover_every_local_shim_import():
+    import re
+
+    server = setup._ROOT / "integrations" / "paseo" / "server"
+    pending, seen = ["acp-load-shim.mjs"], set()
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        source = (server / name).read_text(encoding="utf-8")
+        pending.extend(re.findall(r"""from\s+["']\./([^"']+)["']""", source))
+
+    assert seen == set(setup._PASEO_SHIM_MODULES)
+
+
+def test_bootstrap_paseo_git_install_stages_and_repairs_shim_modules(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    result = setup.bootstrap_paseo_git_install()
+
+    shim_dir = Path(result["runtime_root"]) / "integrations" / "paseo" / "server"
+    assert {path.name for path in shim_dir.iterdir()} == set(setup._PASEO_SHIM_MODULES)
+    (shim_dir / "replay-spool.mjs").unlink()
+
+    setup.bootstrap_paseo_git_install()
+
+    source = setup._ROOT / "integrations" / "paseo" / "server" / "replay-spool.mjs"
+    assert (shim_dir / "replay-spool.mjs").read_bytes() == source.read_bytes()
+    assert {path.name for path in shim_dir.iterdir()} == set(setup._PASEO_SHIM_MODULES)
+
+
 def test_configure_paseo_plugin_launch_supports_git_installed_provider(tmp_path, monkeypatch, capsys):
     _config_home, _state_home, home = _isolate(tmp_path, monkeypatch)
 
