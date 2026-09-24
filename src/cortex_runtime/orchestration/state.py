@@ -137,6 +137,12 @@ def _ask_about_stop(db, task_id, source, blocker):
         event(db, task_id, 'TASK_STATE_CHANGED', dict(previous=source, state='RECOVERING', blocker=None))
         return
     revision = db.execute('SELECT revision FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()['revision']
+    # The answer resumes through RECOVERING into a new plan, as above: nothing
+    # of the stopped plan may keep holding its scope (a review node left
+    # 'running' with scope ** blocked every later plan's dispatch).
+    db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')", (task_id,))
+    db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",
+               (now(), task_id))
     if source == 'WAITING_USER':
         db.execute("UPDATE pending_questions SET status='superseded',answered_at=? WHERE task_id=? AND status='open'",
                    (now(), task_id))
@@ -496,14 +502,19 @@ class TaskMachine:
             completed = {n['node_id'] for n in nodes if n['status'] == 'completed'}
             # Only this task's own in-flight workers hold a write scope. No
             # worker-count limit, and no other task -- live, blocked or long
-            # dead -- can keep this one from starting.
-            active_nodes = db.execute("""SELECT n.scope_json FROM runtime_nodes n WHERE n.task_id=? AND (n.status='running'
+            # dead -- can keep this one from starting. An earlier revision's
+            # node still marked 'running' holds scope only while its worker
+            # is not yet released; a stale marker alone never blocks a new plan.
+            active_nodes = db.execute("""SELECT n.scope_json FROM runtime_nodes n WHERE n.task_id=? AND (
+                (n.status='running' AND (n.revision=? OR NOT EXISTS (
+                    SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='WORKER_RELEASED'
+                    AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref)))
                 OR (n.assignment_ref IS NOT NULL AND EXISTS (
                     SELECT 1 FROM delegation_provisioning p WHERE p.idempotency_key=n.assignment_ref
                 ) AND NOT EXISTS (
                     SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='WORKER_RELEASED'
                     AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref
-                )))""", (task_id,)).fetchall()
+                )))""", (task_id, task['revision'])).fetchall()
             stage = 'review' if task['state'] == 'REVIEWING' else 'execution'
             ready = [n for n in nodes if n['status'] == 'pending' and n['stage'] == stage
                      and set(json.loads(n['dependencies_json'])) <= completed]
