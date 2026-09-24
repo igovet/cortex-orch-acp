@@ -397,31 +397,6 @@ function modelEfforts(command: readonly string[]): Promise<Record<string, string
   });
 }
 
-/** Native quota observations through the same installed Cortex entry used by this provider.
- * The command does not start an engine or issue a paid model call. */
-export function nativeAccountUsage(): Promise<unknown> {
-  const target = launchTarget(cortexCommand());
-  if (!target) return Promise.reject(new Error("Cortex launch target unavailable"));
-  return new Promise((resolve, reject) => {
-    execFile(target.argv[0], target.argv.slice(1), {
-      env: { ...process.env, ...(target.env ?? {}), CORTEX_ACCOUNT_USAGE: "1" },
-      timeout: 5000,
-      maxBuffer: 1024 * 1024,
-    }, (error, stdout) => {
-      if (error) { reject(error); return; }
-      try {
-        const result: unknown = JSON.parse(stdout);
-        if (!result || typeof result !== "object" || !("connections" in result)) {
-          throw new Error("Cortex account usage response missing connections");
-        }
-        resolve(result.connections);
-      } catch (parseError) {
-        reject(parseError);
-      }
-    });
-  });
-}
-
 /**
  * Paseo's ACP bridge gives every model the efforts of whichever one was
  * selected when it built its catalog, so switching models showed the wrong

@@ -139,10 +139,12 @@ def test_install_paseo_plugin_is_idempotent_and_preserves_config(tmp_path, monke
     assert second["legacy_provider_migration"] == {
         "migrated": False, "reason": "no_owned_legacy_provider"
     }
+    assert first["routing"]["routing"]["status"] == "created"
+    assert second["routing"]["routing"]["status"] == "current"
     assert {**first, "launch_config": {k: v for k, v in first["launch_config"].items() if k != "created"},
-            "legacy_provider_migration": None} == {
+            "legacy_provider_migration": None, "routing": None} == {
         **second, "launch_config": {k: v for k, v in second["launch_config"].items() if k != "created"},
-        "legacy_provider_migration": None,
+        "legacy_provider_migration": None, "routing": None,
     }
     launch = Path(home / ".config" / "cortex" / "paseo-plugin-launch.json")
     assert json.loads(launch.read_text(encoding="utf-8"))["argv"] == [
@@ -344,7 +346,12 @@ def test_init_storage_is_idempotent(tmp_path, monkeypatch):
     assert Path(first["config_root"]).is_dir()
     assert Path(first["state_root"]).is_dir()
     second = setup.init_storage()
-    assert second == first
+    assert first["routing"]["routing"]["status"] == "created"
+    assert second["routing"] == {
+        "routing": {**first["routing"]["routing"], "status": "current", "changed": False},
+        "route_policy": first["routing"]["route_policy"],
+    }
+    assert {**second, "routing": None} == {**first, "routing": None}
 
 
 def test_init_storage_never_creates_project_cortex_dir(tmp_path, monkeypatch):

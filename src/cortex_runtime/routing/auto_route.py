@@ -8,6 +8,14 @@ available -- replaces the hand-maintained per-role ``route-policy.json``.
    (strongest first), split into thirds, so a new model still lands in a
    tier without configuration. Claude Haiku remains available for an explicit
    pin, but is excluded from automatic worker selection by default.
+   Only the newest version of each model family on an engine is routed
+   automatically (:func:`superseded_routes`): family and version are parsed
+   from the engine-confirmed model id (or, for an alias such as
+   ``opus[1m]``, from the engine's own display name "Opus 5.5"), so a new
+   release such as ``gpt-6-luna`` supersedes ``gpt-5.6-luna`` with no
+   configuration. ``deny`` is applied first, so the newest *non-denied*
+   version is the one routed. A model whose version cannot be parsed is
+   never treated as older.
 3. Among models of the role's tier (nearest other tier when none is usable),
    rank by honoured provider preference, quota band, recent same-tier engine
    balance, role suitability as a soft tiebreak, known quota percentage only
@@ -39,7 +47,7 @@ Optional overrides, first existing file wins (never merged):
 
     {
       "pin":       {"security-auditor": "claude-agent-acp/opus:high", "*": "codex-acp/gpt-5.6-luna"},
-      "deny":      ["gpt-5.5", "claude-agent-acp/haiku"],
+      "deny":      ["gpt-5.5", "haiku"],
       "auto_allow": ["claude-agent-acp/haiku"],
       "tiers":     {"gpt-5.6-luna": "light"},
       "providers": ["claude-agent-acp", "codex-acp"]
@@ -47,8 +55,14 @@ Optional overrides, first existing file wins (never merged):
 
 ``pin`` is strict: a pinned route that is not available (not offered, or
 recorded unavailable) refuses the delegation rather than substituting
-another one. ``deny`` also applies to
-explicitly selected routes and to the model selector.
+another one; a pin may name an older, superseded version on purpose.
+``deny`` also applies to explicitly selected routes and to the model
+selector. A ``deny``/``auto_allow`` token is an exact model id, a versioned
+id that also covers its variants (``gpt-5.5`` covers ``gpt-5.5[1m]``), or a
+bare family name that covers every version and alias of that family
+(``haiku`` covers ``haiku`` and ``claude-haiku-4-5-20251001``); an
+``engine/`` prefix restricts it to that engine. Setup writes the default
+global file (:mod:`routing.defaults`).
 The built-in Haiku exclusion applies only to automatic worker selection;
 a matching ``pin`` or ``auto_allow`` can opt into Haiku, while ``deny`` still wins.
 
@@ -65,6 +79,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -95,6 +110,10 @@ KNOWN_MODEL_TIERS = {
     "gpt-5.6-sol": "standard", "gpt-5.6-terra": "standard",
     "gpt-6-luna": "light", "gpt-5.6-luna": "light", "gpt-5.5": "light",
 }
+# A Codex line (the family name after the version) keeps its tier across
+# generations, so a newer release no table names (gpt-7-luna) still lands
+# in its line's tier rather than by list position.
+LINE_TIERS = {"astra": "flagship", "sol": "deep", "terra": "standard", "luna": "light"}
 EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
 _NEVER_EFFORTS = frozenset({"ultra"})
 _LIGHT_ONLY_EFFORTS = frozenset({"max"})
@@ -196,21 +215,21 @@ def route_menu(project_root=None, environ=None, unavailable=()):
     entries = [e for e in _allowed(overrides, _entries(overrides, connections, environ))
                if not _is_seed(e)]
     tiers = model_tiers(entries, overrides.get("tiers") or {})
+    superseded = superseded_routes(entries)
     result = {tier: [] for tier in TIERS}
     for entry in entries:
         engine, model = entry.route.engine, entry.route.model
         used = quota.used_percent(connections[entry.connection_id], model, environ)
         blocked = availability.blocking(unavailable, entry.connection_id, model)
-        excluded = (engine == "claude-agent-acp"
-                    and any(f in model.casefold() for f in DEFAULT_AUTO_DENY_FAMILIES)
-                    and not _listed(overrides.get("auto_allow") or (), engine, model))
+        excluded = _default_auto_denied(overrides, entry)
         result[tiers[entry.route.id]].append(dict(
             route=_route_label(entry), engine=engine, model=model,
             connection_id=entry.connection_id,
             efforts=list(permitted_efforts(entry, tiers[entry.route.id])),
             state=(f"unavailable_until:{blocked['expires_at']}" if blocked else
                    "exhausted" if used is not None and used >= 100 else "available"),
-            auto_eligible=not excluded,
+            auto_eligible=not excluded and entry.route.id not in superseded,
+            superseded_by=superseded.get(entry.route.id),
             quota=dict(band="unknown" if used is None else "hot" if used >= HOT_PERCENT else "cool",
                        used_percent=used)))
     return dict(tiers=result, roles={role: {complexity: tier_for(role, complexity=complexity)
@@ -306,12 +325,8 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         return Choice(best.connection_id, model,
                       nearest(effort or EFFORT_BY_TIER[role_tier], permitted_efforts(best, tiers[best.route.id])),
                       "auto:pin", decision)
-    default_denied = {
-        entry.route.id for entry in allowed
-        if entry.route.engine == "claude-agent-acp"
-        and any(family in entry.route.model.casefold() for family in DEFAULT_AUTO_DENY_FAMILIES)
-        and not _listed(overrides.get("auto_allow") or (), entry.route.engine, entry.route.model)
-    }
+    default_denied = {entry.route.id for entry in allowed if _default_auto_denied(overrides, entry)}
+    superseded = superseded_routes(allowed)
     providers = overrides.get("providers")
     status = None
     if preference is not None and providers is not None and preference not in providers:
@@ -319,8 +334,9 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     elif preference is not None and not any(e.route.engine == preference for e in entries):
         status = "ignored:provider_not_configured"
     picked, decision = rank(role_tier, allowed, usage, overrides.get("tiers") or {},
-                            excluded=frozenset(blocked) | default_denied,
-                            policy_excluded=frozenset(default_denied),
+                            excluded=frozenset(blocked) | default_denied | frozenset(superseded),
+                            policy_excluded=frozenset(default_denied) | frozenset(superseded),
+                            superseded=superseded,
                             role=role, preference=None if status else preference,
                             model_hint=model_hint, model_reason=model_reason,
                             escalated=escalate, previous_engine=previous_engine,
@@ -348,7 +364,12 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             remediation=("No configured route can take this work now: "
                          + "; ".join(_unavailable_reasons(allowed, blocked, usage)
                                      + (["Claude Haiku is excluded from automatic routing; pin it explicitly "
-                                         "in routing.json to override this default"] if default_denied else []))
+                                         "in routing.json to override this default"] if default_denied else [])
+                                     + (["older versions superseded by a newer model are not routed "
+                                         "automatically (" + ", ".join(sorted(
+                                             f"{_route_label(e)} -> {superseded[e.route.id]}"
+                                             for e in allowed if e.route.id in superseded))
+                                         + "); pin one in routing.json to use it"] if superseded else []))
                          + ". Wait for a limit to reset, connect another account, or change routing.json."),
             retry_eligible=False,
         )
@@ -394,7 +415,7 @@ def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 
 def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, str] | None = None,
          excluded: frozenset = frozenset(), *, role: str | None = None, preference: str | None = None,
-         policy_excluded: frozenset = frozenset(),
+         policy_excluded: frozenset = frozenset(), superseded: Mapping[str, str] | None = None,
          model_hint: str = "auto", model_reason: str | None = None,
          escalated: bool = False, previous_engine: str | None = None,
          all_entries: Sequence | None = None, providers: Sequence[str] | None = None,
@@ -418,7 +439,11 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     6. engine order.
 
     ``decision`` records the tier, every candidate of it in rank order with
-    what ranked it, the preference and whether it was honoured."""
+    what ranked it, the preference and whether it was honoured.
+    ``superseded`` maps an older route id to the newer route that replaces
+    it (see :func:`superseded_routes`); those ids should also be in
+    ``excluded`` and ``policy_excluded``."""
+    superseded = superseded or {}
     tiers = model_tiers(entries, tier_overrides or {})
     usable = [e for e in entries if e.route.id not in excluded and (usage(e) or 0.0) < 100.0]
     for tier in _FALLBACK_ORDER[role_tier]:
@@ -462,6 +487,8 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                 hint_status = "ignored:not_offered"
             elif slash and all(tiers[e.route.id] != tier for e in allowed_offered):
                 hint_status = "ignored:tier_mismatch"
+            elif slash and all(e.route.id in superseded for e in allowed_offered):
+                hint_status = "ignored:superseded"
             elif slash and all(e.route.id in policy_excluded for e in allowed_offered):
                 hint_status = "ignored:auto_excluded"
             elif not hinted:
@@ -498,7 +525,9 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                                if tiers[e.route.id] == tier and e.route.id not in policy_excluded
                                and (e.route.id in excluded or (usage(e) or 0.0) >= 100.0)),
             excluded_by_policy=sorted(_route_label(e) for e in entries
-                                      if tiers[e.route.id] == tier and e.route.id in policy_excluded),
+                                      if tiers[e.route.id] == tier and e.route.id in policy_excluded
+                                      and e.route.id not in superseded),
+            superseded={_route_label(e): superseded[e.route.id] for e in entries if e.route.id in superseded},
             chosen=_route_label(best), chosen_connection_id=best.connection_id,
         )
         return best, decision
@@ -527,7 +556,8 @@ def model_tiers(entries: Sequence, tier_overrides: Mapping[str, str]) -> dict[st
     for entry in entries:
         model = entry.route.model
         family = (next((tier for name, tier in FAMILY_TIERS.items() if name in model.casefold()), None)
-                  or KNOWN_MODEL_TIERS.get(model.casefold()))
+                  or KNOWN_MODEL_TIERS.get(model.casefold())
+                  or LINE_TIERS.get(model_line(model)[0]))
         if tier_overrides.get(model) or family:
             tiers[entry.route.id] = tier_overrides.get(model) or family
         else:
@@ -638,7 +668,96 @@ def is_denied(engine: str, model: str, project_root=None, environ=None) -> bool:
 
 
 def _listed(values: Sequence[str], engine: str, model: str) -> bool:
-    return model in values or f"{engine}/{model}" in values
+    """Whether a ``deny``/``auto_allow`` token names ``engine``/``model``:
+    an exact id, a versioned id covering its variants (``gpt-5.5`` covers
+    ``gpt-5.5[1m]``), or a bare family name covering every version and
+    alias (``haiku`` covers ``claude-haiku-4-5-20251001``). ``engine/``
+    restricts a token to that engine."""
+    if model in values or f"{engine}/{model}" in values:
+        return True
+    family, version = model_line(model)
+    for value in values:
+        token_engine, slash, token = value.partition("/")
+        if not slash:
+            token_engine, token = None, value
+        if token_engine is not None and token_engine != engine:
+            continue
+        token = token.casefold()
+        if re.fullmatch(r"[a-z]+", token):
+            if token == family:
+                return True
+        elif "[" not in token and version is not None and model_line(token) == (family, version):
+            return True
+    return False
+
+
+def _default_auto_denied(overrides: Mapping, entry) -> bool:
+    """The built-in Haiku exclusion from automatic selection (``auto_allow``
+    lifts it; ``deny`` still wins)."""
+    engine, model = entry.route.engine, entry.route.model
+    return (engine == "claude-agent-acp"
+            and any(family in model.casefold() for family in DEFAULT_AUTO_DENY_FAMILIES)
+            and not _listed(overrides.get("auto_allow") or (), engine, model))
+
+
+# --- model versions ----------------------------------------------------------
+
+_VENDOR_PREFIXES = frozenset({"claude", "gpt"})
+_VARIANT = re.compile(r"\[[^\]]*\]")
+_NUMBER = re.compile(r"\d+(?:\.\d+)*")
+_BUILD_DATE = re.compile(r"\d{6,}")
+
+
+def _parse_tokens(text: str) -> tuple[list[str], tuple[int, ...] | None]:
+    tokens = [t for t in re.split(r"[-_\s()]+", _VARIANT.sub("", text.casefold())) if t]
+    words = [t for t in tokens if not _NUMBER.fullmatch(t)]
+    parts = [int(p) for t in tokens if _NUMBER.fullmatch(t) and not _BUILD_DATE.fullmatch(t)
+             for p in t.split(".")]
+    while parts and parts[-1] == 0 and len(parts) > 1:
+        parts.pop()
+    return words, (tuple(parts) or None)
+
+
+def model_line(model: str, name: str | None = None) -> tuple[str, tuple[int, ...] | None]:
+    """``(family, version)`` parsed from an engine's model id, e.g.
+    ``gpt-5.6-luna`` -> ``("luna", (5, 6))``, ``claude-opus-4-8`` ->
+    ``("opus", (4, 8))``, ``claude-haiku-4-5-20251001`` -> ``("haiku",
+    (4, 5))`` (a build date is not a version). A vendor prefix (``gpt``,
+    ``claude``) is not a family unless nothing else is (``gpt-5.5`` ->
+    ``("gpt", (5, 5))``); a context variant such as ``[1m]`` is ignored.
+    An alias without a version in its id (``opus[1m]``) takes it from the
+    engine's display ``name`` ("Opus 5.5") when that names the same family.
+    The version is ``None`` when neither says."""
+    words, version = _parse_tokens(model)
+    family_words = [w for w in words if w not in _VENDOR_PREFIXES] or words
+    family = "-".join(family_words)
+    if version is None and name and family:
+        name_words, name_version = _parse_tokens(name)
+        if all(w in name_words for w in family_words):
+            version = name_version
+    return family, version
+
+
+def superseded_routes(entries: Sequence) -> dict[str, str]:
+    """Route id -> the newer route that supersedes it: among one engine's
+    entries of the same family (:func:`model_line`), every version below the
+    newest one. Callers pass entries with ``deny`` already applied, so the
+    newest non-denied version wins; a model with no parseable version is
+    never superseded and never supersedes."""
+    lines: dict[tuple[str, str], list] = {}
+    for entry in entries:
+        family, version = model_line(entry.route.model, getattr(entry, "model_name", None))
+        if family and version is not None:
+            lines.setdefault((entry.route.engine, family), []).append((version, entry))
+    result = {}
+    for group in lines.values():
+        newest = max(version for version, _ in group)
+        for version, entry in group:
+            if version < newest:
+                successor = next((e for v, e in group if v == newest and e.connection_id == entry.connection_id),
+                                 next(e for v, e in group if v == newest))
+                result[entry.route.id] = _route_label(successor)
+    return result
 
 
 def _denied(overrides: Mapping, engine: str, model: str) -> bool:

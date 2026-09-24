@@ -12,7 +12,6 @@ import { isWorkerTimelineRunning, workerTimelineStatus } from "./client/worker-t
 import { workerCardMetadata, workerTerminalState, type WorkerStatusTone } from "./client/worker-display.ts";
 import { coalesced } from "./client/coalesce.ts";
 import { UsageMeter, useWorkerUsage } from "./client/usage-meter.tsx";
-import { AccountUsagePopover } from "./client/account-usage.tsx";
 import { readPipeline, type Pipeline } from "./shared/pipeline.js";
 import { WorkerResultDetail } from "./client/worker-result.tsx";
 import { workerResultItems } from "./client/worker-result-model.ts";
@@ -299,21 +298,7 @@ export default function contribute(client: PluginClientContext) {
           },
         },
       });
-      const accountUsage = client.addComposerPill({
-        id: `account-usage-${agentId}`,
-        workspaceId: candidate.workspace.id,
-        agentId,
-        button: {
-          title: "Provider plan usage",
-          icon: "Gauge",
-          label: "Usage",
-          behavior: {
-            kind: "popover",
-            Content: (props) => <AccountUsagePopover theme={props.theme} />,
-          },
-        },
-      });
-      registrations.set(agentId, { remove() { workers.remove(); pipeline.remove(); accountUsage.remove(); } });
+      registrations.set(agentId, { remove() { workers.remove(); pipeline.remove(); } });
     }
   };
   // Coalesced, never dropped: creating an agent fires several

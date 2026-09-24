@@ -1,4 +1,4 @@
-"""Opt-in ssh askpass: a desktop dialog for ssh inside the sandbox."""
+"""ssh inside the sandbox: the owner's ssh-agent and the opt-in askpass dialog."""
 import json
 import shutil
 import subprocess
@@ -107,3 +107,63 @@ def test_apply_changes_nothing_when_disabled(environ, tmp_path):
     command = ['bwrap', '--chdir', '/', '--', 'true']
     assert not ssh_askpass.apply(command, environ, tmp_path / 'askpass')
     assert command == ['bwrap', '--chdir', '/', '--', 'true']
+
+
+@pytest.fixture
+def agent(tmp_path):
+    """A listening unix socket standing in for the owner's ssh-agent; each
+    connection is answered with 'agent-ok'."""
+    import socket
+    import threading
+    path = tmp_path / 'agent.sock'
+    server = socket.socket(socket.AF_UNIX)
+    server.bind(str(path))
+    server.listen()
+
+    def serve():
+        while True:
+            try:
+                connection, _ = server.accept()
+            except OSError:
+                return
+            with connection:
+                connection.sendall(b'agent-ok')
+    threading.Thread(target=serve, daemon=True).start()
+    yield str(path)
+    server.close()
+
+
+def test_host_agent_passes_only_an_owned_socket(agent, tmp_path):
+    assert ssh_askpass.host_agent_env({'SSH_AUTH_SOCK': agent}) == {'SSH_AUTH_SOCK': agent}
+    plain = tmp_path / 'plain'
+    plain.write_text('')
+    for value in (None, '', 'agent.sock', str(plain), str(tmp_path / 'missing'), agent + '\n'):
+        assert ssh_askpass.host_agent_env({'SSH_AUTH_SOCK': value}) == {}, value
+
+
+_REACH_AGENT = ('import os, socket; s = socket.socket(socket.AF_UNIX); '
+                's.connect(os.environ["SSH_AUTH_SOCK"]); print(s.recv(16).decode())')
+
+
+@pytest.mark.engine_jail
+@pytest.mark.skipif(shutil.which('bwrap') is None, reason='bubblewrap is required')
+def test_command_sandbox_reaches_the_owner_agent(environ, agent, tmp_path):
+    project, scratch = tmp_path / 'project', tmp_path / 'scratch'
+    project.mkdir(), scratch.mkdir()
+    with gateway_command(project, scratch, ['python3', '-c', _REACH_AGENT], [], system_root=True) as (command, fds):
+        as_owner(command, {**environ, 'SSH_AUTH_SOCK': agent})
+        result = subprocess.run(command, pass_fds=fds, env={'PATH': '/usr/bin:/bin'},
+                                capture_output=True, text=True, timeout=30)
+    assert result.stdout.strip() == 'agent-ok', result.stderr
+
+
+@pytest.mark.engine_jail
+@pytest.mark.skipif(shutil.which('bwrap') is None, reason='bubblewrap is required')
+def test_engine_jail_reaches_the_owner_agent(environ, agent, tmp_path):
+    project, scratch = tmp_path / 'project', tmp_path / 'scratch'
+    project.mkdir(), scratch.mkdir()
+    env = {'HOME': environ['HOME'], 'PATH': '/usr/bin:/bin', **ssh_askpass.host_agent_env({'SSH_AUTH_SOCK': agent})}
+    with engine_jail(project, scratch, ['python3', '-c', _REACH_AGENT], [], env=env) as (command, fds):
+        result = subprocess.run(command, pass_fds=fds, env={'PATH': '/usr/bin:/bin'},
+                                capture_output=True, text=True, timeout=30)
+    assert result.stdout.strip() == 'agent-ok', result.stderr

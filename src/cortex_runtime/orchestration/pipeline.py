@@ -19,6 +19,13 @@ def publish(store, channel, context):
             rows.append(f"- {node['node_id']} ({node['role']}): {node['status']}; "
                         f"dependencies: {', '.join(node['dependencies']) or 'none'}; "
                         f"report: {result.get('report_ref', 'not published')}")
+        waiver = context.get('review_not_required')
+        if waiver:
+            reference = ('the project as observed before the planned work' if waiver['reference'] == 'execution_baseline'
+                         else f"the project an independent reviewer approved in plan revision {waiver['reference_revision']}")
+            rows.extend(['', '## Independent review', '',
+                         f"Not required ({waiver['reason']}): the runtime observed no project file changes; "
+                         f"the project digest {waiver['revision_digest']} equals {reference}."])
         if context.get('verification'):
             rows.extend(['','## Runtime verification','',json.dumps(context['verification'],ensure_ascii=False,indent=2)])
         if context['synthesis']:

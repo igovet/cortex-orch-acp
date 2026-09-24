@@ -42,8 +42,12 @@ def _verification(runtime, task_id, machine, emit_tool_call, cancel):
     if not digest:
         machine.move(task_id, 'BLOCKED', blocker='verification_revision_unavailable')
         return
+    # Bound to the approved review's project digest, or to the runtime's own
+    # no-change observation when the planned work needed no review.
     reviews = [node for node in context['nodes'] if node['stage'] == 'review']
-    if not reviews or not reviews[-1]['result'] or reviews[-1]['result'].get('project_digest') != digest:
+    expected = ((reviews[-1]['result'] or {}).get('project_digest') if reviews
+                else (context['review_not_required'] or {}).get('revision_digest'))
+    if not expected or expected != digest:
         machine.move(task_id, 'BLOCKED', blocker='verification_review_revision_changed')
         return
     checks = []
@@ -187,7 +191,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                        'code review or verification jobs for an explanation. Explaining how to run tests does not require executing them. '
                        'The coordinator can inspect files but cannot execute commands. Do not expand a description into a defect audit. '
                        'If changes or substantial delegated work are required, submit a focused structured plan. '
-                       'Runtime schedules planned workers and mandatory review. '
+                       'Runtime schedules planned workers, then independent review whenever the project changed, then verification. '
                        + _released_request(runtime, task_id)
                        + (_ask_user_request(context) or _verification_repair_request(context)
                           or _failed_worker_request(context))

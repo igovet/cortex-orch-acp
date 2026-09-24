@@ -84,28 +84,7 @@ def _print_model_efforts():
     print(json.dumps(config_options.model_efforts(registry.read_registry().connections)))
 
 
-def _print_account_usage():
-    """Read native subscription windows for the Paseo plugin; no engine call."""
-    import json
-
-    from cortex_runtime.connections import quota, registry
-
-    result = []
-    for record in registry.read_registry().connections.values():
-        if record.engine not in {"codex-acp", "claude-agent-acp"}:
-            continue
-        result.append({
-            "engine": record.engine,
-            "name": record.name,
-            "windows": quota.visible_windows(record),
-        })
-    print(json.dumps({"connections": result}, ensure_ascii=False))
-
-
 if __name__ == '__main__':
-    if os.environ.get("CORTEX_ACCOUNT_USAGE") == "1":
-        _print_account_usage()
-        raise SystemExit(0)
     if os.environ.get("CORTEX_MODEL_EFFORTS") == "1":
         _print_model_efforts()
         raise SystemExit(0)

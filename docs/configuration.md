@@ -9,10 +9,11 @@ This reference describes configuration the current ACP runtime actually reads. T
 | Connection registry | `$XDG_CONFIG_HOME/cortex/connections.json` or `~/.config/cortex/connections.json` | User-wide. Managed by `cortex_acp_setup.py`; it has no project override. |
 | Connection secrets | `$XDG_CONFIG_HOME/cortex/secrets/<connection-id>` | User-wide private files, written by setup. Native-account credentials can instead be referenced from the existing user engine directory. |
 | User defaults and policy ceiling | `$XDG_CONFIG_HOME/cortex/defaults.json` | User-wide base configuration. |
-| Routing rules | `<project>/.cortex/routing.json`, then `$CORTEX_ROUTING`, then `$XDG_CONFIG_HOME/cortex/routing.json` (or `~/.config/cortex/routing.json`) | First existing file wins; files are not merged. |
+| Routing rules | `<project>/.cortex/routing.json`, then `$CORTEX_ROUTING`, then `$XDG_CONFIG_HOME/cortex/routing.json` (or `~/.config/cortex/routing.json`) | First existing file wins; files are not merged. Setup writes the user file's default `{"deny": ["gpt-5.5", "haiku"]}`. |
 | Cortex-owned external MCP servers | `$XDG_CONFIG_HOME/cortex/mcp-servers.json` | User-wide only. Project-local MCP registries are intentionally ignored. |
 | Engine-native state and catalog snapshots | `$XDG_STATE_HOME/cortex/connections/<id>/...` or `~/.local/state/cortex/...` | User-wide mutable state, separate from configuration. |
 | Paseo launch record | `~/.config/cortex/paseo-plugin-launch.json` | Owner-private non-secret command, environment and shim metadata written by the setup helper. |
+| ssh password dialog (optional, off) | `$XDG_CONFIG_HOME/cortex/ssh-askpass.json` | User-wide, written by hand. See [ssh from workers](#ssh-from-workers). |
 | Task and report store | `<project>/.cortex/cortex.sqlite3` and sibling published Markdown | Project data, not operator configuration. |
 
 `HOME`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` must resolve to absolute paths. The user roots cannot be placed inside a project workspace. Cortex creates managed directories owner-only and validates existing files before trusting them. See `connections.registry.config_root/state_root`, `configuration.store`, `routing.auto_route._routing_path`, `configuration.mcp_servers._global_path`, and `scripts/cortex_acp_setup.py::_write_paseo_launch_config`.
@@ -46,6 +47,12 @@ The registry JSON is intentionally an implementation format, not a hand-authored
 - `max_concurrent_sessions`: integer from 1 to 64; defaults to 4 when absent in an older record.
 
 The closed fields and defaults are enforced by `connections.registry._parse_registry_bytes/_record_from_dict` and `connections.model.ConnectionRecord`. Unknown fields fail closed.
+
+### Engine install records
+
+There is no installer for either engine. `add-connection --install-record FILE` takes an operator-recorded install of an engine you already installed by other means (for example `npm install @agentclientprotocol/codex-acp`). It holds absolute paths without symlink components and the SHA-256 of each pinned file. `verify_install()` re-hashes every file before launch. The JSON shape follows `engine.codex_install.CodexAcpInstall` or `engine.claude_install.ClaudeAcpInstall`: `node_binary`, `adapter_entry`, `package_json`, `package_version` (must equal the package's own `"version"`) and their digests, plus the bundled Codex binary and version for Codex only. `tests/fixtures/engine/codex/install-record.template.json` shows the shape without real hashes. The field-by-field recipes are in the [Codex adapter](acp/codex-acp-adapter.md#current-runtime-gateway-policy) and [Claude adapter](acp/claude-agent-acp-adapter.md#pinned-install-requirements-manual-recipe-placeholder) pages.
+
+Accepted adapter versions (`connections.discovery.QUALIFIED_ADAPTER_VERSIONS`): codex-acp exactly `1.12.0` or `1.13.0` (an allowlist, not a floor; any other version is refused). claude-agent-acp has no allowlist, and `pinned-dependencies.json` records the last tested version.
 
 ## Defaults and policy ceiling
 
@@ -106,7 +113,7 @@ The routing loader reads five keys: `pin`, `deny`, `auto_allow`, `tiers`, and `p
     "worker-security-auditor": "claude-agent-acp/opus:high",
     "*": "codex-acp/gpt-5.6-luna"
   },
-  "deny": ["gpt-5.5"],
+  "deny": ["gpt-5.5", "haiku"],
   "auto_allow": ["claude-agent-acp/haiku"],
   "tiers": {
     "gpt-5.6-luna": "light",
@@ -117,14 +124,18 @@ The routing loader reads five keys: `pin`, `deny`, `auto_allow`, `tiers`, and `p
 ```
 
 - `pin`: object mapping worker role names or `*` to `engine/model` or `engine/model:effort`. A pin is strict: unavailable or disallowed pins fail instead of silently switching routes.
-- `deny`: array of model names or `engine/model` pairs. Explicit deny applies to automatic routing, pins, and the model selector.
-- `auto_allow`: array of model names or `engine/model` pairs that may enter automatic selection despite the built-in Haiku exclusion. It does not override `deny`, `providers`, catalog availability or quota limits.
+- `deny`: array of model tokens, each optionally prefixed `engine/`. A token is an exact model id; a versioned id, which also covers that version's variants (`gpt-5.5` covers `gpt-5.5[1m]`, not `gpt-5.6-luna`); or a bare family name, which covers every version and alias of that family (`haiku` covers `haiku`, `claude-haiku-4-5` and `claude-haiku-4-5-20251001`). A token with a `[...]` variant is exact only. Explicit deny applies to automatic routing, pins, and the model selector, and always wins.
+- `auto_allow`: tokens of the same form that may enter automatic selection despite the built-in Haiku exclusion. It does not override `deny`, `providers`, catalog availability or quota limits.
 - `tiers`: object mapping model names to `flagship`, `deep`, `standard`, or `light`. Built-in known families/models are classified automatically; this key overrides that classification.
 - `providers`: array restricted to `codex-acp` and/or `claude-agent-acp`. When absent, every configured provider is considered. A disallowed pin is refused.
 
-Precedence is first existing routing file: project `<project>/.cortex/routing.json`, then `CORTEX_ROUTING`, then user `routing.json`. The files do not merge. An existing malformed file fails closed. If no file exists, built-in automatic routing applies.
+Precedence is first existing routing file: project `<project>/.cortex/routing.json`, then `CORTEX_ROUTING`, then user `routing.json`. The files do not merge, so a project file that should keep the defaults must list them itself. An existing malformed file fails closed. If no file exists, built-in automatic routing applies.
 
-Haiku policy: Claude Haiku is excluded from automatic worker model selection by default (`routing.auto_route.DEFAULT_AUTO_DENY_FAMILIES`). When a suitable confirmed Codex Luna route is available, it can be selected for light work according to role, quota, provider preference, and availability. This is not a blanket substitution guarantee: if Luna is unavailable, other eligible routes may be selected; if no route is usable, dispatch refuses. A matching explicit pin may select Haiku despite the default automatic exclusion. An explicit `deny` entry blocks it everywhere, including pins. Routing decisions are made by the runtime; models do not choose their own models.
+Default user file: `scripts/cortex_acp_setup.py init-storage`, `apply-routing-defaults`, `install-paseo-plugin` and the Paseo plugin's Git install hook (`bootstrap-paseo-git-install`) create `$XDG_CONFIG_HOME/cortex/routing.json` as exactly `{"deny": ["gpt-5.5", "haiku"]}` when it is absent. When the file already exists, setup keeps every setting and only appends the default `deny` tokens it lacks. It reports an invalid file and leaves it untouched. The same step removes every route whose model the global `deny` names from a leftover `$XDG_CONFIG_HOME/cortex/route-policy.json`, the per-role policy file that automatic routing replaced and the runtime no longer reads. It keeps a private `route-policy.json.cortex-backup-<ns>` copy first, preserves all other content, and removes a role left with no route. Neither the plugin nor the package ships a `route-policy.json`. Project files and `$CORTEX_ROUTING` are never modified. See `routing.defaults`.
+
+Latest version only: automatic routing uses only the newest engine-confirmed version of each model family on an engine. Codex `gpt-6-luna` supersedes `gpt-5.6-luna`; Claude `opus[1m]` ("Opus 5.5") supersedes `claude-opus-5[1m]` and `claude-opus-4-8`, and `claude-sonnet-5` supersedes `claude-sonnet-4-6`. Family and version are parsed from the model id, or for a versionless alias from the engine's own display name for the same family, so a new release takes over without configuration. `deny` is applied first, so if it removes the newest version, the newest non-denied version is routed. A model whose version cannot be parsed, such as a bare `sonnet` alias, is never treated as older. A superseded version stays in the model selector. It is reported with `auto_eligible: false` and `superseded_by` in `list_route_options`, and under `superseded` in the route decision. A plan hint naming it is recorded as `ignored:superseded`. An explicit `pin` of an older version is still honoured. Supersession does not depend on availability: an older version does not take over while the newest is exhausted or recorded unavailable.
+
+Haiku policy: the default user `routing.json` denies `haiku`, which removes every Claude Haiku model from automatic routing, pins and the selector. Independently of any file, Claude Haiku is also excluded from automatic worker model selection (`routing.auto_route.DEFAULT_AUTO_DENY_FAMILIES`). When a suitable confirmed Codex Luna route is available, it can be selected for light work according to role, quota, provider preference, and availability. This is not a blanket substitution guarantee: if Luna is unavailable, other eligible routes may be selected; if no route is usable, dispatch refuses. A matching explicit pin may select Haiku despite the default automatic exclusion. An explicit `deny` entry blocks it everywhere, including pins. Routing decisions are made by the runtime; models do not choose their own models.
 
 Automatic routing uses engine-observed catalog routes, excludes exhausted/unavailable routes and chooses among tiers based on role, task complexity, prior retry/escalation, provider constraints and current plan usage. Recent same-tier project attempts are balanced across engines within a four-attempt tolerance; currently active attempts are recorded separately. Tier names do not guarantee that a specific model is installed or selectable. See [routing and fallback](acp/routing-and-fallback.md).
 
@@ -175,12 +186,25 @@ Fields:
 
 Cortex-owned entries take precedence over client-supplied MCP entries with the same name; other client entries pass through for that session. MCP server values are loaded into memory for engine sessions, not copied into task reports. External tools still pass the gateway's channel, role, tool, path and network checks. Read [permissions and containment](acp/permissions-and-containment.md) for the enforcement boundary.
 
+## ssh from workers
+
+ssh in a worker's native shell and in `command_run` behaves as it does in your terminal. HOME is your own, read-only, so `~/.ssh/config`, `known_hosts` and host aliases apply. Cortex passes your running ssh-agent (`SSH_AUTH_SOCK` from the environment Cortex was started with) to every engine process and command, provided it names a socket you own. Keys unlocked in that agent, such as a desktop keyring's, work without a passphrase prompt. Nothing needs configuring. Without an agent, a key with a passphrase needs the optional password dialog below.
+
+For prompts the agent cannot answer (a key passphrase, a password, a new host-key confirmation), `{"enabled": true}` in `$XDG_CONFIG_HOME/cortex/ssh-askpass.json` shows ssh's own prompt in a desktop dialog. See [SECURITY.md](../SECURITY.md#owners-ssh-agent) and `orchestration.ssh_askpass`. Both apply to engine processes started after the change, so open a new session.
+
 ## Verify configuration
 
 Check the current user registry and engine discovery without printing secret values:
 
 ```bash
 python3 -B scripts/cortex_acp_setup.py status
+```
+
+For a broader offline check (storage layout and permissions, pinned-dependency digests, connection and route availability, adapter qualification and, with `--project`, that project's policy ceiling), run the non-paid diagnostics. They make no model call. JSON is the default output; use `--format text` for a summary. Exit code `0` means ok, `1` degraded (a repairable gap) and `2` failed:
+
+```bash
+python3 -B scripts/cortex_diagnose.py --format text
+python3 -B scripts/cortex_diagnose.py --project /path/to/project
 ```
 
 To validate the documented loader examples without reading the real user registry, set isolated `HOME`, `XDG_CONFIG_HOME`, and `XDG_STATE_HOME` outside every repository and call the project loaders. For example:

@@ -20,9 +20,11 @@ const base = {
   workers: [worker("b", "running", "QA"), worker("a", "reported", "Implement")],
 };
 
+// The base fixture's "ref-a" delegation carries a failed check: a "reported"
+// worker with a non-passed check must show as "issues", never "done".
 let view = buildPipeline(base);
 assert.deepEqual(view.steps.map((s) => [s.kind, s.status]), [
-  ["request", "done"], ["plan", "done"], ["worker", "done"], ["worker", "active"], ["finish", "pending"],
+  ["request", "done"], ["plan", "done"], ["worker", "issues"], ["worker", "active"], ["finish", "pending"],
 ]);
 assert.equal(view.steps[2].title, "Implement");
 assert.equal(view.steps[2].subtitle, "backend-dev · Luna · medium");
@@ -33,14 +35,52 @@ const unresolvedWorker = worker("a", "reported", "Implement");
 unresolvedWorker.route.modelName = null;
 const unresolved = buildPipeline({ ...base, workers: [unresolvedWorker] });
 assert.equal(unresolved.steps[2].subtitle, "backend-dev · gpt-5.6-luna (alias) · medium");
-assert.deepEqual(view.steps[2].badges, [{ text: "Accepted", tone: "success" }]);
+assert.deepEqual(view.steps[2].badges, [{ text: "Accepted", tone: "success" }, { text: "1 issue", tone: "warning" }]);
 assert.deepEqual(view.steps[2].items.map((i) => i.status), ["done", "failed"]);
 assert.deepEqual(view.steps[0].followUps, ["Continue"]);
-assert.equal(view.done, 3);
+assert.equal(view.done, 2);
+
+// P1 regression: a "reported" or "completed" status word must never hide a
+// non-passed check behind the success icon, for every non-passed outcome.
+for (const outcome of ["failed", "not_run", "unverified"]) {
+  for (const rawStatus of ["reported", "completed"]) {
+    const issueWorker = worker("a", rawStatus, "Implement");
+    view = buildPipeline({ ...base, delegations: { ...base.delegations,
+      "ref-a": { order: 10, result: { summary: "x", checks: [{ name: "check", outcome }] }, decision: null } },
+      workers: [issueWorker] });
+    assert.deepEqual([view.steps[2].status, view.steps[2].badges], ["issues", [{ text: "1 issue", tone: "warning" }]]);
+  }
+}
+
+// The same statuses with every check passed stay "done".
+for (const rawStatus of ["reported", "completed"]) {
+  const cleanWorker = worker("a", rawStatus, "Implement");
+  view = buildPipeline({ ...base, delegations: { ...base.delegations,
+    "ref-a": { order: 10, result: { summary: "x", checks: [{ name: "check", outcome: "passed" }] }, decision: null } },
+    workers: [cleanWorker] });
+  assert.equal(view.steps[2].status, "done");
+}
 
 const partialWorker = worker("a", "completed_with_issues", "Implement");
 view = buildPipeline({ ...base, workers: [partialWorker] });
 assert.deepEqual([view.steps[2].status, view.steps[2].badges.at(-1)], ["issues", { text: "1 issue", tone: "warning" }]);
+
+// A worker whose graph/runtime status string the popover does not recognize
+// (e.g. a stray "needs_revision" work-graph attempt state, or any other
+// value the runtime-nodes join could not normalize) must not fall back to
+// the unstarted numbered placeholder once it has actually reported a
+// result. The reported checks are the authoritative terminal signal.
+const unrecognizedStatusWorker = worker("a", "needs_revision", "Implement");
+view = buildPipeline({ ...base, workers: [unrecognizedStatusWorker] });
+assert.deepEqual([view.steps[2].status, view.steps[2].badges.at(-1)], ["issues", { text: "1 issue", tone: "warning" }]);
+
+// The same unrecognized status, but with every reported check passed, is a
+// reported success, not a pending placeholder.
+const unrecognizedStatusCleanWorker = worker("a", "needs_revision", "Implement");
+view = buildPipeline({ ...base, delegations: { ...base.delegations,
+  "ref-a": { order: 10, result: { summary: "Fixed", checks: [{ name: "adds", outcome: "passed" }] }, decision: null } },
+  workers: [unrecognizedStatusCleanWorker] });
+assert.equal(view.steps[2].status, "done");
 
 // Once workers settle the coordinator owns the next move.
 view = buildPipeline({ ...base, workers: [worker("a", "reported", "Implement")] });
@@ -100,4 +140,30 @@ assert.deepEqual(view.steps.slice(2, 4).map((step) => [step.status, step.badges,
   ["issues", [{ text: "1 issue", tone: "warning" }], ["done", "failed"]],
   ["failed", [], []],
 ]);
+
+// A planned node whose raw runtime status is neither "completed" nor
+// "failed" (any value NODE_STATUS does not enumerate) still shows its
+// reported outcome rather than the unstarted number, once it has a result.
+const unrecognizedStatusNode = { ...node("unrecognized", "needs_revision", null), result };
+view = buildPipeline({ ...waiting, plan: { state: "EXECUTING", blocker: null, nodes: [unrecognizedStatusNode] } });
+assert.deepEqual([view.steps[2].status, view.steps[2].badges], ["issues", [{ text: "1 issue", tone: "warning" }]]);
+
+const cleanResult = { summary: "All checks passed", checks: [{ name: "typecheck", outcome: "passed" }] };
+const unrecognizedStatusCleanNode = { ...node("clean", "needs_revision", null), result: cleanResult };
+view = buildPipeline({ ...waiting, plan: { state: "EXECUTING", blocker: null, nodes: [unrecognizedStatusCleanNode] } });
+assert.equal(view.steps[2].status, "done");
+
+// P1 regression, node path: a "completed" raw status must never hide a
+// non-passed check behind the success icon, for every non-passed outcome.
+for (const outcome of ["failed", "not_run", "unverified"]) {
+  const completedIssueNode = { ...node("completed-issue", "completed", null), result: { summary: "x", checks: [{ name: "check", outcome }] } };
+  view = buildPipeline({ ...waiting, plan: { state: "EXECUTING", blocker: null, nodes: [completedIssueNode] } });
+  assert.deepEqual([view.steps[2].status, view.steps[2].badges], ["issues", [{ text: "1 issue", tone: "warning" }]]);
+}
+
+// "completed" with every check passed stays "done".
+const completedCleanNode = { ...node("completed-clean", "completed", null), result: { summary: "x", checks: [{ name: "check", outcome: "passed" }] } };
+view = buildPipeline({ ...waiting, plan: { state: "EXECUTING", blocker: null, nodes: [completedCleanNode] } });
+assert.equal(view.steps[2].status, "done");
+
 console.log("pipeline model tests passed");

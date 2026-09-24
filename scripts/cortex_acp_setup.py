@@ -64,7 +64,13 @@ an unrelated one:
    single explicit Cortex-on-Paseo installation command; it is idempotent,
    preserves unrelated daemon configuration/plugins, and verifies the plugin
    reaches ``running``. It never runs implicitly when an ACP session starts.
-8. ``print-client-recipes`` -- delegates entirely to the existing T011
+8. ``apply-routing-defaults`` -- write the default user-global
+   ``routing.json`` (``{"deny": ["gpt-5.5", "haiku"]}``) when it is absent,
+   append any missing default ``deny`` token to an existing one, and drop
+   denied models from a leftover ``route-policy.json`` (see
+   ``cortex_runtime.routing.defaults``). ``init-storage`` and
+   ``install-paseo-plugin`` run it too.
+9. ``print-client-recipes`` -- delegates entirely to the existing T011
    ``cortex_acp_client_config.py`` (Zed dry-run-by-default entry +
    ``--print-codeg-recipe``); this script never re-implements or
    duplicates that write path.
@@ -100,6 +106,7 @@ from cortex_runtime.configuration import store as configuration_store  # noqa: E
 from cortex_runtime.connections import discovery as connection_discovery, onboarding, registry  # noqa: E402
 from cortex_runtime.connections.model import AuthMode, EngineNativeDir  # noqa: E402
 from cortex_runtime.portable.errors import PortableError  # noqa: E402
+from cortex_runtime.routing import defaults as routing_defaults  # noqa: E402
 
 import cortex_acp_client_config  # noqa: E402
 from paseo_integrity import EXCLUDED_DIRS as _PASEO_EXCLUDED_DIRS, payload_digest as _paseo_payload_digest  # noqa: E402
@@ -485,8 +492,11 @@ def install_paseo_plugin(*, plugin_dir=None, paseo_cli=None, environ=None, runne
         # through the native provider without a duplicate entry.
         if migration.get("migrated"):
             invoke(["reload", "--json"])
+        # The global routing defaults the installed runtime reads (Haiku and
+        # gpt-5.5 denied); an existing routing.json keeps its settings.
+        routing = init_storage(env)["routing"]
         return {"plugin_id": manifest["id"], "source": str(root), "status": "running", "payload_sha256": payload_sha256,
-                "launch_config": launch_config, "legacy_provider_migration": migration}
+                "launch_config": launch_config, "legacy_provider_migration": migration, "routing": routing}
     except BaseException:
         _remove_new_paseo_launch_config(launch_config)
         raise
@@ -498,7 +508,8 @@ def init_storage(environ=None):
     state_root = registry.state_root(environ)
     registry.ensure_private_dir(config_root, root=config_root, environ=environ)
     registry.ensure_private_dir(state_root, root=state_root, environ=environ)
-    return dict(config_root=str(config_root), state_root=str(state_root))
+    return dict(config_root=str(config_root), state_root=str(state_root),
+                routing=routing_defaults.apply(environ))
 
 
 def add_connection(*, name, engine, provider, auth_mode, key_kind=None, api_key_reader=None,
@@ -794,6 +805,10 @@ def main(argv=None):
     )
     sub.add_parser("bootstrap-paseo-git-install", help="Stage the owner-private ACP runtime for a Git-installed Paseo plugin.")
     sub.add_parser("install-paseo-plugin", help="Install and verify the Cortex provider plugin in Paseo (explicit setup only).")
+    sub.add_parser(
+        "apply-routing-defaults",
+        help="Write/complete the default global routing.json and drop denied models from route-policy.json.",
+    )
 
     p_validate = sub.add_parser(
         "validate-connection", help="Recompute one connection's authorization state (no credentials shown).",
@@ -862,6 +877,9 @@ def main(argv=None):
         return 0
     if step == "install-paseo-plugin":
         print(_json(install_paseo_plugin()))
+        return 0
+    if step == "apply-routing-defaults":
+        print(_json(init_storage()["routing"]))
         return 0
     if step == "validate-connection":
         print(_json(validate_connection(connection_id=args.connection_id)))

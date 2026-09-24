@@ -52,7 +52,9 @@ TRANSITIONS = {
     'PLANNING': {'PLAN_READY', 'ANSWER_READY', 'WAITING_USER', 'VERIFYING'},
     'ANSWER_READY': {'COMPLETED'},
     'PLAN_READY': {'EXECUTING'},
-    'EXECUTING': {'REVIEWING', 'WAITING_USER'},
+    # EXECUTING -> VERIFYING only with the runtime's own REVIEW_NOT_REQUIRED
+    # observation for the revision (see transition and review_waiver).
+    'EXECUTING': {'REVIEWING', 'VERIFYING', 'WAITING_USER'},
     'REVIEWING': {'EXECUTING', 'VERIFYING', 'WAITING_USER'},
     'VERIFYING': {'RECONCILING', 'PLANNING'},
     'RECONCILING': {'COMPLETED', 'WAITING_USER'},
@@ -89,9 +91,12 @@ def transition(db, task_id, target, *, blocker=None):
         raise StoreError('runtime_task_missing')
     source = row['state']
     allowed = TRANSITIONS.get(source, set()) | ({'BLOCKED', 'FAILED', 'CANCELLED', 'RECOVERING'} if source not in TERMINAL else set())
-    if target not in allowed:
+    if target not in allowed or (source == 'EXECUTING' and target == 'VERIFYING'
+                                 and not current_review_waiver(db, task_id)):
         raise StoreError('invalid_state_transition', 'state', f'{source} -> {target}',
                          ', '.join(sorted(allowed)), 'The runtime owns stage transitions.')
+    if source == 'PLAN_READY' and target == 'EXECUTING':
+        _record_execution_baseline(db, task_id)
     if target == 'BLOCKED':
         # A stop is never a dead end: the user is asked why and what next,
         # and the answer resumes through RECOVERING (workers confirmed gone)
@@ -101,6 +106,77 @@ def transition(db, task_id, target, *, blocker=None):
     db.execute('UPDATE runtime_tasks SET state=?,blocker=?,updated_at=? WHERE task_id=?',
                (target, blocker, now(), task_id))
     event(db, task_id, 'TASK_STATE_CHANGED', dict(previous=source, state=target, blocker=blocker))
+
+
+def _observe_project(db, task_id):
+    from ..delegation.revision import capture_revision
+    return capture_revision(task_workspace.task_root(db, task_id))
+
+
+def _record_execution_baseline(db, task_id):
+    """Observe the project as a plan revision starts executing.
+
+    Review is decided later against this runtime observation, never against
+    a model's claim that nothing changed."""
+    revision = db.execute('SELECT revision FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()['revision']
+    observed = _observe_project(db, task_id)
+    event(db, task_id, 'EXECUTION_BASELINE', dict(revision=revision, kind=observed['kind'], head=observed['head'],
+                                                  revision_digest=observed['dirty_digest']))
+
+
+def review_waiver(db, task_id, revision, nodes):
+    """Why independent review is not required for this revision, or None.
+
+    Only when the project observed now is exactly a state that needs no
+    review: the one observed before this task's first planned work (since the
+    user last reopened it -- later changes by an earlier revision are still
+    caught), or one an independent reviewer approved. A revision that already
+    has a review node (a fix cycle) is always reviewed again, and an
+    unavailable observation always requires review."""
+    if any(n['stage'] == 'review' for n in nodes):
+        return None
+    observed = _observe_project(db, task_id)
+    if observed['kind'] != 'observed' or not observed['dirty_digest']:
+        return None
+    digest, head = observed['dirty_digest'], observed['head']
+    reopened = db.execute("SELECT MAX(id) FROM runtime_events WHERE task_id=? AND type='TASK_REOPENED'",
+                          (task_id,)).fetchone()[0] or 0
+    baseline = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='EXECUTION_BASELINE' "
+                          "AND id>? ORDER BY id LIMIT 1", (task_id, reopened)).fetchone()
+    baseline = json.loads(baseline[0]) if baseline else {}
+    if baseline.get('kind') == 'observed' and baseline.get('revision_digest') == digest and baseline.get('head') == head:
+        return dict(reason='no_project_changes', reference='execution_baseline',
+                    reference_revision=baseline['revision'], revision_digest=digest, head=head)
+    for row in db.execute("SELECT revision,result_json FROM runtime_nodes WHERE task_id=? AND stage='review' "
+                          "AND result_json IS NOT NULL ORDER BY rowid DESC", (task_id,)).fetchall():
+        result = json.loads(row['result_json'])
+        if result.get('verdict') == 'APPROVE' and result.get('project_digest') == digest:
+            return dict(reason='no_changes_since_approved_review', reference='approved_review',
+                        reference_revision=row['revision'], revision_digest=digest, head=head)
+    return None
+
+
+def current_review_waiver(db, task_id):
+    """The runtime's REVIEW_NOT_REQUIRED record for the current revision."""
+    task = db.execute('SELECT revision FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+    if task is None or db.execute("SELECT 1 FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='review'",
+                                  (task_id, task['revision'])).fetchone():
+        return None
+    row = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_NOT_REQUIRED' "
+                     "AND json_extract(payload_json,'$.revision')=? ORDER BY id DESC LIMIT 1",
+                     (task_id, task['revision'])).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def reviewed_digest(db, task_id, revision):
+    """The project digest verification and completion must match: the last
+    review's, or the runtime's no-change observation when none was required."""
+    review = db.execute("SELECT result_json FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='review' "
+                        "ORDER BY rowid DESC LIMIT 1", (task_id, revision)).fetchone()
+    if review:
+        return json.loads(review[0]).get('project_digest') if review[0] else None
+    waiver = current_review_waiver(db, task_id)
+    return waiver['revision_digest'] if waiver and waiver['revision'] == revision else None
 
 
 STOP_OPTIONS = ('Continue: let the coordinator decide how to proceed',
@@ -347,7 +423,9 @@ class TaskMachine:
             verification=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED') ORDER BY id DESC LIMIT 1",(task_id,)).fetchone()
             from .policy import denied_paths
             denials = denied_paths(db,task_id)
+            waiver = current_review_waiver(db, task_id)
         value = dict(task)
+        value['review_not_required'] = waiver
         value['runtime_proposals']=[json.loads(row[0]) for row in reversed(proposals)]
         value['steering'] = [json.loads(row[0]) for row in reversed(steering)]
         value['policy'] = dict(deny_write=denials, native_tools=True)
@@ -608,8 +686,15 @@ class TaskMachine:
             nodes = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND revision=?', (task_id, task['revision'])).fetchall()
             if not nodes or any(n['status'] != 'completed' for n in nodes):
                 raise StoreError('execution_incomplete')
+            # Review exists to check changes: planned work that changed no
+            # project file (advice, investigation) goes straight to
+            # verification, with the runtime's observation retained.
+            waiver = review_waiver(db, task_id, task['revision'], nodes)
             cycle = task['review_cycle'] + 1
-            if cycle > MAX_REVIEW_CYCLES:
+            if waiver:
+                event(db, task_id, 'REVIEW_NOT_REQUIRED', dict(waiver, revision=task['revision']))
+                transition(db, task_id, 'VERIFYING')
+            elif cycle > MAX_REVIEW_CYCLES:
                 transition(db, task_id, 'BLOCKED', blocker='review_cycle_limit')
             else:
                 key = f'_review_{cycle}'
@@ -695,8 +780,7 @@ class TaskMachine:
             task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
             if not task or task['state'] != 'VERIFYING':
                 raise StoreError('verification_not_expected')
-            review = db.execute("SELECT result_json FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='review' ORDER BY rowid DESC LIMIT 1", (task_id, task['revision'])).fetchone()
-            if not review or not review[0] or json.loads(review[0]).get('project_digest') != revision_digest:
+            if reviewed_digest(db, task_id, task['revision']) != revision_digest:
                 transition(db, task_id, 'BLOCKED', blocker='verification_review_revision_changed')
                 db.commit()
                 return False
@@ -798,12 +882,16 @@ class TaskMachine:
             if report is None or report_digest(self.store, task_id, report['filename']) != result.get('report_digest'):
                 raise StoreError('completion_artifact_changed_or_missing')
         reviews = [n for n in nodes if n['stage'] == 'review']
-        if not reviews or json.loads(reviews[-1]['result_json']).get('verdict') != 'APPROVE':
+        if reviews and json.loads(reviews[-1]['result_json']).get('verdict') != 'APPROVE':
+            raise StoreError('completion_review_missing')
+        if not reviews and not current_review_waiver(db, task_id):
             raise StoreError('completion_review_missing')
         evidence = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='VERIFICATION_PASSED' ORDER BY id DESC LIMIT 1",
                               (task_id,)).fetchone()
         if not evidence or json.loads(evidence['payload_json'])['revision'] != task['revision']:
             raise StoreError('completion_verification_missing')
+        if reviewed_digest(db, task_id, task['revision']) != json.loads(evidence['payload_json'])['revision_digest']:
+            raise StoreError('completion_review_missing')
         from ..delegation.revision import capture_revision
         observed = capture_revision(task_workspace.task_root(db, task_id))
         if observed['kind'] != 'observed' or observed['dirty_digest'] != json.loads(evidence['payload_json'])['revision_digest']:

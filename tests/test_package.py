@@ -229,7 +229,10 @@ def test_orchestrator_routes_conditional_procedures_with_valid_links():
 
 def test_completion_requires_runtime_review_and_verification():
     from cortex_runtime.orchestration.state import TRANSITIONS
-    assert TRANSITIONS['EXECUTING']=={'REVIEWING','WAITING_USER'}
+    # EXECUTING -> VERIFYING exists only for work that changed nothing, and
+    # transition() refuses it without the runtime's REVIEW_NOT_REQUIRED record.
+    assert TRANSITIONS['EXECUTING']=={'REVIEWING','VERIFYING','WAITING_USER'}
+    assert 'current_review_waiver' in (PLUGIN/'src/cortex_runtime/orchestration/state.py').read_text()
     assert 'COMPLETED' not in TRANSITIONS['REVIEWING']
     assert 'COMPLETED' not in TRANSITIONS['VERIFYING']
     source=(PLUGIN/'skills/orchestrator/SKILL.md').read_text()

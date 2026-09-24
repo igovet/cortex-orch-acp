@@ -66,6 +66,8 @@ paseo plugin reload cortex-acp
 
 Git installs run their declared preparation hook. Local directory installs use the checkout directly; use the setup helper for a managed local Paseo installation when needed. See [Paseo onboarding and diagnostics](docs/acp/packaging-and-onboarding.md).
 
+The Paseo plugin shows per-worker context and token usage on worker cards. It does not add a separate provider plan-usage button.
+
 ### Other ACP clients
 
 Register Cortex as an ACP stdio agent with this command, adapting the absolute path to your checkout:
@@ -78,4 +80,14 @@ Use the client’s ACP agent registration settings. See [the ACP documentation i
 
 ## Configuration
 
-See the [configuration guide](docs/configuration.md) for JSON configuration files and their locations, MCP server setup, engine connections, routing rules, and the default Haiku exclusion with conditional Luna routing.
+See the [configuration guide](docs/configuration.md) for JSON configuration files and their locations, MCP server setup, engine connections, routing rules, and the default Haiku exclusion with conditional Luna routing. ssh from workers uses your own ssh-agent and `~/.ssh/config`; see [ssh from workers](docs/configuration.md#ssh-from-workers).
+
+## Further documentation
+
+- [Packaging and onboarding](docs/acp/packaging-and-onboarding.md): install, first-run setup, diagnostics
+- [Configuration guide](docs/configuration.md): connections, routing, MCP servers, ssh
+- [Codex adapter](docs/acp/codex-acp-adapter.md) and [Claude adapter](docs/acp/claude-agent-acp-adapter.md): how Cortex runs each engine
+- [Routing and fallback](docs/acp/routing-and-fallback.md): worker routing and multi-provider fallback
+- [Project storage and recovery](docs/project/storage.md): task storage, format upgrades, recovery
+- [Security](SECURITY.md): the sandbox and permission boundary
+- [ACP documentation index](docs/acp/index.md): full reference

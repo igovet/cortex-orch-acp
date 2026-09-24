@@ -1,6 +1,7 @@
 from copy import deepcopy
 from types import SimpleNamespace
 import concurrent.futures
+import json
 
 import pytest
 
@@ -142,7 +143,7 @@ def test_retired_model_controls_not_advertised():
     assert not {'delegate','decide','plan_submit'} & set(schemas_for('worker'))
 
 
-@pytest.mark.parametrize("scenario", ["success", "fix", "review_block", "verification_fail", "synthesis_drift", "post_review_drift", "elicitation", "text_question", "worker_question", "replan", "scope", "escalation", "result_recovery", "result_correction"])
+@pytest.mark.parametrize("scenario", ["success", "advice", "fix", "review_block", "verification_fail", "synthesis_drift", "post_review_drift", "elicitation", "text_question", "worker_question", "replan", "scope", "escalation", "result_recovery", "result_correction"])
 def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, scenario):
     """A model cannot finish the task; the runtime drives every required stage."""
     import threading
@@ -193,6 +194,13 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
                         with pytest.raises(StoreError):
                             mcp_tools.dispatch(store,channel,'project_read',dict(path='.'))
                     return PromptOutcome(StopReason.END_TURN,'Requested runtime decision')
+                with store.connection() as db:
+                    worker_role = db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',
+                                             (channel.attempt_id,)).fetchone()['role_id']
+                if scenario != 'advice' and worker_role not in {'worker-code-reviewer', 'worker-senior-consultant'}:
+                    # An implementation changes the project, as a native edit tool would.
+                    (tmp_path / 'src' / 'part0').mkdir(parents=True, exist_ok=True)
+                    (tmp_path / 'src' / 'part0' / f'{channel.attempt_id}.txt').write_text('implemented')
                 draft = store.call('create_draft', dict(template='general', request_key='draft-' + channel.attempt_id),
                                    channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True)
                 path = Path(draft['draft_path'])
@@ -264,6 +272,17 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
         runtime.shutdown()
     assert result == StopReason.END_TURN
     context = TaskMachine(store).context(task.task_id)
+    if scenario == 'advice':
+        # Nothing in the project changed: no reviewer, and the runtime says why.
+        assert context['state'] == 'COMPLETED', context
+        assert calls == ['coordinator', 'worker', 'coordinator']
+        assert reviews == [] and not any(n['stage'] == 'review' for n in context['nodes'])
+        with store.connection() as db:
+            waived = [json.loads(r[0]) for r in db.execute(
+                "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_NOT_REQUIRED'", (task.task_id,))]
+        assert [(w['reason'], w['revision']) for w in waived] == [('no_project_changes', 1)]
+        assert context['review_not_required']['revision_digest'] == context['verification']['revision_digest']
+        return
     if scenario in {'success', 'fix', 'elicitation', 'text_question', 'worker_question', 'replan', 'scope', 'escalation', 'result_recovery', 'result_correction'}:
         assert context['state'] == 'COMPLETED', context
         expected = ['coordinator','worker','worker','worker','worker','coordinator'] if scenario == 'fix' else ['coordinator','worker','worker','coordinator']
@@ -484,6 +503,10 @@ def test_project_overview_reads_and_answers_once_without_workers(tmp_path,langua
     context=TaskMachine(store).context(task.task_id)
     assert context['state']=='COMPLETED' and context['nodes']==[] and context['verification'] is None
     assert (tmp_path/'README.md').read_text()=='A static website for focus sessions.\n'
+    with store.connection() as db:
+        review_events=db.execute("SELECT type FROM runtime_events WHERE task_id=? AND type IN "
+                                 "('REVIEW_STARTED','REVIEW_NOT_REQUIRED','EXECUTION_BASELINE')",(task.task_id,)).fetchall()
+    assert review_events==[], 'A direct answer never reaches the review stage'
 
 
 def test_another_tasks_stale_running_node_never_blocks_this_one(machine):
@@ -737,3 +760,141 @@ def test_unknown_exact_model_and_missing_reason_are_rejected(machine, monkeypatc
     with pytest.raises(StoreError, match='unknown_model_hint'):
         state.submit_plan(channel, proposal, 'missing-model')
     assert state.context(channel.task_id)['state'] == 'PLANNING'
+
+
+def _finish_execution(state, task_id, **result):
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET status='completed',result_json=? WHERE task_id=? AND status IN ('pending','running')",
+                   (json.dumps(dict(dict(report_ref='r', summary='done', checks=[]), **result)), task_id))
+        db.commit()
+
+
+def _events(state, task_id, kind):
+    with state.store.connection() as db:
+        return [json.loads(r[0]) for r in db.execute(
+            'SELECT payload_json FROM runtime_events WHERE task_id=? AND type=? ORDER BY id', (task_id, kind))]
+
+
+def _review_nodes(state, task_id):
+    return [n for n in state.context(task_id)['nodes'] if n['stage'] == 'review']
+
+
+def test_planned_work_that_changed_nothing_completes_without_review(machine):
+    """Advice or investigation: the runtime observes an unchanged project and
+    goes straight to verification, recording why no review was scheduled."""
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'advice'); state.move(channel.task_id, 'EXECUTING')
+    baseline = _events(state, channel.task_id, 'EXECUTION_BASELINE')
+    assert [(b['revision'], b['kind']) for b in baseline] == [(1, 'observed')]
+    _finish_execution(state, channel.task_id)
+    state.add_review(channel.task_id)
+    context = state.context(channel.task_id)
+    assert context['state'] == 'VERIFYING' and _review_nodes(state, channel.task_id) == []
+    waiver = context['review_not_required']
+    assert waiver['reason'] == 'no_project_changes' and waiver['reference'] == 'execution_baseline'
+    assert waiver['revision_digest'] == baseline[0]['revision_digest'] and waiver['revision'] == 1
+    # Verification binds to that observation (the composed advice scenario
+    # also passes the completion gate).
+    assert state.record_verification(channel.task_id, [dict(argv=['python3', '-B', '-m', 'pytest', '-q'], exit_code=0,
+                                     complete=True, revision_digest=waiver['revision_digest'])], waiver['revision_digest'])
+    assert _events(state, channel.task_id, 'REVIEW_STARTED') == []
+
+
+def test_a_model_cannot_skip_review_of_changed_work(machine, tmp_path):
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'change'); state.move(channel.task_id, 'EXECUTING')
+    with pytest.raises(StoreError, match='invalid_state_transition'):
+        state.move(channel.task_id, 'VERIFYING')
+    (tmp_path / 'feature.py').write_text('changed = True\n')
+    _finish_execution(state, channel.task_id)
+    state.add_review(channel.task_id)
+    assert state.context(channel.task_id)['state'] == 'REVIEWING'
+    assert [n['node_id'] for n in _review_nodes(state, channel.task_id)] == ['_review_1']
+    assert _events(state, channel.task_id, 'REVIEW_NOT_REQUIRED') == []
+    assert state.context(channel.task_id)['review_not_required'] is None
+
+
+def test_a_fix_cycle_is_always_reviewed_again(machine, tmp_path):
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'change'); state.move(channel.task_id, 'EXECUTING')
+    (tmp_path / 'feature.py').write_text('changed = True\n')
+    _finish_execution(state, channel.task_id)
+    state.add_review(channel.task_id)
+    _finish_execution(state, channel.task_id, verdict='REQUEST_CHANGES', project_digest='x' * 64)
+    state.add_fix(channel.task_id, dict(node_id='_review_1', result=dict(summary='Fix it')))
+    assert state.context(channel.task_id)['state'] == 'EXECUTING'
+    (tmp_path / 'feature.py').write_text('changed = "fixed"\n')
+    _finish_execution(state, channel.task_id)
+    state.add_review(channel.task_id)
+    assert state.context(channel.task_id)['state'] == 'REVIEWING'
+    assert [n['node_id'] for n in _review_nodes(state, channel.task_id)] == ['_review_1', '_review_2']
+    assert _events(state, channel.task_id, 'REVIEW_NOT_REQUIRED') == []
+
+
+def test_a_fix_cycle_without_new_changes_is_still_reviewed(machine, tmp_path):
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'change'); state.move(channel.task_id, 'EXECUTING')
+    (tmp_path / 'feature.py').write_text('changed = True\n')
+    _finish_execution(state, channel.task_id)
+    state.add_review(channel.task_id)
+    _finish_execution(state, channel.task_id, verdict='REQUEST_CHANGES', project_digest='x' * 64)
+    state.add_fix(channel.task_id, dict(node_id='_review_1', result=dict(summary='Fix it')))
+    _finish_execution(state, channel.task_id)
+    state.add_review(channel.task_id)
+    assert [n['node_id'] for n in _review_nodes(state, channel.task_id)] == ['_review_1', '_review_2']
+
+
+def test_an_earlier_revisions_unreviewed_change_still_requires_review(machine, tmp_path):
+    """A worker changed files, then the task returned to the coordinator
+    before review; a later investigation-only plan cannot hide that change."""
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'first'); state.move(channel.task_id, 'EXECUTING')
+    (tmp_path / 'feature.py').write_text('changed = True\n')
+    assert state.return_to_coordinator(channel.task_id, 'worker_failed')
+    from cortex_runtime.orchestration.policy import resume_planning
+    resume_planning(state.store, channel.task_id)
+    state.submit_plan(channel, plan(), 'second'); state.move(channel.task_id, 'EXECUTING')
+    _finish_execution(state, channel.task_id)
+    state.add_review(channel.task_id)
+    assert state.context(channel.task_id)['state'] == 'REVIEWING'
+
+
+def test_a_repair_revision_after_an_approved_review(machine, tmp_path):
+    """After an approved review, a new plan that changes nothing more is not
+    reviewed again; one that changes the project is."""
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'first'); state.move(channel.task_id, 'EXECUTING')
+    (tmp_path / 'feature.py').write_text('changed = True\n')
+    _finish_execution(state, channel.task_id)
+    state.add_review(channel.task_id)
+    from cortex_runtime.delegation.revision import capture_revision
+    approved = capture_revision(str(tmp_path))['dirty_digest']
+    _finish_execution(state, channel.task_id, verdict='APPROVE', project_digest=approved)
+    state.move(channel.task_id, 'VERIFYING')
+    assert state.record_verification(channel.task_id, [dict(argv=['false'], exit_code=1, complete=True,
+                                     revision_digest=approved)], approved) is False
+    assert state.context(channel.task_id)['state'] == 'PLANNING'
+    state.submit_plan(channel, plan(), 'inspect'); state.move(channel.task_id, 'EXECUTING')
+    _finish_execution(state, channel.task_id)
+    state.add_review(channel.task_id)
+    waiver = state.context(channel.task_id)['review_not_required']
+    assert waiver['reason'] == 'no_changes_since_approved_review' and waiver['reference_revision'] == 1
+    # Bound to the approved digest: a failing check returns to the coordinator, never a binding stop.
+    assert state.record_verification(channel.task_id, [], approved) is False
+    assert state.context(channel.task_id)['state'] == 'PLANNING'
+    state.submit_plan(channel, plan(), 'repair'); state.move(channel.task_id, 'EXECUTING')
+    (tmp_path / 'feature.py').write_text('changed = "repaired"\n')
+    _finish_execution(state, channel.task_id)
+    state.add_review(channel.task_id)
+    assert state.context(channel.task_id)['state'] == 'REVIEWING'
+
+
+def test_an_unobservable_project_always_requires_review(machine, monkeypatch):
+    from cortex_runtime.delegation import revision
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'advice'); state.move(channel.task_id, 'EXECUTING')
+    _finish_execution(state, channel.task_id)
+    monkeypatch.setattr(revision, 'capture_revision',
+                        lambda root: dict(kind='unavailable', head=None, dirty_digest=None, detail='cap', manifest=None))
+    state.add_review(channel.task_id)
+    assert state.context(channel.task_id)['state'] == 'REVIEWING'

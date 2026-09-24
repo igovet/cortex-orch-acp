@@ -1,4 +1,11 @@
-"""Opt-in desktop password dialog for ssh run inside the sandbox.
+"""ssh inside the sandbox: the owner's own agent, and an opt-in dialog.
+
+ssh in an engine's native shell and in ``command_run`` uses the host's own
+ssh setup: HOME (``~/.ssh/config``, ``known_hosts``, keys) is the owner's,
+read-only, and ``host_agent_env`` passes the owner's running ssh-agent
+(``SSH_AUTH_SOCK``) through, so keys unlocked on the host work unchanged.
+Only a socket owned by the owner is passed; the private keys never leave the
+agent, and the model can only ask it to sign, as any owner process can.
 
 A sandboxed command has no terminal, so ssh cannot ask for a password and
 fails. With ``ssh-askpass.json`` (``{"enabled": true}``) in the Cortex config
@@ -16,8 +23,10 @@ sets no_new_privs, which forbids setuid programs.
 from pathlib import Path
 import json
 import re
+import os
 import shlex
 import shutil
+import stat
 
 CONFIG_NAME = 'ssh-askpass.json'
 TITLE = 'Cortex: ssh'
@@ -61,6 +70,21 @@ case $prompt in
 esac
 exec {program} {hidden}
 '''
+
+
+def host_agent_env(environ) -> dict[str, str]:
+    """``SSH_AUTH_SOCK`` from the owner's environment when it names a socket
+    the owner owns; ``{}`` otherwise (no agent, or anything suspicious)."""
+    value = environ.get('SSH_AUTH_SOCK')
+    if not isinstance(value, str) or not _PATH_VALUE.match(value):
+        return {}
+    try:
+        info = os.stat(value)
+    except OSError:
+        return {}
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        return {}
+    return {'SSH_AUTH_SOCK': value}
 
 
 def enabled(environ) -> bool:

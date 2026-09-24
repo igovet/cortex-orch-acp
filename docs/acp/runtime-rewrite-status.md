@@ -11,8 +11,10 @@ Implemented production paths:
   history in the single project-local store; four concurrent non-overlapping workers.
 - Closed plan/result/question/scope/replan/escalation/synthesis tools. No public
   delegate, decide, integrate, acceptance or model/effort selection API.
-- Fresh mandatory review, scoped fixes, three review cycles, contained verification
-  and completion bound to report identity and the reviewed project revision.
+- Independent review whenever the observed project differs from its execution
+  baseline, or for every fix cycle and any unobservable state; unchanged state is
+  recorded as `REVIEW_NOT_REQUIRED`. Scoped fixes, three review cycles, contained
+  verification and completion remain bound to exact report and project digests.
 - Pre-execution gateway checks for files, commands, drafts and external MCP tools;
   native tools bounded by the engine jail in both supported pinned adapters. Unknown execution
   effects remain unresolved rather than replaying a possible mutation.
@@ -24,7 +26,8 @@ Implemented production paths:
   redaction, except file/skill read bodies omitted from new display history. Paseo shows readable tool names while hiding thinking and protocol
   bookkeeping in chat and worker panels, including replay.
 - Informational questions have a read-only direct-answer path before any plan or
-  worker exists. Planned work retains mandatory review and verification.
+  worker exists. Planned work receives independent review when required by the
+  observed project state, plus verification.
 - Workers receive English-only communication instructions on every turn; the
   coordinator receives the selected message language after its context.
 
@@ -43,8 +46,8 @@ disabled. Unsupported versions or changed patch shapes fail closed.
 wrapper inside the engine jail with a loopback fake Responses provider. On
 2026-09-22 it observed MCP gateway dispatch, native `apply_patch` creating a file
 in the granted scope, and the same tool failing to write outside it. The
-installed Claude adapter was started in the jail and created a session without a
-model turn. This is executable installed-CLI evidence, not a paid-model or ACP
+installed Claude adapter was started in the jail and created a session without
+a model turn. This is executable installed-CLI evidence, not a paid-model or ACP
 GUI qualification.
 
 ## Verification boundary

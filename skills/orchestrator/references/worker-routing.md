@@ -14,6 +14,12 @@ better, for example after it failed or fell short on the same work, when the
 user asked for one, or when a review should run on a different provider from
 the implementation it checks. It is a preference, not a guarantee.
 
+Prefer `auto` for a node's model. When you do name an exact route, copy one that
+`list_route_options` marks `auto_eligible`. The runtime routes only the newest
+version of each model family and never a denied model (by default Haiku and
+`gpt-5.5`). A hint naming an older, superseded version or an excluded model is
+recorded as ignored.
+
 ## Specialist catalogue
 
 - `accessibility-auditor`: Accessibility auditor for WCAG conformance, keyboard navigation, and assistive-technology risks.
@@ -40,4 +46,4 @@ the implementation it checks. It is a preference, not a guarantee.
 
 ## Runtime-reserved (not plannable)
 
-`code-reviewer` and `build-verification` are runtime-reserved roles. The runtime adds independent review and final verification; do not include either role in a plan proposal.
+`code-reviewer` and `build-verification` are runtime-reserved roles. The runtime adds independent review (whenever the planned work changed the project) and final verification; do not include either role in a plan proposal.

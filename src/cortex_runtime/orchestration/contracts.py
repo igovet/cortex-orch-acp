@@ -18,7 +18,7 @@ def obj(properties, required=None):
 
 
 NODE = obj(dict(id=text('Unique plan node name: a letter, then letters, digits, \'_\' or \'-\', at most 64 characters.', 64), role=text('Specialist role. Runtime resolves its profile and route.', 80),
-                objective=text('One bounded implementation or investigation objective. The runtime automatically adds mandatory independent code review and final verification after all proposed tasks; do not duplicate those stages in this plan. Put any scope note or rationale here: a task has no other free-text field.'),
+                objective=text('One bounded implementation or investigation objective. After all proposed tasks the runtime automatically adds independent code review whenever it observes that the project changed, and final verification; do not duplicate those stages in this plan. Put any scope note or rationale here: a task has no other free-text field.'),
                 dependencies=array(text('Predecessor node name.', 64)),
                 scope=array(text('Requested project-relative path or glob; \'.\' is the whole project. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write. Runtime policy decides access.', 512), minimum=1),
                 complexity=dict(type='string', enum=['low', 'normal', 'high'],

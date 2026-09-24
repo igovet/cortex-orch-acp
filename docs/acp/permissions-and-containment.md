@@ -27,6 +27,11 @@ which is read-only and created neutral when absent; installed plugins are hidden
 A revoked or expired channel terminates the process. Engines therefore keep their
 native tools, `AGENTS.md`/`CLAUDE.md` loading and skills.
 
+The engine environment and each `command_run` receive the owner's own
+ssh-agent (`SSH_AUTH_SOCK`, only a socket the owner owns), so ssh uses the
+host's keys and `~/.ssh/config`; see
+[SECURITY.md](../../SECURITY.md#owners-ssh-agent).
+
 With the owner's opt-in `ssh-askpass.json` (`orchestration.ssh_askpass`), the
 engine environment and each `command_run` also receive the display session and
 `SSH_ASKPASS` pointing at a Cortex-generated dialog script mounted read-only.

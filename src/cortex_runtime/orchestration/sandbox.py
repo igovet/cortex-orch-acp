@@ -256,7 +256,8 @@ def as_owner(command, environ):
 
     Their name and groups resolve, HOME is their real one (read-only, mounted
     beneath the project so project grants still apply on top), the environment
-    is theirs without credentials, and the network is shared. Writes remain
+    is theirs without credentials (their ssh-agent socket stays: it holds no
+    key material), and the network is shared. Writes remain
     limited to the granted scope and private runtime paths stay masked.
     """
     home = environ.get('HOME', '')
@@ -273,6 +274,9 @@ def as_owner(command, environ):
     env = [arg for name, value in environ.items()
            if name not in {'HOME', 'TMPDIR', 'PWD', 'OLDPWD'} and not _SECRET_ENV.search(name)
            for arg in ('--setenv', name, value)]
+    # Their own ssh-agent (the secret filter above drops SSH_AUTH_SOCK).
+    from .ssh_askpass import host_agent_env
+    env += [arg for name, value in host_agent_env(environ).items() for arg in ('--setenv', name, value)]
     # HOME is read-only except the tool caches mounted above.
     scratch = command[command.index('TMPDIR', command.index('--clearenv')) + 1]
     env += ['--setenv', 'HOME', home if has_home else scratch]

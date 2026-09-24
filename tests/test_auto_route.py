@@ -525,3 +525,159 @@ def test_route_menu_reflects_live_catalog_and_policy(tmp_path, monkeypatch):
     assert [item["route"] for item in second["tiers"]["light"]] == ["claude-agent-acp/haiku"]
     assert second["tiers"]["light"][0]["auto_eligible"] is True
     assert second["roles"]["worker-backend-dev"]["high"] == "deep"
+
+
+# --- latest-version-only routing and family deny tokens -------------------
+
+def _named(connection, model, name=None):
+    entry = _entry(connection, model)
+    entry.model_name = name
+    return entry
+
+
+# The live engine-confirmed lists (claude-agent-acp names its aliases'
+# versions only in the display name).
+LIVE_CODEX = [_named("codex", m) for m in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol",
+                                           "gpt-5.6-terra", "gpt-5.6-luna")]
+LIVE_CLAUDE = [_named("claude", m, n) for m, n in (
+    ("opus[1m]", "Opus 5.5"), ("claude-opus-5[1m]", "claude-opus-5[1m]"), ("claude-fable-5-1[1m]", "Fable 5.1"),
+    ("claude-fable-5", "claude-fable-5"), ("claude-sonnet-5", "Sonnet 5"), ("claude-opus-4-8", "Opus 4.8"),
+    ("claude-opus-4-7", "Opus 4.7"), ("claude-sonnet-4-6", "Sonnet 4.6"))]
+
+
+@pytest.mark.parametrize("model,name,expected", [
+    ("gpt-6-luna", None, ("luna", (6,))),
+    ("gpt-5.6-luna", "5.6 Luna", ("luna", (5, 6))),
+    ("gpt-5.5", None, ("gpt", (5, 5))),
+    ("claude-opus-4-8", None, ("opus", (4, 8))),
+    ("claude-fable-5-1[1m]", None, ("fable", (5, 1))),
+    ("claude-haiku-4-5-20251001", None, ("haiku", (4, 5))),
+    ("opus[1m]", "Opus 5.5", ("opus", (5, 5))),
+    ("haiku", "Haiku 4.5", ("haiku", (4, 5))),
+    ("sonnet", "sonnet", ("sonnet", None)),
+    ("default", "Default (recommended)", ("default", None)),
+    ("opus", "Sonnet 5", ("opus", None)),  # a name for another family is never borrowed
+])
+def test_model_line_parses_family_and_version(model, name, expected):
+    assert auto_route.model_line(model, name) == expected
+
+
+def test_only_the_newest_version_of_each_family_is_routable():
+    superseded = auto_route.superseded_routes(LIVE_CODEX + LIVE_CLAUDE)
+    assert superseded == {
+        "codex:gpt-5.6-sol": "codex-acp/gpt-6-sol",
+        "codex:gpt-5.6-luna": "codex-acp/gpt-6-luna",
+        "claude:claude-opus-5[1m]": "claude-agent-acp/opus[1m]",
+        "claude:claude-opus-4-8": "claude-agent-acp/opus[1m]",
+        "claude:claude-opus-4-7": "claude-agent-acp/opus[1m]",
+        "claude:claude-fable-5": "claude-agent-acp/claude-fable-5-1[1m]",
+        "claude:claude-sonnet-4-6": "claude-agent-acp/claude-sonnet-5",
+    }
+
+
+def test_a_new_release_supersedes_its_family_automatically():
+    codex = LIVE_CODEX + [_named("codex", "gpt-7-luna", "7 Luna")]
+    claude = LIVE_CLAUDE + [_named("claude", "claude-sonnet-5-1", "Sonnet 5.1")]
+    superseded = auto_route.superseded_routes(codex + claude)
+    assert superseded["codex:gpt-6-luna"] == "codex-acp/gpt-7-luna"
+    assert superseded["codex:gpt-5.6-luna"] == "codex-acp/gpt-7-luna"
+    assert superseded["claude:claude-sonnet-5"] == "claude-agent-acp/claude-sonnet-5-1"
+    assert "codex:gpt-7-luna" not in superseded and "claude:claude-sonnet-5-1" not in superseded
+    # A release no tier table names keeps its line's tier.
+    assert auto_route.model_tiers(codex, {})["codex:gpt-7-luna"] == "light"
+
+
+def test_families_are_per_engine_and_unversioned_aliases_are_never_superseded():
+    entries = [_named("claude", "sonnet", "sonnet"), _named("claude", "claude-sonnet-4-6", "Sonnet 4.6"),
+               _named("codex", "gpt-5.6-terra")]
+    assert auto_route.superseded_routes(entries) == {}
+
+
+def _live_choose(monkeypatch, tmp_path, entries, routing=None):
+    from cortex_runtime.connections import registry
+
+    project = tmp_path / "project"
+    (project / ".cortex").mkdir(parents=True, exist_ok=True)
+    environ = {"HOME": str(tmp_path)}
+    if routing is not None:
+        (project / ".cortex" / "routing.json").write_text(json.dumps(routing))
+    connections = {"claude": SimpleNamespace(launch_command=("claude",)),
+                   "codex": SimpleNamespace(launch_command=("codex",))}
+    monkeypatch.setattr(registry, "read_registry", lambda _: SimpleNamespace(connections=connections))
+    monkeypatch.setattr(auto_route, "_entries", lambda overrides, *_: [
+        e for e in entries if not auto_route._denied(overrides, e.route.engine, e.route.model)])
+    monkeypatch.setattr(auto_route, "_is_seed", lambda _: False)
+    monkeypatch.setattr(quota, "used_percent", lambda *_: None)
+    return project, environ
+
+
+def test_choose_routes_only_the_newest_non_denied_version(tmp_path, monkeypatch):
+    entries = LIVE_CODEX + LIVE_CLAUDE
+    project, environ = _live_choose(monkeypatch, tmp_path, entries)
+    choice = auto_route.choose("worker-explorer", project, environ)
+    assert choice.model == "gpt-6-luna"
+    assert choice.decision["superseded"]["codex-acp/gpt-5.6-luna"] == "codex-acp/gpt-6-luna"
+    assert "codex-acp/gpt-5.6-luna" not in choice.decision["excluded_by_policy"]
+    assert all(c["route"] != "codex-acp/gpt-5.6-luna" for c in choice.decision["candidates"])
+    deep = auto_route.choose("worker-security-auditor", project, environ)
+    assert {c["route"] for c in deep.decision["candidates"]} == {
+        "codex-acp/gpt-6-sol", "claude-agent-acp/opus[1m]"}
+    # Deny removes the newest version: the newest non-denied one is routed.
+    project, environ = _live_choose(monkeypatch, tmp_path, entries, {"deny": ["gpt-6-luna"]})
+    assert auto_route.choose("worker-explorer", project, environ).model == "gpt-5.6-luna"
+
+
+def test_an_explicit_pin_of_an_older_version_is_honoured(tmp_path, monkeypatch):
+    project, environ = _live_choose(monkeypatch, tmp_path, LIVE_CODEX + LIVE_CLAUDE,
+                                    {"pin": {"worker-explorer": "codex-acp/gpt-5.6-luna"}})
+    choice = auto_route.choose("worker-explorer", project, environ)
+    assert (choice.model, choice.basis) == ("gpt-5.6-luna", "auto:pin")
+
+
+def test_a_model_hint_for_a_superseded_version_is_ignored(tmp_path, monkeypatch):
+    project, environ = _live_choose(monkeypatch, tmp_path, LIVE_CODEX + LIVE_CLAUDE)
+    choice = auto_route.choose("worker-explorer", project, environ, model_hint="codex-acp/gpt-5.6-luna")
+    assert choice.model == "gpt-6-luna"
+    assert choice.decision["model_hint_status"] == "ignored:superseded"
+
+
+def test_route_menu_reports_superseded_versions(tmp_path, monkeypatch):
+    project, environ = _live_choose(monkeypatch, tmp_path, LIVE_CODEX + LIVE_CLAUDE)
+    menu = auto_route.route_menu(project, environ)
+    items = {item["route"]: item for group in menu["tiers"].values() for item in group}
+    old = items["claude-agent-acp/claude-opus-4-8"]
+    assert (old["auto_eligible"], old["superseded_by"]) == (False, "claude-agent-acp/opus[1m]")
+    new = items["claude-agent-acp/opus[1m]"]
+    assert (new["auto_eligible"], new["superseded_by"]) == (True, None)
+
+
+@pytest.mark.parametrize("model", ["haiku", "claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-haiku-5[1m]"])
+def test_a_bare_haiku_deny_covers_every_haiku_id(model):
+    assert auto_route._denied({"deny": ["haiku"]}, "claude-agent-acp", model)
+    assert auto_route._denied({"deny": ["claude-agent-acp/haiku"]}, "claude-agent-acp", model)
+    assert not auto_route._denied({"deny": ["codex-acp/haiku"]}, "claude-agent-acp", model)
+
+
+def test_deny_tokens_never_match_another_family_or_version():
+    deny = {"deny": ["gpt-5.5", "haiku"]}
+    assert auto_route._denied(deny, "codex-acp", "gpt-5.5")
+    assert auto_route._denied(deny, "codex-acp", "gpt-5.5[1m]")
+    for model in ("gpt-5.6-luna", "gpt-6-luna", "gpt-5.5-codex", "gpt-6-sol"):
+        assert not auto_route._denied(deny, "codex-acp", model), model
+    for model in ("opus[1m]", "claude-sonnet-5", "claude-fable-5-1[1m]", "sonnet"):
+        assert not auto_route._denied(deny, "claude-agent-acp", model), model
+    # A token with a variant is exact: it never widens to the whole family.
+    assert not auto_route._denied({"deny": ["opus[1m]"]}, "claude-agent-acp", "claude-opus-5[1m]")
+
+
+def test_the_default_deny_removes_haiku_from_automatic_routing_and_the_selector(tmp_path, monkeypatch):
+    entries = [_named("claude", "haiku", "Haiku 4.5"), _named("claude", "claude-haiku-4-5-20251001"),
+               _named("codex", "gpt-5.5")] + LIVE_CODEX
+    project, environ = _live_choose(monkeypatch, tmp_path, entries, {"deny": ["gpt-5.5", "haiku"]})
+    menu = auto_route.route_menu(project, environ)
+    routes = {item["route"] for group in menu["tiers"].values() for item in group}
+    assert not any("haiku" in route or route.endswith("/gpt-5.5") for route in routes)
+    assert auto_route.is_denied("claude-agent-acp", "claude-haiku-4-5-20251001", project, environ)
+    with pytest.raises(PortableError) as refused:
+        auto_route.refuse_if_denied("claude-agent-acp", "haiku", project, environ)
+    assert refused.value.code == "route_denied"

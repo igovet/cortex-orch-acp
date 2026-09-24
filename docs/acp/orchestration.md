@@ -18,7 +18,20 @@ Reservations commit before provisioning, and concurrent claims share the same
 four-worker ceiling. Runtime routing resolves model and effort from the current tier, policy, catalog and audit balance; plan hints remain advisory. All
 23 specialist/consultant profiles remain available.
 
-The runtime inserts an independent code reviewer after execution. APPROVE proceeds
+The runtime inserts an independent code reviewer after execution whenever the
+planned work changed the project. When a plan revision starts executing, the runtime
+records an `EXECUTION_BASELINE` observation of the project (the same read-only tree
+digest and HEAD used for review and verification binding). When every node has
+completed, review is skipped only if the project observed now equals the first
+baseline since the task was created or last reopened, or a state an independent
+reviewer approved. The runtime then records `REVIEW_NOT_REQUIRED` with the reason
+and digest, projects it into the pipeline's "Independent review" section, and goes
+straight to verification, which binds to that digest. Any other observation, an
+unavailable observation, or a revision that already has a reviewer (a fix cycle)
+schedules review. Retried nodes and fix nodes are covered because the decision
+compares the whole project, not individual worker claims. No model argument or
+hint can waive review; `EXECUTING → VERIFYING` is refused without the runtime's own
+record. APPROVE proceeds
 to verification; REQUEST_CHANGES creates a fix node followed by a fresh reviewer;
 BLOCK stops acceptance. Three unsuccessful review cycles block further automatic
 work. The loop never treats an ordinary final model message as a worker result.
@@ -34,7 +47,8 @@ in an explicit Linux namespace sandbox with no user home, inherited credentials,
 network, or access to the real runtime store. Missing isolation, failed commands,
 incomplete output or a changed project digest cannot establish a pass.
 
-Completion of planned work requires current completed nodes, an approving review, complete passing
+Completion of planned work requires current completed nodes, an approving review
+(or the runtime's `REVIEW_NOT_REQUIRED` record for an unchanged project), complete passing
 verification for the exact plan/project revision, intact reports, synthesis and no
 live or unknown worker session. Runtime pipeline editions project the durable state;
 the pipeline is one newest-first Markdown file and other reports remain immutable.
@@ -43,7 +57,8 @@ For a simple informational question, the coordinator reads relevant files and
 submits an answer without a plan or workers. The runtime transitions through
 ANSWER_READY and validates the exact answer receipt before completion. Any plan
 revision, node or worker provisioning disallows this path. Project mutations stay
-unavailable to the coordinator; planned work retains the full review gate.
+unavailable to the coordinator; a direct answer never reaches the review stage,
+and planned work that changes the project retains the full review gate.
 
 Paseo hides thinking and protocol bookkeeping (including wait) in chat and worker
 panels, live and on replay. Meaningful MCP operations, private-store tool cards,

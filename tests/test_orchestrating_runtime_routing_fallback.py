@@ -194,13 +194,18 @@ def test_engine_failure_triggers_authorized_fallback_and_audits_both_attempts(tm
         _publish(store, channel, title, call_index)
         return PromptOutcome(StopReason.END_TURN, "")
 
+    def worker_implementing_behavior(store, channel, session_ref, message, call_index):
+        # The fallback attempt builds A, so the runtime schedules review.
+        (Path(store.project_root) / "a.py").write_text("A = True\n", encoding="utf-8")
+        return worker_success_behavior(store, channel, session_ref, message, call_index)
+
     def router(store, channel, session_ref, launch, instructions):
         if channel is None:
             return None
         if channel.role == "coordinator":
             return coordinator_behavior
         if launch.get('role_id') == 'worker-code-reviewer': return worker_success_behavior
-        return worker_success_behavior if launch.get("route_override") is not None else worker_failing_behavior
+        return worker_implementing_behavior if launch.get("route_override") is not None else worker_failing_behavior
 
     runtime, engine = _make_runtime(store, router, connections)
     cancel_event = threading.Event()

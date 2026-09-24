@@ -260,7 +260,23 @@ Models are grouped into light, standard, deep, and flagship. An unavailable
 role tier searches the nearest tier permitted by policy; flagship is never a
 starting tier. Haiku is excluded from automatic selection by default, but
 `auto_allow` can opt in a model or `engine/model`; `deny` and `providers` still
-apply. A pin is strict and has priority over automatic selection.
+apply. Setup writes the default user `routing.json`, `{"deny": ["gpt-5.5",
+"haiku"]}`, whose bare `haiku` token denies every Haiku id and alias
+everywhere (see [configuration](../configuration.md#routing-rules)). A pin is
+strict and has priority over automatic selection.
+
+Only the newest version of each model family per engine is routed
+automatically (`routing.auto_route.superseded_routes`). Family and version
+come from the engine-confirmed model id (`gpt-6-luna` → luna 6,
+`claude-opus-4-8` → opus 4.8). For a versionless alias, they come from the
+engine's display name for the same family (`opus[1m]`, "Opus 5.5" → opus 5.5).
+No version table is maintained. `deny` is applied first, so the newest
+*non-denied* version wins. A model with no parseable version is never
+superseded. Older versions stay selectable in the editor and pinnable. The
+route menu shows them with `auto_eligible: false` and `superseded_by`, the
+decision records them under `superseded`, and a plan hint naming one gets
+`ignored:superseded`. An unavailable or exhausted newest version does not
+hand its place to an older one.
 
 `plan_submit` requires every node to provide `model`: `auto`, an engine id, or
 an exact `engine/model` route label from `list_route_options`. A non-`auto`
@@ -276,14 +292,14 @@ tier and prefers a different engine from the failed attempt when candidates
 otherwise tie. A hinted engine exceeding the eight-attempt balance tolerance
 gets `ignored:engine_overused`. Other hint statuses include
 `ignored:provider_not_allowed`, `ignored:not_offered`,
-`ignored:tier_mismatch`, `ignored:auto_excluded`, `ignored:no_candidate_in_tier`,
+`ignored:tier_mismatch`, `ignored:superseded`, `ignored:auto_excluded`, `ignored:no_candidate_in_tier`,
 `ignored:unavailable`, `ignored:near_quota_limit`, `ignored:escalated`, and
 `ignored:pinned`; the audit includes the reason and status.
 
 ### Within-tier rank order
 
 Hard exclusions are applied before ranking: unavailable routes, `deny`,
-`providers`, strict pins, and quota at 100%. For deep/standard work the 85%
+`providers`, superseded older versions, strict pins, and quota at 100%. For deep/standard work the 85%
 threshold affects preference/hint eligibility and quota-band ordering. Among eligible candidates the rank criteria are:
 
 1. Honoured legacy provider preference for a stored pre-model plan.

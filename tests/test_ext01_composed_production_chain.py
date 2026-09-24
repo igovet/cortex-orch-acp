@@ -241,7 +241,11 @@ def test_composed_production_chain(tmp_path, monkeypatch,engine):
             task=db.execute('SELECT task_id FROM runtime_tasks').fetchone()[0]
         context=TaskMachine(store).context(task)
         assert context['state']=='COMPLETED',context
-        assert [node['stage'] for node in context['nodes']]==['execution','review']
+        # An inspection that changed no project file needs no reviewer; the
+        # runtime records why, and verification binds to that observation.
+        assert [node['stage'] for node in context['nodes']]==['execution']
+        assert context['review_not_required']['reason']=='no_project_changes'
+        assert context['verification']['revision_digest']==context['review_not_required']['revision_digest']
         assert context['verification']['checks'][0]['exit_code']==0
         assert all(node['result']['report_digest'] for node in context['nodes'])
         updates=[m['params']['update'] for m in harness.stdout.lines if m.get('method')=='session/update']

@@ -763,6 +763,10 @@ class EngineProcess:
         # harmless for the Node-based Claude adapter and keeps the launch
         # contract independent of the caller's ambient environment.
         process_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        # ssh in the engine's shell uses the owner's own ssh-agent, like
+        # their terminal (see orchestration.ssh_askpass.host_agent_env).
+        from ..orchestration.ssh_askpass import host_agent_env
+        process_env.update(host_agent_env(base_env))
         if record.engine == "claude-agent-acp":
             # Claude aborts an MCP tools/call after 30 min (stdio) / 5 min
             # (http) of silence and ~28 h overall. A long command_run is
