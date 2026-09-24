@@ -46,36 +46,51 @@ def test_paseo_manifest_bootstraps_git_installation():
     ]
 
 
-def test_paseo_shim_modules_cover_every_local_shim_import():
+def test_paseo_runtime_payload_covers_every_local_shim_import():
     import re
 
-    server = setup._ROOT / "integrations" / "paseo" / "server"
+    payload = {relative for relative, _ in setup._paseo_runtime_payload()}
+    server = "integrations/paseo/server"
     pending, seen = ["acp-load-shim.mjs"], set()
     while pending:
         name = pending.pop()
         if name in seen:
             continue
         seen.add(name)
-        source = (server / name).read_text(encoding="utf-8")
+        source = (setup._ROOT / server / name).read_text(encoding="utf-8")
         pending.extend(re.findall(r"""from\s+["']\./([^"']+)["']""", source))
 
-    assert seen == set(setup._PASEO_SHIM_MODULES)
+    assert {f"{server}/{name}" for name in seen} <= payload
 
 
-def test_bootstrap_paseo_git_install_stages_and_repairs_shim_modules(tmp_path, monkeypatch):
+def test_bootstrap_paseo_git_install_stages_and_repairs_complete_payload(tmp_path, monkeypatch):
     _isolate(tmp_path, monkeypatch)
+    payload = {relative for relative, _ in setup._paseo_runtime_payload()}
 
     result = setup.bootstrap_paseo_git_install()
 
-    shim_dir = Path(result["runtime_root"]) / "integrations" / "paseo" / "server"
-    assert {path.name for path in shim_dir.iterdir()} == set(setup._PASEO_SHIM_MODULES)
-    (shim_dir / "replay-spool.mjs").unlink()
+    runtime = Path(result["runtime_root"])
+    staged = {path.relative_to(runtime).as_posix() for path in runtime.rglob("*") if path.is_file()}
+    assert staged == payload
+    removed = ("integrations/paseo/server/replay-spool.mjs", "skills/orchestrator/SKILL.md", "package-identity.json")
+    for relative in removed:
+        (runtime / relative).unlink()
 
     setup.bootstrap_paseo_git_install()
 
-    source = setup._ROOT / "integrations" / "paseo" / "server" / "replay-spool.mjs"
-    assert (shim_dir / "replay-spool.mjs").read_bytes() == source.read_bytes()
-    assert {path.name for path in shim_dir.iterdir()} == set(setup._PASEO_SHIM_MODULES)
+    for relative in removed:
+        assert (runtime / relative).read_bytes() == (setup._ROOT / relative).read_bytes()
+    # The staged runtime alone must satisfy what a coordinator turn reads
+    # before any engine launch: the package version and its role source.
+    probe = subprocess.run(
+        [sys.executable, "-B", "-c",
+         "import sys; sys.path.insert(0, 'src');"
+         "from cortex_runtime.portable.roles import load_role;"
+         "from cortex_runtime.acp import agent;"
+         "load_role('orchestrator'); print(agent.Agent.__name__)"],
+        cwd=runtime, capture_output=True, text=True, timeout=60,
+    )
+    assert probe.returncode == 0, probe.stderr
 
 
 def test_configure_paseo_plugin_launch_supports_git_installed_provider(tmp_path, monkeypatch, capsys):
