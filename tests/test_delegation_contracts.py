@@ -6,7 +6,7 @@ from cortex_runtime.delegation import contracts as dc,mcp_tools
 from cortex_runtime.orchestration.contracts import COORDINATOR,WORKER
 from cortex_runtime.orchestration.gateway import SCHEMAS
 
-PLAN=dict(plan=dict(tasks=[dict(id='inspect',role='explorer',objective='Inspect the project',dependencies=[],scope=['src/**'])],
+PLAN=dict(plan=dict(tasks=[dict(id='inspect',role='explorer',objective='Inspect the project',dependencies=[],scope=['src/**'],model='auto')],
                     verification=[['python3','-B','-c','print(1)']]),request_key='plan')
 
 
@@ -26,7 +26,7 @@ def test_retired_operations_have_no_schema_or_dispatch_alias(role,operation):
 
 
 def test_no_model_contract_accepts_authority_selectors():
-    forbidden={'task_id','attempt_id','session_id','channel_id','workspace_id','workspace_binding_id','epoch','owner_epoch','assignment_id','model','effort','engine'}
+    forbidden={'task_id','attempt_id','session_id','channel_id','workspace_id','workspace_binding_id','epoch','owner_epoch','assignment_id' ,'effort','engine'}
     def inspect(schema):
         if schema.get('type')=='object':
             assert schema['additionalProperties'] is False
@@ -61,10 +61,16 @@ def test_plan_accepts_only_the_bounded_complexity_hint():
     with pytest.raises(StoreError,match='invalid_arguments'): dc.validate('coordinator','plan_submit',args)
 
 
-def test_plan_accepts_only_a_known_provider_preference():
-    args=deepcopy(PLAN); args['plan']['tasks'][0]['provider']='codex-acp'
+def test_plan_accepts_model_recommendation_and_rejects_legacy_provider():
+    args=deepcopy(PLAN); args['plan']['tasks'][0].update(model='codex-acp', model_reason='This is a code change.')
     dc.validate('coordinator','plan_submit',args)
-    args['plan']['tasks'][0]['provider']='gpt-6-astra'
+    args['plan']['tasks'][0]['model']='codex-acp/gpt-5.6-terra'
+    dc.validate('coordinator','plan_submit',args)
+    args['plan']['tasks'][0]['model']='gpt-6-astra'
+    with pytest.raises(StoreError,match='invalid_arguments'): dc.validate('coordinator','plan_submit',args)
+    args=deepcopy(PLAN); args['plan']['tasks'][0]['provider']='codex-acp'
+    with pytest.raises(StoreError,match='invalid_arguments'): dc.validate('coordinator','plan_submit',args)
+    args=deepcopy(PLAN); del args['plan']['tasks'][0]['model']
     with pytest.raises(StoreError,match='invalid_arguments'): dc.validate('coordinator','plan_submit',args)
 
 

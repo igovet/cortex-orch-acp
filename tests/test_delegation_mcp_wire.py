@@ -111,7 +111,7 @@ def test_plan_wire_is_idempotent_and_does_not_start_a_worker(tmp_path):
     from cortex_runtime.orchestration.state import TaskMachine
     project,store,task,ch,secret=_bootstrap(tmp_path)
     machine=TaskMachine(store);machine.create(task,'Build a page.')
-    proposed=dict(tasks=[dict(id='A',role='backend-dev',objective='Implement',dependencies=[],scope=['src/**'])],verification=[['true']])
+    proposed=dict(tasks=[dict(id='A',role='backend-dev',objective='Implement',dependencies=[],scope=['src/**'],model='auto')],verification=[['true']])
     request=dict(name='plan_submit',arguments=dict(plan=proposed,request_key='plan'))
     first=_data(_call(project,ch,secret,_init_and('tools/call',request),tmp_path))
     assert first==_data(_call(project,ch,secret,_init_and('tools/call',request),tmp_path))

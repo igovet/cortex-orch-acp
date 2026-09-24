@@ -25,18 +25,23 @@ NODE = obj(dict(id=text('Unique plan node name: a letter, then letters, digits, 
                                 description='How hard this task is, judged from the work itself: low for a narrow lookup or mechanical change, '
                                             'high for cross-cutting root-cause analysis, production incidents, concurrency, security or data-loss risk; '
                                             'omit for normal. The runtime turns it into a stronger or cheaper route; it never names a model.'),
-                provider=dict(type='string', enum=list(SUPPORTED_ENGINES),
-                              description='Optional provider preference for this task when the work clearly suits one: codex-acp (Codex) or '
-                                          'claude-agent-acp (Claude). The runtime still chooses the tier, model and effort, and honours the '
-                                          'preference only among available candidates of that tier that routing.json allows and not over a pin '
-                                          'or a nearly exhausted plan; otherwise it records why it was ignored. Omit to let the runtime decide.')),
-           required=['id', 'role', 'objective', 'dependencies', 'scope'])
+                model=dict(type='string', minLength=1, maxLength=160,
+                           description='Required routing recommendation. Use auto to let the runtime choose, an engine id to prefer that engine, or an exact engine/model route from list_route_options. The runtime computes tier and effort; a hint never raises tier or overrides pin, deny, providers, availability or quota. Flagship is escalation-only; retries and fixes ignore the hint.'),
+                model_reason=dict(type='string', minLength=1, maxLength=300,
+                                  description='One short sentence explaining a non-auto model recommendation; required for every non-auto hint.')),
+           required=['id', 'role', 'objective', 'dependencies', 'scope', 'model'])
+NODE['properties']['model']['pattern'] = (
+    r'^(auto|' + '|'.join(re.escape(engine) for engine in SUPPORTED_ENGINES) +
+    r'|(' + '|'.join(re.escape(engine) for engine in SUPPORTED_ENGINES) +
+    r')/[A-Za-z0-9._:\[\]-]{1,128})$'
+)
 NODE['properties']['id']['pattern'] = r'^[A-Za-z][A-Za-z0-9_-]{0,63}$'
 from ..portable.roles import WORKER_ALIASES
 NODE['properties']['role']['enum'] = sorted(role for role in WORKER_ALIASES if role not in {'code-reviewer','build-verification'})
 PLAN = obj(dict(tasks=array(NODE, minimum=1), verification=array(array(text('Literal argument of a verification command copied exactly from the project\'s own documented verification (docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json scripts), interpreter path included; set environment variables with ["env", "NAME=value", ...]. Runs with the owner\'s tools; only git-ignored paths are writable.', 4096), minimum=1), maximum=16, minimum=1)))
 COORDINATOR = {
     'task_get_context': obj({}),
+    'list_route_options': obj({}),
     'answer_submit': obj(dict(text=text('Answer a read-only question directly, in the selected coordinator language, grounded in the project files you inspected. Use for explanations, project overviews and factual questions that need no changes or delegated investigation. Available before any plan or worker exists, or after the user answered a runtime stop question or a question asked after verification by choosing to finish. Does not certify implementation, review, or tests; use plan_submit when the user requests changes.',32000), request_key=text('Unique answer delivery key; exact retries return the same receipt.',128))),
     'plan_submit': obj(dict(plan=PLAN, request_key=text('Unique proposal delivery key; exact retries return the same receipt.', 128))),
     'synthesis_submit': obj(dict(

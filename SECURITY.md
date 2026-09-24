@@ -252,7 +252,9 @@ mode) is retried on a different available route instead, at most six times.
 Routing refusals (`no_available_route`, `pinned_route_unavailable`,
 `invalid_routing_overrides`, `route_denied`) are never retried. These records
 come only from the engine's structured error fields and carry no credentials.
-They never lift a `deny` or substitute a pin. Review/fix cycles and model
+They never lift a `deny` or substitute a pin. Recent-attempt balance and the
+optional `auto_allow` for Haiku cannot bypass `deny`, `providers`, route
+availability or the 100% plan-window exclusion. Review/fix cycles and model
 replan requests are bounded. Coordinator, worker, review and command deadlines
 are runtime-owned. Recovery capsules include the current durable graph and policy;
 a compacted model summary cannot change either. Live replacement-session and

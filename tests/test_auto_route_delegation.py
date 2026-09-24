@@ -134,6 +134,12 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     assert detail["connection_id"] == connection_b.id
     assert detail["decision_detail"]["route_basis"] == "auto"
     assert detail["decision_detail"]["effort"] == "high"
+    decision = detail["decision_detail"]["route_decision"]
+    assert decision["rank_version"] == 2
+    assert decision["balance"]["window"] == 20 and decision["balance"]["tolerance"] == 4
+    assert decision["used_percent_compared"] is False
+    assert {c["quota_state"] for c in decision["candidates"]} == {"known", "unknown"}
+    assert adapter._route_inflight == {}
     adapter.terminate_owned(result.attempt_id)
 
 
@@ -304,7 +310,8 @@ def _planned_provider(monkeypatch, provider):
     """The node's planned ``provider``, as ``attempt_routing`` reads it from the plan."""
     from cortex_runtime.orchestration import state
 
-    monkeypatch.setattr(state, "attempt_routing", lambda store, task_id, attempt_id: (False, "normal", provider))
+    monkeypatch.setattr(state, "attempt_routing", lambda store, task_id, attempt_id:
+                        state.AttemptRouting(False, "normal", provider, "This work suits the engine.", None))
 
 
 def _decision(store, result):
@@ -333,7 +340,7 @@ def test_the_coordinators_provider_preference_is_honoured(tmp_path, monkeypatch)
     assert result.status == "ready"
     assert _read_log(log_a) and _read_log(log_b) == []
     decision = _decision(store, result)
-    assert decision["preference"] == "codex-acp" and decision["preference_status"] == "honoured"
+    assert decision["model_hint"] == "codex-acp" and decision["model_hint_status"] == "honoured"
     adapter.terminate_owned(result.attempt_id)
 
 
@@ -344,7 +351,7 @@ def test_a_preference_outside_providers_is_ignored_and_recorded(tmp_path, monkey
     result = provisioning.delegate(channel, "Audit", "Audit it.", "security-auditor", "Report.", "req-1")
     assert result.status == "ready"
     assert _read_log(log_a) and _read_log(log_b) == []
-    assert _decision(store, result)["preference_status"] == "ignored:provider_not_allowed"
+    assert _decision(store, result)["model_hint_status"] == "ignored:provider_not_allowed"
     adapter.terminate_owned(result.attempt_id)
 
 
@@ -356,7 +363,7 @@ def test_a_preference_never_overrides_a_pin(tmp_path, monkeypatch):
     assert result.status == "ready"
     assert _read_log(log_a) and _read_log(log_b) == []
     decision = _decision(store, result)
-    assert decision["basis"] == "pin" and decision["preference_status"] == "ignored:pinned"
+    assert decision["basis"] == "pin" and decision["model_hint_status"] == "ignored:pinned"
     adapter.terminate_owned(result.attempt_id)
 
 
@@ -367,7 +374,7 @@ def test_a_preference_never_takes_an_exhausted_provider(tmp_path, monkeypatch):
     result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Built.", "req-1")
     assert result.status == "ready"
     assert _read_log(log_a) == [] and _read_log(log_b)
-    assert _decision(store, result)["preference_status"] == "ignored:provider_unavailable"
+    assert _decision(store, result)["model_hint_status"] == "ignored:unavailable"
     adapter.terminate_owned(result.attempt_id)
 
 
@@ -400,6 +407,7 @@ def test_an_exhausted_provider_is_skipped(tmp_path):
     assert result.status == "ready"
     assert _read_log(log_a) == []
     assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
+    assert adapter._route_inflight == {}
     adapter.terminate_owned(result.attempt_id)
 
 
@@ -485,6 +493,7 @@ def test_a_dispatch_failure_records_the_route_and_the_retry_uses_another_provide
     _codex_used(connection_a, 90.0)
     with pytest.raises(WorkerModeNotConfirmed):
         provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    assert adapter._route_inflight == {}
     [record] = availability.active(store)
     assert record["connection_id"] == connection_a.id and record["model"] == "coordinator-model"
     assert (record["reason"], record["scope"], record["expiry_basis"]) == ("configuration_not_confirmed", "model", "default")
@@ -547,4 +556,19 @@ def test_an_unrelated_turn_error_records_nothing(tmp_path):
     with pytest.raises(EngineProtocolError):
         adapter.prompt(result.engine_session_ref, "Find it.", threading.Event())
     assert availability.active(store) == []
+    adapter.terminate_owned(result.attempt_id)
+
+
+
+def test_exact_model_hint_and_reason_are_audited(tmp_path, monkeypatch):
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _planned_provider(monkeypatch, "codex-acp/coordinator-model")
+    result = provisioning.delegate(channel, "Audit", "Audit it.", "security-auditor", "Report.", "req-hint")
+    assert result.status == "ready"
+    detail = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]["decision_detail"]
+    decision = detail["route_decision"]
+    assert decision["model_hint"] == "codex-acp/coordinator-model"
+    assert decision["model_hint_status"] == "honoured"
+    assert decision["model_hint_reason"] == "This work suits the engine."
+    assert detail["route_decision"]["chosen"] == "codex-acp/coordinator-model"
     adapter.terminate_owned(result.attempt_id)

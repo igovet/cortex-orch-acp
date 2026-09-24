@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 from ..connections.model import SUPPORTED_ENGINES
 from .. import task_workspace
@@ -168,33 +169,49 @@ def released_by_user(db, task):
     return any(json.loads(r[0]).get('question_id') in stops for r in answered)
 
 
+class AttemptRouting(NamedTuple):
+    escalate: bool
+    complexity: str
+    model_hint: str
+    model_reason: str | None
+    previous_engine: str | None
+
+
 def attempt_routing(store, task_id, attempt_id):
-    """What routing needs to know about this attempt's node, as
-    ``(escalate, complexity, provider)``: whether it is escalated -- a retry
-    of its node or a fix after review requested changes, i.e. a weaker run
-    already fell short -- the planned ``complexity`` and the planned
-    ``provider`` preference (``None`` when not set). A fix keeps its
-    node's plan fields. A retry because the route itself was unavailable
-    (``route_failure``) does not escalate: no model fell short, the next
-    route is simply used."""
+    """Read a node's plan hint and prior audited engine for runtime routing."""
     with store.connection() as db:
         provision = db.execute('SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
                                (task_id, attempt_id)).fetchone()
         node = provision and db.execute('SELECT node_id,revision FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
                                         (task_id, provision['idempotency_key'])).fetchone()
         if not node:
-            return False, 'normal', None
+            return AttemptRouting(False, 'normal', 'auto', None, None)
         plan = db.execute('SELECT plan_json FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
         retries = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'",
                              (task_id,)).fetchall()
+        # runtime_nodes.assignment_ref changes on retry. The immutable
+        # ASSIGNMENT_CREATED event retains each earlier assignment-to-node
+        # mapping, so previous audits still resolve after that update.
+        prior = db.execute(
+            "SELECT a.engine FROM attempt_route_audit a "
+            "JOIN delegation_provisioning p ON p.task_id=a.task_id AND p.attempt_id=a.attempt_id "
+            "JOIN runtime_events e ON e.task_id=p.task_id AND e.type='ASSIGNMENT_CREATED' "
+            "AND json_extract(e.payload_json,'$.assignment_ref')=p.idempotency_key "
+            "WHERE a.task_id=? AND json_extract(e.payload_json,'$.revision')=? "
+            "AND json_extract(e.payload_json,'$.node') IN (?,?) AND a.attempt_id<>? "
+            "ORDER BY a.rowid DESC LIMIT 1",
+            (task_id, node['revision'], node['node_id'],
+             re.sub(r'^_fix_\d+_', '', node['node_id']), attempt_id),
+        ).fetchone()
     fix = re.fullmatch(r'_fix_\d+_(.+)', node['node_id'])
     planned = fix.group(1) if fix else node['node_id']
     tasks = json.loads(plan['plan_json'])['tasks'] if plan and plan['plan_json'] else []
     task = next((t for t in tasks if t['id'] == planned), {})
     retried = any(p.get('node') == node['node_id'] and p.get('revision') == node['revision'] and not p.get('route_failure')
                   for p in (json.loads(r[0]) for r in retries))
-    return bool(fix) or retried, task.get('complexity', 'normal'), task.get('provider')
-
+    return AttemptRouting(bool(fix) or retried, task.get('complexity', 'normal'),
+                          task.get('model') or task.get('provider') or 'auto',
+                          task.get('model_reason'), prior['engine'] if prior else None)
 
 
 def review_provider_preference(store, task_id, attempt_id):
@@ -252,9 +269,19 @@ def validate_plan(plan):
     ids = set()
     for node in nodes:
         if (not isinstance(node, dict) or not {'id', 'role', 'objective', 'dependencies', 'scope'} <= set(node)
-                or set(node) - {'id', 'role', 'objective', 'dependencies', 'scope', 'complexity', 'provider'}
+                or set(node) - {'id', 'role', 'objective', 'dependencies', 'scope', 'complexity', 'provider', 'model', 'model_reason'}
                 or node.get('complexity', 'normal') not in {'low', 'normal', 'high'}
                 or node.get('provider', SUPPORTED_ENGINES[0]) not in SUPPORTED_ENGINES):
+            raise StoreError('invalid_plan_node')
+        from .contracts import NODE, validate as validate_contract
+        if 'model' in node:
+            validate_contract(NODE['properties']['model'], node['model'], 'model')
+            if node['model'] != 'auto':
+                if not isinstance(node.get('model_reason'), str) or not 1 <= len(node['model_reason']) <= 300:
+                    raise StoreError('model_reason_required')
+            elif 'model_reason' in node:
+                validate_contract(NODE['properties']['model_reason'], node['model_reason'], 'model_reason')
+        elif 'model_reason' in node:
             raise StoreError('invalid_plan_node')
         key = node['id']
         if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,63}', key) or key in ids:
@@ -345,6 +372,26 @@ class TaskMachine:
     def submit_plan(self, channel, plan, request_key, *, authorization=None):
         validate_plan(plan)
         digest = hashlib.sha256(encoded(plan).encode()).hexdigest()
+        # Exact model labels must be in the currently confirmed, policy-allowed
+        # menu. Engine hints and auto do not require a catalog at plan time.
+        from ..routing.auto_route import route_menu, tier_for
+        exact_hints = [n['model'] for n in plan['tasks'] if '/' in n.get('model', '')]
+        if exact_hints:
+            menu = route_menu(self.store.project_root)
+            offered = {item['route'] for group in menu['tiers'].values() for item in group}
+            if any(hint not in offered for hint in exact_hints):
+                raise StoreError('unknown_model_hint', 'model', ', '.join(exact_hints),
+                                 'an exact route from list_route_options',
+                                 'Call list_route_options and copy an offered route.')
+        previews = [dict(node=n['id'], model=n.get('model', 'auto'),
+                         tier_now=tier_for(resolve_role(n['role']), complexity=n.get('complexity', 'normal')),
+                         preview_status=('auto' if n.get('model', 'auto') == 'auto' else
+                                         'ignored:tier_mismatch' if '/' in n.get('model', '')
+                                         and next((tier for tier, group in menu['tiers'].items()
+                                                   if any(item['route'] == n['model'] for item in group)), None)
+                                         != tier_for(resolve_role(n['role']), complexity=n.get('complexity', 'normal'))
+                                         else 'pending_dispatch'))
+                    for n in plan['tasks']]
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             if authorization: authorization(db)
@@ -381,7 +428,7 @@ class TaskMachine:
                             encoded(node['dependencies']), encoded(node['scope']), 'execution', 'pending', None, None))
             event(db, channel.task_id, 'PLAN_ACCEPTED', dict(revision=revision, plan=plan), channel.channel_id)
             transition(db, channel.task_id, 'PLAN_READY')
-            result = dict(revision=revision, state='PLAN_READY')
+            result = dict(revision=revision, state='PLAN_READY', model_hints=previews)
             db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
                        (channel.task_id, request_key, channel.channel_id, 'plan_submit', digest, encoded(result)))
             db.commit()

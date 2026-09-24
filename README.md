@@ -101,7 +101,9 @@ For comprehensive configuration documentation, see [Cortex Configuration Guide](
 ## Key features
 
 - **Multi-provider coordination** – Run Codex and Claude workers in the same task
-- **Automatic routing** – Cortex selects engines and models based on request complexity
+- **Automatic routing** – Cortex selects engines, models and effort by task tier,
+  quota policy and recent same-tier balance. Coordinator model hints are
+  constrained recommendations, with role suitability as a final soft tiebreak
 - **Fallback routing** – If a worker fails, Cortex can route to a backup provider with your consent
 - **Verification and review** – Every change is reviewed before acceptance
 - **Structured reporting** – Task history, worker output, and decisions are stored as Markdown and SQLite

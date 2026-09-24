@@ -14,6 +14,20 @@ def dispatch(store, channel, operation, args):
     schema = schemas(channel.role).get(operation)
     if schema is None:
         raise StoreError('unknown_operation')
+    # A persisted pre-model plan can be delivered again after recovery.
+    # Accept only its exact recorded request; fresh plans use the new schema.
+    if operation == 'plan_submit' and isinstance(args, dict) and isinstance(args.get('plan'), dict) and isinstance(args.get('request_key'), str):
+        candidate = args['plan']
+        nodes = candidate.get('tasks')
+        if isinstance(nodes, list) and any(isinstance(n, dict) and 'model' not in n for n in nodes):
+            digest = hashlib.sha256(encoded(candidate).encode()).hexdigest()
+            with store.connection() as db:
+                prior = db.execute('SELECT operation,digest FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                                   (channel.task_id, channel.channel_id, args['request_key'])).fetchone()
+            if prior is not None and prior['operation'] == 'plan_submit' and prior['digest'] == digest:
+                from .gateway import _authority
+                return TaskMachine(store).submit_plan(
+                    channel, candidate, args['request_key'], authorization=lambda db: _authority(db, channel))
     validate(schema, args)
     machine = TaskMachine(store)
     from .gateway import _authority

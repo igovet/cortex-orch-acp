@@ -3,7 +3,7 @@
 The coordinator proposes a structured plan and submits synthesis. The runtime
 validates the plan, reserves ready nodes, selects the configured role route,
 provisions each engine session, delivers a bounded assignment and schedules review.
-There is no public model-controlled spawn, model/effort selection or acceptance API.
+There is no public model-controlled spawn, effort selection or acceptance API. A coordinator plan requires a constrained `model` recommendation and may include `model_reason`; `list_route_options` provides a read-only live menu. Runtime policy makes the final route and effort decision. See [automatic routing](routing-and-fallback.md#automatic-worker-routing-tiers-model-hints-and-ranking).
 
 All 23 existing worker profiles remain generated from their role specializations
 and a shared report protocol. Instructions describe intellectual work and evidence;
@@ -21,8 +21,7 @@ verification is executed by the runtime itself.
 Reference ids are scoped separately: workers can read the worker references (`report-publication`, `code-and-evidence`, and `interactive-resources`), coordinators can read their coordinator references, and both can read the example catalogue (`index` and the `*-example` ids). The runtime checks the channel role and the enum; prompt text only explains when an available skill may be useful and grants no authority.
 
 An independent reviewer is a fresh runtime assignment. Its verdict controls the
-review/fix loop, while actual command verification belongs to the runtime. Route
-policy remains configured by the user and resolved by the runtime for each role.
+review/fix loop, while actual command verification belongs to the runtime. Route policy is configured by the user and resolved by the runtime for each role; per-node model hints are validated recommendations, not authority.
 
 Requested scopes are validated before reservation and enforced by the runtime
 gateway and by the engine jail around each worker's engine process.

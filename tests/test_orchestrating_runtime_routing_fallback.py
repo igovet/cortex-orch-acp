@@ -181,7 +181,7 @@ def test_engine_failure_triggers_authorized_fallback_and_audits_both_attempts(tm
         from runtime_scenarios import propose_inspection
         context=mcp_tools.dispatch(store,channel,'task_get_context',{})
         if context['state']=='PLANNING':
-            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'],model='auto')],verification=[['true']]),request_key='plan'))
         else:
             mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
         return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
@@ -237,7 +237,7 @@ def test_fallback_worker_prompt_rebuilds_project_docs_catalog(tmp_path):
         from runtime_scenarios import propose_inspection
         context=mcp_tools.dispatch(store,channel,'task_get_context',{})
         if context['state']=='PLANNING':
-            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'],model='auto')],verification=[['true']]),request_key='plan'))
         else:
             mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
         return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
@@ -282,7 +282,7 @@ def test_refusal_never_triggers_fallback_and_reports_explicitly(tmp_path):
         from runtime_scenarios import propose_inspection
         context=mcp_tools.dispatch(store,channel,'task_get_context',{})
         if context['state']=='PLANNING':
-            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'],model='auto')],verification=[['true']]),request_key='plan'))
         else:
             mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
         return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
@@ -316,7 +316,7 @@ def test_cross_provider_fallback_without_consent_refused_before_any_open(tmp_pat
         from runtime_scenarios import propose_inspection
         context=mcp_tools.dispatch(store,channel,'task_get_context',{})
         if context['state']=='PLANNING':
-            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'],model='auto')],verification=[['true']]),request_key='plan'))
         else:
             mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
         return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
@@ -355,7 +355,7 @@ def test_attempt_budget_exhausted_refuses_fallback(tmp_path):
         from runtime_scenarios import propose_inspection
         context=mcp_tools.dispatch(store,channel,'task_get_context',{})
         if context['state']=='PLANNING':
-            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'],model='auto')],verification=[['true']]),request_key='plan'))
         else:
             mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
         return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
@@ -390,7 +390,7 @@ def test_running_worker_keeps_route_when_profile_changes_mid_task(tmp_path):
         from runtime_scenarios import propose_inspection
         context=mcp_tools.dispatch(store,channel,'task_get_context',{})
         if context['state']=='PLANNING':
-            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'],model='auto')],verification=[['true']]),request_key='plan'))
         else:
             mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
         return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')
@@ -468,7 +468,7 @@ def test_second_consecutive_failure_tries_a_different_route_then_refuses(tmp_pat
         from runtime_scenarios import propose_inspection
         context=mcp_tools.dispatch(store,channel,'task_get_context',{})
         if context['state']=='PLANNING':
-            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'])],verification=[['true']]),request_key='plan'))
+            mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(tasks=[dict(id='A',role='backend-dev',objective='A',dependencies=[],scope=['.'],model='auto')],verification=[['true']]),request_key='plan'))
         else:
             mcp_tools.dispatch(store,channel,'synthesis_submit',dict(text='Reviewed and verified.'))
         return PromptOutcome(StopReason.END_TURN,'Visible coordinator text')

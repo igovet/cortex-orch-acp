@@ -339,7 +339,7 @@ class FakeEngine:
             if 'plan_submit' in names:
                 context=call('task_get_context')
                 if context['state']=='PLANNING':
-                    value=call('plan_submit',plan=dict(tasks=[dict(id='inspect',role='explorer',objective='Inspect the project',dependencies=[],scope=['src/**'])],verification=[['python3','-B','-c','print("verified fixture")']]),request_key='plan-'+str(context['revision']))
+                    value=call('plan_submit',plan=dict(tasks=[dict(id='inspect',role='explorer',objective='Inspect the project',dependencies=[],scope=['src/**'],model='auto')],verification=[['python3','-B','-c','print("verified fixture")']]),request_key='plan-'+str(context['revision']))
                 else:value=call('synthesis_submit',text='Report independently reviewed and runtime verification passed.')
             else:
                 draft=call('create_draft',template='general',request_key='draft')

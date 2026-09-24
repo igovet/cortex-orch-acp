@@ -149,11 +149,11 @@ The `routing.json` file is entirely optional and is resolved from three possible
 2. **Environment:** `$CORTEX_ROUTING=/path/to/routing.json` — checked next when no project-local file exists
 3. **User-level:** `~/.config/cortex/routing.json` — Controls routing across all projects, used last
 
-Workers without a matching `pin` use automatic routing based on their role and task complexity. By default, automatic routing excludes Claude Haiku models because retained live sessions showed repeated Cortex tool argument errors. When Codex Luna is available, light work can route there instead. To use Haiku deliberately, pin that model for a role in `routing.json`; explicit `deny` entries still take precedence over pins.
+Workers without a matching `pin` use runtime-owned automatic routing based on role tier, complexity, catalog availability, quota observations and recent same-tier project balance. Haiku remains excluded from automatic selection by default; `auto_allow` opts a model or engine/model into it while preserving `deny` and `providers`. The per-task `model` field is a constrained recommendation; see [routing and fallback](acp/routing-and-fallback.md#automatic-worker-routing-tiers-model-hints-and-ranking). To use Haiku deliberately, pin it for a role or add it to `auto_allow` in `routing.json`; explicit `deny` entries still take precedence.
 
 ### routing.json structure and overrides
 
-The routing.json file supports four types of overrides:
+The routing.json file supports six override keys:
 
 ```json
 {
@@ -161,7 +161,8 @@ The routing.json file supports four types of overrides:
     "worker-security-auditor": "claude-agent-acp/opus:high",
     "*": "codex-acp/gpt-5.6-luna:medium"
   },
-  "deny": ["gpt-5.5", "claude-agent-acp/haiku"],
+  "deny": ["gpt-5.5"],
+  "auto_allow": ["claude-agent-acp/haiku"],
   "tiers": {
     "gpt-5.6-luna": "light",
     "gpt-5.6-sol": "standard"
@@ -169,6 +170,10 @@ The routing.json file supports four types of overrides:
   "providers": ["claude-agent-acp", "codex-acp"]
 }
 ```
+
+### Auto-allow: opt a model into automatic routing
+
+The optional `auto_allow` list accepts model names or `engine/model` pairs. It permits those routes in automatic selection, including Haiku; it does not override `deny`, `providers`, runtime tier/effort selection, availability or quota limits. This list has no role or complexity mapping.
 
 ### Pin: force a specific route for a role
 
@@ -197,7 +202,7 @@ The `pin` section maps worker roles to specific `engine/model:effort` combinatio
 
 ### Deny: exclude models or engine/model pairs
 
-The `deny` section lists models or engine/model combinations that Cortex will never select, even if available. It also blocks explicit pins and manual model selection. The built-in Haiku restriction applies only to automatic worker selection, so a pin can override that default.
+The `deny` section lists models or engine/model combinations that Cortex will never select, even if available. It also blocks explicit pins and manual model selection. The built-in Haiku restriction applies only to automatic worker selection; a pin or `auto_allow` can override that default, unless `deny` blocks the route. `deny` still wins over both.
 
 **Format:** List of model names or `"engine/model"` pairs
 
@@ -303,17 +308,28 @@ When multiple sources define routing, Cortex uses the first matching file:
 
 If a routing.json file exists but is malformed, routing is refused entirely (fail-closed) rather than silently falling back.
 
+### Per-task model recommendation
+
+Each new `plan_submit` node requires `model`: `auto`, an engine id, or an exact
+`engine/model` label returned by `list_route_options`. `model_reason` may give
+a brief reason. The recommendation does not choose effort or tier and cannot
+bypass `pin`, `deny`, `providers`, availability, or quota limits. The menu is a
+read-only snapshot; plan submission and dispatch validate against current policy.
+Legacy stored plans without `model` continue to use their old `provider` hint.
+
 ### Auto-routing (for workers without a pin)
 
 For a worker without a matching pin, Cortex uses automatic routing based on:
 
 1. **Worker role tier** (e.g., security auditor/architect/database-architect/senior-consultant get `deep`, explorer/general/planner/technical-writer get `light`, everything else defaults to `standard`; `flagship` is reserved for escalation after a retry or requested changes, never a role's starting tier)
 2. **Request complexity** (low/high adjusts the tier up or down)
-3. **Plan usage** (prefers accounts with remaining budget)
-4. **Engine suitability** for the work kind (Codex better for implementation, Claude better for review/writing)
-5. **Model availability** (excludes exhausted or unavailable routes)
+3. **Plan usage band** (protects deep/standard work when known usage reaches 85%; unknown readings are neutral)
+4. **Recent project-local, same-tier engine balance** (20 attempts; a lead of more than four overrides role suitability)
+5. **Engine suitability** as a soft tiebreak within the balance tolerance
+6. **Known plan percentage** only when every candidate reports a reading
+7. **Stable engine order**, with unavailable and exhausted routes excluded before ranking
 
-Automatic routing excludes Claude Haiku model IDs by default, including the `haiku` alias. A role pinned to `claude-agent-acp/haiku` remains eligible unless an explicit `deny` rule blocks it. If no other authorized route is available, Cortex reports `no_available_route` instead of silently using Haiku.
+Automatic routing excludes Claude Haiku model IDs by default, including the `haiku` alias. A role pinned to `claude-agent-acp/haiku`, or a Haiku route named in `auto_allow`, remains eligible unless an explicit `deny` rule blocks it. If no other authorized route is available, Cortex reports `no_available_route` instead of silently using Haiku.
 
 Models are automatically assigned to tiers based on:
 - **Claude:** Family name (Opus→deep, Sonnet→standard, Haiku→light, Fable→flagship)
