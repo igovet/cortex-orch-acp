@@ -96,6 +96,15 @@ those events (previously dropped entirely) and, when the engine reported
 nothing during the call, persists `basis='unknown'` with empty
 `tokens_json` — never `0`/free.
 
+Automatic worker routing writes its full choice into the existing
+`attempt_route_audit.decision_detail_json` field. The `route_decision` object
+identifies its ranking algorithm with `rank_version` and records model-hint
+status/reason, quota state, same-tier balance (including in-flight counts),
+policy exclusions, and effort basis. These are decision inputs and outcomes,
+not usage measurements. Unknown quota is retained as unknown, never reported as
+zero usage. The recovery capsule exposes this detail only when the exact
+attempt's audit row is available.
+
 Route/connection/model/config-revision are **not** duplicated onto every
 usage row: `observability.usage.list_usage`/`usage_summary` join
 `attempt_route_audit` (T027) on `attempt_id` at read time

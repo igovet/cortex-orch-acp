@@ -1,16 +1,17 @@
-# Mixed-team routing and authorized fallback (T027)
+# Automatic routing, mixed teams, and authorized fallback
 
-This section covers the user-authorized route set a mixed-engine/mixed-
-connection task may dispatch within, the per-attempt audit trail every
-dispatch (including a fallback) leaves, the pre-dispatch checks that
-refuse an unauthorized/over-budget attempt before any process starts, and
-the narrow, explicitly-policed conditions under which Cortex ever opens a
-*different* route for the same task than the one its active configuration
-currently selects.
+Cortex automatically selects worker engine, model, and effort from the runtime's
+current model catalog, task tier, routing policy, quota observations, and recent
+project-local route history. The model may submit a routing recommendation in
+its plan; only the runtime decides and dispatches. A plan hint never grants a
+route or raises effort/tier beyond runtime policy. `list_route_options` is a
+read-only snapshot for coordinators; dispatch validates current eligibility
+again.
 
-No universal vendor/role ranking exists anywhere in this code or in these
-docs: every route a role may use is either the coordinator's own route (the
-default) or a route this task's own stored profile/ceiling names.
+This automatic worker selection is separate from configured coordinator routes
+and from the explicitly authorized fallback path described below. Legacy
+mixed-team route profiles and fallback checks remain documented here for
+assignments that use them.
 
 ## Route profile: the authorized route set
 
@@ -21,9 +22,10 @@ in the new `configuration_route_extras` table — see
 insert) is one of:
 
 - **Default (single-route inheritance)** — `RouteProfile()`
-  (`role_routes=None`). Every role, coordinator and every worker alike, is
-  authorized only for that revision's own route. This is what every task
-  gets unless a caller explicitly proposes otherwise.
+  (`role_routes=None`). For explicit profile resolution and fallback, each
+  role inherits the revision's own route unless the task proposes a different
+  profile. Runtime automatic worker routing uses its separately audited
+  `auto`/`auto:pin` basis before opening a worker session.
 - **Explicit mixed-team profile** — `RouteProfile(role_routes={role:
   {route_id, ...}})`. A role present in the mapping is authorized only for
   its own listed route ids; a role *absent* from the mapping still falls
@@ -231,7 +233,7 @@ connection is ever opened; an exhausted attempt budget refusing fallback;
 and a running worker keeping its already-recorded route/revision when the
 coordinator's own selection changes mid-task.
 
-## Automatic worker routing: tiers and the choice within a tier
+## Automatic worker routing: tiers, model hints, and ranking
 
 `routing.auto_route.choose` picks the role's tier (`ROLE_TIERS`, shifted by
 the planned `complexity` and by escalation), then a model of that tier (the
@@ -247,86 +249,81 @@ The flagship tier requires an explicit runtime escalation after a prior
 attempt fell short. A user `routing.json` pin is also an explicit route
 choice and remains strict.
 
-Explorer stays `light` for low, normal, high, and escalated attempts. It can
-therefore select only an engine-confirmed light-tier model such as Luna or
-Haiku; it never falls back upward to strong or flagship models. Unknown catalog
-models are assigned only among deep, standard, and light, so an unrecognized
-model is never inferred to be flagship.
+The role tier starts from `ROLE_TIERS` and is shifted by complexity (low moves
+cheaper; high moves stronger). On escalation, the runtime advances the tier;
+`flagship` is reserved for escalation. If no usable candidate exists in the
+requested tier, the configured fallback order searches other tiers. Explorer
+remains light at every complexity and escalation; because its tier cannot rise,
+escalation raises its effort one supported step (normally low to medium).
 
-Independent review derives the completed execution engines from the immutable
-attempt-route audit. If every completed worker used Claude, it prefers Codex
-for the reviewer; if they all used Codex, it prefers Claude. Availability,
-quota, provider restrictions, and pins can prevent that preference from being
-honored. The audit records both `preference_status` and
-`cross_provider_review`; mixed execution engines record
-`no_single_opposite_provider:mixed_execution` and use normal ranking.
+Models are grouped into light, standard, deep, and flagship. An unavailable
+role tier searches the nearest tier permitted by policy; flagship is never a
+starting tier. Haiku is excluded from automatic selection by default, but
+`auto_allow` can opt in a model or `engine/model`; `deny` and `providers` still
+apply. A pin is strict and has priority over automatic selection.
 
-A model's tier comes from, first match wins:
+`plan_submit` requires every node to provide `model`: `auto`, an engine id, or
+an exact `engine/model` route label from `list_route_options`. A non-`auto`
+recommendation requires a short `model_reason`; it is optional for `auto`. This is a recommendation only. A model hint is
+considered only within the runtime-computed tier and cannot override pin, deny,
+providers, availability, the 100% quota exclusion, or the 85% deep/standard
+quota rule. A hint from another tier is recorded as `ignored:tier_mismatch`;
+using `auto` delegates all selection to ranking. Legacy stored plans without
+`model` retain their old `provider` preference behavior; new plans use `model`.
 
-1. `tiers` in `routing.json`;
-2. a Claude family name (`FAMILY_TIERS`: fable `flagship`, opus `deep`, sonnet
-   `standard`, haiku `light`);
-3. a known Codex model (`KNOWN_MODEL_TIERS`: `gpt-6-astra` `flagship`, `gpt-6-sol`
-   `deep`; `gpt-5.6-sol`, `gpt-5.6-terra` `standard`; `gpt-6-luna`,
-   `gpt-5.6-luna`, `gpt-5.5` `light`);
-4. only for a model none of these names: its position among its
-   connection's other unnamed models, split into thirds.
+On escalation, the previous hint is not inherited. The runtime ranks the new
+tier and prefers a different engine from the failed attempt when candidates
+otherwise tie. A hinted engine exceeding the eight-attempt balance tolerance
+gets `ignored:engine_overused`. Other hint statuses include
+`ignored:provider_not_allowed`, `ignored:not_offered`,
+`ignored:tier_mismatch`, `ignored:auto_excluded`, `ignored:no_candidate_in_tier`,
+`ignored:unavailable`, `ignored:near_quota_limit`, `ignored:escalated`, and
+`ignored:pinned`; the audit includes the reason and status.
 
-codex-acp lists its newest generation first (`gpt-6-luna` before
-`gpt-5.6-sol`), so its list order is not strength order. With both
-providers configured, every tier has a candidate from each.
+### Within-tier rank order
 
-`auto_route.rank` orders the usable candidates of the chosen tier (not
-recorded unavailable, plan window below 100%). The first difference wins:
+Hard exclusions are applied before ranking: unavailable routes, `deny`,
+`providers`, strict pins, and quota at 100%. For deep/standard work the 85%
+threshold affects preference/hint eligibility and quota-band ordering. Among eligible candidates the rank criteria are:
 
-1. **Provider preference.** The plan task's optional `provider`, when
-   honoured (see below).
-2. **Quota band.** For `deep`/`standard` work, accounts below `HOT_PERCENT`
-   (85%) come first. For `light` work, accounts above it come first.
-3. **Suitability.** The engine that suits the role's kind of work
-   (`ROLE_WORK_KINDS` → `WORK_KIND_ENGINES`) comes first. Codex takes
-   implementation, debugging, testing, operations and investigation; Claude
-   takes review, design, writing, planning and analysis. This is a
-   judgement, not a benchmark.
-4. **Used percentage.** Lower first. An unknown reading counts as 0.
-5. **Engine order.** The final tiebreak.
+1. Honoured legacy provider preference for a stored pre-model plan.
+2. Honoured model hint for a new plan.
+3. Quota band: for deep/standard, known usage at or above 85% ranks behind
+   candidates below 85%; unknown quota is neutral. Light-tier ranking does not
+   apply the 85% band.
+4. Per-tier project balance: compare each engine's recent count in the bounded
+   history window, including in-flight choices. Differences within the four
+   attempt tolerance are treated equally; larger excess favors the less-used
+   engine. The window uses up to 20 recent worker attempts from at most 256
+   audited rows.
+5. Role suitability as a soft final tiebreak.
+6. Known usage percentage only when every candidate has a known value.
+7. Stable engine order.
 
-Before this change the order was only quota band, then used percentage, then
-engine order. Codex's rollout window had reset and Claude reports usage only
-during a turn, so both readings were usually unknown and tied. The tie then
-went to whichever connection the registry listed first.
+Unknown quota remains neutral and is never coerced to zero for percentage
+comparison. In-flight reservations prevent concurrent assignments in this
+process from all seeing the same pre-dispatch balance snapshot. Reservations
+are released after audit or failed-open cleanup.
 
-The coordinator's `provider` preference is set per plan task through
-`plan_submit`. It names an engine id, never a model, and a review fix
-(`_fix_N_<node>`) keeps its node's preference
-(`orchestration.state.attempt_routing`). It never changes the tier, and the
-runtime still owns routing, deny, strict pin and failover. It is ignored,
-with the reason recorded, in these cases:
+Effort is derived from the runtime-selected tier, task complexity/escalation,
+and each model's supported effort list. `effort_basis` records whether it came
+from the role tier, escalation step, or a pin. A pin may explicitly name an
+effort; otherwise the runtime chooses a supported effort. A model hint cannot
+raise tier or effort.
 
-| `preference_status` | When |
-| --- | --- |
-| `ignored:pinned` | a `pin` applies to the role |
-| `ignored:provider_not_allowed` | `providers` in `routing.json` excludes it |
-| `ignored:provider_not_configured` | no engine-confirmed, non-denied route of that engine exists |
-| `ignored:provider_unavailable` | its routes in the tier are recorded unavailable or at 100% |
-| `ignored:no_candidate_in_tier` | it offers no model in the chosen tier |
-| `ignored:provider_near_quota_limit` | `deep`/`standard` work, every preferred candidate at or above 85% while another candidate is below |
+The read-only `list_route_options` tool reports currently engine-confirmed
+routes, tier, supported effort, availability and quota band, plus role tiers
+for low/normal/high complexity. It is advisory and may become stale; the
+runtime validates the choice at plan submission and dispatch. The server
+advertises `listChanged: false`, so clients must call the menu again when they
+need a fresh snapshot; there is no push refresh contract.
 
-Otherwise the status is `honoured`, or `none` when no preference was given.
-
-The decision basis is stored in the attempt's route audit as
-`decision_detail.route_decision`
-(`live_adapters._record_route_audit`). It holds the role, the role tier, the
-chosen tier, the basis (`rank` or `pin`), the preference and its status,
-every candidate of the tier in rank order (route, connection,
-`used_percent`, `hot`, `suitability`, `preferred`), the tier's routes that
-were skipped as unavailable, and the chosen route.
-
-See `tests/test_auto_route.py` (both providers in every tier, suitability
-between idle accounts, quota outranking suitability, preference honoured and
-ignored) and `tests/test_auto_route_delegation.py` (the same through real
-provisioning: the audit's `route_decision`, preference outside `providers`,
-under a pin, and on an exhausted provider).
+Audit rows retain the decision under `decision_detail.route_decision`,
+including `rank_version`, tier and effort basis, `model_hint`,
+`model_hint_status`, `model_hint_reason`, `diversify_from`, balance window,
+counts and in-flight counts, candidate `quota_state`/`balance_excess`,
+`excluded_by_policy`, and whether usage percentages were comparable. These
+fields are evidence of runtime decisions, not proof of real-client qualification.
 
 ## Automatic worker routing: unavailable routes
 

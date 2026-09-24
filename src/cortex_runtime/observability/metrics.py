@@ -34,7 +34,7 @@ def resource_caps(store, task_id: str) -> dict:
         ).fetchone()
     if row is None:
         return dict(
-            task_id=task_id, availability="unavailable_reason",
+            availability="unavailable_reason",
             reason="no configuration_revisions row recorded for this task yet",
         )
     ceiling = deserialize_ceiling(row["ceiling_snapshot"])
@@ -44,7 +44,7 @@ def resource_caps(store, task_id: str) -> dict:
         monetary_cap = ceiling.spend_limit
         monetary_basis = "enforced"
     return dict(
-        task_id=task_id, config_revision_id=row["id"], availability="available",
+        availability="available",
         call_token_concurrency_limits=dict(ceiling.limits),
         limits_unit="count (attempts/calls/tokens: per task; concurrency: simultaneous active attempts)",
         monetary_cap=monetary_cap, monetary_cap_unit="opaque integer spend unit" if monetary_cap is not None else None,
@@ -149,7 +149,6 @@ def diagnostics_summary(store, task_id: str) -> dict:
     optional telemetry never gates this call -- every section always
     returns, unavailable ones simply say so (see each helper above)."""
     return dict(
-        task_id=task_id,
         resource_caps=resource_caps(store, task_id),
         recovery_latency=_recovery_latency(store, task_id),
         repeat_calls=_repeat_calls(store, task_id),

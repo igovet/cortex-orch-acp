@@ -195,6 +195,124 @@ def test_queued_steer_waits_for_worker_and_reaches_next_plan(tmp_path):
         runtime.shutdown()
 
 
+def test_paseo_steer_during_active_worker_turn_reaches_next_plan(tmp_path, monkeypatch):
+    """Exercise the real ACP config handoff while the controller owns a worker."""
+    from cortex_runtime.orchestration.state import TaskMachine
+    from runtime_scenarios import propose_inspection, publish_result
+
+    agent, transport, environ = _agent_for_language_tests(tmp_path, monkeypatch)
+    environ["CORTEX_PASEO_QUESTION_UI"] = "1"
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(project))
+    task = bootstrap_task(
+        store, SourceEvent(origin="test", event_id=str(uuid.uuid4())), "Inspect", "owner-1",
+    )
+    agent.sessions[session_id]["task_id"] = task.task_id
+    agent.sessions[session_id]["owner_epoch"] = task.owner_epoch
+    acp_sessions.bind_task(store, session_id, task.task_id)
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+    planning_messages = []
+
+    def router(store, channel, *_):
+        def behavior(store, channel, _ref, message, _index):
+            if channel.role == "coordinator":
+                context = mcp_tools.dispatch(store, channel, "task_get_context", {})
+                if context["state"] == "PLANNING":
+                    planning_messages.append(message)
+                    propose_inspection(store, channel)
+                else:
+                    mcp_tools.dispatch(store, channel, "synthesis_submit", dict(text="Reviewed and verified"))
+                return PromptOutcome(StopReason.END_TURN, "Coordinator text")
+            worker_entered.set()
+            assert release_worker.wait(10)
+            return publish_result(store, channel)
+        return behavior
+
+    runtime, _engine = _make_runtime(store, router)
+    agent.runtime = runtime
+    try:
+        agent._session_prompt(100, dict(
+            sessionId=session_id, prompt=[dict(type="text", text="Inspect")],
+        ))
+        assert worker_entered.wait(5)
+        agent._session_set_config_option(101, dict(
+            sessionId=session_id, configId="cortex_queued_steer",
+            value=json.dumps(dict(clientMessageId="steer-during-worker", text="Also inspect title")),
+        ))
+        assert any("result" in response for response in transport.responses if response.get("id") == 101)
+        assert agent.sessions[session_id]["active"] is not None
+        assert not agent.sessions[session_id]["active"].is_set()
+        assert TaskMachine(store).context(task.task_id)["nodes"][0]["status"] == "running"
+        release_worker.set()
+        agent.join_workers()
+        assert any("Also inspect title" in message for message in planning_messages[1:])
+        with store.connection() as db:
+            event_types = [row[0] for row in db.execute(
+                "SELECT event_type FROM task_events WHERE task_id=? ORDER BY id", (task.task_id,),
+            )]
+        assert "worker_result" in event_types
+        assert "assignment_cancelled" not in event_types
+        assert TaskMachine(store).context(task.task_id)["state"] == "COMPLETED"
+    finally:
+        release_worker.set()
+        agent.join_workers()
+        runtime.shutdown()
+
+
+def test_explicit_cancel_during_worker_does_not_record_route_fallback(tmp_path):
+    from cortex_runtime.orchestration.state import TaskMachine
+    from runtime_scenarios import propose_inspection, publish_result
+
+    store, task_id = _task(tmp_path)
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+
+    def router(store, channel, *_):
+        def behavior(store, channel, _ref, message, _index):
+            if channel.role == "coordinator":
+                propose_inspection(store, channel)
+                return PromptOutcome(StopReason.END_TURN, "Coordinator text")
+            worker_entered.set()
+            assert release_worker.wait(10)
+            return publish_result(store, channel)
+        return behavior
+
+    runtime, _engine = _make_runtime(store, router)
+    cancel_event = threading.Event()
+    outcomes = []
+    turn = threading.Thread(target=lambda: outcomes.append(
+        runtime.start_prompt(task_id, "s1", "Inspect", lambda _: True, cancel_event),
+    ))
+    turn.start()
+    try:
+        assert worker_entered.wait(5)
+        cancel_event.set()
+        runtime.cancel("s1")
+        turn.join(10)
+        assert not turn.is_alive()
+        assert outcomes == [StopReason.CANCELLED]
+        context = TaskMachine(store).context(task_id)
+        assert context["state"] == "RECOVERING"
+        with store.connection() as db:
+            rows = db.execute(
+                "SELECT event_type,payload_json FROM task_events WHERE task_id=?",
+                (task_id,),
+            ).fetchall()
+            runtime_types = [row[0] for row in db.execute(
+                "SELECT type FROM runtime_events WHERE task_id=?", (task_id,),
+            )]
+        assert "TURN_INTERRUPTED" in runtime_types
+        assert not any("fallback_refused" in row["payload_json"] for row in rows)
+        assert not any(row["event_type"] == "assignment_failed" for row in rows)
+    finally:
+        release_worker.set()
+        turn.join(5)
+        runtime.shutdown()
+
+
 # -- commands.py -------------------------------------------------------
 
 def test_recognize_new_commands():
@@ -760,6 +878,70 @@ def test_paseo_steer_config_is_durable_and_idempotent(tmp_path, monkeypatch):
             sessionId=session_id, configId="cortex_queued_steer",
             value=json.dumps(dict(clientMessageId="msg-2", text="Stale steer")),
         ))
+
+
+def test_paseo_steer_during_active_turn_waits_without_cancelling(tmp_path, monkeypatch):
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    agent, transport, environ = _agent_for_language_tests(tmp_path, monkeypatch)
+    environ["CORTEX_PASEO_QUESTION_UI"] = "1"
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(project))
+    result = bootstrap_task(
+        store, SourceEvent(origin="test", event_id=str(uuid.uuid4())),
+        "Inspect", "owner-1",
+    )
+    agent.sessions[session_id]["task_id"] = result.task_id
+    agent.sessions[session_id]["owner_epoch"] = result.owner_epoch
+    acp_sessions.bind_task(store, session_id, result.task_id)
+    TaskMachine(store).create(result.task_id, "Inspect")
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO task_orchestration (task_id,state,updated_at,requirement_revision) "
+            "VALUES (?,?,?,0)", (result.task_id, "running", "now"),
+        )
+        db.commit()
+
+    entered = threading.Event()
+    release = threading.Event()
+    continued = threading.Event()
+    calls = []
+    cancellations = []
+    def prompt(task_id, current_session, text, emit_update, cancel_event):
+        calls.append((text, cancel_event))
+        if text == "Continue":
+            entered.set()
+            assert release.wait(10)
+        else:
+            continued.set()
+        return StopReason.END_TURN
+    agent.runtime.start_prompt = prompt
+    agent.runtime.cancel = lambda current_session: cancellations.append(current_session)
+
+    try:
+        agent._session_prompt(100, dict(
+            sessionId=session_id, prompt=[dict(type="text", text="Continue")],
+        ))
+        assert entered.wait(5)
+        agent._session_set_config_option(101, dict(
+            sessionId=session_id, configId="cortex_queued_steer",
+            value=json.dumps(dict(clientMessageId="msg-active", text="Also inspect title")),
+        ))
+        assert any("result" in response for response in transport.responses if response.get("id") == 101)
+        assert [text for text, _ in calls] == ["Continue"]
+        assert not calls[0][1].is_set()
+        assert cancellations == []
+        assert TaskMachine(store).context(result.task_id)["state"] == "PLANNING"
+        release.set()
+        assert continued.wait(5)
+        agent.join_workers()
+        assert [text for text, _ in calls] == ["Continue", "Also inspect title"]
+        assert cancellations == []
+    finally:
+        release.set()
+        agent.join_workers()
 
 
 def test_language_option_present_pre_task_and_settable_via_set_config_option(tmp_path, monkeypatch):

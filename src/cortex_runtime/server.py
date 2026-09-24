@@ -42,6 +42,7 @@ MUTATING_TOOLS = frozenset({'create_draft', 'write_report', 'set_governance'})
 DELEGATION_READ_OPERATIONS = frozenset({
     'list_sources','read_source','read_capsule','read_large_output',
     'read_diagnostics','read_skill','task_get_context','project_read',
+    'list_route_options',
 })
 
 

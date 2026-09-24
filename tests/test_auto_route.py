@@ -305,7 +305,7 @@ def test_a_preference_is_honoured_among_the_tiers_candidates():
     assert picked.route.model == "gpt-6-sol"
     assert decision["tier"] == "deep" and decision["preference_status"] == "honoured"
     assert decision["candidates"][0] == dict(route="codex-acp/gpt-6-sol", connection_id="codex", used_percent=None,
-                                             hot=False, suitability=0, preferred=True)
+                                             hot=False, quota_state="unknown", balance_excess=0, suitability=0, preferred=True)
     assert {c["route"] for c in decision["candidates"]} == {
         "codex-acp/gpt-6-sol", "claude-agent-acp/claude-opus-5[1m]",
         "claude-agent-acp/claude-opus-4-6"}
@@ -340,3 +340,188 @@ def test_without_a_preference_the_decision_says_so():
     assert picked.route.model == "gpt-5.6-sol"
     assert decision["preference"] is None and decision["preference_status"] == "none"
     assert [c["suitability"] for c in decision["candidates"]] == [1, 1, 0]
+
+
+def test_balance_overrides_role_suitability_only_beyond_tolerance():
+    recent = {"standard": {"codex-acp": 5, "claude-agent-acp": 0}}
+    picked, decision = auto_route.rank(
+        "standard", ENTRIES, _usage(), role="worker-backend-dev", recent=recent,
+    )
+    assert picked.route.engine == "claude-agent-acp"
+    assert decision["rank_version"] == 2
+    assert decision["balance"]["counts"] == recent["standard"]
+    assert next(c for c in decision["candidates"] if c["route"] == "codex-acp/gpt-5.6-sol")["balance_excess"] == 1
+
+    recent["standard"]["codex-acp"] = 4
+    picked, decision = auto_route.rank(
+        "standard", ENTRIES, _usage(), role="worker-backend-dev", recent=recent,
+    )
+    assert picked.route.engine == "codex-acp"
+    assert all(c["balance_excess"] == 0 for c in decision["candidates"])
+
+
+def test_unknown_quota_never_wins_the_percentage_tiebreak():
+    # Same suitability (role omitted) and balance. The list order decides
+    # when either quota is unknown, regardless of the known percentage.
+    entries = [CODEX[4], CLAUDE[1]]
+    picked, decision = auto_route.rank("standard", entries, _usage(codex=50, claude=None))
+    assert picked is entries[0]
+    assert decision["used_percent_compared"] is False
+    assert [c["quota_state"] for c in decision["candidates"]] == ["known", "unknown"]
+    picked, decision = auto_route.rank("standard", entries, _usage(codex=50, claude=20))
+    assert picked is entries[1] and decision["used_percent_compared"] is True
+
+
+def test_unknown_quota_is_neutral_in_light_hot_band():
+    entries = [CLAUDE[2], CODEX[2]]
+    picked, decision = auto_route.rank("light", entries, _usage(codex=None, claude=None))
+    assert picked is entries[0] and decision["used_percent_compared"] is False
+    picked, _ = auto_route.rank("light", entries, _usage(codex=90, claude=None))
+    assert picked is entries[1]
+
+
+def test_policy_exclusion_is_distinct_from_unavailable():
+    entries = [CLAUDE[2], CODEX[2]]
+    picked, decision = auto_route.rank(
+        "light", entries, _usage(), excluded=frozenset({CLAUDE[2].route.id}),
+        policy_excluded=frozenset({CLAUDE[2].route.id}),
+    )
+    assert picked is CODEX[2]
+    assert decision["excluded_by_policy"] == ["claude-agent-acp/haiku"]
+    assert decision["unavailable"] == []
+
+
+def test_auto_allow_restores_haiku_but_deny_still_wins(tmp_path, monkeypatch):
+    from cortex_runtime.connections import registry
+
+    project = tmp_path / "project"
+    (project / ".cortex").mkdir(parents=True)
+    environ = {"HOME": str(tmp_path)}
+    entries = [_entry("claude", "haiku"), _entry("codex", "gpt-5.6-luna")]
+    connections = {
+        "claude": SimpleNamespace(launch_command=("claude",)),
+        "codex": SimpleNamespace(launch_command=("codex",)),
+    }
+    monkeypatch.setattr(registry, "read_registry", lambda _: SimpleNamespace(connections=connections))
+    monkeypatch.setattr(auto_route, "_entries", lambda *_: [
+        e for e in entries if not auto_route._denied(auto_route.load_overrides(project, environ),
+                                                       e.route.engine, e.route.model)
+    ])
+    monkeypatch.setattr(auto_route, "_is_seed", lambda _: False)
+    monkeypatch.setattr(quota, "used_percent", lambda *_: None)
+    route_file = project / ".cortex" / "routing.json"
+    route_file.write_text(json.dumps({"auto_allow": ["claude-agent-acp/haiku"]}))
+    assert auto_route.choose("worker-technical-writer", project, environ).model == "haiku"
+    route_file.write_text(json.dumps({"auto_allow": ["claude-agent-acp/haiku"], "deny": ["haiku"]}))
+    assert auto_route.choose("worker-technical-writer", project, environ).model == "gpt-5.6-luna"
+    for invalid in ("haiku", [None], [""], [3]):
+        route_file.write_text(json.dumps({"auto_allow": invalid}))
+        with pytest.raises(PortableError) as refused:
+            auto_route.choose("worker-technical-writer", project, environ)
+        assert refused.value.code == "invalid_routing_overrides"
+
+
+def test_escalated_explorer_raises_effort_without_raising_tier(tmp_path, monkeypatch):
+    from cortex_runtime.connections import registry
+
+    project = tmp_path / "project"
+    (project / ".cortex").mkdir(parents=True)
+    environ = {"HOME": str(tmp_path)}
+    entry = _entry("codex", "gpt-5.6-luna")
+    monkeypatch.setattr(registry, "read_registry", lambda _: SimpleNamespace(
+        connections={"codex": SimpleNamespace(launch_command=("codex",))}))
+    monkeypatch.setattr(auto_route, "_entries", lambda *_: [entry])
+    monkeypatch.setattr(auto_route, "_is_seed", lambda _: False)
+    monkeypatch.setattr(quota, "used_percent", lambda *_: None)
+    choice = auto_route.choose("worker-explorer", project, environ, escalate=True)
+    assert choice.effort == "medium"
+    assert choice.decision["tier"] == "light"
+    assert choice.decision["effort_basis"] == "escalation_step"
+
+
+def test_quota_and_unavailability_still_dominate_balance():
+    recent = {"deep": {"codex-acp": 0, "claude-agent-acp": 20}}
+    picked, decision = auto_route.rank(
+        "deep", ENTRIES, _usage(codex=90, claude=40),
+        role="worker-backend-dev", recent=recent,
+    )
+    assert picked.route.engine == "claude-agent-acp"
+    assert decision["candidates"][0]["balance_excess"] == 16
+    blocked = frozenset(e.route.id for e in CLAUDE)
+    picked, decision = auto_route.rank(
+        "deep", ENTRIES, _usage(codex=30, claude=40),
+        excluded=blocked, role="worker-security-auditor", recent=recent,
+    )
+    assert picked.route.engine == "codex-acp"
+    assert "claude-agent-acp/claude-opus-5[1m]" in decision["unavailable"]
+
+
+
+def test_model_hint_honour_and_tier_guard():
+    entries = [CODEX[4], CLAUDE[1], CODEX[0]]
+    _, decision = auto_route.rank(
+        "standard", entries, _usage(codex=20, claude=20),
+        role="worker-backend-dev", model_hint="claude-agent-acp/sonnet",
+        model_reason="The work requires prose analysis.")
+    assert (decision["chosen"], decision["model_hint_status"]) == ("claude-agent-acp/sonnet", "honoured")
+    assert decision["model_hint_reason"] == "The work requires prose analysis."
+    _, decision = auto_route.rank(
+        "standard", entries, _usage(codex=20, claude=20),
+        role="worker-backend-dev", model_hint="codex-acp/gpt-6-astra")
+    assert decision["tier"] == "standard"
+    assert decision["model_hint_status"] == "ignored:tier_mismatch"
+
+
+@pytest.mark.parametrize("hint,excluded,policy,usage,recent,expected", [
+    ("unknown-acp/model", frozenset(), frozenset(), _usage(20, 20), None, "ignored:not_offered"),
+    ("claude-agent-acp/sonnet", frozenset({"claude:sonnet"}), frozenset(),
+     _usage(20, 20), None, "ignored:unavailable"),
+    ("claude-agent-acp/sonnet", frozenset({"claude:sonnet"}),
+     frozenset({"claude:sonnet"}), _usage(20, 20), None, "ignored:auto_excluded"),
+    ("codex-acp/gpt-5.6-terra", frozenset(), frozenset(), _usage(90, 20), None,
+     "ignored:near_quota_limit"),
+    ("codex-acp/gpt-5.6-terra", frozenset(), frozenset(), _usage(20, 20),
+     {"standard": {"codex-acp": 20, "claude-agent-acp": 0}}, "ignored:engine_overused"),
+])
+def test_model_hint_rejection_reasons(hint, excluded, policy, usage, recent, expected):
+    entries = [CODEX[4], CLAUDE[1]]
+    _, decision = auto_route.rank(
+        "standard", entries, usage, excluded=excluded, policy_excluded=policy,
+        role="worker-backend-dev", model_hint=hint, recent=recent)
+    assert decision["model_hint_status"] == expected
+
+
+def test_escalation_ignores_hint_and_prefers_another_engine():
+    entries = [CODEX[4], CLAUDE[1]]
+    _, decision = auto_route.rank(
+        "standard", entries, _usage(20, 20), role="worker-backend-dev",
+        model_hint="codex-acp/gpt-5.6-terra", model_reason="Legacy preference.",
+        escalated=True, previous_engine="codex-acp")
+    assert decision["model_hint_status"] == "ignored:escalated"
+    assert decision["diversify_from"] == "codex-acp"
+    assert decision["chosen"] == "claude-agent-acp/sonnet"
+
+
+
+def test_route_menu_reflects_live_catalog_and_policy(tmp_path, monkeypatch):
+    from cortex_runtime.connections import registry
+    project = tmp_path / "project"
+    (project / ".cortex").mkdir(parents=True)
+    environ = {"HOME": str(tmp_path)}
+    candidates = [_entry("claude", "haiku"), _entry("codex", "gpt-5.6-luna")]
+    connections = {"claude": SimpleNamespace(launch_command=("claude",)),
+                   "codex": SimpleNamespace(launch_command=("codex",))}
+    monkeypatch.setattr(registry, "read_registry", lambda _: SimpleNamespace(connections=connections))
+    monkeypatch.setattr(auto_route, "_entries", lambda *_: candidates)
+    monkeypatch.setattr(auto_route, "_is_seed", lambda _: False)
+    monkeypatch.setattr(quota, "used_percent", lambda *_: None)
+    first = auto_route.route_menu(project, environ)
+    assert {item["route"] for item in first["tiers"]["light"]} == {
+        "claude-agent-acp/haiku", "codex-acp/gpt-5.6-luna"}
+    assert next(item for item in first["tiers"]["light"] if item["model"] == "haiku")["auto_eligible"] is False
+    (project / ".cortex" / "routing.json").write_text(json.dumps({
+        "providers": ["claude-agent-acp"], "auto_allow": ["haiku"]}))
+    second = auto_route.route_menu(project, environ)
+    assert [item["route"] for item in second["tiers"]["light"]] == ["claude-agent-acp/haiku"]
+    assert second["tiers"]["light"][0]["auto_eligible"] is True
+    assert second["roles"]["worker-backend-dev"]["high"] == "deep"

@@ -10,13 +10,12 @@ and the separate real-client qualification boundary.
 nodes, structured results, events and request receipts in `.cortex/cortex.sqlite3`.
 State changes and their events commit together. A plan is validated for exact fields,
 known roles, unique node names, existing dependencies, cycles, bounded scope and
-verification commands. A model cannot include engine, model, effort or permissions
-in the plan schema.
+verification commands. Each new plan node requires a `model` recommendation (`auto`, engine id, or `engine/model`) and may include `model_reason`; neither field grants dispatch authority. The runtime computes tier and effort and revalidates policy and availability. See [automatic routing](routing-and-fallback.md#automatic-worker-routing-tiers-model-hints-and-ranking).
 
 `orchestration/controller.py` drives planning, execution, independent review,
 verification and synthesis. Only dependency-ready nodes are reserved for execution.
 Reservations commit before provisioning, and concurrent claims share the same
-four-worker ceiling. Existing role configuration resolves model and effort. All
+four-worker ceiling. Runtime routing resolves model and effort from the current tier, policy, catalog and audit balance; plan hints remain advisory. All
 23 specialist/consultant profiles remain available.
 
 The runtime inserts an independent code reviewer after execution. APPROVE proceeds
@@ -25,7 +24,12 @@ BLOCK stops acceptance. Three unsuccessful review cycles block further automatic
 work. The loop never treats an ordinary final model message as a worker result.
 
 Worker results bind to a published report owned by the exact provisioned attempt.
-The result receipt retains a content digest. Command verification runs literal argv
+The result receipt retains a content digest. A passed check may cite a completed,
+zero-exit `command_run` or user-confirmed `outside_command` receipt from that
+same task and attempt; a cited failed check requires a completed nonzero exit.
+Pending, duplicated, foreign or mismatched receipts cannot establish an outcome.
+Every synthesis `not_verified` item requires a nonblank concrete blocker.
+Command verification runs literal argv
 in an explicit Linux namespace sandbox with no user home, inherited credentials,
 network, or access to the real runtime store. Missing isolation, failed commands,
 incomplete output or a changed project digest cannot establish a pass.

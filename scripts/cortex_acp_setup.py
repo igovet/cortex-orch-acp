@@ -202,6 +202,38 @@ def _atomic_private_json(path: Path, body: str) -> None:
                 pass
 
 
+def _is_managed_paseo_launch_config(value, desired):
+    """Recognize a prior Cortex launch record without accepting arbitrary JSON.
+
+    Git-source updates stage a versioned runtime, so their expected absolute
+    paths differ from a prior successful installation.  The record remains
+    safe to replace only when it has the complete Cortex-owned shape and the
+    current user's storage roots; a similarly named unrelated record stays
+    protected.
+    """
+    if not isinstance(value, dict) or set(value) != {"argv", "env", "shim"}:
+        return False
+    argv = value.get("argv")
+    env = value.get("env")
+    shim = value.get("shim")
+    if not isinstance(argv, list) or len(argv) != 3 or argv[:2] != ["python3", "-B"]:
+        return False
+    if not isinstance(env, dict) or env != desired["env"] or not isinstance(shim, str):
+        return False
+    try:
+        entrypoint = Path(argv[2])
+        shim_path = Path(shim)
+    except TypeError:
+        return False
+    if not entrypoint.is_absolute() or not shim_path.is_absolute():
+        return False
+    runtime = entrypoint.parent.parent
+    return (
+        entrypoint == runtime / "src" / "cortex_acp.py"
+        and shim_path == runtime / "integrations" / "paseo" / "server" / "acp-load-shim.mjs"
+    )
+
+
 def _write_paseo_launch_config(environ=None, *, runtime_root=None):
     """Persist the Cortex argv and user storage roots used after restart.
 
@@ -241,7 +273,7 @@ def _write_paseo_launch_config(environ=None, *, runtime_root=None):
         # so setup cannot overwrite an unrelated owner-managed file.
         legacy_argv_only = {"argv": desired["argv"]}
         legacy_argv_env = {"argv": desired["argv"], "env": desired["env"]}
-        if current != desired and current not in (legacy_argv_only, legacy_argv_env):
+        if current != desired and current not in (legacy_argv_only, legacy_argv_env) and not _is_managed_paseo_launch_config(current, desired):
             raise SystemExit(f"error: refusing to overwrite unrelated launch configuration: {path}")
         if current != desired:
             _atomic_private_json(path, json.dumps(desired, indent=2) + "\n")

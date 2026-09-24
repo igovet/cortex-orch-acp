@@ -1,1 +1,7 @@
-{}
+{
+  "metadataGeneration": {
+    "branchName": {
+      "instructions": "Use the prefix `feat/` for new tasks, `fix/` for fixes."
+    }
+  }
+}

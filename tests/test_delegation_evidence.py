@@ -73,3 +73,81 @@ def test_a_check_the_engine_ran_with_its_own_shell_counts_as_passed(tmp_path,cas
     mcp_tools.dispatch(store,worker,'result_submit',args)
     node=next(n for n in TaskMachine(store).context(task.task_id)['nodes'] if n['assignment_ref']==assignment)
     assert node['status']=='completed'
+
+
+@pytest.mark.parametrize('outcome,exit_code,accepted', [
+    ('passed', 0, True),
+    ('passed', 2, False),
+    ('failed', 2, True),
+    ('failed', 0, False),
+])
+def test_outside_command_receipt_supports_matching_check_outcome(tmp_path, monkeypatch,
+                                                                  outcome, exit_code, accepted):
+    from cortex_runtime.orchestration import consent
+    monkeypatch.setattr(consent, 'request', lambda *args, **kwargs: True)
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    task=bootstrap_task(store,SourceEvent(origin='outside-evidence',event_id=outcome+str(exit_code)),
+                        'Check','owner')
+    coordinator=resolve_channel(store,task.channel_id,task.secret)
+    worker,assignment=provision_fixture(store,coordinator)
+    report=publish_fixture_report(store,worker)
+    receipt=mcp_tools.dispatch(store,worker,'outside_command',
+        dict(argv=['python3','-B','-c',f'raise SystemExit({exit_code})'],
+             cwd=str(tmp_path.parent),request_key='outside-check'))
+    assert receipt['complete'] and receipt['exit_code']==exit_code
+    args=dict(report_ref=report,summary='Observed',
+              checks=[dict(name='outside check',outcome=outcome,
+                           tool_call_ref=receipt['tool_call_ref'])],
+              request_key='result')
+    if not accepted:
+        with pytest.raises(StoreError,match='check_evidence_required'):
+            mcp_tools.dispatch(store,worker,'result_submit',args)
+        with store.connection() as db:
+            assert db.execute('SELECT 1 FROM runtime_requests WHERE actor=? AND request_key=?',
+                              (worker.channel_id,'result')).fetchone() is None
+        return
+    mcp_tools.dispatch(store,worker,'result_submit',args)
+    node=next(n for n in TaskMachine(store).context(task.task_id)['nodes']
+              if n['assignment_ref']==assignment)
+    assert node['status']==('completed' if outcome=='passed' else 'failed')
+
+
+@pytest.mark.parametrize('tamper', ['foreign','pending','replayed','missing_output','mismatched_ref'])
+def test_outside_command_receipt_rejects_unbound_or_unfinished_evidence(tmp_path,monkeypatch,tamper):
+    from cortex_runtime.orchestration import consent
+    monkeypatch.setattr(consent,'request',lambda *args,**kwargs: True)
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    task=bootstrap_task(store,SourceEvent(origin='outside-evidence',event_id=tamper),'Check','owner')
+    coordinator=resolve_channel(store,task.channel_id,task.secret)
+    worker,assignment=provision_fixture(store,coordinator)
+    report=publish_fixture_report(store,worker)
+    owner=worker
+    if tamper=='foreign':
+        owner,_=provision_fixture(store,coordinator,key='other')
+    receipt=mcp_tools.dispatch(store,owner,'outside_command',
+        dict(argv=['python3','-B','-c','print("ok")'],cwd=str(tmp_path.parent),
+             request_key='outside-check'))
+    ref=receipt['tool_call_ref']
+    if tamper!='foreign':
+        with store.connection() as db:
+            row=db.execute("SELECT result_json FROM runtime_requests WHERE actor=? AND request_key='outside-check'",
+                           (worker.channel_id,)).fetchone()
+            saved=json.loads(row[0])
+            if tamper=='pending': saved['complete']=False
+            if tamper=='missing_output': saved['receipt'].pop('large_output_id')
+            if tamper=='mismatched_ref': saved['receipt']['tool_call_ref']='gateway:wrong'
+            if tamper=='replayed':
+                db.execute("INSERT INTO runtime_requests(task_id,request_key,actor,operation,digest,result_json) "
+                           "SELECT task_id,'duplicate',actor,operation,digest,result_json "
+                           "FROM runtime_requests WHERE actor=? AND request_key='outside-check'",
+                           (worker.channel_id,))
+            else:
+                db.execute("UPDATE runtime_requests SET result_json=? "
+                           "WHERE actor=? AND request_key='outside-check'",
+                           (json.dumps(saved),worker.channel_id))
+            db.commit()
+    args=dict(report_ref=report,summary='Observed',
+              checks=[dict(name='outside check',outcome='passed',tool_call_ref=ref)],
+              request_key='result')
+    with pytest.raises(StoreError,match='check_evidence_required'):
+        mcp_tools.dispatch(store,worker,'result_submit',args)

@@ -12,8 +12,8 @@ def test_coordinator_has_proposals_and_questions_but_no_lifecycle_or_route_contr
     assert not {'delegate','decide','cancel','complete_task','set_task_state','integrate'} & tools.keys()
     plan=tools['plan_submit']['inputSchema']['properties']['plan']
     node=plan['properties']['tasks']['items']
-    assert set(node['properties'])=={'id','role','objective','dependencies','scope','complexity','provider'}  # bounded hints, never a route
-    assert node['properties']['provider']['enum']==['codex-acp','claude-agent-acp']  # a provider preference, never a model
+    assert set(node['properties'])=={'id','role','objective','dependencies','scope','complexity','model','model_reason'}
+    assert 'model' in node['required'] and 'auto' in node['properties']['model']['description']
     assert node['additionalProperties'] is False
     assert 'question' in tools['user_question_request']['inputSchema']['required']
 

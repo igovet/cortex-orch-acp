@@ -268,6 +268,32 @@ def test_paseo_launch_config_upgrades_argv_only_record_for_daemon_restart(tmp_pa
     assert persisted["env"]["HOME"] == str(home)
 
 
+def test_paseo_launch_config_upgrades_prior_managed_git_runtime(tmp_path, monkeypatch):
+    config_home, state_home, home = _isolate(tmp_path, monkeypatch)
+    launch_dir = home / ".config" / "cortex"
+    launch_dir.mkdir(parents=True)
+    launch = launch_dir / "paseo-plugin-launch.json"
+    old_runtime = tmp_path / "state" / "cortex" / "paseo-runtime" / "0.9.0"
+    launch.write_text(json.dumps({
+        "argv": ["python3", "-B", str(old_runtime / "src" / "cortex_acp.py")],
+        "env": {
+            "HOME": str(home),
+            "XDG_CONFIG_HOME": str(config_home),
+            "XDG_STATE_HOME": str(state_home),
+        },
+        "shim": str(old_runtime / "integrations" / "paseo" / "server" / "acp-load-shim.mjs"),
+    }), encoding="utf-8")
+    launch.chmod(0o600)
+    new_runtime = tmp_path / "state" / "cortex" / "paseo-runtime" / "1.0.0"
+
+    result = setup._write_paseo_launch_config(runtime_root=new_runtime)
+
+    persisted = json.loads(launch.read_text(encoding="utf-8"))
+    assert result["created"] is False
+    assert persisted["argv"] == ["python3", "-B", str(new_runtime / "src" / "cortex_acp.py")]
+    assert persisted["shim"] == str(new_runtime / "integrations" / "paseo" / "server" / "acp-load-shim.mjs")
+
+
 def test_paseo_launch_config_rejects_symlinked_private_ancestor(tmp_path, monkeypatch):
     _config_home, _state_home, home = _isolate(tmp_path, monkeypatch)
     real_config = tmp_path / "real-config"

@@ -110,6 +110,46 @@ def test_a_hardlink_to_outside_is_read_only_and_never_refuses_the_worker(tmp_pat
     assert outside.read_text()=='private' and (root/'work'/'own.txt').read_text()=='ok\n'
 
 
+def test_hardlinks_wholly_inside_the_writable_project_can_be_reinstalled(tmp_path):
+    """esbuild links its two binaries together; pinning them made every
+    `npm ci` fail with EBUSY. A file whose every link is a writable project
+    path is writable, removable and replaceable."""
+    import subprocess
+    root=tmp_path/'project';root.mkdir();scratch=tmp_path/'scratch';scratch.mkdir()
+    one=root/'node_modules'/'esbuild'/'bin'/'esbuild';two=root/'node_modules'/'@esbuild'/'linux-x64'/'bin'/'esbuild'
+    one.parent.mkdir(parents=True);two.parent.mkdir(parents=True)
+    one.write_text('old');two.hardlink_to(one)
+    script=('echo new > node_modules/esbuild/bin/esbuild && rm node_modules/@esbuild/linux-x64/bin/esbuild '
+            '&& rm -r node_modules && mkdir -p node_modules/esbuild/bin && echo fresh > node_modules/esbuild/bin/esbuild && echo DONE')
+    with gateway_command(root,scratch,['/bin/sh','-c',script],['.']) as (command,fds):
+        assert str(one) not in command and str(two) not in command  # never a mount point
+        done=subprocess.run(command,pass_fds=fds,capture_output=True,text=True,env={'PATH':'/usr/bin:/bin'})
+    assert 'DONE' in done.stdout,done.stderr
+    assert one.read_text()=='fresh\n' and not two.exists()
+
+
+@pytest.mark.parametrize('shape',['outside','denied','ungranted'])
+def test_a_project_hardlink_pair_stays_read_only_unless_every_link_is_writable(tmp_path,shape):
+    """A third link outside the project, a peer under a deny-write path, or a
+    peer outside the granted scope keeps the granted link read-only."""
+    import subprocess
+    root=tmp_path/'project';root.mkdir();scratch=tmp_path/'scratch';scratch.mkdir()
+    (root/'work').mkdir();(root/'other').mkdir()
+    first=root/'work'/'a';first.write_text('private');(root/'work'/'b').hardlink_to(first)
+    readonly=()
+    if shape=='outside':
+        (tmp_path/'outside').hardlink_to(first);scopes=['.']
+    elif shape=='denied':
+        (root/'other'/'c').hardlink_to(first);scopes=['.'];readonly=('other/**',)
+    else:
+        (root/'other'/'c').hardlink_to(first);scopes=['work']
+    script='echo x >> work/a && echo WROTE; rm work/b && echo REMOVED; echo ok > work/own.txt && echo OWN'
+    with gateway_command(root,scratch,['/bin/sh','-c',script],scopes,readonly=readonly) as (command,fds):
+        done=subprocess.run(command,pass_fds=fds,capture_output=True,text=True,env={'PATH':'/usr/bin:/bin'})
+    assert 'WROTE' not in done.stdout and 'REMOVED' not in done.stdout and 'OWN' in done.stdout,done
+    assert first.read_text()=='private' and (root/'work'/'b').exists()
+
+
 def test_project_shapes_that_used_to_refuse_the_worker_now_run(tmp_path):
     """A private-name symlink, a socket in scope, and the tree limit each
     stopped a worker from starting at all."""

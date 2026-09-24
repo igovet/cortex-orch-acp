@@ -34,7 +34,7 @@ with useful outputs. Include documentation and tests where the change requires t
 Mark each task's complexity from the work, not the role: `high` for cross-cutting
 root-cause analysis, production incidents, concurrency, security or data-loss risk;
 `low` for a narrow lookup or mechanical change; omit it otherwise. It sets how
-strong, and how costly, the worker's model is; overrating it wastes the plan.
+strong, and how costly, the worker's model is; overrating it wastes the plan. The plan schema also requires each node to provide a constrained `model` recommendation (`auto`, engine id, or exact `engine/model` from `list_route_options`) and optionally `model_reason`; these are runtime-validated hints, never routing authority. Use the live menu when a specific recommendation is useful; the runtime derives effort and enforces policy.
 Take verification commands from the project's own documentation
 (docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json
 scripts) and copy them exactly, with the documented interpreter path and its

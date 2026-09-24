@@ -14,7 +14,7 @@ from cortex_runtime.orchestration import mcp,gateway
 READ_NAMES = {
     "read_draft", "list_reports", "read_report", "task_get_context", "project_read", "project_git", "list_sources",
     "read_source", "read_capsule", "read_large_output", "read_diagnostics",
-    "read_skill",
+    "read_skill", "list_route_options",
 }
 
 

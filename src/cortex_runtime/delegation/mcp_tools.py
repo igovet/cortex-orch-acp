@@ -328,10 +328,16 @@ def _coordinator_read_diagnostics(store, channel: ChannelContext, args: Mapping[
     return observability_metrics.diagnostics_summary(store, channel.task_id)
 
 
+def _coordinator_route_options(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
+    from ..routing import auto_route, availability
+    return auto_route.route_menu(store.project_root, unavailable=availability.active(store))
+
+
 _COORDINATOR_HANDLERS = dict(
     list_sources=_shared_list_sources, read_source=_shared_read_source,
     read_capsule=_shared_read_capsule, read_large_output=_shared_read_large_output,
     read_skill=_shared_read_skill, read_diagnostics=_coordinator_read_diagnostics,
+    list_route_options=_coordinator_route_options,
 )
 _WORKER_HANDLERS = dict(
     ask_question=_worker_ask_question, list_sources=_shared_list_sources,
@@ -343,6 +349,7 @@ _ROLE_HANDLERS = dict(coordinator=_COORDINATOR_HANDLERS, worker=_WORKER_HANDLERS
 
 _OPERATION_DESCRIPTIONS = dict(
     task_get_context="Read the current runtime task, original goal, validated plan, results and user answers.",
+    list_route_options="Read the live engine-confirmed model routes, tier, permitted efforts, availability and quota band, plus role tiers at low/normal/high complexity. Use exact route labels in plan_submit model. Informational: dispatch revalidates every route; flagship remains escalation-only.",
     answer_submit="Submit a direct answer to an informational question before any plan or workers exist, or a final summary after the user chose to finish when answering a runtime stop question or a question asked after verification. The runtime records and delivers the answer; this does not certify code changes or tests.",
     plan_submit="For changes or substantial delegated work, submit a dependency plan for runtime validation. Accepted only while the task is planning. The runtime chooses routes, schedules assignments, requires review and runs verification.",
     verification_submit="After the runtime verification failed and the work itself is fine: replace only the verification commands and verify again, without redoing the reviewed work.",
@@ -486,7 +493,7 @@ def tool_definitions(role_kind: str, *, role_id: str | None = None, stage: str |
             description=_OPERATION_DESCRIPTIONS.get(name, f"Delegation operation '{name}'."),
             inputSchema=dict(type="object", properties=schema["properties"],
                               required=schema["required"], additionalProperties=False),
-            annotations=dict(readOnlyHint=name in ("project_read", "project_git", "task_get_context", "list_sources", "read_source", "read_capsule", "read_large_output", "read_diagnostics", "read_skill"), destructiveHint=name=="project_delete",
+            annotations=dict(readOnlyHint=name in ("project_read", "project_git", "task_get_context", "list_sources", "read_source", "read_capsule", "read_large_output", "read_diagnostics", "read_skill", "list_route_options"), destructiveHint=name=="project_delete",
                               idempotentHint=name != "ask_question", openWorldHint=False),
         ))
     return tools

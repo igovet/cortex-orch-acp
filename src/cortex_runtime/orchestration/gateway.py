@@ -437,27 +437,29 @@ ENGINE_SHELL_COMPLETED = ("SELECT 1 FROM tool_result_observations c WHERE c.atte
                           "AND k.tool_call_ref=c.tool_call_ref AND k.kind='execute') LIMIT 1")
 
 
-def verified_check(db,task_id,attempt_id,ref):
-    """Evidence behind a passed check, strongest first.
+def verified_check(db,task_id,attempt_id,ref,outcome='passed'):
+    """Evidence behind a stated check outcome, strongest first.
 
-    A ``gateway:`` ref must be this attempt's complete, zero-exit command_run.
-    A command the engine ran with its own shell counts too -- it executed it
-    within its own tools: a cited engine tool call must have completed in
-    this attempt, and an uncited pass needs at least one completed engine
-    shell run in this attempt. A pass with no command run at all is a claim.
+    A ``gateway:`` ref must be this attempt's complete command_run or
+    outside_command receipt with an exit status matching the stated outcome.
+    An engine shell call may also count: a cited call needs the status matching
+    the outcome in this attempt. An uncited pass needs at least one completed
+    engine shell run in this attempt. A pass without a run is a claim.
     """
     if not isinstance(ref,str) or not ref.startswith('gateway:'):
         if isinstance(ref,str) and ref:
             row=db.execute("SELECT status FROM tool_result_observations WHERE attempt_id=? AND tool_call_ref=? ORDER BY id DESC LIMIT 1",
                            (attempt_id,ref)).fetchone()
-            return bool(row) and row[0]=='completed'
-        return bool(db.execute(ENGINE_SHELL_COMPLETED,(attempt_id,)).fetchone())
+            return bool(row) and row[0]==('completed' if outcome=='passed' else 'failed')
+        return outcome=='passed' and bool(db.execute(ENGINE_SHELL_COMPLETED,(attempt_id,)).fetchone())
     rows=db.execute("SELECT r.result_json FROM runtime_requests r JOIN trusted_channels c ON c.channel_id=r.actor "
-                    "WHERE r.task_id=? AND c.attempt_id=? AND r.operation='command_run'",(task_id,attempt_id))
+                    "WHERE r.task_id=? AND c.attempt_id=? AND r.operation IN ('command_run','outside_command')",(task_id,attempt_id))
     matches=[]
     for row in rows:
         saved=json.loads(row[0]);result=saved.get('receipt',{})
         if result.get('tool_call_ref')==ref: matches.append((saved,result))
     return (len(matches)==1 and matches[0][0].get('complete') is True
-            and matches[0][1].get('complete') is True and matches[0][1].get('exit_code')==0
+            and matches[0][1].get('complete') is True
+            and type(matches[0][1].get('exit_code')) is int
+            and ((matches[0][1]['exit_code']==0) if outcome=='passed' else (matches[0][1]['exit_code']!=0))
             and matches[0][1].get('failure') is None and bool(matches[0][1].get('large_output_id')))

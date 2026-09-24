@@ -14,6 +14,20 @@ def dispatch(store, channel, operation, args):
     schema = schemas(channel.role).get(operation)
     if schema is None:
         raise StoreError('unknown_operation')
+    # A persisted pre-model plan can be delivered again after recovery.
+    # Accept only its exact recorded request; fresh plans use the new schema.
+    if operation == 'plan_submit' and isinstance(args, dict) and isinstance(args.get('plan'), dict) and isinstance(args.get('request_key'), str):
+        candidate = args['plan']
+        nodes = candidate.get('tasks')
+        if isinstance(nodes, list) and any(isinstance(n, dict) and 'model' not in n for n in nodes):
+            digest = hashlib.sha256(encoded(candidate).encode()).hexdigest()
+            with store.connection() as db:
+                prior = db.execute('SELECT operation,digest FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                                   (channel.task_id, channel.channel_id, args['request_key'])).fetchone()
+            if prior is not None and prior['operation'] == 'plan_submit' and prior['digest'] == digest:
+                from .gateway import _authority
+                return TaskMachine(store).submit_plan(
+                    channel, candidate, args['request_key'], authorization=lambda db: _authority(db, channel))
     validate(schema, args)
     machine = TaskMachine(store)
     from .gateway import _authority
@@ -65,13 +79,14 @@ def dispatch(store, channel, operation, args):
                     if not gap and 'blocker' in check:
                         raise StoreError('check_blocker_unexpected', f'arguments.checks[{index}].blocker', check['outcome'],
                                          'no blocker on a passed or failed check', 'Remove blocker from checks that passed or failed.')
-                    if check['outcome'] == 'passed' and not verified_check(
-                        db, channel.task_id, channel.attempt_id, check.get('tool_call_ref')
+                    if (check['outcome'] == 'passed' or
+                            (check['outcome'] == 'failed' and check.get('tool_call_ref'))) and not verified_check(
+                        db, channel.task_id, channel.attempt_id, check.get('tool_call_ref'), check['outcome']
                     ):
                         raise StoreError('check_evidence_required',
                             f'arguments.checks[{index}].tool_call_ref', 'missing or unverified',
-                            'a command this attempt ran: a zero-exit command_run receipt or a completed shell command of your own',
-                            'Cite the exact command_run tool_call_ref, or omit tool_call_ref for a check you ran with your own shell. '
+                            'a completed command_run or outside_command receipt with an exit status matching the check outcome, or a completed shell command of your own for a pass',
+                            'Cite the exact command_run or outside_command tool_call_ref, or omit tool_call_ref for a check you ran with your own shell. '
                             'Unexecuted or unresolved checks must be not_run or unverified; they are retained as disclosed gaps. '
                             'Descriptive review observations belong in the report, not automated checks.')
                 db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',

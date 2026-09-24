@@ -1,24 +1,25 @@
 # ACP documentation
 
-Cortex is an incoming ACP v1 stdio agent at src/cortex_acp.py. It runs its own project-local runtime and starts pinned Codex or Claude ACP engines as outgoing sessions. Models propose work and interpret evidence; the runtime owns lifecycle, dependency scheduling, rights, routing, independent review, verification and completion. The current security contract is [SECURITY.md](../../SECURITY.md).
+Cortex is an incoming ACP v1 stdio agent at `src/cortex_acp.py`. It runs its own project-local runtime and starts Codex or Claude ACP engines as outgoing sessions. Models propose work and interpret evidence; the runtime owns lifecycle, dependency scheduling, rights, routing, independent review, verification and completion. The current security contract is [SECURITY.md](../../SECURITY.md).
 
-## Start and qualify
+## Start and configure
 
+- [Paseo installation, onboarding and diagnostics](packaging-and-onboarding.md)
+- [Complete JSON configuration reference](../configuration.md): connections, defaults and policy ceilings, routing, MCP servers, file locations and precedence
 - [Zed Custom Agent setup](zed-custom-agent.md)
 - [codeg recipe and current limits](codeg-custom-agent.md)
-- [Packaging, onboarding and diagnostics](packaging-and-onboarding.md)
-- [Isolated dev Paseo environment and plugin safety](dev-paseo-environment.md) — current Paseo isolation remains unverified until the installed 0.9.1 build is inspected
+- [Isolated dev Paseo environment and plugin safety](dev-paseo-environment.md)
 - [Google Drive and Docs MCP setup](google-drive-mcp.md)
 - [Figma MCP setup](figma-mcp.md)
 - [No-paid test matrix and live-only cases](test-matrix-and-ci.md)
-- [Real-client runbook](real-client-runbook.md) — live rows remain NOT RUN until retained observations exist
+- [Real-client runbook](real-client-runbook.md)
 - [Registry metadata draft](registry-metadata-draft.md) — not submitted
 
-The no-paid startup smoke in scripts/cortex_acp_smoke.py launches the production entry point in an isolated temporary project and host configuration. It checks ACP framing and schema without an engine call. The Zed setup helper in scripts/cortex_acp_client_config.py defaults to a dry run and requires explicit consent for a write. Neither substitutes for real-client qualification.
+The no-paid startup smoke in `scripts/cortex_acp_smoke.py` launches the production entry point in an isolated temporary project and host configuration. It checks ACP framing and schema without an engine call. The Zed setup helper in `scripts/cortex_acp_client_config.py` defaults to a dry run and requires explicit consent for a write. Neither substitutes for real-client qualification.
 
 ## Orchestration and state
 
-- [Current orchestration contract](orchestration.md): requirements, assignments, attempts, direct project writers, checks, decisions and instruction delivery
+- [Current orchestration contract](orchestration.md)
 - [Roles, delegation and instruction delivery](roles-and-delegation.md)
 - [Completion and resource lifecycle](completion-and-lifecycle.md)
 - [Steering, stop and questions](steering-and-questions.md)
@@ -39,7 +40,7 @@ The no-paid startup smoke in scripts/cortex_acp_smoke.py launches the production
 
 - [Codex ACP adapter](codex-acp-adapter.md)
 - [Claude ACP adapter](claude-agent-acp-adapter.md)
-- [Permissions and containment](permissions-and-containment.md) (including the Guarded/Auto access mode)
+- [Permissions and containment](permissions-and-containment.md)
 - [Security boundary audit](security-boundaries.md)
 
-A client must explicitly select or launch Cortex as its agent. Finding a .cortex directory does not activate orchestration. Every project has one .cortex store; work must be qualified in a separate disposable project. Real Zed, Codex and Claude end-to-end operation cannot be inferred from fake-engine tests or the no-paid smoke; use the runbook and mark unobserved scenarios unverified.
+A client must explicitly select or launch Cortex as its agent. Finding a `.cortex` directory does not activate orchestration. Every project has one `.cortex` store; work must be qualified in a separate disposable project. Real Zed, Codex and Claude end-to-end operation cannot be inferred from fake-engine tests or the no-paid smoke; use the runbook and mark unobserved scenarios unverified.

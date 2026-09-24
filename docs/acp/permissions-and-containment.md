@@ -177,10 +177,14 @@ owner, or with `outside_command`, which the owner confirms. The read-only
 
 Tool state needs no list: a writing worker's grant is the whole project, and only
 the private names above are withheld. A regular file with more than one hard link
-stays read-only (its other link may be outside the project), and a directory with
-more than 256 of them (a pnpm `node_modules`, a hardlinked uv `.venv`) is
-read-only as a whole; reinstall such a tree from the owner's shell or with
-`outside_command`.
+stays read-only (its other link may be outside the project), unless every one of
+its links was found as a granted, non-deny-write path inside the project: esbuild
+links its two binaries to each other, and pinning them made every `npm ci` fail
+with `EBUSY`. Links are counted as distinct directory entries, so a tree seen
+twice through a bind mount never makes up a missing outside link. A directory with
+more than 256 such read-only files (a pnpm `node_modules`, a hardlinked uv
+`.venv`) is read-only as a whole; reinstall such a tree from the owner's shell or
+with `outside_command`.
 
 Every side effect has a durable started receipt before execution. Identical retries
 return the retained result. Conflicting keys fail. An interrupted operation with

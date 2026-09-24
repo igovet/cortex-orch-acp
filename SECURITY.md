@@ -191,9 +191,10 @@ path through `.git`, `.cortex`, `.codex` or `.claude`, and plan scopes cannot na
 them. Tool state inside the project (`.venv`, `node_modules/.cache`,
 `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, build caches) is
 writable because a writing worker's grant is the whole project, with no list of
-tools; multiply hard-linked files stay read-only, and so does a directory with
-more than 256 of them (pnpm `node_modules`, a hardlinked uv `.venv`). `.cortex`
-stays hidden.
+tools; multiply hard-linked files stay read-only unless every one of their links
+is itself a writable path of the project (esbuild links its two binaries to each
+other), and a directory with more than 256 read-only ones stays read-only as a
+whole (pnpm `node_modules`, a hardlinked uv `.venv`). `.cortex` stays hidden.
 
 ### Sandboxed command umask
 
@@ -252,7 +253,9 @@ mode) is retried on a different available route instead, at most six times.
 Routing refusals (`no_available_route`, `pinned_route_unavailable`,
 `invalid_routing_overrides`, `route_denied`) are never retried. These records
 come only from the engine's structured error fields and carry no credentials.
-They never lift a `deny` or substitute a pin. Review/fix cycles and model
+They never lift a `deny` or substitute a pin. Recent-attempt balance and the
+optional `auto_allow` for Haiku cannot bypass `deny`, `providers`, route
+availability or the 100% plan-window exclusion. Review/fix cycles and model
 replan requests are bounded. Coordinator, worker, review and command deadlines
 are runtime-owned. Recovery capsules include the current durable graph and policy;
 a compacted model summary cannot change either. Live replacement-session and

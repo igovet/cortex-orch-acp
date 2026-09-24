@@ -7,7 +7,8 @@ Commands below are copied exactly from `AGENTS.md`, `README.md`,
 
 Plan a real check for every changed surface before work starts; the
 [orchestrator reference](../../skills/orchestrator/references/verification-coverage.md)
-sets out GUI, installation, runtime and documentation coverage. An unrun or
+sets out GUI, installation, runtime and documentation coverage. Close every
+check that can be performed in the authorized environment. An unrun or
 unverified check needs a concrete blocker, and synthesis discloses it.
 
 ## No-paid default test suite
@@ -85,16 +86,34 @@ python3 -B scripts/cortex_acp_setup.py status
 python3 -B scripts/cortex_acp_setup.py add-connection --help
 ```
 
-## Paid probes (opt-in only, never part of routine verification)
+## Standing approval for paid live verification
+
+Applicable paid live checks are authorized by the owner by default. Run them
+only through the isolated dev Paseo environment described in
+[`docs/acp/dev-paseo-environment.md`](../acp/dev-paseo-environment.md):
+the permanent `~/.paseo-dev` daemon, separate `~/.config/Paseo-dev` Electron
+profile, a disposable project, and the Cortex runtime launched by that daemon
+from the explicit absolute checkout plugin path. Do not use production
+`~/.paseo` or the production Cortex agent. Keep the existing production
+Codex/Claude account and credential-isolation rules. Check login status without
+printing credentials. Use `gpt-5.6-luna` at medium/high effort; heavy models
+remain prohibited in routine live qualification.
+
+The paid probes retain their safety guard and require both flags. The standing
+approval supplies the approval reference shown here:
 
 ```
-scripts/cortex_codex_probe.py --i-authorize-paid-call --approval-ref <ref>
-scripts/cortex_claude_probe.py --i-authorize-paid-call --approval-ref <ref>
+scripts/cortex_codex_probe.py --i-authorize-paid-call --approval-ref owner-standing-2026-09-24
+scripts/cortex_claude_probe.py --i-authorize-paid-call --approval-ref owner-standing-2026-09-24
 ```
 
-Both flags are required together; either alone exits non-zero before any
-engine is loaded. `scripts/cortex_acp_smoke.py` is the no-paid startup smoke
-harness (schema-validated launch/protocol surface only, not GUI evidence).
+This approval does not make paid probes part of pytest: the default automated
+suite remains no-paid. A probe or GUI observation only supports the exact
+surface it exercises; it cannot substitute for unrelated live acceptance
+cases or mark unobserved real-client runbook rows passed.
+
+`scripts/cortex_acp_smoke.py` is the no-paid startup smoke harness
+(schema-validated launch/protocol surface only, not GUI evidence).
 
 ## Paseo plugin (`integrations/paseo/`)
 
@@ -113,28 +132,51 @@ npm run test:status    # node --experimental-strip-types client/worker-panel-sta
 npm run test:coalesce  # node --experimental-strip-types client/coalesce.test.ts
 ```
 
-**GUI testing** (verifies rendering and user-facing behavior):
+**GUI testing** (verifies rendered user-facing behavior):
 
-Start the dev daemon and Electron Desktop client with the isolated dev home. **The plugin path
-must always be given explicitly as the full absolute path; it changes per worktree:**
+Paseo 0.9.1 has no supported browser client or local HTTP UI. Its local daemon
+uses WebSocket, and the installed CLI provides daemon and plugin commands rather
+than a web-client launcher. The Electron Desktop application is the standard
+GUI method. Use the isolated dev home/profile and a disposable project as
+described in [the dev Paseo environment guide](../acp/dev-paseo-environment.md).
+
+Always pass the plugin directory explicitly as a full absolute path. The plugin
+is edited in isolated git worktrees and the path changes between sessions.
+From the repository root:
 
 ```
+npm --prefix integrations/paseo ci
+npm --prefix integrations/paseo run typecheck
 python3 -B scripts/cortex_paseo_dev.py -- start --timeout 60 --json
 python3 -B scripts/cortex_paseo_dev.py -- plugin install "$PWD/integrations/paseo" --json
-PASEO_ELECTRON_USER_DATA_DIR=~/.config/Paseo-dev /opt/Paseo/Paseo &
+python3 -B scripts/cortex_paseo_dev.py gui
 ```
 
-In the Paseo Desktop window, create or open cortex agents and verify:
-- Worker cards display and update in the timeline
-- Worker results (when completed) render correctly
-- Tool output and shell commands display properly
-- Plugin routes requests to the local cortex daemon (not production)
-
-After testing, stop the daemon:
+In Paseo Desktop, open or create a Cortex agent and inspect the rendered behavior
+under test: worker cards and results, tool output and shell commands, and the
+timeline. CLI output, logs and CDP inspection alone do not establish rendered
+behavior. For Xvfb use `python3 -B scripts/cortex_paseo_dev.py gui --xvfb`.
+After testing, stop only the isolated dev daemon:
 
 ```
 python3 -B scripts/cortex_paseo_dev.py -- daemon stop --timeout 15 --json
 ```
+
+CLI access is secondary and supports diagnostics such as daemon health, plugin
+registration and logs. Keep the plugin path explicit when installing it:
+
+```
+python3 -B scripts/cortex_paseo_dev.py -- status --json
+python3 -B scripts/cortex_paseo_dev.py -- plugin ls --json
+python3 -B scripts/cortex_paseo_dev.py -- logs <agent-id> --json
+```
+
+For retained-history checks, omit `--tail` and retain the exit status, output
+byte count, structural event count, safe first/last event identities and any
+explicit error. Paseo 0.9.1 documents `--tail`, `--filter` and `--since` for
+logs, but no pagination or full-history flag; if completeness cannot be independently
+established, mark that check unverified. Do not store message bodies or raw logs
+in repository documents or reports.
 
 ## What automated evidence cannot close
 

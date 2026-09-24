@@ -24,100 +24,58 @@
   </tr>
 </table>
 
-> **Runtime rewrite in progress.** The coordinator API and control loop have changed.
-> This working tree is not release qualified; see [status and remaining work](docs/acp/runtime-rewrite-status.md).
+> **Release qualification is incomplete.** 45 of 69 mandatory live-only cases remain; real-client observations are still marked NOT RUN. See [runtime status and remaining work](docs/acp/runtime-rewrite-status.md).
 
 ## What Cortex is
 
-Cortex is an ACP agent: run it from an editor like Zed or Paseo over stdio. It receives your work requests, runs other coding agents (codex-acp, claude-agent-acp) as isolated workers in the exact project you have open, and records everything.
+Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory.
 
-The runtime owns the plan lifecycle, worker scheduling, review, verification, and completion. Workers publish immutable Markdown reports and results. Each project stores its own tasks, events, and reports in a local `.cortex/` directory.
+Worker routes and effort are selected from observed models by task tier, quota and recent same-tier balance. Plan model hints are constrained recommendations; explicit routing rules remain authoritative.
 
-## Installation
+## Install
 
-### In Paseo
+### Paseo
 
-Cortex runs in Paseo 0.9.1+ as a plugin. Install directly from GitHub or from a local checkout.
+Paseo installs can prepare Cortex automatically: the plugin manifest’s supported `build` hook runs the setup command before activation.
 
-**GitHub URL (recommended)**
-
-Install the plugin from GitHub using the CLI:
+Install the current GitHub version:
 
 ```bash
 paseo plugin install github:igovet/cortex-orch-acp:integrations/paseo
 ```
 
-The Git installation's declared preparation steps create Cortex's private
-configuration and launch record automatically. It does not log in to Codex or
-Claude; add a connection after installation if you have not configured one yet.
-
-**Local checkout**
-
-Clone the repository and run the local setup, which writes the private launch
-record and installs the plugin from this checkout:
+Install from a branch, tag, or commit by adding `--ref`:
 
 ```bash
-git clone https://github.com/igovet/cortex-orch-acp.git
-cd cortex-orch-acp
-python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
+paseo plugin install github:igovet/cortex-orch-acp:integrations/paseo --ref dev
 ```
 
-See [Paseo plugin installation](docs/acp/packaging-and-onboarding.md) for detailed setup and troubleshooting.
+Update an installed Git plugin:
 
-### In other ACP clients
-
-Cortex runs as a standard ACP agent. Register it with any ACP-compatible client using:
-
+```bash
+paseo plugin update cortex-acp --check
+paseo plugin update cortex-acp --ref dev --yes
 ```
+
+For a local checkout, install the plugin directory by its absolute path and reload it after editing:
+
+```bash
+paseo plugin install /absolute/path/to/cortex-orch-acp/integrations/paseo
+paseo plugin reload cortex-acp
+```
+
+Git installs run their declared preparation hook. Local directory installs use the checkout directly; use the setup helper for a managed local Paseo installation when needed. See [Paseo onboarding and diagnostics](docs/acp/packaging-and-onboarding.md).
+
+### Other ACP clients
+
+Register Cortex as an ACP stdio agent with this command, adapting the absolute path to your checkout:
+
+```text
 python3 -B /absolute/path/to/cortex-orch-acp/src/cortex_acp.py
 ```
 
-Refer to your client's documentation for the specific registration mechanism (e.g., configuration file or settings UI). See [Packaging and onboarding](docs/acp/packaging-and-onboarding.md) for detailed setup guidance for your ACP client.
+Use the client’s ACP agent registration settings. See [the ACP documentation index](docs/acp/index.md).
 
-## Quick configuration
+## Configuration
 
-Cortex stores configuration in `~/.config/cortex/`. You'll need to:
-
-1. **Add engine connections** – Register your Codex or Claude account:
-
-```bash
-python3 -B scripts/cortex_acp_setup.py add-connection \
-    --name work --engine codex-acp --provider openai \
-    --auth-mode api_key --key-kind openai_api_key \
-    --api-key-file /path/to/key.txt \
-    --install-record /path/to/codex-install-record.json
-```
-
-There is no installer for either engine: you build this install record yourself for an engine you already have installed by some other means, and Cortex re-verifies its file hashes on every use. See [engine install records](docs/configuration.md#engine-install-records) for the exact recipe.
-
-2. **Set defaults** – Choose a model and effort level; they'll be saved when you select them in the client.
-
-3. **(Optional) Configure MCP servers** – Add tools for knowledge, APIs, or custom operations. See [MCP configuration](docs/configuration.md#mcp-servers-tools-and-capabilities).
-
-4. **(Optional) Override routing** – Create `~/.config/cortex/routing.json` to control which engine/model handles specific work. See [routing configuration](docs/configuration.md#routing-controlling-which-engine-handles-work).
-
-For comprehensive configuration documentation, see [Cortex Configuration Guide](docs/configuration.md).
-
-## Key features
-
-- **Multi-provider coordination** – Run Codex and Claude workers in the same task
-- **Automatic routing** – Cortex selects engines and models based on request complexity
-- **Fallback routing** – If a worker fails, Cortex can route to a backup provider with your consent
-- **Verification and review** – Every change is reviewed before acceptance
-- **Structured reporting** – Task history, worker output, and decisions are stored as Markdown and SQLite
-
-The Paseo Usage pill reads native plan windows for Codex and Claude; it states when a provider supplied no current window. See [token and plan usage](docs/acp/token-and-plan-usage.md) for token totals and availability rules.
-
-## Starting a task
-
-Open your project in Cortex and describe what you want done. Cortex will propose delegated work, coordinate the agents, verify the results, and report what it accomplished.
-
-## Further documentation
-
-- [Packaging and onboarding](docs/acp/packaging-and-onboarding.md) – Install, first-run setup, diagnostics
-- [Configuration guide](docs/configuration.md) – Detailed configuration for connections, routing, and MCP
-- [Codex adapter](docs/acp/codex-acp-adapter.md) – How Cortex works with Codex
-- [Claude adapter](docs/acp/claude-agent-acp-adapter.md) – How Cortex works with Claude
-- [Routing and fallback](docs/acp/routing-and-fallback.md) – Worker routing, multi-provider fallback
-- [ACP documentation index](docs/acp/index.md) – Full reference
-- [Project storage and recovery](docs/project/storage.md) – Task storage, format upgrades, recovery
+See the [configuration guide](docs/configuration.md) for JSON configuration files and their locations, MCP server setup, engine connections, routing rules, and the default Haiku exclusion with conditional Luna routing.

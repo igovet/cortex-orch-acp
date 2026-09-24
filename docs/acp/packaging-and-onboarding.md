@@ -255,46 +255,57 @@ python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
 
 #### Install from GitHub
 
-The plugin lives below the repository root, so its GitHub source must include
-the Paseo subdirectory suffix. Paseo stages the complete Git checkout before it
-runs the manifest's supported `build` argv. Cortex uses that preparation phase
-to copy its launch-critical runtime and load shim into the current user's
-private Cortex state directory, then writes a launch record for that stable
-copy. The server bundle has no usable `import.meta.url` in Paseo 0.9.1;
-activation resolves this launch record directly. Install it with one command:
+The plugin lives below the repository root, so include the Paseo subdirectory
+suffix. Paseo stages the full Git checkout and runs the manifest's supported
+`build` command before activation. The manifest calls
+`scripts/cortex_acp_setup.py bootstrap-paseo-git-install`, which prepares the
+private runtime and launch record. No separate `init-storage` or
+`configure-paseo-plugin-launch` command is needed for this Git install; the
+hook does not log in to an engine or copy credentials.
+
+Install the current default ref:
 
 ```bash
 paseo plugin install github:igovet/cortex-orch-acp:integrations/paseo
 ```
 
-The complete repository, including `src/cortex_acp.py`, is available in the
-staged Git checkout; the `:integrations/paseo` suffix selects the plugin entry
-directory rather than limiting the checkout to that subdirectory. The build
-step retains only the launch-critical runtime under
+Select a branch, tag, or commit with `--ref`:
+
+```bash
+paseo plugin install github:igovet/cortex-orch-acp:integrations/paseo --ref dev
+```
+
+Paseo stages the complete repository, including `src/cortex_acp.py`; the
+`:integrations/paseo` suffix selects the plugin entry directory. The build
+step retains the launch-critical runtime under
 `$XDG_STATE_HOME/cortex/paseo-runtime/` and writes a `0600` launch record at
-`~/.config/cortex/paseo-plugin-launch.json`. It never copies credentials,
-modify another user's configuration, or log in to an engine. Add a Codex or
-Claude connection separately when needed.
+`~/.config/cortex/paseo-plugin-launch.json`.
 
-For an isolated development daemon, use the guarded wrapper and the equivalent
-Git source form:
+Update the installed Git plugin, checking first if desired:
 
 ```bash
-python3 -B scripts/cortex_paseo_dev.py -- \
-  plugin install file:///absolute/path/to/cortex-orch-acp:integrations/paseo
+paseo plugin update cortex-acp --check
+paseo plugin update cortex-acp --ref dev --yes
 ```
 
-After changing the plugin, use the repository helper while Paseo is already
-running:
+For an isolated development daemon, use the guarded wrapper and a full absolute
+checkout path. For a local directory install, install that plugin directory and
+reload it after editing; directory sources are reloaded, not updated with
+`plugin update`:
 
 ```bash
-scripts/update-paseo-plugin.sh
+paseo plugin install /absolute/path/to/cortex-orch-acp/integrations/paseo
+paseo plugin reload cortex-acp
 ```
 
-It restamps the package, installs/reloads the repository-owned provider, and
-checks that it is running. It does not start or stop Paseo and does not touch
-accounts, chats, or project-local `.cortex` stores. Set `CORTEX_PASEO_CLI` if
-the Paseo executable is not on `PATH`.
+The managed local-checkout setup remains available while Paseo is running:
+
+```bash
+python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
+```
+
+It validates and installs/reloads the repository-owned provider, then verifies
+that it is running. This is the supported explicit local setup workflow.
 
 `install-paseo-plugin` is the single explicit Cortex-on-Paseo installation
 step. It validates the repository-owned `integrations/paseo` source and its

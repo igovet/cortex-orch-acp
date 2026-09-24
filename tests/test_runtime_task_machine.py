@@ -24,7 +24,7 @@ def machine(tmp_path):
 
 def plan(count=1):
     return dict(tasks=[dict(id=f'N{i}', role='backend-dev', objective=f'Implement part {i}',
-                           dependencies=[], scope=[f'src/part{i}/**', f'tests/part{i}/**']) for i in range(count)],
+                           dependencies=[], scope=[f'src/part{i}/**', f'tests/part{i}/**'], model='auto') for i in range(count)],
                 verification=[['python3', '-B', '-m', 'pytest', '-q']])
 
 
@@ -543,27 +543,27 @@ def test_only_retries_and_review_fixes_escalate_the_route(machine):
     with state.store.connection() as db:
         db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                    (node['assignment_ref'], channel.task_id, 'xa_first', 'worker-debugger', 'ready', 'ready', 0, 'now', 'now')); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (False, 'high', None)
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (False, 'high', 'auto', None, None)
     with state.store.connection() as db:
         event(db, channel.task_id, 'ASSIGNMENT_RETRIED', dict(node=node['node_id'], revision=1, retry=1)); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', None)
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None)
     with state.store.connection() as db:
         db.execute("UPDATE runtime_nodes SET node_id='_fix_0_N0' WHERE task_id=?", (channel.task_id,))
         db.execute("DELETE FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'"); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', None)  # a fix keeps its node's complexity
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None)  # a fix keeps its node's complexity
 
 
 def test_a_planned_provider_preference_reaches_routing(machine):
     from cortex_runtime.orchestration.state import attempt_routing
     state, channel = machine
-    preferred = plan(); preferred['tasks'][0]['provider'] = 'codex-acp'
+    preferred = plan(); preferred['tasks'][0].pop('model'); preferred['tasks'][0]['provider'] = 'codex-acp'
     state.submit_plan(channel, preferred, 'p'); state.move(channel.task_id, 'EXECUTING')
     node = state.claim_ready(channel.task_id, channel.channel_id)[0]
     with state.store.connection() as db:
         db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                    (node['assignment_ref'], channel.task_id, 'xa_first', 'worker-debugger', 'ready', 'ready', 0, 'now', 'now')); db.commit()
         db.execute("UPDATE runtime_nodes SET node_id='_fix_0_N0' WHERE task_id=?", (channel.task_id,)); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'normal', 'codex-acp')  # a fix keeps it too
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'normal', 'codex-acp', None, None)  # a fix keeps it too
 
 
 def test_plan_provider_is_optional_and_bounded(machine):
@@ -669,3 +669,71 @@ def test_a_decision_left_after_verification_keeps_the_task_open_until_the_user_a
     assert answer(state.store, pending(state.store, channel.task_id)['question_id'], 'Finish', 'text')
     assert resume_answered(state.store, channel.task_id)
     assert state.submit_answer(channel, 'Done as approved.', 'close')['state'] == 'ANSWER_READY'
+
+
+
+def test_retry_uses_prior_audit_even_after_assignment_ref_changes(machine):
+    from cortex_runtime.orchestration.state import attempt_routing, event
+    from cortex_runtime.routing.store import record_attempt_audit
+    state, channel = machine
+    proposal = plan()
+    proposal['tasks'][0].update(model='claude-agent-acp', model_reason='Review the written contract.')
+    receipt = state.submit_plan(channel, proposal, 'hint-plan')
+    assert receipt['model_hints'][0]['model'] == 'claude-agent-acp'
+    state.move(channel.task_id, 'EXECUTING')
+    original = state.claim_ready(channel.task_id, channel.channel_id)[0]
+    with state.store.connection() as db:
+        db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                   (original['assignment_ref'], channel.task_id, 'xa_original', 'worker-backend-dev', 'ready', 'ready', 0, 'now', 'now'))
+        db.commit()
+    record_attempt_audit(state.store, attempt_id='xa_original', task_id=channel.task_id,
+                         role='worker-backend-dev', engine='codex-acp', connection_id='cn_old',
+                         model='gpt-5.6-terra', params_fingerprint='hash',
+                         config_revision_id=None, decision='authorized', detail={})
+    with state.store.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        db.execute("UPDATE runtime_nodes SET status='pending',assignment_ref=NULL WHERE task_id=? AND node_id='N0'",
+                   (channel.task_id,))
+        event(db, channel.task_id, 'ASSIGNMENT_RETRIED',
+              dict(node='N0', revision=1, route_failure=False))
+        db.commit()
+    current = state.claim_ready(channel.task_id, channel.channel_id)[0]
+    with state.store.connection() as db:
+        db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                   (current['assignment_ref'], channel.task_id, 'xa_current', 'worker-backend-dev', 'ready', 'ready', 0, 'now', 'now'))
+        db.commit()
+    routed = attempt_routing(state.store, channel.task_id, 'xa_current')
+    assert routed.escalate is True
+    assert routed.model_hint == 'claude-agent-acp'
+    assert routed.previous_engine == 'codex-acp'
+
+
+
+def test_exact_model_hint_requires_live_menu_and_reports_tier_mismatch(machine, monkeypatch):
+    from cortex_runtime.routing import auto_route
+    state, channel = machine
+    proposal = plan()
+    proposal['tasks'][0].update(model='codex-acp/gpt-6-astra',
+                                model_reason='The coordinator suspects a hard implementation.')
+    monkeypatch.setattr(auto_route, 'route_menu', lambda *_: {
+        'tiers': {'flagship': [{'route': 'codex-acp/gpt-6-astra'}],
+                  'deep': [], 'standard': [], 'light': []}})
+    receipt = state.submit_plan(channel, proposal, 'hint-preview')
+    assert receipt['model_hints'] == [{
+        'node': 'N0', 'model': 'codex-acp/gpt-6-astra',
+        'tier_now': 'standard', 'preview_status': 'ignored:tier_mismatch'}]
+
+
+def test_unknown_exact_model_and_missing_reason_are_rejected(machine, monkeypatch):
+    from cortex_runtime.routing import auto_route
+    state, channel = machine
+    proposal = plan()
+    proposal['tasks'][0]['model'] = 'codex-acp/gpt-6-astra'
+    with pytest.raises(StoreError, match='model_reason_required'):
+        state.submit_plan(channel, proposal, 'missing-reason')
+    proposal['tasks'][0]['model_reason'] = 'This is a hard implementation.'
+    monkeypatch.setattr(auto_route, 'route_menu', lambda *_: {
+        'tiers': {'flagship': [], 'deep': [], 'standard': [], 'light': []}})
+    with pytest.raises(StoreError, match='unknown_model_hint'):
+        state.submit_plan(channel, proposal, 'missing-model')
+    assert state.context(channel.task_id)['state'] == 'PLANNING'

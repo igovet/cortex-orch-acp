@@ -164,6 +164,7 @@
     "src/cortex_runtime/routing/authorization.py",
     "src/cortex_runtime/routing/auto_route.py",
     "src/cortex_runtime/routing/availability.py",
+    "src/cortex_runtime/routing/balance.py",
     "src/cortex_runtime/routing/store.py",
     "src/cortex_runtime/server.py",
     "src/cortex_runtime/split.py",

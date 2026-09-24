@@ -7,7 +7,7 @@ from cortex_runtime.delegation import mcp_tools
 
 def propose_inspection(store,channel):
     return mcp_tools.dispatch(store,channel,'plan_submit',dict(plan=dict(
-        tasks=[dict(id='inspect',role='explorer',objective='Inspect requested change',dependencies=[],scope=['.'])],
+        tasks=[dict(id='inspect',role='explorer',objective='Inspect requested change',dependencies=[],scope=['.'],model='auto')],
         verification=[['python3','-B','-c','print("verified")']]),request_key=str(uuid.uuid4())))
 
 

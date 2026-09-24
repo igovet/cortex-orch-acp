@@ -83,3 +83,24 @@ def test_recovery_accepts_publication_with_blocker(tmp_path):
                 if n['assignment_ref'] == assignment)
     assert node['status'] == 'completed'
     assert node['result']['checks'][0]['blocker'] == args['checks'][0]['blocker']
+
+
+def test_synthesis_rejects_whitespace_blocker_before_publication(tmp_path):
+    store,task,worker,assignment,_=setup_worker(tmp_path)
+    coordinator=resolve_channel(store,task.channel_id,task.secret)
+    with store.connection() as db:
+        db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?",
+                   (task.task_id,))
+        db.execute("UPDATE runtime_nodes SET result_json=? WHERE assignment_ref=?",
+                   (json.dumps({'checks':[{'name':'Live GUI','outcome':'not_run',
+                                           'blocker':'GUI unavailable'}]}),assignment))
+        db.commit()
+    with pytest.raises(StoreError,match='synthesis_blocker_required') as error:
+        mcp_tools.dispatch(store,coordinator,'synthesis_submit',
+            {'text':'Done','not_verified':[{'item':'Live GUI','blocker':'   '}]})
+    assert error.value.field=='arguments.not_verified[0].blocker'
+    with store.connection() as db:
+        assert db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?',
+                          (task.task_id,)).fetchone()[0] is None
+    assert mcp_tools.dispatch(store,coordinator,'synthesis_submit',
+        {'text':'Done','not_verified':[{'item':'Live GUI','blocker':'GUI failed to start.'}]})['recorded']

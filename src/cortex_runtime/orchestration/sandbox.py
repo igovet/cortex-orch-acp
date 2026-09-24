@@ -482,9 +482,14 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
             if any(c in base for c in '*?['): denied_globs.append(pattern)
             else: denied_exact.add(base.strip('/'))
         denied_found=[]
+        # Per inode: its link count and each distinct writable link found
+        # (a link is a directory entry: parent inode plus name, so a tree
+        # seen twice through a bind mount is not counted twice).
+        link_counts={};link_entries={}
         for current,dirs,files in os.walk(root,followlinks=False):
             visited+=len(dirs)+len(files)
             over_limit = visited>_TREE_LIMIT  # grants stop; private masking does not
+            parent_id=None
             for name in list(dirs):
                 path=Path(current)/name
                 if name in PRIVATE:
@@ -509,18 +514,35 @@ def gateway_command(root, scratch, argv, scopes, reveal=frozenset(), system_root
                         # through it would escape the scope. Read-only, not a
                         # refusal -- a build's hardlinks (gradle, pnpm) used to
                         # stop the whole worker from starting.
-                        linked.append((relative,owner))
+                        key=(info.st_dev,info.st_ino)
+                        if parent_id is None:
+                            parent=os.lstat(current); parent_id=(parent.st_dev,parent.st_ino)
+                        if link_counts.setdefault(key,info.st_nlink)!=info.st_nlink:
+                            link_counts[key]=None  # changed while walking: never trusted
+                        if not (readonly and _matches(relative,readonly)):
+                            link_entries.setdefault(key,{})[(parent_id,name)]=owner
+                        linked.append((relative,owner,key))
                     elif owner is None and not path.is_symlink(): candidates.add(relative)
+        def internal(key,excluded=frozenset()):
+            # Every link of this file is a writable path of this project
+            # (esbuild links its two binaries together): writing through one
+            # reaches nothing outside, and pinning it made the tree
+            # impossible to reinstall (EBUSY on unlink).
+            entries=link_entries.get(key,{})
+            return (link_counts.get(key) is not None and len(entries)==link_counts[key]
+                    and not any(owner in excluded for owner in entries.values()))
         # A directory made of hardlinks (pnpm's node_modules points into a
         # store shared by every project) stays read-only as a whole: writing
         # there corrupts other projects, and a bind per link hits the
         # kernel's mount limit.
         per_grant={}
-        for _,owner in linked:
-            if owner is not None: per_grant[owner]=per_grant.get(owner,0)+1
+        for _,owner,key in linked:
+            if owner is not None and not internal(key): per_grant[owner]=per_grant.get(owner,0)+1
         demoted={owner for owner,count in per_grant.items() if count>_HARDLINK_DIR_LIMIT and owner!='.'}
         candidates-=demoted
-        linked=[relative for relative,owner in linked if owner not in demoted]
+        kept=[(relative,owner,key) for relative,owner,key in linked if owner not in demoted]
+        linked=[relative for relative,owner,key in kept if not internal(key,demoted)]
+        candidates|={relative for relative,owner,key in kept if owner is None and internal(key,demoted)}
         # Read-only on top of the writable binds: demoted directories and the
         # user's deny-write paths.
         overlays=sorted(demoted|{path for path in denied_exact if path and (root/path).exists()}|set(denied_found))

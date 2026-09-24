@@ -156,6 +156,18 @@ def test_dispatch_refuses_a_handler_result_that_would_leak_technical_metadata(tm
     assert str(excinfo.value) == "internal_leak"
 
 
+def test_coordinator_read_diagnostics_omits_technical_ids(tmp_path):
+    """The read-only diagnostics handler must pass the gateway's metadata guard."""
+    store, task_id, coordinator = _task(tmp_path)
+
+    result = mcp_tools.dispatch(store, coordinator, "read_diagnostics", {})
+
+    assert result["resource_caps"]["availability"] == "unavailable_reason"
+    assert "task_id" not in result
+    assert "task_id" not in result["resource_caps"]
+    assert "config_revision_id" not in result["resource_caps"]
+
+
 
 
 
