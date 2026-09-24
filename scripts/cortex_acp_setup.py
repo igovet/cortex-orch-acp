@@ -79,6 +79,7 @@ nothing and reports the existing state rather than erroring or duplicating.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from dataclasses import fields
 import json
 import os
@@ -92,9 +93,6 @@ from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 _ROOT = SCRIPTS.parent
-# acp-load-shim.mjs and every local module it imports; the staged runtime
-# must carry all of them or the ACP child exits before initialize.
-_PASEO_SHIM_MODULES = ("acp-load-shim.mjs", "replay-spool.mjs")
 sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(SCRIPTS.parent / "src"))
 
@@ -285,6 +283,31 @@ def _write_paseo_launch_config(environ=None, *, runtime_root=None):
     return dict(path=str(path), created=True, argv=desired["argv"], env=desired["env"])
 
 
+def _paseo_runtime_payload():
+    """(relative, source) for every file of this checkout's package payload."""
+    import cortex_package
+
+    return [(relative, path) for relative, path in cortex_package.payload_paths(_ROOT)
+            if path.is_file() and not path.is_symlink()]
+
+
+def _copy_runtime_file(source, target, runtime):
+    """Copy one payload file below ``runtime`` through an atomic rename."""
+    parent = target.parent
+    if runtime.resolve() not in (parent.resolve(), *parent.resolve().parents):
+        raise ValueError(f"payload path escapes the runtime: {target}")
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    handle, temporary = tempfile.mkstemp(prefix=f".{target.name}-", dir=str(parent))
+    os.close(handle)
+    try:
+        shutil.copy2(source, temporary)
+        os.replace(temporary, target)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temporary)
+        raise
+
+
 def bootstrap_paseo_git_install(environ=None):
     """Install a stable, owner-private ACP runtime for a staged Git plugin."""
     env = os.environ if environ is None else environ
@@ -298,37 +321,31 @@ def bootstrap_paseo_git_install(environ=None):
     if not isinstance(version, str) or not version or any(part in version for part in ("/", "\\\\", "..")):
         raise SystemExit("error: package identity has an unsafe version for Paseo bootstrap.")
     runtime = runtime_parent / version
-    shim_source = _ROOT / "integrations" / "paseo" / "server"
-    shim_target = runtime / "integrations" / "paseo" / "server"
-    required = (runtime / "src" / "cortex_acp.py", runtime / "pinned-dependencies.json",
-                *(shim_target / name for name in _PASEO_SHIM_MODULES))
+    # The runtime reads package files outside src/ (skills/ for role
+    # instructions, package-identity.json, report-templates/, the shim's
+    # own imports), so stage the complete declared payload -- the same file
+    # set the version hash covers -- never a hand-picked subset.
+    payload = _paseo_runtime_payload()
     if runtime.exists():
         _ensure_private_directory(runtime)
-        # A runtime staged by an older bootstrap of this same version can lack
-        # a shim module added later; the version pins identical source, so
-        # restore only the missing shim modules before checking completeness.
-        for name in _PASEO_SHIM_MODULES:
-            target = shim_target / name
-            if shim_target.is_dir() and not shim_target.is_symlink() and not os.path.lexists(target):
+        # A runtime staged by an older bootstrap of this same version can
+        # lack payload files; the version pins identical payload content, so
+        # restore only the missing files before checking completeness.
+        for relative, source in payload:
+            target = runtime / relative
+            if not os.path.lexists(target):
                 try:
-                    handle, temporary = tempfile.mkstemp(prefix=f".{name}-", dir=str(shim_target))
-                    os.close(handle)
-                    shutil.copy2(shim_source / name, temporary)
-                    os.replace(temporary, target)
-                except OSError as error:
-                    raise SystemExit(f"error: cannot repair Paseo runtime shim {target}: {error}") from None
-        if not all(path.is_file() and not path.is_symlink() for path in required):
+                    _copy_runtime_file(source, target, runtime)
+                except (OSError, ValueError) as error:
+                    raise SystemExit(f"error: cannot repair Paseo runtime file {target}: {error}") from None
+        if not all((runtime / relative).is_file() and not (runtime / relative).is_symlink() for relative, _ in payload):
             raise SystemExit(f"error: incomplete existing Paseo runtime: {runtime}")
     else:
         stage = Path(tempfile.mkdtemp(prefix=".paseo-runtime-", dir=str(runtime_parent)))
         try:
             os.chmod(stage, 0o700)
-            shutil.copytree(_ROOT / "src", stage / "src", symlinks=False)
-            shutil.copy2(_ROOT / "pinned-dependencies.json", stage / "pinned-dependencies.json")
-            shim = stage / "integrations" / "paseo" / "server"
-            shim.mkdir(parents=True, mode=0o700)
-            for name in _PASEO_SHIM_MODULES:
-                shutil.copy2(shim_source / name, shim / name)
+            for relative, source in payload:
+                _copy_runtime_file(source, stage / relative, stage)
             os.replace(stage, runtime)
         except OSError as error:
             shutil.rmtree(stage, ignore_errors=True)
