@@ -135,26 +135,60 @@ def bump_requirement_revision(store, task_id: str) -> int:
 
 
 def record_steering(store, task_id: str, origin: str, event_id: str, text: str) -> int:
-    """Record an ordinary in-active-task prompt as steering: bumps and
-    returns the task's ``requirement_revision``, and appends a durable
-    ``progress``-typed event carrying ``kind="user_steering"`` (see the
-    module docstring on why this reuses the existing, CHECK-constrained
-    ``progress`` event_type rather than adding a new CHECK value: SQLite
-    cannot additively widen a CHECK constraint on an existing table without
-    a full rebuild, which is out of this task's minimal-migration scope --
-    see docs/acp/steering-and-questions.md). This event is *informative*
-    only (see ``delegation.events.MEANINGFUL_EVENT_TYPES``); the
-    already-recorded ``user_message`` row for the very same prompt is what
-    actually gates/delivers the continuation -- this row exists purely so
-    the requirement_revision boundary is durably visible in the event log,
-    independent of the coalesced text."""
-    from ..orchestration.policy import steer
-    steer(store, task_id, text, f'user:{origin}:{event_id}')
-    revision = bump_requirement_revision(store, task_id)
-    delegation_events.append_event(
-        store, task_id, "progress", f"user_steering:{origin}:{event_id}",
-        dict(kind="user_steering", requirement_revision=revision, text=text), origin="runtime",
-    )
+    """Queue one source-identified steer and its revision in one transaction.
+
+    The already-captured user_message remains the delivery event. The
+    progress row records the requirement boundary; the runtime event is
+    applied only when the controller reaches a safe planning boundary.
+    """
+    from ..orchestration.policy import parse_denials
+    from ..orchestration.state import event as runtime_event
+
+    actor = f"user:{origin}:{event_id}"
+    dedup_key = f"user_steering:{origin}:{event_id}"
+    denials = parse_denials(text)
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            row = db.execute(
+                "SELECT requirement_revision FROM task_orchestration WHERE task_id=?", (task_id,),
+            ).fetchone()
+            current = row["requirement_revision"] if row else 0
+            if db.execute(
+                "SELECT 1 FROM task_events WHERE task_id=? AND dedup_key=?",
+                (task_id, dedup_key),
+            ).fetchone():
+                db.commit()
+                return current
+            if db.execute(
+                "SELECT 1 FROM task_stopped WHERE task_id=?", (task_id,),
+            ).fetchone():
+                db.commit()
+                return current
+            task = db.execute(
+                "SELECT state FROM runtime_tasks WHERE task_id=?", (task_id,),
+            ).fetchone()
+            if task and task["state"] == "CANCELLED":
+                db.commit()
+                return current
+            if task:
+                runtime_event(db, task_id, "USER_STEERING",
+                              dict(text=text, deny_write=denials), actor)
+            revision = current + 1
+            if row:
+                db.execute(
+                    "UPDATE task_orchestration SET requirement_revision=? WHERE task_id=?",
+                    (revision, task_id),
+                )
+            delegation_events.append_event_tx(
+                db, task_id, "progress", dedup_key,
+                dict(kind="user_steering", requirement_revision=revision, text=text),
+                origin="runtime",
+            )
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
     return revision
 
 

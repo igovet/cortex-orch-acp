@@ -174,6 +174,41 @@ def test_pin_accepts_alias_full_id_and_wildcard():
     assert auto_route._pin_for({"pin": {"planner": "codex-acp/luna"}}, "worker-debugger") is None
 
 
+def test_default_route_skips_haiku_and_an_explicit_pin_can_restore_it(tmp_path, monkeypatch):
+    from cortex_runtime.connections import registry
+
+    project = tmp_path / "project"
+    (project / ".cortex").mkdir(parents=True)
+    environ = {"HOME": str(tmp_path)}
+    candidates = [_entry("claude", "haiku"), _entry("codex", "gpt-5.6-luna")]
+    connections = {
+        "claude": SimpleNamespace(launch_command=("claude",)),
+        "codex": SimpleNamespace(launch_command=("codex",)),
+    }
+    monkeypatch.setattr(registry, "read_registry", lambda _environ: SimpleNamespace(connections=connections))
+    monkeypatch.setattr(auto_route, "_entries", lambda *_args: candidates)
+    monkeypatch.setattr(auto_route, "_is_seed", lambda _entry: False)
+    monkeypatch.setattr(quota, "used_percent", lambda *_args: None)
+
+    automatic = auto_route.choose("worker-technical-writer", project, environ)
+    assert automatic.model == "gpt-5.6-luna"
+    assert automatic.basis == "auto"
+
+    (project / ".cortex" / "routing.json").write_text(
+        json.dumps({"pin": {"worker-technical-writer": "claude-agent-acp/haiku"}})
+    )
+    pinned = auto_route.choose("worker-technical-writer", project, environ)
+    assert pinned.model == "haiku"
+    assert pinned.basis == "auto:pin"
+
+    (project / ".cortex" / "routing.json").unlink()
+    candidates[:] = [_entry("claude", "claude-haiku-4-5-20251001")]
+    with pytest.raises(PortableError) as unavailable:
+        auto_route.choose("worker-technical-writer", project, environ)
+    assert unavailable.value.code == "no_available_route"
+    assert "Haiku" in unavailable.value.remediation
+
+
 def test_codex_usage_is_read_from_its_newest_rollout(tmp_path):
     day = tmp_path / "sessions" / "2026" / "09" / "22"
     day.mkdir(parents=True)

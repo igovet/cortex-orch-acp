@@ -1,17 +1,22 @@
 import { isHiddenOperation } from "./shared/timeline-visibility.ts";
-import { useAgent, type PluginClientContext, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
+import { useAgent, useRpc, type PluginClientContext, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Animated, Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { WorkerPanel } from "./client/worker-panel.js";
 import { PipelinePanel } from "./client/pipeline-panel.js";
 import { selectWorker } from "./client/worker-selection.js";
 import { WorkerPopover } from "./client/worker-popover.js";
-import { isWorkerTimelineRunning } from "./client/worker-timeline-status.js";
-import { workerCardMetadata, workerStatusPresentation, type WorkerStatusTone } from "./client/worker-display.ts";
+import { isWorkerTimelineRunning, workerTimelineStatus } from "./client/worker-timeline-status.js";
+import { workerCardMetadata, workerTerminalState, type WorkerStatusTone } from "./client/worker-display.ts";
 import { coalesced } from "./client/coalesce.ts";
 import { UsageMeter, useWorkerUsage } from "./client/usage-meter.tsx";
+import { AccountUsagePopover } from "./client/account-usage.tsx";
+import { readPipeline, type Pipeline } from "./shared/pipeline.js";
+import { WorkerResultDetail } from "./client/worker-result.tsx";
+import { workerResultItems } from "./client/worker-result-model.ts";
+import { setWorkerCardPulse } from "./client/worker-card-pulse.ts";
 
 const workerTimelineSchema = z.object({
   callId: z.string(),
@@ -34,30 +39,71 @@ type WorkerTimelineData = z.output<typeof workerTimelineSchema>;
  * one-off hex, so the card matches the theme's light/dark contrast. */
 function statusToneColor(tone: WorkerStatusTone, colors: PluginTimelineItemProps<never>["theme"]["colors"]): string {
   if (tone === "success") return colors.statusSuccess;
+  if (tone === "warning") return colors.statusWarning;
   if (tone === "danger") return colors.statusDanger;
   if (tone === "muted") return colors.foregroundMuted;
   return colors.accent;
 }
 
+/** Read only the finished worker's result projection; the Workers popover does not use this hook. */
+function useWorkerProjection(workspaceId: string | null, agentId: string, assignmentRef: string, live: boolean) {
+  const rpc = useRpc(readPipeline);
+  const [projection, setProjection] = useState<{ result: { summary: string | null; checks: { name: string; outcome: string }[] } | null; worker: Pipeline["workers"][number] | undefined } | null>(null);
+  useEffect(() => {
+    if (!workspaceId) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = async () => {
+      try {
+        const pipeline = await rpc({ workspaceId, agentId });
+        if (active) setProjection({
+          result: pipeline.delegations[assignmentRef]?.result ?? null,
+          worker: pipeline.workers.find((worker) => (worker.assignmentRef ?? worker.id) === assignmentRef),
+        });
+      } catch {
+        // A result is supplementary card content. Keep the last successful read.
+      }
+      if (active && live) timer = setTimeout(load, 3000);
+    };
+    void load();
+    return () => { active = false; clearTimeout(timer); };
+  }, [agentId, assignmentRef, live, rpc, workspaceId]);
+  return projection;
+}
+
 function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }: PluginTimelineItemProps<z.output<typeof workerTimelineSchema>> & { workspaceId: string | null; onOpen: () => void }) {
-  const metadata = workerCardMetadata(item.data.title, item.data.status);
-  const presentation = workerStatusPresentation(item.data.status);
-  const statusColor = statusToneColor(presentation.tone, theme.colors);
   const opacity = useRef(new Animated.Value(1)).current;
+  const pulseElement = useRef<HTMLElement | null>(null);
   const isWorking = isWorkerTimelineRunning(item.data.status);
   const usage = useWorkerUsage(workspaceId, agentId, item.data.assignmentRef, isWorking);
+  const projection = useWorkerProjection(workspaceId, agentId, item.data.assignmentRef, isWorking);
+  const result = projection?.result ?? null;
+  const resolvedStatus = workerTimelineStatus(projection?.worker, item.data.status);
+  const terminal = workerTerminalState(resolvedStatus, result?.checks);
+  const metadata = workerCardMetadata(item.data.title, resolvedStatus);
+  const { issueCount } = terminal;
+  const statusColor = statusToneColor(terminal.tone, theme.colors);
 
   useEffect(() => {
+    if (Platform.OS === "web") {
+      const element = pulseElement.current;
+      if (!element) return;
+      setWorkerCardPulse(element, isWorking);
+      return () => setWorkerCardPulse(element, false);
+    }
     if (!isWorking) {
       opacity.stopAnimation();
       opacity.setValue(1);
       return;
     }
 
+    // Native surfaces still use Animated; web uses CSS so a hidden chat panel
+    // resumes its pulse when the host makes it visible without remounting.
+    opacity.setValue(1);
     const activity = Animated.loop(
       Animated.sequence([
-        Animated.timing(opacity, { toValue: 0.58, duration: 850, useNativeDriver: true }),
-        Animated.timing(opacity, { toValue: 1, duration: 850, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 0.58, duration: 850, useNativeDriver: false }),
+        Animated.timing(opacity, { toValue: 1, duration: 850, useNativeDriver: false }),
       ]),
     );
     activity.start();
@@ -79,19 +125,23 @@ function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }
         borderLeftColor: statusColor, borderRadius: 8,
         backgroundColor: theme.colors.surface1, paddingHorizontal: 12, paddingVertical: 10, gap: 6 }}
     >
-      <Animated.View style={{ opacity, gap: 6 }}>
+      <Animated.View ref={(node) => { pulseElement.current = node as unknown as HTMLElement | null; }} style={{ opacity: Platform.OS === "web" ? 1 : opacity, gap: 6 }}>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
           <Icon name="Bot" size={12} color={theme.colors.foregroundMuted} />
           <Text style={{ flex: 1, color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600", letterSpacing: 0.6, textTransform: "uppercase" }}>Worker</Text>
           {/* Colour plus an icon and a text label, so status is never carried by colour alone. */}
           <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
-            <Icon name={presentation.icon} size={12} color={statusColor} />
-            <Text style={{ color: statusColor, fontSize: 11, fontWeight: "600", textTransform: "capitalize" }}>{presentation.label}</Text>
+            <Icon name={terminal.icon} size={12} color={statusColor} />
+            <Text style={{ color: statusColor, fontSize: 11, fontWeight: "600", textTransform: "capitalize" }}>{terminal.label}</Text>
+            {issueCount > 0 && <Text style={{ color: statusColor, fontSize: 11, fontWeight: "600" }}>{issueCount} issue{issueCount === 1 ? "" : "s"}</Text>}
           </View>
         </View>
         <Text numberOfLines={2} ellipsizeMode="tail" style={{ color: theme.colors.foreground, fontSize: 14, fontWeight: "600" }}>{metadata.workerName}</Text>
         <Text numberOfLines={1} ellipsizeMode="tail" style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>{metadata.subtitle}</Text>
         <UsageMeter context={usage?.context} tokens={usage?.tokens} theme={theme} />
+        {!isWorking && result && <View style={{ marginTop: 2, paddingTop: 8, borderTopWidth: 1, borderColor: theme.colors.border }}>
+          <WorkerResultDetail body={result.summary ?? undefined} items={workerResultItems(result.checks)} theme={theme} />
+        </View>}
       </Animated.View>
     </Pressable>
   );
@@ -249,7 +299,21 @@ export default function contribute(client: PluginClientContext) {
           },
         },
       });
-      registrations.set(agentId, { remove() { workers.remove(); pipeline.remove(); } });
+      const accountUsage = client.addComposerPill({
+        id: `account-usage-${agentId}`,
+        workspaceId: candidate.workspace.id,
+        agentId,
+        button: {
+          title: "Provider plan usage",
+          icon: "Gauge",
+          label: "Usage",
+          behavior: {
+            kind: "popover",
+            Content: (props) => <AccountUsagePopover theme={props.theme} />,
+          },
+        },
+      });
+      registrations.set(agentId, { remove() { workers.remove(); pipeline.remove(); accountUsage.remove(); } });
     }
   };
   // Coalesced, never dropped: creating an agent fires several

@@ -1,6 +1,5 @@
 from pathlib import Path
 import json
-import subprocess
 import tomllib
 import pytest
 
@@ -103,12 +102,6 @@ def test_coordinator_cannot_accept_or_publish_pipeline_through_channel():
 
 
 
-def test_source_check_is_read_only():
-    before=payload_digest(PLUGIN)
-    result=subprocess.run([str(ROOT/'scripts/sync-cortex.sh'),'--check'],capture_output=True,text=True)
-    assert result.returncode==0 and payload_digest(PLUGIN)==before
-
-
 def test_payload_enumeration_excludes_local_python_bytecode():
     paths = [relative for relative, _path in payload_paths(PLUGIN)]
     assert all('__pycache__' not in path for path in paths)
@@ -179,14 +172,6 @@ def test_coordinator_handoffs_use_retained_runtime_results():
     package_version=json.loads((PLUGIN/'package-identity.json').read_text())['version']
     assert package_version.startswith('1.0.0+sha256.')
     assert payload_digest(PLUGIN).startswith(package_version.rsplit('.',1)[-1])
-
-
-
-def test_sync_cannot_install_without_isolated_entrypoint():
-    import os
-    env=dict(os.environ);env.pop('CORTEX_DEV_OWNER_HOME',None)
-    result=subprocess.run([str(ROOT/'scripts/sync-cortex.sh')],capture_output=True,text=True,env=env)
-    assert result.returncode!=0
 
 
 

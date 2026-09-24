@@ -174,7 +174,9 @@ def list_since(store, task_id: str, after: int = 0, limit: int = 200) -> list[Ta
     return [TaskEvent._from_row(row) for row in rows]
 
 
-def claim_unconsumed(store, task_id: str, continuation_id: str) -> list[TaskEvent]:
+def claim_unconsumed(
+    store, task_id: str, continuation_id: str, *, exclude_types: Sequence[str] = (),
+) -> list[TaskEvent]:
     """Atomically claim every not-yet-consumed, not-superseded event.
 
     Marks the claimed rows' ``consumed_by`` in the same transaction that
@@ -184,12 +186,19 @@ def claim_unconsumed(store, task_id: str, continuation_id: str) -> list[TaskEven
     ``assignment_cancelled`` events instead of replaying the superseded
     ones -- see ``acp.orchestrating_runtime``).
     """
+    if any(event_type not in EVENT_TYPES for event_type in exclude_types):
+        raise ValueError("unknown excluded event type")
+    exclusions = (
+        f" AND event_type NOT IN ({','.join('?' for _ in exclude_types)})"
+        if exclude_types else ""
+    )
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
         try:
             rows = db.execute(
-                "SELECT * FROM task_events WHERE task_id=? AND consumed_by IS NULL AND superseded=0 ORDER BY id",
-                (task_id,),
+                "SELECT * FROM task_events WHERE task_id=? AND consumed_by IS NULL AND superseded=0"
+                + exclusions + " ORDER BY id",
+                (task_id, *exclude_types),
             ).fetchall()
             ids = [row["id"] for row in rows]
             if ids:

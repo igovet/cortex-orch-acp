@@ -10,7 +10,8 @@ def test_paseo_worker_timeline_row_uses_supported_agent_context_and_panel_naviga
     assert 'query: { itemType: "tool_call" }' in source
     assert 'item.callId.startsWith("worker:")' in source
     assert 'status: z.enum(["running", "completed", "canceled", "failed"])' in source
-    assert 'workerCardMetadata(item.data.title, item.data.status)' in source
+    assert 'workerTimelineStatus(projection?.worker, item.data.status)' in source
+    assert 'workerCardMetadata(item.data.title, resolvedStatus)' in source
     display = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-display.ts").read_text(encoding="utf-8")
     assert 'return "cancelled"' in display and 'return "working"' in display
     assert '>Worker</Text>' in source and '{metadata.workerName}' in source

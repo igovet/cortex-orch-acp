@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from types import SimpleNamespace
 from pathlib import Path
@@ -34,6 +36,28 @@ def test_repository_paseo_source_has_valid_integrity_record():
     assert root == setup.PASEO_PLUGIN_DIR.resolve()
     assert manifest["id"] == "cortex-acp"
     assert digest == setup._paseo_payload_sha256(root)
+
+
+def test_paseo_manifest_bootstraps_git_installation():
+    manifest = json.loads((setup.PASEO_PLUGIN_DIR / "paseo-plugin.json").read_text(encoding="utf-8"))
+
+    assert manifest["build"] == [
+        ["python3", "-B", "../../scripts/cortex_acp_setup.py", "bootstrap-paseo-git-install"],
+    ]
+
+
+def test_configure_paseo_plugin_launch_supports_git_installed_provider(tmp_path, monkeypatch, capsys):
+    _config_home, _state_home, home = _isolate(tmp_path, monkeypatch)
+
+    assert setup.main(["configure-paseo-plugin-launch"]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    launch = home / ".config" / "cortex" / "paseo-plugin-launch.json"
+    assert result["path"] == str(launch)
+    assert result["argv"] == ["python3", "-B", str((setup._ROOT / "src" / "cortex_acp.py").resolve())]
+    persisted = json.loads(launch.read_text(encoding="utf-8"))
+    assert persisted["shim"] == str((setup._ROOT / "integrations" / "paseo" / "server" / "acp-load-shim.mjs").resolve())
+    assert launch.stat().st_mode & 0o777 == 0o600
 
 
 def test_paseo_integrity_ignores_dependency_and_generated_churn_but_covers_source(tmp_path):
@@ -596,6 +620,30 @@ def test_cli_status_produces_json(tmp_path, monkeypatch, capsys):
 
     data = json.loads(out)
     assert "connections" in data
+
+
+def test_status_cli_succeeds_with_read_only_xdg_roots_without_writing(tmp_path):
+    config_home = tmp_path / "config"
+    state_home = tmp_path / "state"
+    home = tmp_path / "home"
+    for path in (config_home, state_home, home):
+        path.mkdir()
+        path.chmod(0o500)
+    env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(config_home), XDG_STATE_HOME=str(state_home))
+    command = [sys.executable, "-B", str(SCRIPTS / "cortex_acp_setup.py"), "status"]
+    try:
+        completed = subprocess.run(command, cwd=SCRIPTS.parent, env=env, text=True, capture_output=True)
+    finally:
+        for path in (config_home, state_home, home):
+            path.chmod(0o700)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads(completed.stdout)
+    assert report["connections"] == []
+    assert report["pinned_route"] is None
+    assert list(config_home.iterdir()) == []
+    assert list(state_home.iterdir()) == []
+    assert list(home.iterdir()) == []
 
 
 def test_paseo_update_rejects_old_mcp_grants_before_mutating_daemon(tmp_path, monkeypatch):

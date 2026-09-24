@@ -14,19 +14,48 @@ def scrub(value):
     except re.error:
         return '[redacted]'
 def sum_tokens(rows):
-    # Engine-reported ACP PromptResponse.usage rows; None when no call reported.
-    totals, seen = {'input': 0, 'output': 0, 'cachedRead': 0, 'total': 0}, False
+    # One per-turn ACP PromptResponse.usage row per prompt. Context fill is separate.
+    totals = {'input': 0, 'output': 0, 'cachedRead': 0, 'cachedWrite': 0,
+              'total': 0, 'knownCalls': 0, 'unknownCalls': 0}
     for row in rows:
         try: t = json.loads(row['tokens_json'] or '{}')
-        except (ValueError, TypeError): continue
-        if not isinstance(t, dict) or not t: continue
-        count = lambda key: t.get(key) if isinstance(t.get(key), int) and t.get(key) >= 0 else 0
-        seen = True
+        except (ValueError, TypeError): t = {}
+        if row['basis'] == 'unknown' or not isinstance(t, dict) or not t:
+            totals['unknownCalls'] += 1
+            continue
+        count = lambda key: t.get(key) if isinstance(t.get(key), int) and not isinstance(t.get(key), bool) and t.get(key) >= 0 else 0
+        totals['knownCalls'] += 1
         totals['input'] += count('inputTokens')
         totals['output'] += count('outputTokens')
         totals['cachedRead'] += count('cachedReadTokens')
-        totals['total'] += count('totalTokens') or count('inputTokens') + count('outputTokens')
-    return totals if seen else None
+        totals['cachedWrite'] += count('cachedWriteTokens')
+        if isinstance(t.get('totalTokens'), int) and not isinstance(t.get('totalTokens'), bool) and t['totalTokens'] >= 0:
+            totals['total'] += t['totalTokens']
+        else:
+            totals['total'] += count('inputTokens') + count('outputTokens') + count('cachedReadTokens') + count('cachedWriteTokens')
+    return totals if totals['knownCalls'] or totals['unknownCalls'] else None
+def usage_fallback_refs(db, task_id, execution_refs):
+    # A routed retry replaces delegation_provisioning.attempt_id. Follow its
+    # audited predecessor chain so the worker card still includes real spend
+    # from every earlier route hop. This affects usage only, not lifecycle.
+    refs = set(execution_refs)
+    columns = {row[1] for row in db.execute("pragma table_info(attempt_route_audit)")}
+    if 'predecessor_attempt_id' not in columns:
+        return sorted(refs)
+    for start in execution_refs:
+        current = start
+        for _ in range(50):
+            row = db.execute(
+                'select predecessor_attempt_id from attempt_route_audit '
+                'where task_id=? and attempt_id=? order by recorded_at desc, id desc limit 1',
+                (task_id, current),
+            ).fetchone()
+            previous = row['predecessor_attempt_id'] if row is not None else None
+            if not previous or previous in refs:
+                break
+            refs.add(previous)
+            current = previous
+    return sorted(refs)
 `;
 
 const PYTHON = String.raw`
@@ -314,8 +343,18 @@ try:
                     if len(runtime_rows) == 1:
                         runtime_status, runtime_result = runtime_rows[0]['status'], runtime_rows[0]['result_json']
                         attempt_result['status'] = 'completed_with_issues' if runtime_status == 'failed' and runtime_result is not None else runtime_status
+                        try:
+                            result = json.loads(runtime_result or '{}') if runtime_result is not None else {}
+                        except (TypeError, ValueError):
+                            result = {}
+                        if not isinstance(result, dict):
+                            result = {}
+                        checks = result.get('checks')
+                        if isinstance(checks, list) and all(isinstance(check, dict) and isinstance(check.get('name'), str) and isinstance(check.get('outcome'), str) for check in checks):
+                            attempt_result['checks'] = [{'name': check['name'], 'outcome': check['outcome'],
+                                **({'blocker': check['blocker'][:600]} if isinstance(check.get('blocker'), str) and check['blocker'].strip() else {})}
+                                for check in checks]
                         if runtime_rows[0]['status'] == 'failed':
-                            result = json.loads(runtime_result or '{}')
                             unresolved = [check.get('name', 'check') + ': ' + check.get('outcome', 'unverified') for check in result.get('checks', []) if check.get('outcome') != 'passed']
                             prefix = 'Completed with issues. Runtime did not accept worker checks. ' if runtime_result is not None else 'Worker failed. '
                             attempt_result['failureReason'] = scrub(prefix + '; '.join(unresolved))
@@ -328,7 +367,8 @@ try:
                     if isinstance(content, dict) and all(isinstance(content.get(k), int) and content.get(k) >= 0 for k in ('used', 'size')) and content['size'] > 0:
                         attempt_result['context'] = {'used': content['used'], 'size': content['size']}
                 if 'usage_records' in tables and execution_attempt_refs:
-                    tokens = sum_tokens(db.execute('select tokens_json from usage_records where task_id=? and attempt_id in (%s)' % ','.join('?' for _ in execution_attempt_refs), (task['id'], *execution_attempt_refs)).fetchall())
+                    usage_refs = usage_fallback_refs(db, task['id'], execution_attempt_refs) if has_route_audit else execution_attempt_refs
+                    tokens = sum_tokens(db.execute('select basis,tokens_json from usage_records where task_id=? and attempt_id in (%s)' % ','.join('?' for _ in usage_refs), (task['id'], *usage_refs)).fetchall())
                     if tokens is not None:
                         attempt_result['tokens'] = tokens
                 if completed_at is not None:

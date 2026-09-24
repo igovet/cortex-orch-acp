@@ -59,7 +59,7 @@ assert.deepEqual(workerStatusPresentation("running"), { label: "working", tone: 
 assert.deepEqual(workerStatusPresentation("provisioning"), { label: "working", tone: "active", icon: "Loader2" });
 assert.deepEqual(workerStatusPresentation("completed"), { label: "completed", tone: "success", icon: "CircleCheck" });
 assert.deepEqual(workerStatusPresentation("reported"), { label: "completed", tone: "success", icon: "CircleCheck" });
-assert.deepEqual(workerStatusPresentation("completed_with_issues"), { label: "completed with issues", tone: "danger", icon: "CircleAlert" });
+assert.deepEqual(workerStatusPresentation("completed_with_issues"), { label: "completed with issues", tone: "warning", icon: "CircleAlert" });
 assert.deepEqual(workerStatusPresentation("failed"), { label: "failed", tone: "danger", icon: "CircleAlert" });
 assert.deepEqual(workerStatusPresentation("error"), { label: "failed", tone: "danger", icon: "CircleAlert" });
 assert.deepEqual(workerStatusPresentation("cancelled"), { label: "cancelled", tone: "muted", icon: "CircleSlash" });

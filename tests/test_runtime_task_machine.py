@@ -56,6 +56,50 @@ def test_invalid_plans_do_not_change_state(machine):
     assert state.context(channel.task_id)['state'] == 'PLANNING'
 
 
+
+def test_synthesis_discloses_retained_gap_with_blocker(machine):
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'gap-plan')
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?", (channel.task_id,))
+        db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N0'",
+                   ('{"checks":[{"name":"Live GUI","outcome":"not_run","blocker":"GUI unavailable"}]}',
+                    channel.task_id))
+        db.commit()
+    with pytest.raises(StoreError, match='synthesis_gaps_undisclosed') as error:
+        state.submit_synthesis(channel, 'Done')
+    assert 'Live GUI' in error.value.correction
+    with state.store.connection() as db:
+        assert db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?',
+                          (channel.task_id,)).fetchone()[0] is None
+    items = [dict(item='  LIVE   gui ', blocker='The disposable GUI failed to start.')]
+    assert state.submit_synthesis(channel, 'Done', items)['recorded']
+    with state.store.connection() as db:
+        stored = db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?',
+                            (channel.task_id,)).fetchone()[0]
+    assert stored == 'Done\n\n## Not verified\n\n-   LIVE   gui  — blocker: The disposable GUI failed to start.'
+    assert state.submit_synthesis(channel, 'Done', items)['recorded']
+    with pytest.raises(StoreError, match='synthesis_conflict'):
+        state.submit_synthesis(channel, 'Done', [dict(item='Live GUI', blocker='Different reason')])
+
+
+def test_same_revision_pass_resolves_synthesis_gap(machine):
+    state, channel = machine
+    state.submit_plan(channel, plan(2), 'gap-plan')
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?", (channel.task_id,))
+        db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N0'",
+                   ('{"checks":[{"name":"Live GUI","outcome":"unverified"}]}', channel.task_id))
+        db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N1'",
+                   ('{"checks":[{"name":"  live   gui ","outcome":"passed"}]}', channel.task_id))
+        db.commit()
+    assert state.submit_synthesis(channel, 'Verified')['recorded']
+    with state.store.connection() as db:
+        stored = db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?',
+                            (channel.task_id,)).fetchone()[0]
+    assert stored == 'Verified'
+
+
 def test_cannot_skip_review_or_complete_with_chat(machine):
     state, channel = machine
     state.submit_plan(channel, plan(), 'p1')
@@ -282,23 +326,37 @@ def test_report_digest_rejects_symlinked_file_and_parent(machine, tmp_path):
         report_digest(state.store, 'fake_task', 'symlink.md')
 
 
-def test_user_steering_revokes_old_scopes_before_replanning(machine):
-    from cortex_runtime.orchestration.policy import steer,resume_planning
-    state,ch=machine
-    state.submit_plan(ch,plan(),'old');state.move(ch.task_id,'EXECUTING')
-    state.claim_ready(ch.task_id,ch.channel_id)
-    assert steer(state.store,ch.task_id,'Не меняй database','user:one')
-    assert not steer(state.store,ch.task_id,'Не меняй database','user:one')
-    context=state.context(ch.task_id)
-    assert context['state']=='RECOVERING'
-    assert context['nodes'][0]['status']=='cancelled'
-    assert context['policy']['deny_write']==['database']
-    resume_planning(state.store,ch.task_id)
-    denied=plan();denied['tasks'][0]['scope']=['database/schema/**']
-    with pytest.raises(StoreError,match='scope_conflicts_with_user_policy'):
-        state.submit_plan(ch,denied,'denied')
-    state.submit_plan(ch,plan(),'new')
-    assert state.context(ch.task_id)['revision']==2
+def test_user_steering_applies_denials_only_after_active_work(machine):
+    from cortex_runtime.orchestration.policy import steer, apply_pending_steering
+    state, ch = machine
+    state.submit_plan(ch, plan(), 'old')
+    state.move(ch.task_id, 'EXECUTING')
+    state.claim_ready(ch.task_id, ch.channel_id)
+    assert steer(state.store, ch.task_id, 'Не меняй database', 'user:one')
+    assert not steer(state.store, ch.task_id, 'Не меняй database', 'user:one')
+    context = state.context(ch.task_id)
+    assert context['state'] == 'EXECUTING'
+    assert context['nodes'][0]['status'] == 'running'
+    assert context['policy']['deny_write'] == []
+    assert not apply_pending_steering(state.store, ch.task_id)
+    # This unit fixture advances the completed plan to its verified
+    # reconciliation boundary; the controller integration test covers the
+    # actual worker, review and verification path.
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET status='completed' WHERE task_id=?", (ch.task_id,))
+        db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?", (ch.task_id,))
+        db.commit()
+    assert apply_pending_steering(state.store, ch.task_id)
+    context = state.context(ch.task_id)
+    assert context['state'] == 'PLANNING'
+    assert context['nodes'][0]['status'] == 'completed'
+    assert context['policy']['deny_write'] == ['database']
+    denied = plan()
+    denied['tasks'][0]['scope'] = ['database/schema/**']
+    with pytest.raises(StoreError, match='scope_conflicts_with_user_policy'):
+        state.submit_plan(ch, denied, 'denied')
+    state.submit_plan(ch, plan(), 'new')
+    assert state.context(ch.task_id)['revision'] == 2
 
 
 def test_scheduler_serializes_overlapping_write_scopes(machine):
@@ -527,11 +585,12 @@ def test_plan_complexity_is_optional_and_bounded(machine):
 
 
 def test_a_task_that_failed_before_stops_became_questions_reopens_on_a_new_message(machine):
-    from cortex_runtime.orchestration.policy import steer
+    from cortex_runtime.orchestration.policy import steer, apply_pending_steering
     state, channel = machine
     state.move(channel.task_id, 'FAILED', blocker='coordinator_turn_failed:refusal')
     assert steer(state.store, channel.task_id, 'Try again, please.', 'user:test:1')
-    assert state.context(channel.task_id)['state'] == 'RECOVERING'
+    assert apply_pending_steering(state.store, channel.task_id)
+    assert state.context(channel.task_id)['state'] == 'PLANNING'
 
 
 def test_a_failed_verification_goes_back_to_the_coordinator_to_repair(machine):

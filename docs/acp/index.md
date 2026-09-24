@@ -32,6 +32,7 @@ The no-paid startup smoke in scripts/cortex_acp_smoke.py launches the production
 - [Summaries and budgets](summaries-and-budgets.md)
 - [Mixed-team routing and fallback](routing-and-fallback.md)
 - [Observability](observability.md)
+- [Token accounting and provider plan usage](token-and-plan-usage.md)
 - [Storage format 12 migration and rollback](format-migration.md)
 
 ## Engine and access boundaries

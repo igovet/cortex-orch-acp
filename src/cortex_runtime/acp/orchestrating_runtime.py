@@ -4664,6 +4664,14 @@ class OrchestratingRuntime:
                 # _attempt_worker_route_fallback at all -- it is refused
                 # here, before any route/consent lookup, not merely relying
                 # on routing.authorization's own denylist as the only gate.
+                # A stopped/cancelled turn is not evidence of an engine fault.
+                # In particular, never route an interrupted worker to fallback.
+                from ..orchestration.limits import assignment_current
+                if (cancel_event.is_set() or acp_steering.is_stopped(self._store, task_id)
+                        or not assignment_current(self._store, task_id, assignment_ref)):
+                    with self._lock:
+                        self._worker_recoveries_in_flight.discard(assignment_ref)
+                    return
                 failure_class = failure_classification.classify(failure.kind)
                 old_attempt_id = getattr(result, "attempt_id", None)
                 new_session_ref = None

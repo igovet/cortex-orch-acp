@@ -158,6 +158,26 @@ def read_user_defaults(environ: dict[str, str] | None = None) -> dict[str, objec
         raise _fail_closed("invalid_user_defaults", "defaults.json is not valid UTF-8 JSON with the expected shape.") from None
 
 
+def inspect_user_defaults(environ: dict[str, str] | None = None) -> dict[str, object]:
+    """Read user defaults without initializing the connection config root."""
+    path = _user_defaults_path(environ)
+    try:
+        info = path.parent.lstat()
+    except FileNotFoundError:
+        return dict(defaults={}, ceiling=PolicyCeiling())
+    import stat
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise _fail_closed("unsafe_storage", f"{path.parent} is not a real directory.")
+    data = connection_registry.read_owner_file(path)
+    if data is None:
+        return dict(defaults={}, ceiling=PolicyCeiling())
+    try:
+        raw = json.loads(data.decode("utf-8"))
+        return dict(defaults=raw.get("defaults", {}), ceiling=deserialize_ceiling(_encode(raw["ceiling"])) if "ceiling" in raw else PolicyCeiling())
+    except (UnicodeDecodeError, ValueError, KeyError):
+        raise _fail_closed("invalid_user_defaults", "defaults.json is not valid UTF-8 JSON with the expected shape.") from None
+
+
 def write_user_defaults(defaults: dict[str, object], ceiling: PolicyCeiling, environ: dict[str, str] | None = None) -> None:
     path = _user_defaults_path(environ)
     connection_registry.ensure_private_dir(path.parent, root=connection_registry.config_root(environ), environ=environ)

@@ -1,5 +1,6 @@
 import { isHiddenOperation } from "./timeline-visibility.ts";
 import { gatewayPresentation } from "./gateway-presentation.ts";
+import { shellCommand } from "./shell-command.ts";
 /** Shared semantic projection for collapsed tool rows.
  *
  * This is presentation data only.  The original call and its complete input
@@ -160,7 +161,7 @@ function targetFor(name: string, input: ToolPresentationInput, action: string): 
     ?? nestedString(args, new Set(["file_path", "filePath", "path", "absolutePath"]))
     ?? stringValue(structuredArgs, "file_path", "filePath", "path", "absolutePath")
     ?? nestedString(structuredArgs, new Set(["file_path", "filePath", "path", "absolutePath"]));
-  const command = stringValue(args, "command", "cmd", "argv");
+  const command = shellCommand(args);
   const author = stringValue(args, "author", "report_author", "worker_name", "worker")
     ?? stringValue(input.metadata, "author", "report_author", "worker_name", "worker");
   const descriptive = stringValue(args, "skill", "summary", "node_key", "statement");
@@ -197,7 +198,7 @@ export function presentToolSemantics(input: ToolPresentationInput): ToolPresenta
             : undefined;
   // A shell call titled with its own command (Claude's Bash: "for f in …")
   // carries that command in its input even when no tool kind came with it.
-  const shellInput = !ACTIONS[name] && !native && stringValue(input.rawInput ?? input.input, "command", "cmd") ? NATIVE_SHELL : undefined;
+  const shellInput = !ACTIONS[name] && !native && shellCommand(input.rawInput ?? input.input) ? NATIVE_SHELL : undefined;
   const mapped = ACTIONS[name] ?? native ?? shellInput;
   if (!mapped) {
     const action = humanize(name || title || "tool");

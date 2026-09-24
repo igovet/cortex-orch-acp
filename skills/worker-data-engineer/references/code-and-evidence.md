@@ -15,9 +15,18 @@ the ACP client using the full root returned by `list_projects`, not a similar na
 or another worktree. If multiple entries match, compare
 `index_status` and relevant `check_index_coverage` results to select the healthy index
 covering the assigned scope. A ready index can still exclude the entire subsystem.
-Retain the selection within the assignment. If no matching index exists, initial
-`index_repository` use is allowed for the authorized project; this does not authorize
-changing ignore rules or indexing other projects.
+Retain the selection within the assignment. If no matching index exists, make one
+initial `index_repository` attempt for the authorized exact workspace root. Do not
+substitute the logical repository root for a linked worktree, change ignore rules,
+or retry argument variations after an indexing error.
+
+An indexer can reject an otherwise valid linked worktree. Treat that failed single
+attempt as unavailable for the exact workspace, record the returned error, and use
+bounded repository-native reads for the concrete question. The installed
+codebase-memory-mcp 0.10.8 rejected a readable `.paseo/worktrees/` root containing
+source files while accepting comparable linked worktrees; no Cortex-side argument
+workaround was observed. Follow the live schema for tool arguments: this guidance
+only determines when an index attempt is appropriate.
 
 Use the smallest operation that answers the question: `search_graph` for definitions,
 `trace_path` for callers, dependencies and impact paths, and `get_code_snippet` for the

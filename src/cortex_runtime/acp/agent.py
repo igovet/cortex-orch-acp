@@ -1367,7 +1367,10 @@ class Agent:
             observe(self.environ, "session/prompt", "internal_error")
         finally:
             with session["lock"]:
-                session["active"] = None
+                if session["active"] is cancel_event:
+                    session["active"] = None
+            if not cancel_event.is_set():
+                self._start_queued_steer_continuation(session_id, session)
 
     def _run_prompt_body(self, request_id, session_id, session, text, cancel_event, raw_blocks=None, meta=None):
         """The actual prompt turn; wrapped by ``_run_prompt`` for the
@@ -1656,10 +1659,27 @@ class Agent:
         the opaque ``pending_selection_route_unavailable``.
         """
         pending = session.get("pending_selection") or session.get("default_selection")
-        session["pending_selection"] = None
-        session["default_selection"] = None
         if pending is None:
             return False
+        # The selector has already resolved the selected route's effective
+        # thought level.  A route/model selection deliberately clears any
+        # *previous* route's dependent settings, but must not leave that
+        # effective default as presentation-only: the first coordinator
+        # revision has to carry it to the downstream engine.  Read the
+        # current ACP option while the pending/default selection is still
+        # present, before consuming it below.
+        parameters = dict(pending.get("parameters") or {})
+        if "thought_level" not in parameters:
+            options = self._config_options_for_session(session, store)
+            thought_option = next(
+                (option for option in options if option.get("id") == acp_config_options.THOUGHT_LEVEL_OPTION_ID),
+                None,
+            )
+            thought_level = thought_option.get("currentValue") if thought_option is not None else None
+            if isinstance(thought_level, str) and thought_level:
+                parameters["thought_level"] = thought_level
+        session["pending_selection"] = None
+        session["default_selection"] = None
         entries, connections = self._selectable_entries_and_connections(session["project"])
         catalog_entry, withdrawn_model = self._resolve_pending_route(entries, connections, pending)
         if catalog_entry is None:
@@ -1669,10 +1689,10 @@ class Agent:
                 observe(self.environ, "session/prompt", "pending_selection_route_unavailable")
             return False
         if catalog_entry.route.id != pending.get("route_id"):
-            self._persist_migrated_default(catalog_entry, pending.get("parameters") or {})
+            self._persist_migrated_default(catalog_entry, parameters)
             observe(self.environ, "session/prompt", "pending_selection_route_migrated")
         service = ConfigurationService(store)
-        inputs = ConfigurationInputs(route=catalog_entry.route, parameters=pending.get("parameters") or {})
+        inputs = ConfigurationInputs(route=catalog_entry.route, parameters=parameters)
         try:
             service.ui_select(task_id, catalog_entry, inputs, 0, session["owner_epoch"])
         except PortableError:
@@ -2270,6 +2290,10 @@ class Agent:
                 and self.environ.get("CORTEX_PASEO_QUESTION_UI") == "1"):
             self._answer_question_card(request_id, session_id, session, value)
             return
+        if (config_id == "cortex_queued_steer" and kind == "value_id"
+                and self.environ.get("CORTEX_PASEO_QUESTION_UI") == "1"):
+            self._queue_paseo_steer(request_id, session_id, session, value)
+            return
         with session["lock"]:
             store = self._store_for(session["project"])
             accepted, options, error = self._apply_config_selection(store, session, config_id, kind, value)
@@ -2280,6 +2304,126 @@ class Agent:
             return
         self.transport.send_response(protocol.result_response(request_id, protocol.set_config_option_response(options)))
         self.transport.send_notification(protocol.config_option_update(session_id, options))
+
+    def _start_queued_steer_continuation(self, session_id, session):
+        """Resume a steer that crossed the just-finished turn boundary."""
+        from ..orchestration.policy import has_pending_steering
+
+        with session["lock"]:
+            queued = session.get("queued_steers") or []
+            if session["active"] is not None or not queued:
+                return
+            store = self._store_for(session["project"])
+            if (acp_steering.is_stopped(store, session["task_id"])
+                    or not has_pending_steering(store, session["task_id"])):
+                queued.clear()
+                return
+            origin, event_id, text = queued.pop(0)
+            cancel_event = threading.Event()
+            session["active"] = cancel_event
+            session["background"] = True
+        worker = threading.Thread(
+            target=self._run_queued_steer_continuation, name="acp-queued-steer",
+            args=(session_id, session, origin, event_id, text, cancel_event), daemon=True,
+        )
+        with self._workers_lock:
+            self._workers.append(worker)
+        worker.start()
+
+    def _run_queued_steer_continuation(
+        self, session_id, session, origin, event_id, text, cancel_event,
+    ):
+        store = self._store_for(session["project"])
+        message_id = f"assistant:queued-steer:{event_id}"
+
+        def emit_update(chunk_text):
+            if cancel_event.is_set() or self.transport is None:
+                return False
+            with self._history_lock(session_id):
+                try:
+                    acp_replay_store.append_host_transcript(
+                        store, session_id, "agent_message", chunk_text, message_id=message_id,
+                    )
+                except (StoreError, OSError, ValueError, TypeError, sqlite3.Error):
+                    return False
+                return self.transport.send_notification(
+                    protocol.agent_message_chunk(session_id, chunk_text, message_id),
+                )
+
+        try:
+            method, kwargs = self._runtime_call_kwargs(
+                "start_prompt", project_root=session["project"],
+                source_origin=origin, source_event_id=event_id,
+                emit_tool_call=self._make_emit_tool_call(session_id, cancel_event),
+                emit_display_update=self._make_emit_display_update(session_id, cancel_event),
+                host_permission_requester=self._make_permission_requester(session_id),
+                host_fs_requester=self._make_fs_requester(session_id),
+                host_mcp_servers=session.get("mcp_servers") or None,
+                client_surface=self.client_info.get("name"),
+            )
+            if method is not None:
+                method(session["task_id"], session_id, text, emit_update, cancel_event, **kwargs)
+        except Exception:
+            observe(self.environ, "session/prompt", "queued_steer_continuation_failed")
+        finally:
+            with session["lock"]:
+                if session["active"] is cancel_event:
+                    session["active"] = None
+                    session["background"] = False
+            if not cancel_event.is_set():
+                self._start_queued_steer_continuation(session_id, session)
+
+    def _queue_paseo_steer(self, request_id, session_id, session, value):
+        """Capture a Paseo steer while the existing ACP turn remains in flight.
+
+        Paseo's installed ACP bridge has no native prompt.steer. Its provider
+        forwards this request through the bridge's live config channel, whose
+        response is acknowledged only after durable source/event capture.
+        """
+        try:
+            payload = json.loads(value)
+            message_id, text = payload["clientMessageId"], payload["text"]
+        except (ValueError, TypeError, KeyError):
+            raise RpcError(-32602, "A queued steer needs clientMessageId and text.") from None
+        if (not isinstance(message_id, str) or not 1 <= len(message_id) <= 256
+                or not isinstance(text, str) or not text.strip() or len(text) > 100000):
+            raise RpcError(-32602, "A queued steer needs a valid message id and non-empty text.")
+        task_id = session.get("task_id")
+        if task_id is None:
+            raise RpcError(-32602, "A queued steer needs an existing task.")
+        store = self._store_for(session["project"])
+        with store.connection() as db:
+            owner_epoch = _current_owner_epoch_obj(db, task_id)
+        if owner_epoch is None or session.get("owner_epoch") != owner_epoch:
+            raise RpcError(-32602, "This session no longer owns the task.")
+        if acp_steering.is_stopped(store, task_id):
+            raise RpcError(-32602, "The task has been stopped.")
+        origin = f"paseo-steer:{session_id}"
+        source_event = SimpleNamespace(origin=origin, event_id=message_id)
+        result = append_source_event(store, source_event, text, task_id)
+        acp_replay_store.record_user_message_event(
+            store, task_id, f"user_message:{origin}:{message_id}", session_id,
+            dict(content=text, session_id=session_id),
+            ledger_origin=origin, ledger_event_id=message_id,
+        )
+        acp_steering.record_steering(store, task_id, origin, message_id, text)
+        if acp_steering.is_stopped(store, task_id):
+            acp_steering.supersede_undelivered_steering(store, task_id)
+            raise RpcError(-32602, "The task has been stopped.")
+        if not result.replayed:
+            with self._history_lock(session_id):
+                acp_replay_store.append_host_transcript(
+                    store, session_id, "user_message", text, message_id=message_id,
+                )
+        with session["lock"]:
+            queued = session.setdefault("queued_steers", [])
+            if not result.replayed and not any(item[1] == message_id for item in queued):
+                queued.append((origin, message_id, text))
+            options = self._config_options_for_session(session, store)
+        self.transport.send_response(
+            protocol.result_response(request_id, protocol.set_config_option_response(options))
+        )
+        self._start_queued_steer_continuation(session_id, session)
 
     def _answer_question_card(self, request_id, session_id, session, value):
         """A question card's typed "Other..." answer, from Paseo.

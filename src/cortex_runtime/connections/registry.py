@@ -642,6 +642,21 @@ def read_registry(environ: dict[str, str] | None = None) -> RegistryState:
     return _parse_registry_bytes(data)
 
 
+def inspect_registry(environ: dict[str, str] | None = None) -> RegistryState:
+    """Read registry state without creating roots, lock files, or defaults."""
+    path = registry_path(environ)
+    try:
+        info = path.parent.lstat()
+    except FileNotFoundError:
+        return _empty_state()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise _fail_closed("unsafe_storage", f"{path.parent} is not a real directory.")
+    data = read_owner_file(path)
+    if data is None:
+        return _empty_state()
+    return _parse_registry_bytes(data)
+
+
 def write_registry(state: RegistryState, environ: dict[str, str] | None = None) -> None:
     path = registry_path(environ)
     ensure_private_dir(path.parent, root=config_root(environ), environ=environ)

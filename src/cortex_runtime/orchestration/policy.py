@@ -1,4 +1,4 @@
-"""Durable constraints and revocation before delivering user steering."""
+"""Durable steering queue, boundary application, and explicit interruption."""
 import json
 import re
 
@@ -6,15 +6,18 @@ from ..contracts import StoreError
 from .state import event, transition, now
 
 
-def denied_paths(db,task_id):
-    rows=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_STEERING' ORDER BY id",(task_id,))
-    return sorted({path for row in rows for path in json.loads(row[0]).get('deny_write',[])})
+def denied_paths(db, task_id):
+    rows = db.execute(
+        "SELECT payload_json FROM runtime_events e WHERE task_id=? AND type='USER_STEERING' "
+        "AND EXISTS (SELECT 1 FROM runtime_events a WHERE a.task_id=e.task_id "
+        "AND a.type='STEERING_APPLIED' AND a.actor=e.actor) ORDER BY id",
+        (task_id,),
+    )
+    return sorted({path for row in rows for path in json.loads(row[0]).get('deny_write', [])})
 
 
 def parse_denials(text):
-    """Recognize explicit path prohibitions. Unstructured steering still
-    revokes all old assignments before replanning; it cannot preserve grants.
-    """
+    """Recognize explicit path prohibitions for the next planning boundary."""
     from .gateway import _parts
     values=[]
     pattern=r'(?:deny-write\s*:|do\s+not\s+(?:change|modify|edit)|не\s+(?:меняй|менять|изменяй|изменять|трогай|трогать))\s+[`\"\']?([\w./*-]+)'
@@ -44,30 +47,105 @@ def validate_grants(db,task_id,scopes):
         raise StoreError('scope_conflicts_with_user_policy')
 
 
-def steer(store,task_id,text,identity):
-    denied=parse_denials(text)
+def steer(store, task_id, text, identity):
+    """Durably queue steering without changing grants or active assignments."""
+    denied = parse_denials(text)
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
-        task=db.execute('SELECT state FROM runtime_tasks WHERE task_id=?',(task_id,)).fetchone()
-        if not task: return False
-        existing=db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND type='USER_STEERING' AND actor=?",(task_id,identity)).fetchone()
-        if existing: return False
-        if task['state']=='CANCELLED': return False
-        # A new user request can extend completed work; it creates a new plan
-        # revision and invalidates the prior completion, never edits its report.
-        # A task that FAILED before failures became questions reopens the same
-        # way instead of ignoring every later message.
-        if task['state'] in {'COMPLETED','FAILED'}:
-            db.execute("UPDATE runtime_tasks SET state='RECOVERING',synthesis=NULL,blocker=NULL WHERE task_id=?",(task_id,))
-            event(db,task_id,'TASK_REOPENED',{},identity)
-        elif task['state']!='RECOVERING':
-            transition(db,task_id,'RECOVERING')
-        db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')",(task_id,))
-        db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",
-                   (now(),task_id))
-        event(db,task_id,'USER_STEERING',dict(text=text,deny_write=denied),identity)
+        task = db.execute('SELECT state FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+        if not task or task['state'] == 'CANCELLED':
+            db.commit()
+            return False
+        existing = db.execute(
+            "SELECT 1 FROM runtime_events WHERE task_id=? AND type='USER_STEERING' AND actor=?",
+            (task_id, identity),
+        ).fetchone()
+        if existing:
+            db.commit()
+            return False
+        event(db, task_id, 'USER_STEERING', dict(text=text, deny_write=denied), identity)
         db.commit()
     return True
+
+
+def has_pending_steering(store, task_id):
+    with store.connection() as db:
+        return db.execute(
+            "SELECT 1 FROM runtime_events e WHERE e.task_id=? AND e.type='USER_STEERING' "
+            "AND NOT EXISTS (SELECT 1 FROM runtime_events a WHERE a.task_id=e.task_id "
+            "AND a.type='STEERING_APPLIED' AND a.actor=e.actor) LIMIT 1",
+            (task_id,),
+        ).fetchone() is not None
+
+
+def apply_pending_steering(store, task_id):
+    """Apply queued requirements only after active work reaches a safe boundary.
+
+    The controller calls this at planning/reconciliation boundaries. All current
+    revision workers, review and verification must finish before a new plan.
+    """
+    with store.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        task = db.execute('SELECT state,revision FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+        if not task or task['state'] not in {
+            'PLANNING', 'PLAN_READY', 'ANSWER_READY', 'RECONCILING', 'COMPLETED', 'FAILED',
+        }:
+            db.commit()
+            return False
+        pending = db.execute(
+            "SELECT e.actor FROM runtime_events e WHERE e.task_id=? AND e.type='USER_STEERING' "
+            "AND NOT EXISTS (SELECT 1 FROM runtime_events a WHERE a.task_id=e.task_id "
+            "AND a.type='STEERING_APPLIED' AND a.actor=e.actor) ORDER BY e.id",
+            (task_id,),
+        ).fetchall()
+        if not pending:
+            db.commit()
+            return False
+        if db.execute(
+            "SELECT 1 FROM runtime_nodes WHERE task_id=? AND revision=? AND status='running'",
+            (task_id, task['revision']),
+        ).fetchone():
+            db.commit()
+            return False
+        if task['state'] == 'PLAN_READY':
+            db.execute(
+                "UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND revision=? AND status='pending'",
+                (task_id, task['revision']),
+            )
+        if task['state'] in {'COMPLETED', 'FAILED'}:
+            db.execute(
+                "UPDATE runtime_tasks SET state='RECOVERING',synthesis=NULL,blocker=NULL,updated_at=? "
+                "WHERE task_id=?", (now(), task_id),
+            )
+            event(db, task_id, 'TASK_REOPENED', {})
+        else:
+            transition(db, task_id, 'RECOVERING')
+            db.execute("UPDATE runtime_tasks SET synthesis=NULL WHERE task_id=?", (task_id,))
+        for row in pending:
+            event(db, task_id, 'STEERING_APPLIED', {}, row['actor'])
+        transition(db, task_id, 'PLANNING')
+        db.commit()
+    return True
+
+
+def interrupt(store, task_id):
+    """Explicit turn cancellation fences unfinished work without creating steering."""
+    with store.connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        task = db.execute('SELECT state FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+        if task and task['state'] not in {'COMPLETED', 'FAILED', 'CANCELLED'}:
+            if task['state'] != 'RECOVERING':
+                transition(db, task_id, 'RECOVERING')
+            db.execute(
+                "UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')",
+                (task_id,),
+            )
+            db.execute(
+                "UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",
+                (now(), task_id),
+            )
+            event(db, task_id, 'TURN_INTERRUPTED', {})
+        db.commit()
 
 
 def resume_planning(store,task_id):

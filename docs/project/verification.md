@@ -3,6 +3,13 @@
 Commands below are copied exactly from `AGENTS.md`, `README.md`,
 `docs/acp/test-matrix-and-ci.md` and `integrations/paseo/package.json`.
 
+## Verification coverage
+
+Plan a real check for every changed surface before work starts; the
+[orchestrator reference](../../skills/orchestrator/references/verification-coverage.md)
+sets out GUI, installation, runtime and documentation coverage. An unrun or
+unverified check needs a concrete blocker, and synthesis discloses it.
+
 ## No-paid default test suite
 
 ```
@@ -91,13 +98,42 @@ harness (schema-validated launch/protocol surface only, not GUI evidence).
 
 ## Paseo plugin (`integrations/paseo/`)
 
-Scripts copied exactly from `integrations/paseo/package.json`:
+**Before any testing:** Install dev dependencies and verify type-check:
 
 ```
-npm run typecheck      # tsc --noEmit
+npm --prefix integrations/paseo ci
+npm --prefix integrations/paseo run typecheck
+```
+
+**Automated unit tests** (from `integrations/paseo/package.json`):
+
+```
 npm run test:diff      # node --experimental-strip-types client/worker-panel-diff.test.ts
 npm run test:status    # node --experimental-strip-types client/worker-panel-status.test.ts
 npm run test:coalesce  # node --experimental-strip-types client/coalesce.test.ts
+```
+
+**GUI testing** (verifies rendering and user-facing behavior):
+
+Start the dev daemon and Electron Desktop client with the isolated dev home. **The plugin path
+must always be given explicitly as the full absolute path; it changes per worktree:**
+
+```
+python3 -B scripts/cortex_paseo_dev.py -- start --timeout 60 --json
+python3 -B scripts/cortex_paseo_dev.py -- plugin install "$PWD/integrations/paseo" --json
+PASEO_ELECTRON_USER_DATA_DIR=~/.config/Paseo-dev /opt/Paseo/Paseo &
+```
+
+In the Paseo Desktop window, create or open cortex agents and verify:
+- Worker cards display and update in the timeline
+- Worker results (when completed) render correctly
+- Tool output and shell commands display properly
+- Plugin routes requests to the local cortex daemon (not production)
+
+After testing, stop the daemon:
+
+```
+python3 -B scripts/cortex_paseo_dev.py -- daemon stop --timeout 15 --json
 ```
 
 ## What automated evidence cannot close

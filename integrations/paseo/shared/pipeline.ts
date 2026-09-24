@@ -2,7 +2,7 @@ import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { readWorkerHistory, tokenTotals } from "./worker-history.js";
 
-const check = z.object({ name: z.string(), outcome: z.string() });
+const check = z.object({ name: z.string(), outcome: z.string(), blocker: z.string().optional() });
 
 export const readPipeline = defineRpc({
   name: "cortex.pipeline.read",
@@ -44,6 +44,7 @@ export const readPipeline = defineRpc({
         status: z.string(),
         assignmentRef: z.string().nullable(),
         waiting: z.string().nullable(),
+        result: z.object({ summary: z.string().nullable(), checks: z.array(check) }).nullable(),
       })),
     }).nullable().default(null),
     workers: readWorkerHistory.output.shape.assignments,

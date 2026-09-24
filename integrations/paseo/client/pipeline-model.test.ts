@@ -38,6 +38,10 @@ assert.deepEqual(view.steps[2].items.map((i) => i.status), ["done", "failed"]);
 assert.deepEqual(view.steps[0].followUps, ["Continue"]);
 assert.equal(view.done, 3);
 
+const partialWorker = worker("a", "completed_with_issues", "Implement");
+view = buildPipeline({ ...base, workers: [partialWorker] });
+assert.deepEqual([view.steps[2].status, view.steps[2].badges.at(-1)], ["issues", { text: "1 issue", tone: "warning" }]);
+
 // Once workers settle the coordinator owns the next move.
 view = buildPipeline({ ...base, workers: [worker("a", "reported", "Implement")] });
 assert.equal(view.steps.at(-1)?.status, "active");
@@ -57,7 +61,7 @@ assert.equal(view.steps.at(-1)?.body, "Needs a decision");
 // Accepted runtime plan: nodes appear before any worker starts, a started
 // node is shown once (by its worker), and a waiting node says why.
 const node = (id: string, status: string, assignmentRef: string | null, waiting: string | null = null) => ({
-  id, role: "worker-debugger", objective: `Diagnose ${id}. Read-only.`, stage: "execution", status, assignmentRef, waiting,
+  id, role: "worker-debugger", objective: `Diagnose ${id}. Read-only.`, stage: "execution", status, assignmentRef, waiting, result: null,
 });
 view = buildPipeline({ ...base, requirements: [], delegations: {}, workers: [worker("a", "running", "Implement")],
   plan: { state: "EXECUTING", blocker: null, nodes: [node("a", "running", "ref-a"), node("b", "pending", null, "Waiting for a")] } });
@@ -86,4 +90,14 @@ view = buildPipeline({ ...base, requirements: [], delegations: {}, workers: [],
   plan: { state: "BLOCKED", blocker: "scheduler_capacity_timeout", nodes: [node("a", "cancelled", null)] } });
 assert.equal(view.steps[2].status, "cancelled");
 assert.equal(view.steps.at(-1)?.body, "scheduler_capacity_timeout");
+
+// A runtime-rejected report is visibly completed with issues, rather than
+// looking like an unstarted numbered node. A failure without a result stays a hard failure.
+const result = { summary: "Implemented with one failed check", checks: [{ name: "typecheck", outcome: "passed" }, { name: "browser flow", outcome: "failed" }] };
+const issueNode = { ...node("issues", "failed", null), result };
+view = buildPipeline({ ...waiting, plan: { state: "EXECUTING", blocker: null, nodes: [issueNode, node("hard-failure", "failed", null)] } });
+assert.deepEqual(view.steps.slice(2, 4).map((step) => [step.status, step.badges, step.items.map((item) => item.status)]), [
+  ["issues", [{ text: "1 issue", tone: "warning" }], ["done", "failed"]],
+  ["failed", [], []],
+]);
 console.log("pipeline model tests passed");

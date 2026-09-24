@@ -71,8 +71,11 @@ def _observation_raw(model_id="model-placeholder-1", model_name="Placeholder Mod
 
 
 def _build_and_save_snapshot(record, *, environ, model_id="model-placeholder-1",
-                              model_name="Placeholder Model 1", thought_level="high"):
-    observation = discovery.parse_observation(_observation_raw(model_id, model_name, thought_level))
+                              model_name="Placeholder Model 1", thought_level="high",
+                              thought_levels=("high", "low")):
+    observation = discovery.parse_observation(
+        _observation_raw(model_id, model_name, thought_level, thought_levels)
+    )
     snapshot = discovery.build_catalog({record.id: record}, {record.id: observation})
     catalog_store.save_snapshot(snapshot, environ)
     return snapshot
@@ -1318,7 +1321,10 @@ def test_session_load_of_never_configured_task_is_distinguishable(tmp_path, monk
 def test_pending_pre_task_selection_is_proposed_on_first_prompt(tmp_path, monkeypatch):
     environ = _isolate(tmp_path, monkeypatch)
     record = _configured_connection(environ=environ)
-    _build_and_save_snapshot(record, environ=environ, model_id="model-a")
+    _build_and_save_snapshot(
+        record, environ=environ, model_id="model-a", thought_level="medium",
+        thought_levels=("medium", "high"),
+    )
     project = tmp_path / "project"
     project.mkdir()
     agent, transport = _new_agent(tmp_path, environ)
@@ -1335,6 +1341,10 @@ def test_pending_pre_task_selection_is_proposed_on_first_prompt(tmp_path, monkey
     history = service.history(task_id)
     assert len(history) == 1
     assert history[0]["route_id"] == route_id
+    # A model selection clears the old route's dependent parameters, but the
+    # selected route's effective ACP default must become the coordinator
+    # revision rather than remain a display-only value.
+    assert history[0]["parameters"]["thought_level"] == "medium"
     # F2: consumed -- no longer pending in the session afterward.
     session = agent.sessions[session_id]
     assert session["pending_selection"] is None

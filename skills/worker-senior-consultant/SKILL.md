@@ -54,7 +54,7 @@ assignment and relevant evidence from the runtime.
 
 ## Evidence and verification
 
-Keep checks proportional to the assignment and retain their actual outcomes.
+Verify every surface your assignment changes with the means actually available (tests, the isolated dev environments the project documents, real installs, authorized calls) and retain their actual outcomes. Leave a check unrun or unverified only when a concrete blocker makes it impossible, and state that blocker; "not run" or "out of scope" is not a reason. If an authorization would unblock it, ask for it rather than leaving a gap.
 Unrun, failed, truncated and unverifiable checks remain explicit. A successful
 model turn or tool response is not proof that the project works.
 

@@ -5,13 +5,13 @@ import { Pressable, Text, View } from "react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { readWorkerHistory, type WorkerHistory } from "../shared/worker-history.js";
 import { savedWorkerView, saveWorkerView, selectedWorker, subscribeWorkerSelection } from "./worker-selection.js";
-import { workerSection, workerStatus } from "./worker-panel-status.js";
+import { workerSection } from "./worker-panel-status.js";
 import { historyCursor, mergeWorkerHistory, shouldPollWorkerHistory, shouldShowWorkerHistoryLoader, WORKER_HISTORY_POLL_MS } from "./worker-panel-refresh.js";
 import { groupWorkerEvents, type WorkerEvent } from "./worker-panel-events.js";
 import { presentTool } from "./worker-panel-tool.js";
 import { diffBlocks, diffLines, type DiffRow } from "./worker-panel-diff.js";
 import { chatToolIcon, groupToolRuns, isToolEvent, nativeRow, toolSemantics, type TranscriptItem } from "./worker-panel-groups.ts";
-import { workerAssignmentLine, workerDisplayName, workerModelDisplay } from "./worker-display.js";
+import { workerAssignmentLine, workerDisplayName, workerModelDisplay, workerTerminalState } from "./worker-display.js";
 import { workerPopoverStatus } from "./worker-popover-status.js";
 import { openWorkspaceFile } from "./open-workspace-file.ts";
 import { UsageMeter } from "./usage-meter.tsx";
@@ -373,6 +373,8 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
   };
   const transcript = selectedAttempt ? groupWorkerEvents(selectedAttempt.events) : [];
   const route = selectedAttempt?.route ?? selectedAssignment?.route;
+  const selectedTerminal = workerTerminalState(selectedAssignment ? workerPopoverStatus(selectedAssignment) : selectedAttempt?.status, selectedAttempt?.checks);
+  const selectedStatusColor = selectedTerminal.tone === "success" ? theme.colors.statusSuccess : selectedTerminal.tone === "danger" ? theme.colors.statusDanger : selectedTerminal.tone === "muted" ? theme.colors.foregroundMuted : selectedTerminal.tone === "warning" ? theme.colors.statusWarning : theme.colors.accent;
   return (
     <ScrollView {...pageScroll} style={{ flex: 1, backgroundColor: theme.colors.surface0 }} contentContainerStyle={{ paddingHorizontal: layout.compact ? 12 : 16, paddingTop: 15, paddingBottom: 28, gap: 12 }}>
       {!selectedAttempt ? <>
@@ -391,9 +393,10 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
         <View style={{ gap: 8, paddingBottom: 14, borderBottomWidth: 1, borderColor: theme.colors.border }}>
           <Text style={[styles.title, { color: theme.colors.foreground }]}>{selectedAssignment?.title?.trim() || "Worker"}</Text>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 7, alignItems: "center" }}>
-            <Text style={[styles.muted, { color: selectedAttempt.status === "failed" ? theme.colors.statusDanger : theme.colors.foregroundMuted }]}>{selectedAssignment ? workerDisplayName(selectedAssignment) : "worker"}</Text>
+            <Text style={[styles.muted, { color: selectedStatusColor }]}>{selectedAssignment ? workerDisplayName(selectedAssignment) : "worker"}</Text>
             {route && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.provider}</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{workerModelDisplay(route)}</Text>{route.effort && <><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>·</Text><Text style={[styles.muted, { color: theme.colors.foregroundMuted }]}>{route.effort} effort</Text></>}</>}
-            <Text style={[styles.muted, { color: selectedAttempt.status === "failed" ? theme.colors.statusDanger : theme.colors.foregroundMuted }]}>· {workerStatus(selectedAttempt.status, selectedAttempt.events.length)}</Text>
+            <Icon name={selectedTerminal.icon} size={13} color={selectedStatusColor} />
+            <Text style={[styles.muted, { color: selectedStatusColor }]}>· {selectedTerminal.label}{selectedTerminal.issueCount > 0 ? ` · ${selectedTerminal.issueCount} issue${selectedTerminal.issueCount === 1 ? "" : "s"}` : ""}</Text>
           </View>
           <UsageMeter context={selectedAttempt.context} tokens={selectedAttempt.tokens} theme={theme} />
           {selectedAssignment && selectedAssignment.attempts.length > 1 && <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>

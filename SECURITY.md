@@ -266,6 +266,18 @@ migration is distinct from the removed model-owned orchestration API.
 
 ## Display, secrets and evidence
 
+The Paseo provider-usage pill reads only the owner's registered Codex/Claude
+connection references and native plan-window observations through the
+`CORTEX_ACCOUNT_USAGE=1` entry-point mode. It starts no engine and sends no
+model prompt. The response contains connection display names, window names,
+percentages and reset times; it contains no credential value or raw native
+session log. The isolated dev wrapper passes the current worktree root
+explicitly because Paseo evaluates server plugins as CommonJS bundles without
+a source module URL. An isolated launch record takes precedence; absent that
+record, the explicit source root prevents a stale normal-home record from
+redirecting the read. Missing or expired observations have explicit availability
+messages. See [token and plan usage](docs/acp/token-and-plan-usage.md).
+
 Every observed native and Cortex tool lifecycle is forwarded to the ACP transcript,
 including titleless/status-only updates, input/output and locations. Worker display
 updates and coordinator display updates are forwarded through the production

@@ -6,8 +6,8 @@ available -- replaces the hand-maintained per-role ``route-policy.json``.
    a known Codex model its entry in :data:`KNOWN_MODEL_TIERS`; only a model
    neither names is placed by its position in its own engine's list
    (strongest first), split into thirds, so a new model still lands in a
-   tier without configuration. Every tier thus has a candidate from each
-   engine that offers a model for it.
+   tier without configuration. Claude Haiku remains available for an explicit
+   pin, but is excluded from automatic worker selection by default.
 3. Among the models of the role's tier (nearest other tier when there are
    none), candidates are ranked, first difference wins (:func:`rank`):
    the coordinator's per-task ``provider`` preference when it can be
@@ -56,6 +56,8 @@ Optional overrides, first existing file wins (never merged):
 recorded unavailable) refuses the delegation rather than substituting
 another one. ``deny`` also applies to
 explicitly selected routes and to the model selector.
+The built-in Haiku exclusion applies only to automatic worker selection;
+a matching ``pin`` can opt that role into Haiku.
 
 ``providers`` restricts automatic routing and failover to connections whose
 engine is in the list (each id must be one of
@@ -105,6 +107,10 @@ _LIGHT_ONLY_EFFORTS = frozenset({"max"})
 # only cost more. Named because no engine reports "flagship" itself.
 FLAGSHIP_FAMILIES = ("astra", "fable")
 _FLAGSHIP_CEILING = "high"
+# Haiku repeatedly submitted arguments that contradicted advertised Cortex
+# tool schemas in real worker sessions. Keep it available for an explicit pin,
+# while excluding it from automatic worker selection.
+DEFAULT_AUTO_DENY_FAMILIES = frozenset({"haiku"})
 
 # What a mistake costs: design/security get the strongest models,
 # exploration/planning/writing the cheapest. Debugging and performance work
@@ -259,13 +265,19 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         return Choice(best.connection_id, model,
                       nearest(effort or EFFORT_BY_TIER[role_tier], permitted_efforts(best, tiers[best.route.id])),
                       "auto:pin", decision)
+    default_denied = {
+        entry.route.id for entry in allowed
+        if entry.route.engine == "claude-agent-acp"
+        and any(family in entry.route.model.casefold() for family in DEFAULT_AUTO_DENY_FAMILIES)
+    }
     providers = overrides.get("providers")
     status = None
     if preference is not None and providers is not None and preference not in providers:
         status = "ignored:provider_not_allowed"
     elif preference is not None and not any(e.route.engine == preference for e in entries):
         status = "ignored:provider_not_configured"
-    picked, decision = rank(role_tier, allowed, usage, overrides.get("tiers") or {}, excluded=frozenset(blocked),
+    picked, decision = rank(role_tier, allowed, usage, overrides.get("tiers") or {},
+                            excluded=frozenset(blocked) | default_denied,
                             role=role, preference=None if status else preference)
     if decision is not None and status:
         decision.update(preference=preference, preference_status=status)
@@ -287,7 +299,9 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         raise PortableError(
             category=PortableErrorCategory.VALIDATION, code="no_available_route",
             remediation=("No configured route can take this work now: "
-                         + "; ".join(_unavailable_reasons(allowed, blocked, usage))
+                         + "; ".join(_unavailable_reasons(allowed, blocked, usage)
+                                     + (["Claude Haiku is excluded from automatic routing; pin it explicitly "
+                                         "in routing.json to override this default"] if default_denied else []))
                          + ". Wait for a limit to reset, connect another account, or change routing.json."),
             retry_eligible=False,
         )

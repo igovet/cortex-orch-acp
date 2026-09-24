@@ -51,6 +51,26 @@ const identified = groupWorkerEvents([
 ]);
 assert.deepEqual(identified.map((row) => row.event.text), ["before-tool", "after-tool"]);
 
+// Older durable history can store the activity as its own event type. The
+// server explicitly reads these rows, so loading or refreshing the panel must
+// join chunks with the same message identity just like current progress rows.
+const replayedActivity = [
+  event(44, { type: "worker_activity", text: "in_progress · [worker message] The package stamp, ", message_id: "turn:1:segment:0" }),
+  event(45, { type: "worker_activity", text: "in_progress · [worker message] profile check, repeated focused test, and ", message_id: "turn:1:segment:0" }),
+  event(46, { type: "worker_activity", text: "in_progress · [worker message] package test all passed.", message_id: "turn:1:segment:0" }),
+  event(47, { type: "worker_activity", text: "in_progress · [worker message] A separate message.", message_id: "turn:1:segment:1" }),
+  event(48, { type: "worker_activity", activity_ref: "tool:shell", tool_kind: "execute", text: "Shell" }),
+  event(49, { type: "worker_activity", text: "in_progress · [worker message] After the tool.", message_id: "turn:1:segment:2" }),
+];
+for (const history of [replayedActivity, [...replayedActivity]]) {
+  const grouped = groupWorkerEvents(history);
+  assert.deepEqual(grouped.map((row) => row.event.text), [
+    "The package stamp, profile check, repeated focused test, and package test all passed.",
+    "A separate message.", "Shell", "After the tool.",
+  ]);
+  assert.deepEqual(grouped.map((row) => row.updates.map((update) => update.id)), [[44, 45, 46], [47], [48], [49]]);
+}
+
 // Even if a malformed/replayed producer repeats an id across a visible tool,
 // grouping remains timeline-local and never joins opposite sides.
 const repeatedIdAroundTool = groupWorkerEvents([

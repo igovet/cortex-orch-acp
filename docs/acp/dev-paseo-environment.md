@@ -56,43 +56,90 @@ plugin install returns “already configured”; inspect plugin ls --json and
 continue only when it identifies $PWD/integrations/paseo, is enabled, and has
 status: "running". Never install into ~/.paseo.
 
-## 2026-09-23 observed dev instance
+## Dev instance setup and verification
 
-A read-consistent clone was created at ~/.paseo-dev; a separate Electron profile
-directory exists at ~/.config/Paseo-dev. Its local daemon started successfully at
-127.0.0.1:16767. The cloned cortex-acp record identifies the local repository
-directory and reports enabled/running. Production remained running at its original
-endpoint.
+The persistent dev home at ~/.paseo-dev and separate Electron profile directory
+at ~/.config/Paseo-dev enable GUI testing that mirrors the production Paseo experience.
+The local daemon listens on 127.0.0.1:16767 via WebSocket. Paseo 0.9.1 does not serve
+a local HTTP web UI; the Electron Desktop application is the primary GUI method for
+developer testing.
 
-The requested dev log query for agent
-6956c56d-b9f4-4a35-a572-b97659773b80 initially exited 1 because its archived
-working directory was unavailable. Paseo 0.9.1 has no supported CLI option to
-change an agent working directory. Following the user-selected clone-only
-procedure, the archived record was backed up in ~/.paseo-dev and its two stored
-working-directory fields were changed to the existing disposable directory
-~/.paseo-dev-workdirs/6956c56. The dev daemon then inspected the remapped record
-with that directory. The log query still exited 1, now with
-"Failed to get logs: Unknown sessionId"; the archived provider session is absent
-from the clone's Cortex store. This is a retained failure, not successful
-history recovery.
+Before dev testing, ensure integrations/paseo dev dependencies are installed and
+type-check passes:
 
-The query for edb2bdc7-c125-4790-b159-1c2324f5d9e0 exited 0 and returned its
-final retained entry. The returned history is private and is intentionally not
-reproduced here. Neither command is GUI confirmation.
+~~~bash
+npm --prefix integrations/paseo ci
+npm --prefix integrations/paseo run typecheck
+~~~
 
-The installed desktop accepts the documented
-PASEO_ELECTRON_USER_DATA_DIR environment control; it started under the dedicated
-~/.config/Paseo-dev profile while reporting only the dev daemon at
-127.0.0.1:16767. The supported `agent open` request for 6956c56 returned
-"opened". The rendered session history could not be bound to that archive and
-the capture was not retained because it included unrelated desktop content.
-Therefore GUI recovery for 6956c56 is **NOT RUN**, rather than inferred from
-the open acknowledgement. The dev GUI and dev daemon were stopped afterwards.
+Type-check failures block developer testing; resolve them before starting the GUI.
 
-The cloned configuration retains the production relay/server identity. The installed
-CLI observations establish separate local homes and TCP endpoints, but do not
-establish a supported way to create an independent relay identity. Relay and
-remote pairing were not used. No prompt or paid model call was made.
+**The plugin path must always be given explicitly when installing into the dev daemon**
+because the plugin is edited in isolated git worktrees and its path changes between
+sessions. Use the full absolute path from the current worktree root.
+The guarded wrapper also passes that root as `CORTEX_PASEO_SOURCE_ROOT` to its
+isolated Paseo process. Paseo 0.9.1 evaluates server plugins as CommonJS bundles,
+so the provider cannot derive its source path from `import.meta.url`. A Git-source
+installation uses its private launch record before this development fallback.
+
+**Critical environment variables for isolation:**
+
+The Paseo daemon manager (app.asar) defaults PASEO_HOME to ~/.paseo (production) when unset.
+To guarantee isolation, always set these three variables.
+
+Start the daemon first:
+
+~~~bash
+python3 -B scripts/cortex_paseo_dev.py -- start --timeout 60 --json
+python3 -B scripts/cortex_paseo_dev.py -- plugin install "$PWD/integrations/paseo" --json
+~~~
+
+**Option 1: Using the helper subcommand (recommended for safety)**
+
+The `cortex_paseo_dev.py gui` subcommand sets all required environment variables automatically
+and refuses production homes:
+
+~~~bash
+python3 -B scripts/cortex_paseo_dev.py gui
+~~~
+
+For Xvfb environments:
+
+~~~bash
+python3 -B scripts/cortex_paseo_dev.py gui --xvfb
+~~~
+
+**Option 2: Manual environment setup**
+
+If the calling shell inherited `ELECTRON_RUN_AS_NODE` (e.g. from a Node-based
+tool), unset it first; Option 1's `gui` subcommand already does this for you,
+but a manual launch that leaves it set makes the Paseo executable reject its
+own flags as Node arguments and exit non-zero:
+
+~~~bash
+unset ELECTRON_RUN_AS_NODE
+PASEO_HOME=$HOME/.paseo-dev PASEO_ELECTRON_USER_DATA_DIR=$HOME/.config/Paseo-dev PASEO_ELECTRON_FLAGS="--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222" /opt/Paseo/Paseo
+~~~
+
+For Xvfb environments, add `--ozone-platform=x11` to PASEO_ELECTRON_FLAGS:
+
+~~~bash
+PASEO_HOME=$HOME/.paseo-dev PASEO_ELECTRON_USER_DATA_DIR=$HOME/.config/Paseo-dev PASEO_ELECTRON_FLAGS="--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --ozone-platform=x11" /opt/Paseo/Paseo
+~~~
+
+**Important:** Do not pass direct Chromium argv to the Paseo executable; it is rejected by the app.asar daemon manager. Use PASEO_ELECTRON_FLAGS only.
+
+The Electron Desktop application connects to the dev daemon and renders the agent
+timeline, worker results, and tool presentation as users experience them. This provides
+evidence for GUI behavior, tool expansion, worker status display, and form input
+handling that CLI commands cannot show.
+
+**Debugging with Chrome DevTools Protocol (CDP):**
+
+The PASEO_ELECTRON_FLAGS setting includes `--remote-debugging-address=127.0.0.1 --remote-debugging-port=9222`, which enables Chrome DevTools Protocol inspection. Connect to `http://127.0.0.1:9222` to inspect the Paseo window, capture screenshots, and verify GUI rendering programmatically using tools like Playwright or the Chrome DevTools client.
+
+The cloned configuration retains the production relay/server identity. Relay and remote
+pairing were not used in this setup. No prompt or paid model call was made.
 
 
 ## Standard CLI verification mode

@@ -599,19 +599,41 @@ class TaskMachine:
                 transition(db, task_id, 'EXECUTING')
             db.commit()
 
-    def submit_synthesis(self, channel, text, *, authorization=None):
+    def submit_synthesis(self, channel, text, not_verified=(), *, authorization=None):
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             if authorization: authorization(db)
-            task = db.execute('SELECT state,synthesis FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
+            task = db.execute('SELECT state,synthesis,revision FROM runtime_tasks WHERE task_id=?', (channel.task_id,)).fetchone()
             if not task or task['state'] != 'RECONCILING':
                 raise StoreError('synthesis_not_expected')
-            if task['synthesis'] is not None and task['synthesis'] != text:
+
+            def normalized(name):
+                return ' '.join(str(name).split()).casefold()
+
+            rows = db.execute(
+                'SELECT result_json FROM runtime_nodes WHERE task_id=? AND revision=? AND result_json IS NOT NULL',
+                (channel.task_id, task['revision']),
+            ).fetchall()
+            checks = [check for row in rows for check in json.loads(row[0]).get('checks', [])]
+            passed = {normalized(check['name']) for check in checks if check.get('outcome') == 'passed'}
+            gaps = {normalized(check['name']): check['name'] for check in checks
+                    if check.get('outcome') in {'not_run', 'unverified'} and normalized(check['name']) not in passed}
+            listed = {normalized(item['item']) for item in not_verified}
+            missing = [name for key, name in gaps.items() if key not in listed]
+            if missing:
+                raise StoreError('synthesis_gaps_undisclosed', 'arguments.not_verified', ', '.join(missing)[:160],
+                                 'every retained not_run or unverified check by its exact name, each with its blocker',
+                                 'Close these gaps with replan_request if they can be verified; otherwise list each exact name in not_verified with its concrete blocker: ' + '; '.join(missing))
+            stored = text if not not_verified else (
+                text.rstrip() + '\n\n## Not verified\n\n' +
+                '\n'.join(f"- {item['item']} — blocker: {item['blocker']}" for item in not_verified)
+            )
+            if task['synthesis'] is not None and task['synthesis'] != stored:
                 raise StoreError('synthesis_conflict')
-            if task['synthesis']==text:
+            if task['synthesis'] == stored:
                 return dict(recorded=True,state='RECONCILING')
-            db.execute('UPDATE runtime_tasks SET synthesis=? WHERE task_id=?', (text, channel.task_id))
-            event(db, channel.task_id, 'SYNTHESIS_SUBMITTED', dict(text=text), channel.channel_id)
+            db.execute('UPDATE runtime_tasks SET synthesis=? WHERE task_id=?', (stored, channel.task_id))
+            event(db, channel.task_id, 'SYNTHESIS_SUBMITTED', dict(text=stored, not_verified=list(not_verified)), channel.channel_id)
             db.commit()
         return dict(recorded=True)
 

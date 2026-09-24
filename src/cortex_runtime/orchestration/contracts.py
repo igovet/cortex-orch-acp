@@ -39,7 +39,12 @@ COORDINATOR = {
     'task_get_context': obj({}),
     'answer_submit': obj(dict(text=text('Answer a read-only question directly, in the selected coordinator language, grounded in the project files you inspected. Use for explanations, project overviews and factual questions that need no changes or delegated investigation. Available before any plan or worker exists, or after the user answered a runtime stop question or a question asked after verification by choosing to finish. Does not certify implementation, review, or tests; use plan_submit when the user requests changes.',32000), request_key=text('Unique answer delivery key; exact retries return the same receipt.',128))),
     'plan_submit': obj(dict(plan=PLAN, request_key=text('Unique proposal delivery key; exact retries return the same receipt.', 128))),
-    'synthesis_submit': obj(dict(text=text('Final synthesis grounded in current reports and runtime verification. Only when nothing is left for the user to decide: it completes the task.', 32000))),
+    'synthesis_submit': obj(dict(
+        text=text('Final synthesis grounded in current reports and runtime verification. Only when nothing is left for the user to decide: it completes the task.', 32000),
+        not_verified=array(obj(dict(
+            item=text('What stayed unverified. For a retained not_run or unverified worker check, its exact check name; otherwise the changed surface.', 200),
+            blocker=text('The concrete blocker that made verification impossible in this task. "Not run", "out of scope" or "not requested" is not a blocker: verify it instead.', 1000))), maximum=32)),
+        required=['text']),
     'user_question_request': obj(dict(question=text('One short line naming the decision, e.g. "Approve the plan above?". Put the details, evidence and each option\'s consequences in your message text before this call, not here.', 4000),
                                      options=array(text('One short answer the user can pick, e.g. "Approve the plan" or "Do it in a separate task".', 1000), maximum=8),
                                      request_key=text('Unique question delivery key. Exact retries preserve question identity.', 128)),
@@ -49,7 +54,8 @@ RESULT = obj(dict(
     report_ref=text('Exact immutable report_id from write_report for this worker attempt.', 14),
     summary=text('What was found or changed, in plain words: the conclusion first, then what supports it. At most 4000 characters.', 4000),
     verdict=dict(type='string', enum=['APPROVE', 'REQUEST_CHANGES', 'BLOCK'], description='The review decision: APPROVE when the change is correct, REQUEST_CHANGES for fixable problems, BLOCK when it must not proceed.'),
-    checks=array(obj(dict(name=text('What the check verified, e.g. "unit tests for services/trading" or "ruff on the changed files".',200), outcome=dict(type='string', enum=['passed','failed','not_run','unverified'], description='passed: you ran it in this attempt and it succeeded (see tool_call_ref for the evidence rule). failed: it ran and failed, which fails the assignment. not_run: you did not run it. unverified: it ran but its result could not be established.'),
+    checks=array(obj(dict(name=text('What the check verified, e.g. "unit tests for services/trading" or "ruff on the changed files".',200), outcome=dict(type='string', enum=['passed','failed','not_run','unverified'], description='passed: you ran it in this attempt and it succeeded (see tool_call_ref for the evidence rule). failed: it ran and failed, which fails the assignment. not_run: a real blocker prevented running it. unverified: it ran but its result could not be established. not_run and unverified require blocker.'),
+                         blocker=text('Required for not_run and unverified, omitted for passed and failed: the concrete blocker that made running or establishing this check impossible in this attempt. "Not run", "out of scope" or "not requested" is not a blocker.', 1000),
                          tool_call_ref=text('Evidence for a passed check, from this attempt only: the exact tool_call_ref a command_run returned (it must have exited 0), or the id of one of your own completed tool calls. Omit it for a check you ran with your own shell: a pass is then accepted only if this attempt ran at least one shell command that completed. A pass with no command run at all is refused.',128)), required=['name','outcome']), maximum=20),
     request_key=text('Unique result delivery key.',128),
 ), required=['report_ref','summary','checks','request_key'])
@@ -63,7 +69,8 @@ COORDINATOR['verification_submit'] = obj(dict(
     verification=dict(PLAN['properties']['verification'], description='Corrected verification commands. Only after the runtime verification failed and the work itself is fine: it verifies again without redoing the reviewed work. When the code is wrong, submit a new plan instead.'),
     request_key=text('Unique proposal identity.',128)))
 COORDINATOR.update(REQUESTS)
-RESULT['properties']['checks']['description'] = 'Automated checks this attempt actually ran, up to 20; [] when there were none. Descriptive review observations belong in the report, not here. A failed check fails the assignment; not_run or unverified checks are kept as disclosed gaps for review and synthesis.'
+RESULT['properties']['checks']['description'] = 'Automated checks this attempt actually ran, up to 20; [] when there were none. Descriptive review observations belong in the report, not here. A failed check fails the assignment; not_run or unverified checks each need their blocker and are kept as disclosed gaps for review and synthesis.'
+COORDINATOR['synthesis_submit']['properties']['not_verified']['description'] = ('Every item this task changed but could not verify, each with its concrete blocker; [] or omit when everything was verified. Every retained not_run or unverified worker check that no other result of this plan revision passed under the same name must appear here by its exact name. Prefer verifying a gap (replan_request) over listing it.')
 WORKER = {'result_submit': RESULT, **REQUESTS}
 
 

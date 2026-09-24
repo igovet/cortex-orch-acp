@@ -21,8 +21,11 @@ export function UsageMeter({ context, tokens, theme }: { context?: Attempt["cont
       </View>
       <Text style={muted}>{summary.percent}% · {summary.detail}</Text>
     </View>}
-    {tokens && <Text accessibilityLabel={`${tokens.input} input and ${tokens.output} output tokens`} style={muted}>
-      ↑ {formatTokens(tokens.input)}  ↓ {formatTokens(tokens.output)}{tokens.cachedRead ? `  · ${formatTokens(tokens.cachedRead)} cached` : ""}
+    {tokens && <Text accessibilityLabel={tokens.knownCalls
+      ? `${tokens.input} uncached input, ${tokens.output} output, ${tokens.cachedRead} cache read, ${tokens.cachedWrite} cache write tokens`
+      : "Token usage unavailable"} style={muted}>
+      {tokens.knownCalls ? `↑ ${formatTokens(tokens.input)}  ↓ ${formatTokens(tokens.output)}${tokens.cachedRead ? `  · ${formatTokens(tokens.cachedRead)} cache read` : ""}${tokens.cachedWrite ? `  · ${formatTokens(tokens.cachedWrite)} cache write` : ""}` : "Tokens unavailable"}
+      {tokens.unknownCalls ? `  · ${tokens.unknownCalls} call${tokens.unknownCalls === 1 ? "" : "s"} unavailable` : ""}
     </Text>}
   </View>;
 }

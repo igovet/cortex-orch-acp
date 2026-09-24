@@ -2562,9 +2562,9 @@ class EngineSessionManagerAdapter:
         # two paths race-safe without ever sending the notification twice.
         _cancel_sent = threading.Event()
         _stop_watch = threading.Event()
-        # Whether a non-delta engine event has been seen since the last
-        # delta -- the only observable message boundary inside one turn.
-        _saw_non_delta = [False]
+        # A tool call separates prose within one turn. Telemetry and display
+        # updates can arrive between chunks of the same sentence.
+        _saw_tool_boundary = [False]
         # Stall watchdog state: when the engine last said anything, the
         # current silence limit, and whether this turn was nudged.
         _last_event = [time.monotonic()]
@@ -2627,10 +2627,8 @@ class EngineSessionManagerAdapter:
                         _fault_injection.checkpoint("t028_late_event_after_cancel")
                         _cancel_sent.set()
                         manager.cancel(session_ref)
-                    if event.kind != EngineEventKind.TURN_DELTA:
-                        # Any non-delta event ends the message the coordinator
-                        # was in the middle of saying -- see the delta branch.
-                        _saw_non_delta[0] = True
+                    if event.kind == EngineEventKind.TOOL_CALL_OBSERVED:
+                        _saw_tool_boundary[0] = True
                     if event.kind == EngineEventKind.TURN_DELTA and event.delta_text:
                         text_parts.append(event.delta_text)
                         if on_delta is not None:
@@ -2644,16 +2642,16 @@ class EngineSessionManagerAdapter:
                                 # and render as "...verify the change.The Cortex
                                 # draft was created...". The tool call between
                                 # them IS the observable boundary: a delta that
-                                # is the first one after any non-delta event
+                                # is the first one after a tool call
                                 # starts a new message, and gets a blank line
                                 # ahead of it. Never before the turn's own first
                                 # delta -- the caller owns the separation
                                 # between turns (see
                                 # acp.orchestrating_runtime._continuation_loop's
                                 # rebound emit_update).
-                                if _saw_non_delta[0] and text_parts[:-1]:
+                                if _saw_tool_boundary[0] and text_parts[:-1]:
                                     on_delta("\n\n")
-                                _saw_non_delta[0] = False
+                                _saw_tool_boundary[0] = False
                                 on_delta(event.delta_text)
                             except Exception:  # noqa: BLE001 - best-effort, never fails the turn
                                 pass

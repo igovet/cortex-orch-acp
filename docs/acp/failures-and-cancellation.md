@@ -72,9 +72,13 @@ anywhere for an external mutation whose fate cannot be observed.
 ## 3. Cancellation (`session/cancel`)
 
 `session/cancel` interrupts the current turn, revokes current worker channels,
-terminates owned sessions and persists RECOVERING. This includes clients that
-cancel before sending a steering message. A later user prompt can resume planning
-from durable state. It does not cancel unrelated tasks.
+terminates owned sessions and persists RECOVERING. It is distinct from a queued
+Paseo steer, which uses a concurrent configuration request and does not call
+`session/cancel`. The cancellation path records `TURN_INTERRUPTED`, not
+`USER_STEERING`; `turn_interrupted` classifies as `cancellation` even when
+an adapter prefixes it with `engine_error`, and a cancelled worker never
+enters fallback routing. A later user
+prompt can resume planning from durable state. It does not cancel unrelated tasks.
 
 `/cortex-stop` permanently marks the task CANCELLED before cleanup. It closes
 pending questions, fences late publications and cancels capacity-queued opens.
