@@ -439,6 +439,38 @@ def test_finished_node_holds_scope_until_engine_absence_is_observed(machine):
     assert [n['node_id'] for n in state.claim_ready(ch.task_id,ch.channel_id)]==['N1']
 
 
+def test_runtime_stop_question_releases_the_stopped_plans_nodes(machine):
+    state,ch=machine
+    proposed=plan(2)
+    proposed['tasks'][1]['dependencies']=['N0']
+    state.submit_plan(ch,proposed,'p');state.move(ch.task_id,'EXECUTING')
+    assert [n['node_id'] for n in state.claim_ready(ch.task_id,ch.channel_id)]==['N0']
+    state.move(ch.task_id,'BLOCKED',blocker='stale_assignment_result')
+    context=state.context(ch.task_id)
+    assert context['state']=='WAITING_USER'
+    assert {n['status'] for n in context['nodes']}=={'cancelled'}
+
+
+def test_stale_running_node_of_an_earlier_revision_holds_scope_only_until_released(machine):
+    state,ch=machine
+    proposed=plan()
+    proposed['tasks'][0]['scope']=['src/**']
+    state.submit_plan(ch,proposed,'old');state.move(ch.task_id,'EXECUTING')
+    old=state.claim_ready(ch.task_id,ch.channel_id)[0]
+    # A path that replanned without cancelling left the old node 'running'.
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?",(ch.task_id,))
+        db.commit()
+    state.submit_plan(ch,proposed,'new');state.move(ch.task_id,'EXECUTING')
+    assert state.claim_ready(ch.task_id,ch.channel_id)==[]
+    with state.store.connection() as db:
+        db.execute("INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES(?,?,?,?,?)",
+                   (ch.task_id,'WORKER_RELEASED','runtime',
+                    '{"assignment_ref":"%s","observed_session":"absent"}'%old['assignment_ref'],'now'))
+        db.commit()
+    assert [n['node_id'] for n in state.claim_ready(ch.task_id,ch.channel_id)]==['N0']
+
+
 def test_direct_answer_is_runtime_completed_and_cannot_bypass_a_plan(machine):
     state,channel=machine
     with pytest.raises(StoreError): state.move(channel.task_id,'COMPLETED')
