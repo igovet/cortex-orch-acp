@@ -20,6 +20,12 @@ a new fix node and another review, with a three-cycle ceiling. Verification is a
 runtime command observation, independent of model review. Nonzero exit, incomplete
 output or project drift prevents a passing verification event.
 
+Every not_run or unverified worker check carries its blocker; result_submit rejects
+one without it. Synthesis is refused while a retained not_run or unverified check
+of the current plan revision is neither passed by a later result under the same
+name nor listed in synthesis not_verified with its blocker. The runtime renders
+that list into the synthesis as "Not verified".
+
 The final gate checks the current plan, completed nodes, final review, exact
 verification revision, report content digests, synthesis and absence of live worker
 sessions. A report removed or changed after publication, or a project changed during

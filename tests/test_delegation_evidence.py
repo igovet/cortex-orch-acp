@@ -28,7 +28,10 @@ def test_result_uses_actual_gateway_evidence(tmp_path,case):
         with store.connection() as db:
             db.execute("UPDATE runtime_requests SET result_json=? WHERE operation='command_run'",(json.dumps(dict(complete=False)),));db.commit()
     outcome=case if case in {'not_run','unverified'} else 'passed'
-    args=dict(report_ref=report,summary='Observed',checks=[dict(name='check',outcome=outcome,tool_call_ref=ref)],request_key='result')
+    check=dict(name='check',outcome=outcome,tool_call_ref=ref)
+    if outcome in {'not_run', 'unverified'}:
+        check['blocker']='The fixture cannot establish this check outcome.'
+    args=dict(report_ref=report,summary='Observed',checks=[check],request_key='result')
     if case in {'failed','missing','foreign','native','incomplete'}:
         with pytest.raises(StoreError, match='check_evidence_required'):
             mcp_tools.dispatch(store,worker,'result_submit',args)
@@ -39,6 +42,8 @@ def test_result_uses_actual_gateway_evidence(tmp_path,case):
         assert node['status']=='running' and node['result'] is None
         # An honest failure/unresolved check is retained and blocks completion.
         args['checks'][0]['outcome']='failed' if case=='failed' else 'unverified'
+        if case!='failed':
+            args['checks'][0]['blocker']='The fixture command receipt did not establish a pass.'
     mcp_tools.dispatch(store,worker,'result_submit',args)
     node=next(n for n in TaskMachine(store).context(task.task_id)['nodes'] if n['assignment_ref']==assignment)
     # Only a real failure fails the node; not_run/unverified are retained disclosures.

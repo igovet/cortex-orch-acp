@@ -26,3 +26,11 @@
   configuration are never touched. Requested via
   `read_source(pq_bc3b03c3f491:answer)` (runtime fix to make answers visible
   to reviewers, which this citation form now reflects).
+
+## 2026-09-24 verification gap disclosure
+
+A structured unrun or unverified worker check carries a concrete blocker. At
+synthesis, retained gaps from the current plan revision must either have a
+same-name passing result or appear in the structured not-verified list with a
+blocker. The runtime renders the list into the stored synthesis. This prevents
+silent omission while leaving the coordinator able to replan verifiable gaps.

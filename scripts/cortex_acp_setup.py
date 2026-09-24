@@ -55,12 +55,16 @@ an unrelated one:
    Never touches the pinned user-default route -- unlike ``pin-route``/
    ``record-observation``, this only refreshes the cached catalog snapshot
    a later selection reads from.
-6. ``install-paseo-plugin`` -- validate and install the repository-owned
+6. ``configure-paseo-plugin-launch`` -- write the owner-private, non-secret
+   launch record used by the Paseo provider.  This lets an operator install
+   the provider from the published GitHub source while the ACP runtime stays
+   in their checked-out Cortex repository.
+7. ``install-paseo-plugin`` -- validate and install the repository-owned
    Paseo 0.9 provider plugin through the installed Paseo CLI. This is the
    single explicit Cortex-on-Paseo installation command; it is idempotent,
    preserves unrelated daemon configuration/plugins, and verifies the plugin
    reaches ``running``. It never runs implicitly when an ACP session starts.
-7. ``print-client-recipes`` -- delegates entirely to the existing T011
+8. ``print-client-recipes`` -- delegates entirely to the existing T011
    ``cortex_acp_client_config.py`` (Zed dry-run-by-default entry +
    ``--print-codeg-recipe``); this script never re-implements or
    duplicates that write path.
@@ -198,7 +202,7 @@ def _atomic_private_json(path: Path, body: str) -> None:
                 pass
 
 
-def _write_paseo_launch_config(environ=None):
+def _write_paseo_launch_config(environ=None, *, runtime_root=None):
     """Persist the Cortex argv and user storage roots used after restart.
 
     Paseo daemon plugins do not inherit the shell environment that ran setup.
@@ -211,10 +215,11 @@ def _write_paseo_launch_config(environ=None):
         raise SystemExit(f"error: HOME must be an existing, non-symlink directory: {home}")
     config_base = Path(env.get("XDG_CONFIG_HOME") or str(home / ".config")).expanduser().resolve()
     state_base = Path(env.get("XDG_STATE_HOME") or str(home / ".local" / "state")).expanduser().resolve()
+    runtime = Path(runtime_root or _ROOT).resolve()
     desired = {
-        "argv": ["python3", "-B", str((_ROOT / "src" / "cortex_acp.py").resolve())],
+        "argv": ["python3", "-B", str((runtime / "src" / "cortex_acp.py").resolve())],
         "env": {"HOME": str(home), "XDG_CONFIG_HOME": str(config_base), "XDG_STATE_HOME": str(state_base)},
-        "shim": str((_ROOT / "integrations" / "paseo" / "server" / "acp-load-shim.mjs").resolve()),
+        "shim": str((runtime / "integrations" / "paseo" / "server" / "acp-load-shim.mjs").resolve()),
     }
     # The locator must not depend on XDG_CONFIG_HOME: a GUI daemon restart can
     # start with a different XDG environment. Keep the record under the
@@ -243,6 +248,42 @@ def _write_paseo_launch_config(environ=None):
         return dict(path=str(path), created=False, argv=desired["argv"], env=desired["env"])
     _atomic_private_json(path, json.dumps(desired, indent=2) + "\n")
     return dict(path=str(path), created=True, argv=desired["argv"], env=desired["env"])
+
+
+def bootstrap_paseo_git_install(environ=None):
+    """Install a stable, owner-private ACP runtime for a staged Git plugin."""
+    env = os.environ if environ is None else environ
+    init_storage(env)
+    state_root = _ensure_private_directory(registry.state_root(env))
+    runtime_parent = _ensure_private_directory(state_root / "paseo-runtime", create=True)
+    try:
+        version = json.loads((_ROOT / "package-identity.json").read_text(encoding="utf-8"))["version"]
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise SystemExit(f"error: invalid package identity for Paseo bootstrap: {error}") from None
+    if not isinstance(version, str) or not version or any(part in version for part in ("/", "\\\\", "..")):
+        raise SystemExit("error: package identity has an unsafe version for Paseo bootstrap.")
+    runtime = runtime_parent / version
+    required = (runtime / "src" / "cortex_acp.py", runtime / "pinned-dependencies.json",
+                runtime / "integrations" / "paseo" / "server" / "acp-load-shim.mjs")
+    if runtime.exists():
+        _ensure_private_directory(runtime)
+        if not all(path.is_file() and not path.is_symlink() for path in required):
+            raise SystemExit(f"error: incomplete existing Paseo runtime: {runtime}")
+    else:
+        stage = Path(tempfile.mkdtemp(prefix=".paseo-runtime-", dir=str(runtime_parent)))
+        try:
+            os.chmod(stage, 0o700)
+            shutil.copytree(_ROOT / "src", stage / "src", symlinks=False)
+            shutil.copy2(_ROOT / "pinned-dependencies.json", stage / "pinned-dependencies.json")
+            shim = stage / "integrations" / "paseo" / "server"
+            shim.mkdir(parents=True, mode=0o700)
+            shutil.copy2(_ROOT / "integrations" / "paseo" / "server" / "acp-load-shim.mjs", shim / "acp-load-shim.mjs")
+            os.replace(stage, runtime)
+        except OSError as error:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise SystemExit(f"error: cannot stage owner-private Paseo runtime: {error}") from None
+    launch = _write_paseo_launch_config(env, runtime_root=runtime)
+    return {"runtime_root": str(runtime), "launch_config": launch}
 
 
 def _remove_new_paseo_launch_config(launch_config):
@@ -664,7 +705,7 @@ def status(environ=None):
     except PortableError as error:
         result["storage_error"] = error.code
     try:
-        state = registry.read_registry(environ)
+        state = registry.inspect_registry(environ)
         def _credential_kind(record):
             ref = record.credential_ref
             if isinstance(ref, EngineNativeDir):
@@ -679,7 +720,7 @@ def status(environ=None):
     except PortableError as error:
         result["connections_error"] = error.code
     try:
-        defaults = configuration_store.read_user_defaults(environ)["defaults"]
+        defaults = configuration_store.inspect_user_defaults(environ)["defaults"]
         route_id = defaults.get("route_id") if isinstance(defaults, dict) else None
         result["pinned_route"] = route_id
     except PortableError as error:
@@ -715,6 +756,11 @@ def main(argv=None):
 
     sub.add_parser("status", help="Report current setup state (read-only, default).")
     sub.add_parser("init-storage", help="Create/verify owner-private config/state roots.")
+    sub.add_parser(
+        "configure-paseo-plugin-launch",
+        help="Write the non-secret launch record used by a Git-installed Paseo plugin.",
+    )
+    sub.add_parser("bootstrap-paseo-git-install", help="Stage the owner-private ACP runtime for a Git-installed Paseo plugin.")
     sub.add_parser("install-paseo-plugin", help="Install and verify the Cortex provider plugin in Paseo (explicit setup only).")
 
     p_validate = sub.add_parser(
@@ -775,6 +821,12 @@ def main(argv=None):
         return 0
     if step == "init-storage":
         print(_json(init_storage()))
+        return 0
+    if step == "configure-paseo-plugin-launch":
+        print(_json(_write_paseo_launch_config()))
+        return 0
+    if step == "bootstrap-paseo-git-install":
+        print(_json(bootstrap_paseo_git_install()))
         return 0
     if step == "install-paseo-plugin":
         print(_json(install_paseo_plugin()))

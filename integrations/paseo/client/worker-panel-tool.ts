@@ -1,4 +1,5 @@
 import { gatewayPresentation } from "../shared/gateway-presentation.ts";
+import { shellCommand } from "../shared/shell-command.ts";
 import type { WorkerEvent } from "./worker-panel-events.js";
 
 export type ToolPresentation = {
@@ -20,10 +21,9 @@ function stringField(value: Record<string, unknown>, ...names: string[]): string
 }
 function nativeInput(value: unknown): Record<string, unknown> {
   const envelope = fields(value);
-  // codex-acp forwards custom tools as { name, input }, while Claude sends
-  // the command fields directly. Only unwrap the documented custom-tool
-  // envelope so arbitrary tool arguments keep their original meaning.
-  return typeof envelope.name === "string" && Object.keys(fields(envelope.input)).length > 0
+  // Codex ACP forwards custom tools beneath `input`; history updates can omit
+  // the envelope name, while Claude sends command fields directly.
+  return Object.keys(fields(envelope.input)).length > 0
     ? fields(envelope.input)
     : envelope;
 }
@@ -54,7 +54,7 @@ export function presentTool(event: WorkerEvent): ToolPresentation {
   const rawInput = gateway?.input ?? event.raw_input ?? event.input;
   const input = nativeInput(rawInput);
   const path = stringField(input, "file_path", "filePath", "path", "absolutePath");
-  const command = stringField(input, "command", "cmd");
+  const command = shellCommand(rawInput);
   const oldText = stringField(input, "old_string", "oldString", "oldText");
   const newText = stringField(input, "new_string", "newString", "newText", "content");
   const outputValue = gateway?.output ?? event.raw_output ?? event.output;

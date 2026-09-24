@@ -212,10 +212,11 @@ def test_installed_codex_app_server_reads_disabled_agents_and_features(tmp_path)
     binary = os.environ.get("CORTEX_PINNED_CODEX_BINARY")
     if not binary:
         pytest.skip("set CORTEX_PINNED_CODEX_BINARY to check the installed App Server")
-    wrapper = _prepare_codex_runtime_wrapper(binary, new_connection_id(), isolated_environ(tmp_path))
+    environ = isolated_environ(tmp_path)
+    wrapper = _prepare_codex_runtime_wrapper(binary, new_connection_id(), environ)
     proc = subprocess.Popen(
         [wrapper, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, text=True, bufsize=1,
+        stderr=subprocess.DEVNULL, text=True, bufsize=1, env=environ,
     )
     try:
         assert proc.stdin is not None and proc.stdout is not None

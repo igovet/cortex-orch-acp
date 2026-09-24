@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test:activation": "node --experimental-strip-types server/plugin-activation.test.ts",
     "test:diff": "node --experimental-strip-types client/worker-panel-diff.test.ts",
     "test:status": "node --experimental-strip-types client/worker-panel-status.test.ts",
     "test:replay": "node --experimental-strip-types server/replay.test.ts",
@@ -15,6 +16,7 @@
     "@getpaseo/protocol": "^0.9.1",
     "@types/node": "^20.9.0",
     "@types/react": "~19.2.0",
+    "esbuild": "^0.25.12",
     "react": "19.1.0",
     "react-native": "0.81.5",
     "typescript": "^5.9.3",

@@ -1,6 +1,0 @@
-# No third-party runtime dependencies. cortex_runtime (everything under
-# scripts/cortex_runtime/) is standard-library only. This file, and the
-# hash-locked requirements.lock beside it, are kept only for the isolated
-# dev-candidate identity mechanism in scripts/cortex_package.py; the
-# Codex-plugin-harness-era gateway that once pinned aiohttp/zstandard here
-# was removed at T033.

@@ -118,7 +118,7 @@ def reconcile_results(store, task_id):
         if len(matching) != 1 or matching[0]['origin'] != request['actor']:
             raise StoreError('ambiguous_result_publication')
         observed = json.loads(matching[0]['payload_json'])
-        observed_checks = [{k: c[k] for k in ('name', 'outcome', 'tool_call_ref') if k in c and c[k] is not None}
+        observed_checks = [{k: c[k] for k in ('name', 'outcome', 'tool_call_ref', 'blocker') if k in c and c[k] is not None}
                            for c in observed.get('checks', [])]
         if observed.get('summary') != result['summary'] or observed_checks != result['checks']:
             raise StoreError('result_publication_mismatch')

@@ -3,11 +3,11 @@ import { ReplaySpool } from "./replay-spool.mjs";
 import { isHiddenOperation } from "../shared/timeline-visibility.ts";
 import { presentToolSemantics } from "../shared/tool-presentation.ts";
 import { gatewayPresentation } from "../shared/gateway-presentation.ts";
+import { shellCommand } from "../shared/shell-command.ts";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { runAcpProvider } from "@getpaseo/plugin/server/acp";
 import type {
@@ -105,7 +105,7 @@ export function nativeToolDetail(event: ProviderEvent): ProviderEvent {
   const output = gateway?.output ?? rawOutput;
   const name = gateway?.kind === "edit" ? "write" : gateway?.kind === "read" ? "read" : gateway?.kind === "shell" ? "shell" : item.name.trim().toLowerCase();
   const filePath = firstString(input, ["filePath", "file_path", "path", "absolutePath"]);
-  const command = firstString(input, ["command", "cmd"]);
+  const command = shellCommand(input);
   const oldString = firstString(input, ["oldString", "old_string", "oldText", "old_text"]);
   const newString = firstString(input, ["newString", "new_string", "newText", "new_text", "content"]);
   const unifiedDiff = firstString(input, ["unifiedDiff", "unified_diff", "patch", "diff"]);
@@ -204,11 +204,8 @@ function shimmedCommand(shim: string, targetArgv: string[], targetEnv?: Record<s
 function bundledShimPath(): string {
   const explicit = process.env.CORTEX_PASEO_SHIM?.trim();
   if (explicit) return explicit;
-  const configHomes = [
-    process.env.XDG_CONFIG_HOME,
-    join(homedir(), ".config"),
-  ].filter((value, index, values): value is string =>
-    Boolean(value) && values.indexOf(value) === index,
+  const configHomes = [process.env.XDG_CONFIG_HOME].filter(
+    (value): value is string => Boolean(value),
   );
   for (const configHome of configHomes) {
     const launchConfig = join(configHome, "cortex", "paseo-plugin-launch.json");
@@ -220,13 +217,32 @@ function bundledShimPath(): string {
       throw new Error(`Invalid Cortex Paseo launch configuration: ${launchConfig}`);
     }
   }
-  // This fallback is for source-tree development only. Packaged daemon
-  // launches must use the owner-private launch record above.
-  try {
-    return resolve(dirname(fileURLToPath(import.meta.url)), "acp-load-shim.mjs");
-  } catch {
-    throw new Error("Cortex ACP Paseo load shim path is unavailable");
+  const source = sourceTreeLaunch();
+  if (source) return source.shim;
+  const homeLaunch = join(homedir(), ".config", "cortex", "paseo-plugin-launch.json");
+  if (existsSync(homeLaunch)) {
+    try {
+      const configured = JSON.parse(readFileSync(homeLaunch, "utf8")) as LaunchConfig;
+      if (typeof configured.shim === "string") return configured.shim;
+    } catch {
+      throw new Error(`Invalid Cortex Paseo launch configuration: ${homeLaunch}`);
+    }
   }
+  throw new Error("Cortex ACP Paseo load shim is unavailable; configure a launch record or CORTEX_PASEO_SOURCE_ROOT");
+}
+
+function sourceTreeLaunch(): { entry: string; shim: string } | undefined {
+  const root = process.env.CORTEX_PASEO_SOURCE_ROOT?.trim();
+  if (!root) return undefined;
+  if (!isAbsolute(root)) {
+    throw new Error("CORTEX_PASEO_SOURCE_ROOT must be an absolute path");
+  }
+  const entry = resolve(root, "src", "cortex_acp.py");
+  const shim = resolve(root, "integrations", "paseo", "server", "acp-load-shim.mjs");
+  if (!existsSync(entry) || !existsSync(shim)) {
+    throw new Error(`CORTEX_PASEO_SOURCE_ROOT has no Cortex entry point or Paseo shim: ${root}`);
+  }
+  return { entry, shim };
 }
 
 function cortexCommand(): CommandArgv {
@@ -259,13 +275,16 @@ function cortexCommand(): CommandArgv {
     return shimmedCommand(bundledShimPath(), [command]);
   }
 
-  // A desktop daemon can restart with a different XDG_CONFIG_HOME from the
-  // shell that ran setup. Keep the normal location first, then try the
-  // user's conventional HOME/.config location so the durable setup record
-  // remains discoverable across that restart.
+  // Prefer a launch record in this XDG profile. An isolated source-tree
+  // profile uses the matching local entry point when it has no record, so a
+  // stale record in the user's normal profile cannot redirect the dev session.
+  // Other profiles can still use the normal HOME/.config record.
+  const isolatedConfigHome = process.env.XDG_CONFIG_HOME;
+  const regularConfigHome = join(homedir(), ".config");
+  const explicitSource = Boolean(process.env.CORTEX_PASEO_SOURCE_ROOT?.trim());
   const configHomes = [
-    process.env.XDG_CONFIG_HOME,
-    join(homedir(), ".config"),
+    isolatedConfigHome,
+    ...(!explicitSource ? [regularConfigHome] : []),
   ].filter((value, index, values): value is string =>
     Boolean(value) && values.indexOf(value) === index,
   );
@@ -309,15 +328,9 @@ function cortexCommand(): CommandArgv {
     throw new Error(`Invalid Cortex Paseo launch configuration: ${launchConfig}`);
   }
 
-  // Development fallback. Packaged Paseo bundles may not preserve this URL;
-  // production setup writes the owner-private launch config above.
-  const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-  const entry = resolve(repositoryRoot, "src", "cortex_acp.py");
-  if (!existsSync(entry)) {
-    throw new Error(`Cortex ACP entry point is missing: ${entry}`);
-  }
-  const shim = bundledShimPath();
-  return shimmedCommand(shim, ["python3", "-B", entry]);
+  const source = sourceTreeLaunch();
+  if (source) return shimmedCommand(source.shim, ["python3", "-B", source.entry]);
+  throw new Error("Cortex ACP launch unavailable; configure a Paseo launch record or CORTEX_PASEO_SOURCE_ROOT");
 }
 
 /**
@@ -347,23 +360,20 @@ export function emulatesSteer(offered: readonly string[], supported: readonly st
   return offered.includes("prompt.steer") && !supported.includes("prompt.steer");
 }
 
-/**
- * The answer to a steer prompt: "failed", never delivered. Paseo then falls
- * back to its own replacement (cancel the running turn, send the message as a
- * new one). Delivering it as a follow-up instead made the bridge open a new
- * turn itself, and Paseo refused that with "Active turn changed before
- * steering could be delivered".
- */
-export function steerRefusal<T extends { type: string }>(input: T): ProviderEvent | null {
-  const { sessionId, prompt } = input as { sessionId?: string; prompt?: { delivery?: string; clientMessageId?: string } };
-  if (input.type !== "session.prompt" || prompt?.delivery !== "steer") return null;
-  return {
-    type: "session.prompt_result",
-    sessionId,
-    clientMessageId: prompt.clientMessageId,
-    result: { type: "failed", error: { message: "Cortex replaces the running turn instead of steering it." } },
-  } as ProviderEvent;
+/** Config id the ACP agent uses to durably queue a Paseo steer. */
+export const QUEUED_STEER_CONFIG_ID = "cortex_queued_steer";
+const STEER_REQUEST_PREFIX = "cortex-queued-steer:";
+
+/** Extract only message text; unsupported media must never be silently dropped. */
+export function steerText(input: Parameters<ProviderConnection["send"]>[0]): string | null {
+  if (input.type !== "session.prompt" || input.prompt.delivery !== "steer") return null;
+  if (input.prompt.input.type !== "message") return null;
+  const content = input.prompt.input.content;
+  if (!content.length || content.some((part) => part.type !== "text")) return null;
+  const text = content.map((part) => (part as { text: string }).text).join("\n");
+  return text.trim() ? text : null;
 }
+
 
 /** The Cortex process a shimmed launch command starts (see shimmedCommand). */
 function launchTarget(command: readonly string[]): LaunchConfig | undefined {
@@ -387,12 +397,40 @@ function modelEfforts(command: readonly string[]): Promise<Record<string, string
   });
 }
 
+/** Native quota observations through the same installed Cortex entry used by this provider.
+ * The command does not start an engine or issue a paid model call. */
+export function nativeAccountUsage(): Promise<unknown> {
+  const target = launchTarget(cortexCommand());
+  if (!target) return Promise.reject(new Error("Cortex launch target unavailable"));
+  return new Promise((resolve, reject) => {
+    execFile(target.argv[0], target.argv.slice(1), {
+      env: { ...process.env, ...(target.env ?? {}), CORTEX_ACCOUNT_USAGE: "1" },
+      timeout: 5000,
+      maxBuffer: 1024 * 1024,
+    }, (error, stdout) => {
+      if (error) { reject(error); return; }
+      try {
+        const result: unknown = JSON.parse(stdout);
+        if (!result || typeof result !== "object" || !("connections" in result)) {
+          throw new Error("Cortex account usage response missing connections");
+        }
+        resolve(result.connections);
+      } catch (parseError) {
+        reject(parseError);
+      }
+    });
+  });
+}
+
 /**
  * Paseo's ACP bridge gives every model the efforts of whichever one was
  * selected when it built its catalog, so switching models showed the wrong
  * efforts, or none. Each model gets its own.
  */
-export function withModelEfforts<T extends { models: ReadonlyArray<{ id: string }> }>(
+export function withModelEfforts<T extends {
+  models: ReadonlyArray<{ id: string; defaultThinkingOptionId?: string }>;
+  defaultThinkingOption?: string;
+}>(
   catalog: T, efforts: Record<string, string[]>,
 ): T {
   return {
@@ -400,6 +438,13 @@ export function withModelEfforts<T extends { models: ReadonlyArray<{ id: string 
     models: catalog.models.map((model) => ({
       ...model,
       thinkingOptions: (efforts[model.id] ?? []).map((value) => ({ id: value, label: value })),
+      // The ACP bridge gives us the effective session choice separately as
+      // `defaultThinkingOption`.  Once each model receives its own option
+      // list, carry that choice onto the matching model or Paseo falls back
+      // to the first option (usually "low") in its composer.
+      ...(catalog.defaultThinkingOption && (efforts[model.id] ?? []).includes(catalog.defaultThinkingOption)
+        ? { defaultThinkingOptionId: catalog.defaultThinkingOption }
+        : {}),
     })),
   };
 }
@@ -484,10 +529,9 @@ export function wrapCortexConnection(
   connection: ProviderConnection,
   offered: readonly string[],
 ): ProviderConnection {
-  // Paseo sends a message typed during a running turn as a "steer"
-  // prompt, which the stock ACP bridge does not support ("Provider does
-  // not support prompt.steer"). Cortex advertises it and refuses each
-  // one (see steerRefusal), so Paseo replaces the running turn itself.
+  // The installed ACP bridge lacks prompt.steer. Carry text through its
+  // concurrent config channel; Cortex durably queues it without cancelling
+  // the running turn or any worker.
   const steer = emulatesSteer(offered, connection.capabilities);
   const capabilities = steer ? [...connection.capabilities, "prompt.steer"] : connection.capabilities;
   const questionActions = new Map<
@@ -498,11 +542,18 @@ export function wrapCortexConnection(
   // Our own configure requests: their completion is ours to await,
   // never Paseo's to see.
   const answerRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+  const steerRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+  const activeTurns = new Map<string, string>();
   connection.onEvent((event) => {
+    if (event.type === "session.turn") {
+      if (event.state === "started") activeTurns.set(event.sessionId, event.turnId);
+      else if (activeTurns.get(event.sessionId) === event.turnId) activeTurns.delete(event.sessionId);
+    }
     if (event.type !== "request.completed" && event.type !== "request.failed") return;
-    const pending = answerRequests.get(event.requestId);
+    const pending = answerRequests.get(event.requestId) ?? steerRequests.get(event.requestId);
     if (!pending) return;
     answerRequests.delete(event.requestId);
+    steerRequests.delete(event.requestId);
     if (event.type === "request.completed") pending.resolve();
     else pending.reject(new Error(event.error.message));
   });
@@ -534,6 +585,53 @@ export function wrapCortexConnection(
     } as ProviderEvent));
     await connection.send({ ...input, response: { behavior: "deny" } });
   }
+  async function sendQueuedSteer(
+    input: Extract<Parameters<typeof connection.send>[0], { type: "session.prompt" }>,
+  ) {
+    const text = steerText(input);
+    const warnWithoutInterrupting = (description: string) => {
+      listeners.forEach((listener) => listener({
+        type: "session.notice", sessionId: input.sessionId,
+        notice: { id: `cortex-steer:${input.prompt.clientMessageId}`,
+          severity: "warning", title: "Steering was not queued", description },
+      }));
+      listeners.forEach((listener) => listener({
+        type: "session.prompt_result", sessionId: input.sessionId,
+        clientMessageId: input.prompt.clientMessageId, result: { type: "completed" },
+      }));
+    };
+    if (text === null) {
+      warnWithoutInterrupting("Only text steering is supported during an active turn. Current work is continuing.");
+      return;
+    }
+    const requestId = `${STEER_REQUEST_PREFIX}${randomUUID()}`;
+    const delivered = new Promise<void>((resolve, reject) => {
+      steerRequests.set(requestId, { resolve, reject });
+    });
+    try {
+      await connection.send({
+        type: "session.configure", requestId, sessionId: input.sessionId,
+        changes: { settings: { [QUEUED_STEER_CONFIG_ID]: JSON.stringify({
+          clientMessageId: input.prompt.clientMessageId, text,
+        }) } },
+      });
+      await delivered;
+      listeners.forEach((listener) => listener({
+        type: "timeline.item", sessionId: input.sessionId,
+        item: { type: "user_message", id: input.prompt.clientMessageId,
+          clientMessageId: input.prompt.clientMessageId, text },
+      }));
+      const turnId = activeTurns.get(input.sessionId);
+      listeners.forEach((listener) => listener({
+        type: "session.prompt_result", sessionId: input.sessionId,
+        clientMessageId: input.prompt.clientMessageId,
+        result: turnId ? { type: "steer", turnId } : { type: "completed" },
+      }));
+    } catch {
+      steerRequests.delete(requestId);
+      warnWithoutInterrupting("Cortex did not confirm durable capture. Current work is continuing; send the instruction again.");
+    }
+  }
   const openedSessions = new Set<string>();
   const bufferedTimeline = new Map<string, ReplaySpool>();
   const listeners = new Set<(event: ProviderEvent) => void>();
@@ -542,10 +640,8 @@ export function wrapCortexConnection(
     ...connection,
     capabilities,
     send(input: Parameters<typeof connection.send>[0]) {
-      const refusal = steer ? steerRefusal(input) : null;
-      if (refusal) {
-        queueMicrotask(() => listeners.forEach((listener) => listener(refusal)));
-        return Promise.resolve() as ReturnType<typeof connection.send>;
+      if (steer && input.type === "session.prompt" && input.prompt.delivery === "steer") {
+        return sendQueuedSteer(input) as ReturnType<typeof connection.send>;
       }
       if (
         input.type === "session.permission" &&
@@ -602,6 +698,8 @@ export function wrapCortexConnection(
       questionActions.clear();
       questionIds.clear();
       answerRequests.clear();
+      steerRequests.clear();
+      activeTurns.clear();
       openedSessions.clear();
       for (const spool of bufferedTimeline.values()) spool.close();
       bufferedTimeline.clear();
@@ -615,7 +713,7 @@ export function wrapCortexConnection(
       unsubscribe ??= connection.onEvent((event) => {
         if (!visibleTimeline(event)) return;
         if ((event.type === "request.completed" || event.type === "request.failed")
-          && event.requestId.startsWith(ANSWER_REQUEST_PREFIX)) return;
+          && (event.requestId.startsWith(ANSWER_REQUEST_PREFIX) || event.requestId.startsWith(STEER_REQUEST_PREFIX))) return;
         if (event.type === "session.opened") {
           openedSessions.add(event.sessionId);
           listener(steer && !event.capabilities.includes("prompt.steer")

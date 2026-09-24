@@ -73,7 +73,7 @@ _PROVIDER_RESTRICTION_MARKERS = (
     "provider_restricted", "provider restricted", "unsupported_region", "not_available_in_region",
 )
 _REFUSAL_MARKERS = ("refusal", "refused_by_model", "content_policy", "safety_refusal")
-_CANCELLATION_MARKERS = ("cancelled", "canceled", "cancellation")
+_CANCELLATION_MARKERS = ("turn_interrupted", "cancelled", "canceled", "cancellation")
 # ACP host-connection-level transport markers -- deliberately excludes
 # "transport_eof"/"eof": this codebase already raises exactly that kind for
 # a *downstream engine's own* transport closing (see

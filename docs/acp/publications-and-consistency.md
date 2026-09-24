@@ -17,7 +17,9 @@ Publication retains exact task/report/attempt identity. Runtime projection can
 recover an interrupted result submission from its durable publication event; absent
 or ambiguous evidence remains unresolved. A result closes a node only when its
 owned report exists, its digest is retained and its declared passing checks refer
-to actual complete successful gateway command receipts. Chat text cannot publish
+to actual complete successful gateway command receipts. A not_run or unverified
+check must include its concrete blocker in the structured result; publication
+and recovery preserve that blocker. Chat text cannot publish
 or accept a task. Review additionally binds the project digest and an explicit
 APPROVE, REQUEST_CHANGES or BLOCK verdict.
 

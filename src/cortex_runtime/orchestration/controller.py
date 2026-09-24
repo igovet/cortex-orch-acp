@@ -139,6 +139,10 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             return StopReason.CANCELLED
         context = machine.context(task_id)
         state = context['state']
+        from .policy import apply_pending_steering
+        if apply_pending_steering(runtime._store, task_id):
+            prompted.clear()
+            continue
         if state == 'ANSWER_READY':
             machine.move(task_id,'COMPLETED')
             from .pipeline import publish
@@ -147,7 +151,8 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             emit_update(context['synthesis'])
             return StopReason.END_TURN
         if state == 'RECOVERING':
-            # Revoke first (policy.steer), terminate second, then accept new plans.
+            # Explicit cancellation/replanning revokes first, then terminates
+            # owned work before accepting a new plan.
             for node in context['nodes']:
                 if node['assignment_ref']:
                     runtime._cancel_assignment(task_id,node['assignment_ref'],'replanning',emit_tool_call=emit_tool_call)
@@ -187,8 +192,12 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                        + (_ask_user_request(context) or _verification_repair_request(context)
                           or _failed_worker_request(context))
                        if state == 'PLANNING' else
-                       'Reconcile the retained results and runtime verification, then submit synthesis. State plainly every not_run or unverified '
-                       'worker check as a gap the user should know about. Runtime decides completion. '
+                       'Reconcile the retained results and runtime verification. Every changed surface must be verified. '
+                       'If a retained not_run or unverified check, or a changed surface nobody verified, can still be verified '
+                       'with the available environment and the user\'s authorizations, submit replan_request to verify it before synthesis. '
+                       'List in synthesis not_verified only what a real blocker makes impossible, each with that blocker; '
+                       'your final message\'s not-verified list must be exactly those items with their blockers, and omit that list when everything was verified. '
+                       'Runtime decides completion. '
                        'If the user must still decide something (approve a proposed plan, choose between fixes, confirm manual steps), '
                        'write the full details as your message and ask with user_question_request instead of submitting synthesis. ')
             delivery_marker=f'runtime-coordinator:{time.monotonic_ns()}'
@@ -301,6 +310,9 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 failure_stop_reason = outcome.stop_reason
                 machine.move(task_id,'BLOCKED',blocker='coordinator_turn_failed:'+outcome.stop_reason.value)
             elif state == 'RECONCILING' and machine.context(task_id)['synthesis']:
+                if apply_pending_steering(runtime._store, task_id):
+                    prompted.clear()
+                    continue
                 with runtime._lock:
                     active = bool(runtime._running.get(task_id))
                 if active:
@@ -353,7 +365,11 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             runtime._process_new_events_safely(task_id, channel, cancel_event, emit_tool_call, phase="scheduler")
             # Project a batch once to lifecycle cards. This is presentation, not decision input.
             marker = f'runtime-controller:{time.monotonic_ns()}'
-            batch = events.claim_unconsumed(runtime._store, task_id, marker)
+            # Keep queued user messages unclaimed until the coordinator's
+            # next planning turn; the scheduler consumes only lifecycle rows.
+            batch = events.claim_unconsumed(
+                runtime._store, task_id, marker, exclude_types=("user_message",),
+            )
             runtime._emit_assignment_tool_calls(task_id, emit_tool_call, batch)
             if batch:
                 events.mark_delivered(runtime._store, task_id, marker)
@@ -464,7 +480,10 @@ def _stop_question(question, context, language):
             result = node['status'] == 'failed' and node['result']
             if not result:
                 continue
-            unpassed = ', '.join(f"{c['name']}: {c['outcome']}" for c in result.get('checks', []) if c.get('outcome') != 'passed')
+            unpassed = ', '.join(
+                f"{c['name']}: {c['outcome']}" + (f" ({c['blocker']})" if c.get('blocker') else '')
+                for c in result.get('checks', []) if c.get('outcome') != 'passed'
+            )
             details += messages.render('worker_failed_details', language, node=node['node_id'], report_ref=result['report_ref'],
                                        summary=result['summary'],
                                        unpassed=f"\n{messages.render('unpassed_checks_label', language)}: {unpassed}" if unpassed else '')
@@ -529,11 +548,10 @@ def _released_request(runtime, task_id):
 
 
 def _pause_turn(runtime,task_id,machine,emit_tool_call):
-    from .policy import steer
+    from .policy import interrupt
     context=machine.context(task_id)
     if context['state'] in {'COMPLETED','FAILED','CANCELLED'}: return
-    steer(runtime._store,task_id,'Turn interrupted; reconcile observed work before continuing.',
-          'cancel:'+str(time.monotonic_ns()))
+    interrupt(runtime._store, task_id)
     for node in context['nodes']:
         if node['assignment_ref'] and node['status']=='running':
             runtime._cancel_assignment(task_id,node['assignment_ref'],'turn_interrupted',emit_tool_call=emit_tool_call)

@@ -31,7 +31,21 @@ export function workerStatusLabel(status: string | null | undefined): string {
   return value || "working";
 }
 
-export type WorkerStatusTone = "active" | "success" | "danger" | "muted";
+export type WorkerStatusTone = "active" | "success" | "warning" | "danger" | "muted";
+export type WorkerCheck = { outcome: string };
+
+/**
+ * One durable projection for every worker terminal surface. Callers supply
+ * the status resolved from the persisted assignment, never Paseo's coarse
+ * host status, plus the runtime's retained checks when they are available.
+ */
+export function workerTerminalState(status: string | null | undefined, checks: readonly WorkerCheck[] = []) {
+  const presentation = workerStatusPresentation(status);
+  const issueCount = presentation.label === "completed with issues"
+    ? checks.filter((check) => check.outcome !== "passed").length
+    : 0;
+  return { ...presentation, issueCount };
+}
 
 /**
  * The at-a-glance treatment for a worker card: the same status word as
@@ -41,7 +55,7 @@ export type WorkerStatusTone = "active" | "success" | "danger" | "muted";
 export function workerStatusPresentation(status: string | null | undefined): { label: string; tone: WorkerStatusTone; icon: string } {
   const label = workerStatusLabel(status);
   if (label === "completed") return { label, tone: "success", icon: "CircleCheck" };
-  if (label === "completed with issues") return { label, tone: "danger", icon: "CircleAlert" };
+  if (label === "completed with issues") return { label, tone: "warning", icon: "CircleAlert" };
   if (label === "failed") return { label, tone: "danger", icon: "CircleAlert" };
   if (label === "cancelled") return { label, tone: "muted", icon: "CircleSlash" };
   return { label, tone: "active", icon: "Loader2" };

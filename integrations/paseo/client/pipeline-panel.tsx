@@ -4,7 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { Animated, Pressable, Text, View, useWindowDimensions } from "react-native";
 import { readPipeline, type Pipeline } from "../shared/pipeline.js";
 import { UsageMeter } from "./usage-meter.tsx";
-import { buildPipeline, type PipelineStep, type StepItem, type StepStatus, type Tone } from "./pipeline-model.ts";
+import { WorkerResultDetail } from "./worker-result.tsx";
+import { buildPipeline, type PipelineStep, type StepStatus, type Tone } from "./pipeline-model.ts";
 
 type Theme = PluginAgentPanelProps["theme"];
 type Props = Pick<PluginAgentPanelProps, "theme" | "workspaceId" | "agentId"> & {
@@ -24,9 +25,9 @@ function toneColor(theme: Theme, tone: Tone): string {
 }
 
 const STATUS_TONE: Record<StepStatus, Tone> = {
-  done: "success", active: "accent", failed: "danger", blocked: "warning", cancelled: "muted", pending: "muted",
+  done: "success", active: "accent", issues: "warning", failed: "danger", blocked: "warning", cancelled: "muted", pending: "muted",
 };
-const STATUS_ICON: Partial<Record<StepStatus, string>> = { done: "Check", failed: "X", blocked: "Pause", cancelled: "Minus" };
+const STATUS_ICON: Partial<Record<StepStatus, string>> = { done: "Check", issues: "CircleAlert", failed: "X", blocked: "Pause", cancelled: "Minus" };
 const KIND_ICON: Record<PipelineStep["kind"], string> = { request: "MessageSquare", plan: "ListChecks", worker: "Bot", finish: "Flag" };
 
 /** A soft breathing loop for whatever is happening right now. */
@@ -73,28 +74,13 @@ function Badge({ text, tone, theme }: { text: string; tone: Tone; theme: Theme }
   </View>;
 }
 
-function Checklist({ items, theme }: { items: StepItem[]; theme: Theme }) {
-  return <View style={{ gap: 5, marginTop: 2 }}>
-    {items.map((item, index) => {
-      const color = item.status === "done" ? theme.colors.statusSuccess : item.status === "failed" ? theme.colors.statusDanger : theme.colors.foregroundMuted;
-      return <View key={index} style={{ flexDirection: "row", gap: 7, alignItems: "flex-start" }}>
-        <View style={{ marginTop: 2 }}>
-          <Icon name={item.status === "done" ? "CircleCheck" : item.status === "failed" ? "CircleX" : "Circle"} size={13} color={color} />
-        </View>
-        <Text style={{ flex: 1, color: item.status === "open" ? theme.colors.foregroundMuted : theme.colors.foreground, fontSize: 12, lineHeight: 17 }}>{item.text}</Text>
-      </View>;
-    })}
-  </View>;
-}
-
 function Step({ step, index, last, nextDone, theme, onOpenWorker }: {
   step: PipelineStep; index: number; last: boolean; nextDone: boolean; theme: Theme; onOpenWorker(ref: string): void;
 }) {
-  const [expanded, setExpanded] = useState(step.status === "active" || step.status === "blocked" || step.status === "failed");
+  // Pipeline detail is opt-in for every state; the list never opens cards itself.
+  const [expanded, setExpanded] = useState(false);
   const muted = step.status === "pending" || step.status === "cancelled";
   const hasDetail = Boolean(step.body || step.items.length || step.followUps?.length);
-  // The rail between two finished steps is drawn in the success colour so
-  // completed progress reads as one continuous line.
   const railColor = step.status === "done" && nextDone ? theme.colors.statusSuccess : theme.colors.border;
   return <View style={{ flexDirection: "row", gap: 12 }}>
     <View style={{ alignItems: "center", width: NODE }}>
@@ -125,8 +111,7 @@ function Step({ step, index, last, nextDone, theme, onOpenWorker }: {
       </View>}
       {expanded && hasDetail && <View style={{ marginTop: 8, gap: 8, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8,
         backgroundColor: theme.colors.surface1, padding: 10 }}>
-        {step.body ? <Text selectable style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}>{step.body}</Text> : null}
-        {step.items.length > 0 && <Checklist items={step.items} theme={theme} />}
+        <WorkerResultDetail body={step.body} items={step.items} theme={theme} />
         {step.followUps?.map((text, i) => <View key={i} style={{ borderLeftWidth: 2, borderColor: theme.colors.accent, paddingLeft: 8 }}>
           <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, fontWeight: "600", marginBottom: 2 }}>Follow-up {i + 1}</Text>
           <Text selectable style={{ color: theme.colors.foreground, fontSize: 12, lineHeight: 18 }}>{text}</Text>
@@ -142,7 +127,6 @@ function Step({ step, index, last, nextDone, theme, onOpenWorker }: {
 export function PipelinePanel({ theme, workspaceId, agentId, onOpenWorker, popover = false }: Props) {
   const rpc = useRpc(readPipeline);
   const { height } = useWindowDimensions();
-  // A popover has no height of its own to fill: bound it and let it scroll.
   const frame = popover
     ? { flexGrow: 0, maxHeight: Math.round(height * 0.7), marginHorizontal: -12, backgroundColor: theme.colors.surface1 }
     : { flex: 1, backgroundColor: theme.colors.surface0 };
