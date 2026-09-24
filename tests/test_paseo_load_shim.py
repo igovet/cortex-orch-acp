@@ -29,6 +29,7 @@ for line in sys.stdin:
         encoding="utf-8",
     )
     env = dict(os.environ)
+    env.pop("CORTEX_REPLAY_ACK", None)
     env["CORTEX_ACP_TARGET"] = json.dumps({"argv": [sys.executable, str(agent)]})
     process = subprocess.Popen(
         ["node", str(SHIM)],
