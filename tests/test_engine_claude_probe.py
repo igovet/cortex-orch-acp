@@ -77,7 +77,7 @@ def test_plan_mode_states_the_instruction_delivery_status_first(tmp_path):
     assert result.returncode == 0
     assert "0. STATUS" in result.stdout
     assert "QUALIFIED" in result.stdout
-    assert "T035/T036" in result.stdout
+    assert "does not establish GUI behavior" in result.stdout
 
 
 def test_plan_mode_takes_precedence_over_missing_required_args(tmp_path):

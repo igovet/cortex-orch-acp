@@ -49,9 +49,11 @@ and ran a `prepare_codex.py` that no longer exists), `cortex-live-capture-sink`
 (its only caller), and `cortex_dev_config.py` (its `mcp_servers`/isolated-profile
 opt-in was reachable only through `cortex-dev`). The old `cortex-desktop-dev`
 and `cortex-live-smoke` launchers and their observer-only tests were removed in
-the ACP cleanup. Real-client
-qualification is defined by the ACP runbook and retains real client
-observations; no retired native CLI/Desktop harness is a current reference.
+the ACP cleanup. Client registration and setup are verified through
+[zed-custom-agent.md](zed-custom-agent.md) and
+[codeg-custom-agent.md](codeg-custom-agent.md); any retained evidence lives
+under `docs/acp/evidence/`. No retired native CLI/Desktop harness is a
+current reference.
 
 ### Launch-time environment variables
 
@@ -356,8 +358,7 @@ project intended for the qualification run.
 [registry-metadata-draft.md](registry-metadata-draft.md) (T011) is
 explicitly **not submitted or published**; Custom Agent installation
 (above) works with no Registry dependency at all — see
-[real-client-runbook.md](real-client-runbook.md) for the still-NOT-RUN
-live client rows owned by T035.
+the client setup guide for client-specific registration details.
 
 ### Paseo update and existing MCP registries
 

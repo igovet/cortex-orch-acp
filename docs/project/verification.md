@@ -108,9 +108,7 @@ scripts/cortex_claude_probe.py --i-authorize-paid-call --approval-ref owner-stan
 ```
 
 This approval does not make paid probes part of pytest: the default automated
-suite remains no-paid. A probe or GUI observation only supports the exact
-surface it exercises; it cannot substitute for unrelated live acceptance
-cases or mark unobserved real-client runbook rows passed.
+suite remains no-paid. A probe or GUI observation supports only the exact surface it exercises.
 
 `scripts/cortex_acp_smoke.py` is the no-paid startup smoke harness
 (schema-validated launch/protocol surface only, not GUI evidence).
@@ -182,20 +180,4 @@ in repository documents or reports.
 
 ## What automated evidence cannot close
 
-Of 69 mandatory acceptance cases, 45 require live evidence from real ACP
-clients and real engines (`docs/acp/test-matrix-and-ci.md`): client
-experience (UI-01…UI-11), engine execution (EX-01…EX-07, EX-10), recovery and
-context (RC-01…RC-12), security (SEC-01…SEC-05), protocol dialogue (PR-08),
-deployment (DEP-01), and qualification (QUAL-02…QUAL-08). Live-client
-qualification uses the manual observation table in
-`docs/acp/real-client-runbook.md` (Zed now; codeg deferred). As of this
-writing every row in that runbook is **NOT RUN**; no passing offline test
-changes a NOT RUN real-client row into a pass, and this document does not
-claim otherwise.
-
-Real-client qualification, when it runs, uses a throwaway Zed profile with
-isolated Zed `HOME`/XDG directories and a separate disposable project; Codex
-and Claude use the user's existing native accounts (only the test Zed's
-Cortex agent entry overrides its child process's `HOME`). Default live/test
-model policy is `gpt-5.6-luna` at medium/high effort; heavy models are
-prohibited in routine live qualification.
+The no-paid automated suite cannot reach a paid engine and does not establish rendered GUI behavior. Use isolated dev Paseo for applicable live checks. Each probe or GUI observation supports only the exact surface exercised.

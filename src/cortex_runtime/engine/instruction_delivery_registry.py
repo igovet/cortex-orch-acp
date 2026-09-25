@@ -125,7 +125,7 @@ class ClaudeAgentAcp0_78Delivery:
     registry classification with no runtime effect.
 
     Still not "live-executed": no real turn has run through this channel
-    (see T035/T036's mandatory live gate); a live run could in principle
+    (as documented by the adapter's installed capability evidence); a live run could in principle
     still reveal a downstream drop/override this static reading cannot
     see. That is exactly why the enum's own QUALIFIED definition allows "a
     confirmed system-role channel" as sufficient basis (not literally

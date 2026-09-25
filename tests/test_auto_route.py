@@ -118,7 +118,12 @@ ALL = ("low", "medium", "high", "xhigh", "max", "ultra")
 
 def test_ultra_is_never_permitted_and_max_only_on_a_light_model():
     assert auto_route.permitted_efforts(_entry("codex", "terra", ALL), "standard") == ("low", "medium", "high", "xhigh")
-    assert auto_route.permitted_efforts(_entry("codex", "luna", ALL), "light") == ("low", "medium", "high", "xhigh", "max")
+    assert auto_route.permitted_efforts(_entry("codex", "alpha", ALL), "light") == ("low", "medium", "high", "xhigh", "max")
+    # Luna: never below high, and max even when a tiers override moves it.
+    assert auto_route.permitted_efforts(_entry("codex", "gpt-6-luna", ALL), "light") == ("high", "xhigh", "max")
+    assert auto_route.permitted_efforts(_entry("codex", "gpt-6-luna", ALL), "standard") == ("high", "xhigh", "max")
+    # A Luna that offers nothing at or above the floor keeps what it offers.
+    assert auto_route.permitted_efforts(_entry("codex", "gpt-6-luna", ("low", "medium")), "light") == ("low", "medium")
 
 
 def test_flagship_models_never_go_above_high():
@@ -353,7 +358,7 @@ def test_plan_usage_decides_between_suitable_engines_before_affinity():
     assert auto_route.USAGE_MARGIN == 10.0
     picked, decision = _rank("standard", "worker-backend-dev", codex=30, claude=10)
     assert picked.route.model == "sonnet" and decision["decided_by"] == "usage"
-    assert decision["rank_version"] == 4
+    assert decision["rank_version"] == 5
     assert decision["usage"] == dict(compared=True, margin=10.0, least_used_percent=10)
     assert {c["route"]: c["usage_band"] for c in decision["candidates"]} == {
         "claude-agent-acp/sonnet": 0, "codex-acp/gpt-5.6-sol": 2, "codex-acp/gpt-5.6-terra": 2}
@@ -452,7 +457,8 @@ def test_escalated_explorer_raises_effort_without_raising_tier(tmp_path, monkeyp
     project = tmp_path / "project"
     (project / ".cortex").mkdir(parents=True)
     environ = {"HOME": str(tmp_path)}
-    entry = _entry("codex", "gpt-5.6-luna")
+    # A light model that is not Luna (Luna has its own effort steps).
+    entry = _entry("codex", "gpt-5.5")
     monkeypatch.setattr(registry, "read_registry", lambda _: SimpleNamespace(
         connections={"codex": SimpleNamespace(launch_command=("codex",))}))
     monkeypatch.setattr(auto_route, "_entries", lambda *_: [entry])
@@ -815,8 +821,9 @@ def test_no_task_is_promoted_above_its_tier_while_the_tier_has_a_usable_model():
 def test_light_work_runs_on_the_light_model_at_the_light_effort(tmp_path, monkeypatch):
     project, environ = _live_choose(monkeypatch, tmp_path, LIVE_CODEX + LIVE_CLAUDE)
     choice = auto_route.choose("worker-technical-writer", project, environ)
-    assert (choice.model, choice.effort) == ("gpt-6-luna", "low")
-    assert choice.decision["effort_basis"] == "role_tier:light"
+    # Luna never runs below high (its light-work effort).
+    assert (choice.model, choice.effort) == ("gpt-6-luna", "high")
+    assert choice.decision["effort_basis"] == "luna:light"
     assert choice.decision["tier"] == "light" and choice.decision["decided_by"] == "only_candidate"
     # Allowing Haiku is the owner's lever for Claude on light work.
     haiku = _named("claude", "claude-haiku-4-5-20251001", "Haiku 4.5")
@@ -881,3 +888,171 @@ def test_decided_by_names_the_first_separating_key(kwargs, expected):
     assert decision["decided_by"] == expected
     _, decision = auto_route.rank("standard", [CODEX[4]], usage, **kwargs)
     assert decision["decided_by"] == "only_candidate"
+
+
+# --- the Codex Luna line ------------------------------------------------------
+
+def _all_efforts(entries):
+    for entry in entries:
+        entry.route.supported_parameters = tuple(("thought_level", e) for e in ALL)
+    return entries
+
+
+def _live_all(monkeypatch, tmp_path, routing=None, codex=None, claude=None):
+    entries = _all_efforts([_named("codex", e.route.model) for e in LIVE_CODEX]
+                           + [_named("claude", e.route.model, e.model_name) for e in LIVE_CLAUDE])
+    project, environ = _live_choose(monkeypatch, tmp_path, entries, routing)
+    monkeypatch.setattr(quota, "used_percent", lambda record, *_: (
+        codex if record.launch_command == ("codex",) else claude))
+    return project, environ
+
+
+def test_luna_effort_steps_with_the_work_and_never_goes_below_high():
+    assert auto_route.LUNA_EFFORT_FLOOR == "high"
+    assert auto_route.luna_effort("light") == "high"
+    assert auto_route.luna_effort("light", escalate=True) == "xhigh"
+    assert auto_route.luna_effort("standard") == "xhigh"
+    assert auto_route.luna_effort("standard", escalate=True) == "max"
+    assert auto_route.is_luna("gpt-6-luna") and auto_route.is_luna("gpt-7-luna")
+    assert not auto_route.is_luna("gpt-5.6-terra")
+
+
+def test_light_work_runs_luna_at_high(tmp_path, monkeypatch):
+    project, environ = _live_all(monkeypatch, tmp_path)
+    for role, complexity in (("worker-technical-writer", "normal"), ("worker-backend-dev", "low"),
+                             ("worker-explorer", "high")):
+        choice = auto_route.choose(role, project, environ, complexity=complexity)
+        assert (choice.model, choice.effort) == ("gpt-6-luna", "high"), role
+        assert choice.decision["luna"]["status"] == "light_tier"
+    # A pin to Luna at low is raised to the floor, not honoured below it.
+    project, environ = _live_all(monkeypatch, tmp_path, {"pin": {"*": "codex-acp/gpt-6-luna:low"}})
+    choice = auto_route.choose("worker-backend-dev", project, environ)
+    assert (choice.model, choice.effort) == ("gpt-6-luna", "high")
+    assert choice.decision["luna"] == dict(status="pinned", chosen=True)
+    # A worker's requested effort is clamped the same way at dispatch.
+    assert auto_route.allowed_efforts("codex-acp", "gpt-6-luna", project, environ) == ("high", "xhigh", "max")
+
+
+def test_normal_development_ranks_luna_with_the_standard_models(tmp_path, monkeypatch):
+    project, environ = _live_all(monkeypatch, tmp_path)
+    choice = auto_route.choose("worker-backend-dev", project, environ)
+    decision = choice.decision
+    assert decision["tier"] == "standard" and decision["role_tier"] == "standard"
+    assert {c["route"] for c in decision["candidates"]} == {
+        "codex-acp/gpt-6-luna", "codex-acp/gpt-5.6-terra", "claude-agent-acp/claude-sonnet-5"}
+    # Same Codex plan and affinity: Codex's own list order (newest
+    # generation first) puts gpt-6-luna ahead of the older gpt-5.6-terra.
+    assert (choice.model, choice.effort) == ("gpt-6-luna", "xhigh")
+    assert decision["effort_basis"] == "luna:standard"
+    assert decision["luna"] == dict(status="standard_candidate", candidate=True, chosen=True, outranked_by=None)
+    # The rank still decides: a hot Codex plan sends the work to Sonnet.
+    project, environ = _live_all(monkeypatch, tmp_path, codex=90.0, claude=10.0)
+    choice = auto_route.choose("worker-backend-dev", project, environ)
+    assert choice.model == "claude-sonnet-5" and choice.effort == "medium"
+    assert choice.decision["luna"] == dict(status="standard_candidate", candidate=True, chosen=False,
+                                           outranked_by="quota")
+    # A coordinator hint picks either standard model; a Luna hint is not a tier mismatch.
+    project, environ = _live_all(monkeypatch, tmp_path)
+    choice = auto_route.choose("worker-backend-dev", project, environ, model_hint="codex-acp/gpt-5.6-terra",
+                               model_reason="Terra for this module.")
+    assert choice.model == "gpt-5.6-terra" and choice.decision["luna"]["outranked_by"] == "hint"
+    choice = auto_route.choose("worker-debugger", project, environ, model_hint="codex-acp/gpt-6-luna",
+                               model_reason="Cheap and strong enough.")
+    assert choice.decision["model_hint_status"] == "honoured"
+    assert (choice.model, choice.effort) == ("gpt-6-luna", "xhigh")
+
+
+@pytest.mark.parametrize("complexity", ["low", "normal"])
+def test_escalated_standard_development_runs_luna_at_max(tmp_path, monkeypatch, complexity):
+    project, environ = _live_all(monkeypatch, tmp_path)
+    choice = auto_route.choose("worker-backend-dev", project, environ, complexity=complexity, escalate=True)
+    assert choice.decision["base_role_tier"] == ("light" if complexity == "low" else "standard")
+    assert choice.decision["role_tier"] == "standard"
+    assert choice.decision["luna"]["candidate"] is True
+    assert (choice.model, choice.effort) == ("gpt-6-luna", "max")
+    assert choice.decision["effort_basis"] == "luna:standard:escalated"
+    # Escalated light work stays light: one Luna step up.
+    choice = auto_route.choose("worker-explorer", project, environ, escalate=True)
+    assert (choice.model, choice.effort) == ("gpt-6-luna", "xhigh")
+
+
+@pytest.mark.parametrize("role,kwargs,status", [
+    ("worker-backend-dev", dict(complexity="high"), "excluded:complexity_high"),
+    ("worker-planner", dict(complexity="high"), "excluded:complexity_high"),
+    ("worker-backend-dev", dict(complexity="high", escalate=True), "excluded:complexity_high"),
+    ("worker-code-reviewer", dict(escalate=True), "excluded:deep_work"),
+    ("worker-architect", dict(complexity="low", escalate=True), "excluded:deep_work"),
+    ("worker-architect", dict(complexity="low"), "excluded:deep_role"),
+    ("worker-security-auditor", dict(escalate=True), "excluded:flagship_work"),
+    ("worker-architect", dict(), "excluded:deep_work"),
+])
+def test_hard_deep_and_flagship_work_never_goes_to_luna(tmp_path, monkeypatch, role, kwargs, status):
+    project, environ = _live_all(monkeypatch, tmp_path)
+    choice = auto_route.choose(role, project, environ, **kwargs)
+    assert not auto_route.is_luna(choice.model)
+    assert choice.decision["luna"]["status"] == status
+    assert all("luna" not in c["route"] for c in choice.decision["candidates"])
+    # Not even as the last fallback: with only Luna left, the work is refused.
+    luna_only = _all_efforts([_named("codex", "gpt-6-luna")])
+    project, environ = _live_choose(monkeypatch, tmp_path, luna_only)
+    with pytest.raises(PortableError) as refused:
+        auto_route.choose(role, project, environ, **kwargs)
+    assert refused.value.code == "no_available_route"
+    assert "Luna is not used for this work" in refused.value.remediation
+
+
+def test_standard_work_that_is_not_development_is_not_a_luna_candidate(tmp_path, monkeypatch):
+    project, environ = _live_all(monkeypatch, tmp_path)
+    for role, kwargs in (("worker-ux-designer", {}), ("worker-technical-writer", dict(escalate=True))):
+        choice = auto_route.choose(role, project, environ, **kwargs)
+        assert choice.decision["tier"] == "standard"
+        assert choice.decision["luna"]["status"].startswith("not_candidate:work_kind_")
+        assert choice.decision["luna"]["candidate"] is False
+        assert not auto_route.is_luna(choice.model)
+
+
+def test_route_menu_and_hint_preview_describe_the_luna_rule(tmp_path, monkeypatch):
+    project, environ = _live_all(monkeypatch, tmp_path)
+    menu = auto_route.route_menu(project, environ)
+    luna = next(item for item in menu["tiers"]["light"] if item["model"] == "gpt-6-luna")
+    assert luna["efforts"] == ["high", "xhigh", "max"]
+    assert menu["luna"]["efforts"] == dict(light="high", standard="xhigh", standard_escalated="max")
+    assert "worker-backend-dev" in menu["luna"]["standard_candidate_roles"]
+    assert "worker-architect" not in menu["luna"]["standard_candidate_roles"]
+    assert "worker-ux-designer" not in menu["luna"]["standard_candidate_roles"]
+    assert auto_route.hint_serves_tier("gpt-6-luna", "light", "worker-backend-dev", "standard")
+    assert not auto_route.hint_serves_tier("gpt-6-luna", "light", "worker-backend-dev", "deep", "high")
+    assert not auto_route.hint_serves_tier("gpt-6-luna", "light", "worker-ux-designer", "standard")
+    assert not auto_route.hint_serves_tier("gpt-5.6-terra", "standard", "worker-backend-dev", "light", "low")
+
+
+@pytest.mark.parametrize("previous_engine,codex,claude,reason", [
+    ("codex-acp", 20.0, 20.0, "diversify"),
+    ("claude-agent-acp", 90.0, 20.0, "quota"),
+])
+def test_standard_retry_can_choose_claude_over_luna(tmp_path, monkeypatch, previous_engine, codex, claude, reason):
+    project, environ = _live_all(monkeypatch, tmp_path, codex=codex, claude=claude)
+    choice = auto_route.choose("worker-backend-dev", project, environ, escalate=True,
+                               previous_engine=previous_engine, model_hint="codex-acp/gpt-6-luna")
+    assert (choice.model, choice.effort) == ("claude-sonnet-5", "high")
+    assert choice.decision["model_hint_status"] == "ignored:escalated"
+    assert choice.decision["luna"] == dict(status="standard_candidate", candidate=True,
+                                          chosen=False, outranked_by=reason)
+
+
+def test_standard_retry_falls_back_when_no_standard_or_luna_route_is_usable(tmp_path, monkeypatch):
+    project, environ = _live_all(monkeypatch, tmp_path, {
+        "deny": ["luna", "terra", "sonnet", "gpt-5.6-sol"]})
+    choice = auto_route.choose("worker-backend-dev", project, environ, escalate=True)
+    assert choice.decision["base_role_tier"] == choice.decision["role_tier"] == "standard"
+    assert choice.decision["tier"] == "deep"
+    assert not auto_route.is_luna(choice.model)
+    assert choice.effort == "high"
+
+
+@pytest.mark.parametrize("suffix,effort", [("", "high"), (":medium", "medium")])
+def test_standard_retry_preserves_non_luna_pin_effort(tmp_path, monkeypatch, suffix, effort):
+    project, environ = _live_all(monkeypatch, tmp_path, {
+        "pin": {"worker-backend-dev": "claude-agent-acp/claude-sonnet-5" + suffix}})
+    choice = auto_route.choose("worker-backend-dev", project, environ, escalate=True)
+    assert (choice.model, choice.effort, choice.basis) == ("claude-sonnet-5", effort, "auto:pin")

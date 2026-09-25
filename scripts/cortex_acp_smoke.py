@@ -43,12 +43,7 @@ anything about pre-``sys.stdout = sys.stderr`` redirect output (see
 line -- which would land on the real stdout, ahead of the first protocol
 frame -- is not something this harness can distinguish from a client
 itself misbehaving, because by the time this harness's own reader thread
-starts consuming stdout, the write already happened. A real client's own
-stdout parsing during T035 GUI qualification, or a manual
-``python3 -B src/cortex_acp.py < /dev/null | head -c 200
-| xxd`` byte-level check, remains the authoritative check for this
-specific failure mode; see ``docs/acp/real-client-runbook.md``'s
-stdout-clean-verification row.
+starts consuming stdout, the write already happened. A direct byte-level stdout check is needed to verify this specific failure mode; this smoke harness does not make that claim.
 """
 from __future__ import annotations
 

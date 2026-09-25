@@ -45,6 +45,5 @@ State, graph and events survive process loss. Retry requires observed engine
 absence and no uncertain action receipt. Review binds the project digest from
 dispatch through verdict publication, verification and completion; a
 `REVIEW_NOT_REQUIRED` record binds its observed digest the same way. See
-[qualification status](runtime-rewrite-status.md) for the distinction between
-automated recovery tests and real-client observations.
+[qualification status](runtime-rewrite-status.md) for automated recovery test coverage.
 No unsupported reconnect or absent observation is treated as successful recovery.

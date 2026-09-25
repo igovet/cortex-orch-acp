@@ -470,7 +470,7 @@ class TaskMachine:
         digest = hashlib.sha256(encoded(plan).encode()).hexdigest()
         # Exact model labels must be in the currently confirmed, policy-allowed
         # menu. Engine hints and auto do not require a catalog at plan time.
-        from ..routing.auto_route import route_menu, tier_for
+        from ..routing.auto_route import hint_serves_tier, route_menu, tier_for
         exact_hints = [n['model'] for n in plan['tasks'] if '/' in n.get('model', '')]
         if exact_hints:
             menu = route_menu(self.store.project_root)
@@ -483,9 +483,13 @@ class TaskMachine:
                          tier_now=tier_for(resolve_role(n['role']), complexity=n.get('complexity', 'normal')),
                          preview_status=('auto' if n.get('model', 'auto') == 'auto' else
                                          'ignored:tier_mismatch' if '/' in n.get('model', '')
-                                         and next((tier for tier, group in menu['tiers'].items()
-                                                   if any(item['route'] == n['model'] for item in group)), None)
-                                         != tier_for(resolve_role(n['role']), complexity=n.get('complexity', 'normal'))
+                                         and not hint_serves_tier(
+                                             n['model'].partition('/')[2],
+                                             next((tier for tier, group in menu['tiers'].items()
+                                                   if any(item['route'] == n['model'] for item in group)), None),
+                                             resolve_role(n['role']),
+                                             tier_for(resolve_role(n['role']), complexity=n.get('complexity', 'normal')),
+                                             n.get('complexity', 'normal'))
                                          else 'pending_dispatch'))
                     for n in plan['tasks']]
         with self.store.connection() as db:

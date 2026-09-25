@@ -53,5 +53,5 @@ models remain prohibited in routine live qualification. This standing approval
 authorizes the paid probe flags with approval reference
 `owner-standing-2026-09-24`; the probe scripts still enforce both
 `--i-authorize-paid-call` and `--approval-ref`. The default automated pytest
-suite remains no-paid. This decision does not change evidence rules: no
-unobserved real-client runbook row may be marked passed.
+suite remains no-paid. General evidence rules still apply: never mark an
+unobserved check as passed.

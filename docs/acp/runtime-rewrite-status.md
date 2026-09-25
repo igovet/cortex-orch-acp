@@ -68,10 +68,7 @@ reached runtime COMPLETED with mandatory code review and three passing tests. Cl
 also retained a blocked attempt and required steering/replanning within its second
 task; those failures are not erased. See the [exact live observations and limitations](evidence/paseo-2026-09-21/runtime-rewrite.md).
 
-The campaign does not qualify every live-only matrix case or Zed/codeg. No absent
-signal is counted as a pass. The [runbook](real-client-runbook.md) remains the manual
-authority for outstanding observations; this is not an immutable release-artifact
-certification. See [test matrix](test-matrix-and-ci.md).
+The automated suite and isolated dev Paseo observations cover only the surfaces they exercise. Missing evidence is not treated as a pass. See [test matrix](test-matrix-and-ci.md) for automated coverage.
 
 ## Production MCP update follow-up
 

@@ -1,20 +1,13 @@
-# Automated test matrix, CI commands and the live-test queue
+# Automated test matrix and CI commands
 
-Written at T034. This page states how the mandatory automated matrix is run,
-what guarantees a default run cannot spend money, and which acceptance cases
-automated evidence deliberately cannot close.
+This page documents the no-paid automated suite and its limits. Applicable paid live checks use the isolated dev Paseo environment documented separately.
 
 Current candidate coverage includes deterministic DAG scheduling, authenticated
 file/command/external MCP gateways, mandatory review, exact revision verification,
 steering, bounded recovery and unfiltered transcript replay. Authorized real Codex Luna and Claude Haiku tasks ran through isolated Paseo;
 see the [retained observations](evidence/paseo-2026-09-21/runtime-rewrite.md).
 The standalone paid probe scripts were not used in this campaign. See [current results](runtime-rewrite-status.md).
-No passing offline test changes a NOT RUN real-client row into a pass.
-The broker suite forces a random token whose first byte is `-`, then checks
-that the actual stdio relay still connects and advertises tools. It also
-checks an MCP child that exits before `tools/list` and the prompt-level error
-classification. Those no-paid checks cannot establish a real client's MCP
-availability; its actual first prompt remains a live observation.
+The broker suite forces a random token whose first byte is `-`, then checks that the stdio relay still connects and advertises tools. It also checks an MCP child that exits before `tools/list` and prompt-level error classification. These tests cover the runtime broker behavior exercised by the fixtures.
 
 ## The non-paid default command
 
@@ -72,23 +65,3 @@ non-root user. The suite otherwise has no skips: as of T034 it is
 Remaining conditional guards are platform guards (POSIX FIFO support,
 symlink support, `tmux` presence) whose logic is also covered by unconditional
 tests; they are not the sole coverage of any mandatory case.
-
-## What automated evidence cannot close
-
-Of the 69 mandatory acceptance cases, **45 require live evidence** —
-observations from real clients and real engines that no fixture may stand in
-for. Automated coverage for these rows is contract evidence only and is never
-to be recorded as satisfying them.
-
-| Group | Cases | Owning tasks |
-| --- | --- | --- |
-| Client experience (UI) | UI-01 … UI-11 | T035 |
-| Engine execution (EX) | EX-01 … EX-07, EX-10 | T035, T036 |
-| Recovery and context (RC) | RC-01 … RC-12 | T037 |
-| Security (SEC) | SEC-01 … SEC-05 | T035, T036 |
-| Protocol dialogue | PR-08 | T036 |
-| Deployment | DEP-01 | T035 |
-| Qualification | QUAL-02 … QUAL-08 | T037, T038 |
-
-A fixture-driven fault injection stays fixture evidence even when it runs
-inside a live campaign. An unrun live case is never labelled passed.

@@ -28,6 +28,5 @@ reference `owner-standing-2026-09-24`.
 While reconciling, use replan_request to close every verification gap that can
 be resolved in the authorized environment. List a check as not verified only
 when a concrete blocker prevents it; name that blocker in the structured result
-and synthesis. Keep every real-client observation bound to exact, complete,
-non-replayed evidence; never infer a pass or convert an unobserved runbook row.
+and synthesis. Bind each observation to exact, complete, non-replayed evidence; never infer a pass from missing evidence.
 When all checks are verified, the final message has no not-verified list.

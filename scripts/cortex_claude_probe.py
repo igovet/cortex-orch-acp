@@ -13,7 +13,7 @@ import argparse
 import sys
 
 _PLAN_STEPS = (
-    "0. STATUS: instruction delivery for pinned 0.78.0 is QUALIFIED from installed evidence; T035/T036 real-client observations are separate and unrun for this rewrite.",
+    "0. STATUS: instruction delivery for pinned 0.78.0 is QUALIFIED from installed evidence; this probe does not establish GUI behavior or full orchestration.",
     "1. Read --install-record and verify_install() the exact ClaudeAcpInstall bytes.",
     "2. Read the existing claude-agent-acp connection and cached ExecutionRoute; do not create accounts or copy credentials.",
     "3. Create a disposable temporary workspace outside the checkout.",

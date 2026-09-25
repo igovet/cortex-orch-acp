@@ -13,8 +13,8 @@ research against `docs.codeg.app/guide/custom-agents`, not independently
 re-verified by this task). Whether any of those channels — or a separate,
 undocumented one — accepts an arbitrary already-installed local command
 (the same `python3 -B <abs>/cortex_acp.py` launch Zed's custom agent uses)
-is **UNKNOWN** and is not assumed here. This must be determined by an
-actual GUI check in T035 (see the runbook), not guessed.
+is **UNKNOWN** and is not assumed here. Confirm this against the installed
+client before relying on a local-command setup.
 
 Candidate approaches, explicitly marked unverified:
 
@@ -51,10 +51,9 @@ inert metadata.
 
 codeg has a built-in Tauri auto-updater (observed upstream URL pattern
 `https://github.com/xintaofei/codeg/releases/latest/download/latest.json`
-— see ADR-001a). Any real qualification run (T035) must record the exact
-installed codeg version at the time of the run (`dpkg -s codeg` or the
-in-app "About" version), since an auto-update between runs invalidates
-prior capability observations.
+— see ADR-001a). When recording a codeg capability observation, include the
+exact installed version (`dpkg -s codeg` or the in-app "About" version),
+since an auto-update between observations invalidates prior results.
 
 ## fs write roots / other open gaps
 
@@ -62,7 +61,7 @@ codeg restricts filesystem write roots (workspace, tmp, plus
 `CODEG_ACP_FS_EXTRA_ROOTS`); Cortex's agent never issues an `fs/*`
 client-request in this release (`agentCapabilities` advertises no such
 need), so this does not currently affect Cortex, but is recorded here per
-ADR-001a for T035's awareness.
+ADR-001a as an open compatibility detail.
 
 ## This task's scope
 
@@ -70,5 +69,4 @@ This task prepares the recipe/candidates and the shared no-paid smoke
 harness (client-agnostic: `scripts/cortex_acp_smoke.py` exercises the same
 `cortex_acp.py` entry point codeg or Zed would launch). It does **not**
 claim codeg custom-agent registration has been performed or verified — see
-[real-client-runbook.md](real-client-runbook.md), whose codeg rows are all
-`NOT RUN`, owner T035.
+the ACP adapter documentation for current integration behavior.

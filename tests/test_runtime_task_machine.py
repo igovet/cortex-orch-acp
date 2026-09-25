@@ -809,6 +809,21 @@ def test_exact_model_hint_requires_live_menu_and_reports_tier_mismatch(machine, 
         'tier_now': 'standard', 'preview_status': 'ignored:tier_mismatch'}]
 
 
+def test_a_luna_hint_on_standard_development_work_is_not_a_tier_mismatch(machine, monkeypatch):
+    from cortex_runtime.routing import auto_route
+    state, channel = machine
+    proposal = plan(2)
+    for node in proposal['tasks']:
+        node.update(model='codex-acp/gpt-6-luna', model_reason='Cheap and strong enough.')
+    proposal['tasks'][1]['complexity'] = 'high'
+    monkeypatch.setattr(auto_route, 'route_menu', lambda *_: {
+        'tiers': {'flagship': [], 'deep': [], 'standard': [],
+                  'light': [{'route': 'codex-acp/gpt-6-luna'}]}})
+    receipt = state.submit_plan(channel, proposal, 'luna-preview')
+    assert [(hint['tier_now'], hint['preview_status']) for hint in receipt['model_hints']] == [
+        ('standard', 'pending_dispatch'), ('deep', 'ignored:tier_mismatch')]
+
+
 def test_unknown_exact_model_and_missing_reason_are_rejected(machine, monkeypatch):
     from cortex_runtime.routing import auto_route
     state, channel = machine

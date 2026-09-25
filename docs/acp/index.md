@@ -11,11 +11,10 @@ Cortex is an incoming ACP v1 stdio agent at `src/cortex_acp.py`. It runs its own
 - [Isolated dev Paseo environment and plugin safety](dev-paseo-environment.md)
 - [Google Drive and Docs MCP setup](google-drive-mcp.md)
 - [Figma MCP setup](figma-mcp.md)
-- [No-paid test matrix and live-only cases](test-matrix-and-ci.md)
-- [Real-client runbook](real-client-runbook.md)
+- [Automated test matrix and CI](test-matrix-and-ci.md)
 - [Registry metadata draft](registry-metadata-draft.md) — not submitted
 
-The no-paid startup smoke in `scripts/cortex_acp_smoke.py` launches the production entry point in an isolated temporary project and host configuration. It checks ACP framing and schema without an engine call. The Zed setup helper in `scripts/cortex_acp_client_config.py` defaults to a dry run and requires explicit consent for a write. Neither substitutes for real-client qualification.
+The no-paid startup smoke in `scripts/cortex_acp_smoke.py` launches the production entry point in an isolated temporary project and host configuration. It checks ACP framing and schema without an engine call. The Zed setup helper in `scripts/cortex_acp_client_config.py` defaults to a dry run and requires explicit consent for a write.
 
 ## Orchestration and state
 
@@ -43,4 +42,4 @@ The no-paid startup smoke in `scripts/cortex_acp_smoke.py` launches the producti
 - [Permissions and containment](permissions-and-containment.md)
 - [Security boundary audit](security-boundaries.md)
 
-A client must explicitly select or launch Cortex as its agent. Finding a `.cortex` directory does not activate orchestration. Every project has one `.cortex` store; work must be qualified in a separate disposable project. Real Zed, Codex and Claude end-to-end operation cannot be inferred from fake-engine tests or the no-paid smoke; use the runbook and mark unobserved scenarios unverified.
+A client must explicitly select or launch Cortex as its agent. Finding a `.cortex` directory does not activate orchestration. Every project has one `.cortex` store. For paid live checks use the isolated dev Paseo environment and a disposable project; see [the dev Paseo guide](dev-paseo-environment.md).

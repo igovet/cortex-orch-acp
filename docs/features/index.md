@@ -13,9 +13,7 @@
 
 All 23 worker profiles remain available. Models have no delegation, route-selection
 or acceptance API. The optional model-owned Rubber Duck lane has been removed.
-[Implementation status](../acp/runtime-rewrite-status.md) records automated evidence;
-[real-client observations](../acp/real-client-runbook.md) remain explicitly NOT RUN
-for this rewrite until retained in an isolated client session.
+[Implementation status](../acp/runtime-rewrite-status.md) records the available automated evidence.
 
 Paseo uses the same tool presentation in coordinator chat and worker panels:
 Read/Read skill retain only target/status in display history, never expand, and

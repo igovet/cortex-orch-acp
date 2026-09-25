@@ -58,5 +58,4 @@ command above returned **12 tools** in a local, unauthenticated stdio
 than 20 advertised tools; use Workspace MCP's `--disabled-tools` filter or a
 narrower permission set if later versions exceed that budget. This check proves
 only startup and catalogue shape, not Google authorization or tool execution.
-Do not claim authenticated access or real-client qualification until the
-corresponding live signals have been retained.
+Do not claim authenticated access until the corresponding authorization and tool-use signals have been observed.

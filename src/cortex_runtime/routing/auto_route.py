@@ -39,17 +39,34 @@ available -- replaces the hand-maintained per-role ``route-policy.json``.
    writing, planning and analysis to Claude; debugging and testing are
    neutral. routing.json ``engine_affinity`` overrides it per kind.
 4. Effort follows the role's tier, clamped to what that model supports.
-   ``ultra`` is never used; ``max`` only on a ``light`` model (Luna-class:
-   the cheapest model is the one worth running at its maximum); flagship
+   ``ultra`` is never used; ``max`` only on a ``light`` or Luna model (the
+   cheapest model is the one worth running at its maximum); flagship
    models (:data:`FLAGSHIP_FAMILIES`) never above ``high``. This rule is
    for automatic worker routing only: the editor's own effort selector
    offers every effort the engine reports, and the coordinator runs at the
    effort chosen there.
+   The Codex Luna line (:data:`LUNA_LINES`) is cheap but strong, so it has
+   its own rule: never below ``high`` (:data:`LUNA_EFFORT_FLOOR`, also for
+   a pin or a worker's requested effort), and its effort follows how hard
+   the work is (:data:`LUNA_EFFORTS`): ``high`` for light work, ``xhigh``
+   for ordinary standard-tier development, ``max`` for work above that --
+   standard-tier work that is a retry or a fix after review requested
+   changes (``escalate``) -- which still does not justify a deep model.
+   Besides the light tier, Luna is a candidate for standard-tier
+   development work (:data:`LUNA_WORK_KINDS`) next to the tier's own
+   models, and the rank decides between them (:func:`luna_status`). It is
+   never used for ``complexity`` ``high`` work, deep or flagship work, or a
+   deep role, not even as a fallback; a ``tiers`` override that moves a
+   Luna model out of the light tier removes it from this rule except for
+   its effort floor. Hard-coded rather than configured: routing.json names
+   tiers per model, not per work kind or complexity.
 5. The work moves the role's tier: the coordinator's planned
    ``complexity`` (``low``/``high``) shifts it one step cheaper/stronger,
    and a retried attempt or a fix after review requested changes runs one
-   more step up (``escalate``). If a tier cannot rise (explorer), effort
-   rises one step within the model's supported range.
+   more step up (``escalate``). Standard development instead stays in
+   the standard candidate pool: Luna targets max, other models raise effort
+   one step. Explicit high complexity and deep roles still move up. If a
+   tier cannot rise (explorer), effort rises one supported step.
 
 Only engine-confirmed catalogs are used -- a connection whose models were
 never observed (seed catalog) is not routed to automatically; the worker
@@ -140,6 +157,16 @@ _LIGHT_ONLY_EFFORTS = frozenset({"max"})
 # only cost more. Named because no engine reports "flagship" itself.
 FLAGSHIP_FAMILIES = ("astra", "fable")
 _FLAGSHIP_CEILING = "high"
+# The Codex Luna line is very cheap and very effective: below high its
+# answers are not worth even their small cost, and at high..max it handles
+# simple and ordinary development work. Its effort steps with the work:
+# light work, standard-tier work, standard-tier work that fell short once.
+LUNA_LINES = frozenset({"luna"})
+LUNA_EFFORT_FLOOR = "high"
+LUNA_EFFORTS = ("high", "xhigh", "max")
+# Development work Luna may take in the standard tier. Design and review
+# (judgement) and planning/writing/analysis stay on the tier's own models.
+LUNA_WORK_KINDS = frozenset({"implementation", "operations", "debugging", "testing"})
 # Haiku repeatedly submitted arguments that contradicted advertised Cortex
 # tool schemas in real worker sessions. Keep it available for an explicit pin,
 # while excluding it from automatic worker selection.
@@ -220,6 +247,46 @@ def work_kind(role: str | None) -> str | None:
     return None if role is None else ROLE_WORK_KINDS.get(role, "implementation")
 
 
+def is_luna(model: str) -> bool:
+    """Whether ``model`` is of the Codex Luna line (any generation)."""
+    return model_line(model)[0] in LUNA_LINES
+
+
+def luna_status(role: str | None, role_tier: str, complexity: str = "normal") -> str:
+    """Whether a light-tier Luna model may take this work, and why:
+    ``light_tier`` (its own tier), ``standard_candidate`` (standard-tier
+    development work, ranked with the tier's own models), or
+    ``excluded:<reason>``. ``excluded`` is absolute -- not even a fallback."""
+    if role_tier == "light":
+        return "light_tier"
+    if complexity == "high":
+        return "excluded:complexity_high"
+    if role_tier != "standard":
+        return f"excluded:{role_tier}_work"
+    if ROLE_TIERS.get(role or "", "standard") in ("deep", "flagship"):
+        return "excluded:deep_role"
+    kind = work_kind(role)
+    if kind not in LUNA_WORK_KINDS:
+        return f"not_candidate:work_kind_{kind}"
+    return "standard_candidate"
+
+
+def hint_serves_tier(model: str, model_tier: str | None, role: str | None, role_tier: str,
+                     complexity: str = "normal") -> bool:
+    """Whether a model of ``model_tier`` can take ``role_tier`` work: its own
+    tier, or a light Luna model on standard-tier development work."""
+    return model_tier == role_tier or (
+        model_tier == "light" and is_luna(model)
+        and luna_status(role, role_tier, complexity) == "standard_candidate")
+
+
+def luna_effort(role_tier: str, escalate: bool = False) -> str:
+    """Luna's target effort: one :data:`LUNA_EFFORTS` step per tier above
+    light, and one more for a retry or a fix after requested changes."""
+    step = (0 if role_tier == "light" else 1) + int(escalate)
+    return LUNA_EFFORTS[min(step, len(LUNA_EFFORTS) - 1)]
+
+
 def affinity_engine(role: str | None, affinity: Mapping[str, str | None] | None = None) -> str | None:
     """The engine ``role``'s kind of work leans to, or ``None`` (neutral).
     ``affinity`` is routing.json ``engine_affinity``: a kind it names wins,
@@ -281,12 +348,18 @@ def route_menu(project_root=None, environ=None, unavailable=()):
             superseded_by=superseded.get(entry.route.id),
             quota=dict(band="unknown" if used is None else "hot" if used >= HOT_PERCENT else "cool",
                        used_percent=used)))
+    roles = sorted(role for role in set(WORKER_ALIASES.values()) if role.startswith("worker-")
+                   and role not in {"worker-code-reviewer", "worker-build-verification"})
     return dict(tiers=result, roles={role: {complexity: tier_for(role, complexity=complexity)
                                           for complexity in ("low", "normal", "high")}
-                                     for role in sorted(set(WORKER_ALIASES.values()))
-                                     if role.startswith("worker-") and role not in
-                                     {"worker-code-reviewer", "worker-build-verification"}},
-                flagship_note="escalation-only")
+                                     for role in roles},
+                flagship_note="escalation-only",
+                luna=dict(effort_floor=LUNA_EFFORT_FLOOR,
+                          efforts=dict(light=luna_effort("light"), standard=luna_effort("standard"),
+                                       standard_escalated=luna_effort("standard", True)),
+                          standard_candidate_roles=[role for role in roles
+                                                    if luna_status(role, "standard") == "standard_candidate"],
+                          never="complexity high, deep or flagship work, deep roles"))
 
 
 def choose(role: str, project_root=None, environ: Mapping[str, str] | None = None, *,
@@ -326,8 +399,18 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         record = availability.blocking(unavailable, entry.connection_id, entry.route.model)
         if record is not None:
             blocked[entry.route.id] = record
+    base_role_tier = tier_for(role, False, complexity)
     role_tier = tier_for(role, escalate, complexity)
+    # A standard development retry is the intermediate Luna-max band.
+    # Decide from the original work before generic escalation labels it deep.
+    # Explicit high complexity and deep roles still fail luna_status here.
+    if escalate and luna_status(role, base_role_tier, complexity) == "standard_candidate":
+        role_tier = base_role_tier
     affinity = overrides.get("engine_affinity") or {}
+    # Light-tier Luna models follow their own rule (see luna_status); a
+    # tiers override that moves one elsewhere routes it like any model.
+    luna_ids = frozenset(e.route.id for e in allowed if is_luna(e.route.model) and tiers[e.route.id] == "light")
+    luna = luna_status(role, role_tier, complexity) if luna_ids else "not_offered"
     pin = _pin_for(overrides, role)
     if pin is not None:
         engine, model, effort = pin
@@ -361,7 +444,8 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         ranked = sorted(open_matches, key=lambda e: _order_key(usage(e)))
         best = ranked[0]
         decision = dict(
-            role=role, role_tier=role_tier, tier=tiers.get(best.route.id), basis="pin",
+            role=role, base_role_tier=base_role_tier, role_tier=role_tier,
+            tier=tiers.get(best.route.id), basis="pin",
             preference=preference, preference_status="ignored:pinned" if preference else "none",
             rank_version=RANK_VERSION, effort_basis="pin", decided_by="pin",
             candidates=[_candidate(e, usage, role, False, affinity=affinity) for e in ranked],
@@ -369,11 +453,15 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         )
         decision.update(model_hint=model_hint, model_hint_status=(
             "auto" if model_hint == "auto" else "ignored:escalated" if escalate else "ignored:pinned"),
-            model_hint_reason=model_reason, diversify_from=previous_engine if escalate else None)
+            model_hint_reason=model_reason, diversify_from=previous_engine if escalate else None,
+            luna=dict(status="pinned" if best.route.id in luna_ids else luna, chosen=best.route.id in luna_ids))
+        default_effort = (luna_effort(role_tier, escalate) if best.route.id in luna_ids
+                          else EFFORT_BY_TIER[tier_for(role, escalate, complexity)])
         return Choice(best.connection_id, model,
-                      nearest(effort or EFFORT_BY_TIER[role_tier], permitted_efforts(best, tiers[best.route.id])),
+                      nearest(effort or default_effort, permitted_efforts(best, tiers[best.route.id])),
                       "auto:pin", decision)
     default_denied = {entry.route.id for entry in allowed if _default_auto_denied(overrides, entry)}
+    luna_denied = luna_ids if luna.startswith("excluded:") else frozenset()
     superseded = superseded_routes(allowed)
     providers = overrides.get("providers")
     status = None
@@ -382,9 +470,11 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     elif preference is not None and not any(e.route.engine == preference for e in entries):
         status = "ignored:provider_not_configured"
     picked, decision = rank(role_tier, allowed, usage, overrides.get("tiers") or {},
-                            excluded=frozenset(blocked) | default_denied | frozenset(superseded),
-                            policy_excluded=frozenset(default_denied) | frozenset(superseded),
+                            excluded=frozenset(blocked) | default_denied | frozenset(superseded) | luna_denied,
+                            policy_excluded=frozenset(default_denied) | frozenset(superseded) | luna_denied,
                             superseded=superseded,
+                            luna_standard=luna_ids if luna == "standard_candidate" else frozenset(),
+                            luna_status=luna,
                             role=role, preference=None if status else preference,
                             model_hint=model_hint, model_reason=model_reason,
                             escalated=escalate, previous_engine=previous_engine,
@@ -416,17 +506,23 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                                          "automatically (" + ", ".join(sorted(
                                              f"{_route_label(e)} -> {superseded[e.route.id]}"
                                              for e in allowed if e.route.id in superseded))
-                                         + "); pin one in routing.json to use it"] if superseded else []))
+                                         + "); pin one in routing.json to use it"] if superseded else [])
+                                     + ([f"Luna is not used for this work ({luna.partition(':')[2]})"]
+                                        if luna_denied else []))
                          + ". Wait for a limit to reset, connect another account, or change routing.json."),
             retry_eligible=False,
         )
     effort_target = EFFORT_BY_TIER[role_tier]
     effort_basis = f"role_tier:{role_tier}"
-    if escalate and tier_for(role, False, complexity) == role_tier:
+    if picked.route.id in luna_ids:
+        effort_target = luna_effort(role_tier, escalate)
+        effort_basis = f"luna:{role_tier}" + (":escalated" if escalate else "")
+    elif escalate and tier_for(role, False, complexity) == role_tier:
         effort_target = EFFORT_ORDER[min(EFFORT_ORDER.index(effort_target) + 1,
                                          EFFORT_ORDER.index("high"))]
         effort_basis = "escalation_step"
     effort = nearest(effort_target, permitted_efforts(picked, tiers[picked.route.id]))
+    decision["base_role_tier"] = base_role_tier
     decision["effort_basis"] = effort_basis
     return Choice(picked.connection_id, picked.route.model, effort, "auto", decision)
 
@@ -463,7 +559,9 @@ def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 # 3: plus plan usage, engine affinity and cross-tier stand-ins (tolerance 2).
 # 4: no attempt counts and no cross-tier stand-ins -- the task and plan usage
 # alone decide.
-RANK_VERSION = 4
+# 5: a light-tier Luna model also ranks among standard-tier development
+# candidates (``luna_standard``); the decision records ``luna``.
+RANK_VERSION = 5
 # The rank key's parts in order, named for the decision's ``decided_by``.
 RANK_KEYS = ("preference", "hint", "quota", "diversify", "usage", "affinity", "used_percent", "engine_order")
 
@@ -474,7 +572,8 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
          model_hint: str = "auto", model_reason: str | None = None,
          escalated: bool = False, previous_engine: str | None = None,
          all_entries: Sequence | None = None, providers: Sequence[str] | None = None,
-         affinity: Mapping[str, str | None] | None = None):
+         affinity: Mapping[str, str | None] | None = None,
+         luna_standard: frozenset = frozenset(), luna_status: str | None = None):
     """``(best entry, decision)`` for ``role_tier``, or ``(None, None)``.
 
     ``entries`` are in engine order; ``excluded`` route ids are skipped
@@ -508,20 +607,27 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     the runner-up (``only_candidate`` when there was none).
     ``superseded`` maps an older route id to the newer route that replaces
     it (see :func:`superseded_routes`); those ids should also be in
-    ``excluded`` and ``policy_excluded``."""
+    ``excluded`` and ``policy_excluded``. ``luna_standard`` route ids (light
+    Luna models, see :func:`luna_status`) are also candidates of the
+    standard tier; ``decision["luna"]`` records ``luna_status`` and, when a
+    Luna model was ranked but not chosen, the key that ranked it behind."""
     superseded = superseded or {}
     tiers = model_tiers(entries, tier_overrides or {})
     usable = [e for e in entries if e.route.id not in excluded and (usage(e) or 0.0) < 100.0]
     order = {e.route.id: index for index, e in enumerate(entries)}
+
+    def serves(e, tier):
+        return tiers[e.route.id] == tier or (tier == "standard" and e.route.id in luna_standard)
+
     for tier in _FALLBACK_ORDER[role_tier]:
-        candidates = [e for e in usable if tiers[e.route.id] == tier]
+        candidates = [e for e in usable if serves(e, tier)]
         if not candidates:
             continue
         status = "none"
         if preference is not None:
             preferred = [e for e in candidates if e.route.engine == preference]
             if not preferred:
-                offered = any(e.route.engine == preference and tiers[e.route.id] == tier for e in entries)
+                offered = any(e.route.engine == preference and serves(e, tier) for e in entries)
                 status = "ignored:provider_unavailable" if offered else "ignored:no_candidate_in_tier"
             elif all(_hot(usage(e)) for e in preferred) and not all(_hot(usage(e)) for e in candidates):
                 status = "ignored:provider_near_quota_limit"
@@ -550,7 +656,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                 hint_status = "ignored:provider_not_allowed"
             elif not offered or not allowed_offered:
                 hint_status = "ignored:not_offered"
-            elif slash and all(tiers[e.route.id] != tier for e in allowed_offered):
+            elif slash and not any(serves(e, tier) for e in allowed_offered):
                 hint_status = "ignored:tier_mismatch"
             elif slash and all(e.route.id in superseded for e in allowed_offered):
                 hint_status = "ignored:superseded"
@@ -558,7 +664,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                 hint_status = "ignored:auto_excluded"
             elif not hinted:
                 hint_status = ("ignored:no_candidate_in_tier" if not slash and
-                               not any(e.route.engine == hint_engine and tiers[e.route.id] == tier
+                               not any(e.route.engine == hint_engine and serves(e, tier)
                                        for e in entries) else "ignored:unavailable")
             elif (all((usage(e) or 0.0) >= HINT_TOLERANCE for e in hinted)
                   and not all((usage(e) or 0.0) >= HINT_TOLERANCE for e in candidates)):
@@ -581,6 +687,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
         else:
             first, second = key(best), key(ranked[1])
             decided_by = next(name for name, a, b in zip(RANK_KEYS, first, second) if a != b)
+        best_luna = next((e for e in ranked if is_luna(e.route.model)), None)
         affinity_kind = work_kind(role)
         decision = dict(
             role=role, role_tier=role_tier, tier=tier, basis="rank", rank_version=RANK_VERSION,
@@ -595,13 +702,17 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             candidates=[_candidate(e, usage, role, e.route.engine == honoured, usage_band(e),
                                    affinity=affinity) for e in ranked],
             unavailable=sorted(_route_label(e) for e in entries
-                               if tiers[e.route.id] == tier and e.route.id not in policy_excluded
+                               if serves(e, tier) and e.route.id not in policy_excluded
                                and (e.route.id in excluded or (usage(e) or 0.0) >= 100.0)),
             excluded_by_policy=sorted(_route_label(e) for e in entries
                                       if tiers[e.route.id] == tier and e.route.id in policy_excluded
                                       and e.route.id not in superseded),
             superseded={_route_label(e): superseded[e.route.id] for e in entries if e.route.id in superseded},
             decided_by=decided_by,
+            luna=dict(status=luna_status, candidate=best_luna is not None, chosen=best_luna is best,
+                      outranked_by=(None if best_luna is None or best_luna is best else
+                                    next(name for name, a, b in zip(RANK_KEYS, key(best), key(best_luna))
+                                         if a != b))),
             chosen=_route_label(best), chosen_connection_id=best.connection_id,
         )
         return best, decision
@@ -669,16 +780,22 @@ def _order_key(used: float | None):
 
 def permitted_efforts(entry, tier: str) -> tuple[str, ...]:
     """What ``entry``'s model offers, weakest first, minus ``ultra``,
-    ``max`` unless the model is ``light``, and anything above ``high`` on a
-    flagship model."""
+    ``max`` unless the model is ``light`` or Luna, anything above ``high``
+    on a flagship model, and anything below :data:`LUNA_EFFORT_FLOOR` on a
+    Luna model that offers the floor or more."""
     offered = {value for name, value in entry.route.supported_parameters if name == "thought_level"}
     flagship = any(family in entry.route.model.casefold() for family in FLAGSHIP_FAMILIES)
+    luna = is_luna(entry.route.model)
     ceiling = EFFORT_ORDER.index(_FLAGSHIP_CEILING) if flagship else len(EFFORT_ORDER)
-    return tuple(
+    permitted = tuple(
         value for index, value in enumerate(EFFORT_ORDER)
         if value in offered and value not in _NEVER_EFFORTS and index <= ceiling
-        and (tier == "light" or value not in _LIGHT_ONLY_EFFORTS)
+        and (tier == "light" or luna or value not in _LIGHT_ONLY_EFFORTS)
     )
+    if luna:
+        floor = EFFORT_ORDER.index(LUNA_EFFORT_FLOOR)
+        return tuple(value for value in permitted if EFFORT_ORDER.index(value) >= floor) or permitted
+    return permitted
 
 
 def nearest(effort: str, permitted: Sequence[str]) -> str | None:

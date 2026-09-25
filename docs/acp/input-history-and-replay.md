@@ -308,7 +308,7 @@ The Paseo 0.8 production observation retained in the [real-client
 record](evidence/paseo-2026-09-20/live-acp-regressions.md) predates this
 transformer and reproduced the failed-history problem. Offline coverage and
 source inspection do not qualify the client behavior; the post-fix live agent
-run remains `NOT RUN` until a fresh disposable-client observation records the
+run is not established by automated fixtures;
 result.
 
 There is deliberately no reconstruction fallback for sessions created before

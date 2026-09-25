@@ -251,11 +251,13 @@ attempt fell short. A user `routing.json` pin is also an explicit route
 choice and remains strict.
 
 The role tier starts from `ROLE_TIERS` and is shifted by complexity (low moves
-cheaper; high moves stronger). On escalation, the runtime advances the tier;
-`flagship` is reserved for escalation. If no usable candidate exists in the
+cheaper; high moves stronger). On escalation, the runtime normally advances the tier;
+`flagship` is reserved for escalation. Ordinary standard-tier development
+retries and review fixes retain the standard candidate pool described below. If no usable candidate exists in the
 requested tier, the configured fallback order searches other tiers. Explorer
 remains light at every complexity and escalation; because its tier cannot rise,
-escalation raises its effort one supported step (normally low to medium).
+escalation raises its effort one supported step (normally low to medium; on
+Luna, high to xhigh).
 
 Models are grouped into light, standard, deep, and flagship. An unavailable
 role tier searches the nearest tier permitted by policy; flagship is never a
@@ -278,6 +280,55 @@ another tier only when **no** engine has a usable model in the task's tier
 other engine as a `cross_tier` candidate; that was removed in rank version 4,
 and older audit rows that carry `cross_tier`/`chosen_cross_tier` stay
 readable.
+
+### Codex Luna
+
+The Codex Luna line (`gpt-6-luna`, `gpt-5.6-luna`, and any later
+`gpt-<n>-luna`; the newest non-denied version is routed) is very cheap and
+very effective, so it has its own rule in `routing.auto_route` (rank version
+5). The rule is hard-coded: `routing.json` classifies models by tier, and has
+no per-work-kind or per-complexity setting that would fit it.
+
+- **Effort floor.** Luna never runs below `high` (`LUNA_EFFORT_FLOOR`). The
+  floor also applies to a pin (`codex-acp/gpt-6-luna:low` runs at `high`) and
+  to a worker's requested effort at dispatch. `max` is allowed on Luna even
+  when a `tiers` override moves it out of the light tier. A Luna build that
+  offers nothing at or above `high` keeps what it offers.
+- **Effort by work** (`LUNA_EFFORTS`, `luna_effort`): `high` for light work;
+  `xhigh` for ordinary standard-tier development; `max` for standard-tier work
+  that is a retry or a fix after review requested changes (`escalate`). That
+  work has already proved harder than planned but does not justify a deep
+  model. Eligibility uses the base task tier before generic escalation:
+  normal standard-tier development stays in the standard pool on a retry or
+  review fix. Luna targets `max`; another selected model raises effort one
+  step (normally medium to high). Retry diversification and quota still
+  apply, and an unusable standard pool falls back through the usual tier
+  order. The audit retains `base_role_tier` as well as the effective
+  `role_tier`. Explicit high complexity and deep roles retain their normal
+  escalation and Luna exclusions. Escalated light work (explorer) gets `xhigh`.
+- **Candidacy** (`luna_status`, recorded as `luna.status`). Luna remains the
+  light tier's model (`light_tier`). For standard-tier development work
+  (`LUNA_WORK_KINDS`: implementation, operations, debugging, testing), it also
+  ranks next to the tier's own models, such as `gpt-5.6-terra` and Claude
+  Sonnet (`standard_candidate`). The ordinary rank then decides: preference,
+  hint, quota band, plan usage, affinity, used percent, engine order. Luna is
+  not always chosen. A hot Codex plan, a Claude plan at least 10 points less
+  used, or a hint for another model all move the work away from it. On one
+  Codex plan with equal affinity, Codex's own list order (newest generation
+  first) puts `gpt-6-luna` ahead of the older `gpt-5.6-terra`. Standard-tier
+  design, review, planning, writing and analysis work stays on the tier's own
+  models (`not_candidate:work_kind_<kind>`).
+- **Never Luna** (`excluded:<reason>`): `complexity: high` work, deep or
+  flagship work, and a deep role (architect, database architect, security
+  auditor, senior consultant) even at `complexity: low`. This applies even as
+  a fallback. When only Luna is usable, such work is refused with
+  `no_available_route` and the reason is named.
+- A `tiers` override that moves a Luna model out of the light tier makes it
+  route like any model of that tier. Only its effort floor and `max` still
+  apply.
+
+An exact Luna hint on standard-tier development work is not a tier mismatch,
+either at plan submission (`hint_serves_tier`) or at dispatch.
 
 Only the newest version of each model family per engine is routed
 automatically (`routing.auto_route.superseded_routes`). Family and version
@@ -358,13 +409,15 @@ nothing and affinity decides.
 
 Effort is derived from the runtime-selected tier, task complexity/escalation,
 and each model's supported effort list. `effort_basis` records whether it came
-from the role tier, escalation step, or a pin. A pin may explicitly name an
+from the role tier, escalation step, the Luna rule (`luna:<tier>` or
+`luna:<tier>:escalated`), or a pin. A pin may explicitly name an
 effort; otherwise the runtime chooses a supported effort. A model hint cannot
 raise tier or effort.
 
 The read-only `list_route_options` tool reports currently engine-confirmed
 routes, tier, supported effort, availability and quota band, plus role tiers
-for low/normal/high complexity. It is advisory and may become stale; the
+for low/normal/high complexity and the Luna rule (`luna`: effort floor, efforts
+by work, and the roles for which Luna is a standard-tier candidate). It is advisory and may become stale; the
 runtime validates the choice at plan submission and dispatch. The server
 advertises `listChanged: false`, so clients must call the menu again when they
 need a fresh snapshot; there is no push refresh contract.
@@ -375,14 +428,17 @@ including `rank_version`, `role_tier`, tier and effort basis, `model_hint`,
 (`compared`, `margin`, `least_used_percent`), `affinity` (work kind, engine,
 `default` or `routing.json` source), candidates with `used_percent`, `hot`,
 `quota_state`, `usage_band`, `suitability` and `preferred`, `decided_by`,
-`excluded_by_policy`, `unavailable`, `superseded`, and whether usage
-percentages were comparable. `rank_version` history: 2 ranked by quota band,
+`excluded_by_policy`, `unavailable`, `superseded`, `luna` (`status`,
+`candidate`, `chosen`, and `outranked_by`, the rank key that put the best Luna
+candidate behind the chosen route), and whether usage percentages were
+comparable. `rank_version` history: 2 ranked by quota band,
 count balance (tolerance 4) and suitability; 3 added plan usage, engine
 affinity, cross-tier stand-ins and a two-attempt balance; 4 removed attempt
-counts and cross-tier stand-ins. Older rows keep their own fields
+counts and cross-tier stand-ins; 5 made Luna a standard-tier candidate for
+development work. Older rows keep their own fields
 (`balance`, `balance_excess`, `cross_tier`, `chosen_cross_tier`) and still
 render. These fields are evidence of runtime decisions, not proof of
-real-client qualification.
+the exact observed live surface.
 
 The worker card title and each `pipeline.md` assignment line show a one-line
 summary of the recorded decision (`routing.decision_display`): engine, model,

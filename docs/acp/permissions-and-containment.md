@@ -219,4 +219,4 @@ The no-paid suite exercises real Linux sandboxes, real MCP subprocesses, protoco
 peers and installed startup/configuration surfaces. It cannot prove a GUI client
 rendered a permission choice or that a paid model obeyed its advertised tools.
 See [implementation status](runtime-rewrite-status.md),
-[security](../../SECURITY.md), and the [real-client runbook](real-client-runbook.md).
+[security](../../SECURITY.md).

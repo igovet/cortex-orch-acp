@@ -1,10 +1,6 @@
-# Real-client qualification
+# Live verification
 
-Use only capabilities verified in the installed client and engine. Keep every
-observation bound to one exact task, session and artifact. Missing, ambiguous,
-truncated or replayed evidence cannot establish a passing result. Follow the
-project's real-client runbook in disposable environments; retain NOT RUN for
-unobserved rows. Unit tests and fake engine sessions are not live qualification.
+Use only capabilities verified in the current installed environment. Bind each observation to its exact task, session and artifact. Missing, ambiguous, truncated or replayed evidence cannot establish a passing result. Unit tests and fake sessions support only the behavior they exercise.
 
 The owner's standing approval authorizes paid model calls by default for
 applicable live checks. Run those checks through isolated dev Paseo: use the
@@ -19,5 +15,4 @@ effort; heavy models are prohibited in routine live qualification.
 
 The paid probes still require both `--i-authorize-paid-call` and
 `--approval-ref`. The standing approval reference is
-`owner-standing-2026-09-24`. This authorization does not change the no-paid
-default automated suite or permit marking an unobserved runbook row passed.
+`owner-standing-2026-09-24`. This authorization does not change the no-paid default automated suite.

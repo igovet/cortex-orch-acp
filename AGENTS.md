@@ -53,14 +53,6 @@ Apply these rules to ACP qualification evidence:
 - No mutation, private-target access, or destructive action is ever excused
   by "it was only a diagnostic."
 
-For the current ACP product, the equivalent automated, real-host, real-client
-audit tool does not exist yet: live qualification against real ACP clients
-(Zed now; codeg deferred) is `docs/acp/real-client-runbook.md`'s manual
-observation table, all rows explicitly `NOT RUN` as of this writing, owned by
-T035–T038 (see `docs/acp/test-matrix-and-ci.md` for what the automated test
-suite can and cannot close). Do not invent a stand-in procedure or claim a row
-passed without a real, retained observation; state plainly that this is
-unverified where it is.
 
 Use one real `pipeline.md` per task, newest edition first with older editions
 below. Other reports are immutable real Markdown files. Both published task
@@ -127,12 +119,6 @@ standing approval authorizes using approval reference
 startup smoke harness (schema-validated launch/protocol surface only, not GUI
 evidence).
 
-Real-client qualification uses the manual observation table in
-`docs/acp/real-client-runbook.md` (Zed now; codeg deferred), scoped by
-`docs/acp/test-matrix-and-ci.md`'s 45 live-only acceptance cases. As of this
-writing every row in that runbook is `NOT RUN`; this file does not know of a
-completed real-host qualification and must not be edited to claim one. Do not
-invent a substitute procedure or claim an unobserved runbook row passed.
 
 This release-verification obligation belongs to the owner of the Cortex
 change. Run live workloads against a separate isolated project, never against

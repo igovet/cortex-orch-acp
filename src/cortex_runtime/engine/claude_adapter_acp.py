@@ -373,7 +373,7 @@ def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker
     observes the real dumped wire payload). Still not live-executed: no
     real turn has run through this channel, so nothing here confirms the
     spawned CLI actually *honors* the delivered text as opposed to merely
-    receiving it (see T035/T036's mandatory live gate).
+    receiving it (as documented by the adapter's installed capability evidence).
     """
     if not isinstance(instructions_text, str) or not instructions_text.strip():
         raise PortableError(

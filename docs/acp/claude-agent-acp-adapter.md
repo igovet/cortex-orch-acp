@@ -40,7 +40,7 @@ the fresh, lead- and agent-re-verified dist file:line citations below (read
 | Context compaction lifecycle | `dist/context-compaction.js` (see `.cortex/acp-migration/evidence/T002/static-capability-findings.md:38`) |
 
 Nothing here claims a main-branch/newer-release capability, and nothing
-above was exercised live (see the T035/T036 rows at the end of this page).
+above was exercised live.
 
 ## Current runtime gateway policy
 
@@ -251,8 +251,7 @@ and `tests/test_instruction_delivery_qualification.py` (T015, updated by
 this same change) asserts the qualification directly, plus that an
 unrecognized version/unknown engine still refuses a critical-rules role.
 
-**Still not live-executed** (T035/T036 mandatory gate, not satisfied by
-any test here): no real turn has run through this channel. What a live
+**Still not live-executed**: no real turn has run through this channel. What a live
 run would still need to show: (a) the spawned Claude Code CLI actually
 honors `systemPrompt` as delivered — a real turn whose observable behavior
 demonstrably follows the injected instructions, not merely that the field
@@ -297,36 +296,3 @@ sandbox around what it instructs.
   `CAPABILITY_MATRIX.json` for claude-agent-acp — a `requestPermission`/
   `fs.readTextFile` method existing in the dist is not evidence of an
   actual sandbox (per `INVARIANTS.md`); no containment test was performed.
-
-## T035/T036 live qualification rows: NOT RUN (blockers)
-
-The following rows are **explicitly unrun live evidence**, never claimed
-as passed contract fixtures (per `INVARIANTS.md` and this task's own "Live
-verification boundary"):
-
-- `outgoing-engine: claude-agent-acp` — every `status: "unqualified"` /
-  `"unknown"` cell in `CAPABILITY_MATRIX.json` for this engine, pending a
-  real, explicitly authorized run (T035).
-- Live confirmation that the spawned Claude Code CLI actually *honors*
-  `_meta.systemPrompt` as delivered — a real turn whose observable
-  behavior demonstrably follows the injected instructions, not merely
-  that the field reached the wire (which this task's tests do confirm
-  statically/via the fake engine). `native_tool_containment` also stays
-  `unknown` regardless: a system-prompt channel existing is not evidence
-  of any sandbox around what it instructs.
-- Real non-Codex coordinator execution (delegates a managed assignment,
-  processes the result, participates in explicit `decide` acceptance) —
-  **not run**; even a fixture/fake-engine pass is not release evidence
-  (this task's own "Live verification boundary"). The opt-in, never-run
-  script `scripts/cortex_claude_probe.py` documents the exact steps a
-  future, explicitly authorized run would take (`--plan` mode only in this
-  task).
-- Exact-version drift re-check (0.78.0 vs whatever an operator's live
-  install actually reports at run time) — not run; see `ADR-001b`'s own
-  precedent for codex-acp's 1.11.0→1.12.0 drift.
-
-These are assigned to **T035/T036**, never marked passed here.
-
-See also [../index.md](index.md) and
-[codex-acp-adapter.md](codex-acp-adapter.md) for the first engine's
-equivalent page.

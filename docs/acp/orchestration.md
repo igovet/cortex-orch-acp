@@ -4,7 +4,7 @@ Cortex is the incoming ACP agent and the owner of orchestration. ACP transports
 messages and sessions; the models propose plans, solve assignments and synthesize
 results. The runtime chooses what executes and whether the task can complete.
 See [implementation status](runtime-rewrite-status.md) for retained test evidence
-and the separate real-client qualification boundary.
+and its automated evidence limits.
 
 `orchestration/state.py` stores task state, original goal, plan revision, dependency
 nodes, structured results, events and request receipts in `.cortex/cortex.sqlite3`.

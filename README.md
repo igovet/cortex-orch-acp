@@ -24,13 +24,12 @@
   </tr>
 </table>
 
-> **Release qualification is incomplete.** 45 of 69 mandatory live-only cases remain; real-client observations are still marked NOT RUN. See [runtime status and remaining work](docs/acp/runtime-rewrite-status.md).
 
 ## What Cortex is
 
 Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts.
 
-Worker routes and effort are selected from observed models by the task (role tier, complexity, work-kind engine affinity configurable with `engine_affinity` in `routing.json`, and the coordinator's hint) and each engine's subscription plan usage; how often an engine was used before is not a factor. Light work stays on light models and hard work gets stronger ones. Plan model hints are constrained recommendations; explicit routing rules remain authoritative.
+Worker routes and effort are selected from observed models by the task (role tier, complexity, work-kind engine affinity configurable with `engine_affinity` in `routing.json`, and the coordinator's hint) and each engine's subscription plan usage; how often an engine was used before is not a factor. Light work stays on light models and hard work gets stronger ones. Codex Luna runs at high to max effort and also competes for ordinary development work. A normal standard-tier development retry or review fix keeps the standard candidate pool and targets Luna at max; explicit high-complexity work and deep roles still escalate and exclude Luna. Plan model hints are constrained recommendations; explicit routing rules remain authoritative.
 
 ## Install
 

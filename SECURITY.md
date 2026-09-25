@@ -143,7 +143,7 @@ choice made before the first prompt becomes the new task's first revision.
 Switching back to Guarded applies at once to new prompts and new workers; a
 worker already confirmed in a permissive engine mode keeps it until it ends. The
 client's rendering of the shield and the Auto path against a paid engine have not
-been observed live; see the [real-client runbook](docs/acp/real-client-runbook.md).
+been exercised in the applicable live environment; retain only the evidence for the exact observed surface. The no-paid test suite and startup smoke do not establish GUI behavior.
 
 ### Owner's ssh-agent
 

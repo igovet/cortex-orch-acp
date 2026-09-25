@@ -21,6 +21,6 @@ document a bounded change. Add another worker only for a concrete independent
 benefit.
 
 Use `python3 -B`, preserve the no-paid default test policy, and report live ACP
-client checks as unverified until the real-client runbook has a retained
-observation. Release-sensitive generation, stamping, package and sync checks
+client checks as unverified until observed and retained; follow the isolated
+dev Paseo procedure in `docs/acp/dev-paseo-environment.md`. Release-sensitive generation, stamping, package and sync checks
 run sequentially.

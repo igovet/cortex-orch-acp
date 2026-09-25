@@ -221,7 +221,7 @@ successful outcome, and the resulting `usage_records` row is
   never fabricates a conversion rate).
 - Permission-dialog counts as a queryable-by-task SQLite metric (currently
   JSONL-only per engine instance — see `manual_interventions` above).
-- Live qualification rows (T035–T037/T038); this task requires no paid
+- Paid live probes; this task requires no paid
   model invocation.
 
 Worker history resolves the exact `delegation_requested` mapping from the

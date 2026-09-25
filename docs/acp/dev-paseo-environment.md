@@ -52,8 +52,7 @@ scripts/cortex_claude_probe.py --i-authorize-paid-call --approval-ref owner-stan
 
 This approval does not add paid calls to the default automated test suite, which
 remains no-paid. It does not change the evidence standard: every live result must
-be observed and retained, and an unobserved real-client runbook row remains
-`NOT RUN`.
+be observed and retained for the exact surface being checked.
 
 ## Create or refresh the persistent clone
 

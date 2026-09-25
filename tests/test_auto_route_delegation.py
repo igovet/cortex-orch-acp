@@ -33,7 +33,7 @@ from engine_fakes import default_scenario, fake_launch_command, isolated_environ
 from test_mixed_team_ordinary_delegation import _bootstrap, _FakeConfigAdapter, _MODE_BY_ENGINE, _read_log
 
 
-def _make_connection(tmp_path, environ, *, engine, model, request_log, mode=True, **scenario):
+def _make_connection(tmp_path, environ, *, engine, model, request_log, mode=True, efforts=("low", "medium", "high"), **scenario):
     """Like ``test_mixed_team_ordinary_delegation._make_connection``, plus
     an offered effort option, so the auto-chosen effort reaches the wire.
     ``mode=False`` offers no mode option (the worker's mode can never be
@@ -44,7 +44,7 @@ def _make_connection(tmp_path, environ, *, engine, model, request_log, mode=True
         *([dict(id="mode", currentValue=_MODE_BY_ENGINE[engine][0]["value"], options=_MODE_BY_ENGINE[engine])]
           if mode else []),
         dict(id=effort_option_id, currentValue="medium", options=[
-            dict(value=v, name=v) for v in ("low", "medium", "high")
+            dict(value=v, name=v) for v in efforts
         ]),
     ]
     scenario = default_scenario(config_options=config_options, request_log_path=str(request_log), **scenario)
@@ -60,28 +60,29 @@ def _make_connection(tmp_path, environ, *, engine, model, request_log, mode=True
     return connection
 
 
-def _snapshot(connection, model):
+def _snapshot(connection, model, efforts=("low", "medium", "high")):
     options = [
         {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
          "options": [{"value": model, "name": model}]},
         {"id": "thought_level", "name": "Thought level", "category": "thought_level", "type": "select",
-         "currentValue": "medium", "options": [{"value": v, "name": v} for v in ("low", "medium", "high")]},
+         "currentValue": "medium", "options": [{"value": v, "name": v} for v in efforts]},
     ]
     return build_catalog({connection.id: connection}, {connection.id: parse_observation(options)})
 
 
-def _setup(tmp_path, *, observed=True, a=None, b=None, model_a="coordinator-model", model_b="reviewer-model"):
+def _setup(tmp_path, *, observed=True, a=None, b=None, model_a="coordinator-model", model_b="reviewer-model",
+           efforts=("low", "medium", "high")):
     store, task_id, channel, epoch, project = _bootstrap(tmp_path)
     environ = isolated_environ(tmp_path)
     log_a, log_b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
-    connection_a = _make_connection(tmp_path, environ, engine="codex-acp", model=model_a, request_log=log_a,
+    connection_a = _make_connection(tmp_path, environ, engine="codex-acp", model=model_a, request_log=log_a, efforts=efforts,
                                     **(a or {}))
-    connection_b = _make_connection(tmp_path, environ, engine="claude-agent-acp", model=model_b, request_log=log_b,
+    connection_b = _make_connection(tmp_path, environ, engine="claude-agent-acp", model=model_b, request_log=log_b, efforts=efforts,
                                     **(b or {}))
-    snapshot_a = _snapshot(connection_a, model_a)
+    snapshot_a = _snapshot(connection_a, model_a, efforts)
     if observed:
         catalog_store.save_snapshot(snapshot_a, environ)
-        catalog_store.save_snapshot(_snapshot(connection_b, model_b), environ)
+        catalog_store.save_snapshot(_snapshot(connection_b, model_b, efforts), environ)
 
     entry_a = snapshot_a.entries[0]
     service = ConfigurationService(store)
@@ -135,7 +136,7 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     assert detail["decision_detail"]["route_basis"] == "auto"
     assert detail["decision_detail"]["effort"] == "high"
     decision = detail["decision_detail"]["route_decision"]
-    assert decision["rank_version"] == 4
+    assert decision["rank_version"] == 5
     assert "balance" not in decision
     assert decision["used_percent_compared"] is False
     assert decision["usage"] == dict(compared=False, margin=10.0, least_used_percent=None)
@@ -615,3 +616,42 @@ def test_exact_model_hint_and_reason_are_audited(tmp_path, monkeypatch):
     assert decision["model_hint_reason"] == "This work suits the engine."
     assert detail["route_decision"]["chosen"] == "codex-acp/coordinator-model"
     adapter.terminate_owned(result.attempt_id)
+
+
+@pytest.mark.parametrize("trigger", ["retry", "review_fix"])
+def test_normal_development_retry_and_review_fix_dispatch_luna_max(tmp_path, trigger):
+    from cortex_runtime.orchestration.state import TaskMachine, event
+    from test_runtime_task_machine import plan
+
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
+        tmp_path, model_a="gpt-6-luna", model_b="claude-sonnet-5",
+        efforts=("low", "medium", "high", "xhigh", "max"))
+    machine = TaskMachine(store)
+    machine.create(channel.task_id, "Implement ordinary backend work")
+    machine.submit_plan(channel, plan(), "normal-plan")
+    machine.move(channel.task_id, "EXECUTING")
+    node = machine.claim_ready(channel.task_id, channel.channel_id)[0]
+    with store.connection() as db:
+        if trigger == "retry":
+            event(db, channel.task_id, "ASSIGNMENT_RETRIED",
+                  dict(node=node["node_id"], revision=node["revision"], retry=1))
+        else:
+            db.execute("UPDATE runtime_nodes SET node_id=? WHERE task_id=? AND assignment_ref=?",
+                       ("_fix_1_" + node["node_id"], channel.task_id, node["assignment_ref"]))
+        db.commit()
+
+    result = provisioning.delegate(channel, "Fix", "Fix ordinary backend work.", "backend-dev",
+                                   "Tests pass.", node["request_key"])
+    assert result.status == "ready"
+    try:
+        assert _read_log(log_b) == []
+        assert _effort_calls(log_a)[-1]["params"]["value"] == "max"
+        audit = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]
+        assert audit["model"] == "gpt-6-luna"
+        decision = audit["decision_detail"]["route_decision"]
+        assert decision["base_role_tier"] == decision["role_tier"] == "standard"
+        assert decision["luna"]["status"] == "standard_candidate"
+        assert decision["luna"]["chosen"] is True
+        assert decision["effort_basis"] == "luna:standard:escalated"
+    finally:
+        adapter.terminate_owned(result.attempt_id)
