@@ -9,7 +9,8 @@
     "test:diff": "node --experimental-strip-types client/worker-panel-diff.test.ts",
     "test:status": "node --experimental-strip-types client/worker-panel-status.test.ts",
     "test:replay": "node --experimental-strip-types server/replay.test.ts",
-    "test:coalesce": "node --experimental-strip-types client/coalesce.test.ts"
+    "test:coalesce": "node --experimental-strip-types client/coalesce.test.ts",
+    "test:worker-result-batch": "node --experimental-strip-types client/worker-result-batch.test.ts"
   },
   "devDependencies": {
     "@getpaseo/client": "^0.9.1",

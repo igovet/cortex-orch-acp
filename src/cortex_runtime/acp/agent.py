@@ -130,6 +130,52 @@ def observe(environ, operation, outcome):
     )
 
 
+_MAX_CRASH_DIAGNOSTIC_FILES = 200
+
+
+def _write_crash_diagnostic(environ, exc: BaseException) -> None:
+    """Durable, server-side-only record of a prompt-turn crash.
+
+    Live (2026-09-19, see the except block below) a prompt died leaving
+    nothing behind but "the runtime failed" -- no type, no line, nothing
+    on stderr the operator could find. The class name and source line
+    were then added to the ACP error's own ``data`` field, but a real
+    third-party host (Paseo 0.9.2, observed 2026-09-25) logs only the
+    error's plain-text message and drops that ``data`` field before it
+    ever reaches a log an operator can read, and does not durably capture
+    this process's own stderr either -- so the improved detail was still
+    unreachable in practice. This writes the full traceback (never sent
+    to the client -- the reply below is unchanged) to the same
+    ``$XDG_STATE_HOME/cortex/`` root ``engine.logs`` already uses for
+    per-engine diagnostics, so a crash is still findable after the host's
+    own logging drops it. Best-effort and bounded like every sibling log
+    under that root: a write that cannot land, or a crash-diagnostics
+    directory already at capacity, is silently skipped -- this must never
+    itself turn one failure into a second one."""
+    try:
+        import traceback as _traceback
+
+        from ..connections import registry as connection_registry
+
+        root = connection_registry.state_root(environ)
+        directory = root / "agent-crashes"
+        connection_registry.ensure_private_dir(directory, root=root, environ=environ)
+        try:
+            existing = sum(1 for _ in directory.iterdir())
+        except OSError:
+            existing = 0
+        if existing >= _MAX_CRASH_DIAGNOSTIC_FILES:
+            return
+        path = directory / f"{time.time_ns()}-{os.getpid()}.log"
+        text = "".join(_traceback.format_exception(type(exc), exc, exc.__traceback__))
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            os.write(fd, text[:65536].encode("utf-8", errors="replace"))
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
 
 def _store_error_message(error: StoreError) -> str:
     """What the client is told when the store refuses.
@@ -1608,6 +1654,7 @@ class Agent:
                     traceback = traceback.tb_next
                 detail = type(exc).__name__ + (f" at {where}" if where else "")
                 print(f"cortex: prompt failed: {detail}", file=sys.stderr, flush=True)
+                _write_crash_diagnostic(self.environ, exc)
                 self._reply_error(request_id, -32603, "The runtime failed while processing this prompt.",
                                   data={"failure": detail})
                 observe(self.environ, "session/prompt", "runtime_error")

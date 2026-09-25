@@ -208,6 +208,48 @@ def worker_card_outcome(node_status: str | None, result_json: str | None) -> tup
     return (_acp_tool_call_status(node_status), None)
 
 
+# The same bounds Paseo's ``pipeline.ts`` reader applies to a worker's
+# reported result, kept identical here so the projection embedded in the
+# terminal ACP card matches (byte for byte) the RPC-read projection an older
+# item still falls back to.  See ``integrations/paseo/server/pipeline.ts``.
+_WORKER_RESULT_SUMMARY_MAX_CHARS = 600
+_WORKER_RESULT_CHECK_NAME_MAX_CHARS = 300
+_WORKER_RESULT_CHECK_BLOCKER_MAX_CHARS = 600
+_WORKER_RESULT_MAX_CHECKS = 30
+
+
+def _clip_worker_result_text(value: Any, max_chars: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = scrub_text(value.strip(), max_chars=max(max_chars, len(value) * 2 + 1000))
+    return text if len(text) <= max_chars else text[: max_chars - 1] + "…"
+
+
+def worker_result_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """The bounded, redacted ``{summary, checks}`` shown on a worker's card.
+
+    Mirrors ``integrations/paseo/server/pipeline.ts``'s Python reader
+    exactly (same bounds, same ``outcome``/``blocker`` shape) so a client can
+    render this embedded projection and the RPC-read fallback identically.
+    """
+    checks = []
+    for check in (payload.get("checks") or [])[:_WORKER_RESULT_MAX_CHECKS]:
+        if not isinstance(check, Mapping):
+            continue
+        entry: dict[str, Any] = {
+            "name": _clip_worker_result_text(check.get("name"), _WORKER_RESULT_CHECK_NAME_MAX_CHARS) or "check",
+            "outcome": str(check.get("outcome") or "unverified"),
+        }
+        blocker = _clip_worker_result_text(check.get("blocker"), _WORKER_RESULT_CHECK_BLOCKER_MAX_CHARS)
+        if blocker:
+            entry["blocker"] = blocker
+        checks.append(entry)
+    return {
+        "summary": _clip_worker_result_text(payload.get("summary"), _WORKER_RESULT_SUMMARY_MAX_CHARS),
+        "checks": checks,
+    }
+
+
 # A worker's card carries the one thing it is doing right now, not its
 # whole feed -- so this bounds a single line, not a transcript.
 _WORKER_ACTIVITY_MAX_CHARS = 300
@@ -2276,6 +2318,7 @@ class OrchestratingRuntime:
                             bound_emitter, assignment_ref, status="completed",
                             entry=("Result: " + _compact_text(summary, _WORKER_ACTIVITY_MAX_CHARS - 8)
                                    if isinstance(summary, str) and summary else None),
+                            result_payload=payload if isinstance(payload, dict) else None,
                         )
                     else:
                         payload = json.loads(terminal_row["payload_json"] or "{}")
@@ -2800,6 +2843,7 @@ class OrchestratingRuntime:
                     entry=((outcome_label + ": " if outcome_label else "") + "Result: " +
                            _compact_text(lines[0], _WORKER_ACTIVITY_MAX_CHARS - 8)
                            if lines[0] and not has_final_response else None),
+                    result_payload=event.payload,
                     **fields,
                 )
             elif event.event_type == "assignment_failed" and event.assignment_ref:
@@ -2815,10 +2859,22 @@ class OrchestratingRuntime:
             elif event.event_type == "assignment_cancelled" and event.assignment_ref:
                 self._close_assignment(task_id, event.assignment_ref)
                 text = f"Cancelled: {event.payload.get('reason', '')}"
+                fields: dict[str, Any] = {"status": _TOOL_CALL_STATUS_FOR_CANCELLED}
+                # ACP's ToolCallStatus has no "cancelled" value (this card is
+                # rendered "failed", per the module docstring), so a client
+                # with zero live pipeline data cannot otherwise tell a
+                # cancelled assignment from a genuine failure. Carry it on
+                # the same portable title channel T035 already uses for
+                # "Completed with issues" -- see worker-display.ts's
+                # `resolveWorkerCardStatus`.
+                with self._lock:
+                    base_title = getattr(self, "_worker_card_title", {}).get(event.assignment_ref)
+                if base_title:
+                    fields["title"] = f"{base_title} · Cancelled"
                 self._emit_worker_card(
                     emit_tool_call, event.assignment_ref,
-                    status=_TOOL_CALL_STATUS_FOR_CANCELLED,
                     entry=_compact_text(text, _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                    **fields,
                 )
 
     def _close_assignment(self, task_id: str, assignment_ref: str) -> None:
@@ -3168,6 +3224,7 @@ class OrchestratingRuntime:
                 self._worker_card_terminal[card_id] = incoming_status
         entry = fields.pop("entry", None)
         entry_ref = fields.pop("entry_ref", None)
+        result_payload = fields.pop("result_payload", None)
         display_project_root = fields.pop("_project_root", None)
         if display_project_root:
             with self._lock:
@@ -3209,6 +3266,15 @@ class OrchestratingRuntime:
             # detail, not synthesized success/error evidence.
             if incoming_status == "failed":
                 fields["raw_output"] = mirror
+        # Embed the worker's terminal result projection (bounded summary +
+        # checks) directly on the completed card's rawOutput, so a client
+        # that persists/replays this ACP update can render the result
+        # section with zero follow-up RPC. Only ever set for "completed"
+        # (a bare "failed" card already owns raw_output as its plain-text
+        # failure mirror above, and worker_card_outcome only maps to
+        # "failed" when there is no result at all).
+        if incoming_status == "completed" and isinstance(result_payload, Mapping):
+            fields["raw_output"] = _client_safe_raw(worker_result_projection(result_payload))
         with self._lock:
             first = card_id not in self._emitted_worker_cards
             if first:
@@ -4510,6 +4576,7 @@ class OrchestratingRuntime:
                             pending_feed, assignment_ref, status="completed",
                             entry=("Result: " + _compact_text(summary, _WORKER_ACTIVITY_MAX_CHARS - 8)
                                    if summary and not has_final_response else None),
+                            result_payload=pending_result,
                         )
                 if pending_result is None and outcome.stop_reason == StopReason.END_TURN:
                     # A publish event may be delivered after the prompt's
@@ -4530,6 +4597,7 @@ class OrchestratingRuntime:
                             pending_feed, assignment_ref, status="completed",
                             entry=("Result: " + _compact_text(summary, _WORKER_ACTIVITY_MAX_CHARS - 8)
                                    if summary and not has_final_response else None),
+                            result_payload=pending_result,
                         )
                 # A normal END_TURN is not itself a worker failure.  Give a
                 # worker which left no question, result, or owned published
@@ -4625,6 +4693,7 @@ class OrchestratingRuntime:
                                 pending_feed, assignment_ref, status="completed",
                                 entry=("Result: " + _compact_text(summary, _WORKER_ACTIVITY_MAX_CHARS - 8)
                                        if summary and not has_final_response else None),
+                                result_payload=result_payload if isinstance(result_payload, dict) else None,
                             )
                 with self._lock:
                     # The first-turn fence was held through the durable

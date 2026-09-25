@@ -130,7 +130,14 @@ npm --prefix integrations/paseo run test:steer      # server/provider-steer.test
 npm run test:diff      # node --experimental-strip-types client/worker-panel-diff.test.ts
 npm run test:status    # node --experimental-strip-types client/worker-panel-status.test.ts
 npm run test:coalesce  # node --experimental-strip-types client/coalesce.test.ts
+npm run test:worker-result-batch # node --experimental-strip-types client/worker-result-batch.test.ts
 ```
+
+A local sibling import must use its real `.ts` extension (e.g. `./pipeline.ts`),
+never a `.js` specifier standing in for it: `tsc`/esbuild remap `.js` to the
+sibling `.ts` file, but `node --experimental-strip-types` does not, and a
+`.js` specifier that resolves to nothing breaks every test that transitively
+imports it.
 
 **GUI testing** (verifies rendered user-facing behavior):
 

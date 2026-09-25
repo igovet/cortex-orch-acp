@@ -27,7 +27,7 @@ import pytest
 
 from cortex_runtime.acp.orchestrating_runtime import (
     OrchestratingRuntime, PromptOutcome, _display_role, _worker_display_text,
-    _worker_tool_details, worker_card_outcome,
+    _worker_tool_details, worker_card_outcome, worker_result_projection,
 )
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation import mcp_tools
@@ -333,6 +333,104 @@ def test_worker_card_outcome_distinguishes_clean_result_issues_and_execution_fai
     assert worker_card_outcome("failed", None) == ("failed", None)
 
 
+def test_worker_result_projection_bounds_and_shapes_like_pipeline_reader():
+    """Same ``{summary, checks}`` shape/bounds as Paseo's RPC-read projection
+    (``integrations/paseo/server/pipeline.ts``'s ``clip``/checks logic), so
+    an embedded card and a fallback RPC read render identically."""
+    payload = {
+        "summary": "s" * 900,
+        "checks": [
+            {"name": "n" * 400, "outcome": "failed", "blocker": "b" * 900},
+            {"name": "ok", "outcome": "passed"},
+            {"name": "", "outcome": None},
+        ] + [{"name": f"extra-{i}", "outcome": "passed"} for i in range(40)],
+    }
+    projection = worker_result_projection(payload)
+    assert projection["summary"] is not None
+    assert len(projection["summary"]) <= 600
+    assert len(projection["checks"]) == 30
+    first = projection["checks"][0]
+    assert len(first["name"]) <= 300
+    assert first["outcome"] == "failed"
+    assert len(first["blocker"]) <= 600
+    assert projection["checks"][1] == {"name": "ok", "outcome": "passed"}
+    # An empty/omitted name falls back to "check"; an omitted outcome to
+    # "unverified" -- exactly pipeline.ts's own fallback values.
+    assert projection["checks"][2]["name"] == "check"
+    assert projection["checks"][2]["outcome"] == "unverified"
+
+
+def test_worker_result_projection_scrubs_secrets():
+    projection = worker_result_projection({
+        "summary": "token: sk-abcdefghijklmnop",
+        "checks": [{"name": "check", "outcome": "passed", "blocker": "password=hunter2"}],
+    })
+    assert "sk-abcdefghijklmnop" not in projection["summary"]
+    assert "hunter2" not in (projection["checks"][0].get("blocker") or "")
+
+
+def test_completed_worker_card_embeds_result_projection():
+    """The terminal ACP card's ``rawOutput`` carries the same structured
+    projection, so a client can render the result section without a
+    follow-up RPC. See the primary design in the T-worker-timeline-instant
+    assignment: Paseo's ``pipeline.ts`` RPC remains only the fallback."""
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._lock = threading.RLock()
+    runtime._worker_action_log = {}
+    runtime._worker_action_refs = {}
+    runtime._worker_card_sent = {}
+    runtime._worker_card_terminal = {}
+    runtime._emitted_worker_cards = set()
+    runtime._worker_final_response_seen = set()
+    runtime._assignment_ref_for_attempt = lambda task_id, attempt: "assignment"
+    runtime._close_assignment = lambda task_id, assignment: None
+    runtime._worker_card_outcome = lambda task_id, assignment: ("completed", None)
+    cards = []
+    result = SimpleNamespace(
+        event_type="worker_result", assignment_ref="attempt",
+        payload={"summary": "Did the thing.",
+                 "checks": [{"name": "tests pass", "outcome": "passed"},
+                            {"name": "docs updated", "outcome": "not_run", "blocker": "no time"}],
+                 "report_ref": "r_secret"},
+    )
+    runtime._emit_assignment_tool_calls("task", cards.append, [result])
+    assert len(cards) == 1
+    assert cards[0]["raw_output"] == {
+        "summary": "Did the thing.",
+        "checks": [
+            {"name": "tests pass", "outcome": "passed"},
+            {"name": "docs updated", "outcome": "not_run", "blocker": "no time"},
+        ],
+    }
+
+
+def test_cancelled_assignment_card_carries_a_portable_cancelled_title_suffix():
+    """ACP's ``ToolCallStatus`` has no ``cancelled`` value, so a cancelled
+    assignment is rendered ``failed`` (see the module docstring near
+    ``_TOOL_CALL_STATUS_FOR_CANCELLED``). A client with zero live pipeline
+    data must still be able to tell it apart from a genuine failure, so this
+    reuses T035's portable title channel -- the same one "Completed with
+    issues" already uses -- instead of requiring an RPC. See Paseo's
+    ``resolveWorkerCardStatus`` (client/worker-display.ts)."""
+    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
+    runtime._lock = threading.RLock()
+    runtime._worker_action_log = {}
+    runtime._worker_action_refs = {}
+    runtime._worker_card_sent = {}
+    runtime._worker_card_terminal = {}
+    runtime._emitted_worker_cards = set()
+    runtime._worker_final_response_seen = set()
+    runtime._worker_card_title = {"assignment": "Worker: debugger — Audit"}
+    runtime._close_assignment = lambda task_id, assignment: None
+    cards = []
+    event = SimpleNamespace(
+        event_type="assignment_cancelled", assignment_ref="assignment",
+        payload={"reason": "superseded"},
+    )
+    runtime._emit_assignment_tool_calls("task", cards.append, [event])
+    assert len(cards) == 1
+    assert cards[0]["status"] == "failed"
+    assert cards[0]["title"] == "Worker: debugger — Audit · Cancelled"
 
 
 

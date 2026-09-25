@@ -1,8 +1,13 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { readWorkerHistory, tokenTotals } from "./worker-history.js";
+import { readWorkerHistory, tokenTotals } from "./worker-history.ts";
 
 const check = z.object({ name: z.string(), outcome: z.string(), blocker: z.string().optional() });
+
+// A worker's terminal result: the same bounded/scrubbed shape whether read
+// from the embedded ACP card (see ``worker-timeline-result.ts``) or from
+// this RPC's fallback projection below.
+export const workerResult = z.object({ summary: z.string().nullable(), checks: z.array(check) });
 
 export const readPipeline = defineRpc({
   name: "cortex.pipeline.read",
@@ -28,7 +33,7 @@ export const readPipeline = defineRpc({
     // Keyed by the public delegation ref (a worker's `assignmentRef`).
     delegations: z.record(z.string(), z.object({
       order: z.number(),
-      result: z.object({ summary: z.string().nullable(), checks: z.array(check) }).nullable(),
+      result: workerResult.nullable(),
       decision: z.object({ decision: z.string(), rationale: z.string().nullable() }).nullable(),
     })),
     // The runtime's accepted plan (current revision), including nodes no
@@ -44,7 +49,7 @@ export const readPipeline = defineRpc({
         status: z.string(),
         assignmentRef: z.string().nullable(),
         waiting: z.string().nullable(),
-        result: z.object({ summary: z.string().nullable(), checks: z.array(check) }).nullable(),
+        result: workerResult.nullable(),
       })),
     }).nullable().default(null),
     workers: readWorkerHistory.output.shape.assignments,

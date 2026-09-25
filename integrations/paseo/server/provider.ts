@@ -20,6 +20,7 @@ import {
   CORTEX_QUESTION_INPUT_MARKER,
   isCortexQuestionRequest,
 } from "../shared/question-marker.ts";
+import { parseWorkerResult } from "../shared/worker-timeline-result.ts";
 
 type CommandArgv = [string, ...string[]];
 
@@ -174,7 +175,15 @@ export function presentTimeline(event: ProviderEvent): ProviderEvent {
   // stay its own row: grouped, it would become the run's visible latest call
   // and the client's worker-row transform would hide every call before it.
   if (item.callId.startsWith("worker:")) {
-    return { ...projected, item: { ...item, detail: { type: "plan", text: item.name } } };
+    // The runtime embeds its terminal `{summary, checks}` projection as this
+    // card's rawOutput (orchestrating_runtime.py's `_emit_worker_card`),
+    // which lands here as `detail.output` while detail is still "unknown".
+    // Move it into `metadata` -- the one channel the client-side worker-row
+    // transformer can still read once `detail` becomes a bare "plan" below
+    // -- so a completed card renders its result with zero follow-up RPC.
+    const result = parseWorkerResult(item.detail.type === "unknown" ? item.detail.output : undefined);
+    return { ...projected, item: { ...item, detail: { type: "plan", text: item.name },
+      ...(result ? { metadata: { ...item.metadata, cortexWorkerResult: result } } : {}) } };
   }
   const rawInput = item.metadata?.cortexRawInput ?? (item.detail.type === "unknown" ? item.detail.input : item.detail);
   const semantics = presentToolSemantics({ name: item.name, rawInput });

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import {
-  contextSummary, workerAssignmentLine, workerCardMetadata, workerDisplayName,
+  contextSummary, resolveWorkerCardStatus, workerAssignmentLine, workerCardMetadata, workerDisplayName,
   workerModelDisplay, workerStatusPresentation,
 } from "./worker-display.ts";
 
@@ -20,6 +20,18 @@ assert.deepEqual(workerAssignmentLine({
 } as never, "running"), chat);
 assert.equal(workerCardMetadata("Worker: debugger — Audit", "canceled").subtitle, "debugger · cancelled");
 assert.deepEqual(workerCardMetadata("Worker: debugger · codex · Luna · medium · Completed with issues — Audit", "completed"), { workerName: "Audit", subtitle: "debugger · codex · Luna · medium · completed with issues" });
+
+// A card rendered with zero live pipeline data (an embedded result, or the
+// batched fallback -- no `pipeline.workers` projection either way) recovers
+// "completed with issues" and "cancelled" from this same portable title
+// suffix; ACP's own status carries neither (no "completed_with_issues"
+// value at all, and a cancelled assignment is rendered "failed" -- see
+// orchestrating_runtime.py's module docstring near
+// `_TOOL_CALL_STATUS_FOR_CANCELLED`).
+assert.equal(resolveWorkerCardStatus("Worker: debugger — Audit", "completed"), "completed");
+assert.equal(resolveWorkerCardStatus("Worker: debugger · Completed with issues — Audit", "completed"), "completed_with_issues");
+assert.equal(resolveWorkerCardStatus("Worker: debugger · Cancelled — Audit", "failed"), "cancelled");
+assert.deepEqual(workerCardMetadata("Worker: debugger · Cancelled — Audit", "failed"), { workerName: "Audit", subtitle: "debugger · cancelled" });
 
 // T035: realistic Claude and Codex configOptions shapes -- an alias
 // (`opus[1m]`, `haiku`, `default`) with the engine's own resolved name

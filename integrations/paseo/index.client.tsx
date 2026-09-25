@@ -1,21 +1,23 @@
 import { isHiddenOperation } from "./shared/timeline-visibility.ts";
-import { useAgent, useRpc, type PluginClientContext, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
+import { useAgent, type PluginClientContext, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { Animated, Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { WorkerPanel } from "./client/worker-panel.js";
 import { PipelinePanel } from "./client/pipeline-panel.js";
 import { selectWorker } from "./client/worker-selection.js";
 import { WorkerPopover } from "./client/worker-popover.js";
-import { isWorkerTimelineRunning, workerTimelineStatus } from "./client/worker-timeline-status.js";
-import { workerCardMetadata, workerTerminalState, type WorkerStatusTone } from "./client/worker-display.ts";
+import { isWorkerTimelineRunning } from "./client/worker-timeline-status.js";
+import { resolveWorkerCardStatus, workerCardMetadata, workerTerminalState, type WorkerStatusTone } from "./client/worker-display.ts";
 import { coalesced } from "./client/coalesce.ts";
 import { UsageMeter, useWorkerUsage } from "./client/usage-meter.tsx";
-import { readPipeline, type Pipeline } from "./shared/pipeline.js";
+import { workerResult } from "./shared/pipeline.js";
+import { parseWorkerResult } from "./shared/worker-timeline-result.ts";
 import { WorkerResultDetail } from "./client/worker-result.tsx";
 import { workerResultItems } from "./client/worker-result-model.ts";
 import { setWorkerCardPulse } from "./client/worker-card-pulse.ts";
+import { useFallbackWorkerResult } from "./client/use-worker-result.ts";
 
 const workerTimelineSchema = z.object({
   callId: z.string(),
@@ -26,6 +28,13 @@ const workerTimelineSchema = z.object({
   // aligned with that exact projected shape so the renderer is mounted
   // instead of falling back to "Plugin timeline item unavailable.".
   status: z.enum(["running", "completed", "canceled", "failed"]),
+  // The runtime's terminal `{summary, checks}` projection, carried on the
+  // host-persisted/replayed tool_call item's `metadata` (see this file's
+  // `worker-tool-call-row` transformer and `server/provider.ts`'s
+  // `presentTimeline`) so a completed card renders it with zero RPC, even
+  // the first time a session is opened. `undefined` for a running card or
+  // an older item that predates this field -- see `useFallbackWorkerResult`.
+  result: workerResult.nullable().optional(),
 });
 
 const CORTEX_PROVIDER = "cortex";
@@ -44,40 +53,18 @@ function statusToneColor(tone: WorkerStatusTone, colors: PluginTimelineItemProps
   return colors.accent;
 }
 
-/** Read only the finished worker's result projection; the Workers popover does not use this hook. */
-function useWorkerProjection(workspaceId: string | null, agentId: string, assignmentRef: string, live: boolean) {
-  const rpc = useRpc(readPipeline);
-  const [projection, setProjection] = useState<{ result: { summary: string | null; checks: { name: string; outcome: string }[] } | null; worker: Pipeline["workers"][number] | undefined } | null>(null);
-  useEffect(() => {
-    if (!workspaceId) return;
-    let active = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const load = async () => {
-      try {
-        const pipeline = await rpc({ workspaceId, agentId });
-        if (active) setProjection({
-          result: pipeline.delegations[assignmentRef]?.result ?? null,
-          worker: pipeline.workers.find((worker) => (worker.assignmentRef ?? worker.id) === assignmentRef),
-        });
-      } catch {
-        // A result is supplementary card content. Keep the last successful read.
-      }
-      if (active && live) timer = setTimeout(load, 3000);
-    };
-    void load();
-    return () => { active = false; clearTimeout(timer); };
-  }, [agentId, assignmentRef, live, rpc, workspaceId]);
-  return projection;
-}
-
 function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }: PluginTimelineItemProps<z.output<typeof workerTimelineSchema>> & { workspaceId: string | null; onOpen: () => void }) {
   const opacity = useRef(new Animated.Value(1)).current;
   const pulseElement = useRef<HTMLElement | null>(null);
   const isWorking = isWorkerTimelineRunning(item.data.status);
   const usage = useWorkerUsage(workspaceId, agentId, item.data.assignmentRef, isWorking);
-  const projection = useWorkerProjection(workspaceId, agentId, item.data.assignmentRef, isWorking);
-  const result = projection?.result ?? null;
-  const resolvedStatus = workerTimelineStatus(projection?.worker, item.data.status);
+  // A running card never shows a result yet, so the fallback read only ever
+  // triggers once the card is terminal and has no embedded result -- an
+  // older item, or a host build that did not persist the field.
+  const embedded = item.data.result ?? null;
+  const fallback = useFallbackWorkerResult(workspaceId, agentId, item.data.assignmentRef, !isWorking && !embedded);
+  const result = embedded ?? fallback;
+  const resolvedStatus = resolveWorkerCardStatus(item.data.title, item.data.status);
   const terminal = workerTerminalState(resolvedStatus, result?.checks);
   const metadata = workerCardMetadata(item.data.title, resolvedStatus);
   const { issueCount } = terminal;
@@ -164,6 +151,13 @@ export default function contribute(client: PluginClientContext) {
       // The server projection already gives them readable names and native
       // read/edit/shell detail.
       if (!item.callId.startsWith("worker:")) return undefined;
+      // The server's `presentTimeline` embeds the runtime's terminal
+      // `{summary, checks}` projection at `item.metadata.cortexWorkerResult`
+      // (see `server/provider.ts`). Paseo persists and replays a tool_call
+      // item's `metadata` exactly like its other fields, so this is a
+      // completed card's result the *first* time a session is opened, not
+      // just after a live update -- the result no longer needs its own RPC.
+      const result = parseWorkerResult(item.metadata?.cortexWorkerResult);
       return {
         items: [{
           type: "plugin",
@@ -175,7 +169,8 @@ export default function contribute(client: PluginClientContext) {
           id: `worker-row:${item.callId}`,
           kind: "worker-row",
           version: 1,
-          data: { callId: item.callId, assignmentRef: item.callId.slice("worker:".length), title: item.name, status: item.status },
+          data: { callId: item.callId, assignmentRef: item.callId.slice("worker:".length), title: item.name, status: item.status,
+            ...(result !== undefined ? { result } : {}) },
         }],
       };
     },

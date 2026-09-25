@@ -145,4 +145,39 @@ test("worker cards use the one detail Paseo overview never groups", () => {
   });
   if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
   assert.deepEqual(event.item.detail, { type: "plan", text: "Worker: debugger — audit" });
+  assert.equal(event.item.metadata, undefined);
+});
+
+test("a completed worker card's embedded result projection reaches item.metadata.cortexWorkerResult", () => {
+  const event = presentTimeline({
+    type: "timeline.item",
+    sessionId: "s",
+    item: {
+      type: "tool_call", id: "worker:a1", callId: "worker:a1", name: "Worker: debugger — audit",
+      status: "completed", error: null,
+      detail: {
+        type: "unknown", input: null,
+        output: { summary: "Did the thing.", checks: [{ name: "tests", outcome: "passed" }] },
+      },
+    },
+  });
+  if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
+  assert.deepEqual(event.item.detail, { type: "plan", text: "Worker: debugger — audit" });
+  assert.deepEqual(event.item.metadata, {
+    cortexWorkerResult: { summary: "Did the thing.", checks: [{ name: "tests", outcome: "passed" }] },
+  });
+});
+
+test("a worker card whose rawOutput is not the result shape embeds no metadata", () => {
+  const event = presentTimeline({
+    type: "timeline.item",
+    sessionId: "s",
+    item: {
+      type: "tool_call", id: "worker:a1", callId: "worker:a1", name: "Worker: debugger — audit",
+      status: "failed", error: "boom",
+      detail: { type: "unknown", input: null, output: "plain-text failure mirror" },
+    },
+  });
+  if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
+  assert.equal(event.item.metadata, undefined);
 });

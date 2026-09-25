@@ -74,13 +74,36 @@ export function workerLine(name: string, profile: string, route: readonly (strin
  * `Worker: profile · provider · model · effort — assignment title`.
  * Keep parsing tolerant for older cards that omitted route metadata.
  */
-export function workerCardMetadata(title: string, status: string) {
+function parseWorkerCardTitle(title: string) {
   const body = title.trim().replace(/^Worker:\s*/i, "");
   const [route, ...nameParts] = body.split(/\s+—\s+/, 2);
   const routeParts = route.split(/\s+·\s+/).map((part) => part.trim()).filter(Boolean);
-  const hasIssues = routeParts.at(-1)?.toLowerCase() === "completed with issues";
-  if (hasIssues) routeParts.pop();
-  return workerLine(nameParts.join(" — "), routeParts[0] || "worker", routeParts.slice(1), hasIssues ? "completed_with_issues" : status);
+  const suffix = routeParts.at(-1)?.toLowerCase();
+  const hasIssues = suffix === "completed with issues";
+  // ACP's ToolCallStatus has no "cancelled" value, so a cancelled
+  // assignment's card carries this same portable title suffix instead
+  // (see orchestrating_runtime.py's `assignment_cancelled` handler).
+  const isCancelled = suffix === "cancelled";
+  if (hasIssues || isCancelled) routeParts.pop();
+  return { name: nameParts.join(" — "), routeParts, hasIssues, isCancelled };
+}
+
+/**
+ * The status a reader should see for this card: the title's own
+ * "Completed with issues"/"Cancelled" suffix (T035's portable channel,
+ * above) takes precedence over a coarser host/embedded status -- this is
+ * what lets a card rendered with zero RPC (embedded ``result`` only, no
+ * live pipeline projection) still show the right pill.
+ */
+export function resolveWorkerCardStatus(title: string, status: string): string {
+  const { hasIssues, isCancelled } = parseWorkerCardTitle(title);
+  return hasIssues ? "completed_with_issues" : isCancelled ? "cancelled" : status;
+}
+
+export function workerCardMetadata(title: string, status: string) {
+  const { name, routeParts, hasIssues, isCancelled } = parseWorkerCardTitle(title);
+  return workerLine(name, routeParts[0] || "worker", routeParts.slice(1),
+    hasIssues ? "completed_with_issues" : isCancelled ? "cancelled" : status);
 }
 
 /**
