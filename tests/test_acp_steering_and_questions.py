@@ -262,6 +262,62 @@ def test_paseo_steer_during_active_worker_turn_reaches_next_plan(tmp_path, monke
         runtime.shutdown()
 
 
+def test_follow_up_question_on_a_completed_task_is_answered_without_a_plan(tmp_path):
+    """A read-only question sent after verified completion was refused by
+    answer_submit and synthesis_submit and ended in structured_proposal_missing."""
+    from cortex_runtime.contracts import StoreError
+    from cortex_runtime.orchestration.state import TaskMachine
+    from runtime_scenarios import propose_inspection, publish_result
+
+    store, task_id = _task(tmp_path, "Inspect the fixture.")
+    answer = "Yes: the inspection report is retained."
+    follow_ups, refused = [], []
+
+    def router(store, channel, *_):
+        def behavior(store, channel, _ref, message, _index):
+            if channel.role != "coordinator":
+                return publish_result(store, channel)
+            context = mcp_tools.dispatch(store, channel, "task_get_context", {})
+            if context["state"] == "RECONCILING":
+                mcp_tools.dispatch(store, channel, "synthesis_submit", dict(text="Inspected and verified"))
+            elif context["revision"] == 0:
+                propose_inspection(store, channel)
+            else:
+                follow_ups.append(message)
+                try:
+                    mcp_tools.dispatch(store, channel, "answer_submit", dict(text=answer, request_key="follow-up"))
+                except StoreError as error:
+                    refused.append(str(error))
+            return PromptOutcome(StopReason.END_TURN, "Coordinator text")
+        return behavior
+
+    runtime, _engine = _make_runtime(store, router)
+    output = []
+    try:
+        assert runtime.start_prompt(task_id, "s1", "Inspect the fixture.", lambda _: True,
+                                    threading.Event()) == StopReason.END_TURN
+        completed = TaskMachine(store).context(task_id)
+        assert completed["state"] == "COMPLETED" and completed["verification"]["revision"] == 1
+        assert runtime.start_prompt(task_id, "s1", "Can I already see the report?", output.append,
+                                    threading.Event()) == StopReason.END_TURN
+    finally:
+        runtime.shutdown()
+    context = TaskMachine(store).context(task_id)
+    assert refused == [] and len(follow_ups) == 1
+    assert "This task was completed" in follow_ups[0] and "answer_submit is not available" not in follow_ups[0]
+    assert (context["state"], context["blocker"], context["synthesis"], context["revision"]) == (
+        "COMPLETED", None, answer, 1)
+    assert answer in output
+    with store.connection() as db:
+        types = [row[0] for row in db.execute(
+            "SELECT type FROM runtime_events WHERE task_id=? AND id>(SELECT MAX(id) FROM runtime_events "
+            "WHERE task_id=? AND type='TASK_REOPENED') ORDER BY id", (task_id, task_id))]
+        blocked = db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND payload_json LIKE ?",
+                             (task_id, "%structured_proposal_missing%")).fetchone()
+    assert "ANSWER_SUBMITTED" in types and "PLAN_ACCEPTED" not in types and "ASSIGNMENT_CREATED" not in types
+    assert blocked is None
+
+
 def test_explicit_cancel_during_worker_does_not_record_route_fallback(tmp_path):
     from cortex_runtime.orchestration.state import TaskMachine
     from runtime_scenarios import propose_inspection, publish_result

@@ -63,6 +63,13 @@ queued `user_message` events unclaimed for that coordinator turn rather than
 consuming their text as a worker-card update. Repeated delivery of the same
 message identity does not create another requirement revision.
 
+A message sent to a task that already reached `COMPLETED` reopens the task
+(`TASK_REOPENED`) and returns it to planning. If the message only asks about
+the finished work, the coordinator answers with `answer_submit` and the task
+completes again. If it asks for changes, the coordinator submits a plan, and
+that new revision gets its own review and verification. See
+[orchestration](orchestration.md) for the exact eligibility rule.
+
 The ACP bridge in Paseo 0.9.1 and 0.9.2 (the same code) has no native
 `prompt.steer`. The Cortex
 provider sends a text steer through the bridge's concurrent configuration

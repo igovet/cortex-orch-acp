@@ -271,7 +271,7 @@ ERROR_HELP = {
     "gateway_read_failure": "The requested project path could not be read. No file was changed.",
     "request_key_conflict": "This request_key was already used for a different request. Reuse a key only to retry the identical call; give any different request a new key.",
     "plan_not_expected": "A plan is accepted only while the task is planning. Read task_get_context for the current state: a plan is already running, so wait for its results or, from a worker, use replan_request.",
-    "direct_answer_not_available": "answer_submit is only for a question answered before any plan or worker exists, or after the user chose to finish at a stop question. Once work has been planned, finish through the plan and synthesis_submit.",
+    "direct_answer_not_available": "answer_submit is only for a question answered before any plan or worker exists, after the user chose to finish at a stop question, or for a follow-up that reopened a completed task before any new plan. Once work has been planned, finish through the plan and synthesis_submit.",
     "answer_conflict": "A different answer was already submitted for this task. Resubmit exactly the accepted text, or leave it.",
     "synthesis_not_expected": "A synthesis is accepted only after every planned task, the review and the verification finished. Read task_get_context and wait for that state.",
     "synthesis_conflict": "A different synthesis was already accepted for this task. Resubmit exactly the accepted text, or leave it.",

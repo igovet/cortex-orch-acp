@@ -186,9 +186,8 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 machine.move(task_id, 'BLOCKED', blocker='structured_proposal_missing')
                 continue
             prompted[key]=prompted.get(key,0)+1
-            request = ('First determine whether the user wants information or changes. For a simple question or project overview, '
-                       'read only the relevant files yourself and submit a concise direct answer; do not create workers, reports, '
-                       'code review or verification jobs for an explanation. Explaining how to run tests does not require executing them. '
+            request = (_direct_answer_request(runtime, task_id) +
+                       'Explaining how to run tests does not require executing them. '
                        'The coordinator can inspect files but cannot execute commands. Do not expand a description into a defect audit. '
                        'If changes or substantial delegated work are required, submit a focused structured plan. '
                        'Runtime schedules planned workers, then independent review whenever the project changed, then verification. '
@@ -539,6 +538,23 @@ def _verification_repair_request(context):
             'Find how to run the check correctly in this project (read its docs, Makefile, package.json, its virtualenvs; '
             'a missing interpreter or tool is a wrong command, not a reason to stop) and submit verification_submit with '
             'corrected commands. If the code itself is wrong, submit a new plan that fixes it. ')
+
+
+def _direct_answer_request(runtime, task_id):
+    """Offer answer_submit only when the runtime will accept it."""
+    from .state import direct_answer_allowed, reopened_after_completion
+    with runtime._store.connection() as db:
+        task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+        allowed = bool(task) and direct_answer_allowed(db, task)
+        reopened = allowed and reopened_after_completion(db, task)
+    if not allowed:
+        return ('answer_submit is not available now: work planned in this task must finish through the plan, '
+                'independent review, verification and synthesis_submit. Submit a plan or verification repair, '
+                'or ask the user with user_question_request. ')
+    return (('This task was completed and the user\'s new message reopened it. ' if reopened else '') +
+            'First determine whether the user wants information or changes. For a simple question or project overview, '
+            'read only the relevant files yourself and submit a concise direct answer with answer_submit; do not create '
+            'workers, reports, code review or verification jobs for an explanation. ')
 
 
 def _released_request(runtime, task_id):

@@ -117,7 +117,7 @@ def apply_pending_steering(store, task_id):
                 "UPDATE runtime_tasks SET state='RECOVERING',synthesis=NULL,blocker=NULL,updated_at=? "
                 "WHERE task_id=?", (now(), task_id),
             )
-            event(db, task_id, 'TASK_REOPENED', {})
+            event(db, task_id, 'TASK_REOPENED', dict(previous=task['state'], revision=task['revision']))
         else:
             transition(db, task_id, 'RECOVERING')
             db.execute("UPDATE runtime_tasks SET synthesis=NULL WHERE task_id=?", (task_id,))

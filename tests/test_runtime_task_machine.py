@@ -527,6 +527,106 @@ def test_direct_answer_cannot_replace_planned_work_or_review(machine):
     assert 'answer_submit' not in schemas_for('worker')
 
 
+def _complete_and_reopen(state, channel, key='done'):
+    """A planned revision reaches COMPLETED, then a user message reopens it.
+
+    Unit fixture: the completed plan is advanced to its verified completion
+    directly; the controller integration test in
+    test_acp_steering_and_questions.py drives the real review and
+    verification path."""
+    from cortex_runtime.orchestration.policy import steer, apply_pending_steering
+    from cortex_runtime.orchestration.state import event
+    state.submit_plan(channel, plan(), key); state.move(channel.task_id, 'EXECUTING')
+    node = state.claim_ready(channel.task_id, channel.channel_id)[0]
+    with state.store.connection() as db:
+        db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                   (node['assignment_ref'], channel.task_id, 'xa_'+key, 'worker-backend-dev', 'ready', 'ready', 1, 'now', 'now'))
+        db.execute("UPDATE runtime_nodes SET status='completed' WHERE task_id=?", (channel.task_id,))
+        event(db, channel.task_id, 'WORKER_RELEASED', dict(assignment_ref=node['assignment_ref'], observed_session='absent'))
+        db.execute("UPDATE runtime_tasks SET state='COMPLETED',synthesis='Verified.' WHERE task_id=?", (channel.task_id,))
+        event(db, channel.task_id, 'TASK_STATE_CHANGED', dict(previous='RECONCILING', state='COMPLETED', blocker=None))
+        db.commit()
+    assert steer(state.store, channel.task_id, 'Can I already see the drafts?', f'user:{key}')
+    assert apply_pending_steering(state.store, channel.task_id)
+    context = state.context(channel.task_id)
+    assert (context['state'], context['plan'] is not None, bool(context['nodes'])) == ('PLANNING', True, True)
+    return context
+
+
+def test_follow_up_question_on_a_completed_task_is_answered_directly(machine):
+    """A read-only question after verified completion dead-ended in
+    structured_proposal_missing: answer_submit and synthesis_submit were both
+    refused, leaving only a plan."""
+    state, channel = machine
+    revision = _complete_and_reopen(state, channel)['revision']
+    assert state.submit_answer(channel, 'Yes: the drafts are in drafts/.', 'follow-up')['state'] == 'ANSWER_READY'
+    state.move(channel.task_id, 'COMPLETED')
+    context = state.context(channel.task_id)
+    assert (context['state'], context['revision'], context['blocker']) == ('COMPLETED', revision, None)
+    # A second follow-up on the same task is answered the same way.
+    from cortex_runtime.orchestration.policy import steer, apply_pending_steering
+    assert steer(state.store, channel.task_id, 'And the final version?', 'user:again')
+    assert apply_pending_steering(state.store, channel.task_id)
+    state.submit_answer(channel, 'Not yet.', 'again')
+    state.move(channel.task_id, 'COMPLETED')
+    assert state.context(channel.task_id)['state'] == 'COMPLETED'
+
+
+def test_reopened_completed_task_with_new_work_cannot_answer_until_it_is_verified(machine):
+    from cortex_runtime.orchestration.state import event
+    state, channel = machine
+    _complete_and_reopen(state, channel)
+    state.submit_plan(channel, plan(), 'change')
+    with pytest.raises(StoreError, match='direct_answer_not_available'):
+        state.submit_answer(channel, 'Skip the new work.', 'skip-ready')
+    state.move(channel.task_id, 'EXECUTING')
+    assert state.claim_ready(channel.task_id, channel.channel_id)
+    # The unverified new revision comes back to the coordinator in PLANNING.
+    assert state.return_to_coordinator(channel.task_id, 'worker_failed')
+    state.move(channel.task_id, 'PLANNING')
+    with pytest.raises(StoreError, match='direct_answer_not_available'):
+        state.submit_answer(channel, 'Skip the new work.', 'skip-planning')
+    # Nor can a forced ANSWER_READY complete it.
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_tasks SET state='ANSWER_READY',synthesis='Skip.' WHERE task_id=?", (channel.task_id,))
+        event(db, channel.task_id, 'ANSWER_SUBMITTED', dict(text='Skip.', request_key='forced'))
+        db.commit()
+    with pytest.raises(StoreError, match='completion_answer_invariant'):
+        state.move(channel.task_id, 'COMPLETED')
+
+
+def test_reopened_completed_task_with_a_new_worker_cannot_answer(machine):
+    state, channel = machine
+    _complete_and_reopen(state, channel)
+    with state.store.connection() as db:
+        db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                   ('unplanned', channel.task_id, 'xa_unplanned', 'worker-backend-dev', 'ready', 'ready', 1, 'now', 'now'))
+        db.commit()
+    with pytest.raises(StoreError, match='direct_answer_not_available'):
+        state.submit_answer(channel, 'Skip.', 'skip')
+
+
+def test_unverified_executed_work_is_never_closed_by_a_direct_answer(machine):
+    """Work that never reached COMPLETED: neither a return to planning nor a
+    reopened FAILED task makes answer_submit available."""
+    from cortex_runtime.orchestration.policy import steer, apply_pending_steering
+    state, channel = machine
+    state.submit_plan(channel, plan(), 'p'); state.move(channel.task_id, 'EXECUTING')
+    assert state.claim_ready(channel.task_id, channel.channel_id)
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET status='completed' WHERE task_id=?", (channel.task_id,)); db.commit()
+    assert state.return_to_coordinator(channel.task_id, 'worker_failed')
+    state.move(channel.task_id, 'PLANNING')
+    with pytest.raises(StoreError, match='direct_answer_not_available'):
+        state.submit_answer(channel, 'Done.', 'unverified')
+    state.move(channel.task_id, 'FAILED', blocker='coordinator_turn_failed:refusal')
+    assert steer(state.store, channel.task_id, 'What happened?', 'user:failed')
+    assert apply_pending_steering(state.store, channel.task_id)
+    assert state.context(channel.task_id)['state'] == 'PLANNING'
+    with pytest.raises(StoreError, match='direct_answer_not_available'):
+        state.submit_answer(channel, 'Done.', 'after-failure')
+
+
 @pytest.mark.parametrize('language',['en','ru'])
 @pytest.mark.parametrize('streamed',[True,False])
 def test_project_overview_reads_and_answers_once_without_workers(tmp_path,language,streamed):

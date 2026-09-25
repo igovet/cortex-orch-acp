@@ -56,9 +56,21 @@ the pipeline is one newest-first Markdown file and other reports remain immutabl
 For a simple informational question, the coordinator reads relevant files and
 submits an answer without a plan or workers. The runtime transitions through
 ANSWER_READY and validates the exact answer receipt before completion. Any plan
-revision, node or worker provisioning disallows this path. Project mutations stay
-unavailable to the coordinator; a direct answer never reaches the review stage,
-and planned work that changes the project retains the full review gate.
+revision, node or worker provisioning disallows this path. There are two
+exceptions. First, the user answered a runtime stop question, or a question
+asked after verification, by choosing to finish. Second, a new user message
+reopened a task that had reached `COMPLETED`, and since that `TASK_REOPENED`
+event no plan was accepted, no assignment or replan was created, no node is
+pending or running, and no worker was provisioned outside an earlier
+assignment. The runtime derives both from its own committed events, never from
+the coordinator's text. `COMPLETED` is reached only through the runtime's
+completion checks. So a follow-up question about finished work gets a direct
+answer; before this, it ended blocked with
+`structured_proposal_missing`. Once a reopened task accepts a new plan, that
+revision again needs its review and verification. The PLANNING prompt offers
+`answer_submit` only when the runtime would accept it. Project mutations stay
+unavailable to the coordinator. A direct answer never reaches the review stage,
+and planned work that changes the project keeps the full review gate.
 
 Paseo hides thinking and protocol bookkeeping (including wait) in chat and worker
 panels, live and on replay. Meaningful MCP operations, private-store tool cards,

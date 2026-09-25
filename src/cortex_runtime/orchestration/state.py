@@ -255,6 +255,48 @@ def released_by_user(db, task):
     return any(json.loads(r[0]).get('question_id') in stops for r in answered)
 
 
+def reopened_after_completion(db, task):
+    """The user's message reopened a COMPLETED task and nothing was planned since.
+
+    Derived only from runtime events: the last state change before the latest
+    TASK_REOPENED is COMPLETED (reachable only through the completion
+    invariants: verified work, or a direct answer the runtime accepted), and
+    since then no plan was accepted, no assignment created, no replan accepted
+    and no worker provisioned outside an earlier assignment. A follow-up that only asks
+    about the finished work may be answered directly; any new work still goes
+    through a plan, review and verification."""
+    task_id = task['task_id']
+    reopened = db.execute("SELECT MAX(id) FROM runtime_events WHERE task_id=? AND type='TASK_REOPENED'",
+                          (task_id,)).fetchone()[0]
+    if reopened is None:
+        return False
+    before = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='TASK_STATE_CHANGED' "
+                        "AND id<? ORDER BY id DESC LIMIT 1", (task_id, reopened)).fetchone()
+    if not before or json.loads(before[0]).get('state') != 'COMPLETED':
+        return False
+    if db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND id>? AND type IN "
+                  "('PLAN_ACCEPTED','ASSIGNMENT_CREATED','REPLAN_REQUEST_ACCEPTED')", (task_id, reopened)).fetchone():
+        return False
+    if db.execute("SELECT 1 FROM runtime_nodes WHERE task_id=? AND status IN ('pending','running')",
+                  (task_id,)).fetchone():
+        return False
+    return not db.execute(
+        "SELECT 1 FROM delegation_provisioning p WHERE p.task_id=? AND p.role_id!='orchestrator' AND NOT EXISTS ("
+        "SELECT 1 FROM runtime_events e WHERE e.task_id=p.task_id AND e.type='ASSIGNMENT_CREATED' AND e.id<? "
+        "AND json_extract(e.payload_json,'$.assignment_ref')=p.idempotency_key)", (task_id, reopened)).fetchone()
+
+
+def direct_answer_allowed(db, task):
+    """Whether answer_submit may close the task: before any plan or worker
+    exists, after the user released a stopped or verified revision, or for a
+    follow-up on a completed task with no work planned since it reopened."""
+    return (released_by_user(db, task) or reopened_after_completion(db, task) or (
+        task['revision'] == 0 and task['plan_json'] is None
+        and not db.execute('SELECT 1 FROM runtime_nodes WHERE task_id=?', (task['task_id'],)).fetchone()
+        and not db.execute("SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",
+                           (task['task_id'],)).fetchone()))
+
+
 class AttemptRouting(NamedTuple):
     escalate: bool
     complexity: str
@@ -558,10 +600,7 @@ class TaskMachine:
                     raise StoreError('request_key_conflict')
                 return json.loads(previous['result_json'])
             task=db.execute('SELECT * FROM runtime_tasks WHERE task_id=?',(channel.task_id,)).fetchone()
-            if (not task or task['state'] not in {'PLANNING','ANSWER_READY'}
-                or not (released_by_user(db, task) or (task['revision'] == 0 and task['plan_json'] is None
-                and not db.execute('SELECT 1 FROM runtime_nodes WHERE task_id=?',(channel.task_id,)).fetchone()
-                and not db.execute("SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",(channel.task_id,)).fetchone()))):
+            if not task or task['state'] not in {'PLANNING','ANSWER_READY'} or not direct_answer_allowed(db, task):
                 raise StoreError('direct_answer_not_available')
             if task['state']=='ANSWER_READY':
                 if task['synthesis']!=text: raise StoreError('answer_conflict')
@@ -888,10 +927,7 @@ class TaskMachine:
             raise StoreError('completion_task_stopped')
         task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
         if task['state']=='ANSWER_READY':
-            if (not task['synthesis'] or task['blocker'] or not (released_by_user(db, task) or (
-                task['revision']==0 and task['plan_json'] is None
-                and not db.execute('SELECT 1 FROM runtime_nodes WHERE task_id=?',(task_id,)).fetchone()
-                and not db.execute("SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator'",(task_id,)).fetchone()))):
+            if not task['synthesis'] or task['blocker'] or not direct_answer_allowed(db, task):
                 raise StoreError('completion_answer_invariant')
             proposal=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ANSWER_SUBMITTED' ORDER BY id DESC LIMIT 1",(task_id,)).fetchone()
             if not proposal or json.loads(proposal[0]).get('text')!=task['synthesis']:
