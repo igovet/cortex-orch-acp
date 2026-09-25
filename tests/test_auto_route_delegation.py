@@ -109,6 +109,11 @@ def _codex_used(connection, percent):
     (day / "rollout.jsonl").write_text(json.dumps({"payload": {"rate_limits": limits}}) + "\n")
 
 
+def _claude_used(connection, percent, environ):
+    quota.observe(connection.id, dict(rateLimitType="unscoped", utilization=percent / 100.0,
+                                      resetsAt=time.time() + 3600), environ)
+
+
 def _routing(project, overrides):
     (project / ".cortex").mkdir(exist_ok=True)
     (project / ".cortex" / "routing.json").write_text(json.dumps(overrides), encoding="utf-8")
@@ -136,7 +141,7 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     assert detail["decision_detail"]["route_basis"] == "auto"
     assert detail["decision_detail"]["effort"] == "high"
     decision = detail["decision_detail"]["route_decision"]
-    assert decision["rank_version"] == 5
+    assert decision["rank_version"] == 6
     assert "balance" not in decision
     assert decision["used_percent_compared"] is False
     assert decision["usage"] == dict(compared=False, margin=10.0, least_used_percent=None)
@@ -145,16 +150,50 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     adapter.terminate_owned(result.attempt_id)
 
 
-def test_light_work_also_moves_off_the_account_above_the_threshold(tmp_path):
-    """Light work no longer spends a hot plan first, even against affinity."""
+def test_crossing_the_hot_band_alone_no_longer_overrides_affinity(tmp_path):
+    """Rank version 6: with no known cheaper alternative, a forced affinity
+    still keeps light work on the (barely) hot account -- crossing
+    HOT_PERCENT alone no longer overrides task/model fit."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
     _routing(project, {"engine_affinity": {"*": "codex-acp"}})
     _codex_used(connection_a, 90.0)
     result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
     assert result.status == "ready"
+    assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
+    assert _read_log(log_b) == []
+    assert _effort_calls(log_a)[-1]["params"]["value"] == "low"
+    decision = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]["decision_detail"]["route_decision"]
+    assert decision["decided_by"] == "affinity"
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_light_work_still_moves_off_the_account_above_the_threshold_on_a_meaningful_gap(tmp_path):
+    """A meaningfully cheaper known alternative still moves light work off
+    the hot account, through the usage-gap signal."""
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _routing(project, {"engine_affinity": {"*": "codex-acp"}})
+    _codex_used(connection_a, 90.0)
+    _claude_used(connection_b, 10.0, environ)
+    result = provisioning.delegate(channel, "Look", "Find it.", "explorer", "Found.", "req-1")
+    assert result.status == "ready"
     assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
     assert _read_log(log_a) == []
     assert _effort_calls(log_b)[-1]["params"]["value"] == "low"
+    decision = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]["decision_detail"]["route_decision"]
+    assert decision["decided_by"] == "usage"
+    adapter.terminate_owned(result.attempt_id)
+
+
+def test_a_late_quota_tie_breaker_still_moves_work_when_affinity_ties(tmp_path):
+    """Debugging has no engine affinity lean (neutral); with no meaningful
+    usage gap, the quota band remains a real, if late, tie breaker."""
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    _codex_used(connection_a, 90.0)
+    _claude_used(connection_b, 84.0, environ)
+    result = provisioning.delegate(channel, "Debug", "Debug it.", "debugger", "Fixed.", "req-1")
+    assert result.status == "ready"
+    assert "session/new" in [entry["method"] for entry in _read_log(log_b)]
+    assert _read_log(log_a) == []
     decision = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]["decision_detail"]["route_decision"]
     assert decision["decided_by"] == "quota"
     adapter.terminate_owned(result.attempt_id)

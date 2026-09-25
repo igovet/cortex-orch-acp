@@ -1370,7 +1370,7 @@ class Agent:
                 if session["active"] is cancel_event:
                     session["active"] = None
             if not cancel_event.is_set():
-                self._start_queued_steer_continuation(session_id, session)
+                self._start_queued_message_continuation(session_id, session)
 
     def _run_prompt_body(self, request_id, session_id, session, text, cancel_event, raw_blocks=None, meta=None):
         """The actual prompt turn; wrapped by ``_run_prompt`` for the
@@ -2290,9 +2290,9 @@ class Agent:
                 and self.environ.get("CORTEX_PASEO_QUESTION_UI") == "1"):
             self._answer_question_card(request_id, session_id, session, value)
             return
-        if (config_id == "cortex_queued_steer" and kind == "value_id"
+        if (config_id == "cortex_queued_message" and kind == "value_id"
                 and self.environ.get("CORTEX_PASEO_QUESTION_UI") == "1"):
-            self._queue_paseo_steer(request_id, session_id, session, value)
+            self._queue_paseo_message(request_id, session_id, session, value)
             return
         with session["lock"]:
             store = self._store_for(session["project"])
@@ -2305,12 +2305,12 @@ class Agent:
         self.transport.send_response(protocol.result_response(request_id, protocol.set_config_option_response(options)))
         self.transport.send_notification(protocol.config_option_update(session_id, options))
 
-    def _start_queued_steer_continuation(self, session_id, session):
-        """Resume a steer that crossed the just-finished turn boundary."""
+    def _start_queued_message_continuation(self, session_id, session):
+        """Resume a queued message that crossed the just-finished turn boundary."""
         from ..orchestration.policy import has_pending_steering
 
         with session["lock"]:
-            queued = session.get("queued_steers") or []
+            queued = session.get("queued_messages") or []
             if session["active"] is not None or not queued:
                 return
             store = self._store_for(session["project"])
@@ -2323,18 +2323,18 @@ class Agent:
             session["active"] = cancel_event
             session["background"] = True
         worker = threading.Thread(
-            target=self._run_queued_steer_continuation, name="acp-queued-steer",
+            target=self._run_queued_message_continuation, name="acp-queued-message",
             args=(session_id, session, origin, event_id, text, cancel_event), daemon=True,
         )
         with self._workers_lock:
             self._workers.append(worker)
         worker.start()
 
-    def _run_queued_steer_continuation(
+    def _run_queued_message_continuation(
         self, session_id, session, origin, event_id, text, cancel_event,
     ):
         store = self._store_for(session["project"])
-        message_id = f"assistant:queued-steer:{event_id}"
+        message_id = f"assistant:queued-message:{event_id}"
 
         def emit_update(chunk_text):
             if cancel_event.is_set() or self.transport is None:
@@ -2364,33 +2364,42 @@ class Agent:
             if method is not None:
                 method(session["task_id"], session_id, text, emit_update, cancel_event, **kwargs)
         except Exception:
-            observe(self.environ, "session/prompt", "queued_steer_continuation_failed")
+            observe(self.environ, "session/prompt", "queued_message_continuation_failed")
         finally:
             with session["lock"]:
                 if session["active"] is cancel_event:
                     session["active"] = None
                     session["background"] = False
             if not cancel_event.is_set():
-                self._start_queued_steer_continuation(session_id, session)
+                self._start_queued_message_continuation(session_id, session)
 
-    def _queue_paseo_steer(self, request_id, session_id, session, value):
-        """Capture a Paseo steer while the existing ACP turn remains in flight.
+    def _queue_paseo_message(self, request_id, session_id, session, value):
+        """Capture a Paseo message (text, and any image/uploaded-file
+        attachments) while the existing ACP turn remains in flight.
 
         Paseo's installed ACP bridge has no native prompt.steer. Its provider
         forwards this request through the bridge's live config channel, whose
         response is acknowledged only after durable source/event capture.
+        Attachments are resolved and staged exactly as an ordinary new-turn
+        ``session/prompt`` would (see ``_run_prompt_body``): the durably
+        captured source event carries them, so orchestration context built
+        later sees the same attachment descriptors either way.
         """
         try:
             payload = json.loads(value)
-            message_id, text = payload["clientMessageId"], payload["text"]
+            message_id, content = payload["clientMessageId"], payload["content"]
         except (ValueError, TypeError, KeyError):
-            raise RpcError(-32602, "A queued steer needs clientMessageId and text.") from None
-        if (not isinstance(message_id, str) or not 1 <= len(message_id) <= 256
-                or not isinstance(text, str) or not text.strip() or len(text) > 100000):
-            raise RpcError(-32602, "A queued steer needs a valid message id and non-empty text.")
+            raise RpcError(-32602, "A queued message needs clientMessageId and content.") from None
+        if not isinstance(message_id, str) or not 1 <= len(message_id) <= 256:
+            raise RpcError(-32602, "A queued message needs a valid message id.")
+        text = protocol.content_blocks_to_text(content)
+        if not text.strip():
+            raise RpcError(-32602, "A queued message needs non-empty content.")
+        if len(text) > 100000:
+            raise RpcError(-32602, "A queued message's text exceeds Cortex's limit.")
         task_id = session.get("task_id")
         if task_id is None:
-            raise RpcError(-32602, "A queued steer needs an existing task.")
+            raise RpcError(-32602, "A queued message needs an existing task.")
         store = self._store_for(session["project"])
         with store.connection() as db:
             owner_epoch = _current_owner_epoch_obj(db, task_id)
@@ -2398,9 +2407,39 @@ class Agent:
             raise RpcError(-32602, "This session no longer owns the task.")
         if acp_steering.is_stopped(store, task_id):
             raise RpcError(-32602, "The task has been stopped.")
+        resolved_blocks = acp_replay_store.resolve_prompt_blocks(content, self._session_workspace(session))
+        image_failures = [
+            capture for capture in resolved_blocks
+            if capture.kind == "image" and capture.availability != "stored"
+        ]
+        if image_failures:
+            reason = image_failures[0].reason or "capture_unavailable"
+            raise RpcError(-32602, "Image content could not be captured within Cortex limits.",
+                           data={"reason": reason, "retryable": False})
+        staged_blocks = (
+            acp_replay_store.stage_blocks(session["project"], resolved_blocks) if resolved_blocks else []
+        )
+        staged_image_failures = [
+            item.capture for item in staged_blocks
+            if item.capture.kind == "image" and item.capture.availability != "stored"
+        ]
+        if staged_image_failures:
+            reason = staged_image_failures[0].reason or "capture_unavailable"
+            acp_replay_store.cleanup_staged(staged_blocks)
+            raise RpcError(-32602, "Image content could not be captured within Cortex limits.",
+                           data={"reason": reason, "retryable": False})
         origin = f"paseo-steer:{session_id}"
         source_event = SimpleNamespace(origin=origin, event_id=message_id)
-        result = append_source_event(store, source_event, text, task_id)
+        try:
+            result = append_source_event(store, source_event, text, task_id, blocks=staged_blocks)
+        except StoreError:
+            acp_replay_store.cleanup_staged(staged_blocks)
+            raise RpcError(-32603, "Durable capture failed; nothing was forwarded to orchestration.") from None
+        attachment_descriptors = [
+            dict(source_ref=f"{result.report_id}:{b.capture.block_index}", name=b.capture.name, uri=b.capture.uri,
+                 kind=b.capture.kind, availability=b.capture.availability, reason=b.capture.reason)
+            for b in staged_blocks
+        ] if not result.replayed else []
         acp_replay_store.record_user_message_event(
             store, task_id, f"user_message:{origin}:{message_id}", session_id,
             dict(content=text, session_id=session_id),
@@ -2413,17 +2452,17 @@ class Agent:
         if not result.replayed:
             with self._history_lock(session_id):
                 acp_replay_store.append_host_transcript(
-                    store, session_id, "user_message", text, message_id=message_id,
+                    store, session_id, "user_message", text, attachment_descriptors, message_id=message_id,
                 )
         with session["lock"]:
-            queued = session.setdefault("queued_steers", [])
+            queued = session.setdefault("queued_messages", [])
             if not result.replayed and not any(item[1] == message_id for item in queued):
                 queued.append((origin, message_id, text))
             options = self._config_options_for_session(session, store)
         self.transport.send_response(
             protocol.result_response(request_id, protocol.set_config_option_response(options))
         )
-        self._start_queued_steer_continuation(session_id, session)
+        self._start_queued_message_continuation(session_id, session)
 
     def _answer_question_card(self, request_id, session_id, session, value):
         """A question card's typed "Other..." answer, from Paseo.

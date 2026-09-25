@@ -2282,9 +2282,9 @@ class OrchestratingRuntime:
                         reason = payload.get("reason") or payload.get("error") or event_type
                         self._emit_worker_card(
                             bound_emitter, assignment_ref, status="failed",
-                            entry=scrub_text(f"Cancelled: {reason}" if event_type == "assignment_cancelled"
-                                             else f"Not delegated/failed: {reason}",
-                                             max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                            entry=_compact_text(f"Cancelled: {reason}" if event_type == "assignment_cancelled"
+                                                else f"Not delegated/failed: {reason}",
+                                                _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                         )
                 continue
             self._cancel_assignment(
@@ -2810,7 +2810,7 @@ class OrchestratingRuntime:
                     text += f" {detail}"
                 self._emit_worker_card(
                     emit_tool_call, event.assignment_ref, status="failed",
-                    entry=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                    entry=_compact_text(text, _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 )
             elif event.event_type == "assignment_cancelled" and event.assignment_ref:
                 self._close_assignment(task_id, event.assignment_ref)
@@ -2818,7 +2818,7 @@ class OrchestratingRuntime:
                 self._emit_worker_card(
                     emit_tool_call, event.assignment_ref,
                     status=_TOOL_CALL_STATUS_FOR_CANCELLED,
-                    entry=scrub_text(text, max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                    entry=_compact_text(text, _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 )
 
     def _close_assignment(self, task_id: str, assignment_ref: str) -> None:
@@ -3112,7 +3112,7 @@ class OrchestratingRuntime:
             dict(
                 sessionUpdate="tool_call_update", toolCallId=_worker_tool_call_id(assignment_ref),
                 status=_TOOL_CALL_STATUS_FOR_CANCELLED,
-                content=[dict(type="text", text=scrub_text(f"Cancelled: {reason}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS))],
+                content=[dict(type="text", text=_compact_text(f"Cancelled: {reason}", _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS))],
             ),
         )
 
@@ -3303,7 +3303,7 @@ class OrchestratingRuntime:
             if base:
                 # The title names the worker and its assignment and stays
                 # put while the card body accumulates its complete activity.
-                fields["title"] = scrub_text(base, max_chars=_WORKER_CARD_TITLE_MAX_CHARS)
+                fields["title"] = _compact_text(base, _WORKER_CARD_TITLE_MAX_CHARS)
             # _emit_worker_card renders and de-duplicates the lifecycle
             # body -- this runs on every wait tick
             # and a worker is not doing something new on every tick.
@@ -5156,7 +5156,7 @@ class OrchestratingRuntime:
                 self._emit_worker_card(
                     emit_tool_call, assignment_ref,
                     status=_TOOL_CALL_STATUS_FOR_CANCELLED,
-                    entry=scrub_text(f"Cancelled: {reason}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                    entry=_compact_text(f"Cancelled: {reason}", _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 )
         else:
             with self._lock:
@@ -5165,7 +5165,7 @@ class OrchestratingRuntime:
                 self._emit_worker_card(
                     bound_emitter, assignment_ref,
                     status=_TOOL_CALL_STATUS_FOR_CANCELLED,
-                    entry=scrub_text(f"Cancelled: {reason}", max_chars=_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
+                    entry=_compact_text(f"Cancelled: {reason}", _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
                 )
             else:
                 for owner_session, status in durable_sessions.items():

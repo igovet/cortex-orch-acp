@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { ProviderEventSchema } from "@getpaseo/plugin/server/provider";
-import { emulatesSteer, QUEUED_STEER_CONFIG_ID, steerText, wrapCortexConnection } from "./provider.ts";
+import { emulatesSteer, QUEUED_MESSAGE_CONFIG_ID, queuedContent, wrapCortexConnection } from "./provider.ts";
 
 assert.equal(emulatesSteer(["prompt.message", "prompt.steer"], ["prompt.message"]), true);
 assert.equal(emulatesSteer(["prompt.message"], ["prompt.message"]), false);
@@ -10,7 +10,7 @@ const prompt = { type: "session.prompt", sessionId: "s", prompt: {
   clientMessageId: "message-1", delivery: "steer",
   input: { type: "message", content: [{ type: "text", text: "Change the title" }] },
 } } as any;
-assert.equal(steerText(prompt), "Change the title");
+assert.deepEqual(queuedContent(prompt), [{ type: "text", text: "Change the title" }]);
 
 /** A stand-in for Paseo's ACP bridge; `configure` decides each capture outcome. */
 function bridge(configure: (input: any, emit: (event: any) => void) => void) {
@@ -32,7 +32,7 @@ function bridge(configure: (input: any, emit: (event: any) => void) => void) {
   const wrapped = wrapCortexConnection(connection, ["prompt.message", "prompt.steer"]);
   const seen: any[] = [];
   // Paseo parses every provider event with this schema (plugin-provider.js
-  // normalizeConnection); an invalid event would throw inside the steer.
+  // normalizeConnection); an invalid event would throw inside the queue send.
   wrapped.onEvent((event) => seen.push(ProviderEventSchema.parse(event)));
   return { sent, emit, wrapped, seen };
 }
@@ -71,8 +71,8 @@ async function paseoSteer(wrapped: any, input: any, expectedTurnId: string) {
   assert.deepEqual(await paseoSteer(wrapped, prompt, "acp:original"), { disposition: "steered" });
   assert.equal(sent.length, 1);
   assert.equal(sent[0].type, "session.configure");
-  assert.deepEqual(JSON.parse(sent[0].changes.settings[QUEUED_STEER_CONFIG_ID]), {
-    clientMessageId: "message-1", text: "Change the title",
+  assert.deepEqual(JSON.parse(sent[0].changes.settings[QUEUED_MESSAGE_CONFIG_ID]), {
+    clientMessageId: "message-1", content: [{ type: "text", text: "Change the title" }],
   });
   assert.ok(!sent.some((item) => item.type === "session.interrupt"));
   assert.ok(seen.some((event) => event.type === "timeline.item" &&
@@ -81,9 +81,10 @@ async function paseoSteer(wrapped: any, input: any, expectedTurnId: string) {
   assert.ok(!seen.some((event) => event.type === "request.completed"));
 }
 
-// The turn ends while Cortex captures the steer. Paseo still expects that
-// turn, and Cortex continues the captured message in the background, so the
-// steer is accepted rather than replayed as a second, interrupting prompt.
+// The turn ends while Cortex captures the queued message. Paseo still
+// expects that turn, and Cortex continues the captured message in the
+// background, so it is accepted rather than replayed as a second,
+// interrupting prompt.
 {
   let finish: () => void = () => {};
   const { emit, wrapped, seen } = bridge((input, emit) => {
@@ -116,7 +117,7 @@ async function paseoSteer(wrapped: any, input: any, expectedTurnId: string) {
   assert.ok(!seen.some((event) => event.type === "timeline.item"));
   const notice = seen.find((event) => event.type === "session.notice")?.notice;
   assert.equal(notice?.severity, "warning");
-  assert.equal(notice?.title, "Steering was not queued");
+  assert.equal(notice?.title, "Message was not queued");
   assert.match(notice?.description, /no longer owns the task/);
   assert.match(notice?.description, /Nothing was sent/);
 }
@@ -130,13 +131,60 @@ async function paseoSteer(wrapped: any, input: any, expectedTurnId: string) {
   assert.match(seen.find((event) => event.type === "session.notice")?.notice.description, /ACP transport is closed/);
 }
 
-// Non-text steer content: warned and refused, never passed to Paseo's
-// cancel-and-replace fallback.
+// Image content sent during an active turn: durably queued (not refused),
+// carried as an ACP-shaped image content block, and echoed with a short
+// placeholder since the synthetic timeline item carries only text.
 {
-  const { sent, emit, wrapped, seen } = bridge(() => assert.fail("image steer must not be configured"));
+  const { sent, emit, wrapped, seen } = bridge((input, emit) =>
+    queueMicrotask(() => emit({ type: "request.completed", requestId: input.requestId })));
   emit({ type: "session.turn", sessionId: "s", turnId: "acp:running", state: "started" });
   const outcome = await paseoSteer(wrapped, { ...prompt, prompt: { ...prompt.prompt, clientMessageId: "image-1",
-    input: { type: "message", content: [{ type: "image", data: "x", mimeType: "image/png" }] },
+    input: { type: "message", content: [
+      { type: "text", text: "See attached" },
+      { type: "image", data: "eA==", mimeType: "image/png" },
+    ] },
+  } }, "acp:running");
+  assert.equal(outcome.disposition, "steered");
+  assert.equal(sent.length, 1);
+  assert.deepEqual(JSON.parse(sent[0].changes.settings[QUEUED_MESSAGE_CONFIG_ID]), {
+    clientMessageId: "image-1", content: [
+      { type: "text", text: "See attached" },
+      { type: "image", data: "eA==", mimeType: "image/png" },
+    ],
+  });
+  assert.ok(seen.some((event) => event.type === "timeline.item" &&
+    event.item.type === "user_message" && event.item.text === "See attached\n[image attached]"));
+  assert.ok(!seen.some((event) => event.type === "session.notice"));
+}
+
+// An uploaded file is carried as a resource_link content block, addressed
+// by its staged path as a file:// URI.
+{
+  const { sent, emit, wrapped } = bridge((input, emit) =>
+    queueMicrotask(() => emit({ type: "request.completed", requestId: input.requestId })));
+  emit({ type: "session.turn", sessionId: "s", turnId: "acp:running", state: "started" });
+  const outcome = await paseoSteer(wrapped, { ...prompt, prompt: { ...prompt.prompt, clientMessageId: "file-1",
+    input: { type: "message", content: [
+      { type: "uploaded_file", id: "u1", fileName: "notes.txt", mimeType: "text/plain",
+        size: 12, path: "/tmp/notes.txt" },
+    ] },
+  } }, "acp:running");
+  assert.equal(outcome.disposition, "steered");
+  const sentContent = JSON.parse(sent[0].changes.settings[QUEUED_MESSAGE_CONFIG_ID]).content;
+  assert.deepEqual(sentContent, [
+    { type: "resource_link", name: "notes.txt", uri: "file:///tmp/notes.txt", mimeType: "text/plain" },
+  ]);
+}
+
+// Unsupported attachment content: warned and refused, never passed to
+// Paseo's cancel-and-replace fallback.
+{
+  const { sent, emit, wrapped, seen } = bridge(() => assert.fail("unsupported content must not be configured"));
+  emit({ type: "session.turn", sessionId: "s", turnId: "acp:running", state: "started" });
+  const outcome = await paseoSteer(wrapped, { ...prompt, prompt: { ...prompt.prompt, clientMessageId: "review-1",
+    input: { type: "message", content: [{
+      type: "review", mimeType: "application/paseo-review", cwd: "/tmp", mode: "uncommitted", comments: [],
+    }] },
   } }, "acp:running");
   assert.equal(outcome.disposition, "error");
   assert.equal(sent.length, 0);

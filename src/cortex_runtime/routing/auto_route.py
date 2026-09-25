@@ -17,13 +17,18 @@ available -- replaces the hand-maintained per-role ``route-policy.json``.
    version is the one routed. A model whose version cannot be parsed is
    never treated as older.
 3. Among models of the role's tier (nearest other tier when none is usable),
-   rank by honoured provider preference, honoured model hint, quota band
-   (every tier avoids an account at or above :data:`HOT_PERCENT` while
-   another is below it), a different engine on escalation, subscription
-   plan usage (a plan more than :data:`USAGE_MARGIN` points more used than
-   the least-used candidate's ranks behind it; compared only when every
-   candidate's usage is known), engine affinity, exact used percent, and
-   engine order (:func:`rank`). How often an engine was chosen recently
+   rank by honoured provider preference, honoured model hint, a different
+   engine on escalation, subscription plan usage (a plan more than
+   :data:`USAGE_MARGIN` points more used than the least-used candidate's
+   ranks behind it; compared only when every candidate's usage is known),
+   engine affinity, the quota band as a late tie breaker (an account at or
+   above :data:`HOT_PERCENT` ranks behind one below it only once plan usage
+   and affinity left the candidates tied -- crossing the band alone no
+   longer overrides them), exact used percent, and engine order
+   (:func:`rank`). A preference or model hint is ignored for quota only when
+   its usage is both at or above :data:`HOT_PERCENT` and meaningfully worse
+   (by more than :data:`USAGE_MARGIN`) than an available alternative's, not
+   merely for crossing the band. How often an engine was chosen recently
    never counts: frequency is not evidence of fit. A model of a stronger
    tier never stands in for the role's tier because one engine lacks a model
    there: with Haiku excluded the light tier is Codex-only, and light work
@@ -308,11 +313,14 @@ def suitability(role: str | None, engine: str, affinity: Mapping[str, str | None
     return int(preferred is not None and preferred == engine)
 
 
-# A model hint is honoured while a hinted route's plan is used below this
-# percentage, or every candidate's plan is at or above it: a hint never
-# spends a nearly exhausted plan while another has room. It is independent
-# of how often an engine was chosen before. Excluded, unavailable and
-# exhausted (100%) routes are never honoured at all.
+# A model hint (or a legacy stored provider preference) is ignored for
+# quota only when its usage is both at or above this percentage *and*
+# meaningfully worse than an available alternative's (see USAGE_MARGIN
+# below): crossing the band alone no longer disqualifies it, so a hint just
+# over HOT_PERCENT with no meaningfully better alternative is still
+# honoured. It is independent of how often an engine was chosen before.
+# Excluded, unavailable and exhausted (100%) routes are never honoured at
+# all.
 HINT_TOLERANCE = HOT_PERCENT
 # Plan usage ranks candidates in steps of this many percentage points above
 # the least-used candidate: a smaller difference is not a meaningful
@@ -561,9 +569,23 @@ def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 # alone decide.
 # 5: a light-tier Luna model also ranks among standard-tier development
 # candidates (``luna_standard``); the decision records ``luna``.
-RANK_VERSION = 5
+# 6: the quota (hot) band is demoted from an early hard cut (right after
+# hint) to a late tie breaker (right before used_percent), behind plan usage
+# (the usage-gap signal, unchanged), retry diversification and engine
+# affinity: crossing HOT_PERCENT alone no longer overrides task/model fit,
+# no longer sends a diversified retry to a meaningfully-more-used plan, and
+# no longer causes a near-boundary cliff. A preference or model hint at or
+# above HOT_PERCENT is now ignored only when it is also meaningfully worse
+# (more than USAGE_MARGIN points) than an available alternative's usage,
+# rather than solely for crossing the band. The 100% exhaustion exclusion is
+# unchanged.
+RANK_VERSION = 6
 # The rank key's parts in order, named for the decision's ``decided_by``.
-RANK_KEYS = ("preference", "hint", "quota", "diversify", "usage", "affinity", "used_percent", "engine_order")
+# ``quota`` moved from right after ``hint`` to right before ``used_percent``
+# in rank version 6: it is now a late tie breaker rather than an early hard
+# cut, behind the usage-gap signal (``usage``), retry diversification and
+# affinity (see RANK_VERSION).
+RANK_KEYS = ("preference", "hint", "usage", "diversify", "affinity", "quota", "used_percent", "engine_order")
 
 
 def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, str] | None = None,
@@ -584,17 +606,26 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     difference wins (:data:`RANK_KEYS`):
 
     1. ``preference`` (an engine id) when honoured: the engine has a usable
-       candidate in this tier and is not at or above :data:`HOT_PERCENT`
-       while another candidate is below it. Otherwise it is ignored and the
-       reason recorded.
-    2. an honoured model hint (see :data:`HINT_TOLERANCE`);
-    3. the quota band (unknown is not hot): an account at or above
-       :data:`HOT_PERCENT` ranks last in every tier (:func:`_order_key`);
-    4. on escalation, an engine other than the one that fell short;
-    5. subscription plan usage, only if every candidate's usage is known:
+       candidate in this tier, and its usage is not both at or above
+       :data:`HOT_PERCENT` and meaningfully worse (by more than
+       :data:`USAGE_MARGIN`) than an available alternative's. Otherwise it
+       is ignored and the reason recorded.
+    2. an honoured model hint (see :data:`HINT_TOLERANCE`), ignored on the
+       same hot-and-meaningfully-worse basis;
+    3. subscription plan usage, only if every candidate's usage is known:
        each full :data:`USAGE_MARGIN` points above the least-used candidate
-       ranks a candidate one step behind (``usage_band``);
-    6. engine affinity (:func:`suitability`), the task's fit;
+       ranks a candidate one step behind (``usage_band``) -- this usage-gap
+       signal, not the quota band below, is what usually separates
+       candidates on remaining quota;
+    4. on escalation, an engine other than the one that fell short (a large
+       usage gap above still wins first: diversification does not send a
+       retry to a plan that is meaningfully more used);
+    5. engine affinity (:func:`suitability`), the task's fit;
+    6. the quota band, as a late tie breaker only (unknown is not hot): once
+       plan usage and affinity leave candidates tied, one at or above
+       :data:`HOT_PERCENT` ranks behind one below it. Crossing the band
+       alone no longer overrides plan usage or affinity, and no longer
+       causes a cliff at the boundary;
     7. lower exact used percent, only if every candidate's usage is known;
     8. engine order.
 
@@ -629,7 +660,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             if not preferred:
                 offered = any(e.route.engine == preference and serves(e, tier) for e in entries)
                 status = "ignored:provider_unavailable" if offered else "ignored:no_candidate_in_tier"
-            elif all(_hot(usage(e)) for e in preferred) and not all(_hot(usage(e)) for e in candidates):
+            elif _meaningfully_worse(preferred, candidates, usage):
                 status = "ignored:provider_near_quota_limit"
             else:
                 status = "honoured"
@@ -666,8 +697,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                 hint_status = ("ignored:no_candidate_in_tier" if not slash and
                                not any(e.route.engine == hint_engine and serves(e, tier)
                                        for e in entries) else "ignored:unavailable")
-            elif (all((usage(e) or 0.0) >= HINT_TOLERANCE for e in hinted)
-                  and not all((usage(e) or 0.0) >= HINT_TOLERANCE for e in candidates)):
+            elif _meaningfully_worse(hinted, candidates, usage):
                 hint_status = "ignored:near_quota_limit"
             else:
                 hint_status = "honoured"
@@ -675,9 +705,10 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
         def key(e):
             return (e.route.engine != honoured,
                     not (hint_status == "honoured" and e in hinted),
-                    _order_key(usage(e))[0],
+                    usage_band(e) or 0,
                     not (escalated and previous_engine and e.route.engine != previous_engine),
-                    usage_band(e) or 0, -suitability(role, e.route.engine, affinity),
+                    -suitability(role, e.route.engine, affinity),
+                    _hot(usage(e)),
                     usage(e) if used_percent_compared else 0.0, order[e.route.id])
 
         ranked = sorted(candidates, key=key)
@@ -721,6 +752,23 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 
 def _hot(used: float | None) -> bool:
     return (used or 0.0) >= HOT_PERCENT
+
+
+def _meaningfully_worse(group: Sequence, candidates: Sequence, usage) -> bool:
+    """Whether ``group`` (a preferred/hinted subset of ``candidates``)
+    should be passed over for quota: its least-used member's usage is known,
+    at or above :data:`HOT_PERCENT`, and more than :data:`USAGE_MARGIN`
+    points above the least-used usage of an available alternative (a
+    candidate outside ``group``, also known). Unknown usage on either side,
+    or no alternative, keeps quota neutral -- crossing the hot band alone
+    is never enough."""
+    group_ids = {e.route.id for e in group}
+    group_usages = [usage(e) for e in group]
+    alternative_usages = [usage(e) for e in candidates if e.route.id not in group_ids]
+    return (bool(alternative_usages) and all(u is not None for u in group_usages)
+            and all(u is not None for u in alternative_usages)
+            and _hot(min(group_usages))
+            and min(group_usages) - min(alternative_usages) >= USAGE_MARGIN)
 
 
 def _route_label(entry) -> str:
@@ -768,8 +816,11 @@ def _unavailable_reasons(entries: Sequence, blocked: Mapping, usage) -> list[str
 
 
 def _order_key(used: float | None):
-    """Quota-band order: every tier ranks an account at or above
-    :data:`HOT_PERCENT` last, so work goes to the plan with more room.
+    """Quota-band order: an account at or above :data:`HOT_PERCENT` ranks
+    last, so work goes to the plan with more room. Used to choose among a
+    pin's open connections, where no task/model fit or usage-gap signal
+    applies; the general rank (:func:`rank`) instead treats the band as a
+    late tie breaker behind plan usage and affinity (see ``RANK_VERSION`` 6).
     Light work used to spend a hot account first (7b7aca22); that assumed
     the window resets soon, but ``used_percent`` is the most-used open
     window (often a weekly one) and the rank never sees its reset time, so

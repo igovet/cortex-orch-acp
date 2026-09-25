@@ -168,6 +168,27 @@ def test_coordinator_read_diagnostics_omits_technical_ids(tmp_path):
     assert "config_revision_id" not in result["resource_caps"]
 
 
+def test_coordinator_list_route_options_reaches_its_handler_not_unknown_operation(tmp_path, tmp_path_factory, monkeypatch):
+    """`list_route_options` is advertised (contracts.schemas_for and
+    tool_definitions) and has a real handler (_COORDINATOR_HANDLERS), but the
+    name also used to sit in orchestration.contracts.COORDINATOR, which
+    orchestration.mcp.schemas() reuses for the runtime state-machine's own
+    operation set. dispatch() checks that runtime-state-machine set before
+    the delegation handler table, so a name present in both routed here and
+    hit orchestration.mcp.dispatch's fall-through `unknown_operation` instead
+    of ever calling the real handler. Keep the name out of COORDINATOR so this
+    read stays reachable."""
+    from cortex_runtime.orchestration import mcp as runtime_mcp
+
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path_factory.mktemp('xdg-config')))
+    store, task_id, coordinator = _task(tmp_path)
+
+    assert "list_route_options" not in runtime_mcp.schemas("coordinator")
+    result = mcp_tools.dispatch(store, coordinator, "list_route_options", {})
+    assert set(result["tiers"]) == {"flagship", "deep", "standard", "light"}
+    assert "roles" in result
+
+
 
 
 

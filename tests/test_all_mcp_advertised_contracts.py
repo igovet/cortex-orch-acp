@@ -58,6 +58,21 @@ def test_every_advertised_tool_uses_its_current_validator_and_read_classificatio
     assert len(advertised) == len(entries) == len(expected_names)
     assert set(advertised) == expected_names
     assert set(mcp_tools._ROLE_HANDLERS[role]) | set(mcp.schemas(role)) | set(gateway.SCHEMAS) == expected_delegation
+    # dispatch() tries gateway.SCHEMAS, then mcp.schemas(role), then
+    # _ROLE_HANDLERS[role] in that fixed order and returns on the first
+    # match: a name present in more than one of these groups is routed only
+    # to the earliest one, silently shadowing any handler in a later group
+    # (this is exactly how list_route_options -- advertised and present in
+    # _ROLE_HANDLERS -- once fell into mcp.schemas('coordinator') too and hit
+    # that module's own `raise StoreError('unknown_operation')` fall-through
+    # instead of ever calling its real handler). Every advertised operation
+    # must therefore belong to exactly one of these three dispatch groups.
+    handler_names = set(mcp_tools._ROLE_HANDLERS[role])
+    runtime_names = set(mcp.schemas(role))
+    gateway_names = set(gateway.SCHEMAS)
+    assert not (handler_names & runtime_names), handler_names & runtime_names
+    assert not (handler_names & gateway_names), handler_names & gateway_names
+    assert not (runtime_names & gateway_names), runtime_names & gateway_names
     for name, entry in advertised.items():
         schema = entry["inputSchema"]
         Draft202012Validator.check_schema(schema)

@@ -128,6 +128,36 @@ def test_worker_card_mirror_keeps_project_command_and_bounds_rows_and_history():
     assert len(cards[-1]["raw_input"]) <= 1024 * 1024
 
 
+def test_worker_card_title_over_the_cap_gets_a_clean_ellipsis_not_a_marker():
+    """A long title used to leak redact.scrub_text's internal bookkeeping
+    suffix (``...[truncated_from:N_chars]``) straight into the card the
+    user sees. It must be bounded with a plain ellipsis instead."""
+    runtime = _worker_card_runtime()
+    runtime._worker_activity = {"assignment-1": "doing something"}
+    runtime._worker_card_title = {"assignment-1": "Worker " + "x" * 320}
+    cards = []
+
+    runtime._emit_worker_activity_tool_calls(cards.append)
+
+    title = cards[-1]["title"]
+    assert "truncated_from" not in title
+    assert title.endswith("…")
+    assert len(title) <= 300
+
+
+def test_assignment_failed_card_entry_over_the_cap_gets_a_clean_ellipsis():
+    """The same bookkeeping-leak bug as the card title, on a cancelled/failed
+    worker card's entry text."""
+    from cortex_runtime.acp.orchestrating_runtime import _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS, _compact_text
+
+    long_reason = "x" * (_ASSIGNMENT_FAILED_DETAIL_MAX_CHARS + 50)
+    entry = _compact_text(f"Cancelled: {long_reason}", _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS)
+
+    assert "truncated_from" not in entry
+    assert entry.endswith("…")
+    assert len(entry) <= _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS
+
+
 def test_worker_action_history_is_complete_and_ref_index_remains_usable():
     runtime = _worker_card_runtime()
     for index in range(60):

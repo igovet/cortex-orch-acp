@@ -13,7 +13,7 @@ PLAN=dict(plan=dict(tasks=[dict(id='inspect',role='explorer',objective='Inspect 
 def test_schemas_are_fresh_and_role_surfaces_are_closed():
     first=dc.schemas_for('coordinator');first['plan_submit']['properties']['request_key']['maxLength']=1
     assert dc.schemas_for('coordinator')['plan_submit']['properties']['request_key']['maxLength']==128
-    assert set(dc.schemas_for('coordinator'))==set(dc.SHARED)|set(COORDINATOR)|set(SCHEMAS)|{'read_diagnostics'}
+    assert set(dc.schemas_for('coordinator'))==set(dc.SHARED)|set(COORDINATOR)|set(SCHEMAS)|{'read_diagnostics','list_route_options'}
     assert set(dc.schemas_for('worker'))==set(dc.SHARED)|set(WORKER)|set(SCHEMAS)|{'ask_question'}
     with pytest.raises(StoreError,match='unknown_role_kind'): dc.schemas_for('unknown')
 

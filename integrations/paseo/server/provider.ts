@@ -8,6 +8,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import { runAcpProvider } from "@getpaseo/plugin/server/acp";
 import type {
@@ -362,18 +363,60 @@ export function emulatesSteer(offered: readonly string[], supported: readonly st
   return offered.includes("prompt.steer") && !supported.includes("prompt.steer");
 }
 
-/** Config id the ACP agent uses to durably queue a Paseo steer. */
-export const QUEUED_STEER_CONFIG_ID = "cortex_queued_steer";
-const STEER_REQUEST_PREFIX = "cortex-queued-steer:";
+/** Config id the ACP agent uses to durably queue a Paseo message sent
+ * while a turn is already active. */
+export const QUEUED_MESSAGE_CONFIG_ID = "cortex_queued_message";
+const QUEUE_REQUEST_PREFIX = "cortex-queued-message:";
 
-/** Extract only message text; unsupported media must never be silently dropped. */
-export function steerText(input: Parameters<ProviderConnection["send"]>[0]): string | null {
+/** One ACP-shaped content block Cortex can durably queue and later resolve
+ * (see ``acp.protocol.content_blocks_to_text`` /
+ * ``acp.replay_store.resolve_prompt_blocks``, the same blocks accepted for
+ * an ordinary new-turn ``session/prompt``). */
+export type QueuedContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
+  | { type: "resource_link"; name: string; uri: string; mimeType?: string };
+
+/**
+ * Content Cortex can durably queue while a turn is active: text, inline
+ * images, and uploaded files (carried as a ``resource_link``). Any other
+ * attachment kind (a forge/review/GitHub attachment, for instance) is
+ * refused rather than silently dropped -- this bridge has no durable-queue
+ * path for it yet.
+ */
+export function queuedContent(
+  input: Parameters<ProviderConnection["send"]>[0],
+): QueuedContentBlock[] | null {
   if (input.type !== "session.prompt" || input.prompt.delivery !== "steer") return null;
   if (input.prompt.input.type !== "message") return null;
   const content = input.prompt.input.content;
-  if (!content.length || content.some((part) => part.type !== "text")) return null;
-  const text = content.map((part) => (part as { text: string }).text).join("\n");
-  return text.trim() ? text : null;
+  if (!content.length) return null;
+  const blocks: QueuedContentBlock[] = [];
+  for (const part of content) {
+    if (part.type === "text") {
+      if (part.text.trim()) blocks.push({ type: "text", text: part.text });
+    } else if (part.type === "image") {
+      blocks.push({ type: "image", data: part.data, mimeType: part.mimeType });
+    } else if (part.type === "uploaded_file") {
+      blocks.push({
+        type: "resource_link", name: part.fileName,
+        uri: pathToFileURL(part.path).href, mimeType: part.mimeType,
+      });
+    } else {
+      return null;
+    }
+  }
+  return blocks.length ? blocks : null;
+}
+
+/** A short, human-facing echo of queued content for the synthetic timeline
+ * item -- the provider's ``user_message`` shape carries only text. */
+function queuedContentEcho(blocks: readonly QueuedContentBlock[]): string {
+  return blocks.map((block) => {
+    if (block.type === "text") return block.text;
+    if (block.type === "image") return "[image attached]";
+    return `[file attached: ${block.name}]`;
+  }).join("\n");
 }
 
 
@@ -506,9 +549,10 @@ export function wrapCortexConnection(
   connection: ProviderConnection,
   offered: readonly string[],
 ): ProviderConnection {
-  // The installed ACP bridge lacks prompt.steer. Carry text through its
-  // concurrent config channel; Cortex durably queues it without cancelling
-  // the running turn or any worker.
+  // The installed ACP bridge lacks prompt.steer. Carry the message (text,
+  // and any image/uploaded-file content) through its concurrent config
+  // channel; Cortex durably queues it without cancelling the running turn
+  // or any worker, and delivers it in order once that turn completes.
   const steer = emulatesSteer(offered, connection.capabilities);
   const capabilities = steer ? [...connection.capabilities, "prompt.steer"] : connection.capabilities;
   const questionActions = new Map<
@@ -519,7 +563,7 @@ export function wrapCortexConnection(
   // Our own configure requests: their completion is ours to await,
   // never Paseo's to see.
   const answerRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
-  const steerRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
+  const queueRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   const activeTurns = new Map<string, string>();
   const lastTurns = new Map<string, string>();
   connection.onEvent((event) => {
@@ -531,10 +575,10 @@ export function wrapCortexConnection(
       else if (activeTurns.get(event.sessionId) === event.turnId) activeTurns.delete(event.sessionId);
     }
     if (event.type !== "request.completed" && event.type !== "request.failed") return;
-    const pending = answerRequests.get(event.requestId) ?? steerRequests.get(event.requestId);
+    const pending = answerRequests.get(event.requestId) ?? queueRequests.get(event.requestId);
     if (!pending) return;
     answerRequests.delete(event.requestId);
-    steerRequests.delete(event.requestId);
+    queueRequests.delete(event.requestId);
     if (event.type === "request.completed") pending.resolve();
     else pending.reject(new Error(event.error.message));
   });
@@ -566,47 +610,47 @@ export function wrapCortexConnection(
     } as ProviderEvent));
     await connection.send({ ...input, response: { behavior: "deny" } });
   }
-  async function sendQueuedSteer(
+  async function sendQueuedMessage(
     input: Extract<Parameters<typeof connection.send>[0], { type: "session.prompt" }>,
   ) {
-    const text = steerText(input);
+    const content = queuedContent(input);
     // Paseo accepts a steer only as a `steer` result for the turn it
     // expects; any other result makes it cancel that turn and resend the
-    // text as a new prompt. A refused steer therefore fails the send, which
-    // Paseo reports without touching the running turn.
+    // message as a new prompt. A refused queue attempt therefore fails the
+    // send, which Paseo reports without touching the running turn.
     const refuse = (description: string): never => {
       listeners.forEach((listener) => listener({
         type: "session.notice", sessionId: input.sessionId,
-        notice: { id: `cortex-steer:${input.prompt.clientMessageId}`,
-          severity: "warning", title: "Steering was not queued", description },
+        notice: { id: `cortex-queue:${input.prompt.clientMessageId}`,
+          severity: "warning", title: "Message was not queued", description },
       }));
-      throw new Error(`Steering was not queued. ${description}`);
+      throw new Error(`Message was not queued. ${description}`);
     };
-    if (text === null) {
-      refuse("Only text steering is supported during an active turn. Nothing was sent; current work is continuing.");
+    if (content === null) {
+      refuse("This content cannot be queued during an active turn. Nothing was sent; current work is continuing.");
     }
-    const requestId = `${STEER_REQUEST_PREFIX}${randomUUID()}`;
+    const requestId = `${QUEUE_REQUEST_PREFIX}${randomUUID()}`;
     const delivered = new Promise<void>((resolve, reject) => {
-      steerRequests.set(requestId, { resolve, reject });
+      queueRequests.set(requestId, { resolve, reject });
     });
     try {
       await connection.send({
         type: "session.configure", requestId, sessionId: input.sessionId,
-        changes: { settings: { [QUEUED_STEER_CONFIG_ID]: JSON.stringify({
-          clientMessageId: input.prompt.clientMessageId, text,
+        changes: { settings: { [QUEUED_MESSAGE_CONFIG_ID]: JSON.stringify({
+          clientMessageId: input.prompt.clientMessageId, content,
         }) } },
       });
       await delivered;
     } catch (error) {
-      steerRequests.delete(requestId);
+      queueRequests.delete(requestId);
       const reason = error instanceof Error ? error.message.trim().slice(0, 300) : "";
       refuse(`Cortex did not confirm durable capture${reason ? ` (${reason})` : ""}. `
-        + "Nothing was sent; current work is continuing. Send the instruction again.");
+        + "Nothing was sent; current work is continuing. Send the message again.");
     }
     listeners.forEach((listener) => listener({
       type: "timeline.item", sessionId: input.sessionId,
       item: { type: "user_message", id: input.prompt.clientMessageId,
-        clientMessageId: input.prompt.clientMessageId, text: text! },
+        clientMessageId: input.prompt.clientMessageId, text: queuedContentEcho(content!) },
     }));
     // A turn that ended while Cortex captured the steer is still the one
     // Paseo expects; Cortex processes the captured text in a background
@@ -627,7 +671,7 @@ export function wrapCortexConnection(
     capabilities,
     send(input: Parameters<typeof connection.send>[0]) {
       if (steer && input.type === "session.prompt" && input.prompt.delivery === "steer") {
-        return sendQueuedSteer(input) as ReturnType<typeof connection.send>;
+        return sendQueuedMessage(input) as ReturnType<typeof connection.send>;
       }
       if (
         input.type === "session.permission" &&
@@ -684,7 +728,7 @@ export function wrapCortexConnection(
       questionActions.clear();
       questionIds.clear();
       answerRequests.clear();
-      steerRequests.clear();
+      queueRequests.clear();
       activeTurns.clear();
       lastTurns.clear();
       openedSessions.clear();
@@ -700,7 +744,7 @@ export function wrapCortexConnection(
       unsubscribe ??= connection.onEvent((event) => {
         if (!visibleTimeline(event)) return;
         if ((event.type === "request.completed" || event.type === "request.failed")
-          && (event.requestId.startsWith(ANSWER_REQUEST_PREFIX) || event.requestId.startsWith(STEER_REQUEST_PREFIX))) return;
+          && (event.requestId.startsWith(ANSWER_REQUEST_PREFIX) || event.requestId.startsWith(QUEUE_REQUEST_PREFIX))) return;
         if (event.type === "session.opened") {
           openedSessions.add(event.sessionId);
           listener(steer && !event.capabilities.includes("prompt.steer")

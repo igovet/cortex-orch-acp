@@ -239,8 +239,9 @@ def test_paseo_steer_during_active_worker_turn_reaches_next_plan(tmp_path, monke
         ))
         assert worker_entered.wait(5)
         agent._session_set_config_option(101, dict(
-            sessionId=session_id, configId="cortex_queued_steer",
-            value=json.dumps(dict(clientMessageId="steer-during-worker", text="Also inspect title")),
+            sessionId=session_id, configId="cortex_queued_message",
+            value=json.dumps(dict(clientMessageId="steer-during-worker",
+                                  content=[dict(type="text", text="Also inspect title")])),
         ))
         assert any("result" in response for response in transport.responses if response.get("id") == 101)
         assert agent.sessions[session_id]["active"] is not None
@@ -904,8 +905,9 @@ def test_paseo_steer_config_is_durable_and_idempotent(tmp_path, monkeypatch):
         )
         db.commit()
 
-    params = dict(sessionId=session_id, configId="cortex_queued_steer",
-                  value=json.dumps(dict(clientMessageId="msg-1", text="Also inspect title")))
+    params = dict(sessionId=session_id, configId="cortex_queued_message",
+                  value=json.dumps(dict(clientMessageId="msg-1",
+                                        content=[dict(type="text", text="Also inspect title")])))
     agent._session_set_config_option(101, params)
     assert continued.wait(5)
     agent._session_set_config_option(102, params)
@@ -931,9 +933,96 @@ def test_paseo_steer_config_is_durable_and_idempotent(tmp_path, monkeypatch):
     agent.sessions[session_id]["owner_epoch"] = None
     with pytest.raises(RpcError, match="no longer owns"):
         agent._session_set_config_option(103, dict(
-            sessionId=session_id, configId="cortex_queued_steer",
-            value=json.dumps(dict(clientMessageId="msg-2", text="Stale steer")),
+            sessionId=session_id, configId="cortex_queued_message",
+            value=json.dumps(dict(clientMessageId="msg-2",
+                                  content=[dict(type="text", text="Stale steer")])),
         ))
+
+
+def test_paseo_queued_message_with_image_is_captured_not_refused(tmp_path, monkeypatch):
+    """An image sent mid-turn used to be refused outright ("Steering was not
+    queued") because only text-only content could be carried through the
+    config channel. It must now be durably captured as an ordinary queued
+    message's attachment, exactly like a normal new-turn prompt's image."""
+    import base64
+
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    agent, transport, environ = _agent_for_language_tests(tmp_path, monkeypatch)
+    environ["CORTEX_PASEO_QUESTION_UI"] = "1"
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(project))
+    result = bootstrap_task(
+        store, SourceEvent(origin="test", event_id=str(uuid.uuid4())),
+        "Inspect", "owner-1",
+    )
+    agent.sessions[session_id]["task_id"] = result.task_id
+    agent.sessions[session_id]["owner_epoch"] = result.owner_epoch
+    continued = threading.Event()
+    continuation_calls = []
+
+    def resumed(task_id, session_id, text, emit_update, cancel_event):
+        continuation_calls.append((task_id, session_id, text))
+        continued.set()
+        return StopReason.END_TURN
+    agent.runtime.start_prompt = resumed
+    acp_sessions.bind_task(store, session_id, result.task_id)
+    TaskMachine(store).create(result.task_id, "Inspect")
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO task_orchestration (task_id,state,updated_at,requirement_revision) "
+            "VALUES (?,?,?,0)", (result.task_id, "running", "now"),
+        )
+        db.commit()
+
+    image_data = base64.b64encode(b"stageable bytes, not a real png").decode()
+    params = dict(sessionId=session_id, configId="cortex_queued_message",
+                  value=json.dumps(dict(clientMessageId="msg-image", content=[
+                      dict(type="text", text="See attached"),
+                      dict(type="image", data=image_data, mimeType="image/png"),
+                  ])))
+    agent._session_set_config_option(101, params)
+    assert continued.wait(5)
+    agent.join_workers()
+    assert continuation_calls == [(result.task_id, session_id, "See attached\n[image: image/png]")]
+    assert any("result" in response for response in transport.responses if response.get("id") == 101)
+    assert not any("error" in response for response in transport.responses if response.get("id") == 101)
+    with store.connection() as db:
+        block_count = db.execute(
+            "SELECT COUNT(*) FROM source_blocks WHERE task_id=? AND kind='image'",
+            (result.task_id,),
+        ).fetchone()[0]
+    assert block_count == 1
+    assert TaskMachine(store).context(result.task_id)["state"] == "PLANNING"
+
+
+def test_paseo_queued_message_rejects_unsupported_attachment_content(tmp_path, monkeypatch):
+    """A content block type this queue path cannot carry is refused with a
+    clear error rather than silently accepted or misparsed as text."""
+    from cortex_runtime.acp.protocol import RpcError
+
+    agent, transport, environ = _agent_for_language_tests(tmp_path, monkeypatch)
+    environ["CORTEX_PASEO_QUESTION_UI"] = "1"
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(project))
+    result = bootstrap_task(
+        store, SourceEvent(origin="test", event_id=str(uuid.uuid4())),
+        "Inspect", "owner-1",
+    )
+    agent.sessions[session_id]["task_id"] = result.task_id
+    agent.sessions[session_id]["owner_epoch"] = result.owner_epoch
+    acp_sessions.bind_task(store, session_id, result.task_id)
+
+    params = dict(sessionId=session_id, configId="cortex_queued_message",
+                  value=json.dumps(dict(clientMessageId="msg-audio", content=[
+                      dict(type="audio", data="eA==", mimeType="audio/mpeg"),
+                  ])))
+    with pytest.raises(RpcError):
+        agent._session_set_config_option(101, params)
 
 
 def test_paseo_steer_during_active_turn_waits_without_cancelling(tmp_path, monkeypatch):
@@ -982,8 +1071,9 @@ def test_paseo_steer_during_active_turn_waits_without_cancelling(tmp_path, monke
         ))
         assert entered.wait(5)
         agent._session_set_config_option(101, dict(
-            sessionId=session_id, configId="cortex_queued_steer",
-            value=json.dumps(dict(clientMessageId="msg-active", text="Also inspect title")),
+            sessionId=session_id, configId="cortex_queued_message",
+            value=json.dumps(dict(clientMessageId="msg-active",
+                                  content=[dict(type="text", text="Also inspect title")])),
         ))
         assert any("result" in response for response in transport.responses if response.get("id") == 101)
         assert [text for text, _ in calls] == ["Continue"]

@@ -260,3 +260,39 @@ def test_protocol_revision_and_error_categories(tmp_path):
     assert replies[2]['error']['code']==-32602 and 'arguments as an object' in replies[2]['error']['message']
     assert replies[3]['error']['code']==-32601
     assert replies[4]['error']['code']==-32602 and 'clientInfo' in replies[4]['error']['message']
+
+
+def test_list_route_options_is_advertised_and_dispatches_through_the_real_channeled_path(tmp_path, tmp_path_factory, monkeypatch):
+    """Regression for `list_route_options` returning `unknown_operation`: the
+    advertised coordinator tool must reach `routing.auto_route.route_menu`
+    through the real ``tools/list``/``tools/call`` wire path, and a worker
+    channel (never advertised the tool) must be refused it too."""
+    from cortex_runtime.server import Server
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path_factory.mktemp('xdg-config')))
+    store, coordinator = bootstrap(tmp_path)
+    server = Server(channel_credentials=(coordinator.channel_id, coordinator.secret, str(tmp_path)))
+    catalogue = server.dispatch('tools/list', {})['tools']
+    by_name = {t['name']: t for t in catalogue}
+    assert by_name['list_route_options']['inputSchema']['properties'] == {}
+    assert by_name['list_route_options']['annotations']['readOnlyHint'] is True
+    result = server.dispatch('tools/call', dict(name='list_route_options', arguments={}))
+    assert not result['isError'], result
+    data = result['structuredContent']
+    assert json.loads(result['content'][0]['text']) == data
+    assert set(data['tiers']) == {'flagship', 'deep', 'standard', 'light'}
+    assert 'roles' in data
+
+    with store.connection() as db:
+        owner = db.execute("SELECT epoch FROM task_owners WHERE task_id=?", (coordinator.task_id,)).fetchone()
+        db.execute("BEGIN IMMEDIATE")
+        worker_id, worker_secret = issue_channel_tx(
+            db, coordinator.task_id, 'worker', owner['epoch'],
+            parent_channel_id=coordinator.channel_id, attempt_id='xa_routeopts01',
+        )
+        db.commit()
+    worker_server = Server(channel_credentials=(worker_id, worker_secret, str(tmp_path)))
+    worker_catalogue = worker_server.dispatch('tools/list', {})['tools']
+    assert 'list_route_options' not in {t['name'] for t in worker_catalogue}
+    from cortex_runtime.server import ProtocolError
+    with pytest.raises(ProtocolError):
+        worker_server.dispatch('tools/call', dict(name='list_route_options', arguments={}))

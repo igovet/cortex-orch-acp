@@ -311,9 +311,10 @@ no per-work-kind or per-complexity setting that would fit it.
   (`LUNA_WORK_KINDS`: implementation, operations, debugging, testing), it also
   ranks next to the tier's own models, such as `gpt-5.6-terra` and Claude
   Sonnet (`standard_candidate`). The ordinary rank then decides: preference,
-  hint, quota band, plan usage, affinity, used percent, engine order. Luna is
-  not always chosen. A hot Codex plan, a Claude plan at least 10 points less
-  used, or a hint for another model all move the work away from it. On one
+  hint, plan usage, diversify, affinity, quota band, used percent, engine
+  order. Luna is not always chosen. A Claude plan at least 10 points less
+  used, a much hotter Codex plan than the alternative, or a hint for another
+  model all move the work away from it. On one
   Codex plan with equal affinity, Codex's own list order (newest generation
   first) puts `gpt-6-luna` ahead of the older `gpt-5.6-terra`. Standard-tier
   design, review, planning, writing and analysis work stays on the tier's own
@@ -347,16 +348,19 @@ hand its place to an older one.
 an exact `engine/model` route label from `list_route_options`. A non-`auto`
 recommendation requires a short `model_reason`; it is optional for `auto`. This is a recommendation only. A model hint is
 considered only within the runtime-computed tier and cannot override pin, deny,
-providers, availability, the 100% quota exclusion, or the 85% quota band. A hint from another tier is recorded as `ignored:tier_mismatch`;
+providers, availability, or the 100% quota exclusion. A hint from another tier is recorded as `ignored:tier_mismatch`;
 using `auto` delegates all selection to ranking. Legacy stored plans without
 `model` retain their old `provider` preference behavior; new plans use `model`.
 
 On escalation, the previous hint is not inherited. The runtime ranks the new
 tier and prefers a different engine from the failed attempt when candidates
 otherwise tie. A hint is honoured unless the hinted route is excluded,
-unavailable or exhausted, or every hinted route's plan is at or above 85%
-(`HINT_TOLERANCE`, equal to `HOT_PERCENT`) while another candidate's is
-below it (`ignored:near_quota_limit`). How often an engine was chosen
+unavailable or exhausted, or its usage is both at or above 85%
+(`HINT_TOLERANCE`, equal to `HOT_PERCENT`) and meaningfully worse -- by more
+than `USAGE_MARGIN` (10) points -- than an available alternative's known
+usage (`ignored:near_quota_limit`). Crossing 85% alone, with no known
+alternative or no meaningful gap, no longer disqualifies a hint (rank
+version 6). How often an engine was chosen
 before never affects a hint. Other hint statuses include
 `ignored:provider_not_allowed`, `ignored:not_offered`,
 `ignored:tier_mismatch`, `ignored:superseded`, `ignored:auto_excluded`, `ignored:no_candidate_in_tier`,
@@ -375,37 +379,53 @@ count. Hard exclusions are applied before ranking: unavailable routes, `deny`,
 eligible candidates the rank criteria are, first difference wins:
 
 1. Honoured legacy provider preference for a stored pre-model plan (ignored
-   when every preferred route is at or above 85% while another is below).
-2. Honoured model hint for a new plan (see above).
-3. Quota band, in every tier: known usage at or above 85% (`HOT_PERCENT`)
-   ranks behind candidates below 85%. Unknown quota is not hot. Light work
-   used to spend a hot plan first (commit 7b7aca22); that was dropped because
-   `used_percent` is the most-used open window (often a weekly one) and the
-   rank never sees its reset time, so it could push cheap work into a plan
-   about to run out.
-4. On escalation, an engine other than the one whose attempt fell short.
-5. Plan usage, only when every candidate's usage is known: each full 10
+   when the preferred route's usage is both at or above 85% and meaningfully
+   worse -- by more than `USAGE_MARGIN` (10) points -- than an available
+   alternative's known usage).
+2. Honoured model hint for a new plan (see above), ignored on the same
+   hot-and-meaningfully-worse basis.
+3. Plan usage, only when every candidate's usage is known: each full 10
    points (`USAGE_MARGIN`) above the least-used candidate ranks a candidate
    one step behind (`usage_band`). The plan with clearly more remaining quota
-   takes the work; a smaller difference is left to the task.
-6. Engine affinity (role suitability). Built-in defaults
+   takes the work; a smaller difference is left to the rest of the order
+   below. This usage-gap signal, not the quota band, is what usually
+   separates candidates on remaining quota.
+4. On escalation, an engine other than the one whose attempt fell short --
+   unless step 3 already sent the work to a meaningfully less-used plan,
+   diversification does not retry onto a plan with meaningfully less room.
+5. Engine affinity (role suitability). Built-in defaults
    (`WORK_KIND_ENGINES`): implementation and operations lean to `codex-acp`;
    investigation, review, design, writing, planning and analysis lean to
    `claude-agent-acp`; debugging and testing are neutral. `routing.json`
    `engine_affinity` overrides it per work kind (see
    [configuration](../configuration.md#routing-rules)).
+6. Quota band, as a late tie breaker only (rank version 6): known usage at
+   or above 85% (`HOT_PERCENT`) ranks behind candidates below 85%, but only
+   once steps 1-5 have not already separated the candidates. Unknown quota
+   is not hot. Crossing 85% alone no longer overrides plan usage, retry
+   diversification or engine affinity, and no longer causes a cliff right at
+   the boundary -- a candidate at 86% used is barely behind one at 84% used,
+   not sent to the back of the rank. Light work used to spend a hot plan
+   first (commit 7b7aca22); quota was then promoted to an early, absolute
+   cut ahead of plan usage because `used_percent` is the most-used open
+   window (often a weekly one) and the rank never sees its reset time, so it
+   could otherwise push cheap work into a plan about to run out -- rank
+   version 6 keeps that protection through the usage-gap signal in step 3
+   instead, and only demotes the raw 85% crossing itself.
 7. Exact used percentage, only when every candidate has a known value.
 8. Stable engine order.
 
-`decided_by` names the first of these keys (`preference`, `hint`, `quota`,
-`diversify`, `usage`, `affinity`, `used_percent`, `engine_order`) that
+`decided_by` names the first of these keys (`preference`, `hint`, `usage`,
+`diversify`, `affinity`, `quota`, `used_percent`, `engine_order`) that
 separated the chosen candidate from the runner-up, or `only_candidate`; a pin
 records `pin`. It is never `balance`. The runner-up can be another model on
 the same engine, in which case `engine_order` is the usual answer.
 
 Unknown quota remains neutral and is never coerced to zero for percentage
-comparison: when any candidate's usage is unknown, steps 5 and 7 compare
-nothing and affinity decides.
+comparison: when any candidate's usage is unknown, steps 3 and 7 compare
+nothing and the order falls through to diversify, affinity or the quota tie
+breaker (`quota` is `false`/not-hot for unknown usage, so it still separates
+a known-hot candidate from an unknown one).
 
 Effort is derived from the runtime-selected tier, task complexity/escalation,
 and each model's supported effort list. `effort_basis` records whether it came
@@ -435,7 +455,12 @@ comparable. `rank_version` history: 2 ranked by quota band,
 count balance (tolerance 4) and suitability; 3 added plan usage, engine
 affinity, cross-tier stand-ins and a two-attempt balance; 4 removed attempt
 counts and cross-tier stand-ins; 5 made Luna a standard-tier candidate for
-development work. Older rows keep their own fields
+development work; 6 moved the quota band from an early hard cut (right
+after `hint`) to a late tie breaker (right before `used_percent`), behind
+plan usage, retry diversification and engine affinity, and made the
+preference/hint quota exclusion require the excluded route's usage to be
+both hot and meaningfully worse (`USAGE_MARGIN`) than an available
+alternative's, not merely at or above `HOT_PERCENT`. Older rows keep their own fields
 (`balance`, `balance_excess`, `cross_tier`, `chosen_cross_tier`) and still
 render. These fields are evidence of runtime decisions, not proof of
 the exact observed live surface.

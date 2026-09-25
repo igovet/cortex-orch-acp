@@ -26,7 +26,7 @@ SHARED = {
 def schemas_for(role_kind):
     if role_kind not in {'coordinator','worker'}:
         raise StoreError('unknown_role_kind','role_kind',role_kind)
-    extra = (COORDINATOR | {'read_diagnostics': obj({})}) if role_kind == 'coordinator' else (
+    extra = (COORDINATOR | {'read_diagnostics': obj({}), 'list_route_options': obj({})}) if role_kind == 'coordinator' else (
         WORKER | {'ask_question': obj(dict(question=text('Information needed to finish the assignment.',4000),
                                            request_key=text('Unique request delivery key.',128)))})
     from ..orchestration.gateway import SCHEMAS

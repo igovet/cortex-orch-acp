@@ -71,22 +71,29 @@ that new revision gets its own review and verification. See
 [orchestration](orchestration.md) for the exact eligibility rule.
 
 The ACP bridge in Paseo 0.9.1 and 0.9.2 (the same code) has no native
-`prompt.steer`. The Cortex
-provider sends a text steer through the bridge's concurrent configuration
-channel as `cortex_queued_steer`, waits for durable capture, then acknowledges
-the steer for the still-active turn. If capture races with the end of that
-turn, the provider still acknowledges the steer for that turn, and the agent
-starts a background continuation using the same source identity so the queued
-message is still processed once. Paseo accepts a steer only as a `steer` result
+`prompt.steer`. The Cortex provider sends a message (text, and any inline
+image or uploaded-file content) through the bridge's concurrent configuration
+channel as `cortex_queued_message` -- an ordinary queue item, not steering --
+waits for durable capture, then acknowledges Paseo's own `steer` result for
+the still-active turn (Paseo's own ACP contract, unrelated to Cortex's
+terminology for the item). If capture races with the end of that turn, the
+provider still acknowledges it for that turn, and the agent starts a
+background continuation using the same source identity so the queued message
+is still processed once, in order, after the turn (and any worker it started)
+finishes. An image or uploaded file is resolved and staged exactly as it
+would be for an ordinary new-turn `session/prompt` (capped at 1 MiB per
+block, 4 MiB per message); an oversized or unreadable image is refused before
+capture, same as a first prompt. Paseo accepts this only as a `steer` result
 for the turn it expects. Any other result makes it cancel that turn
-(`session/cancel`) and resend the text as a new prompt. Cortex cannot tell that
-cancel from a Stop, so the task pauses and its running workers are cancelled.
-So when the provider cannot queue a steer, it fails the send instead of
-returning a result. Unsupported non-text content and a failed config
-acknowledgment both do this. The chat shows a "Steering was not queued"
+(`session/cancel`) and resend the message as a new prompt. Cortex cannot tell
+that cancel from a Stop, so the task pauses and its running workers are
+cancelled. So when the provider cannot queue a message, it fails the send
+instead of returning a result. An attachment kind this queue path does not
+carry (a forge/review/GitHub attachment, for instance) and a failed config
+acknowledgment both do this. The chat shows a "Message was not queued"
 warning with the reason, Paseo reports the send as failed, and nothing reaches
 Cortex. The current turn and its workers keep running, and the user can send
-the text again. An explicit Stop
+the message again. An explicit Stop
 (`session/cancel`) or `/cortex-stop` remains an interruption: the former
 moves the task to RECOVERING and fences unfinished work; the latter
 permanently cancels it. Worker questions enter the persisted question protocol;
