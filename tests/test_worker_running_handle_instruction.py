@@ -14,5 +14,6 @@ def test_result_checks_reference_exact_command_receipts():
     from cortex_runtime.orchestration.contracts import RESULT
     check=RESULT['properties']['checks']['items']
     description=check['properties']['tool_call_ref']['description']
-    assert 'command_run' in description and 'own shell' in description
+    assert 'command_run' in description and 'same attempt' in description
+    assert 'engine shell calls' in description and 'never verify a check' in description
     assert set(check['properties']['outcome']['enum'])=={'passed','failed','not_run','unverified'}

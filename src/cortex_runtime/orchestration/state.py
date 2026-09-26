@@ -505,6 +505,17 @@ class TaskMachine:
         for n in value['nodes']:
             for key in ('dependencies_json', 'scope_json', 'result_json'):
                 n.pop(key)
+        # Derived now, never stored: each check's evidence_strength under the
+        # current rule, so a result accepted under an older, weaker rule shows
+        # its weak evidence beside the retained outcome.
+        from ..delegation.evidence import annotate_checks
+        with self.store.connection() as db:
+            for n in value['nodes']:
+                if isinstance(n['result'], dict) and n['result'].get('checks'):
+                    attempt = db.execute('SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?',
+                                         (task_id, n['assignment_ref'])).fetchone()
+                    n['result']['checks'] = annotate_checks(db, task_id, attempt['attempt_id'] if attempt else None,
+                                                            n['result']['checks'])
         return value
 
     def submit_plan(self, channel, plan, request_key, *, authorization=None):
@@ -706,16 +717,18 @@ class TaskMachine:
             from .artifacts import report_digest
             result = dict(result, report_digest=report_digest(self.store, task_id, report['filename']))
             checks = result.get('checks', [])
-            from .gateway import verified_check
-            # A check that failed, or a pass without its own verified run,
-            # fails the node. not_run/unverified are honest disclosures, not
-            # failures: an investigation's evidence steps are rarely runtime
-            # command_run receipts, and failing on them stopped every one.
-            # They stay in the result for review, verification and synthesis.
-            failed = any(c.get('outcome') == 'failed' or
-                         (c.get('outcome') == 'passed' and
-                          not verified_check(db, task_id, provision['attempt_id'], c.get('tool_call_ref')))
-                         for c in checks)
+            from ..delegation.evidence import open_failure
+            # A current failure fails the node: a failed check that no exact
+            # later rerun of the same command closed (its closed_by, derived
+            # again here), or a pass without its own verified, still-latest
+            # run (result_submit already records an unverifiable pass as
+            # unverified; this backstops older retained requests). A closed
+            # failure stays in the result as run history. not_run/unverified
+            # are honest disclosures, not failures: an investigation's
+            # evidence steps are rarely runtime command_run receipts, and
+            # failing on them stopped every one. They stay in the result for
+            # review, verification and synthesis.
+            failed = open_failure(db, task_id, provision['attempt_id'], checks)
             status = 'failed' if failed else 'completed'
             if node['stage'] == 'review' and result.get('verdict') not in {'APPROVE', 'REQUEST_CHANGES', 'BLOCK'}:
                 raise StoreError('review_verdict_required')
@@ -949,9 +962,13 @@ class TaskMachine:
             raise StoreError('completion_review_missing')
         if not reviews and not current_review_waiver(db, task_id):
             raise StoreError('completion_review_missing')
-        evidence = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='VERIFICATION_PASSED' ORDER BY id DESC LIMIT 1",
+        # The latest verification run decides, never the latest passing one:
+        # a failure recorded after an earlier pass is the current outcome.
+        evidence = db.execute("SELECT type,payload_json FROM runtime_events WHERE task_id=? "
+                              "AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED') ORDER BY id DESC LIMIT 1",
                               (task_id,)).fetchone()
-        if not evidence or json.loads(evidence['payload_json'])['revision'] != task['revision']:
+        if (not evidence or evidence['type'] != 'VERIFICATION_PASSED'
+                or json.loads(evidence['payload_json'])['revision'] != task['revision']):
             raise StoreError('completion_verification_missing')
         if reviewed_digest(db, task_id, task['revision']) != json.loads(evidence['payload_json'])['revision_digest']:
             raise StoreError('completion_review_missing')

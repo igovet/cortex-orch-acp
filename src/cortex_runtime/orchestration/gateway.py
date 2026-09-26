@@ -267,7 +267,8 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
     from ..delegation.evidence import record_tool_result_observed
     record_tool_result_observed(store,channel.task_id,channel.attempt_id,ref,'execute','Gateway command',
                                 'completed' if code==0 and not failure else 'failed')
-    return dict(tool_call_ref=ref,exit_code=code,complete=failure is None,failure=failure,
+    # argv is retained so a check citing this receipt can be matched against it.
+    return dict(tool_call_ref=ref,argv=list(args['argv']),exit_code=code,complete=failure is None,failure=failure,
                 output=data.decode('utf-8',errors='replace'),large_output_id=retained['id'])
 
 
@@ -309,8 +310,9 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
     from ..recovery.large_output_store import persist_output
     retained=persist_output(store,task_id=channel.task_id,owner_scope=owner,source_kind='terminal',
                             source_ref=ref,data=data,exit_code=code,failure=failure)
-    return dict(tool_call_ref=ref,exit_code=code,complete=failure is None,failure=failure,
-                output=data.decode('utf-8',errors='replace')[-65536:],large_output_id=retained['id'])
+    # cwd completes the command's identity (delegation.evidence.command_identity).
+    return dict(tool_call_ref=ref,argv=list(args['argv']),cwd=str(resolved),exit_code=code,complete=failure is None,
+                failure=failure,output=data.decode('utf-8',errors='replace')[-65536:],large_output_id=retained['id'])
 
 
 def dispatch(store,channel,operation,args):
@@ -432,36 +434,13 @@ def dispatch(store,channel,operation,args):
     return result
 
 
-# A completed engine shell run in this attempt. Only the call's first
-# observation carries kind='execute'; its status updates carry none.
-ENGINE_SHELL_COMPLETED = ("SELECT 1 FROM tool_result_observations c WHERE c.attempt_id=? AND c.status='completed' "
-                          "AND EXISTS (SELECT 1 FROM tool_result_observations k WHERE k.attempt_id=c.attempt_id "
-                          "AND k.tool_call_ref=c.tool_call_ref AND k.kind='execute') LIMIT 1")
-
-
 def verified_check(db,task_id,attempt_id,ref,outcome='passed'):
-    """Evidence behind a stated check outcome, strongest first.
+    """Whether one check outcome is verified by its cited receipt.
 
-    A ``gateway:`` ref must be this attempt's complete command_run or
-    outside_command receipt with an exit status matching the stated outcome.
-    An engine shell call may also count: a cited call needs the status matching
-    the outcome in this attempt. An uncited pass needs at least one completed
-    engine shell run in this attempt. A pass without a run is a claim.
+    See ``delegation.evidence.assess_check``: only this exact attempt's
+    complete ``command_run``/``outside_command`` receipt with a matching exit
+    status, a complete retained output and (for a pass) a nontrivial command
+    verifies a check. A missing ref or an engine-native call never does.
     """
-    if not isinstance(ref,str) or not ref.startswith('gateway:'):
-        if isinstance(ref,str) and ref:
-            row=db.execute("SELECT status FROM tool_result_observations WHERE attempt_id=? AND tool_call_ref=? ORDER BY id DESC LIMIT 1",
-                           (attempt_id,ref)).fetchone()
-            return bool(row) and row[0]==('completed' if outcome=='passed' else 'failed')
-        return outcome=='passed' and bool(db.execute(ENGINE_SHELL_COMPLETED,(attempt_id,)).fetchone())
-    rows=db.execute("SELECT r.result_json FROM runtime_requests r JOIN trusted_channels c ON c.channel_id=r.actor "
-                    "WHERE r.task_id=? AND c.attempt_id=? AND r.operation IN ('command_run','outside_command')",(task_id,attempt_id))
-    matches=[]
-    for row in rows:
-        saved=json.loads(row[0]);result=saved.get('receipt',{})
-        if result.get('tool_call_ref')==ref: matches.append((saved,result))
-    return (len(matches)==1 and matches[0][0].get('complete') is True
-            and matches[0][1].get('complete') is True
-            and type(matches[0][1].get('exit_code')) is int
-            and ((matches[0][1]['exit_code']==0) if outcome=='passed' else (matches[0][1]['exit_code']!=0))
-            and matches[0][1].get('failure') is None and bool(matches[0][1].get('large_output_id')))
+    from ..delegation.evidence import assess_check
+    return assess_check(db,task_id,attempt_id,outcome,ref)['strength']=='verified'

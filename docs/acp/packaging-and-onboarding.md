@@ -300,6 +300,15 @@ paseo plugin install /absolute/path/to/cortex-orch-acp/integrations/paseo
 paseo plugin reload cortex-acp
 ```
 
+An update or reload restarts the plugin process, which closes every open
+Cortex chat's connection. Paseo then shows `Provider connection closed` on
+each open chat, including completed ones. Cortex keeps the saved task outcome.
+When a chat is reopened, it adds a notice with the saved state. Interrupted
+workers are reconciled on the next message, and actions with an unknown
+outcome are not re-run (see
+[failures and disconnects](failures-and-cancellation.md#4-disconnect)). Until
+that path is qualified in a live dev Paseo run, update between active tasks.
+
 The managed local-checkout setup remains available while Paseo is running:
 
 ```bash

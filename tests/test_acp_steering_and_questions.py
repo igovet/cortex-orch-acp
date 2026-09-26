@@ -319,6 +319,92 @@ def test_follow_up_question_on_a_completed_task_is_answered_without_a_plan(tmp_p
     assert blocked is None
 
 
+def test_a_finish_answer_survives_a_process_restart_without_repeating_the_question(tmp_path):
+    """d8d66aa2: the coordinator's user_question_request stopped the task on
+    WAITING_USER; the user answered with a Russian 'Завершить' ("Finish"),
+    but the same question was asked again. Reproduce the persisted cycle
+    (question -> answer -> a fresh runtime against the same store, standing
+    in for the process restart/session recovery that read the persisted
+    state) and assert the question closes exactly once, the answer is
+    processed exactly once, the same question is never re-asked, no
+    structured_proposal_missing occurs, and completion still requires the
+    coordinator's own planned/verified work -- the answer alone never marks
+    the task COMPLETED."""
+    from cortex_runtime.orchestration.state import TaskMachine
+    from runtime_scenarios import propose_inspection, publish_result
+
+    store, task_id = _task(tmp_path, "Inspect the fixture.")
+    asked, resumed_planning = [], []
+
+    def router(store, channel, *_):
+        def behavior(store, channel, _ref, message, _index):
+            if channel.role != "coordinator":
+                return publish_result(store, channel)
+            context = mcp_tools.dispatch(store, channel, "task_get_context", {})
+            if context["state"] == "RECONCILING":
+                mcp_tools.dispatch(store, channel, "synthesis_submit", dict(text="Inspected and verified."))
+            elif context["revision"] == 0 and not asked:
+                asked.append(True)
+                mcp_tools.dispatch(store, channel, "user_question_request", dict(
+                    question="Работа готова. Завершить задачу?", options=["Завершить", "Продолжить"],
+                    request_key="finish-decision"))
+            else:
+                resumed_planning.append(message)
+                propose_inspection(store, channel)
+            return PromptOutcome(StopReason.END_TURN, "Coordinator text")
+        return behavior
+
+    runtime1, _engine1 = _make_runtime(store, router)
+    try:
+        assert runtime1.start_prompt(task_id, "s1", "Inspect the fixture.", lambda _: True,
+                                     threading.Event()) == StopReason.END_TURN
+    finally:
+        runtime1.shutdown()
+    waiting = TaskMachine(store).context(task_id)
+    assert waiting["state"] == "WAITING_USER" and len(asked) == 1
+    with store.connection() as db:
+        row = db.execute("SELECT state FROM task_orchestration WHERE task_id=?", (task_id,)).fetchone()
+    assert row["state"] == "waiting_for_user"
+
+    # A brand-new runtime against the same persisted store, standing in for
+    # the process restart/session recovery the audit describes; the answer
+    # arrives only after that restart.
+    runtime2, _engine2 = _make_runtime(store, router)
+    output = []
+    try:
+        assert runtime2.start_prompt(task_id, "s1", "Завершить", output.append,
+                                     threading.Event()) == StopReason.END_TURN
+    finally:
+        runtime2.shutdown()
+
+    context = TaskMachine(store).context(task_id)
+    assert context["state"] == "COMPLETED" and context["blocker"] is None
+    assert len(asked) == 1  # the same question was never asked again
+    assert len(resumed_planning) == 1  # exactly one resumed planning turn
+
+    with store.connection() as db:
+        questions = db.execute(
+            "SELECT status, answer_text FROM pending_questions WHERE task_id=?", (task_id,)).fetchall()
+        asked_events = db.execute(
+            "SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED'",
+            (task_id,)).fetchone()[0]
+        answered_events = db.execute(
+            "SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='USER_ANSWER_RECEIVED'",
+            (task_id,)).fetchone()[0]
+        blocked = db.execute(
+            "SELECT 1 FROM runtime_events WHERE task_id=? AND payload_json LIKE ?",
+            (task_id, "%structured_proposal_missing%")).fetchone()
+    assert [(q["status"], q["answer_text"]) for q in questions] == [("answered", "Завершить")]
+    assert asked_events == 1  # closed exactly once, never re-asked
+    assert answered_events == 1  # exactly one answer was processed
+    assert blocked is None
+    # The answer alone did not complete the task: it only resumed planning
+    # (never straight to COMPLETED), which then went through a real plan,
+    # worker result and verification -- and the user was never shown the
+    # question text again.
+    assert not any("Завершить задачу?" in text for text in output)
+
+
 def test_explicit_cancel_during_worker_does_not_record_route_fallback(tmp_path):
     from cortex_runtime.orchestration.state import TaskMachine
     from runtime_scenarios import propose_inspection, publish_result

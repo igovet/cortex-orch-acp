@@ -37,10 +37,130 @@ BLOCK stops acceptance. Three unsuccessful review cycles block further automatic
 work. The loop never treats an ordinary final model message as a worker result.
 
 Worker results bind to a published report owned by the exact provisioned attempt.
-The result receipt retains a content digest. A passed check may cite a completed,
-zero-exit `command_run` or user-confirmed `outside_command` receipt from that
-same task and attempt; a cited failed check requires a completed nonzero exit.
-Pending, duplicated, foreign or mismatched receipts cannot establish an outcome.
+The result receipt retains a content digest.
+
+### Check evidence
+
+`result_submit` `checks` are automated checks: each one is an executed command
+with an exit code. Qualitative review remarks, read files and inspected code belong
+in the report body, not in `checks`. The advertised `result_submit` schema carries
+this contract in its property descriptions; `delegation.evidence.assess_check`
+enforces it.
+
+A `passed` check is **verified** only when its `tool_call_ref` names exactly one
+gateway receipt that is:
+
+1. a `command_run` or user-confirmed `outside_command` (its `TOOL_AUTHORIZED`
+   operation), authorized on a channel of the same task **and** the same attempt;
+2. complete: a completed durable receipt with no `failure` (not pending,
+   interrupted, timed out, authority-revoked or cancelled) and an integer exit
+   code of 0;
+3. backed by a complete retained output: the receipt's `large_output_id` names a
+   `large_outputs` row of the same task, bound to the same ref and attempt, not
+   truncated, with the same exit code and no failure;
+4. recorded with its `argv`, and that command is not a trivial stand-in (below);
+5. cited by no earlier check of the same result (one command, one check).
+
+**Trivial-command rule** (`delegation.evidence.trivial_command`). After leading
+`NAME=value` assignments and the launchers `env`, `timeout`, `nice`, `nohup`,
+`command`, `exec` and `time` are removed, a command is trivial when nothing is
+left; when its program basename is a no-op, printer, listing, file read or search
+(`pwd`, `ls`, `echo`, `printf`, `cat`, `head`, `tail`, `tee`, `grep`, `rg`, `find`,
+`true`, `test`, `cd`, `env`, `which`, `stat`, `wc`, `sort` and the rest of
+`TRIVIAL_PROGRAMS`); when it is a read-only `git` subcommand (`status`, `log`,
+`show`, `branch`, `rev-parse`, `ls-files`, `remote`, `config`, `describe`) or
+`git diff` without `--check`, `--exit-code` or `--quiet`; or when it is a
+`sh`/`bash`/`dash`/`zsh`/`ksh` `-c` script whose exit status cannot come from a
+nontrivial command. For a script, its last command decides: a trivial last command
+masks everything before it unless joined by `&&` (also `;`/newline under `set -e`
+or `-e`, and `|` under `set -o pipefail`); `exit`, `exit $?` and `|| exit N`
+(N nonzero) pass the previous status through, `exit 0` masks it; an unparsable
+script is trivial. So `pytest || true`, `pytest; echo done` and
+`pytest | tail -5` are trivial, while `cd web && npm test` and
+`set -o pipefail; pytest | tee log` are not. Anything else (a test runner, linter,
+type checker, build or project script) may verify a check. The rule does not prove
+that a nontrivial command tests *the named* check (for example an inline
+`python3 -c` program); that correspondence is the independent reviewer's
+judgement, and the reviewer sees the exact `argv` in the receipt.
+
+Engine-native tool calls (the engine's own shell, read, edit or search tools) are
+recorded in `tool_result_observations` for display and audit only. The runtime
+never observes their exit code or retains their complete output, so they never
+verify a check; run checks through `command_run`.
+
+**Insufficient evidence is kept, never refused silently and never promoted.** A
+`passed` claim that is not verified is recorded as `outcome: "unverified"` with
+`claimed_outcome: "passed"`, the structured `evidence_gap` code and a runtime
+blocker; it is a disclosed gap that synthesis must list in `not_verified` unless a
+later result of the same plan revision passes a check of the same name. A `passed`
+claim whose cited command exited nonzero is recorded as `failed` (an observed
+failure is never softened) with `evidence_gap: "nonzero_exit"`. A claimed `failed`
+check is always kept as `failed`. The result receipt returned to the worker lists
+every check's recorded `outcome` with its `claimed_outcome`/`evidence_gap`, and
+`closed_by` for a closed failure (below).
+`evidence_gap` codes: `tool_call_ref_missing`, `tool_call_ref_unknown`,
+`foreign_attempt`, `ref_already_cited`, `not_a_command`,
+`engine_command_unverifiable`, `receipt_missing`, `ambiguous_ref`,
+`call_incomplete`, `nonzero_exit`, `zero_exit` (a failed claim citing exit 0),
+`result_missing`, `result_truncated`, `command_unrecorded`, `trivial_command`,
+`later_run_failed`, `later_run_unresolved` (below).
+
+### Check history and current outcome
+
+A long attempt often runs the same check several times: it fails, the worker
+fixes the code, and the rerun passes. The runtime keeps that run history
+separate from each check's current outcome
+(`delegation.evidence.current_outcomes`, over `command_history`, the
+attempt's gateway command runs in `TOOL_AUTHORIZED` order).
+
+A command's **identity** is its operation, its exact `argv` and its scope:
+`command_run` always runs in the task's working tree; an `outside_command`
+receipt records its `cwd`, which is part of the identity. A receipt without
+`argv` (or an `outside_command` receipt without `cwd`) has no identity and
+matches nothing. A run the gateway rejected before executing it
+(`TOOL_REJECTED`) is not history.
+
+- **A failure stays in the result.** A `failed` check is always recorded as
+  `failed`. It stops failing the assignment only when it is **closed**: its
+  cited run is a verified failure (a complete receipt with a nonzero exit and
+  complete retained output), and a `passed` check of the *same* result cites a
+  strictly verified run (above) of exactly the same identity that is later
+  than the failure and is still the latest run of that identity in the
+  attempt, with no later command run of the attempt whose identity is
+  unrecorded. The closed check then carries `closed_by` with the closing
+  `tool_call_ref`, in the node result, the `worker_result` event and the
+  receipt.
+- **Ambiguity keeps it open.** A rerun with a different `argv` or `cwd`, a
+  weak or uncited pass, a failure without its own verified receipt, a later
+  run of the same command that failed or has no established result, or an
+  unrecorded later run all leave the failure open, and the node fails as
+  before. A current failure is never turned into a warning.
+- **The latest run decides for a pass too.** A cited, verified pass whose
+  command ran again later in the same attempt is recorded `failed` with
+  `evidence_gap: "later_run_failed"` when that later run exited nonzero, or
+  `unverified` with `later_run_unresolved` when the later run has no established
+  result, even when the later run is not cited.
+- **The runtime re-derives closure.** `TaskMachine.record_result` (also on
+  recovery through `reconcile_results`) fails the node on any open failure
+  (`delegation.evidence.open_failure`). A stored `closed_by` counts only when
+  it equals the closing ref derived again from the runtime's own receipts, so a
+  retained result without it, or with a forged one, still fails.
+
+Runtime verification follows the same rule: completion requires the *latest*
+`VERIFICATION_PASSED`/`VERIFICATION_FAILED` event to be a pass for the current
+revision. A failed verification recorded after an earlier pass is the current
+outcome and blocks completion (`completion_verification_missing`). Earlier failed
+verification runs stay in the event history and still count toward the repair
+limit.
+
+**Older results are never rewritten.** Stored node results, `worker_result`
+events and reports keep what an earlier runtime accepted. Reads through the task
+context derive `evidence_strength` for each check under the current rule
+(`verified`, `weak` with its `evidence_gap`, or `none` for a `not_run`/`unverified`
+disclosure), so an older pass that, for example, relied on an engine `pwd` shows
+as `passed` with `evidence_strength: "weak"`. Receipts written before `argv` was
+recorded read as `command_unrecorded`.
+
 Every synthesis `not_verified` item requires a nonblank concrete blocker.
 Command verification runs literal argv
 in an explicit Linux namespace sandbox with no user home, inherited credentials,

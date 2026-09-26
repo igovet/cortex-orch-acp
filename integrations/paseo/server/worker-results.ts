@@ -1,14 +1,14 @@
-import { spawnSync } from "node:child_process";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { readWorkerResults } from "../shared/worker-results.js";
 import { resolveAgentTask, STORE_PYTHON_HELPERS } from "./worker-history.js";
+import { runPython } from "./python-runner.js";
 
 // Deliberately narrow: only the terminal `worker_result` rows for the exact
 // requested assignment refs, one spawn, no ``getWorkerHistory`` call. This is
 // the fallback path (see ``server/provider.ts``'s ``presentTimeline``) for a
 // worker card whose ACP item predates the embedded result projection.
 const PYTHON = String.raw`
-import json, sqlite3, sys
+import json, re, sqlite3, sys
 from urllib.parse import quote
 root, task_id, refs_json = sys.argv[1], sys.argv[2], sys.argv[3]
 ${STORE_PYTHON_HELPERS}
@@ -52,9 +52,8 @@ export async function getWorkerResults(
 ): Promise<{ available: boolean; results: Record<string, { summary: string | null; checks: { name: string; outcome: string; blocker?: string }[] } | null> }> {
   const resolved = await resolveAgentTask(input, context);
   if ("message" in resolved) return unavailable(input.assignmentRefs);
-  const result = spawnSync("python3", ["-B", "-c", PYTHON, resolved.projectRoot, resolved.taskId, JSON.stringify(input.assignmentRefs)], {
-    encoding: "utf8",
-    timeout: 5000,
+  const result = await runPython(["-B", "-c", PYTHON, resolved.projectRoot, resolved.taskId, JSON.stringify(input.assignmentRefs)], {
+    timeoutMs: 5000,
     maxBuffer: 4 * 1024 * 1024,
   });
   if (result.status !== 0 || !result.stdout) return unavailable(input.assignmentRefs);

@@ -70,8 +70,7 @@ completes again. If it asks for changes, the coordinator submits a plan, and
 that new revision gets its own review and verification. See
 [orchestration](orchestration.md) for the exact eligibility rule.
 
-The ACP bridge in Paseo 0.9.1 and 0.9.2 (the same code) has no native
-`prompt.steer`. The Cortex provider sends a message (text, and any inline
+The installed Paseo 0.9.2 ACP bridge has no native `prompt.steer` (observed in the live implementation checks). The Cortex provider sends a message (text, and any inline
 image or uploaded-file content) through the bridge's concurrent configuration
 channel as `cortex_queued_message` -- an ordinary queue item, not steering --
 waits for durable capture, then acknowledges Paseo's own `steer` result for

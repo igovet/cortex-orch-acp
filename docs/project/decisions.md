@@ -1,3 +1,20 @@
+## 2026-09-26 remove the Paseo Workers composer button and popover
+
+The user steered that the Paseo "Workers" composer pill and the popover it
+opened duplicated the Pipeline panel and should be removed entirely, keeping
+only the popup surface (not the Pipeline panel/tab, worker cards in the chat
+timeline, or the worker detail panel/tab those cards and Pipeline's
+"open worker" action still open). Implemented by removing the
+`workers-${agentId}` composer pill and `WorkerPopover` wiring from
+`integrations/paseo/index.client.tsx`, deleting `client/worker-popover.tsx`
+and the now-dead `client/worker-history-poll.ts` (its only caller), and
+trimming the now-dead `orderPopoverWorkers` helper out of
+`client/worker-popover-status.ts` (its `workerPopoverStatus` export stays:
+`worker-panel.tsx` and `pipeline-model.ts` still use it). The "workers"
+workspace panel, its command-center entry, and the Pipeline panel/pill are
+unchanged. Requested via the delivered user steer captured in this task's
+capsule (`r_31708993ed23`).
+
 ## 2026-09-23 audit remediation (user-approved)
 
 - D1 build-verification profile: keep it (all 23 profiles are required);

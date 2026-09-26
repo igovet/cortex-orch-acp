@@ -16,8 +16,14 @@ in schemas, not profile prose. There is no legacy `publish_result` operation.
 Publication retains exact task/report/attempt identity. Runtime projection can
 recover an interrupted result submission from its durable publication event; absent
 or ambiguous evidence remains unresolved. A result closes a node only when its
-owned report exists, its digest is retained and its declared passing checks refer
-to actual complete successful gateway command receipts. A not_run or unverified
+owned report exists and its digest is retained. A passing check stays passed only
+when it refers to an actual complete, successful, nontrivial gateway command
+receipt of the same attempt; any other passing claim is recorded unverified (or
+failed, for a cited nonzero exit) with its `evidence_gap`, as described in
+[check evidence](orchestration.md#check-evidence). A failed check stays failed
+in the published result; only an exact later rerun of the same command closes it
+(`closed_by`, see [check history](orchestration.md#check-history-and-current-outcome)),
+and publication and recovery preserve that closure. A not_run or unverified
 check must include its concrete blocker in the structured result; publication
 and recovery preserve that blocker. Chat text cannot publish
 or accept a task. Review additionally binds the project digest and an explicit

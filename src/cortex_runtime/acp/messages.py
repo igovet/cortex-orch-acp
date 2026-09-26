@@ -53,6 +53,12 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "The user explicitly requested a documentation refresh{scope}. Read `knowledge-harvest` with `read_skill` and update the project's source-backed documentation for this task; this is an explicit request, not an inference.",
         "ru": "Пользователь явно запросил обновление документации{scope}. Прочитай `knowledge-harvest` через `read_skill` и обнови подтверждённую источниками документацию проекта для этой задачи: это явный запрос, а не вывод.",
     },
+    "worker_interrupted_notice": {
+        "en": "Interrupted when the host connection closed; no result yet. "
+              "The next message reconciles this worker from saved state.",
+        "ru": "Прервано закрытием соединения с хостом; результата ещё нет. "
+              "Следующее сообщение восстановит этого исполнителя из сохранённого состояния.",
+    },
     "delivered_but_not_accepted": {
         "en": "This turn ended with a worker's change integrated into the project and the task "
               "still not accepted: acceptance is a recorded decision, and none was made.",
@@ -271,6 +277,22 @@ _CATALOG: dict[str, dict[str, str]] = {
     "coordinator_recovery_new_session": {
         "en": "Reconnected this task with a new coordinator session, rebuilt from recorded task state (this is a new session, not a resumed one).",
         "ru": "Задача переподключена с новой сессией координатора, восстановленной из сохранённого состояния задачи (это новая сессия, а не возобновлённая).",
+    },
+    "connection_closed_notice": {
+        "en": "Cortex restarted after the host connection closed. Any connection error concerns the transport only; the saved task state is authoritative: {state}.",
+        "ru": "Cortex перезапущен после закрытия соединения с хостом. Ошибка соединения, если она показана, касается только транспорта; достоверно сохранённое состояние задачи: {state}.",
+    },
+    "connection_closed_unchanged": {
+        "en": " The task result is unchanged.",
+        "ru": " Результат задачи не изменился.",
+    },
+    "connection_closed_interrupted": {
+        "en": " Interrupted workers: {count}. Send a message to continue; the runtime reconciles them from saved state.",
+        "ru": " Прерванных воркеров: {count}. Отправьте сообщение, чтобы продолжить; runtime сверит их по сохранённому состоянию.",
+    },
+    "connection_closed_unknown_actions": {
+        "en": " Actions with an unknown outcome: {count}. They are not re-run automatically and need explicit reconciliation.",
+        "ru": " Действий с неизвестным исходом: {count}. Они не повторяются автоматически и требуют явной сверки.",
     },
     "coordinator_recovery_new_engine": {
         "en": "Reconnected this task on a newly authorized engine/route ({engine}), with a new session rebuilt from recorded task state (this is a new session, never a native resume of the prior engine).",

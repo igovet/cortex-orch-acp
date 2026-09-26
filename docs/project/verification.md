@@ -29,10 +29,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q
   use a fresh temporary `HOME`/`XDG_CONFIG_HOME`/`XDG_STATE_HOME` with no
   connections configured, and a dedicated test asserts zero engine launches
   during a full diagnostic run.
-- As of T034 the suite is 2053 passed, 0 failed, 0 skipped when run as a
-  non-root user; remaining conditional guards are platform guards (POSIX
-  FIFO, symlink support, `tmux` presence) that are not the sole coverage of
-  any mandatory case.
+- Test totals vary with the checkout; retain the exact counts, skips and exit code from each run rather than treating a historical count as current. Remaining conditional guards are platform guards (POSIX FIFO, symlink support, `tmux` presence) that are not the sole coverage of any mandatory case.
 
 ## Release-grade run
 
@@ -127,10 +124,18 @@ npm --prefix integrations/paseo run typecheck
 ```
 npm --prefix integrations/paseo run test:activation # server/plugin-activation.test.ts
 npm --prefix integrations/paseo run test:steer      # server/provider-steer.test.ts
-npm run test:diff      # node --experimental-strip-types client/worker-panel-diff.test.ts
-npm run test:status    # node --experimental-strip-types client/worker-panel-status.test.ts
-npm run test:coalesce  # node --experimental-strip-types client/coalesce.test.ts
-npm run test:worker-result-batch # node --experimental-strip-types client/worker-result-batch.test.ts
+npm --prefix integrations/paseo run test:diff      # client/worker-panel-diff.test.ts
+npm --prefix integrations/paseo run test:status    # client/worker-panel-status.test.ts
+npm --prefix integrations/paseo run test:replay    # server/replay.test.ts
+npm --prefix integrations/paseo run test:coalesce  # client/coalesce.test.ts
+npm --prefix integrations/paseo run test:worker-result-batch # client/worker-result-batch.test.ts
+npm --prefix integrations/paseo run test:rpc-subscribe # client/rpc-subscribe.test.ts
+npm --prefix integrations/paseo run test:python-runner # server/python-runner.test.ts
+npm --prefix integrations/paseo run test:invoke-diagnostics # server/invoke-diagnostics.test.ts
+npm --prefix integrations/paseo run test:worker-history # server/worker-history.test.ts
+npm --prefix integrations/paseo run test:worker-history-concurrency # server/worker-history-concurrency.test.ts
+npm --prefix integrations/paseo run test:worker-results # server/worker-results.test.ts
+npm --prefix integrations/paseo run test:pipeline # server/pipeline.test.ts
 ```
 
 A local sibling import must use its real `.ts` extension (e.g. `./pipeline.ts`),
@@ -141,7 +146,7 @@ imports it.
 
 **GUI testing** (verifies rendered user-facing behavior):
 
-Paseo 0.9.1 has no supported browser client or local HTTP UI. Its local daemon
+The installed Paseo CLI was read-only checked at version 0.9.2. Its help lists CLI/daemon/plugin commands and `--home`; no browser client or local HTTP UI command is documented. The daemon uses WebSocket, and Electron Desktop remains the GUI method. Its local daemon
 uses WebSocket, and the installed CLI provides daemon and plugin commands rather
 than a web-client launcher. The Electron Desktop application is the standard
 GUI method. Use the isolated dev home/profile and a disposable project as
@@ -180,8 +185,7 @@ python3 -B scripts/cortex_paseo_dev.py -- logs <agent-id> --json
 
 For retained-history checks, omit `--tail` and retain the exit status, output
 byte count, structural event count, safe first/last event identities and any
-explicit error. Paseo 0.9.1 documents `--tail`, `--filter` and `--since` for
-logs, but no pagination or full-history flag; if completeness cannot be independently
+explicit error. Paseo 0.9.2 documents `--tail`, `--filter` and `--since` for logs, but no pagination or full-history flag; if completeness cannot be independently
 established, mark that check unverified. Do not store message bodies or raw logs
 in repository documents or reports.
 

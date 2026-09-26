@@ -173,7 +173,7 @@ def test_retired_model_controls_not_advertised():
     assert not {'delegate','decide','plan_submit'} & set(schemas_for('worker'))
 
 
-@pytest.mark.parametrize("scenario", ["success", "advice", "fix", "review_block", "verification_fail", "synthesis_drift", "post_review_drift", "elicitation", "text_question", "worker_question", "replan", "scope", "escalation", "result_recovery", "result_correction"])
+@pytest.mark.parametrize("scenario", ["success", "advice", "fix", "review_block", "verification_fail", "synthesis_drift", "post_review_drift", "elicitation", "text_question", "worker_question", "replan", "scope", "escalation", "result_recovery", "result_correction", "check_history"])
 def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, scenario):
     """A model cannot finish the task; the runtime drives every required stage."""
     import threading
@@ -189,6 +189,7 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
     calls = []
     reviews = []
     questions = []
+    history = []
     def router(store, channel, session_ref, launch, instructions):
         def behavior(store, channel, ref, message, call_index):
             calls.append(channel.role)
@@ -205,7 +206,9 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
                     proposal['verification'] = [['python3', '-B', '-c', 'raise SystemExit(7)' if scenario == 'verification_fail' else 'print("verified")']]
                     mcp_tools.dispatch(store, channel, 'plan_submit', dict(plan=proposal, request_key='plan-'+str(context['revision'])))
                 else:
-                    mcp_tools.dispatch(store, channel, 'synthesis_submit', dict(text='Result reviewed and verified.'))
+                    mcp_tools.dispatch(store, channel, 'synthesis_submit', dict(text='Result reviewed and verified.', **(
+                        dict(not_verified=[dict(item='Unbound passing claim', blocker='No command receipt was cited for it.')])
+                        if scenario == 'result_correction' else {})))
                     if scenario == 'synthesis_drift':
                         (tmp_path / 'unexpected.txt').write_text('external change')
             else:
@@ -257,17 +260,23 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
                     args['verdict'] = ('BLOCK' if scenario == 'review_block' else 'REQUEST_CHANGES' if scenario == 'fix' and not reviews else 'APPROVE')
                     reviews.append(args['verdict'])
                 if scenario == 'result_correction':
-                    invalid = dict(args, checks=[dict(name='Unbound passing claim', outcome='passed')])
-                    with pytest.raises(StoreError, match='check_evidence_required'):
-                        mcp_tools.dispatch(store, channel, 'result_submit', invalid)
-                    with store.connection() as db:
-                        assert db.execute('SELECT 1 FROM runtime_requests WHERE actor=? AND request_key=?',
-                                          (channel.channel_id, args['request_key'])).fetchone() is None
-                        assert db.execute("SELECT 1 FROM task_events WHERE task_id=? AND assignment_ref=? AND event_type='worker_result'",
-                                          (channel.task_id, channel.attempt_id)).fetchone() is None
+                    # An unbound pass is kept as a disclosed unverified gap;
+                    # the cited real command stays passed.
                     observed = mcp_tools.dispatch(store, channel, 'command_run',
                         dict(argv=['python3', '-B', '-c', 'print("observed check")'], request_key='verify-real'))
-                    args['checks'] = [dict(name='Actual check', outcome='passed', tool_call_ref=observed['tool_call_ref'])]
+                    args['checks'] = [dict(name='Unbound passing claim', outcome='passed'),
+                                      dict(name='Actual check', outcome='passed', tool_call_ref=observed['tool_call_ref'])]
+                if scenario == 'check_history' and provision['role_id'] != 'worker-code-reviewer':
+                    # A long task's own history: the check failed, the worker
+                    # fixed it, and an exact rerun of the same command passed.
+                    toggle = ['python3', '-B', '-c', 'import pathlib,sys; sys.exit(0 if pathlib.Path("fixed.flag").exists() else 1)']
+                    first = mcp_tools.dispatch(store, channel, 'command_run', dict(argv=toggle, request_key='first-run'))
+                    (tmp_path / 'fixed.flag').write_text('fixed')
+                    rerun = mcp_tools.dispatch(store, channel, 'command_run', dict(argv=toggle, request_key='rerun'))
+                    assert (first['exit_code'], rerun['exit_code']) == (1, 0)
+                    args['checks'] = [dict(name='unit tests', outcome='failed', tool_call_ref=first['tool_call_ref']),
+                                      dict(name='unit tests', outcome='passed', tool_call_ref=rerun['tool_call_ref'])]
+                    history.append((first['tool_call_ref'], rerun['tool_call_ref']))
                 if scenario == 'result_recovery':
                     from unittest.mock import patch
                     # Crash after the exact publication event, before its runtime
@@ -278,7 +287,10 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
                     from cortex_runtime.orchestration.recovery import reconcile_results
                     reconcile_results(store, task.task_id)
                 else:
-                    mcp_tools.dispatch(store, channel, 'result_submit', args)
+                    receipt = mcp_tools.dispatch(store, channel, 'result_submit', args)
+                    if scenario == 'result_correction':
+                        assert [(c['outcome'], c.get('evidence_gap')) for c in receipt['checks']] == [
+                            ('unverified', 'tool_call_ref_missing'), ('passed', None)]
                     if scenario == 'post_review_drift' and provision['role_id'] == 'worker-code-reviewer':
                         (tmp_path / 'changed-after-review.txt').write_text('external change')
             return PromptOutcome(StopReason.END_TURN, 'Visible model message')
@@ -312,6 +324,26 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
                 "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_NOT_REQUIRED'", (task.task_id,))]
         assert [(w['reason'], w['revision']) for w in waived] == [('no_project_changes', 1)]
         assert context['review_not_required']['revision_digest'] == context['verification']['revision_digest']
+        return
+    if scenario == 'check_history':
+        # The earlier failure stays in the result as history, closed by the
+        # exact later rerun; the task completes through review and verification.
+        assert context['state'] == 'COMPLETED', context
+        [(failed_ref, passed_ref)] = history
+        node = next(n for n in context['nodes'] if n['stage'] == 'execution')
+        assert node['status'] == 'completed'
+        assert [(c['outcome'], c.get('closed_by'), c['evidence_strength']) for c in node['result']['checks']] == [
+            ('failed', passed_ref, 'verified'), ('passed', None, 'verified')]
+        # A failed verification recorded after the pass is the current outcome:
+        # the earlier pass can no longer complete the task.
+        from cortex_runtime.orchestration.state import event
+        machine = TaskMachine(store)
+        with store.connection() as db:
+            event(db, task.task_id, 'VERIFICATION_FAILED', dict(context['verification'], checks=[]))
+            db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?", (task.task_id,))
+            db.commit()
+        with pytest.raises(StoreError, match='completion_verification_missing'):
+            machine.move(task.task_id, 'COMPLETED')
         return
     if scenario in {'success', 'fix', 'elicitation', 'text_question', 'worker_question', 'replan', 'scope', 'escalation', 'result_recovery', 'result_correction'}:
         assert context['state'] == 'COMPLETED', context

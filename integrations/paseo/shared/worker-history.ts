@@ -57,7 +57,16 @@ const attempt = z.object({
   route: route.optional(),
   // Runtime-retained result checks let the worker tab mirror the chat card
   // and Pipeline's terminal issue count without parsing an error string.
-  checks: z.array(z.object({ name: z.string(), outcome: z.string(), blocker: z.string().optional() })).optional(),
+  checks: z.array(z.object({
+    name: z.string(), outcome: z.string(), blocker: z.string().optional(),
+    // A failed check an exact later rerun closed: kept as run history, not a
+    // current failure (see delegation.evidence.accept_checks).
+    closedBy: z.string().optional(),
+    // The runtime downgraded a claimed "passed" to unverified/failed for
+    // insufficient evidence; evidenceGap names the unmet condition.
+    claimedOutcome: z.string().optional(),
+    evidenceGap: z.string().optional(),
+  })).optional(),
   // Latest ACP context fill of this attempt's engine session.
   context: z.object({ used: z.number().int().nonnegative(), size: z.number().int().positive() }).optional(),
   // Engine-reported token totals of this attempt's calls.

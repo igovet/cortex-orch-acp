@@ -222,6 +222,9 @@ class StdioTransport:
         self._closed = threading.Event()
         self._writer_closed_event = threading.Event()
         self._reader_eof_event = threading.Event()
+        # Set by a termination signal (see `agent.main`): the host stopping
+        # its provider process sends SIGTERM rather than closing stdin.
+        self._shutdown_requested = threading.Event()
         self._reader_thread = threading.Thread(target=self._read_loop, name="acp-reader", daemon=True)
         self._writer_thread = threading.Thread(target=self._write_loop, name="acp-writer", daemon=True)
 
@@ -238,10 +241,15 @@ class StdioTransport:
         failed (never true after a normal `stop_writer()`)."""
         return self._writer_closed_event.is_set()
 
+    def request_shutdown(self):
+        """Async-signal-safe: only sets an event the main thread polls."""
+        self._shutdown_requested.set()
+
     def wait_for_shutdown_signal(self, timeout=None):
-        """Block until the reader hits EOF or the writer stops because a
-        write failed, whichever happens first; return ``"reader_eof"``,
-        ``"writer_closed"``, or ``None`` on timeout.
+        """Block until the reader hits EOF, the writer stops because a
+        write failed, or a shutdown is requested, whichever happens first;
+        return ``"reader_eof"``, ``"writer_closed"``, ``"signal"``, or
+        ``None`` on timeout.
 
         Polls at a short, bounded interval rather than requiring a single
         primitive that can wait on two independent ``threading.Event``
@@ -256,6 +264,8 @@ class StdioTransport:
                 return "reader_eof"
             if self._writer_closed_event.is_set():
                 return "writer_closed"
+            if self._shutdown_requested.is_set():
+                return "signal"
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

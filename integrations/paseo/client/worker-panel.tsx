@@ -411,7 +411,7 @@ export function WorkerPanel({ theme, host, layout, workspaceId, agentId, navigat
           {selectedAttempt.agentId && navigation?.openAgent && <Pressable accessibilityRole="button" onPress={() => navigation.openAgent({ agentId: selectedAttempt.agentId! })}><Text style={[styles.muted, { color: theme.colors.accent }]}>Open full chat ↗</Text></Pressable>}
         </View>
         <View style={{ gap: 2 }}>
-          {selectedAttempt.failureReason && <Text selectable style={[styles.body, { color: theme.colors.statusDanger }]}>{selectedAttempt.failureReason}</Text>}
+          {selectedAttempt.failureReason && <Text selectable style={[styles.body, { color: selectedAttempt.status === "interrupted" ? theme.colors.statusWarning : theme.colors.statusDanger }]}>{selectedAttempt.failureReason}</Text>}
           {groupToolRuns(transcript).map((item) => item.kind === "group"
             ? <ToolGroup key={`group-${item.id}`} group={item} theme={theme}
                 expanded={expandedGroups.has(item.id)}

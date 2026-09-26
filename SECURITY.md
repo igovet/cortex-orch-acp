@@ -18,7 +18,7 @@ that decision as `REVIEW_NOT_REQUIRED` and binds verification to the same digest
 Any project change, every fix cycle, or an unobservable project still requires
 independent review. No model hint can waive review. A model tool call cannot
 select a task state, accept the task or directly create an engine session.
-Plan verification commands execute as literal argv without a shell. Submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses, so a plan cannot defer that syntax error until verification. Structural validation does not prove semantic correctness of a plan, review or implementation.
+Plan verification commands execute as literal argv without a shell. Submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses, so a plan cannot defer that syntax error until verification. Structural validation does not prove semantic correctness of a plan, review or implementation.\n\nA worker `passed` check is accepted only with an exact same-attempt `command_run` or user-confirmed `outside_command` receipt for one completed, nontrivial operation, complete untruncated output and exit code 0. Engine-native shell calls and file reads do not verify checks. Insufficient evidence stays `unverified`; observed nonzero exits stay `failed`. Earlier reports are not rewritten, and older evidence is marked weak when projected under the current rule. Check run history is retained; a failure closes only on a later exact verified rerun that remains the latest result for that command.\n\nTransport state is distinct from task outcome. A plugin disconnect records available session/task/attempt identities and history completeness; restart recovery reads persisted state and leaves actions with unknown outcomes unresolved. Until reload recovery is qualified for the deployed version, update the plugin between active tasks. A host SIGKILL without SIGTERM cannot be recorded, and native engine actions cannot be represented by the retained command receipt mechanism.
 
 ## Tool access and containment
 
@@ -183,7 +183,14 @@ read-only project except its scratch (`HOME`/`TMPDIR`/`TMP`/`TEMP`) and private
 `/var/tmp`. Sandbox absence is a hard
 failure. Complete command bytes, exit status, timeout/cancellation and project
 digest are retained. A successful MCP envelope alone cannot certify a check: a
-passed worker check requires its own complete successful gateway-command receipt.
+passed worker check requires its own complete successful gateway-command receipt of
+the same attempt, with complete retained output and a nontrivial command; an
+engine-native call or a missing, foreign or insufficient reference keeps it
+`unverified` (see [check evidence](docs/acp/orchestration.md#check-evidence)). A
+recorded failure is never dropped or downgraded; the runtime treats it as closed
+only after re-deriving, from its own receipts, an exact later passing rerun of the
+same command in the same attempt
+(see [check history](docs/acp/orchestration.md#check-history-and-current-outcome)).
 
 ### Git and tool state in the project
 

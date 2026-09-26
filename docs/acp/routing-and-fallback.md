@@ -82,7 +82,7 @@ description, or a deterministically decodable versioned id such as
 the audit's own `detail["model_name"]`; every display reader
 (`acp.orchestrating_runtime._delegation_route_label` for worker cards/ACP
 titles, and Paseo's `worker-history.ts`/`worker-display.ts` for the
-Workers popover and panel) prefers this resolved name over the bare id and,
+worker detail panel) prefers this resolved name over the bare id and,
 when it is absent (no cached snapshot, no matching entry, or no evidence
 beyond the alias itself), shows the routing id explicitly marked as an
 alias (`opus[1m] (alias)`) rather than presenting it as though it were the

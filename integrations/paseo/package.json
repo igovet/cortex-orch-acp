@@ -8,9 +8,18 @@
     "test:steer": "node --experimental-strip-types server/provider-steer.test.ts",
     "test:diff": "node --experimental-strip-types client/worker-panel-diff.test.ts",
     "test:status": "node --experimental-strip-types client/worker-panel-status.test.ts",
+    "test:display": "node --experimental-strip-types client/worker-display.test.ts",
+    "test:terminal-status": "node --experimental-strip-types client/worker-terminal-status.test.ts",
     "test:replay": "node --experimental-strip-types server/replay.test.ts",
     "test:coalesce": "node --experimental-strip-types client/coalesce.test.ts",
-    "test:worker-result-batch": "node --experimental-strip-types client/worker-result-batch.test.ts"
+    "test:worker-result-batch": "node --experimental-strip-types client/worker-result-batch.test.ts",
+    "test:rpc-subscribe": "node --experimental-strip-types client/rpc-subscribe.test.ts",
+    "test:python-runner": "node --experimental-strip-types server/python-runner.test.ts",
+    "test:invoke-diagnostics": "node --experimental-strip-types server/invoke-diagnostics.test.ts",
+    "test:worker-history": "node --experimental-strip-types server/worker-history.test.ts",
+    "test:worker-history-concurrency": "node --experimental-strip-types server/worker-history-concurrency.test.ts",
+    "test:worker-results": "node --experimental-strip-types server/worker-results.test.ts",
+    "test:pipeline": "node --experimental-strip-types server/pipeline.test.ts"
   },
   "devDependencies": {
     "@getpaseo/client": "^0.9.1",

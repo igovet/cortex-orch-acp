@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
-import { spawnSync } from "node:child_process";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { readWorkerHistory } from "../shared/worker-history.js";
+import { runPython } from "./python-runner.js";
 
 /** Helpers shared by every Python store reader: the display scrubber (credentials
  * and private absolute paths never reach the client) and token totals.
@@ -86,6 +86,28 @@ ${STORE_PYTHON_HELPERS}def process_identity_absent(row):
     except (OSError, ValueError, TypeError):
         # An unreadable identity is indeterminate, never a false failure.
         return False
+# Mirrors acp/messages.py's worker_interrupted_notice and select_language.
+INTERRUPTED_REASON = {
+    'en': 'Interrupted when the host connection closed; no result yet. '
+          'The next message reconciles this worker from saved state.',
+    'ru': 'Прервано закрытием соединения с хостом; результата ещё нет. '
+          'Следующее сообщение восстановит этого исполнителя из сохранённого состояния.',
+}
+def task_language(db, tables, task_id):
+    if 'task_language' in tables:
+        row = db.execute('select language from task_language where task_id=?', (task_id,)).fetchone()
+        if row is not None and row['language'] in INTERRUPTED_REASON:
+            return row['language']
+    for row in db.execute("select payload_json from task_events where task_id=? and event_type='user_message' order by id desc limit 20", (task_id,)):
+        try:
+            text = json.loads(row['payload_json']).get('content')
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if isinstance(text, str) and text:
+            letters = [ch for ch in text if ch.isalpha()]
+            cyrillic = sum(1 for ch in letters if '\u0400' <= ch <= '\u04ff')
+            return 'ru' if letters and cyrillic / len(letters) >= 0.30 else 'en'
+    return 'en'
 try:
     db = sqlite3.connect('file:' + quote(db_path, safe='/') + '?mode=ro', uri=True)
     db.row_factory = sqlite3.Row
@@ -102,6 +124,36 @@ try:
     truncated = False
     more_assignments = False
     for task in task_rows:
+        # Workers a closed host connection interrupted (e.g. a plugin
+        # update): recovery reconciles them, so an absent process must not
+        # read as a crash. Mirrors replay_store.py's
+        # terminal_worker_card_reconciliation.
+        # Recovery's recovery_worker_lost write-off of such a worker is the
+        # same interruption, not a generic failure.
+        disconnected_attempts = set()
+        for row in db.execute(
+                "select event_type,assignment_ref,payload_json from task_events where task_id=? and "
+                "((event_type='progress' and payload_json like '%host_disconnected%') or "
+                "(event_type='assignment_failed' and payload_json like '%recovery_worker_lost%'))", (task['id'],)):
+            try:
+                payload = json.loads(row['payload_json'])
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if row['event_type'] == 'assignment_failed':
+                # The stale-coordinator-channel write-off names only the assignment.
+                ref = payload.get('attempt_id') or row['assignment_ref']
+                if payload.get('error') == 'recovery_worker_lost' and ref:
+                    disconnected_attempts.add(ref)
+                continue
+            if payload.get('kind') != 'host_disconnected':
+                continue
+            for worker in payload.get('interrupted_workers') or ():
+                ref = worker.get('attempt_id') if isinstance(worker, dict) else None
+                if ref:
+                    disconnected_attempts.add(ref)
+        interrupted_reason = INTERRUPTED_REASON[task_language(db, tables, task['id'])]
         if assignment_ref:
             rows = db.execute('''select a.* from work_assignments a where a.task_id=? and
                 (a.assignment_id=? or a.idempotency_key=? or exists (
@@ -326,7 +378,37 @@ try:
                     attempt_result['status'] = 'failed'
                 elif terminal_type == 'assignment_cancelled':
                     attempt_result['status'] = 'cancelled'
-                elif process_absent and str(attempt_result['status']).lower() in ('planned', 'running', 'in_progress', 'working', 'ready', 'provisioning'):
+                interrupted = False
+                lost = any(ref in disconnected_attempts for ref in (*execution_attempt_refs, *refs))
+                if lost and terminal_type in ('assignment_failed', 'assignment_cancelled'):
+                    # Written off after its host was lost, or cancelled by the
+                    # replan that followed: an interruption, never a failure.
+                    interrupted = True
+                    attempt_result['status'] = 'interrupted'
+                    attempt_result['failureReason'] = interrupted_reason
+                non_terminal = str(attempt_result['status']).lower() in ('planned', 'running', 'in_progress', 'working', 'ready', 'provisioning')
+                # No signal reached the old host (SIGKILL, OOM): its launching
+                # Cortex process is provably gone, so nothing runs this worker
+                # any more. A live or unidentifiable owner never qualifies.
+                if non_terminal and not lost and has_process_registry and execution_attempt_refs:
+                    owner_rows = db.execute(
+                        'select * from attempt_process_registry where task_id=? and role=? and attempt_id in (%s)' % ','.join('?' for _ in execution_attempt_refs),
+                        (task['id'], 'acp_host', *('acp_host:' + ref for ref in execution_attempt_refs)),
+                    ).fetchall()
+                    lost = bool(owner_rows) and all(process_identity_absent(row) for row in owner_rows)
+                # A recorded host disconnect is, on its own, the durable answer: real
+                # recovery (recovery.worker_reconciliation) marks such a worker
+                # recovery_worker_lost on the coordinator's next turn regardless of
+                # whether its OS process can still be probed as alive (there is no
+                # channel secret in a fresh process to safely resume it either way).
+                # Display must not withhold "Interrupted" waiting for a stronger,
+                # OS-level "absent" signal that recovery itself never requires.
+                if non_terminal and lost:
+                    interrupted = True
+                    attempt_result['status'] = 'interrupted'
+                    if not attempt_result['failureReason']:
+                        attempt_result['failureReason'] = interrupted_reason
+                elif process_absent and non_terminal:
                     attempt_result['status'] = 'failed'
                     if not attempt_result['failureReason']:
                         attempt_result['failureReason'] = 'Worker process exited before reporting a result.'
@@ -334,8 +416,12 @@ try:
                 # report with rejected checks is a completed worker turn with
                 # issues, while a failed node without a result is an execution
                 # failure. This is the same distinction as the coordinator
-                # ACP card; both derive it from runtime_nodes.
-                if 'runtime_nodes' in tables and execution_attempt_refs:
+                # ACP card; both derive it from runtime_nodes. A durably
+                # interrupted attempt keeps that status here: the graph row
+                # can still read "running" until recovery reconciles it, and
+                # that stale word must never resurrect a live spinner for a
+                # worker that is not running.
+                if 'runtime_nodes' in tables and execution_attempt_refs and not interrupted:
                     runtime_rows = db.execute(
                         'select n.status,n.result_json from runtime_nodes n join delegation_provisioning p on p.task_id=n.task_id and p.idempotency_key=n.assignment_ref where n.task_id=? and p.attempt_id in (%s)' % ','.join('?' for _ in execution_attempt_refs),
                         (task['id'], *execution_attempt_refs),
@@ -352,7 +438,17 @@ try:
                         checks = result.get('checks')
                         if isinstance(checks, list) and all(isinstance(check, dict) and isinstance(check.get('name'), str) and isinstance(check.get('outcome'), str) for check in checks):
                             attempt_result['checks'] = [{'name': check['name'], 'outcome': check['outcome'],
-                                **({'blocker': check['blocker'][:600]} if isinstance(check.get('blocker'), str) and check['blocker'].strip() else {})}
+                                **({'blocker': check['blocker'][:600]} if isinstance(check.get('blocker'), str) and check['blocker'].strip() else {}),
+                                # closedBy: an exact later rerun closed this
+                                # failure (it stays as run history, resolved).
+                                # claimedOutcome/evidenceGap: the runtime kept
+                                # an insufficiently-evidenced "passed" claim as
+                                # unverified/failed -- both already stored by
+                                # delegation.evidence.accept_checks, never
+                                # re-derived here.
+                                **({'closedBy': check['closed_by']} if isinstance(check.get('closed_by'), str) and check['closed_by'].strip() else {}),
+                                **({'claimedOutcome': check['claimed_outcome']} if isinstance(check.get('claimed_outcome'), str) and check['claimed_outcome'].strip() else {}),
+                                **({'evidenceGap': check['evidence_gap']} if isinstance(check.get('evidence_gap'), str) and check['evidence_gap'].strip() else {})}
                                 for check in checks]
                         if runtime_rows[0]['status'] == 'failed':
                             unresolved = [check.get('name', 'check') + ': ' + check.get('outcome', 'unverified') for check in result.get('checks', []) if check.get('outcome') != 'passed']
@@ -481,8 +577,8 @@ except (Conflict, OSError, RuntimeError, ValueError):
 `;
 
 /** The runtime's logical project root for one workspace directory, or null. */
-function resolveProjectRoot(directory: string): string | null {
-  const result = spawnSync("python3", ["-B", "-c", PROJECT_ROOT_PYTHON, directory], { encoding: "utf8", timeout: 5000 });
+async function resolveProjectRoot(directory: string): Promise<string | null> {
+  const result = await runPython(["-B", "-c", PROJECT_ROOT_PYTHON, directory], { timeoutMs: 5000 });
   const root = result.status === 0 && result.stdout.endsWith("\n") ? result.stdout.slice(0, -1) : "";
   return root.startsWith("/") && !root.includes("\0") && !root.includes("\n") ? root : null;
 }
@@ -542,22 +638,43 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// `resolveAgentTask`'s two identity spawns (`resolveProjectRoot`,
+// `readTaskId`) are invariant for a given (workspaceId, agentId) for the
+// life of the agent's bound session (measured: ~60% of a single call's
+// cost). Cached here, keyed by that pair and invalidated whenever the
+// workspace directory or the agent's bound session id changes underneath
+// it, so a stale or reassigned agent never reads another session's task.
+type AgentTaskCacheEntry = { directory: string; sessionId: string; projectRoot: string; taskId: string };
+const agentTaskCache = new Map<string, AgentTaskCacheEntry>();
+
+function agentTaskCacheKey(workspaceId: string, agentId: string): string {
+  return `${workspaceId}\u0000${agentId}`;
+}
+
 /** Resolve the exact Cortex task bound to this Paseo agent, or say why not. */
 export async function resolveAgentTask(input: { workspaceId: string; agentId: string }, context: PluginHandlerContext): Promise<{ projectRoot: string; taskId: string } | { message: string }> {
   const workspaceHandle = context.paseo.workspaces.ref(input.workspaceId);
   await workspaceHandle.refresh();
   const directory = workspaceHandle.directory;
   if (!directory || !directory.startsWith("/") || directory.includes("\0")) return { message: "Worker history is unavailable for this workspace." };
-  const projectRoot = resolveProjectRoot(directory);
-  if (!projectRoot) return { message: "Worker history is unavailable for this workspace." };
-  if (!existsSync(`${projectRoot}/.cortex/cortex.sqlite3`)) return { message: "No Cortex store is present in this workspace." };
   const agentHandle = context.paseo.agents.ref(input.agentId);
   await agentHandle.refresh();
   const agent = agentHandle.current();
   const sessionId = parsePaseoRuntimeSessionId(agent?.runtimeInfo);
   if (!sessionId || agent?.workspaceId !== input.workspaceId) return { message: "Worker history is unavailable for this agent." };
+
+  const cacheKey = agentTaskCacheKey(input.workspaceId, input.agentId);
+  const cached = agentTaskCache.get(cacheKey);
+  if (cached && cached.directory === directory && cached.sessionId === sessionId) {
+    return { projectRoot: cached.projectRoot, taskId: cached.taskId };
+  }
+
+  const projectRoot = await resolveProjectRoot(directory);
+  if (!projectRoot) return { message: "Worker history is unavailable for this workspace." };
+  if (!existsSync(`${projectRoot}/.cortex/cortex.sqlite3`)) return { message: "No Cortex store is present in this workspace." };
   const taskId = await readTaskId(projectRoot, sessionId);
   if (!taskId) return { message: "No durable Cortex task is bound to this agent." };
+  agentTaskCache.set(cacheKey, { directory, sessionId, projectRoot, taskId });
   return { projectRoot, taskId };
 }
 
@@ -565,9 +682,8 @@ export async function getWorkerHistory(input: { workspaceId: string; agentId: st
   const resolved = await resolveAgentTask(input, context);
   if ("message" in resolved) return { assignments: [], available: false, truncated: false, nextCursor: null, nextAssignmentCursor: null, message: resolved.message };
   const { projectRoot, taskId } = resolved;
-  const result = spawnSync("python3", ["-B", "-c", PYTHON, projectRoot, taskId, input.attemptId ?? "", String(input.cursor ?? 0), String(input.limit ?? 200), input.assignmentCursor ?? "", input.assignmentRef ?? ""], {
-    encoding: "utf8",
-    timeout: 5000,
+  const result = await runPython(["-B", "-c", PYTHON, projectRoot, taskId, input.attemptId ?? "", String(input.cursor ?? 0), String(input.limit ?? 200), input.assignmentCursor ?? "", input.assignmentRef ?? ""], {
+    timeoutMs: 5000,
     maxBuffer: 64 * 1024 * 1024,
   });
   if (result.status !== 0 || !result.stdout) {
@@ -581,6 +697,6 @@ export async function getWorkerHistory(input: { workspaceId: string; agentId: st
 }
 
 async function readTaskId(projectRoot: string, sessionId: string): Promise<string | null> {
-  const result = spawnSync("python3", ["-B", "-c", "import sqlite3,sys; from urllib.parse import quote; db=sqlite3.connect('file:'+quote(sys.argv[1]+'/.cortex/cortex.sqlite3',safe='/')+'?mode=ro',uri=True); r=db.execute('select task_id from acp_host_sessions where session_id=? and project_root=?',(sys.argv[2],sys.argv[1])).fetchone(); print(r[0] if r and r[0] else '')", projectRoot, sessionId], { encoding: "utf8", timeout: 5000 });
+  const result = await runPython(["-B", "-c", "import sqlite3,sys; from urllib.parse import quote; db=sqlite3.connect('file:'+quote(sys.argv[1]+'/.cortex/cortex.sqlite3',safe='/')+'?mode=ro',uri=True); r=db.execute('select task_id from acp_host_sessions where session_id=? and project_root=?',(sys.argv[2],sys.argv[1])).fetchone(); print(r[0] if r and r[0] else '')", projectRoot, sessionId], { timeoutMs: 5000 });
   return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : null;
 }

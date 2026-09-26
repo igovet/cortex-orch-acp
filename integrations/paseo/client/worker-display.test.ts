@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import {
-  contextSummary, resolveWorkerCardStatus, workerAssignmentLine, workerCardMetadata, workerDisplayName,
+  contextSummary, resolveDurableWorkerCardStatus, resolveWorkerCardStatus, workerAssignmentLine, workerCardMetadata, workerDisplayName,
   workerModelDisplay, workerStatusPresentation,
 } from "./worker-display.ts";
 
@@ -32,6 +32,32 @@ assert.equal(resolveWorkerCardStatus("Worker: debugger — Audit", "completed"),
 assert.equal(resolveWorkerCardStatus("Worker: debugger · Completed with issues — Audit", "completed"), "completed_with_issues");
 assert.equal(resolveWorkerCardStatus("Worker: debugger · Cancelled — Audit", "failed"), "cancelled");
 assert.deepEqual(workerCardMetadata("Worker: debugger · Cancelled — Audit", "failed"), { workerName: "Audit", subtitle: "debugger · cancelled" });
+
+// The runtime appends the suffix to the whole title (replay_store.py's
+// interrupted correction, orchestrating_runtime.py's cancelled/interrupted
+// cards). Live (r_b6091be1cd02) that shape read as a generic "failed".
+const runtimeTitle = "Worker: general · claude · Sonnet 5 · medium — Run sleep 40";
+assert.equal(resolveWorkerCardStatus(`${runtimeTitle} · Interrupted`, "failed"), "interrupted");
+assert.equal(resolveWorkerCardStatus(`${runtimeTitle} · Cancelled`, "failed"), "cancelled");
+assert.equal(resolveWorkerCardStatus(`${runtimeTitle} · Completed with issues`, "completed"), "completed_with_issues");
+assert.deepEqual(workerCardMetadata(`${runtimeTitle} · Interrupted`, "failed"),
+  { workerName: "Run sleep 40", subtitle: "general · claude · Sonnet 5 · medium · interrupted" });
+assert.equal(resolveWorkerCardStatus("Worker assignment · Interrupted", "failed"), "interrupted");
+// A name that merely contains the word is not a status.
+assert.equal(resolveWorkerCardStatus("Worker: general — Explain why builds get Interrupted", "running"), "running");
+
+// After a plugin reload the host keeps the card `running` and sends nothing
+// until the next prompt: the polled durable attempt status settles it. A
+// durable status still running never overrides the host.
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "running", "interrupted"), "interrupted");
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "running", "completed"), "completed");
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "running", "running"), "running");
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "running", "planned"), "running");
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "running", undefined), "running");
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "failed", "interrupted"), "interrupted");
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "failed", "failed"), "failed");
+assert.equal(resolveDurableWorkerCardStatus(runtimeTitle, "completed", "interrupted"), "completed");
+assert.equal(resolveDurableWorkerCardStatus(`${runtimeTitle} · Cancelled`, "failed", "interrupted"), "cancelled");
 
 // T035: realistic Claude and Codex configOptions shapes -- an alias
 // (`opus[1m]`, `haiku`, `default`) with the engine's own resolved name

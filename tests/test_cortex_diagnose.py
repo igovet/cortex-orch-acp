@@ -66,6 +66,7 @@ def test_after_full_setup_diagnostics_is_ok(tmp_path, monkeypatch):
                                  auth_mode=AuthMode.API_KEY, key_kind="openai_api_key",
                                  api_key_reader=lambda: secret_file.read_bytes())
     setup.pin_route(connection_id=conn["connection_id"], model="gpt-5-codex")
+    setup.bootstrap_paseo_git_install()
     report = cortex_diagnose.run_diagnostics()
     # Exclude the always-present static "gateway auth mode is unqualified"
     # informational warnings -- those describe engine capability limits,

@@ -1,21 +1,24 @@
 """T017 durable tool-call evidence over ``tool_result_observations`` (see
-``delegation.evidence_store``).
+``delegation.evidence_store``) and the strict check-evidence rule.
 
 Bridges an engine's own ``TOOL_CALL_OBSERVED`` updates (see
 ``engine.session_manager``/``portable.engine_contract.EngineEvent``) into a
-durable per-attempt record, and resolves a worker's claimed
-``publish_result`` ``checks`` (see ``delegation.contracts``) against it:
+durable per-attempt record, and assesses a worker's ``result_submit``
+``checks`` against the runtime's own records (:func:`assess_check`):
 
-- ``claimed`` -- the check is in the worker's own claim; no linked
-  observation (or a ``tool_call_ref`` that only resolves under a
-  *different* attempt -- never trusted across attempts).
-- ``observed`` -- the linked ``tool_call_ref``'s latest observation *for
-  this exact attempt* has ``status == "completed"``.
-- ``contradicted`` -- the linked observation's latest status is
-  ``"failed"``.
+- ``verified`` -- a passed check cites exactly one complete gateway
+  ``command_run``/``outside_command`` receipt of this task and attempt, with
+  exit code 0, a complete non-truncated retained output and a command that
+  is not a trivial stand-in (:func:`trivial_command`). A failed check is
+  verified by the same kind of receipt with a nonzero exit code.
+- ``weak`` -- a passed or failed claim without such a receipt; ``gap``
+  names the first unmet condition (:data:`EVIDENCE_GAPS`).
+- ``none`` -- a ``not_run``/``unverified`` disclosure.
 
-Nothing here ever marks a claim ``observed``/confirmed without an actual
-matching row from this attempt's own observations.
+Engine-native tool calls are recorded here for display and audit, but the
+runtime never observes their exit code or retains their complete output, so
+they never verify a check. Nothing here marks a claim verified without the
+runtime's own matching receipt from this exact attempt.
 """
 from __future__ import annotations
 
@@ -48,50 +51,558 @@ def record_tool_result_observed(
     ))
 
 
-def _latest_status(store, attempt_id: str, tool_call_ref: str) -> str | None:
-    with store.connection() as db:
-        row = db.execute(
-            "SELECT status FROM tool_result_observations WHERE attempt_id=? AND tool_call_ref=? ORDER BY id DESC LIMIT 1",
-            (attempt_id, tool_call_ref),
-        ).fetchone()
-    return row["status"] if row is not None else None
+# Every reason a passed (or failed) claim is not verified. The code is stored
+# on a check the runtime kept unverified (``evidence_gap``) and derived again
+# at read time for older results; the sentence is its readable blocker.
+EVIDENCE_GAPS = {
+    "tool_call_ref_missing": "no tool_call_ref was cited",
+    "tool_call_ref_unknown": "the cited tool_call_ref is not a tool call of this task",
+    "foreign_attempt": "the cited tool call belongs to a different attempt",
+    "ref_already_cited": "the same tool_call_ref was already cited by an earlier check of this result",
+    "not_a_command": "the cited tool call is not a command execution (a read, write, search, listing or report operation)",
+    "engine_command_unverifiable": ("the cited call is an engine-native shell call whose exit code and complete "
+                                    "output the runtime does not retain; run the check with command_run"),
+    "receipt_missing": "no retained receipt is bound to the cited command",
+    "ambiguous_ref": "more than one retained receipt carries the cited tool_call_ref",
+    "call_incomplete": "the cited command did not complete (pending, interrupted, timed out or cancelled)",
+    "nonzero_exit": "the cited command exited with a nonzero code",
+    "zero_exit": "the cited command exited with code 0",
+    "result_missing": "the cited command has no retained output record",
+    "result_truncated": "the retained output of the cited command is truncated or inconsistent",
+    "command_unrecorded": "the receipt of the cited command does not record its argv",
+    "trivial_command": ("the cited command cannot verify anything (a no-op, print, listing, read or search "
+                        "command such as pwd, ls, echo, cat or grep)"),
+    "later_run_failed": "a later run of the same command in this attempt exited with a nonzero code",
+    "later_run_unresolved": "a later run of the same command in this attempt has no established result",
+}
+
+COMMAND_OPERATIONS = frozenset({"command_run", "outside_command"})
+
+# Programs whose success says nothing about a named check: no-ops, printers,
+# listings, file reads and searches. Matched on the argv[0] basename after
+# the wrappers below are removed; a shell -c script is trivial only when
+# every one of its commands is.
+TRIVIAL_PROGRAMS = frozenset({
+    ":", "[", "ag", "basename", "cat", "cd", "date", "df", "dirname", "du", "echo", "env",
+    "export", "fd", "file", "find", "grep", "head", "hostname", "id", "less", "ls", "more",
+    "printenv", "printf", "pwd", "readlink", "realpath", "rg", "set", "sleep", "sort", "stat",
+    "tail", "tee", "test", "tr", "tree", "true", "type", "uname", "uniq", "wc", "which", "whoami", "yes",
+})
+# Read-only git subcommands; ``git diff`` counts only with a flag that makes
+# its exit code meaningful.
+TRIVIAL_GIT = frozenset({"branch", "config", "describe", "log", "ls-files", "remote", "rev-parse", "show", "status"})
+GIT_DIFF_CHECK_FLAGS = frozenset({"--check", "--exit-code", "--quiet"})
+SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
+_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&", ";;", "(", ")", "{", "}", "\n"})
+_KEYWORDS = frozenset({"!", "if", "then", "else", "elif", "do", "while", "until", "fi", "done", "esac", "time"})
 
 
-def resolve_check_tx(db, attempt_id: str, tool_call_ref: str | None) -> str:
-    """Resolve a worker check against an already-open transaction.
+def _strip_wrappers(argv: list[str]) -> list[str]:
+    """Drop leading assignments and the pass-through launchers env, timeout,
+    nice, nohup, command, exec and time, which do not change what runs."""
+    words = list(argv)
+    while words:
+        head = words[0].rsplit("/", 1)[-1]
+        if "=" in words[0] and words[0].split("=", 1)[0].isidentifier():
+            words = words[1:]
+        elif head == "env":
+            words = words[1:]
+            while words and (words[0].startswith("-") or ("=" in words[0] and words[0].split("=", 1)[0].isidentifier())):
+                words = words[2:] if words[0] in {"-u", "--unset", "-C", "--chdir"} else words[1:]
+            if not words:
+                return ["env"]
+        elif head == "timeout":
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[2:] if words[0] in {"-s", "--signal", "-k", "--kill-after"} else words[1:]
+            words = words[1:]  # the duration
+        elif head == "nice":
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[2:] if words[0] in {"-n", "--adjustment"} else words[1:]
+        elif head in {"nohup", "command", "exec", "time"}:
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[1:]
+        else:
+            break
+    return words
 
-    Completion uses this variant while the draft publication and its
-    ``worker_result`` event are in the same SQLite transaction.  It avoids a
-    second connection (and therefore a second commit boundary) between the
-    evidence lookup and finalization.
+
+def _shell_script(words: list[str]) -> tuple[str, str] | None:
+    """``(options, script)`` of a ``sh``/``bash -c`` call, else ``None``."""
+    options = ""
+    for index, word in enumerate(words[1:], start=1):
+        if word.startswith("-") and not word.startswith("--"):
+            options += word[1:]
+            if "c" in word[1:]:
+                return (options, words[index + 1]) if index + 1 < len(words) else (options, "")
+        elif word.startswith("--") or word.startswith("+"):
+            continue
+        else:
+            return None
+    return None
+
+
+def _script_commands(script: str) -> list[tuple[str, list[str]]] | None:
+    """``[(separator before, words)]`` for each simple command of a script,
+    redirections, command substitutions and control keywords removed;
+    ``None`` when the script cannot be tokenized."""
+    import shlex
+
+    lexer = shlex.shlex(script.replace("\n", " \n "), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.whitespace = " \t\r"
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    commands: list[tuple[str, list[str]]] = []
+    separator, current, index = "", [], 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "$" and index + 1 < len(tokens) and tokens[index + 1] == "(":
+            depth, index = 0, index + 1
+            while index < len(tokens):  # a substitution is an argument, not a command
+                depth += {"(": 1, ")": -1}.get(tokens[index], 0)
+                if depth == 0:
+                    break
+                index += 1
+            current.append("$(...)")
+        elif token in _SEPARATORS:
+            # The separator before the next command. An opening group keeps
+            # the one before it; a line break after `&&`/`||`/`|` continues it.
+            if current:
+                commands.append((separator, current))
+                current, separator = [], token
+            elif token not in {"(", "{"} and not (token == "\n" and separator in {"&&", "||", "|"}):
+                separator = token
+        elif set(token) <= set("<>&|"):
+            index += 1  # a redirection and its target
+        elif token in _KEYWORDS and not current:
+            pass
+        else:
+            current.append(token)
+        index += 1
+    if current:
+        commands.append((separator, current))
+    return commands
+
+
+def _script_trivial(options: str, script: str, depth: int) -> bool:
+    """A script is trivial unless a nontrivial command's exit status can
+    reach the script's own exit status. Its last command decides; a trivial
+    last command masks everything before it unless joined by ``&&`` (or by
+    ``;``/newline under ``set -e``, or ``|`` under ``pipefail``)."""
+    commands = _script_commands(script)
+    if commands is None:
+        return True
+    errexit = "e" in options or any(words[0] == "set" and any(
+        (w.startswith("-") and "e" in w[1:] and not w.startswith("--")) or w == "errexit" for w in words[1:])
+        for _, words in commands)
+    pipefail = any(words[0] == "set" and "pipefail" in words for _, words in commands)
+    propagating = {"&&"} | ({";", "\n"} if errexit else set()) | ({"|"} if pipefail else set())
+    commands = [(sep, words) for sep, words in commands if words[0] != "set"] or commands
+    for separator, words in reversed(commands):
+        if words[0] == "exit":
+            # `exit`, `exit $?` and `|| exit N` (N nonzero) pass the previous
+            # command's failure through; `exit 0` or a later exit masks it.
+            if words[1:] in ([], ["$?"]) or (separator == "||" and words[1:] != ["0"]):
+                continue
+            return True
+        if not trivial_command(words, depth + 1):
+            return False
+        if separator not in propagating:
+            return True
+    return True
+
+
+def trivial_command(argv, _depth: int = 0) -> bool:
+    """True when ``argv`` cannot verify any named check.
+
+    The matching rule (documented in docs/acp/orchestration.md): after
+    leading ``NAME=value`` assignments and the launchers ``env``,
+    ``timeout``, ``nice``, ``nohup``, ``command``, ``exec`` and ``time`` are
+    removed, a command is trivial when nothing is left; when its program
+    basename is in :data:`TRIVIAL_PROGRAMS`; when it is a read-only ``git``
+    subcommand (:data:`TRIVIAL_GIT`, or ``git diff`` without ``--check``,
+    ``--exit-code`` or ``--quiet``); or when it is a ``sh``/``bash -c``
+    script that is trivial by :func:`_script_trivial` (an unparsable script
+    counts as trivial). Anything else -- a test runner, linter, type
+    checker, build or project script -- may verify a check. Whether it
+    verifies *the named* check is the independent reviewer's judgement.
     """
-    if not tool_call_ref:
-        # Uncited: engine_reported when this attempt ran a shell command
-        # that completed (see orchestration.gateway.verified_check).
-        from ..orchestration.gateway import ENGINE_SHELL_COMPLETED
-        ran = db.execute(ENGINE_SHELL_COMPLETED, (attempt_id,)).fetchone()
-        return "engine_reported" if ran else "claimed"
-    row = db.execute(
-        "SELECT status FROM tool_result_observations "
-        "WHERE attempt_id=? AND tool_call_ref=? ORDER BY id DESC LIMIT 1",
-        (attempt_id, tool_call_ref),
-    ).fetchone()
-    status = row["status"] if row is not None else None
-    if status == "completed":
+    if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(w, str) for w in argv):
+        return True
+    words = _strip_wrappers(list(argv))
+    if not words or not words[0]:
+        return True
+    program = words[0].rsplit("/", 1)[-1]
+    if program in TRIVIAL_PROGRAMS or program in {"exit", "return"}:
+        return True
+    if program == "git":
+        rest = words[1:]
+        while rest and rest[0].startswith("-"):
+            rest = rest[2:] if rest[0] in {"-C", "-c", "--git-dir", "--work-tree"} else rest[1:]
+        if not rest:
+            return True
+        if rest[0] == "diff":
+            return not (GIT_DIFF_CHECK_FLAGS & set(rest[1:]))
+        return rest[0] in TRIVIAL_GIT
+    if program in SHELLS:
+        parsed = _shell_script(words)
+        if parsed is None:
+            return False  # a script file: its content is the project's own check
+        return _depth >= 4 or _script_trivial(parsed[0], parsed[1], _depth)
+    return False
+
+
+def _gap(gap: str, **detail) -> dict:
+    return dict(strength="weak", gap=gap, **detail)
+
+
+def _engine_assessment(db, task_id: str, attempt_id: str, ref: str) -> dict:
+    rows = db.execute(
+        "SELECT attempt_id, kind, status FROM tool_result_observations WHERE task_id=? AND tool_call_ref=? ORDER BY id",
+        (task_id, ref),
+    ).fetchall()
+    own = [row for row in rows if row["attempt_id"] == attempt_id]
+    if not own:
+        return _gap("foreign_attempt" if rows else "tool_call_ref_unknown")
+    kind = next((row["kind"] for row in own if row["kind"]), None)
+    if kind != "execute":
+        return _gap("not_a_command", operation=kind)
+    if own[-1]["status"] not in {"completed", "failed"}:
+        return _gap("call_incomplete", operation="engine_execute")
+    return _gap("engine_command_unverifiable", operation="engine_execute")
+
+
+def _gateway_assessment(db, task_id: str, attempt_id: str, ref: str, outcome: str) -> dict:
+    import json
+
+    authorized = [
+        (row["id"], row["actor"], json.loads(row["payload_json"]))
+        for row in db.execute(
+            "SELECT id, actor, payload_json FROM runtime_events WHERE task_id=? AND type='TOOL_AUTHORIZED' "
+            "AND instr(payload_json, ?) > 0", (task_id, ref),
+        )
+    ]
+    authorized = [(order, actor, payload) for order, actor, payload in authorized if payload.get("tool_call_ref") == ref]
+    if not authorized:
+        return _gap("tool_call_ref_unknown")
+    if len(authorized) != 1:
+        return _gap("ambiguous_ref")
+    order, actor, payload = authorized[0]
+    operation = payload.get("operation")
+    channel = db.execute("SELECT attempt_id FROM trusted_channels WHERE channel_id=?", (actor,)).fetchone()
+    if channel is None or channel["attempt_id"] != attempt_id:
+        return _gap("foreign_attempt", operation=operation)
+    if operation not in COMMAND_OPERATIONS:
+        return _gap("not_a_command", operation=operation)
+    receipts = []
+    pending = False
+    for row in db.execute(
+        "SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND operation=? AND instr(result_json, ?) > 0",
+        (task_id, actor, operation, ref),
+    ):
+        saved = json.loads(row["result_json"])
+        receipt = saved.get("receipt") if isinstance(saved.get("receipt"), dict) else {}
+        if receipt.get("tool_call_ref") == ref:
+            receipts.append((saved, receipt))
+        elif saved.get("tool_call_ref") == ref and not saved.get("complete"):
+            pending = True
+    if len(receipts) > 1 or (receipts and pending):
+        return _gap("ambiguous_ref", operation=operation)
+    if not receipts:
+        return _gap("call_incomplete" if pending else "receipt_missing", operation=operation)
+    saved, receipt = receipts[0]
+    exit_code = receipt.get("exit_code")
+    detail = dict(operation=operation, exit_code=exit_code if type(exit_code) is int else None,
+                  order=order, identity=command_identity(operation, receipt))
+    if (saved.get("complete") is not True or receipt.get("complete") is not True
+            or receipt.get("failure") is not None or type(exit_code) is not int):
+        return _gap("call_incomplete", **detail)
+    if outcome == "passed" and exit_code != 0:
+        return _gap("nonzero_exit", **detail)
+    if outcome == "failed" and exit_code == 0:
+        return _gap("zero_exit", **detail)
+    output_id = receipt.get("large_output_id")
+    retained = db.execute(
+        "SELECT l.source_ref, l.truncated, l.exit_code, l.failure, l.byte_count, l.owner_scope, p.attempt_id "
+        "FROM large_outputs l LEFT JOIN delegation_provisioning p "
+        "ON p.task_id=l.task_id AND p.idempotency_key=l.owner_scope WHERE l.id=? AND l.task_id=?",
+        (output_id, task_id),
+    ).fetchone() if isinstance(output_id, str) and output_id else None
+    if retained is None or retained["source_ref"] != ref or retained["attempt_id"] != attempt_id:
+        return _gap("result_missing", **detail)
+    if (retained["truncated"] or retained["exit_code"] != exit_code or retained["failure"] is not None
+            or type(retained["byte_count"]) is not int):
+        return _gap("result_truncated", **detail)
+    argv = receipt.get("argv")
+    if not isinstance(argv, list) or not argv:
+        return _gap("command_unrecorded", **detail)
+    if outcome == "passed" and trivial_command(argv):
+        return _gap("trivial_command", **detail)
+    return dict(strength="verified", gap=None, **detail)
+
+
+def command_identity(operation, receipt) -> tuple | None:
+    """The identity of one command run: its operation, exact argv and
+    working directory. ``command_run`` always runs in the task's working
+    tree, so its scope is fixed for an attempt; an ``outside_command`` names
+    its own ``cwd`` in the receipt. ``None`` when the receipt does not record
+    the argv or (for ``outside_command``) the cwd: such a run cannot be
+    matched to any other."""
+    argv = receipt.get("argv") if isinstance(receipt, dict) else None
+    if not isinstance(argv, list) or not argv or not all(isinstance(word, str) for word in argv):
+        return None
+    if operation == "command_run":
+        return (operation, tuple(argv), None)
+    cwd = receipt.get("cwd")
+    if operation == "outside_command" and isinstance(cwd, str) and cwd:
+        return (operation, tuple(argv), cwd)
+    return None
+
+
+def assess_check(db, task_id: str, attempt_id: str, outcome: str, tool_call_ref) -> dict:
+    """Assess one check's cited evidence inside an open connection.
+
+    Returns ``dict(strength, gap, operation?, exit_code?, order?, identity?)``
+    (``order`` is the run's authorization event id and ``identity`` its
+    :func:`command_identity`, once a receipt is bound): ``strength`` is
+    ``verified``, ``weak`` (with the :data:`EVIDENCE_GAPS` code in ``gap``)
+    or ``none`` for a ``not_run``/``unverified`` disclosure. Only a ``gateway:``
+    receipt from this exact task and attempt can verify a check.
+    """
+    if outcome not in {"passed", "failed"}:
+        return dict(strength="none", gap=None)
+    if not isinstance(tool_call_ref, str) or not tool_call_ref:
+        return _gap("tool_call_ref_missing")
+    if tool_call_ref.startswith("gateway:"):
+        return _gateway_assessment(db, task_id, attempt_id, tool_call_ref, outcome)
+    return _engine_assessment(db, task_id, attempt_id, tool_call_ref)
+
+
+def assess_checks(db, task_id: str, attempt_id: str, checks) -> list[dict]:
+    """:func:`assess_check` over one result's checks, in order. A
+    ``tool_call_ref`` already cited by an earlier check of the same result
+    is a duplicated binding and verifies nothing again."""
+    cited: set[str] = set()
+    assessments = []
+    for check in checks or ():
+        ref = check.get("tool_call_ref") if isinstance(check, dict) else None
+        outcome = check.get("outcome") if isinstance(check, dict) else None
+        if outcome in {"passed", "failed"} and isinstance(ref, str) and ref in cited:
+            assessments.append(_gap("ref_already_cited"))
+        else:
+            assessments.append(assess_check(db, task_id, attempt_id, outcome, ref))
+        if isinstance(ref, str) and ref:
+            cited.add(ref)
+    return assessments
+
+
+def command_history(db, task_id: str, attempt_id: str) -> list[dict]:
+    """Every gateway command run of this attempt, in authorization order.
+
+    Each entry is ``dict(ref, order, identity, status)``: ``status`` is
+    ``passed`` (complete, exit 0, complete retained output), ``failed``
+    (complete, nonzero exit, complete retained output) or ``unknown``
+    (pending, interrupted, timed out, unretained or inconsistent);
+    ``identity`` is :func:`command_identity`, ``None`` when unrecorded.
+    A run the gateway rejected before executing it is not history.
+    Nothing here judges whether a command is trivial: that decides whether
+    a pass verifies a check, not whether the run happened.
+    """
+    import json
+
+    channels = [row["channel_id"] for row in db.execute(
+        "SELECT channel_id FROM trusted_channels WHERE task_id=? AND attempt_id=?", (task_id, attempt_id))]
+    if not channels:
+        return []
+    marks = ",".join("?" * len(channels))
+    # A run the gateway refused before any side effect never happened.
+    rejected = {json.loads(row["payload_json"]).get("tool_call_ref") for row in db.execute(
+        f"SELECT payload_json FROM runtime_events WHERE task_id=? AND type='TOOL_REJECTED' AND actor IN ({marks})",
+        (task_id, *channels))}
+    history = []
+    for row in db.execute(
+        f"SELECT id, payload_json FROM runtime_events WHERE task_id=? AND type='TOOL_AUTHORIZED' "
+        f"AND actor IN ({marks}) ORDER BY id", (task_id, *channels),
+    ):
+        payload = json.loads(row["payload_json"])
+        ref = payload.get("tool_call_ref")
+        if payload.get("operation") not in COMMAND_OPERATIONS or not isinstance(ref, str) or ref in rejected:
+            continue
+        passed = _gateway_assessment(db, task_id, attempt_id, ref, "passed")
+        if passed["strength"] == "verified" or passed["gap"] == "trivial_command":
+            status = "passed"
+        elif passed["gap"] == "nonzero_exit":
+            failed = _gateway_assessment(db, task_id, attempt_id, ref, "failed")
+            status = "failed" if failed["strength"] == "verified" else "unknown"
+        else:
+            status = "unknown"
+        history.append(dict(ref=ref, order=row["id"], identity=passed.get("identity"), status=status))
+    return history
+
+
+def current_outcomes(db, task_id: str, attempt_id: str, checks) -> list[dict]:
+    """Each check's current outcome, separated from the attempt's run history.
+
+    Returns one ``dict(outcome, gap, closed_by)`` per check, in order:
+
+    - A ``passed`` claim is ``passed`` only when :func:`assess_checks`
+      verifies it *and* no later run of the same command identity
+      (:func:`command_identity`) in this attempt has a different result: a
+      later failing run makes it ``failed`` (``later_run_failed``), a later
+      run without a known result makes it ``unverified``
+      (``later_run_unresolved``). Otherwise an unverifiable pass is
+      ``failed`` for a nonzero exit, else ``unverified``, with its gap.
+    - A ``failed`` claim stays ``failed`` unless its cited run is a
+      verified failure *and* a ``passed`` check of this same result cites a
+      verified, later run of exactly the same identity that is the latest
+      run of that identity in this attempt, with no later command run whose
+      identity is unrecorded. Only then is it ``passed`` with ``closed_by``
+      naming that closing ref. The claim itself is never rewritten: the
+      failed check stays in the result as history.
+    - ``not_run`` and ``unverified`` are kept as claimed.
+
+    Ambiguity never closes a failure; nothing here turns a current failure
+    into a warning.
+    """
+    checks = [check if isinstance(check, dict) else {} for check in checks or ()]
+    assessments = assess_checks(db, task_id, attempt_id, checks)
+    history = None
+    outcomes = []
+    for check, assessment in zip(checks, assessments):
+        outcome = check.get("outcome")
+        if outcome not in {"passed", "failed"}:
+            outcomes.append(dict(outcome=outcome, gap=None, closed_by=None))
+            continue
+        if assessment["strength"] == "verified" and assessment.get("identity") is None:
+            # A verified run whose receipt records no identity (an older
+            # outside_command receipt without cwd) matches no other run: a
+            # pass keeps its own verdict, a failure can never be closed.
+            outcomes.append(dict(outcome=outcome, gap=None, closed_by=None))
+            continue
+        if assessment["strength"] != "verified":
+            if outcome == "passed":
+                outcomes.append(dict(outcome="failed" if assessment["gap"] == "nonzero_exit" else "unverified",
+                                     gap=assessment["gap"], closed_by=None))
+            else:
+                outcomes.append(dict(outcome="failed", gap=assessment["gap"], closed_by=None))
+            continue
+        if history is None:
+            history = command_history(db, task_id, attempt_id)
+        same = [run for run in history if run["identity"] == assessment["identity"]]
+        latest = same[-1] if same else None
+        if outcome == "passed":
+            if latest is None or latest["order"] <= assessment["order"] or latest["status"] == "passed":
+                outcomes.append(dict(outcome="passed", gap=None, closed_by=None))
+            elif latest["status"] == "failed":
+                outcomes.append(dict(outcome="failed", gap="later_run_failed", closed_by=None))
+            else:
+                outcomes.append(dict(outcome="unverified", gap="later_run_unresolved", closed_by=None))
+            continue
+        closing = None
+        if latest is not None and latest["status"] == "passed" and latest["order"] > assessment["order"]:
+            unrecorded_later = any(run["identity"] is None and run["order"] > assessment["order"] for run in history)
+            cited = [index for index, other in enumerate(checks)
+                     if other.get("outcome") == "passed" and other.get("tool_call_ref") == latest["ref"]
+                     and assessments[index]["strength"] == "verified"]
+            if not unrecorded_later and len(cited) == 1:
+                closing = latest["ref"]
+        outcomes.append(dict(outcome="passed", gap=None, closed_by=closing) if closing
+                        else dict(outcome="failed", gap=None, closed_by=None))
+    return outcomes
+
+
+def accept_checks(db, task_id: str, attempt_id: str, checks) -> list[dict]:
+    """The checks the runtime accepts from one ``result_submit``
+    (:func:`current_outcomes` decides).
+
+    A verified, still-current ``passed`` stays passed. Any other ``passed``
+    claim is recorded ``failed`` when its cited command -- or a later run of
+    the same command -- exited nonzero (an observed failure is never
+    softened), else ``unverified`` with the runtime's blocker; both keep
+    ``claimed_outcome='passed'`` and the structured ``evidence_gap`` code.
+    A ``failed`` check stays ``failed`` in the record, as history; when an
+    exact later rerun closes it, it carries ``closed_by`` with the closing
+    ``tool_call_ref``. ``not_run`` and ``unverified`` are kept as claimed.
+    """
+    accepted = []
+    for check, current in zip(checks, current_outcomes(db, task_id, attempt_id, checks)):
+        if check["outcome"] == "failed":
+            accepted.append(dict(check, closed_by=current["closed_by"]) if current["closed_by"] else dict(check))
+            continue
+        if check["outcome"] != "passed" or current["outcome"] == "passed":
+            accepted.append(dict(check))
+            continue
+        entry = {key: check[key] for key in ("name", "tool_call_ref") if check.get(key)}
+        if current["outcome"] == "failed":
+            entry["outcome"] = "failed"
+        else:
+            entry["outcome"] = "unverified"
+            entry["blocker"] = "Runtime kept this passed claim unverified: " + EVIDENCE_GAPS[current["gap"]] + "."
+        entry.update(claimed_outcome="passed", evidence_gap=current["gap"])
+        accepted.append(entry)
+    return accepted
+
+
+def open_failure(db, task_id: str, attempt_id: str, checks) -> bool:
+    """Whether a recorded result still carries a current failure: a
+    ``failed`` check that no exact later rerun closes (a stored
+    ``closed_by`` counts only when it equals the closing ref derived now),
+    or a ``passed`` check that is not currently verified. ``not_run`` and
+    ``unverified`` are disclosures, never failures."""
+    checks = [check if isinstance(check, dict) else {} for check in checks or ()]
+    for check, current in zip(checks, current_outcomes(db, task_id, attempt_id, checks)):
+        if check.get("outcome") == "failed" and not (
+                current["closed_by"] and check.get("closed_by") == current["closed_by"]):
+            return True
+        if check.get("outcome") == "passed" and current["outcome"] != "passed":
+            return True
+    return False
+
+
+def annotate_checks(db, task_id: str, attempt_id: str | None, checks) -> list[dict]:
+    """Read-time copies of stored checks with ``evidence_strength`` (and
+    ``evidence_gap`` when weak), derived now under the current rule. Stored
+    rows and reports are never rewritten: an older result accepted under a
+    weaker rule shows ``evidence_strength='weak'`` beside its outcome."""
+    checks = [check for check in checks or () if isinstance(check, dict)]
+    if attempt_id is None:
+        assessments = [dict(strength="weak" if c.get("outcome") in {"passed", "failed"} else "none",
+                            gap="tool_call_ref_unknown" if c.get("outcome") in {"passed", "failed"} else None)
+                       for c in checks]
+    else:
+        assessments = assess_checks(db, task_id, attempt_id, checks)
+    annotated = []
+    for check, assessment in zip(checks, assessments):
+        entry = dict(check, evidence_strength=assessment["strength"])
+        gap = check.get("evidence_gap") or assessment["gap"]
+        if gap:
+            entry["evidence_gap"] = gap
+        annotated.append(entry)
+    return annotated
+
+
+def resolve_check_tx(db, task_id: str, attempt_id: str, tool_call_ref: str | None, outcome: str = "passed") -> str:
+    """The audit label stored on a ``worker_result`` event's check:
+    ``observed`` when :func:`assess_check` verifies it, ``contradicted`` when
+    the cited command's exit code disagrees with the outcome, else
+    ``claimed``. Runs inside an already-open transaction."""
+    assessment = assess_check(db, task_id, attempt_id, outcome, tool_call_ref)
+    if assessment["strength"] == "verified":
         return "observed"
-    if status == "failed":
+    if assessment["gap"] in {"nonzero_exit", "zero_exit"}:
         return "contradicted"
     return "claimed"
 
 
-def resolve_check(store, attempt_id: str, tool_call_ref: str | None) -> str:
-    """Return ``"claimed"``, ``"observed"``, or ``"contradicted"`` for one
-    ``publish_result`` check's ``tool_call_ref`` -- strictly scoped to
-    ``attempt_id`` (a ``tool_call_ref`` that only resolves under a
-    different attempt is indistinguishable from "no match": never trusted
-    cross-attempt)."""
+def resolve_check(store, task_id: str, attempt_id: str, tool_call_ref: str | None, outcome: str = "passed") -> str:
+    """:func:`resolve_check_tx` on its own connection."""
     with store.connection() as db:
-        return resolve_check_tx(db, attempt_id, tool_call_ref)
+        return resolve_check_tx(db, task_id, attempt_id, tool_call_ref, outcome)
 
 
 def record_permission_response(

@@ -7,9 +7,8 @@ import { z } from "zod";
 import { WorkerPanel } from "./client/worker-panel.js";
 import { PipelinePanel } from "./client/pipeline-panel.js";
 import { selectWorker } from "./client/worker-selection.js";
-import { WorkerPopover } from "./client/worker-popover.js";
 import { isWorkerTimelineRunning } from "./client/worker-timeline-status.js";
-import { resolveWorkerCardStatus, workerCardMetadata, workerTerminalState, type WorkerStatusTone } from "./client/worker-display.ts";
+import { resolveDurableWorkerCardStatus, workerCardMetadata, workerTerminalState, type WorkerStatusTone } from "./client/worker-display.ts";
 import { coalesced } from "./client/coalesce.ts";
 import { UsageMeter, useWorkerUsage } from "./client/usage-meter.tsx";
 import { workerResult } from "./shared/pipeline.js";
@@ -38,7 +37,7 @@ const workerTimelineSchema = z.object({
 });
 
 const CORTEX_PROVIDER = "cortex";
-// How often the Workers/Pipeline pill catalogue is re-read (see its poll).
+// How often the Pipeline pill catalogue is re-read (see its poll).
 const CATALOGUE_REFRESH_MS = 5000;
 
 type WorkerTimelineData = z.output<typeof workerTimelineSchema>;
@@ -56,15 +55,19 @@ function statusToneColor(tone: WorkerStatusTone, colors: PluginTimelineItemProps
 function WorkerTimelineRow({ theme, layout, agentId, item, workspaceId, onOpen }: PluginTimelineItemProps<z.output<typeof workerTimelineSchema>> & { workspaceId: string | null; onOpen: () => void }) {
   const opacity = useRef(new Animated.Value(1)).current;
   const pulseElement = useRef<HTMLElement | null>(null);
-  const isWorking = isWorkerTimelineRunning(item.data.status);
-  const usage = useWorkerUsage(workspaceId, agentId, item.data.assignmentRef, isWorking);
+  const hostWorking = isWorkerTimelineRunning(item.data.status);
+  // Polled while the host still shows the card running: a plugin reload
+  // closes the provider connection and the host re-sends nothing until the
+  // next prompt, so the durable attempt status is what settles the card.
+  const usage = useWorkerUsage(workspaceId, agentId, item.data.assignmentRef, hostWorking);
+  const resolvedStatus = resolveDurableWorkerCardStatus(item.data.title, item.data.status, usage?.status);
+  const isWorking = isWorkerTimelineRunning(resolvedStatus);
   // A running card never shows a result yet, so the fallback read only ever
   // triggers once the card is terminal and has no embedded result -- an
   // older item, or a host build that did not persist the field.
   const embedded = item.data.result ?? null;
   const fallback = useFallbackWorkerResult(workspaceId, agentId, item.data.assignmentRef, !isWorking && !embedded);
   const result = embedded ?? fallback;
-  const resolvedStatus = resolveWorkerCardStatus(item.data.title, item.data.status);
   const terminal = workerTerminalState(resolvedStatus, result?.checks);
   const metadata = workerCardMetadata(item.data.title, resolvedStatus);
   const { issueCount } = terminal;
@@ -243,32 +246,16 @@ export default function contribute(client: PluginClientContext) {
         registrations.delete(agentId);
       }
     }
-    // Keep the affordances present for every open Cortex agent. Worker history
-    // is session-scoped and the popover owns the empty state, so a missing
-    // worker must not make the composer pill disappear or change the layout.
+    // Keep the affordance present for every open Cortex agent. Pipeline
+    // history is session-scoped and the popover owns the empty state, so a
+    // missing worker must not make the composer pill disappear or change the
+    // layout.
     for (const agentId of candidates.keys()) {
       const candidate = candidates.get(agentId);
       if (!candidate || registrations.has(agentId)) continue;
       // Composer pills are agent-scoped in Paseo 0.8. Header buttons are only
-      // workspace-scoped, so using one here would leak one session's workers
+      // workspace-scoped, so using one here would leak one session's pipeline
       // into every chat sharing the workspace.
-      const workers = client.addComposerPill({
-        id: `workers-${agentId}`,
-        workspaceId: candidate.workspace.id,
-        agentId,
-        button: {
-          title: "Workers",
-          icon: "Users",
-          label: "Workers",
-          behavior: {
-            kind: "popover",
-            Content: (props) => <WorkerPopover {...props} workspaceId={candidate.workspace.id} agentId={agentId} onOpenWorker={(assignmentRef) => {
-              selectWorker(agentId, assignmentRef);
-              client.openPanel("workers", { workspaceId: candidate.workspace.id, agentId, location: "workspace" });
-            }} />,
-          },
-        },
-      });
       const pipeline = client.addComposerPill({
         id: `pipeline-${agentId}`,
         workspaceId: candidate.workspace.id,
@@ -278,7 +265,7 @@ export default function contribute(client: PluginClientContext) {
           icon: "Workflow",
           label: "Pipeline",
           // Phones have no explorer sidebar to open it in; there it opens in
-          // place, like Workers. The desktop keeps the sidebar tab.
+          // place. The desktop keeps the sidebar tab.
           behavior: Platform.OS === "web" ? {
             kind: "action",
             onPress: () => client.openPanel("pipeline", { workspaceId: candidate.workspace.id, agentId, location: "explorer" }),
@@ -293,14 +280,14 @@ export default function contribute(client: PluginClientContext) {
           },
         },
       });
-      registrations.set(agentId, { remove() { workers.remove(); pipeline.remove(); } });
+      registrations.set(agentId, { remove() { pipeline.remove(); } });
     }
   };
   // Coalesced, never dropped: creating an agent fires several
   // subscription events inside the window one refresh (a workspace list
   // plus the agent list) takes, and ignoring those lost the only
-  // notification carrying the new agent -- its Workers and Pipeline
-  // composer pills then never appeared for that session at all.
+  // notification carrying the new agent -- its Pipeline composer pill
+  // then never appeared for that session at all.
   const refreshCatalogue = coalesced(async () => {
     if (!active) return;
     let next: Map<string, Candidate>;
@@ -329,7 +316,7 @@ export default function contribute(client: PluginClientContext) {
       }
     } catch {
       // Keep the last known catalogue; a transient host read must not remove
-      // a valid Workers pill from the current session.
+      // a valid Pipeline pill from the current session.
       return;
     }
     candidates.clear();

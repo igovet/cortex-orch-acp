@@ -196,6 +196,72 @@ def _adapter_qualification_checks():
     return checks
 
 
+def _checkout_package_version():
+    """This checkout's own stamped version (``scripts/cortex_package.py
+    stamp`` writes it) -- may differ from what a running Paseo agent
+    process actually loaded; see :func:`_package_version_checks`."""
+    try:
+        return json.loads((SCRIPTS.parent / "package-identity.json").read_text(encoding="utf-8"))["version"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _installed_paseo_runtime_versions(environ):
+    """Every version directory ``scripts/cortex_acp_setup.py
+    bootstrap-paseo-git-install`` has ever staged under this host's
+    ``$XDG_STATE_HOME/cortex/paseo-runtime/`` -- the actual code a live
+    Paseo agent process runs, independent of whatever this checkout
+    currently contains (e.g. after a checkout is advanced past the last
+    install). ``[]`` (never an exception) when the directory does not
+    exist yet or cannot be listed."""
+    from cortex_runtime.connections import registry
+
+    try:
+        root = registry.state_root(environ) / "paseo-runtime"
+    except PortableError:
+        return []
+    if not root.is_dir():
+        return []
+    versions = []
+    for entry in root.iterdir():
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                versions.append((entry.stat().st_mtime, entry.name))
+        except OSError:
+            continue
+    versions.sort()
+    return [name for _mtime, name in versions]
+
+
+def _package_version_checks(environ):
+    """P1 audit follow-up: report the installed runtime package version
+    separately from this checkout's own version -- a live Paseo agent
+    process runs whatever was last staged under ``paseo-runtime/``, which
+    can lag behind (or, mid-development, lead) the checkout this script is
+    invoked from (2026-09-25 audit: production ran commit 9a70dee9 while
+    the checkout under test already had newer fixes)."""
+    checkout_version = _checkout_package_version()
+    if checkout_version is None:
+        return [_check("package_version", "fail", "This checkout's package-identity.json is missing or invalid.",
+                        "Run scripts/cortex_package.py stamp from a clean checkout.")]
+    installed = _installed_paseo_runtime_versions(environ)
+    if not installed:
+        return [_check("package_version", "warn",
+                        f"This checkout is stamped {checkout_version}; no Paseo runtime is installed yet for this host.",
+                        "Run scripts/cortex_acp_setup.py bootstrap-paseo-git-install to install it.")]
+    newest_installed = installed[-1]
+    if newest_installed == checkout_version:
+        return [_check("package_version", "ok",
+                        f"The installed Paseo runtime ({newest_installed}) matches this checkout's stamped version.")]
+    return [_check(
+        "package_version", "warn",
+        f"The installed Paseo runtime ({newest_installed}) differs from this checkout's stamped version "
+        f"({checkout_version}); a live Paseo agent process runs the installed version, not this checkout.",
+        "Run scripts/cortex_acp_setup.py bootstrap-paseo-git-install after stamping this checkout "
+        "(scripts/cortex_package.py stamp) to install the current code.",
+    )]
+
+
 def _policy_checks(project, environ):
     if project is None:
         return [_check("policy:project_ceiling", "skip", "Not checked -- pass --project PATH to check a project's ceiling.", None)]
@@ -215,6 +281,7 @@ def _policy_checks(project, environ):
 def run_diagnostics(*, environ=None, zed_settings=None, project=None):
     checks = []
     checks += _pinned_checks()
+    checks += _package_version_checks(environ)
     checks += _storage_checks(environ)
     checks += _connection_and_route_checks(environ)
     checks += _discovery_checks(environ)

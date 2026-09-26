@@ -1,7 +1,7 @@
-import { spawnSync } from "node:child_process";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { readPipeline, type Pipeline } from "../shared/pipeline.js";
 import { getWorkerHistory, resolveAgentTask, STORE_PYTHON_HELPERS } from "./worker-history.js";
+import { runPython } from "./python-runner.js";
 
 // Read-only projection of one task's durable lifecycle: its orchestration
 // state, the user's messages, the coordinator's requirements, and per
@@ -62,7 +62,10 @@ if task is not None:
                 if row['ref'] not in delegations: continue
                 payload = load(row['payload_json'])
                 checks = [{'name': clip(c.get('name'), 300) or 'check', 'outcome': str(c.get('outcome') or 'unverified'),
-                    **({'blocker': clip(c.get('blocker'), 600)} if isinstance(c.get('blocker'), str) and c.get('blocker').strip() else {})}
+                    **({'blocker': clip(c.get('blocker'), 600)} if isinstance(c.get('blocker'), str) and c.get('blocker').strip() else {}),
+                    **({'closedBy': clip(c.get('closed_by'), 128)} if isinstance(c.get('closed_by'), str) and c.get('closed_by').strip() else {}),
+                    **({'claimedOutcome': c.get('claimed_outcome')} if isinstance(c.get('claimed_outcome'), str) and c.get('claimed_outcome').strip() else {}),
+                    **({'evidenceGap': c.get('evidence_gap')} if isinstance(c.get('evidence_gap'), str) and c.get('evidence_gap').strip() else {})}
                     for c in payload.get('checks') or [] if isinstance(c, dict)]
                 delegations[row['ref']]['result'] = {'summary': clip(payload.get('summary'), 600), 'checks': checks[:30]}
         for row in db.execute("select assignment_ref, payload_json from task_events where task_id=? and event_type='coordinator_decision' and assignment_ref is not null order by id", (task_id,)):
@@ -89,7 +92,10 @@ if task is not None:
                     waiting = 'Waiting for ' + ', '.join(unmet) if unmet else 'Waiting to start'
                 result = load(r['result_json'])
                 checks = [{'name': clip(c.get('name'), 300) or 'check', 'outcome': str(c.get('outcome') or 'unverified'),
-                    **({'blocker': clip(c.get('blocker'), 600)} if isinstance(c.get('blocker'), str) and c.get('blocker').strip() else {})}
+                    **({'blocker': clip(c.get('blocker'), 600)} if isinstance(c.get('blocker'), str) and c.get('blocker').strip() else {}),
+                    **({'closedBy': clip(c.get('closed_by'), 128)} if isinstance(c.get('closed_by'), str) and c.get('closed_by').strip() else {}),
+                    **({'claimedOutcome': c.get('claimed_outcome')} if isinstance(c.get('claimed_outcome'), str) and c.get('claimed_outcome').strip() else {}),
+                    **({'evidenceGap': c.get('evidence_gap')} if isinstance(c.get('evidence_gap'), str) and c.get('evidence_gap').strip() else {})}
                     for c in result.get('checks') or [] if isinstance(c, dict)]
                 node_result = {'summary': clip(result.get('summary'), 600), 'checks': checks[:30]} if r['result_json'] is not None else None
                 nodes.append({'id': r['node_id'], 'role': r['role'] or '', 'objective': clip(r['objective'], 2000) or '',
@@ -108,9 +114,8 @@ function unavailable(message: string): Pipeline {
 export async function getPipeline(input: { workspaceId: string; agentId: string }, context: PluginHandlerContext): Promise<Pipeline> {
   const resolved = await resolveAgentTask(input, context);
   if ("message" in resolved) return unavailable(resolved.message);
-  const result = spawnSync("python3", ["-B", "-c", PYTHON, resolved.projectRoot, resolved.taskId], {
-    encoding: "utf8",
-    timeout: 5000,
+  const result = await runPython(["-B", "-c", PYTHON, resolved.projectRoot, resolved.taskId], {
+    timeoutMs: 5000,
     maxBuffer: 16 * 1024 * 1024,
   });
   if (result.status !== 0 || !result.stdout) return unavailable("The pipeline could not be read.");

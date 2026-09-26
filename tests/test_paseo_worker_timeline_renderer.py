@@ -14,7 +14,10 @@ def test_paseo_worker_timeline_row_uses_supported_agent_context_and_panel_naviga
     # host has replayed the runtime's embedded projection (`item.data.result`,
     # `resolveWorkerCardStatus`'s title channel) -- `readWorkerResults` is
     # only the batched fallback for an older item. See client/use-worker-result.ts.
-    assert 'resolveWorkerCardStatus(item.data.title, item.data.status)' in source
+    # A settled durable attempt status (polled only while the host still
+    # shows the card running) settles a card the host left stale after a
+    # plugin reload.
+    assert 'resolveDurableWorkerCardStatus(item.data.title, item.data.status, usage?.status)' in source
     assert 'workerCardMetadata(item.data.title, resolvedStatus)' in source
     assert 'const embedded = item.data.result ?? null;' in source
     assert 'useFallbackWorkerResult(workspaceId, agentId, item.data.assignmentRef, !isWorking && !embedded)' in source
@@ -80,27 +83,27 @@ def test_paseo_worker_selection_is_plugin_owned_shared_state():
     assert 'export function selectedWorker(agentId: string): string | null' in source
 
 
-def test_paseo_workers_pill_uses_supported_popover_and_opens_selected_assignment():
+def test_paseo_workers_button_and_popover_are_removed_while_pipeline_remains():
+    """The Workers composer pill/popover duplicated the Pipeline panel and was
+    removed by user steer; the Pipeline panel/pill and worker detail panel
+    (opened from timeline cards and Pipeline entries) must remain intact."""
     source = SOURCE.read_text(encoding="utf-8")
-    popover = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-popover.tsx").read_text(encoding="utf-8")
-    assert 'kind: "popover"' in source
-    assert 'Content: (props) => <WorkerPopover' in source
-    assert 'client.openPanel("workers", { workspaceId: candidate.workspace.id, agentId, location: "workspace" })' in source
-    assert 'const ref = assignment.assignmentRef ?? assignment.id' in popover
-    assert 'close(); onOpenWorker(ref)' in popover
-    assert 'workerPopoverStatus(assignment)' in popover
-    assert 'workerAssignmentLine(assignment, workerPopoverStatus(assignment))' in popover
-    assert 'history?.available && assignments.length === 0' in popover
-    assert 'No workers in this session.' in popover
-
-
-def test_paseo_workers_popover_refreshes_terminal_status_and_is_mobile_bounded():
-    popover = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-popover.tsx").read_text(encoding="utf-8")
+    assert not (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-popover.tsx").exists()
+    assert not (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-history-poll.ts").exists()
+    assert "WorkerPopover" not in source
+    assert 'id: `workers-${agentId}`' not in source
+    # The worker detail panel/tab and its command-center entry stay: worker
+    # cards in the chat timeline and Pipeline's onOpenWorker still open it.
+    assert 'id: "workers"' in source
+    assert 'title: "Workers"' in source
+    assert 'Component: WorkerPanel' in source
+    # Pipeline stays fully intact: panel, composer pill and command item.
+    assert 'id: "pipeline"' in source
+    assert 'id: `pipeline-${agentId}`' in source
+    assert 'title: "Pipeline"' in source
     status = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-popover-status.ts").read_text(encoding="utf-8")
-    assert 'setInterval(() => { void refresh(); }, 750)' in popover
-    assert 'height: layout.compact ? compactHeight : undefined' not in popover
-    assert 'ScrollView' not in popover
-    assert 'eventTypes.has("assignment_cancelled")' in status
+    assert "orderPopoverWorkers" not in status
+    assert "export function workerPopoverStatus" in status
 
 
 def test_worker_history_terminal_status_is_independent_of_bounded_event_page():
@@ -111,36 +114,7 @@ def test_worker_history_terminal_status_is_independent_of_bounded_event_page():
     assert "terminal_type == 'assignment_cancelled'" in server
 
 
-def test_paseo_worker_popover_is_a_flat_compact_worker_list():
-    popover = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-popover.tsx").read_text(encoding="utf-8")
-    assert 'borderWidth: 1' not in popover
-    assert 'compactHeight' not in popover
-    assert 'workerAssignmentLine(assignment, workerPopoverStatus(assignment))' in popover
-    assert 'borderBottomWidth: index === assignments.length - 1 ? 0 : 1' in popover
-    assert 'Loading workers…' in popover
-    assert '>Workers</Text>' not in popover
-
-
-def test_paseo_worker_popover_has_no_unrequested_mutating_action():
-    popover = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-popover.tsx").read_text(encoding="utf-8")
-    assert 'Hide finished workers' not in popover
-    assert 'Show finished workers' not in popover
-
-
-def test_paseo_worker_popover_relies_on_host_frame_and_native_row_typography():
-    popover = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-popover.tsx").read_text(encoding="utf-8")
-    assert 'Icon name=' not in popover
-    assert 'fontSize: 16, fontWeight: "400"' in popover
-    assert 'fontSize: 13' in popover
-    assert 'borderWidth: 1' not in popover
-    assert 'borderRadius: 10' not in popover
-    assert 'width: layout.compact ? undefined : 340' in popover
-    assert 'alignSelf: layout.compact ? "stretch" : "auto"' in popover
-    assert 'marginHorizontal: -12' in popover
-    assert 'flexDirection: "column", alignItems: "stretch", gap: 2' in popover
-
-
-def test_paseo_workers_control_remains_agent_scoped_across_shared_workspaces():
+def test_paseo_pipeline_pill_remains_agent_scoped_across_shared_workspaces():
     source = SOURCE.read_text(encoding="utf-8")
     assert 'client.addComposerPill({' in source
     assert 'client.addHeaderButton({' not in source
@@ -148,7 +122,7 @@ def test_paseo_workers_control_remains_agent_scoped_across_shared_workspaces():
     assert 'workspace-scoped' in source
     # The registration key and contribution both retain the agent identity;
     # a second agent in the same workspace therefore gets an isolated pill.
-    assert 'id: `workers-${agentId}`' in source
+    assert 'id: `pipeline-${agentId}`' in source
     assert 'agentId,' in source
     assert 'kind: "popover"' in source
 
@@ -170,7 +144,6 @@ def test_worker_cards_use_resolved_role_instead_of_internal_delegate_ref():
     history = (Path(__file__).parents[1] / "integrations" / "paseo" / "shared" / "worker-history.ts").read_text(encoding="utf-8")
     display = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-display.ts").read_text(encoding="utf-8")
     panel = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-panel.tsx").read_text(encoding="utf-8")
-    popover = (Path(__file__).parents[1] / "integrations" / "paseo" / "client" / "worker-popover.tsx").read_text(encoding="utf-8")
     server = (Path(__file__).parents[1] / "integrations" / "paseo" / "server" / "worker-history.ts").read_text(encoding="utf-8")
     assert "role: z.string().min(1).optional()" in history
     assert "export function workerDisplayName" in display
@@ -178,7 +151,7 @@ def test_worker_cards_use_resolved_role_instead_of_internal_delegate_ref():
     assert "candidate_role" in server
     assert "assignment_result['role'] = role" in server
     assert "workerDisplayName(assignment)" in panel
-    assert "workerAssignmentLine(assignment" in popover
+    assert "workerAssignmentLine(assignment" in panel
 
 
 def test_worker_panel_seeds_selection_before_first_history_request():

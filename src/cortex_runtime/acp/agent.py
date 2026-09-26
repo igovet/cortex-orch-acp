@@ -25,6 +25,7 @@ import json
 import sqlite3
 import os
 import re
+import signal
 import sys
 import threading
 from typing import Mapping
@@ -133,7 +134,10 @@ def observe(environ, operation, outcome):
 _MAX_CRASH_DIAGNOSTIC_FILES = 200
 
 
-def _write_crash_diagnostic(environ, exc: BaseException) -> None:
+def _write_crash_diagnostic(
+    environ, exc: BaseException, *, stage: str | None = None,
+    task_id: str | None = None, session_id: str | None = None, attempt_id: str | None = None,
+) -> None:
     """Durable, server-side-only record of a prompt-turn crash.
 
     Live (2026-09-19, see the except block below) a prompt died leaving
@@ -151,7 +155,23 @@ def _write_crash_diagnostic(environ, exc: BaseException) -> None:
     own logging drops it. Best-effort and bounded like every sibling log
     under that root: a write that cannot land, or a crash-diagnostics
     directory already at capacity, is silently skipped -- this must never
-    itself turn one failure into a second one."""
+    itself turn one failure into a second one.
+
+    2026-09-25 audit follow-up: some retained dev tracebacks showed a
+    start with a bound task id but no ``runtime_tasks`` row -- a
+    coordinator engine launch failing (e.g. the engine's own child process
+    could not initialize its state sqlite db, see gotchas.md) before
+    ``orchestration.state.TaskMachine.create`` ever runs. ``stage``/
+    ``task_id``/``session_id``/``attempt_id`` (every caller passes only
+    what it actually has -- never guessed) and the runtime package version
+    of *this exact running process* (``_agent_version()``, not the
+    checkout it may have been built from -- see
+    ``scripts/cortex_diagnose.py``'s separate installed-vs-checkout check)
+    are recorded as a small plain-text header so an operator does not have
+    to correlate a bare traceback against separately retained session
+    state by hand. None of this is secret: identities are opaque ids this
+    codebase itself mints, and the stage name is a fixed short label, never
+    free text."""
     try:
         import traceback as _traceback
 
@@ -167,7 +187,15 @@ def _write_crash_diagnostic(environ, exc: BaseException) -> None:
         if existing >= _MAX_CRASH_DIAGNOSTIC_FILES:
             return
         path = directory / f"{time.time_ns()}-{os.getpid()}.log"
-        text = "".join(_traceback.format_exception(type(exc), exc, exc.__traceback__))
+        header_fields = [
+            ("runtime_package_version", _agent_version()),
+            ("stage", stage or "prompt"),
+            ("task_id", task_id),
+            ("session_id", session_id),
+            ("attempt_id", attempt_id),
+        ]
+        header = "".join(f"{name}: {value}\n" for name, value in header_fields if value is not None)
+        text = header + "".join(_traceback.format_exception(type(exc), exc, exc.__traceback__))
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
             os.write(fd, text[:65536].encode("utf-8", errors="replace"))
@@ -644,7 +672,7 @@ class Agent:
 
     def handle_message(self, message, error):
         if message is EOF:
-            self._handle_eof()
+            self._handle_eof("stdin_eof")
             return
         if error is not None:
             self._reply_error(error.request_id, error.code, error.message)
@@ -1654,9 +1682,27 @@ class Agent:
                     traceback = traceback.tb_next
                 detail = type(exc).__name__ + (f" at {where}" if where else "")
                 print(f"cortex: prompt failed: {detail}", file=sys.stderr, flush=True)
-                _write_crash_diagnostic(self.environ, exc)
-                self._reply_error(request_id, -32603, "The runtime failed while processing this prompt.",
-                                  data={"failure": detail})
+                # P1 diagnosable launch failure: acp.orchestrating_runtime
+                # ._open_coordinator_session tags (never replaces) an
+                # engine-launch exception with these attributes -- present
+                # only for that one failure shape, absent (None) for every
+                # other prompt-turn crash, which keeps the pre-existing
+                # generic message/behavior unchanged for those.
+                launch_stage = getattr(exc, "cortex_launch_stage", None)
+                _write_crash_diagnostic(
+                    self.environ, exc, stage=launch_stage, task_id=task_id, session_id=session_id,
+                    attempt_id=getattr(exc, "cortex_launch_attempt_id", None),
+                )
+                if launch_stage == "engine_launch":
+                    # A third-party host (Paseo 0.9.2) drops this response's
+                    # own ``data`` field before it reaches any log an
+                    # operator can read (see gotchas.md) -- only ``message``
+                    # itself is ever shown, so the stage name goes there,
+                    # not only into ``data``/the durable diagnostic file.
+                    message = "The engine failed to start for this task (stage: engine_launch)."
+                else:
+                    message = "The runtime failed while processing this prompt."
+                self._reply_error(request_id, -32603, message, data={"failure": detail})
                 observe(self.environ, "session/prompt", "runtime_error")
                 return
         if cancel_event.is_set() and reason != StopReason.CANCELLED:
@@ -2124,8 +2170,15 @@ class Agent:
                 request_id, RpcError(-32001, "orchestration_unavailable", data={"retryable": False, "reason": str(exc) or "orchestration_unavailable"})))
             observe(self.environ, "session/prompt", "cortex_new_task_unavailable")
             return
-        except Exception:
-            self._reply_error(request_id, -32603, "Failed to start the new task.")
+        except Exception as exc:
+            launch_stage = getattr(exc, "cortex_launch_stage", None)
+            _write_crash_diagnostic(
+                self.environ, exc, stage=launch_stage, task_id=new_task_id, session_id=session_id,
+                attempt_id=getattr(exc, "cortex_launch_attempt_id", None),
+            )
+            message = ("The engine failed to start for this task (stage: engine_launch)."
+                       if launch_stage == "engine_launch" else "Failed to start the new task.")
+            self._reply_error(request_id, -32603, message)
             observe(self.environ, "session/prompt", "cortex_new_task_failed")
             return
         language = acp_messages.select_language(None, [])
@@ -2643,6 +2696,33 @@ class Agent:
             )
             if not queued:
                 raise RpcError(-32603, "Cannot enqueue complete session history.")
+        # A plugin update closed this chat's connection and the host marked
+        # it with a connection error. Show the saved task state beside it
+        # (read-only; recomputed on every load until the next user message).
+        from ..recovery.worker_reconciliation import host_disconnect_notice
+
+        notice = host_disconnect_notice(store, durable["task_id"], session_id)
+        if notice is not None:
+            language = acp_messages.select_language(
+                acp_steering.get_language_override(store, durable["task_id"]),
+                acp_steering.recent_user_direct_texts(store, durable["task_id"]),
+            )
+            text = acp_messages.render("connection_closed_notice", language, state=notice["state"])
+            if notice["state"] == "COMPLETED":
+                text += acp_messages.render("connection_closed_unchanged", language)
+            if notice["interrupted_workers"]:
+                text += acp_messages.render("connection_closed_interrupted", language, count=notice["interrupted_workers"])
+            if notice["unknown_outcome_actions"]:
+                text += acp_messages.render("connection_closed_unknown_actions", language,
+                                            count=notice["unknown_outcome_actions"])
+            message = protocol.agent_message_chunk(session_id, text, f"cortex-connection:{notice['event_id']}")
+            message["params"]["update"]["_meta"] = {"cortexConnectionNotice": {
+                "taskId": notice["task_id"], "taskState": notice["state"], "disconnectEventId": notice["event_id"],
+                "interruptedWorkers": notice["interrupted_workers"],
+                "unknownOutcomeActions": notice["unknown_outcome_actions"],
+            }}
+            if not self.transport.send_notification(message):
+                raise RpcError(-32603, "Cannot enqueue complete session history.")
         if session_id not in self.sessions:
             # Best-effort: lets a subsequent session/prompt on this
             # connection continue the same durable task (via
@@ -2720,10 +2800,20 @@ class Agent:
 
     # -- shutdown ----------------------------------------------------
 
-    def _handle_eof(self):
-        """Cancel every in-flight prompt; the caller (see ``main``) joins workers."""
+    def _handle_eof(self, trigger=None):
+        """Cancel every in-flight prompt; the caller (see ``main``) joins workers.
+
+        Runs once per connection: a termination signal and the stdin EOF
+        that can follow it describe the same disconnect. ``trigger`` names
+        the first one observed (``sigterm``, ``stdin_eof``, ``writer_closed``)
+        and is kept on the durable ``host_disconnected`` record.
+        """
         from .. import _fault_injection
 
+        with self._workers_lock:
+            if getattr(self, "_disconnect_handled", False):
+                return
+            self._disconnect_handled = True
         _fault_injection.checkpoint("t028_disconnect_before_cancel")
         if self.host_requester is not None:
             self.host_requester.close()
@@ -2741,11 +2831,31 @@ class Agent:
         # -- never required, never fabricated here.
         disconnect = getattr(self.runtime, "disconnect", None)
         if disconnect is not None:
-            for session_id in list(self.sessions):
+            for session_id, session in list(self.sessions.items()):
+                recorded = False
                 try:
-                    disconnect(session_id)
+                    try:
+                        recorded = bool(disconnect(session_id, trigger=trigger))
+                    except TypeError:
+                        # A runtime double that predates ``trigger``.
+                        recorded = bool(disconnect(session_id))
                 except Exception:
                     pass
+                if not recorded and session.get("task_id"):
+                    # A session only loaded in this process (a completed chat
+                    # the host restored) had no turn here; its task is still
+                    # recorded so a later session/load can show the persisted
+                    # outcome next to the host's connection-closed error.
+                    try:
+                        from ..recovery.worker_reconciliation import record_host_disconnect
+
+                        record_host_disconnect(
+                            self._store_for(session["project"]), session["task_id"], session_id,
+                            f"disconnect:{session_id}:{time.monotonic_ns()}", turn="no_turn_in_process",
+                            trigger=trigger,
+                        )
+                    except Exception:
+                        pass
 
     def handle_writer_closed(self):
         """Called (on the transport's writer thread; see
@@ -2758,7 +2868,7 @@ class Agent:
         reply or exit). Treated identically to inbound EOF: cancel every
         in-flight prompt so workers unblock and ``main`` can proceed to
         shut down."""
-        self._handle_eof()
+        self._handle_eof("writer_closed")
 
     def join_workers(self, timeout=_PROMPT_JOIN_TIMEOUT):
         deadline = time.monotonic() + timeout
@@ -2809,8 +2919,17 @@ def main(argv=None, runtime=None, environ=None):
     # actually failed (the client's stdout reader is gone -- T012 review
     # item 1). Blocking only on `join_reader()` would otherwise wedge this
     # process forever in the writer-closed-but-stdin-still-open case.
+    # Paseo stops a provider (plugin update/reload) with SIGTERM, then
+    # SIGKILL a second later, instead of closing stdin; the Paseo shim
+    # forwards that SIGTERM here. The default action would end the process
+    # before the disconnect is recorded or owned engines are released, so
+    # treat it as the same host disconnect as EOF.
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, lambda _signum, _frame: transport.request_shutdown())
     reason = transport.wait_for_shutdown_signal()
-    if reason == "writer_closed":
+    if reason == "signal":
+        agent._handle_eof("sigterm")
+    if reason in ("writer_closed", "signal"):
         agent.join_workers()
         agent.shutdown_runtime()
         transport.stop_writer()

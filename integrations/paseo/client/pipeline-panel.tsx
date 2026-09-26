@@ -3,6 +3,7 @@ import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useRef, useState } from "react";
 import { Animated, Pressable, Text, View, useWindowDimensions } from "react-native";
 import { readPipeline, type Pipeline } from "../shared/pipeline.js";
+import { subscribePipelinePoll } from "./pipeline-poll.js";
 import { UsageMeter } from "./usage-meter.tsx";
 import { WorkerResultDetail } from "./worker-result.tsx";
 import { buildPipeline, type PipelineStep, type StepStatus, type Tone } from "./pipeline-model.ts";
@@ -26,8 +27,9 @@ function toneColor(theme: Theme, tone: Tone): string {
 
 const STATUS_TONE: Record<StepStatus, Tone> = {
   done: "success", active: "accent", issues: "warning", failed: "danger", blocked: "warning", cancelled: "muted", pending: "muted",
+  interrupted: "warning",
 };
-const STATUS_ICON: Partial<Record<StepStatus, string>> = { done: "Check", issues: "CircleAlert", failed: "X", blocked: "Pause", cancelled: "Minus" };
+const STATUS_ICON: Partial<Record<StepStatus, string>> = { done: "Check", issues: "CircleAlert", failed: "X", blocked: "Pause", cancelled: "Minus", interrupted: "Pause" };
 const KIND_ICON: Record<PipelineStep["kind"], string> = { request: "MessageSquare", plan: "ListChecks", worker: "Bot", finish: "Flag" };
 
 /** A soft breathing loop for whatever is happening right now. */
@@ -132,26 +134,18 @@ export function PipelinePanel({ theme, workspaceId, agentId, onOpenWorker, popov
     : { flex: 1, backgroundColor: theme.colors.surface0 };
   const [pipeline, setPipeline] = useState<Pipeline | null>(null);
   const [failed, setFailed] = useState(false);
+  // Unknown state polls at the live rate until the first result settles it;
+  // this mirrors the poll loop's own prior default before any fetch lands.
+  const live = pipeline ? pipeline.available && buildPipeline(pipeline).headline.live : true;
 
-  useEffect(() => {
-    let active = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const refresh = async () => {
-      let live = true;
-      try {
-        const result = await rpc({ workspaceId, agentId });
-        if (!active) return;
-        setPipeline(result);
-        setFailed(false);
-        live = result.available && buildPipeline(result).headline.live;
-      } catch {
-        if (active) setFailed(true);
-      }
-      if (active) timer = setTimeout(refresh, live ? LIVE_POLL_MS : SETTLED_POLL_MS);
-    };
-    void refresh();
-    return () => { active = false; clearTimeout(timer); };
-  }, [agentId, rpc, workspaceId]);
+  useEffect(() => subscribePipelinePoll(rpc, { workspaceId, agentId }, live ? LIVE_POLL_MS : SETTLED_POLL_MS, (result) => {
+    if (result) {
+      setPipeline(result);
+      setFailed(false);
+    } else {
+      setFailed(true);
+    }
+  }), [agentId, rpc, workspaceId, live]);
 
   const c = theme.colors;
   if (!pipeline || !pipeline.available) {

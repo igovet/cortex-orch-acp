@@ -1,20 +1,15 @@
 # Persistent isolated dev Paseo environment
 
-## Verified Paseo 0.9.1 boundary
+## Verified Paseo 0.9.2 boundary
 
-The installed Linux CLI is `/opt/Paseo/resources/bin/paseo`, version 0.9.1.
-Its help documents `--home <path>` for the local daemon home and `--host <host>`
-for an explicit endpoint. The supported daemon config set, start, status,
-plugin install, and logs commands accept `--home`.
+The installed Linux CLI is `/opt/Paseo/resources/bin/paseo`; a read-only `--version` check on 2026-09-26 returned 0.9.2. Its help exposes global `--home <path>` and `--host <host>` options. The guarded wrapper passes the explicit dev home and rejects per-command home or endpoint overrides.
 
 Production is `~/.paseo` on `127.0.0.1:6767`. The permanent development home is
 `~/.paseo-dev`; its daemon is configured for `127.0.0.1:16767`. Use the separate
 Electron profile directory `~/.config/Paseo-dev` for desktop validation. Do not use
 the normal Paseo desktop profile for development testing.
 
-Paseo 0.9.1 provides no supported browser client or local HTTP UI. The daemon
-uses WebSocket; its CLI help lists daemon and plugin commands, but no web-client
-launcher. Use the Electron Desktop application as the standard GUI method.
+Paseo 0.9.2 provides no supported browser client or local HTTP UI. Its CLI help lists daemon and plugin commands, with no web-client launcher; the daemon endpoint is WebSocket. Use the Electron Desktop application as the standard GUI method.
 
 ## Mandatory safety rule
 
@@ -24,8 +19,11 @@ Paseo home, daemon, or cortex-acp plugin. All Paseo and plugin work must use
 `scripts/update-paseo-plugin.sh`: it does not establish a dev-only daemon boundary.
 
 Run Paseo through [scripts/cortex_paseo_dev.py](../../scripts/cortex_paseo_dev.py).
-It defaults to `~/.paseo-dev`, rejects the resolved production home, and rejects
-per-command `--home` and `--host` overrides. It makes no model call.
+A read-only `--check` run on 2026-09-26 selected `/home/igovet/.paseo-dev`, reported `/home/igovet/.paseo` as the protected production home, and exited 0. The wrapper defaults to `~/.paseo-dev`, rejects the resolved production home, and rejects per-command `--home` and `--host` overrides. It sets Cortex XDG config/state below the dev home and passes the checkout root for the local plugin. The check validates selection and does not launch or inspect a daemon.
+
+Until plugin-reload recovery is qualified for the deployed version, apply plugin updates between active tasks. Recovery uses persisted Cortex state and does not automatically repeat actions with an unknown outcome. A host SIGKILL without SIGTERM leaves no disconnect record (a later reader identifies the interrupted worker from its provably gone owning process), and native engine actions have no retained command receipt.
+
+To reproduce a reload with an active worker, run `plugin reload cortex-acp` through the guarded wrapper while a worker runs. Paseo 0.9.2 closes the provider connection, the shim forwards SIGTERM, and Cortex records `host_disconnected` with `trigger: sigterm`; Paseo does not reload the session until the next prompt. Start the daemon and the `gui` helper outside the Cortex command sandbox (a Cortex worker uses `outside_command`), because the sandboxed runner cannot write the dev home. The `gui` helper blocks until Electron exits, so run it detached; SIGTERM to the helper stops its Electron and Xvfb.
 
 ## Standing approval for paid live testing
 
@@ -151,7 +149,7 @@ python3 -B scripts/cortex_paseo_dev.py -- logs <agent-id> --json
 
 For retained-history checks, omit `--tail` and retain exit status, output byte
 count, structural event count, safe first/last event identities and any explicit
-error. Paseo 0.9.1 documents `--tail`, `--filter` and `--since` for logs, but
+error. Paseo 0.9.2 documents `--tail`, `--filter` and `--since` for logs, but
 no pagination or full-history flag. If completeness cannot be independently
 established, mark the check unverified. Do not store message bodies or raw logs
 in repository documents or reports.

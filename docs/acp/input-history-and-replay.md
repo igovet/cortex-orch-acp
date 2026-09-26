@@ -237,7 +237,30 @@ correction only: it does not append a task event, mark the process registry,
 open a replacement engine session, or make a model call. A live or
 indeterminate identity is left untouched. The next `session/prompt` remains
 the recovery boundary that can reconcile the old coordinator and delegate a
-fresh worker; `session/load` never starts paid work.
+fresh worker; `session/load` never starts paid work. When the worker was
+lost with its host -- a durable `host_disconnected` record (see
+[failures and disconnects](failures-and-cancellation.md#4-disconnect)) lists
+the attempt, its owning Cortex process is provably gone with no terminal
+event, or recovery wrote it off as `recovery_worker_lost` (including the
+replan cancellation after that) -- the same correction instead reads the
+localized `Interrupted when the host connection closed; no result yet. The
+next message reconciles this worker from saved state.` ACP has no
+interrupted status, so the card status is still `failed`; the title gains the
+suffix ` · Interrupted` (after any earlier status suffix is removed) and the
+update carries `_meta.cortexWorkerInterrupted: {"reason": "host_disconnected"}`.
+The installed Paseo bridge drops `_meta`, so the Paseo card reads the title
+suffix, which the runtime appends to the whole title
+(`Worker: role · route — name · Interrupted`).
+
+After the replayed history, while this session's latest `host_disconnected`
+record has no later `user_message`, `session/load` appends one localized
+`agent_message_chunk` (message id `cortex-connection:<event id>`, with
+`_meta.cortexConnectionNotice`). It reports the saved task state, states that
+a completed result is unchanged, and counts interrupted workers and actions
+with an unknown outcome. Paseo's own `Provider connection closed` error is
+host-owned; this notice is the persisted outcome shown beside it. It is sent
+before the load response, so the Paseo shim includes it in the checked replay
+manifest. Building it only reads the store.
 
 `host_transcript` and the companion `host_updates` table (the sole read
 sources for replay) are written by

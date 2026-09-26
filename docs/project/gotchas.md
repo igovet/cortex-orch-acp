@@ -45,3 +45,31 @@ non-sandboxed `$HOME`) succeeds immediately with no code change. Before
 concluding a live "cortex" Paseo provisioning failure is a runtime defect,
 re-run it once through `outside_command` and only trust a failure that
 reproduces there too.
+
+A crash exactly at that one call site (`acp.orchestrating_runtime
+._open_coordinator_session`'s own `self._engine.open(...)`) leaves a task id
+already durably bound (`bootstrap.bootstrap_task`'s `tasks` row and
+`_ensure_coordinator`'s own `task_orchestration` row are both already
+committed) but no `runtime_tasks` row yet -- `orchestration.state.TaskMachine
+.create` only runs afterward, from `orchestration.controller.run`, itself
+only reached once `_ensure_coordinator` returns successfully. That call site
+now tags (never replaces) the exception with `cortex_launch_stage=
+"engine_launch"` plus the task/attempt id; `acp.agent`'s except block reads
+those (only present for this one failure shape) into
+`_write_crash_diagnostic`'s log header alongside the *running process's own*
+package version (`_agent_version()` -- not necessarily this checkout's, see
+`scripts/cortex_diagnose.py`'s separate installed-vs-checkout
+`package_version` check), and into the `-32603` `message` text itself
+("...(stage: engine_launch)."), since a real host drops `data` (above). A
+retry recovers through the pre-existing coordinator-replacement path
+(`recovery.coordinator_recovery.recover`) without duplicating the task:
+`task_orchestration`/`runtime_tasks` are both `task_id PRIMARY KEY`, and
+`TaskMachine.create`/`_ensure_coordinator` both check for an existing row
+before inserting one -- see
+`tests/test_engine_launch_failure_recovery.py`. The same failure shape also
+used to permanently skip publishing this task's initial pipeline on every
+retry (`_run`'s publish call was gated on the `task_orchestration` row *not*
+existing yet, but that row is committed before the engine session ever
+opens); it is now called unconditionally, relying on
+`pipeline_bootstrap.publish_initial_pipeline`'s own idempotent `reports`-row
+check instead.

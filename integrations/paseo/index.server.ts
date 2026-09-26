@@ -6,11 +6,12 @@ import { getPipeline } from "./server/pipeline.js";
 import { readPipeline } from "./shared/pipeline.js";
 import { getWorkerResults } from "./server/worker-results.js";
 import { readWorkerResults } from "./shared/worker-results.js";
+import { instrumentHandler } from "./server/invoke-diagnostics.js";
 
 export default function contribute(server: PluginServerContext) {
   server.registerProvider(createCortexProvider());
-  server.handle(readWorkerHistory, getWorkerHistory);
-  server.handle(readPipeline, getPipeline);
-  server.handle(readWorkerResults, getWorkerResults);
+  server.handle(readWorkerHistory, instrumentHandler(readWorkerHistory.name, getWorkerHistory));
+  server.handle(readPipeline, instrumentHandler(readPipeline.name, getPipeline));
+  server.handle(readWorkerResults, instrumentHandler(readWorkerResults.name, getWorkerResults));
   return () => {};
 }

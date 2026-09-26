@@ -24,6 +24,10 @@ export function workerDisplayName(assignment: Pick<WorkerAssignment, "role" | "t
 export function workerStatusLabel(status: string | null | undefined): string {
   const value = (status ?? "").toLowerCase();
   if (["running", "pending", "in_progress", "in-progress", "provisioning", "ready", "started"].includes(value)) return "working";
+  // A host disconnect (e.g. a plugin update) paused this worker before it
+  // reported a result; recovery reconciles it from saved state on the next
+  // message. Never the same pill as a genuine failure.
+  if (value === "interrupted") return "interrupted";
   if (["failed", "error"].includes(value)) return "failed";
   if (["canceled", "cancelled"].includes(value)) return "cancelled";
   if (value === "completed_with_issues") return "completed with issues";
@@ -32,7 +36,7 @@ export function workerStatusLabel(status: string | null | undefined): string {
 }
 
 export type WorkerStatusTone = "active" | "success" | "warning" | "danger" | "muted";
-export type WorkerCheck = { outcome: string };
+export type WorkerCheck = { outcome: string; closedBy?: string };
 
 /**
  * One durable projection for every worker terminal surface. Callers supply
@@ -41,8 +45,10 @@ export type WorkerCheck = { outcome: string };
  */
 export function workerTerminalState(status: string | null | undefined, checks: readonly WorkerCheck[] = []) {
   const presentation = workerStatusPresentation(status);
+  // A failed check an exact later rerun closed is resolved history, not a
+  // current open issue.
   const issueCount = presentation.label === "completed with issues"
-    ? checks.filter((check) => check.outcome !== "passed").length
+    ? checks.filter((check) => check.outcome !== "passed" && !check.closedBy).length
     : 0;
   return { ...presentation, issueCount };
 }
@@ -57,6 +63,7 @@ export function workerStatusPresentation(status: string | null | undefined): { l
   if (label === "completed") return { label, tone: "success", icon: "CircleCheck" };
   if (label === "completed with issues") return { label, tone: "warning", icon: "CircleAlert" };
   if (label === "failed") return { label, tone: "danger", icon: "CircleAlert" };
+  if (label === "interrupted") return { label, tone: "warning", icon: "PauseCircle" };
   if (label === "cancelled") return { label, tone: "muted", icon: "CircleSlash" };
   return { label, tone: "active", icon: "Loader2" };
 }
@@ -74,36 +81,73 @@ export function workerLine(name: string, profile: string, route: readonly (strin
  * `Worker: profile · provider · model · effort — assignment title`.
  * Keep parsing tolerant for older cards that omitted route metadata.
  */
+const STATUS_SUFFIX = /\s+·\s+(completed with issues|cancelled|interrupted)$/i;
+
 function parseWorkerCardTitle(title: string) {
-  const body = title.trim().replace(/^Worker:\s*/i, "");
+  let body = title.trim().replace(/^Worker:\s*/i, "");
+  // The runtime appends the status to the whole title
+  // (`Worker: role · route — name · Interrupted`, see replay_store.py and
+  // orchestrating_runtime.py); older cards carried it inside the route.
+  const trailing = body.includes(" — ") ? STATUS_SUFFIX.exec(body)?.[1] : undefined;
+  if (trailing) body = body.slice(0, body.length - trailing.length).replace(/\s+·\s*$/, "");
   const [route, ...nameParts] = body.split(/\s+—\s+/, 2);
   const routeParts = route.split(/\s+·\s+/).map((part) => part.trim()).filter(Boolean);
+  if (trailing) routeParts.push(trailing);
   const suffix = routeParts.at(-1)?.toLowerCase();
   const hasIssues = suffix === "completed with issues";
   // ACP's ToolCallStatus has no "cancelled" value, so a cancelled
   // assignment's card carries this same portable title suffix instead
   // (see orchestrating_runtime.py's `assignment_cancelled` handler).
   const isCancelled = suffix === "cancelled";
-  if (hasIssues || isCancelled) routeParts.pop();
-  return { name: nameParts.join(" — "), routeParts, hasIssues, isCancelled };
+  // Same channel for a host-disconnect pause (see replay_store.py's
+  // `terminal_worker_card_reconciliation`): ACP has no "interrupted" value
+  // either, and unlike `_meta` this suffix survives the installed Paseo
+  // ACP bridge, which drops `_meta` from a `tool_call_update` entirely.
+  const isInterrupted = suffix === "interrupted";
+  if (hasIssues || isCancelled || isInterrupted) routeParts.pop();
+  return { name: nameParts.join(" — "), routeParts, hasIssues, isCancelled, isInterrupted };
 }
 
 /**
  * The status a reader should see for this card: the title's own
- * "Completed with issues"/"Cancelled" suffix (T035's portable channel,
- * above) takes precedence over a coarser host/embedded status -- this is
- * what lets a card rendered with zero RPC (embedded ``result`` only, no
- * live pipeline projection) still show the right pill.
+ * "Completed with issues"/"Cancelled"/"Interrupted" suffix (T035's portable
+ * channel, above) takes precedence over a coarser host/embedded status --
+ * this is what lets a card rendered with zero RPC (embedded ``result``
+ * only, no live pipeline projection) still show the right pill.
  */
 export function resolveWorkerCardStatus(title: string, status: string): string {
-  const { hasIssues, isCancelled } = parseWorkerCardTitle(title);
-  return hasIssues ? "completed_with_issues" : isCancelled ? "cancelled" : status;
+  const { hasIssues, isCancelled, isInterrupted } = parseWorkerCardTitle(title);
+  return hasIssues ? "completed_with_issues" : isInterrupted ? "interrupted" : isCancelled ? "cancelled" : status;
+}
+
+/** Durable attempt statuses that settle a card whatever the host still shows. */
+const SETTLED = new Set(["interrupted", "completed", "completed_with_issues", "failed", "cancelled", "canceled"]);
+
+export function isSettledWorkerStatus(status: string | null | undefined): boolean {
+  return SETTLED.has((status ?? "").toLowerCase());
+}
+
+/**
+ * The card's status once the durable attempt status is known. The host keeps
+ * a card `running` after its provider connection closed (a plugin reload
+ * sends no further update, and Paseo re-sends nothing until the next
+ * prompt), so a settled durable status wins over a running host status, and
+ * a recorded interruption wins over a generic host failure. A durable
+ * status that is still running never overrides anything.
+ */
+export function resolveDurableWorkerCardStatus(title: string, status: string, durable: string | null | undefined): string {
+  const resolved = resolveWorkerCardStatus(title, status);
+  if (!isSettledWorkerStatus(durable)) return resolved;
+  const value = (durable ?? "").toLowerCase();
+  if (resolved === "running" || resolved === "working") return value;
+  if (value === "interrupted" && resolved === "failed") return value;
+  return resolved;
 }
 
 export function workerCardMetadata(title: string, status: string) {
-  const { name, routeParts, hasIssues, isCancelled } = parseWorkerCardTitle(title);
+  const { name, routeParts, hasIssues, isCancelled, isInterrupted } = parseWorkerCardTitle(title);
   return workerLine(name, routeParts[0] || "worker", routeParts.slice(1),
-    hasIssues ? "completed_with_issues" : isCancelled ? "cancelled" : status);
+    hasIssues ? "completed_with_issues" : isInterrupted ? "interrupted" : isCancelled ? "cancelled" : status);
 }
 
 /**

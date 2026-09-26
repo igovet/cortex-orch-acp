@@ -68,7 +68,7 @@ def dispatch(store, channel, operation, args):
             if previous and json.loads(previous['result_json']).get('complete'):
                 return json.loads(previous['result_json'])['receipt']
             if previous is None:
-                from .gateway import verified_check
+                from ..delegation.evidence import accept_checks
                 _authority(db, channel)
                 for index, check in enumerate(args['checks']):
                     gap = check['outcome'] in {'not_run', 'unverified'}
@@ -79,26 +79,29 @@ def dispatch(store, channel, operation, args):
                     if not gap and 'blocker' in check:
                         raise StoreError('check_blocker_unexpected', f'arguments.checks[{index}].blocker', check['outcome'],
                                          'no blocker on a passed or failed check', 'Remove blocker from checks that passed or failed.')
-                    if (check['outcome'] == 'passed' or
-                            (check['outcome'] == 'failed' and check.get('tool_call_ref'))) and not verified_check(
-                        db, channel.task_id, channel.attempt_id, check.get('tool_call_ref'), check['outcome']
-                    ):
-                        raise StoreError('check_evidence_required',
-                            f'arguments.checks[{index}].tool_call_ref', 'missing or unverified',
-                            'a completed command_run or outside_command receipt with an exit status matching the check outcome, or a completed shell command of your own for a pass',
-                            'Cite the exact command_run or outside_command tool_call_ref, or omit tool_call_ref for a check you ran with your own shell. '
-                            'Unexecuted or unresolved checks must be not_run or unverified; they are retained as disclosed gaps. '
-                            'Descriptive review observations belong in the report, not automated checks.')
+                # A pass the runtime cannot verify is kept unverified (or
+                # failed, when its cited command exited nonzero) with the
+                # structured gap; a failure an exact later rerun closed keeps
+                # closed_by. The original claim stays in the digest.
+                accepted = dict(args, checks=accept_checks(db, channel.task_id, channel.attempt_id, args['checks']))
                 db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
                            (channel.task_id, args['request_key'], channel.channel_id, operation, digest,
-                            encoded(dict(complete=False, assignment_ref=provision['idempotency_key'], result=args))))
+                            encoded(dict(complete=False, assignment_ref=provision['idempotency_key'], result=args,
+                                         accepted=accepted))))
+            else:
+                saved = json.loads(previous['result_json'])
+                accepted = saved.get('accepted', saved['result'])
             db.commit()
-        result = _worker_publish_result(store, channel, {key: value for key, value in args.items() if key != 'verdict'})
-        machine.record_result(channel.task_id, provision['idempotency_key'], args)
+        result = _worker_publish_result(store, channel, {key: value for key, value in accepted.items() if key != 'verdict'})
+        machine.record_result(channel.task_id, provision['idempotency_key'], accepted)
+        # The receipt shows the worker every check the runtime did not accept as claimed.
+        result = dict(result, checks=[{key: check[key] for key in ('name', 'outcome', 'claimed_outcome', 'evidence_gap', 'blocker', 'closed_by')
+                                       if key in check} for check in accepted['checks']])
         with store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute('UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?',
-                       (encoded(dict(complete=True, receipt=result, assignment_ref=provision['idempotency_key'], result=args)),
+                       (encoded(dict(complete=True, receipt=result, assignment_ref=provision['idempotency_key'], result=args,
+                                     accepted=accepted)),
                         channel.task_id, channel.channel_id, args['request_key']))
             db.commit()
         return result

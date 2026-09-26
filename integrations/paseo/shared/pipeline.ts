@@ -2,7 +2,16 @@ import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { readWorkerHistory, tokenTotals } from "./worker-history.ts";
 
-const check = z.object({ name: z.string(), outcome: z.string(), blocker: z.string().optional() });
+const check = z.object({
+  name: z.string(), outcome: z.string(), blocker: z.string().optional(),
+  // A failed check an exact later rerun closed: kept as run history, not a
+  // current failure (see delegation.evidence.accept_checks).
+  closedBy: z.string().optional(),
+  // The runtime downgraded a claimed "passed" to unverified/failed for
+  // insufficient evidence; evidenceGap names the unmet condition.
+  claimedOutcome: z.string().optional(),
+  evidenceGap: z.string().optional(),
+});
 
 // A worker's terminal result: the same bounded/scrubbed shape whether read
 // from the embedded ACP card (see ``worker-timeline-result.ts``) or from

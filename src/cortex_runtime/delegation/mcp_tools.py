@@ -73,13 +73,18 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
     # missing to the model.
     checks = []
     for item in args.get("checks") or []:
-        label = delegation_evidence.resolve_check(store, assignment_ref, item.get("tool_call_ref"))
+        label = delegation_evidence.resolve_check(
+            store, channel.task_id, assignment_ref, item.get("tool_call_ref"), item["outcome"],
+        )
         entry = dict(
             name=item["name"], outcome=item["outcome"],
             tool_call_ref=item.get("tool_call_ref"), evidence=label,
         )
-        if item.get("blocker"):
-            entry["blocker"] = item["blocker"]
+        # A pass the runtime did not accept keeps the claim and its gap; a
+        # failure an exact later rerun closed keeps the closing ref.
+        for key in ("blocker", "claimed_outcome", "evidence_gap", "closed_by"):
+            if item.get(key):
+                entry[key] = item[key]
         checks.append(entry)
     with store.connection() as db:
         existing = db.execute(
@@ -132,10 +137,10 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
             delegation_revision.record_attempt_revision(
                 store, assignment_ref, phase, direct_root,
             )
-    # T017: each claimed check is stored as claimed; 'observed'/'contradicted'
-    # is resolved strictly against this exact attempt's own durable
-    # tool_result_observations (delegation.evidence) -- a claim never
-    # becomes confirmed without that link (see delegation.evidence docstring).
+    # T017: each check carries an audit label; 'observed'/'contradicted' is
+    # resolved strictly against this exact attempt's own command receipts
+    # (delegation.evidence.assess_check) -- a claim never becomes confirmed
+    # without that link (see delegation.evidence docstring).
     from ..orchestration.gateway import _authority
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -377,7 +382,7 @@ _OPERATION_DESCRIPTIONS = dict(
     project_write="Create or replace one project file with complete UTF-8 content. Pass the file's current sha256 from project_read, or \"absent\" for a new file; a mismatch changes nothing. Only for a worker whose assignment may write; paths the user protected are refused.",
     project_mkdir="Create one new project directory; its parent must already exist. Only for a worker whose assignment may write.",
     project_delete="Delete one existing regular project file (never a directory), identified by its current sha256. The user confirms every deletion first. Only for a worker whose assignment may write.",
-    command_run="Run one command (argv, no shell) in the project root inside the sandbox, as the owner, with their toolchain. Returns exit_code, a tool_call_ref that result_submit accepts as check evidence, and the retained output (read_large_output). Not available to coordinators or consultants.",
+    command_run="Run one command (argv, no shell) in the project root inside the sandbox, as the owner, with their toolchain. Returns argv, exit_code, a tool_call_ref (the evidence a passed result_submit check must cite) and the retained output (read_large_output). Not available to coordinators or consultants.",
     outside_command="Run one command (argv, no shell) outside the sandbox as the user, for work the sandbox cannot do (a global install, a change in HOME). The user confirms it first on a permission card; a refusal means it did not run. Only for a worker whose assignment may write.",
     outside_write="Write one file OUTSIDE the project as the user (inside the project use project_write or your own tools). The user confirms it first; the parent directory must exist. Only for a worker whose assignment may write.",
     draft_write="Replace the whole content of one of your unpublished drafts (from create_draft), keeping the first line create_draft wrote. Publish it with write_report.",

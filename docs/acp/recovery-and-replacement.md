@@ -99,6 +99,13 @@ are included before the first post-recovery continuation without any
 recovery-specific redelivery code, and a cancelled/superseded requirement
 revision (T020) stays cancelled (it is simply never claimed).
 
+A host transport disconnect before the restart (for example a Paseo plugin
+update) leaves task, node and assignment state as persisted rather than
+cancelling it; step 3 then records its interrupted workers as
+`recovery_worker_lost`, and a restarted runtime never re-dispatches the old
+delegation request. See
+[failures and disconnects](failures-and-cancellation.md#4-disconnect).
+
 ## Cross-process liveness
 
 `delegation.live_adapters.EngineSessionManagerAdapter.lookup_owned`/
@@ -146,3 +153,8 @@ receipt or a duplicate coordinator/worker (see
   every first post-upgrade recovery.
 - Live cross-engine qualification (a real second engine actually
   installed/qualified) is out of this task's scope — T037.
+
+
+## Coordinator launch failure diagnostics
+
+The initial coordinator engine launch can fail after task identity is persisted but before the `runtime_tasks` row is created. That failure records a safe structured diagnostic tagged with `engine_launch`, the task/session/attempt identities that exist, and the running runtime package version; the useful reason is included in the ACP error text because hosts may discard JSON-RPC `data`. Retry uses the existing task identity and recovery path, and initial pipeline publication is idempotent across that retry. `scripts/cortex_diagnose.py` reports the installed runtime package version separately from the checkout version. A diagnostic does not imply a live engine child was started successfully.

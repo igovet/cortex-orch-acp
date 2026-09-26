@@ -51,6 +51,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import time
 from typing import Any, Mapping, Sequence
@@ -952,6 +953,24 @@ def _merge_replay_entries(history: list[dict]) -> list[dict]:
     return result
 
 
+# A status suffix the runtime appends to a worker card title.
+_WORKER_STATUS_SUFFIX = re.compile(r"(?:\s+·\s+(?:Completed with issues|Cancelled|Interrupted))+$")
+
+
+def interrupted_notice_text(store, task_id: str) -> str:
+    """The localized ``worker_interrupted_notice`` line, resolved the same
+    way as every other runtime system line (``messages.select_language``):
+    the task's explicit language choice, else the script of its most recent
+    direct user text."""
+    from . import messages as acp_messages
+    from . import steering as acp_steering
+
+    explicit = acp_steering.get_language_override(store, task_id)
+    texts = acp_steering.recent_user_direct_texts(store, task_id)
+    language = acp_messages.select_language(explicit, texts)
+    return acp_messages.render("worker_interrupted_notice", language)
+
+
 def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[Mapping[str, Any]]) -> list[dict]:
     """Return terminal card updates justified by durable assignment/process evidence.
 
@@ -964,10 +983,14 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
     identity whose process is now provably absent is equally strong evidence
     that the worker cannot still be ``in_progress``; that case is rendered as
     a failed card without writing the transcript or starting a replacement
-    engine session.  It never creates a card absent from history and never
+    engine session. A worker lost with its host (a recorded disconnect, a
+    launching process that is provably gone, or recovery's
+    ``recovery_worker_lost`` and the replan cancellation after it) is
+    rendered Interrupted instead, never as a generic failure.  It never creates a card absent from history and never
     infers a terminal state from task status alone.
     """
     latest: dict[str, str] = {}
+    latest_title: dict[str, str] = {}
     seen_cards: set[str] = set()
     for entry in history:
         if entry.get("kind") != "update":
@@ -982,6 +1005,9 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
         status = update.get("status")
         if isinstance(status, str):
             latest[card_id] = status
+        title = update.get("title")
+        if isinstance(title, str) and title.strip():
+            latest_title[card_id] = title
     if not seen_cards:
         return []
     with store.connection() as db:
@@ -1012,6 +1038,12 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
             "WHERE task_id=? AND event_type IN ('worker_result','assignment_failed','assignment_cancelled') "
             "AND superseded=0 ORDER BY id", (task_id,),
         ).fetchall()
+        # Workers a lost host interrupted (plugin update or reload, a
+        # replaced process no signal reached): recovery reconciles them, so
+        # their card must not read as a crash or as still working.
+        from ..recovery.worker_reconciliation import interrupted_attempts
+
+        disconnected_attempts = interrupted_attempts(db, task_id)
     # A task-wide cancellation can be recorded after a worker has already
     # published its result.  Group terminal evidence by assignment and let a
     # real worker_result win over cancellation/failure regardless of insert
@@ -1027,11 +1059,21 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
         prior = terminal_by_card.get(card_id)
         if prior is None or priority.get(row["event_type"], 0) > priority.get(prior["event_type"], 0):
             terminal_by_card[card_id] = row
+    assignment_to_attempt = {assignment: attempt for attempt, assignment in attempts.items()}
     corrections: list[dict] = []
+    interrupted_cards: list[str] = []
     for card_id, row in terminal_by_card.items():
+        event_type = row["event_type"]
+        attempt_id = assignment_to_attempt.get(card_id.removeprefix("worker:"))
+        if event_type != "worker_result" and attempt_id in disconnected_attempts:
+            # Lost to the host, then written off (recovery_worker_lost) or
+            # cancelled by the replan that followed: still an interruption,
+            # never a generic failure, even over an older "failed" update.
+            if not latest_title.get(card_id, "").endswith(" · Interrupted"):
+                interrupted_cards.append(card_id)
+            continue
         if latest.get(card_id) in {"completed", "failed"}:
             continue
-        event_type = row["event_type"]
         status = "completed" if event_type == "worker_result" else "failed"
         try:
             payload = json.loads(row["payload_json"] or "{}")
@@ -1052,8 +1094,57 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
         if text:
             update["content"] = [{"type": "text", "text": text[:300]}]
         corrections.append(update)
+    existing_terminal = {item["toolCallId"] for item in corrections} | set(terminal_by_card)
+
+    def _interrupted_correction(card_id: str, attempt_id: str | None) -> dict:
+        correction = {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": card_id,
+            "status": "failed",
+            "content": [{"type": "text", "text": interrupted_notice_text(store, task_id)}],
+        }
+        # ACP's ToolCallStatus has no "interrupted" value (this card is
+        # rendered "failed", like a genuine crash). A client with no live
+        # pipeline data still needs to tell the two apart, so this carries
+        # the same portable title-suffix channel T035 already uses for
+        # "Cancelled"/"Completed with issues" (see worker-display.ts's
+        # `resolveWorkerCardStatus`) -- unlike `_meta`, which the installed
+        # Paseo ACP bridge drops before a client ever sees it.
+        base_title = _WORKER_STATUS_SUFFIX.sub("", latest_title.get(card_id) or "")
+        if base_title:
+            correction["title"] = f"{base_title} · Interrupted"
+        # Still emitted for any client build that does forward `_meta` on a
+        # `tool_call_update`.
+        correction["_meta"] = {"cortexWorkerInterrupted": {"reason": "host_disconnected"}}
+        return correction
+
+    for card_id in interrupted_cards:
+        corrections.append(_interrupted_correction(card_id, assignment_to_attempt.get(card_id.removeprefix("worker:"))))
+
+    # A recorded ``host_disconnected`` event (or, when no signal reached the
+    # old process, its provably gone launching process -- see
+    # ``recovery.registry.owner_liveness``) is, on its own, the durable
+    # answer: real recovery (see ``recovery.worker_reconciliation``) marks
+    # such a worker ``recovery_worker_lost`` on the coordinator's next turn
+    # regardless of whether its OS process can still be probed as alive
+    # (there is no channel secret in a fresh process to safely resume it
+    # either way) -- so display must not wait for a stronger, OS-level
+    # "absent" signal that recovery itself never requires. A card already
+    # covered by a real terminal event (above) is left alone; genuinely
+    # untouched work (no disconnect evidence at all) keeps its live status.
+    for card_id in sorted(seen_cards):
+        if card_id in existing_terminal or latest.get(card_id) in {"completed", "failed"}:
+            continue
+        assignment_ref = card_id.removeprefix("worker:")
+        attempt_id = assignment_to_attempt.get(assignment_ref)
+        if attempt_id is None or attempt_id not in disconnected_attempts:
+            continue
+        corrections.append(_interrupted_correction(card_id, attempt_id))
+        existing_terminal.add(card_id)
+
     # A process can disappear after the last ACP card update but before it
-    # publishes a worker_result/assignment_failed event.  The old history
+    # publishes a worker_result/assignment_failed event, with no host
+    # disconnect ever recorded for it (a bare crash).  The old history
     # remains visibly ``in_progress`` forever unless load checks the durable
     # identity.  Only a positively confirmed ``absent`` result qualifies;
     # ``alive`` and ``unknown`` are intentionally left untouched so a
@@ -1061,8 +1152,6 @@ def terminal_worker_card_reconciliation(store, task_id: str, history: Sequence[M
     if process_rows:
         from ..recovery import registry as recovery_registry
 
-        existing_terminal = {item["toolCallId"] for item in corrections}
-        assignment_to_attempt = {assignment: attempt for attempt, assignment in attempts.items()}
         for card_id in sorted(seen_cards):
             if card_id in existing_terminal or latest.get(card_id) in {"completed", "failed"}:
                 continue

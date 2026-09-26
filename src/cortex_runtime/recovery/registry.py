@@ -21,6 +21,13 @@ Two additive tables (see ``store.py``'s composed ``SCHEMA``):
   revision has since been selected/applied (see
   ``recovery.coordinator_recovery``): recovery itself never grants a
   broader policy or a different route than what was actually recorded.
+
+A worker's row is paired with an ``acp_host`` row (see :data:`HOST_ROLE`)
+naming the Cortex ACP process that launched it. A host can be replaced
+without any signal reaching the old process (SIGKILL, an OOM kill), so no
+``host_disconnected`` record is written; a later process then reads the
+owner row to tell "its owner is gone" apart from "still owned by a live
+process" without writing anything.
 """
 from __future__ import annotations
 
@@ -49,6 +56,14 @@ CREATE TABLE IF NOT EXISTS attempt_effective_context (
 '''
 
 
+# The Cortex ACP process that launched a worker, recorded beside it.
+HOST_ROLE = "acp_host"
+
+
+def host_row_id(attempt_id: str) -> str:
+    return f"{HOST_ROLE}:{attempt_id}"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -75,10 +90,40 @@ def record_process_launch(
                 (attempt_id, task_id, role, engine_session_ref, connection_id, pid, pgid,
                  start_ticks, boot_id, launch_command_digest, _now()),
             )
+            host = _own_identity() if role == "worker" else None
+            if host is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO attempt_process_registry "
+                    "(attempt_id, task_id, role, engine_session_ref, connection_id, pid, pgid, "
+                    " start_ticks, boot_id, launch_command_digest, recorded_at, terminated_at, termination_reason) "
+                    "VALUES (?,?,?,NULL,NULL,?,?,?,?,?,?,NULL,NULL)",
+                    (host_row_id(attempt_id), task_id, HOST_ROLE, host.pid, host.pgid,
+                     host.start_ticks, host.boot_id, HOST_ROLE, _now()),
+                )
             db.commit()
         except BaseException:
             db.rollback()
             raise
+
+
+def _own_identity():
+    import os
+
+    from ..engine import process_identity
+
+    return process_identity.capture(os.getpid(), os.getpgrp())
+
+
+def owner_liveness(db, attempt_id: str) -> str | None:
+    """``"alive"``/``"absent"``/``"unknown"`` for the Cortex process that
+    launched worker ``attempt_id``; ``None`` when no owner was recorded
+    (an older store, or a launch whose identity could not be read).
+    Read-only and callable from any process."""
+    row = db.execute(
+        "SELECT * FROM attempt_process_registry WHERE attempt_id=? AND role=?",
+        (host_row_id(attempt_id), HOST_ROLE),
+    ).fetchone()
+    return probe_liveness(dict(row)) if row is not None else None
 
 
 def bind_engine_session_ref(store, attempt_id: str, engine_session_ref: str) -> None:

@@ -2,7 +2,7 @@ import { useRpc, type PluginHostProps } from "@getpaseo/plugin/client";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { readWorkerHistory, type WorkerHistory } from "../shared/worker-history.js";
-import { contextSummary, formatTokens } from "./worker-display.ts";
+import { contextSummary, formatTokens, isSettledWorkerStatus } from "./worker-display.ts";
 
 type Attempt = WorkerHistory["assignments"][number]["attempts"][number];
 type Theme = PluginHostProps["theme"];
@@ -47,14 +47,19 @@ export function useWorkerUsage(workspaceId: string | null, agentId: string, assi
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const load = async () => {
+      let settled = false;
       try {
         const history = await rpc({ workspaceId, agentId, assignmentRef, cursor: Number.MAX_SAFE_INTEGER, limit: 1 });
         const assignment = history.assignments[0];
-        if (active && assignment) setAttempt(latestAttempt(assignment));
+        const latest = assignment && latestAttempt(assignment);
+        if (active && latest) setAttempt(latest);
+        // A settled attempt never runs again (a retry is a new card), so a
+        // card the host still shows running stops polling once it settles.
+        settled = isSettledWorkerStatus(latest?.status);
       } catch {
         // Usage is decoration; a failed read leaves the card as it was.
       }
-      if (active && live) timer = setTimeout(load, CARD_USAGE_POLL_MS);
+      if (active && live && !settled) timer = setTimeout(load, CARD_USAGE_POLL_MS);
     };
     void load();
     return () => { active = false; clearTimeout(timer); };

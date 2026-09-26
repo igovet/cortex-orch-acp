@@ -3,10 +3,20 @@ import { workerDisplayName, workerModelDisplay } from "./worker-display.ts";
 import { workerPopoverStatus } from "./worker-popover-status.ts";
 import { workerResultItems } from "./worker-result-model.ts";
 
-export type StepStatus = "done" | "active" | "issues" | "failed" | "blocked" | "cancelled" | "pending";
+export type StepStatus = "done" | "active" | "issues" | "failed" | "blocked" | "cancelled" | "pending" | "interrupted";
 export type Tone = "success" | "warning" | "danger" | "muted" | "accent";
 
-export interface StepItem { text: string; status: "done" | "failed" | "open"; blocker?: string }
+export interface StepItem {
+  text: string;
+  // "resolved": a failed check an exact later rerun closed -- kept visible
+  // as history, distinct from an open "failed" check.
+  status: "done" | "failed" | "open" | "resolved";
+  blocker?: string;
+  // A passed/failed claim the runtime could not verify with a strict
+  // command receipt (or an older result predating that rule) -- shown as a
+  // separate marker, never folded into `status`.
+  weakEvidence?: boolean;
+}
 
 export interface PipelineStep {
   key: string;
@@ -54,7 +64,7 @@ function workerStep(worker: Pipeline["workers"][number], pipeline: Pipeline): Pi
   else if (decision) badges.push({ text: decision, tone: "muted" });
   const failure = worker.attempts[worker.attempts.length - 1]?.failureReason;
   const checks = delegation?.result?.checks ?? [];
-  const issues = checks.filter((check) => check.outcome !== "passed");
+  const issues = checks.filter((check) => check.outcome !== "passed" && !check.closedBy);
   // A durable worker_result payload is the strongest terminal signal there
   // is: the graph/runtime status string is a coarser projection that has
   // more values than this popover recognizes (e.g. a work-graph attempt
@@ -67,6 +77,9 @@ function workerStep(worker: Pipeline["workers"][number], pipeline: Pipeline): Pi
   // falls through to "done", or the check gets hidden behind a green icon.
   const mappedStatus: StepStatus = status === "completed" ? (issues.length > 0 ? "issues" : "done")
     : status === "completed_with_issues" ? "issues" : status === "running" ? "active"
+    // A host disconnect paused this worker before it could report; recovery
+    // reconciles it from saved state, so it must never render as failed.
+    : status === "interrupted" ? "interrupted"
     : ["failed", "error"].includes(status) ? "failed" : ["cancelled", "canceled"].includes(status) ? "cancelled"
     : reported ? (issues.length > 0 ? "issues" : "done") : "pending";
   if (mappedStatus === "issues" && issues.length > 0) {
@@ -79,7 +92,7 @@ function workerStep(worker: Pipeline["workers"][number], pipeline: Pipeline): Pi
     title,
     subtitle: [workerDisplayName(worker), workerModelDisplay(route), route?.effort].filter(Boolean).join(" · "),
     badges,
-    body: delegation?.result?.summary ?? (status === "failed" || status === "error" ? failure ?? undefined : undefined),
+    body: delegation?.result?.summary ?? (["failed", "error", "interrupted"].includes(status) ? failure ?? undefined : undefined),
     items: workerResultItems(checks),
     assignmentRef: ref,
     usage: worker.attempts[worker.attempts.length - 1],
@@ -95,7 +108,7 @@ function nodeStep(node: NonNullable<Pipeline["plan"]>["nodes"][number]): Pipelin
   const firstLine = node.objective.split(/(?<=[.!?])\s|\n/, 1)[0].trim();
   const role = node.role.replace(/^worker-/i, "");
   const checks = node.result?.checks ?? [];
-  const issues = checks.filter((check) => check.outcome !== "passed");
+  const issues = checks.filter((check) => check.outcome !== "passed" && !check.closedBy);
   // A retained result is this node's own terminal signal, independent of
   // whatever raw runtime status string reached the client: an unrecognized
   // status must never hide a reported result behind the unstarted number.

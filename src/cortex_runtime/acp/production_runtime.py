@@ -260,12 +260,15 @@ class ProductionOrchestratingRuntime:
         runtime = self._runtime_for_project(project_root)
         return runtime.cancel_task(task_id, session_id, emit_tool_call=emit_tool_call)
 
-    def disconnect(self, session_id):
+    def disconnect(self, session_id, trigger=None):
         """T028: forwarded from ``acp.agent.Agent._handle_eof``/
         ``handle_writer_closed`` for every session on the disconnected
-        connection -- see ``OrchestratingRuntime.disconnect_session``."""
+        connection -- see ``OrchestratingRuntime.disconnect_session``.
+        Returns whether any project runtime recorded the disconnect."""
+        recorded = False
         for runtime in list(self._runtimes.values()):
-            runtime.disconnect_session(session_id)
+            recorded = runtime.disconnect_session(session_id, trigger=trigger) or recorded
+        return recorded
 
     def shutdown(self):
         """Shut down every project runtime owned by this ACP daemon.

@@ -194,9 +194,11 @@ with `outside_command`.
 Every side effect has a durable started receipt before execution. Identical retries
 return the retained result. Conflicting keys fail. An interrupted operation with
 an unknown outcome is never automatically executed again. Complete command bytes
-are stored as an artifact; a passed check must reference a completed, successful
-command receipt belonging to the exact worker attempt. An MCP success envelope,
-model text or missing signal cannot establish a passing check.
+are stored as an artifact; a passed check must reference a completed, successful,
+nontrivial command receipt with complete retained output belonging to the exact
+worker attempt (see [check evidence](orchestration.md#check-evidence)). An MCP
+success envelope, an engine-native tool call, model text or missing signal cannot
+establish a passing check; such a claim is kept `unverified`.
 
 ## External MCP
 

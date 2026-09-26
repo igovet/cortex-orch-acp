@@ -194,6 +194,11 @@ def _acp_tool_call_kind(kind: str | None) -> str:
 _ACP_TOOL_CALL_STATUSES = frozenset({"pending", "in_progress", "completed", "failed"})
 
 
+# The status suffix appended to a worker card's title (see
+# worker-display.ts's parseWorkerCardTitle).
+_WORKER_STATUS_SUFFIX = re.compile(r"(?:\s+·\s+(?:Completed with issues|Cancelled|Interrupted))+$")
+
+
 def _acp_tool_call_status(status: str | None) -> str:
     return status if status in _ACP_TOOL_CALL_STATUSES else "in_progress"
 
@@ -243,6 +248,20 @@ def worker_result_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
         blocker = _clip_worker_result_text(check.get("blocker"), _WORKER_RESULT_CHECK_BLOCKER_MAX_CHARS)
         if blocker:
             entry["blocker"] = blocker
+        # closedBy: an exact later rerun closed this failure (kept as run
+        # history, resolved). claimedOutcome/evidenceGap: the runtime kept an
+        # insufficiently-evidenced "passed" claim as unverified/failed. Both
+        # are already stored by delegation.evidence.accept_checks -- never
+        # re-derived here, matching pipeline.ts's identical projection.
+        closed_by = check.get("closed_by")
+        if isinstance(closed_by, str) and closed_by.strip():
+            entry["closedBy"] = closed_by.strip()[:128]
+        claimed_outcome = check.get("claimed_outcome")
+        if isinstance(claimed_outcome, str) and claimed_outcome.strip():
+            entry["claimedOutcome"] = claimed_outcome.strip()
+        evidence_gap = check.get("evidence_gap")
+        if isinstance(evidence_gap, str) and evidence_gap.strip():
+            entry["evidenceGap"] = evidence_gap.strip()
         checks.append(entry)
     return {
         "summary": _clip_worker_result_text(payload.get("summary"), _WORKER_RESULT_SUMMARY_MAX_CHARS),
@@ -1053,6 +1072,11 @@ class OrchestratingRuntime:
         # SecondCoordinatorRefused guard already prevents two concurrent
         # loops for the same task in this process).
         self._active_cancel_events: dict[str, threading.Event] = {}
+        # Tasks whose host connection closed (plugin update/restart), and the
+        # daemon teardown that follows: transport loss, not a user stop or a
+        # worker failure.  See recovery.worker_reconciliation.
+        self._host_disconnected: set[str] = set()
+        self._shutting_down = threading.Event()
         # T023: set by _ensure_coordinator right after a successful
         # recovery/replacement, consumed (popped) by the next _run call for
         # this task_id to emit an honest "new-session recovery" status line
@@ -1135,6 +1159,8 @@ class OrchestratingRuntime:
                 raise SecondCoordinatorRefused()
             self._active_tasks.add(task_id)
             self._active_cancel_events[task_id] = cancel_event
+            # A new turn arrives over a live connection.
+            self._host_disconnected.discard(task_id)
             self._session_task[session_id] = task_id
             self._worker_panel_mode[task_id] = False
             self._task_display_emitters[task_id] = emit_display_update
@@ -1254,7 +1280,7 @@ class OrchestratingRuntime:
             emit_tool_call=emit_tool_call, stop_source="paseo_session_cancel",
         )
 
-    def disconnect_session(self, session_id: str) -> None:
+    def disconnect_session(self, session_id: str, trigger: str | None = None) -> bool:
         """T028 (host transport EOF/writer-closed): called once per
         session on the disconnected ACP connection (see ``acp.agent.Agent
         ._handle_eof``/``handle_writer_closed``). State up to this point is
@@ -1277,7 +1303,14 @@ class OrchestratingRuntime:
 
         An unknown ``session_id`` (never started a turn in this process) is
         a no-op beyond the reaper sweep, which is unconditional and safe to
-        call redundantly (idempotent, bounded)."""
+        call redundantly (idempotent, bounded).
+
+        ``trigger`` is what the ACP process observed first (``sigterm``,
+        ``stdin_eof``, ``writer_closed``), kept on the record.
+
+        Returns whether the ``host_disconnected`` record was written, so the
+        ACP agent records a session that was only loaded itself."""
+        recorded = False
         task_id = self._session_task.get(session_id)
         if task_id is not None:
             # The host transport is now definitively closed.  Do not leave a
@@ -1285,6 +1318,9 @@ class OrchestratingRuntime:
             # request must fail closed rather than block on a dead pipe.
             self._release_task_host_requesters(task_id, session_id=session_id)
             with self._lock:
+                # Marked before the event is set: the turn it wakes suspends
+                # without cancelling work (orchestration.controller).
+                self._host_disconnected.add(task_id)
                 active_event = self._active_cancel_events.get(task_id)
                 session_ref = self._coordinator_sessions.get(task_id)
             turn_state = "cancel_event_set" if active_event is not None else "no_active_turn_in_process"
@@ -1300,17 +1336,20 @@ class OrchestratingRuntime:
                     except Exception:
                         pass
             try:
-                delegation_events.append_event(
-                    self._store, task_id, "progress", f"disconnect:{session_id}:{time.monotonic_ns()}",
-                    dict(note="host disconnected", turn=turn_state, permission_invalidated=permission_invalidated),
-                    origin="runtime",
+                from ..recovery.worker_reconciliation import record_host_disconnect
+
+                record_host_disconnect(
+                    self._store, task_id, session_id, f"disconnect:{session_id}:{time.monotonic_ns()}",
+                    turn=turn_state, permission_invalidated=permission_invalidated, trigger=trigger,
                 )
+                recorded = True
             except Exception:
                 pass
         try:
             engine_reaper.sweep(self._store, self._engine)
         except Exception:
             pass
+        return recorded
 
     def shutdown(self) -> None:
         """T017 (fresh review, MEDIUM): signal every queued-for-capacity
@@ -1318,6 +1357,9 @@ class OrchestratingRuntime:
         owned coordinator/worker process with a confirmed/ambiguous
         release, and shut down the worker-dispatch executor. Idempotent;
         safe to call once at process/runtime teardown."""
+        # First, so every turn and worker the teardown interrupts reads it
+        # as transport loss rather than a failure (see transport_lost).
+        self._shutting_down.set()
         shutdown = getattr(self._engine, "shutdown", None)
         if shutdown is not None:
             # Capacity-aware SessionRuntime (see
@@ -1326,6 +1368,13 @@ class OrchestratingRuntime:
             # with a confirmed/ambiguous release.
             shutdown()
         self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def transport_lost(self, task_id: str) -> bool:
+        """Whether this task's host connection closed or this daemon is
+        tearing down: interrupted work then stays as persisted for recovery
+        instead of being cancelled or recorded as failed."""
+        with self._lock:
+            return self._shutting_down.is_set() or task_id in self._host_disconnected
 
     def _release_task_host_requesters(self, task_id: str, *, session_id: str | None = None) -> None:
         """Drop host request relays once no user decision can be delivered.
@@ -1486,7 +1535,28 @@ class OrchestratingRuntime:
             # (freshly allocated) attempt id before.
             launch["recovery"] = True
         instructions = composed_instructions(role_set)
-        session_id = self._engine.open("shared_project_root", launch, instructions)
+        try:
+            session_id = self._engine.open("shared_project_root", launch, instructions)
+        except Exception as error:
+            # P1 diagnosable launch failure: this is the one place a
+            # coordinator engine session actually starts (spawns the child
+            # process, e.g. codex-acp/claude-agent-acp) -- a failure here
+            # happens *before* orchestration.state.TaskMachine.create ever
+            # runs (see orchestration.controller.run, called only once this
+            # method has returned), so the task can be durably bound
+            # (bootstrap.bootstrap_task already committed a `tasks` row and
+            # this method's own caller already committed `task_orchestration`)
+            # with no `runtime_tasks` row yet -- exactly the shape a live
+            # trace with no such row, but a bound task id, shows. Tagging
+            # (never replacing) the exception lets acp.agent's crash
+            # diagnostic name the stage/task/attempt without this module
+            # importing anything from acp.agent, and without changing the
+            # exception's own type (so unrelated callers that inspect it,
+            # e.g. by isinstance, are unaffected).
+            error.cortex_launch_stage = "engine_launch"
+            error.cortex_launch_task_id = task_id
+            error.cortex_launch_attempt_id = attempt_ref
+            raise
         # T035 FINDING-02 fix (superseded, EXT-01 #2): ``self._engine.open``
         # (see ``delegation.live_adapters.EngineSessionManagerAdapter
         # .reconcile_configuration``) runs the coordinator's own first-turn
@@ -2014,15 +2084,22 @@ class OrchestratingRuntime:
         # below), as opposed to the task's very first prompt.
         pre_existing = acp_steering.orchestration_exists(self._store, task_id)
         channel, session_ref = self._ensure_coordinator(task_id)
-        if not pre_existing:
-            # Runtime-owned record, no model turn spent on it (see
-            # pipeline_bootstrap module docstring). Gated on ``not
-            # pre_existing`` only as a cheap skip for every later turn --
-            # publish_initial_pipeline's own durable check (the task's
-            # ``reports`` row) is the actual idempotency guarantee, so a
-            # second first-turn (recovery, replacement session) is still
-            # safe even if this in-process flag were ever wrong.
-            self._publish_initial_pipeline(task_id, channel, content)
+        # Runtime-owned record, no model turn spent on it (see
+        # pipeline_bootstrap module docstring). Always called -- never
+        # gated on ``not pre_existing`` -- because ``task_orchestration``
+        # (what ``pre_existing`` reflects) is committed *before* the
+        # coordinator's engine session ever opens (see
+        # ``_ensure_coordinator``): an engine-launch failure on a task's
+        # very first turn (P1 diagnosable launch failure -- see
+        # ``acp.agent._write_crash_diagnostic``) leaves that row committed
+        # with no pipeline ever published, so every retry's ``pre_existing``
+        # already reads True and a ``not pre_existing`` gate would skip this
+        # call forever. ``publish_initial_pipeline``'s own durable check
+        # (the task's ``reports`` row, checked first, before any write) is
+        # the actual idempotency guarantee and is cheap (one indexed
+        # SELECT) -- a second first-turn (recovery, replacement session,
+        # this retry case) is always a safe no-op.
+        self._publish_initial_pipeline(task_id, channel, content)
         recovery_notice = self._pending_recovery_notice.pop(task_id, None)
         if recovery_notice is not None:
             notice_language = self._resolve_language(task_id, content_hint=content)
@@ -2195,6 +2272,7 @@ class OrchestratingRuntime:
         )
         with self._lock:
             self._active_cancel_events[task_id] = cancel_event
+            self._host_disconnected.discard(task_id)
         try:
             return self._continuation_loop(
                 task_id, session_id, channel, session_ref, text, emit_update, cancel_event, language,
@@ -2792,19 +2870,11 @@ class OrchestratingRuntime:
             elif event.event_type == "assignment_ready" and event.assignment_ref:
                 assignment_ref = event.assignment_ref
                 fields: dict[str, Any] = dict(status="in_progress")
-                role_id = self._delegation_provisioning_role(task_id, assignment_ref)
-                if role_id:
-                    requested = self._delegation_requested_payload(task_id, assignment_ref)
-                    if requested is not None:
-                        # Requirement: the title names the *resolved* role
-                        # id, not the raw hint the coordinator typed --
-                        # this is the first point a resolved id exists.
-                        route = self._delegation_route_label(task_id, assignment_ref)
-                        who = _display_role(role_id) + (f" · {route}" if route else "")
-                        base_title = f"Worker: {who} — {requested.get('title', '')}"
-                        fields["title"] = base_title
-                        with self._lock:
-                            self._worker_card_title[assignment_ref] = base_title
+                base_title = self._worker_base_title(task_id, assignment_ref)
+                if base_title:
+                    fields["title"] = base_title
+                    with self._lock:
+                        self._worker_card_title[assignment_ref] = base_title
                 # The route is in the title. The body belongs to the
                 # worker's own actions, and putting anything else there
                 # takes the space they are for.
@@ -2846,6 +2916,14 @@ class OrchestratingRuntime:
                     result_payload=event.payload,
                     **fields,
                 )
+            elif event.event_type in {"assignment_failed", "assignment_cancelled"} and event.assignment_ref \
+                    and self._worker_lost_to_host(task_id, event.assignment_ref):
+                # Recovery wrote off a worker its lost host left running
+                # (recovery_worker_lost), or the replan after it cancelled
+                # that assignment: the card stays Interrupted, never a
+                # generic failure or cancellation. A retry is a new card.
+                self._close_assignment(task_id, event.assignment_ref)
+                self._emit_interrupted_worker_card(task_id, emit_tool_call, event.assignment_ref)
             elif event.event_type == "assignment_failed" and event.assignment_ref:
                 self._close_assignment(task_id, event.assignment_ref)
                 text = f"Not delegated/failed: {event.payload.get('error', 'unknown error')}"
@@ -3158,6 +3236,93 @@ class OrchestratingRuntime:
         except (sqlite3.Error, StoreError):
             return {}
         return result
+
+    def _worker_lost_to_host(self, task_id: str, assignment_ref: str) -> bool:
+        """Whether recovery wrote this assignment off as lost to its host."""
+        from ..recovery.worker_reconciliation import RECOVERY_WORKER_LOST
+
+        store = getattr(self, "_store", None)
+        if store is None:
+            return False
+        try:
+            with store.connection() as db:
+                return db.execute(
+                    "SELECT 1 FROM task_events WHERE task_id=? AND assignment_ref=? AND superseded=0 "
+                    "AND event_type='assignment_failed' AND json_valid(payload_json) "
+                    "AND json_extract(payload_json, '$.error')=? LIMIT 1",
+                    (task_id, assignment_ref, RECOVERY_WORKER_LOST),
+                ).fetchone() is not None
+        except (sqlite3.Error, StoreError):
+            return False
+
+    def _worker_base_title(self, task_id: str, assignment_ref: str) -> str | None:
+        """``Worker: role · route — title`` from durable delegation state."""
+        role_id = self._delegation_provisioning_role(task_id, assignment_ref)
+        if not role_id:
+            return None
+        requested = self._delegation_requested_payload(task_id, assignment_ref)
+        if requested is None:
+            return None
+        # Requirement: the title names the *resolved* role id, not the raw
+        # hint the coordinator typed -- assignment_ready is the first point
+        # a resolved id exists.
+        route = self._delegation_route_label(task_id, assignment_ref)
+        who = _display_role(role_id) + (f" · {route}" if route else "")
+        return f"Worker: {who} — {requested.get('title', '')}"
+
+    def _durable_worker_card(self, task_id: str, assignment_ref: str) -> tuple[bool, str | None]:
+        """Whether the host already has this card, and its latest title
+        without any status suffix. A replacement process never cached
+        either in memory."""
+        card_id = _worker_tool_call_id(assignment_ref)
+        seen = False
+        title = None
+        try:
+            with self._store.connection() as db:
+                rows = db.execute(
+                    "SELECT h.update_json FROM host_updates h "
+                    "JOIN acp_host_sessions s ON s.session_id=h.session_id "
+                    "WHERE s.task_id=? AND h.update_json LIKE ? ORDER BY h.seq",
+                    (task_id, f"%{card_id}%"),
+                ).fetchall()
+        except (sqlite3.Error, StoreError):
+            return False, None
+        for row in rows:
+            try:
+                update = json.loads(row["update_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if update.get("toolCallId") != card_id:
+                continue
+            seen = True
+            if isinstance(update.get("title"), str) and update["title"].strip():
+                title = update["title"]
+        return seen, (_WORKER_STATUS_SUFFIX.sub("", title) if title else None)
+
+    def _emit_interrupted_worker_card(self, task_id: str, emit_tool_call, assignment_ref: str) -> None:
+        from . import replay_store
+
+        seen, durable_title = self._durable_worker_card(task_id, assignment_ref)
+        card_id = _worker_tool_call_id(assignment_ref)
+        with self._lock:
+            base_title = getattr(self, "_worker_card_title", {}).get(assignment_ref)
+            emitted_here = card_id in self._emitted_worker_cards
+        if seen and not emitted_here:
+            # The lost process created this card and the host still shows
+            # it. Paseo 0.9.2 renders any update for it from this later turn
+            # as a second row (observed live, even as tool_call_update); its
+            # own row already settles to Interrupted from the durable attempt
+            # status, and session/load replays the same correction for other
+            # clients (replay_store.terminal_worker_card_reconciliation).
+            return
+        base_title = base_title or durable_title or self._worker_base_title(task_id, assignment_ref)
+        fields: dict[str, Any] = {"status": "failed"}
+        if base_title:
+            fields["title"] = f"{base_title} · Interrupted"
+        self._emit_worker_card(
+            emit_tool_call, assignment_ref,
+            entry=replay_store.interrupted_notice_text(self._store, task_id), **fields,
+        )
 
     def _persist_terminal_worker_card(self, session_id: str, assignment_ref: str, reason: str) -> None:
         """Persist a terminal update to the card's owning session only."""
@@ -3546,7 +3711,14 @@ class OrchestratingRuntime:
                 "JOIN runtime_nodes n ON n.task_id=e.task_id AND n.assignment_ref=e.assignment_ref "
                 "JOIN runtime_tasks t ON t.task_id=n.task_id AND t.revision=n.revision "
                 "WHERE e.task_id=? AND e.event_type='delegation_requested' AND e.superseded=0 "
-                "AND n.status='running' AND t.state IN ('EXECUTING','REVIEWING') ORDER BY e.id",
+                "AND n.status='running' AND t.state IN ('EXECUTING','REVIEWING') "
+                # A restarted runtime has no in-memory dispatch record. An
+                # assignment recovery already closed (its worker was lost
+                # with the old process) waits for retry_lost, never a
+                # second dispatch of the same request.
+                "AND NOT EXISTS (SELECT 1 FROM task_events f WHERE f.task_id=e.task_id "
+                "AND f.assignment_ref=e.assignment_ref AND f.event_type IN ('assignment_failed','assignment_cancelled')) "
+                "ORDER BY e.id",
                 (task_id,),
             ).fetchall()
         to_delegate = []
@@ -3589,6 +3761,10 @@ class OrchestratingRuntime:
                         open_refs.discard(assignment_ref)
                         if not open_refs:
                             self._open_assignments.pop(task_id, None)
+                if self._shutting_down.is_set():
+                    # The executor refuses work during teardown; the request
+                    # stays undispatched for the restarted runtime.
+                    continue
                 self._record_coordinator_dispatch_failure(
                     task_id, error, phase="executor_submit", assignment_ref=assignment_ref,
                 )
@@ -4725,8 +4901,11 @@ class OrchestratingRuntime:
                 # on routing.authorization's own denylist as the only gate.
                 # A stopped/cancelled turn is not evidence of an engine fault.
                 # In particular, never route an interrupted worker to fallback.
+                # Daemon teardown kills the engine: transport loss, left for
+                # restart recovery, never an engine failure or a fallback.
                 from ..orchestration.limits import assignment_current
-                if (cancel_event.is_set() or acp_steering.is_stopped(self._store, task_id)
+                if (cancel_event.is_set() or self._shutting_down.is_set()
+                        or acp_steering.is_stopped(self._store, task_id)
                         or not assignment_current(self._store, task_id, assignment_ref)):
                     with self._lock:
                         self._worker_recoveries_in_flight.discard(assignment_ref)
@@ -4792,6 +4971,8 @@ class OrchestratingRuntime:
                 self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind="unexpected_exception", stop_reason=None)
                 with self._lock:
                     self._worker_recoveries_in_flight.discard(assignment_ref)
+                if self._shutting_down.is_set():
+                    return
                 failure = _describe_failure(error)
                 self._mark_work_attempt_failed(task_id, assignment_ref, failure["error"], f"work-failed:{assignment_ref}:exception")
                 delegation_events.append_event(

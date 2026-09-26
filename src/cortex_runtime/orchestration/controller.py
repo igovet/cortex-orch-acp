@@ -138,9 +138,8 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
     failure_stop_reason = StopReason.END_TURN
     reopened = False
     while True:
-        if cancel_event.is_set():
-            _pause_turn(runtime,task_id,machine,emit_tool_call)
-            return StopReason.CANCELLED
+        if cancel_event.is_set() or _transport_lost(runtime, task_id):
+            return _stop_turn(runtime, task_id, machine, emit_tool_call)
         context = machine.context(task_id)
         state = context['state']
         from .policy import apply_pending_steering
@@ -192,6 +191,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                        'If changes or substantial delegated work are required, submit a focused structured plan. '
                        'Runtime schedules planned workers, then independent review whenever the project changed, then verification. '
                        + _released_request(runtime, task_id)
+                       + _unknown_outcome_request(runtime, task_id)
                        + (_ask_user_request(context) or _verification_repair_request(context)
                           or _failed_worker_request(context))
                        if state == 'PLANNING' else
@@ -273,9 +273,8 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 flush()
                 runtime._finalize_generation_delivery(session_ref, delivery_id,
                                                      failure_kind=type(error).__name__, stop_reason=None)
-                if cancel_event.is_set():
-                    _pause_turn(runtime,task_id,machine,emit_tool_call)
-                    return StopReason.CANCELLED
+                if cancel_event.is_set() or _transport_lost(runtime, task_id):
+                    return _stop_turn(runtime, task_id, machine, emit_tool_call)
                 else:
                     kind = getattr(error, 'kind', None)
                     if kind in _COORDINATOR_SESSION_DEAD_KINDS:
@@ -307,8 +306,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             if outcome.text and not streamed and machine.context(task_id)['state'] != 'ANSWER_READY':
                 emit_update(outcome.text)
             if outcome.stop_reason == StopReason.CANCELLED:
-                _pause_turn(runtime,task_id,machine,emit_tool_call)
-                return StopReason.CANCELLED
+                return _stop_turn(runtime, task_id, machine, emit_tool_call)
             if outcome.stop_reason != StopReason.END_TURN:
                 failure_stop_reason = outcome.stop_reason
                 machine.move(task_id,'BLOCKED',blocker='coordinator_turn_failed:'+outcome.stop_reason.value)
@@ -381,6 +379,10 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             nodes = context['nodes']
             with runtime._lock:
                 running = bool(runtime._running.get(task_id))
+            # A worker ends early when its turn is cancelled or its host
+            # connection closes; that is not a lost worker to retry here.
+            if cancel_event.is_set() or _transport_lost(runtime, task_id):
+                return _stop_turn(runtime, task_id, machine, emit_tool_call)
             if any(n['status'] == 'failed' for n in nodes):
                 # Wait only for nodes still working; a finished node's session
                 # teardown must never hold the task (it hung here once).
@@ -485,7 +487,8 @@ def _stop_question(question, context, language):
                 continue
             unpassed = ', '.join(
                 f"{c['name']}: {c['outcome']}" + (f" ({c['blocker']})" if c.get('blocker') else '')
-                for c in result.get('checks', []) if c.get('outcome') != 'passed'
+                # A failure an exact later rerun closed is history, not a current failure.
+                for c in result.get('checks', []) if c.get('outcome') != 'passed' and not c.get('closed_by')
             )
             details += messages.render('worker_failed_details', language, node=node['node_id'], report_ref=result['report_ref'],
                                        summary=result['summary'],
@@ -565,6 +568,31 @@ def _released_request(runtime, task_id):
     return ('The runtime stopped this task and the user answered its stop question (see retained events). '
             'If the user chose to finish or stop, submit answer_submit with a final summary grounded in the retained reports, '
             'stating plainly which checks did not pass. Otherwise submit a new plan or ask the user. ') if released else ''
+
+
+def _unknown_outcome_request(runtime, task_id):
+    from ..recovery.worker_reconciliation import unknown_outcome_request
+    with runtime._store.connection() as db:
+        return unknown_outcome_request(db, task_id)
+
+
+def _transport_lost(runtime, task_id):
+    lost = getattr(runtime, 'transport_lost', None)
+    return bool(lost is not None and lost(task_id))
+
+
+def _stop_turn(runtime, task_id, machine, emit_tool_call):
+    """End an interrupted turn. Only a user's cancel pauses the task.
+
+    A closed host connection (a plugin update restarts the provider) or the
+    daemon teardown after it is transport loss: task, nodes and workers stay
+    as persisted, and the restarted runtime reconciles them (coordinator
+    recovery marks lost workers; retry_lost never repeats an action whose
+    outcome was not retained).
+    """
+    if not _transport_lost(runtime, task_id):
+        _pause_turn(runtime, task_id, machine, emit_tool_call)
+    return StopReason.CANCELLED
 
 
 def _pause_turn(runtime,task_id,machine,emit_tool_call):

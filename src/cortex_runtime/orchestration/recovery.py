@@ -100,8 +100,12 @@ def reconcile_results(store, task_id):
         saved = json.loads(request['result_json'])
         if saved.get('complete'):
             continue
-        result = saved['result']
-        if hashlib.sha256(encoded(result).encode()).hexdigest() != request['digest']:
+        if hashlib.sha256(encoded(saved['result']).encode()).hexdigest() != request['digest']:
+            raise StoreError('result_receipt_digest_mismatch')
+        # The checks the runtime accepted at submission (older rows carry
+        # only the claim; record_result still refuses an unverified pass).
+        result = saved.get('accepted', saved['result'])
+        if (result['report_ref'], result['summary']) != (saved['result']['report_ref'], saved['result']['summary']):
             raise StoreError('result_receipt_digest_mismatch')
         with store.connection() as db:
             provision = db.execute('SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?',
@@ -118,7 +122,8 @@ def reconcile_results(store, task_id):
         if len(matching) != 1 or matching[0]['origin'] != request['actor']:
             raise StoreError('ambiguous_result_publication')
         observed = json.loads(matching[0]['payload_json'])
-        observed_checks = [{k: c[k] for k in ('name', 'outcome', 'tool_call_ref', 'blocker') if k in c and c[k] is not None}
+        observed_checks = [{k: c[k] for k in ('name', 'outcome', 'tool_call_ref', 'blocker', 'claimed_outcome', 'evidence_gap', 'closed_by')
+                            if k in c and c[k] is not None}
                            for c in observed.get('checks', [])]
         if observed.get('summary') != result['summary'] or observed_checks != result['checks']:
             raise StoreError('result_publication_mismatch')

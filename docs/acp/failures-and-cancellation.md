@@ -105,6 +105,78 @@ currently supports a confirmed pause, so cancel is the correct default per
 the task's own "confirmed pause, else cancel" rule — never hidden
 continuing paid work.
 
+A disconnect cancels the in-flight engine turns, never the task's outcome.
+A Paseo plugin update restarts the plugin process and closes every open
+Cortex connection at once; Paseo then marks each open chat, including
+already completed ones, with `Provider connection closed`. That message is
+host-owned and cannot be suppressed from inside the plugin. Inside Cortex:
+
+- The disconnected task is marked before its turn is woken, so the
+  controller ends the turn without `policy.interrupt`: no
+  `TURN_INTERRUPTED`, no `turn_interrupted` assignment cancellation, and
+  task, node and assignment state stay as persisted. Only a user's cancel
+  pauses the task that way.
+- `OrchestratingRuntime.shutdown()` sets a teardown flag first. A worker
+  whose engine the teardown kills, even one whose turn event the
+  disconnect cannot reach, is not recorded as `engine_failure`, is not
+  routed to fallback and is not re-dispatched during teardown.
+- The durable record is a `progress` event of kind `host_disconnected`
+  (`recovery.worker_reconciliation.record_host_disconnect`) with the exact `session_id`,
+  `task_id`, `coordinator_attempt_id`, each interrupted worker's
+  `node_id`/`assignment_ref`/`attempt_id`, each gateway action whose
+  receipt is still open (`unknown_outcome_actions`: operation,
+  `tool_call_ref`, attempt), the task state at disconnect, the runtime
+  package version and `history`: `complete`, `truncated` (more than 50
+  entries) or `unavailable:<error>`. A chat only restored by `session/load`
+  in this process, with no turn here, is recorded by the ACP agent with
+  `turn: no_turn_in_process`. `trigger` names what the process observed
+  first: `sigterm`, `stdin_eof` or `writer_closed`. In the isolated dev
+  Paseo 0.9.2, `plugin reload cortex-acp` produced `sigterm` (the load shim
+  forwards it); the record was written about 0.4 s after the reload began
+  and the process released its engines and exited before any SIGKILL.
+- Every worker launch also records the Cortex ACP process that owns it
+  (an `acp_host` row beside the worker's `attempt_process_registry` row).
+  When no signal reached the old process (SIGKILL, OOM), there is no
+  `host_disconnected` record; a later reader treats a worker with no
+  terminal event whose owning process is provably gone as interrupted. A
+  live or unidentifiable owner never qualifies, and the read writes nothing
+  (`recovery.worker_reconciliation.interrupted_attempts`).
+- Paseo 0.9.2 does not reload the session after a plugin reload and sends
+  nothing until the next prompt, so a worker card would otherwise keep its
+  last `running` status through a page reload. The plugin's card polls the
+  durable attempt status while the host shows it running and settles on
+  Interrupted (or any other settled status) without a new message; the
+  Pipeline panel reads the same projection.
+- After restart, persisted state is the authority. The next prompt runs
+  coordinator recovery: interrupted workers are recorded
+  `recovery_worker_lost`, and `retry_lost` retries a lost node at most
+  twice only after observed process absence and only when it owns no open
+  gateway receipt. A node that does is returned to the coordinator with
+  `lost_worker_action_outcome_unknown`; the coordinator's planning request
+  lists each such action and states that it was not re-run. The
+  gateway's own `request_key` fence still refuses a repeat of the same call.
+  A worker written off as `recovery_worker_lost`, and the replan
+  cancellation that follows, still displays as Interrupted, never as a
+  generic failure; the retry is a new card. The recovery turn sends no update
+  for a lost card the host already shows, because Paseo 0.9.2 renders an
+  update from a later turn as a second row.
+- A restarted runtime never re-dispatches a delegation request that
+  recovery already closed with `assignment_failed`/`assignment_cancelled`.
+- On `session/load`, while this session's latest `host_disconnected`
+  record has no later `user_message`, the agent appends one read-only,
+  localized notice after the replayed history (message id
+  `cortex-connection:<event id>`, `_meta.cortexConnectionNotice`). It
+  states the saved task state (and that a completed result is unchanged),
+  the number of interrupted workers and the number of actions with an
+  unknown outcome. Loading writes nothing.
+
+Native engine tools are not gated per call, so a native edit or shell
+command in flight at the disconnect has no gateway receipt and cannot be
+listed as an unknown outcome; recovery still never replays the lost turn.
+The `plugin reload` path was exercised in the isolated dev Paseo 0.9.2 on
+2026-09-26 (see [the rewrite status](runtime-rewrite-status.md)); until the
+deployed package carries it, apply plugin updates between active tasks.
+
 After the agent joins its prompt workers at daemon teardown, it also calls
 `ProductionOrchestratingRuntime.shutdown()` (and each cached
 `OrchestratingRuntime.shutdown()`). This closes the owned engine processes
@@ -174,3 +246,8 @@ request must never be provisioned under a replacement coordinator channel:
 that changes its idempotency identity and creates an orphan worker. Such a
 request records `recovery_worker_lost`; the coordinator can issue a fresh
 explicit delegation.
+
+
+## 5. Reload recovery limits
+
+A plugin disconnect is transport state, not task completion or failure. `host_disconnected` preserves the exact identities that exist, runtime package version, available-history status and any open gateway receipts; recovery consults the persisted task state after restart. An action with an open receipt remains unknown and is not automatically repeated. Paseo renders interrupted worker state through the title suffix because the installed ACP bridge drops `_meta` from `tool_call_update`. Until reload recovery is qualified for the deployed version, apply plugin updates between active tasks. A host `SIGKILL` without `SIGTERM` still bypasses disconnect recording; a later reader then identifies the interrupted worker from its provably gone owning process instead, which needs a readable `/proc` (an unreadable identity leaves the worker's status unchanged). Native engine actions lack the retained gateway receipt that permits exact outcome reconciliation.

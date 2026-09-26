@@ -27,7 +27,7 @@
 
 ## What Cortex is
 
-Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts.
+Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts. A worker check is marked passed only when its exact same-attempt `command_run` or user-confirmed `outside_command` receipt proves a complete, nontrivial command exited 0. Engine shell calls, reads and incomplete output cannot verify a check; older reports remain intact and weak historic evidence is marked separately when read.
 
 Worker routes and effort are selected from observed models by the task (role tier, complexity, work-kind engine affinity configurable with `engine_affinity` in `routing.json`, and the coordinator's hint) and each engine's subscription plan usage; how often an engine was used before is not a factor. Light work stays on light models and hard work gets stronger ones. Codex Luna runs at high to max effort and also competes for ordinary development work. A normal standard-tier development retry or review fix keeps the standard candidate pool and targets Luna at max; explicit high-complexity work and deep roles still escalate and exclude Luna. Plan model hints are constrained recommendations; explicit routing rules remain authoritative.
 
@@ -48,6 +48,9 @@ Install from a branch, tag, or commit by adding `--ref`:
 ```bash
 paseo plugin install github:igovet/cortex-orch-acp:integrations/paseo --ref dev
 ```
+
+
+Apply plugin updates between active tasks until session recovery has been qualified for the version being deployed. A transport disconnect preserves task state and recovery reconciles saved Cortex state, but a host `SIGKILL` without `SIGTERM` cannot be recorded, and native engine actions do not have retained command receipts.
 
 Update an installed Git plugin:
 
@@ -89,4 +92,5 @@ See the [configuration guide](docs/configuration.md) for JSON configuration file
 - [Routing and fallback](docs/acp/routing-and-fallback.md): worker routing and multi-provider fallback
 - [Project storage and recovery](docs/project/storage.md): task storage, format upgrades, recovery
 - [Security](SECURITY.md): the sandbox and permission boundary
+- [Verification guidance](docs/project/verification.md): check evidence rules and test commands
 - [ACP documentation index](docs/acp/index.md): full reference

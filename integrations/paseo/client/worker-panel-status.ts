@@ -2,7 +2,9 @@ export type WorkerSection = "active" | "completed";
 
 export function workerSection(status: string | undefined, eventCount: number): WorkerSection {
   const value = (status ?? "").toLowerCase();
-  if (["reported", "completed", "succeeded", "success", "failed", "cancelled", "canceled", "error"].includes(value)) return "completed";
+  // A host-disconnect pause is not running; it belongs with the other
+  // terminal-for-now cards, not the live "active" section.
+  if (["reported", "completed", "succeeded", "success", "failed", "cancelled", "canceled", "error", "interrupted"].includes(value)) return "completed";
   if (["running", "provisioning", "ready", "in_progress", "in-progress", "started"].includes(value)) return "active";
   // The durable assignment is enough to show its worker immediately. The
   // first engine event may arrive later while the worker is provisioning.

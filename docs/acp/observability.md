@@ -264,3 +264,8 @@ After a successful observed Cortex delegate call, trailing coordinator prose
 is withheld until another tool starts; the worker card represents the handoff.
 The engine turn is not cancelled, so further delegations still execute. This
 presentation rule does not affect acceptance, worker evidence, or final replies.
+
+
+## Paseo invoke latency and request coalescing
+
+The plugin's GUI RPC handlers that previously used synchronous child-process calls now use asynchronous `execFile` with bounded concurrency. Worker-history identities are cached, and overlapping worker-history and pipeline poll requests are coalesced. `cortex-acp.invoke` timeout diagnostics identify the RPC method so a slow history read can be distinguished from other handlers. These measures remove the observed event-loop serialization cause and reduce duplicate work; they do not by themselves establish a timeout-free workload or a rendered GUI result. Use the plugin typecheck and unit-test commands in [verification guidance](../project/verification.md), and inspect the actual Electron timeline for GUI claims.

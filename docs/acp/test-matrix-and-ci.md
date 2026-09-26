@@ -59,8 +59,9 @@ invocation. It cannot be reached by running the test suite.
 One test (`tests/test_artifact_revision.py`, unreadable-entry handling) skips
 itself when the process can bypass directory permissions. A containerized CI
 runner executing as root would silently never run it. Configure CI with a
-non-root user. The suite otherwise has no skips: as of T034 it is
-**2053 passed, 0 failed, 0 skipped**.
+non-root user. Current totals depend on the checkout and environment; record
+the exact passed, skipped and failed counts from each run rather than relying
+on the historical T034 count.
 
 Remaining conditional guards are platform guards (POSIX FIFO support,
 symlink support, `tmux` presence) whose logic is also covered by unconditional
