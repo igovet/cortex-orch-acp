@@ -44,6 +44,74 @@ def test_delete_checks_exact_content_and_replays_receipt(worker,monkeypatch):
     assert target.read_text()=='new'
 
 
+def test_delete_accepts_binary_file_with_matching_raw_hash(worker,monkeypatch):
+    import hashlib
+    from cortex_runtime.orchestration import consent
+    monkeypatch.setattr(consent,'request',lambda *a,**k: True)
+    store,ch,directory=worker
+    target=directory/'binary.dat';data=b'\x00\xff\x80binary'
+    target.write_bytes(data)
+    args=dict(path=str(target.relative_to(store.project_root)),
+              expected_sha256=hashlib.sha256(data).hexdigest(),request_key='delete-binary')
+    assert dispatch(store,ch,'project_delete',args)==dict(deleted=True)
+    assert not target.exists()
+
+
+def test_delete_refuses_binary_file_with_wrong_raw_hash(worker,monkeypatch):
+    from cortex_runtime.orchestration import consent
+    monkeypatch.setattr(consent,'request',lambda *a,**k: True)
+    store,ch,directory=worker
+    target=directory/'binary.dat';data=b'\x00\xff\x80binary'
+    target.write_bytes(data)
+    args=dict(path=str(target.relative_to(store.project_root)),
+              expected_sha256='0'*64,request_key='delete-binary-wrong-hash')
+    with pytest.raises(StoreError,match='gateway_write_conflict'):
+        dispatch(store,ch,'project_delete',args)
+    assert target.read_bytes()==data
+
+
+def test_project_read_keeps_utf8_text_hash_and_character_paging(worker):
+    import hashlib
+    store,ch,directory=worker
+    target=directory/'text.txt';data='héllo'.encode('utf-8')
+    target.write_bytes(data)
+    result=dispatch(store,ch,'project_read',dict(path=str(target.relative_to(store.project_root)),offset=1,limit=2))
+    assert result==dict(content='él',sha256=hashlib.sha256(data).hexdigest(),
+                       total_characters=5,next_offset=3)
+
+
+def test_project_read_returns_binary_hash_size_and_marker(worker):
+    import hashlib
+    store,ch,directory=worker
+    target=directory/'binary.dat';data=b'\x00\xff\x80binary'
+    target.write_bytes(data)
+    result=dispatch(store,ch,'project_read',dict(path=str(target.relative_to(store.project_root))))
+    assert result==dict(sha256=hashlib.sha256(data).hexdigest(),size_bytes=len(data),binary=True)
+
+
+@pytest.mark.parametrize('link_kind',['symlink','hardlink'])
+def test_delete_refuses_symlink_and_hardlink_files(worker,monkeypatch,link_kind):
+    import hashlib
+    from cortex_runtime.orchestration import consent
+    monkeypatch.setattr(consent,'request',lambda *a,**k: True)
+    store,ch,directory=worker
+    source=directory/'source.dat';data=b'linked bytes';source.write_bytes(data)
+    target=directory/'linked.dat'
+    if link_kind=='symlink':
+        target.symlink_to(source)
+    else:
+        target.hardlink_to(source)
+    args=dict(path=str(target.relative_to(store.project_root)),
+              expected_sha256=hashlib.sha256(data).hexdigest(),request_key='delete-'+link_kind)
+    with pytest.raises(StoreError):
+        dispatch(store,ch,'project_delete',args)
+    assert source.read_bytes()==data
+    if link_kind=='symlink':
+        assert target.is_symlink()
+    else:
+        assert target.read_bytes()==data
+
+
 def test_evidence_failure_after_command_preserves_unknown_outcome(worker,monkeypatch):
     store,ch,directory=worker
     from cortex_runtime.recovery import large_output_store

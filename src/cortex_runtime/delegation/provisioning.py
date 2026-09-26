@@ -827,8 +827,7 @@ class ProvisioningService:
                 session_ref = self._engine.open(row["workspace_binding_id"], launch, composed_instructions(role_set))
             except Exception as error:
                 # T017 (fresh review, MEDIUM/starvation): a queued open
-                # that never reserves (cancelled, or provably
-                # unsatisfiable/timed-out capacity -- see
+                # that never reserves (cancelled or timed-out capacity -- see
                 # delegation.live_adapters.QueuedOpenCancelled, identified
                 # here only by its ``kind`` attribute so this module never
                 # imports the live/adapter-specific exception type) must
@@ -841,7 +840,7 @@ class ProvisioningService:
                 # existing has_intent/has_outcome branch above and the
                 # provisioning-recovery tests).
                 kind = getattr(error, "kind", None)
-                if kind not in ("capacity_unsatisfiable", "capacity_timeout", "attempt", "task", "shutdown"):
+                if kind not in ("capacity_timeout", "attempt", "task", "shutdown"):
                     raise
                 self._fail(idempotency_key, kind)
                 raise PortableError(

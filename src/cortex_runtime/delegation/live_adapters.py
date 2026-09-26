@@ -543,7 +543,10 @@ class EngineSessionManagerAdapter:
     only once the underlying process's exit is *positively observed*
     (``EngineProcess.wait_exited``); an unconfirmed termination (grace
     expired with the process still not observed exited) is marked
-    ``ambiguous`` instead and keeps counting against the limit.
+    ``ambiguous`` instead and keeps counting against the limit. The limit
+    is the resolved connection's own ``max_concurrent_sessions`` (default
+    4), applied separately to coordinator and worker reservations; an
+    explicit ``capacity_limit`` can only lower it.
     """
 
     def __init__(
@@ -828,7 +831,12 @@ class EngineSessionManagerAdapter:
             self._authorize_dispatch(record, task_id, launch, project_root=project_root)
         reservation_id = None
         if self._store is not None:
-            reservation_id = self._reserve_capacity_blocking(record.id, task_id, attempt_id, launch)
+            from . import capacity as delegation_capacity
+
+            reservation_id = self._reserve_capacity_blocking(
+                record.id, task_id, attempt_id, launch,
+                limit=delegation_capacity.limit_for_connection(record, self._capacity_limit),
+            )
         # EXT-01 #8 ("startup cleanup"): from here on a real process may
         # exist (``EngineSessionManager._ensure_started`` spawns it lazily,
         # inside ``negotiate()``) before this method ever reaches its own
@@ -2024,7 +2032,10 @@ class EngineSessionManagerAdapter:
             origin="runtime",
         )
 
-    def _reserve_capacity_blocking(self, connection_id: str, task_id: str, attempt_id: str, launch: Mapping[str, object]) -> str:
+    def _reserve_capacity_blocking(
+        self, connection_id: str, task_id: str, attempt_id: str, launch: Mapping[str, object],
+        *, limit: int | None = None,
+    ) -> str:
         """Block (bounded backoff poll, never a model prompt) until a
         capacity unit is reserved. Deliberately *inside* ``open()`` -- below
         ``delegation.provisioning``'s idempotency-key claim/steal protocol
@@ -2032,12 +2043,19 @@ class EngineSessionManagerAdapter:
         just taking a while to launch", never interacting with that
         protocol's own contention recovery (see
         ``acp.orchestrating_runtime.OrchestratingRuntime._provision_and_prompt``'s
-        docstring for why retrying ``delegate()`` itself would be unsafe)."""
+        docstring for why retrying ``delegate()`` itself would be unsafe).
+
+        ``limit`` is the resolved connection's own ``max_concurrent_sessions``
+        (:func:`delegation.capacity.limit_for_connection`, which :meth:`open`
+        passes); when omitted, only this adapter's explicit ``capacity_limit``
+        or the default applies. Only reservations of this open's own kind
+        count against it, so a coordinator never takes a worker slot."""
         from . import capacity as delegation_capacity
         from . import events as delegation_events
 
         kind = "worker" if launch.get("assignment_id") else "coordinator"
-        limit = self._capacity_limit or delegation_capacity.DEFAULT_MAX_CONCURRENT_SESSIONS
+        if limit is None:
+            limit = delegation_capacity.limit_for_connection(None, self._capacity_limit)
         queued_note_recorded = False
         backoff = 0.05
         deadline = time.monotonic() + self._queue_timeout_seconds
@@ -2060,16 +2078,10 @@ class EngineSessionManagerAdapter:
                     origin="runtime",
                 )
                 queued_note_recorded = True
-            if kind == "worker":
-                # T017 (fresh review, MEDIUM starvation): if every active
-                # reservation on this connection is a *coordinator*'s own
-                # (permanent-for-task-lifetime) reservation, this worker can
-                # never succeed no matter how long it waits -- fail fast and
-                # explicitly instead of queueing forever. Count and kinds
-                # must come from one snapshot: a release between separate
-                # reads could otherwise produce a false unsatisfiable result.
-                if delegation_capacity.saturated_by_coordinators(self._store, connection_id, limit):
-                    raise QueuedOpenCancelled("capacity_unsatisfiable")
+            # No coordinator-starvation fast-fail: coordinator reservations
+            # (held for a task's lifetime) are counted apart from workers,
+            # so a queued worker only ever waits for another worker's
+            # release, the bounded queue deadline, or cancellation.
             if time.monotonic() > deadline:
                 raise QueuedOpenCancelled("capacity_timeout")
             with self._activity_cond:

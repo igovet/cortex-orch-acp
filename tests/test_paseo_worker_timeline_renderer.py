@@ -96,7 +96,8 @@ def test_paseo_workers_button_and_popover_are_removed_while_pipeline_remains():
     # cards in the chat timeline and Pipeline's onOpenWorker still open it.
     assert 'id: "workers"' in source
     assert 'title: "Workers"' in source
-    assert 'Component: WorkerPanel' in source
+    assert '<WorkerPanel {...props} />' in source
+    assert 'label="Workers panel"' in source
     # Pipeline stays fully intact: panel, composer pill and command item.
     assert 'id: "pipeline"' in source
     assert 'id: `pipeline-${agentId}`' in source

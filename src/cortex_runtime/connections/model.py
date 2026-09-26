@@ -176,6 +176,8 @@ def _require_absolute_path(value: object, field_name: str) -> str:
 # unconditionally here (not only by callers) so no code path -- including a
 # hand-tampered connections.json deserialized back into an OsKeyring -- can
 # smuggle a path-shaped value into what must stay a pure keyring lookup key.
+# Validated upper bound of ``ConnectionRecord.max_concurrent_sessions``.
+MAX_CONCURRENT_SESSIONS_LIMIT = 64
 _KEYRING_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -404,11 +406,11 @@ class ConnectionRecord:
                 retry_eligible=False,
                 field="qualified",
             )
-        if isinstance(self.max_concurrent_sessions, bool) or not isinstance(self.max_concurrent_sessions, int) or not 1 <= self.max_concurrent_sessions <= 64:
+        if isinstance(self.max_concurrent_sessions, bool) or not isinstance(self.max_concurrent_sessions, int) or not 1 <= self.max_concurrent_sessions <= MAX_CONCURRENT_SESSIONS_LIMIT:
             raise PortableError(
                 category=PortableErrorCategory.VALIDATION,
                 code="invalid_field",
-                remediation="'max_concurrent_sessions' must be an integer from 1 through 64.",
+                remediation=f"'max_concurrent_sessions' must be an integer from 1 through {MAX_CONCURRENT_SESSIONS_LIMIT}.",
                 retry_eligible=False,
                 field="max_concurrent_sessions",
             )

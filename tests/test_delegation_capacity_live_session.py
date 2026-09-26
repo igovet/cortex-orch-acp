@@ -4,6 +4,7 @@ never a real engine, but a real process lifecycle: confirmed exit frees
 capacity, an unconfirmed (timeout_alive) termination stays ambiguous."""
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 import uuid
@@ -33,10 +34,13 @@ def test_confirmed_process_exit_releases_capacity(tmp_path):
     scenario_path = write_scenario(engine_dir, default_scenario())
     connection_id = new_connection_id()
     record = make_connection_record(connection_id, launch_command=fake_launch_command(scenario_path), environ=environ)
+    # The limit comes from the connection record itself -- no adapter-wide
+    # ``capacity_limit`` override.
+    record = dataclasses.replace(record, max_concurrent_sessions=1)
 
     adapter = EngineSessionManagerAdapter(
         lambda t: record, lambda t: str(tmp_path), environ=environ, call_timeout=10.0,
-        store=store, capacity_limit=1,
+        store=store,
     )
     session_ref = adapter.open("shared_project_root", dict(task_id=task_id, attempt_id="xa_worker1"), "instructions")
     assert session_ref.startswith("es_")

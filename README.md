@@ -35,6 +35,8 @@ Worker routes and effort are selected from observed models by the task (role tie
 
 ### Paseo
 
+If rendering fails in a plugin panel, the composer popover, or a timeline card, Paseo shows a themed fallback for that surface with reopen guidance. If the thrown value cannot safely provide text, the fallback uses `unknown error`.
+
 Paseo installs can prepare Cortex automatically: the plugin manifest’s supported `build` hook runs the setup command before activation.
 
 Install the current GitHub version:

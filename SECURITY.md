@@ -20,6 +20,8 @@ independent review. No model hint can waive review. A model tool call cannot
 select a task state, accept the task or directly create an engine session.
 Plan verification commands execute as literal argv without a shell. Submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses, so a plan cannot defer that syntax error until verification. Structural validation does not prove semantic correctness of a plan, review or implementation.\n\nA worker `passed` check is accepted only with an exact same-attempt `command_run` or user-confirmed `outside_command` receipt for one completed, nontrivial operation, complete untruncated output and exit code 0. Engine-native shell calls and file reads do not verify checks. Insufficient evidence stays `unverified`; observed nonzero exits stay `failed`. Earlier reports are not rewritten, and older evidence is marked weak when projected under the current rule. Check run history is retained; a failure closes only on a later exact verified rerun that remains the latest result for that command.\n\nTransport state is distinct from task outcome. A plugin disconnect records available session/task/attempt identities and history completeness; restart recovery reads persisted state and leaves actions with unknown outcomes unresolved. Until reload recovery is qualified for the deployed version, update the plugin between active tasks. A host SIGKILL without SIGTERM cannot be recorded, and native engine actions cannot be represented by the retained command receipt mechanism.
 
+The Paseo client wraps its rendered panels, composer popover, and timeline card in per-surface error boundaries. If reading or coercing a thrown value fails while formatting the fallback, it uses `unknown error`. This is a UI recovery boundary, not an execution sandbox or a root-cause diagnosis.
+
 ## Tool access and containment
 
 Each channel-bound engine process runs in a Linux `bwrap` engine jail, so its own
@@ -56,6 +58,22 @@ servers (strict MCP config; native Codex MCP entries disabled), hooks and plugin
 The host network is shared, which also exposes abstract Unix sockets of the host
 network namespace. The engine binary itself is trusted, runs as the owner and can
 read what the owner can read.
+
+Outside the jail, entirely unjailed, `connections.quota` lazily runs the
+installed Claude Code CLI's own local `/usage` command (`claude -p /usage
+--output-format json --restricted --strict-mcp-config`) to learn a
+claude-agent-acp connection's plan-usage percentage. The subprocess
+environment comes from `connections.environment.build_process_env`, which
+re-verifies the connection against the on-disk registry before trusting its
+`credential_ref` and sets `CLAUDE_CONFIG_DIR` to that connection's own
+credential directory (never the ambient one); `TZ=UTC` is then applied on
+top. It never starts a model turn, and its result is only ever trusted when
+the parsed JSON itself confirms `is_error: false`, `num_turns: 0` and
+`total_cost_usd: 0` (see `docs/acp/token-and-plan-usage.md`). This is the same
+already-established pattern `connections.account_identity` uses for `claude
+auth status` (a per-connection isolated CLI call, bounded by a short timeout,
+that never raises and never logs a credential) -- both call
+`build_process_env` rather than reading `credential_ref` directly.
 
 Every supplied MCP endpoint is a runtime broker. Cortex operations check the
 current task, assignment, channel and owner epoch. External servers require an

@@ -115,12 +115,15 @@ An operation cannot expand its scope. Steering revokes old worker channels befor
 its text is delivered to a model. Scope/replan/escalation requests are proposals;
 the replacement plan is validated again.
 
-`project_read` is cursor-bounded. `project_write` and `project_delete` require the
-exact existing SHA-256; creation requires `absent`. File operations use no-follow
-directory descriptors and reject symlinks, hardlinks and private components
-`.cortex`, `.git`, `.codex`, `.claude`. `draft_write` accepts only the exact owned,
-unpublished draft ID and marker. Publication rechecks channel authority inside its
-transaction; published reports are immutable.
+`project_read` is cursor-bounded. UTF-8 regular files return text and a SHA-256; a
+non-UTF-8 regular file returns only its SHA-256, byte size and `binary: true`.
+`project_write` and `project_delete` require the exact existing SHA-256; creation
+requires `absent`. `project_delete` supports binary files and checks their raw-byte
+SHA-256 before unlinking. File operations use no-follow directory descriptors and
+reject symlinks, hardlinks and private components `.cortex`, `.git`, `.codex`,
+`.claude`. `draft_write` accepts only the exact owned, unpublished draft ID and
+marker. Publication rechecks channel authority inside its transaction; published
+reports are immutable.
 
 `command_run` requires Linux bubblewrap. It runs as the owner (read-only real
 HOME with its tool caches writable, credential-free environment, shared network)

@@ -33,6 +33,20 @@ from engine_fakes import default_scenario, fake_launch_command, isolated_environ
 from test_mixed_team_ordinary_delegation import _bootstrap, _FakeConfigAdapter, _MODE_BY_ENGINE, _read_log
 
 
+@pytest.fixture(autouse=True)
+def _claude_usage_cli_unavailable(monkeypatch):
+    """This module's fake claude-agent-acp connections have a real,
+    on-disk credential_ref directory (see ``_make_connection``), so
+    ``connections.quota``'s lazy ``/usage`` CLI refresh would otherwise try
+    to spawn one; these tests exercise routing purely through
+    ``quota.observe``/``rate_limit_event``, so the CLI itself is simulated
+    as not installed for this connection (a realistic outcome, and the
+    same one production sees when the CLI is absent)."""
+    def not_installed(argv, env, cwd, timeout):
+        raise FileNotFoundError("claude CLI not installed for this fake connection")
+    monkeypatch.setattr(quota, "_run_claude_usage_subprocess", not_installed)
+
+
 def _make_connection(tmp_path, environ, *, engine, model, request_log, mode=True, efforts=("low", "medium", "high"), **scenario):
     """Like ``test_mixed_team_ordinary_delegation._make_connection``, plus
     an offered effort option, so the auto-chosen effort reaches the wire.

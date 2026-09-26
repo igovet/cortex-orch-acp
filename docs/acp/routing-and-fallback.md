@@ -108,10 +108,12 @@ any engine process is launched. It refuses, with a concrete
   (`routing.store.count_task_attempts`, counted from the audit table
   itself — every past attempt, authorized or fallback, counts).
 
-Per-connection concurrency remains `delegation.capacity.reserve`'s own
-existing atomic job, called strictly after the checks above pass; a
-connection at its `max_concurrent_sessions` limit still queues/refuses
-exactly as T017 already specifies, unaffected by this task's own checks.
+`delegation.capacity.reserve` atomically enforces each connection's
+`max_concurrent_sessions` limit (default 4, configurable from 1 through 64)
+separately for coordinator and worker reservations. Reservations of the other
+kind do not consume that kind's slots, so the combined active count can exceed
+the configured value. A worker waits for worker capacity to become available;
+coordinator reservations cannot consume worker slots.
 Only `PolicyCeiling.limits['attempts']` is enforced anywhere in this task
 (both pre-dispatch, via `authorize_dispatch`, and pre-fallback, via
 `authorize_fallback` — a fallback attempt is still an attempt, counted by
@@ -181,10 +183,10 @@ T023 replacement.
 `acp.orchestrating_runtime.OrchestratingRuntime` wires the actual decision
 point: a worker's own `EngineTurnFailed` (the T017-classified
 `transport_eof`/`timeout_alive`/`poisoned`/generic engine-error kinds —
-never refusal, which is a `PromptOutcome.stop_reason`, not an exception)
-and a `capacity_unsatisfiable`/`capacity_timeout` `PortableError` from
-`delegation.provisioning.ProvisioningService.delegate` both call
-`_attempt_worker_route_fallback`, which:
+never refusal, which is a `PromptOutcome.stop_reason`, not an exception), or a
+`capacity_timeout` `PortableError` from
+`delegation.provisioning.ProvisioningService.delegate`, can call
+`_attempt_worker_route_fallback`. That handler:
 
 1. Reads the active configuration revision's ceiling/route-profile/route-
    details (`configuration_route_extras`) fresh — never a cached/stale
@@ -514,7 +516,11 @@ Expiry works like this:
 
 - For quota and rate limits, the reset time the engine itself reported is used
   (`connections.quota.resets_at`: the most-used open window's `resets_at`).
-  Codex reads it from its rollouts, Claude from its `rate_limit_event`.
+  Codex reads it from its rollouts; Claude merges its adapter's
+  `rate_limit_event` with a lazy, zero-cost read of the Claude Code CLI's own
+  local `/usage` command (see `docs/acp/token-and-plan-usage.md`'s "Claude
+  plan usage: the local `/usage` CLI"), newest observation per window
+  winning.
 - Otherwise a default applies: 60 minutes for quota exhaustion and an
   unavailable model, 30 for an unconfirmed configuration, 15 for a rate limit
   or an engine start failure.
@@ -577,7 +583,8 @@ Known limits:
 - A Claude usage-limit turn whose SDK reports no error kind carries no
   `errorKind`, so it is not recorded. The adapter's `rate_limit_event` with
   `status: rejected` still sets that window to 100% (`connections.quota.observe`),
-  which already keeps the account from being chosen.
+  which already keeps the account from being chosen; the CLI-read `/usage`
+  windows (above) also converge on the same 100% within their own TTL.
 - Records are per project store: another project's first attempt on an
   exhausted account still fails once before it records the route.
 

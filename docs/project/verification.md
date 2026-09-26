@@ -136,6 +136,7 @@ npm --prefix integrations/paseo run test:worker-history # server/worker-history.
 npm --prefix integrations/paseo run test:worker-history-concurrency # server/worker-history-concurrency.test.ts
 npm --prefix integrations/paseo run test:worker-results # server/worker-results.test.ts
 npm --prefix integrations/paseo run test:pipeline # server/pipeline.test.ts
+npm --prefix integrations/paseo run test:error-boundary # client/plugin-error-boundary.test.ts
 ```
 
 A local sibling import must use its real `.ts` extension (e.g. `./pipeline.ts`),

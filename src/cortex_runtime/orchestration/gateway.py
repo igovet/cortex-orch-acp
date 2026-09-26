@@ -51,12 +51,12 @@ def timeout(description):
 
 SCHEMAS = {
     'project_git': obj(dict(kind=dict(type='string',enum=['status','diff'],description='Read-only project status or complete working-tree diff against HEAD, including pre-existing edits. Returns an exact retained output for read_large_output. Untracked file content is read through project_read.'),request_key=text('Unique observation identity; retries return the same retained snapshot.',128))),
-    'project_delete': obj(dict(path=text('Existing project-relative regular file inside the assignment scope. No directory recursion.',512),
-                               expected_sha256=text('Lowercase hex SHA-256 of the file as it is now (project_read returns it as sha256). A mismatch refuses the deletion.',64),
+    'project_delete': obj(dict(path=text('Existing project-relative regular file inside the assignment scope. Binary files are supported; no directory recursion.',512),
+                               expected_sha256=text('Lowercase hex SHA-256 of the file raw bytes as they are now (project_read returns it as sha256). A mismatch refuses the deletion.',64),
                                request_key=text('Unique action identity.',128))),
     'project_mkdir': obj(dict(path=text('New project-relative directory within the assignment scope. Parent must exist.',512),
                               request_key=text('Unique action identity.',128))),
-    'project_read': obj(dict(path=text('Project-relative regular file or directory; \'.\' is the project root. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write.',512),
+    'project_read': obj(dict(path=text('Project-relative regular file or directory; \'.\' is the project root. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write. UTF-8 files return text and SHA-256; non-UTF-8 files return only SHA-256, byte size and binary: true.',512),
                              offset=integer('UTF-8 character offset for file reads.',1000000000),
                              limit=integer('Maximum characters or directory entries; response supplies the next offset.',65536)), required=['path']),
     'project_write': obj(dict(path=text('Project-relative file inside this assignment scope. Symlinks are rejected.',512),
@@ -148,6 +148,29 @@ def _matches(path, scopes):
                or fnmatch.fnmatchcase(path,scope) or (scope.endswith('/**') and path==scope[:-3]) for scope in scopes)
 
 
+def _read_regular_file(fd):
+    """Read and hash one regular, single-link file through its open descriptor."""
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise StoreError('gateway_regular_file_required')
+    with os.fdopen(os.dup(fd),'rb') as stream:
+        data = stream.read(16000001)
+    if len(data)>16000000:
+        raise StoreError('gateway_file_too_large')
+    return data, hashlib.sha256(data).hexdigest()
+
+
+def _file_sha256(root, path):
+    """Hash raw file bytes through a no-follow descriptor under the project root."""
+    with _parent(root,path) as (parent,leaf):
+        fd = os.open(leaf,os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,dir_fd=parent)
+    try:
+        _, digest = _read_regular_file(fd)
+        return digest
+    finally:
+        os.close(fd)
+
+
 def _read(root, args):
     parts = _parts(args['path'])
     if not parts:
@@ -161,15 +184,12 @@ def _read(root, args):
         if stat.S_ISDIR(info.st_mode):
             entries = sorted(n for n in os.listdir(fd) if n not in PRIVATE)
             return dict(entries=entries[offset:offset+limit],next_offset=offset+limit if offset+limit<len(entries) else None)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            raise StoreError('gateway_regular_file_required')
-        # Hash/read one stable descriptor; no symlink or hard-link targets.
-        with os.fdopen(os.dup(fd),'rb') as stream:
-            data = stream.read(16000001)
-        if len(data)>16000000:
-            raise StoreError('gateway_file_too_large')
-        body = data.decode('utf-8')
-        return dict(content=body[offset:offset+limit],sha256=hashlib.sha256(data).hexdigest(),
+        data, digest = _read_regular_file(fd)
+        try:
+            body = data.decode('utf-8')
+        except UnicodeDecodeError:
+            return dict(sha256=digest,size_bytes=len(data),binary=True)
+        return dict(content=body[offset:offset+limit],sha256=digest,
                     total_characters=len(body),next_offset=offset+limit if offset+limit<len(body) else None)
     finally:
         os.close(fd)
@@ -332,7 +352,7 @@ def dispatch(store,channel,operation,args):
                     'The requested path does not exist. List its existing parent with project_read and select an observed path.') from error
             except (OSError,UnicodeError) as error:
                 raise StoreError('gateway_read_failure', 'path', args['path'],
-                    'a readable regular UTF-8 file or directory',
+                    'a readable regular file or directory',
                     'The project read failed; no mutation was attempted. Check the path, file type and read access.') from error
         if operation in {'project_write','project_mkdir','project_delete'} and (
                 not _matches(args['path'],scopes) or _matches(args['path'],write_denials(db,channel.task_id))):
@@ -381,8 +401,8 @@ def dispatch(store,channel,operation,args):
                 db.execute('BEGIN IMMEDIATE')
                 scopes,owner=_authority(db,channel)
                 if operation=='project_delete':
-                    observed=_read(root,dict(path=args['path'],limit=1))
-                    if observed.get('sha256')!=args['expected_sha256']:
+                    observed=_file_sha256(root,args['path'])
+                    if observed!=args['expected_sha256']:
                         raise StoreError('gateway_write_conflict')
                     with _parent(root,args['path']) as (parent,leaf):
                         os.unlink(leaf,dir_fd=parent); os.fsync(parent)

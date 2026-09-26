@@ -163,6 +163,42 @@ def _no_leaked_acp_transport_threads():
     )
 
 
+# --- Claude usage-CLI spawn guard -----------------------------------------
+#
+# connections.quota lazily runs the real `claude -p /usage` CLI for
+# claude-agent-acp connections whose credential_ref directory exists on
+# disk. Several existing fixtures (e.g. engine_fakes.make_connection_record
+# + isolated_environ, whose PATH deliberately mirrors the real host PATH so
+# fake-engine launch_command resolution stays realistic) construct exactly
+# such a connection, so a test that reaches quota.used_percent/resets_at/
+# visible_windows for one without its own fake runner would otherwise spawn
+# the real, installed `claude` binary. connections.quota._run_claude_usage_
+# subprocess is the one seam every real call passes through (see its own
+# docstring), so it is replaced here, for every test, with a stub that
+# records the attempt and fails it -- rather than a silent no-op -- so a
+# test that needs this path must explicitly monkeypatch its own fake
+# runner (as tests/test_usage_accounting.py does), exactly like the no-paid
+# default suite must never spawn the real CLI at all.
+@pytest.fixture(autouse=True)
+def _forbid_real_claude_usage_cli(monkeypatch):
+    from cortex_runtime.connections import quota as quota_module
+
+    violations = []
+
+    def guard(argv, env, cwd, timeout):
+        violations.append(argv)
+        raise AssertionError("connections.quota must not spawn the real claude CLI in tests")
+
+    monkeypatch.setattr(quota_module, "_run_claude_usage_subprocess", guard)
+    yield
+    assert not violations, (
+        "test guard (tests/conftest.py): this test reached "
+        "connections.quota._run_claude_usage_subprocess (the real `claude` CLI "
+        "spawn point) without monkeypatching it with its own fake runner first. "
+        f"argv attempted: {violations!r}"
+    )
+
+
 # The fake engine writes its logs and dumps under the test's /tmp directory,
 # which an engine jail replaces with private scratch. Plumbing tests run it
 # unjailed; tests/test_engine_jail.py exercises the jail itself.

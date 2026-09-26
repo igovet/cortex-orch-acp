@@ -4,17 +4,21 @@
 One reservation per owned engine process. ``reserve`` is atomic (``BEGIN
 IMMEDIATE`` counts ``reserved``+``ambiguous`` rows for the connection before
 inserting) so two concurrent reservers for the same connection never both
-observe capacity as free -- no over-subscription. Capacity is released only
+observe capacity as free -- no over-subscription. Coordinator and worker
+reservations are counted separately, each against the connection's own
+limit: a coordinator holds its reservation for the whole task lifetime, so
+counting it against worker capacity silently took a worker slot away from
+every task on that connection. Capacity is released only
 on a *confirmed* observation (:func:`release_confirmed`); an unconfirmed
 termination attempt (timeout, no observed exit) is :func:`mark_ambiguous`
 instead and keeps counting against the limit -- it is never silently
 dropped (a bounded reaper that eventually force-resolves a long-ambiguous
 reservation is T028 scope).
 
-``max_concurrent_sessions`` is the caller's own concern (see
-``connections.model.ConnectionRecord`` for the optional, validated,
-backward-compatible field this module expects a caller to resolve and
-pass in -- this module has no opinion on where the limit is configured).
+The limit comes from the resolved connection's own optional, validated,
+backward-compatible ``max_concurrent_sessions`` (see
+``connections.model.ConnectionRecord``); callers resolve it with
+:func:`limit_for_connection` and pass it to :func:`reserve`.
 """
 from __future__ import annotations
 
@@ -33,12 +37,13 @@ def reserve(
     store, connection_id: str, task_id: str, attempt_id: str, kind: str, *,
     assignment_ref: str | None = None, limit: int = DEFAULT_MAX_CONCURRENT_SESSIONS,
 ) -> str | None:
-    """Atomically reserve one capacity unit for ``connection_id``.
+    """Atomically reserve one capacity unit of ``kind`` for ``connection_id``.
 
-    Returns the new ``reservation_id``, or ``None`` if the connection is
-    already at ``limit`` active (``reserved``+``ambiguous``) reservations --
-    the caller must not open an engine process in that case (queue/retry
-    on a later capacity release instead of over-subscribing).
+    Returns the new ``reservation_id``, or ``None`` if the connection
+    already has ``limit`` active (``reserved``+``ambiguous``) reservations
+    of the same ``kind`` -- the caller must not open an engine process in
+    that case (queue/retry on a later capacity release instead of
+    over-subscribing). Reservations of the other kind never count.
     """
     if kind not in ("coordinator", "worker"):
         raise ValueError(f"unknown capacity reservation kind {kind!r}")
@@ -46,8 +51,9 @@ def reserve(
         db.execute("BEGIN IMMEDIATE")
         try:
             active = db.execute(
-                "SELECT COUNT(*) AS n FROM capacity_reservations WHERE connection_id=? AND state IN ('reserved','ambiguous')",
-                (connection_id,),
+                "SELECT COUNT(*) AS n FROM capacity_reservations "
+                "WHERE connection_id=? AND kind=? AND state IN ('reserved','ambiguous')",
+                (connection_id, kind),
             ).fetchone()["n"]
             if active >= limit:
                 db.commit()
@@ -110,27 +116,31 @@ def reservation_for_attempt(store, attempt_id: str) -> str | None:
     return row["reservation_id"] if row is not None else None
 
 
-def saturated_by_coordinators(store, connection_id: str, limit: int) -> bool:
-    """Observe saturation and reservation kinds in one database snapshot.
-
-    Separate count and kind reads can straddle a worker's confirmed release:
-    the first sees a full connection, then the second sees only its remaining
-    coordinator and falsely declares a queued worker unsatisfiable.
-    """
+def count_active(store, connection_id: str, kind: str | None = None) -> int:
+    """Active (``reserved``+``ambiguous``) reservations for the connection;
+    all kinds unless ``kind`` names one."""
+    query = "SELECT COUNT(*) AS n FROM capacity_reservations WHERE connection_id=? AND state IN ('reserved','ambiguous')"
+    params: tuple = (connection_id,)
+    if kind is not None:
+        query += " AND kind=?"
+        params += (kind,)
     with store.connection() as db:
-        row = db.execute(
-            "SELECT COUNT(*) AS active, "
-            "COALESCE(SUM(CASE WHEN kind='coordinator' THEN 1 ELSE 0 END), 0) AS coordinators "
-            "FROM capacity_reservations WHERE connection_id=? AND state IN ('reserved','ambiguous')",
-            (connection_id,),
-        ).fetchone()
-    return row["active"] >= limit and row["active"] == row["coordinators"]
-
-
-def count_active(store, connection_id: str) -> int:
-    with store.connection() as db:
-        row = db.execute(
-            "SELECT COUNT(*) AS n FROM capacity_reservations WHERE connection_id=? AND state IN ('reserved','ambiguous')",
-            (connection_id,),
-        ).fetchone()
+        row = db.execute(query, params).fetchone()
     return row["n"]
+
+
+def limit_for_connection(record, override: int | None = None) -> int:
+    """The per-connection session limit to enforce for ``record``.
+
+    The connection's own validated ``max_concurrent_sessions`` (1..64,
+    see ``connections.model.ConnectionRecord``) applies; a record without
+    a usable value falls back to :data:`DEFAULT_MAX_CONCURRENT_SESSIONS`.
+    ``override`` (an adapter's explicit ``capacity_limit``) can only lower
+    that limit, never raise it past what the connection record allows.
+    """
+    configured = getattr(record, "max_concurrent_sessions", None)
+    if isinstance(configured, bool) or not isinstance(configured, int) or configured < 1:
+        configured = DEFAULT_MAX_CONCURRENT_SESSIONS
+    if override:
+        return max(1, min(configured, override))
+    return configured

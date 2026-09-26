@@ -440,6 +440,49 @@ def test_user_steering_applies_denials_only_after_active_work(machine):
     assert state.context(ch.task_id)['revision'] == 2
 
 
+def test_scheduler_claims_overlapping_read_only_nodes_together(machine):
+    state, ch = machine
+    proposed = plan(2)
+    for node in proposed['tasks']:
+        node['role'] = 'worker-explorer'
+        node['scope'] = ['.']
+    state.submit_plan(ch, proposed, 'readonly')
+    state.move(ch.task_id, 'EXECUTING')
+    nodes = state.claim_ready(ch.task_id, ch.channel_id)
+    assert {node['node_id'] for node in nodes} == {'N0', 'N1'}
+
+
+@pytest.mark.parametrize(('first_role', 'second_role'), [
+    ('worker-explorer', 'backend-dev'),
+    ('backend-dev', 'worker-explorer'),
+])
+def test_scheduler_does_not_serialize_read_only_and_writing_candidates(machine, first_role, second_role):
+    state, ch = machine
+    proposed = plan(2)
+    for node, role in zip(proposed['tasks'], (first_role, second_role)):
+        node['role'] = role
+        node['scope'] = ['.']
+    state.submit_plan(ch, proposed, f'mixed-{first_role}')
+    state.move(ch.task_id, 'EXECUTING')
+    nodes = state.claim_ready(ch.task_id, ch.channel_id)
+    assert {node['node_id'] for node in nodes} == {'N0', 'N1'}
+
+
+def test_active_read_only_scope_does_not_block_writing_candidate(machine):
+    state, ch = machine
+    proposed = plan(2)
+    proposed['tasks'][0].update(role='worker-explorer', scope=['.'])
+    proposed['tasks'][1].update(role='backend-dev', scope=['.'])
+    state.submit_plan(ch, proposed, 'active-readonly')
+    state.move(ch.task_id, 'EXECUTING')
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET status='running' WHERE task_id=? AND node_id='N0'",
+                   (ch.task_id,))
+        db.commit()
+    nodes = state.claim_ready(ch.task_id, ch.channel_id)
+    assert [node['node_id'] for node in nodes] == ['N1']
+
+
 def test_scheduler_serializes_overlapping_write_scopes(machine):
     state,ch=machine
     proposed=plan(3)

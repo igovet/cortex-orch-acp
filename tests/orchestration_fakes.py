@@ -203,9 +203,6 @@ class FakeSessionRuntime:
                         dict(note=f"Attempt {attempt_id} is queued: capacity is full."), origin="runtime",
                     )
                     queued_note_recorded = True
-                if kind == "worker":
-                    if delegation_capacity.saturated_by_coordinators(self._store, self._connection_id, limit):
-                        raise QueuedOpenCancelled("capacity_unsatisfiable")
                 if deadline is not None and time.monotonic() > deadline:
                     raise QueuedOpenCancelled("capacity_timeout")
                 with self._activity_cond:

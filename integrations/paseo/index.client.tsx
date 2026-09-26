@@ -17,6 +17,7 @@ import { WorkerResultDetail } from "./client/worker-result.tsx";
 import { workerResultItems } from "./client/worker-result-model.ts";
 import { setWorkerCardPulse } from "./client/worker-card-pulse.ts";
 import { useFallbackWorkerResult } from "./client/use-worker-result.ts";
+import { PluginErrorBoundary } from "./client/plugin-error-boundary.tsx";
 
 const workerTimelineSchema = z.object({
   callId: z.string(),
@@ -184,9 +185,11 @@ export default function contribute(client: PluginClientContext) {
     schema: workerTimelineSchema,
     Component: (props) => {
       const workspaceId = useAgent(props.agentId, (agent) => agent.workspaceId);
-      return <WorkerTimelineRow {...props} workspaceId={workspaceId} onOpen={() => {
-        if (workspaceId) client.openPanel("workers", { workspaceId, agentId: props.agentId, location: "workspace" });
-      }} />;
+      return <PluginErrorBoundary theme={props.theme} label="Worker card">
+        <WorkerTimelineRow {...props} workspaceId={workspaceId} onOpen={() => {
+          if (workspaceId) client.openPanel("workers", { workspaceId, agentId: props.agentId, location: "workspace" });
+        }} />
+      </PluginErrorBoundary>;
     },
   });
   client.addWorkspacePanel({
@@ -199,7 +202,7 @@ export default function contribute(client: PluginClientContext) {
     // context: the panel still resolves the exact worker selected by the
     // coordinator card and retains its read-only transcript.
     locations: ["workspace"],
-    Component: WorkerPanel,
+    Component: (props) => <PluginErrorBoundary theme={props.theme} label="Workers panel"><WorkerPanel {...props} /></PluginErrorBoundary>,
   });
   // The task's whole lifecycle, top to bottom, beside the chat in the
   // explorer (right sidebar). Paseo 0.8 has no "focused agent" hook, so the
@@ -210,10 +213,12 @@ export default function contribute(client: PluginClientContext) {
     icon: "Workflow",
     context: "agent",
     locations: ["explorer"],
-    Component: (props) => <PipelinePanel {...props} onOpenWorker={(assignmentRef) => {
-      selectWorker(props.agentId, assignmentRef);
-      client.openPanel("workers", { workspaceId: props.workspaceId, agentId: props.agentId, location: "workspace" });
-    }} />,
+    Component: (props) => <PluginErrorBoundary theme={props.theme} label="Pipeline panel">
+      <PipelinePanel {...props} onOpenWorker={(assignmentRef) => {
+        selectWorker(props.agentId, assignmentRef);
+        client.openPanel("workers", { workspaceId: props.workspaceId, agentId: props.agentId, location: "workspace" });
+      }} />
+    </PluginErrorBoundary>,
   });
   client.addCommandCenterItem({
     id: "open-pipeline",
@@ -271,12 +276,14 @@ export default function contribute(client: PluginClientContext) {
             onPress: () => client.openPanel("pipeline", { workspaceId: candidate.workspace.id, agentId, location: "explorer" }),
           } : {
             kind: "popover",
-            Content: (props) => <PipelinePanel theme={props.theme} workspaceId={candidate.workspace.id} agentId={agentId} popover
-              onOpenWorker={(assignmentRef) => {
-                props.close();
-                selectWorker(agentId, assignmentRef);
-                client.openPanel("workers", { workspaceId: candidate.workspace.id, agentId, location: "workspace" });
-              }} />,
+            Content: (props) => <PluginErrorBoundary theme={props.theme} label="Pipeline">
+              <PipelinePanel theme={props.theme} workspaceId={candidate.workspace.id} agentId={agentId} popover
+                onOpenWorker={(assignmentRef) => {
+                  props.close();
+                  selectWorker(agentId, assignmentRef);
+                  client.openPanel("workers", { workspaceId: candidate.workspace.id, agentId, location: "workspace" });
+                }} />
+            </PluginErrorBoundary>,
           },
         },
       });

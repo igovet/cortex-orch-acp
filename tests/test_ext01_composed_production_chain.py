@@ -24,6 +24,7 @@ from cortex_runtime.acp.agent import Agent
 from cortex_runtime.acp.production_runtime import ProductionOrchestratingRuntime
 from cortex_runtime.acp.transport import StdioTransport
 from cortex_runtime.configuration.service import ConfigurationService
+from cortex_runtime.connections import quota
 from cortex_runtime.connections.model import AuthMode
 from cortex_runtime.delegation import capacity as delegation_capacity
 from cortex_runtime.delegation import deliveries as delegation_deliveries
@@ -217,6 +218,15 @@ def _init_and(method, params, id_=2):
 @pytest.mark.parametrize("engine", ["codex-acp", "claude-agent-acp"])
 def test_composed_production_chain(tmp_path, monkeypatch,engine):
     """Actual incoming/outgoing ACP and MCP subprocesses; only reasoning is scripted."""
+    # The real runtime lazily refreshes claude-agent-acp plan usage as part
+    # of ordinary session activity; this composed chain runs a real
+    # connection with a real (Cortex-owned) isolated credential directory,
+    # so unlike a narrower unit test it does reach this spawn point. No
+    # paid/real CLI call belongs in this no-paid suite, so it is faked the
+    # same way tests/test_usage_accounting.py fakes it.
+    def _no_claude_cli(argv, env, cwd, timeout):
+        raise FileNotFoundError("no real claude CLI in this test")
+    monkeypatch.setattr(quota, "_run_claude_usage_subprocess", _no_claude_cli)
     environ=_isolate(tmp_path,monkeypatch)
     project=tmp_path/'project';project.mkdir()
     engine_dir=tmp_path/'engine';engine_dir.mkdir()

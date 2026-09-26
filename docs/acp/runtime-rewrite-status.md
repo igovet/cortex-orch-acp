@@ -8,7 +8,10 @@ immutable reports. All 23 specialist/consultant profiles remain available.
 Implemented production paths:
 
 - Transactional task state, plan revisions, validated DAG, original goal and event
-  history in the single project-local store; four concurrent non-overlapping workers.
+  history in the single project-local store; per-connection coordinator and
+  worker limits (default 4, configurable 1–64) plus a 64-worker project pool.
+  Writing nodes with overlapping scopes are serialized; review-stage and
+  READ_ONLY nodes do not conflict by scope.
 - Closed plan/result/question/scope/replan/escalation/synthesis tools. No public
   delegate, decide, integrate, acceptance or model/effort selection API.
 - Independent review whenever the observed project differs from its execution

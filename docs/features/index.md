@@ -2,7 +2,7 @@
 
 | Feature | Owner | Mechanism |
 | --- | --- | --- |
-| Task lifecycle and scheduling | Runtime | Transactional state machine, DAG, four-worker limit |
+| Task lifecycle and scheduling | Runtime | Transactional state machine, DAG, per-connection coordinator/worker limits and a 64-worker project pool |
 | Project actions | Runtime gateway | Channel authority, scoped files, contained commands and external MCP |
 | Reports and pipeline | Runtime store | Immutable reports, runtime-owned newest-first pipeline |
 | Review and verification | Runtime | Fresh reviewer, bounded fix loop, exact command evidence |

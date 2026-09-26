@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Protocol
 from ..configuration import access_mode as configuration_access_mode
 from ..configuration.policy import BENIGN_CONFIGURATION_ERROR_CODES
 from ..connections.environment import DENYLIST_PATTERN
+from ..connections.model import MAX_CONCURRENT_SESSIONS_LIMIT
 from ..contracts import StoreError
 from ..delegation import events as delegation_events
 from ..delegation import revision as delegation_revision
@@ -70,7 +71,17 @@ DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS = 3
 # turn; a fixed number of continuations only ever ended useful work early.
 # Kept as a settable parameter so a test can still bound a loop.
 DEFAULT_MAX_TOTAL_CONTINUATIONS = None
-DEFAULT_WORKER_POOL_SIZE = 4
+# Worker threads per project runtime. Each dispatched worker holds one
+# thread for its whole life, including while it waits in the per-connection
+# capacity queue, so this pool must never be the binding limit: the real
+# limit is each connection's own ``max_concurrent_sessions``
+# (``connections.model.ConnectionRecord``), enforced across processes by
+# ``delegation.capacity``. The pool is sized to that field's validated
+# maximum, so it is never tighter than any single connection's configured
+# limit, and stays a fixed, deterministic bound; only when several
+# connections' limits together exceed it does it cap the project's total.
+# ``ThreadPoolExecutor`` starts threads on demand, so idle headroom is free.
+DEFAULT_WORKER_POOL_SIZE = MAX_CONCURRENT_SESSIONS_LIMIT
 DEFAULT_WAIT_TIMEOUT_SECONDS = 5.0
 _UNSET = object()
 # Bound on the actionable-error text (e.g. resolve_role's own remediation,
@@ -4213,10 +4224,9 @@ class OrchestratingRuntime:
             if failure_code is None:
                 raise
             result = None
-            if failure_code in ("capacity_unsatisfiable", "capacity_timeout"):
-                # T027: this delegation's own attempt was allocated (and its
-                # capacity reservation/channel opened) before open() itself
-                # refused it -- resolvable via the identical idempotency key
+            if failure_code == "capacity_timeout":
+                # T027: this delegation's own attempt was allocated before
+                # open() timed out -- resolvable via the identical idempotency key
                 # delegate() itself derives, never a guess.
                 from ..delegation.provisioning import _idempotency_key
 

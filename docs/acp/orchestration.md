@@ -14,9 +14,15 @@ verification commands. Verification commands run as literal argv without a shell
 
 `orchestration/controller.py` drives planning, execution, independent review,
 verification and synthesis. Only dependency-ready nodes are reserved for execution.
-Reservations commit before provisioning, and concurrent claims share the same
-four-worker ceiling. Runtime routing resolves model and effort from the current tier, policy, catalog and plan usage; plan hints remain advisory. All
-23 specialist/consultant profiles remain available.
+Reservations commit before provisioning. Each connection's
+`max_concurrent_sessions` limit (default 4, configurable from 1 through 64)
+applies separately to coordinator and worker sessions, so the combined count
+may exceed that value. The project worker pool is sized to 64, the validated
+per-connection maximum; it does not tighten any single connection's limit,
+though it can cap aggregate workers across connections. Scope overlap
+serializes writing nodes; review-stage nodes and READ_ONLY roles neither block nor are blocked by overlapping scopes. Runtime routing resolves model and
+effort from the current tier, policy, catalog and plan usage; plan hints remain
+advisory. All 23 specialist/consultant profiles remain available.
 
 The runtime inserts an independent code reviewer after execution whenever the
 planned work changed the project. When a plan revision starts executing, the runtime

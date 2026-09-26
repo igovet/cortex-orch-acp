@@ -649,7 +649,7 @@ class TaskMachine:
             # dead -- can keep this one from starting. An earlier revision's
             # node still marked 'running' holds scope only while its worker
             # is not yet released; a stale marker alone never blocks a new plan.
-            active_nodes = db.execute("""SELECT n.scope_json FROM runtime_nodes n WHERE n.task_id=? AND (
+            active_nodes = db.execute("""SELECT n.scope_json, n.role, n.stage FROM runtime_nodes n WHERE n.task_id=? AND (
                 (n.status='running' AND (n.revision=? OR NOT EXISTS (
                     SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='WORKER_RELEASED'
                     AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref)))
@@ -663,14 +663,21 @@ class TaskMachine:
             ready = [n for n in nodes if n['status'] == 'pending' and n['stage'] == stage
                      and set(json.loads(n['dependencies_json'])) <= completed]
             from .policy import overlaps
-            occupied = [json.loads(n['scope_json']) for n in active_nodes]
+            # Import lazily: gateway imports this module for shared state helpers.
+            from .gateway import READ_ONLY
+            occupied = [
+                json.loads(n['scope_json']) for n in active_nodes
+                if n['stage'] != 'review' and n['role'] not in READ_ONLY
+            ]
             selected = []
             for candidate in ready:
                 scope = json.loads(candidate['scope_json'])
-                if any(overlaps(a,b) for grant in occupied for a in grant for b in scope):
+                read_only = candidate['stage'] == 'review' or candidate['role'] in READ_ONLY
+                if not read_only and any(overlaps(a,b) for grant in occupied for a in grant for b in scope):
                     continue
                 selected.append(candidate)
-                occupied.append(scope)
+                if not read_only:
+                    occupied.append(scope)
             ready = selected
             for node in ready:
                 retries=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'",(task_id,)).fetchall()

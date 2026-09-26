@@ -2,8 +2,9 @@
 accounting, and history retention across release."""
 from __future__ import annotations
 
-import uuid
 import threading
+import time
+import uuid
 
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation import capacity
@@ -43,31 +44,115 @@ def test_confirmed_release_frees_capacity_ambiguous_does_not(tmp_path):
     assert r2 is not None
 
 
-def test_coordinator_saturation_uses_one_current_capacity_snapshot(tmp_path):
+def test_coordinator_reservations_never_consume_worker_capacity(tmp_path):
     store, task_id = _task(tmp_path)
-    coordinator = capacity.reserve(store, "cn_snapshot", task_id, "co_1", "coordinator", limit=2)
-    worker = capacity.reserve(store, "cn_snapshot", task_id, "xa_1", "worker", limit=2)
-    assert coordinator is not None and worker is not None
-    assert not capacity.saturated_by_coordinators(store, "cn_snapshot", 2)
+    connection_id = "cn_split"
+    coordinators = [
+        capacity.reserve(store, connection_id, task_id, f"co_{i}", "coordinator", limit=2) for i in range(2)
+    ]
+    assert all(coordinators)
+    # Coordinators are at their own limit ...
+    assert capacity.reserve(store, connection_id, task_id, "co_over", "coordinator", limit=2) is None
+    # ... yet the full worker limit is still available.
+    workers = [capacity.reserve(store, connection_id, task_id, f"xa_{i}", "worker", limit=2) for i in range(2)]
+    assert all(workers)
+    assert capacity.reserve(store, connection_id, task_id, "xa_over", "worker", limit=2) is None
+    assert capacity.count_active(store, connection_id) == 4
+    assert capacity.count_active(store, connection_id, "worker") == 2
+    assert capacity.count_active(store, connection_id, "coordinator") == 2
 
-    capacity.mark_ambiguous(store, worker)
-    assert not capacity.saturated_by_coordinators(store, "cn_snapshot", 2)
-    capacity.release_confirmed(store, worker)
-    # A stale count of two followed by a separate kinds query used to
-    # misclassify this exact post-release state as unsatisfiable.
-    assert not capacity.saturated_by_coordinators(store, "cn_snapshot", 2)
-
-    second_coordinator = capacity.reserve(store, "cn_snapshot", task_id, "co_2", "coordinator", limit=2)
-    assert second_coordinator is not None
-    assert capacity.saturated_by_coordinators(store, "cn_snapshot", 2)
+    # Releasing a coordinator never frees a worker slot.
+    capacity.release_confirmed(store, coordinators[0])
+    assert capacity.reserve(store, connection_id, task_id, "xa_still_over", "worker", limit=2) is None
+    capacity.release_confirmed(store, workers[0])
+    assert capacity.reserve(store, connection_id, task_id, "xa_next", "worker", limit=2) is not None
 
 
-def test_queued_worker_rechecks_capacity_without_split_saturation_reads(tmp_path, monkeypatch):
+def test_ambiguous_worker_still_counts_against_worker_limit(tmp_path):
+    store, task_id = _task(tmp_path)
+    connection_id = "cn_ambiguous"
+    worker = capacity.reserve(store, connection_id, task_id, "xa_1", "worker", limit=1)
+    assert worker is not None
+    capacity.mark_ambiguous(store, worker, "timeout_alive")
+    assert capacity.reserve(store, connection_id, task_id, "xa_2", "worker", limit=1) is None
+    # A coordinator on the same connection is unaffected by the worker's
+    # ambiguous row, and an ambiguous coordinator keeps its own slot.
+    coordinator = capacity.reserve(store, connection_id, task_id, "co_1", "coordinator", limit=1)
+    assert coordinator is not None
+    capacity.mark_ambiguous(store, coordinator, "timeout_alive")
+    assert capacity.reserve(store, connection_id, task_id, "co_2", "coordinator", limit=1) is None
+    assert capacity.count_active(store, connection_id, "worker") == 1
+
+
+class _Record:
+    def __init__(self, limit=None):
+        if limit is not None:
+            self.max_concurrent_sessions = limit
+
+
+def test_limit_for_connection_uses_the_record_default_four_and_override_only_lowers():
+    assert capacity.limit_for_connection(_Record(2)) == 2
+    assert capacity.limit_for_connection(_Record(6)) == 6
+    assert capacity.limit_for_connection(_Record()) == capacity.DEFAULT_MAX_CONCURRENT_SESSIONS == 4
+    assert capacity.limit_for_connection(None) == 4
+    assert capacity.limit_for_connection(_Record(True)) == 4
+    assert capacity.limit_for_connection(_Record(6), 2) == 2
+    assert capacity.limit_for_connection(_Record(2), 6) == 2
+    assert capacity.limit_for_connection(None, 1) == 1
+
+
+def _reserve_workers(adapter, connection_id, task_id, count, limit):
+    return [
+        adapter._reserve_capacity_blocking(
+            connection_id, task_id, f"xa_{connection_id}_{i}", {"assignment_id": f"as_{i}"}, limit=limit,
+        )
+        for i in range(count)
+    ]
+
+
+def test_adapter_enforces_each_connections_own_limit(tmp_path):
+    from cortex_runtime.delegation.live_adapters import QueuedOpenCancelled
+
+    store, task_id = _task(tmp_path)
+    adapter = EngineSessionManagerAdapter(
+        lambda _: None, lambda _: str(tmp_path), store=store, capacity_queue_timeout_seconds=0.2,
+    )
+    try:
+        # A coordinator already holds a reservation on every connection.
+        for connection_id in ("cn_two", "cn_six", "cn_default"):
+            assert capacity.reserve(store, connection_id, task_id, f"co_{connection_id}", "coordinator") is not None
+
+        two = capacity.limit_for_connection(_Record(2))
+        assert all(_reserve_workers(adapter, "cn_two", task_id, 2, two))
+        try:
+            adapter._reserve_capacity_blocking("cn_two", task_id, "xa_third", {"assignment_id": "as_x"}, limit=two)
+        except QueuedOpenCancelled as error:
+            assert error.kind == "capacity_timeout"
+        else:
+            raise AssertionError("a third worker must not exceed the connection's limit of 2")
+
+        six = capacity.limit_for_connection(_Record(6))
+        assert all(_reserve_workers(adapter, "cn_six", task_id, 6, six))
+        assert capacity.count_active(store, "cn_six", "worker") == 6
+
+        default = capacity.limit_for_connection(_Record())
+        assert all(_reserve_workers(adapter, "cn_default", task_id, 4, default))
+        try:
+            adapter._reserve_capacity_blocking("cn_default", task_id, "xa_fifth", {"assignment_id": "as_y"}, limit=default)
+        except QueuedOpenCancelled as error:
+            assert error.kind == "capacity_timeout"
+        else:
+            raise AssertionError("a record without max_concurrent_sessions keeps the default of 4")
+    finally:
+        adapter.shutdown()
+
+
+def test_queued_worker_proceeds_once_a_worker_is_released(tmp_path, monkeypatch):
     store, task_id = _task(tmp_path)
     connection_id = "cn_release_race"
     coordinator = capacity.reserve(store, connection_id, task_id, "co_1", "coordinator", limit=2)
-    worker = capacity.reserve(store, connection_id, task_id, "xa_1", "worker", limit=2)
-    assert coordinator is not None and worker is not None
+    workers = [capacity.reserve(store, connection_id, task_id, f"xa_{i}", "worker", limit=2) for i in range(2)]
+    assert coordinator is not None and all(workers)
 
     adapter = EngineSessionManagerAdapter(
         lambda _: None, lambda _: str(tmp_path), store=store, capacity_limit=2,
@@ -78,22 +163,17 @@ def test_queued_worker_rechecks_capacity_without_split_saturation_reads(tmp_path
 
     def observe_failed_reserve(*args, **kwargs):
         result = reserve(*args, **kwargs)
-        if args[3] == "xa_2" and result is None:
+        if args[3] == "xa_queued" and result is None:
             queued.set()
         return result
 
-    def forbid_split_read(*args, **kwargs):
-        raise AssertionError("saturation must use one capacity snapshot")
-
     monkeypatch.setattr(capacity, "reserve", observe_failed_reserve)
-    monkeypatch.setattr(capacity, "count_active", forbid_split_read)
-    monkeypatch.setattr(capacity, "all_active_are_kind", forbid_split_read, raising=False)
     outcome = []
 
     def open_queued():
         try:
             outcome.append(adapter._reserve_capacity_blocking(
-                connection_id, task_id, "xa_2", {"assignment_id": "as_2"},
+                connection_id, task_id, "xa_queued", {"assignment_id": "as_2"},
             ))
         except BaseException as error:
             outcome.append(error)
@@ -102,7 +182,18 @@ def test_queued_worker_rechecks_capacity_without_split_saturation_reads(tmp_path
     thread.start()
     try:
         assert queued.wait(timeout=5)
-        capacity.release_confirmed(store, worker)
+        # The queued note is appended right after the refused reserve.
+        deadline = time.monotonic() + 5
+        note = None
+        while note is None and time.monotonic() < deadline:
+            with store.connection() as db:
+                note = db.execute(
+                    "SELECT 1 FROM task_events WHERE task_id=? AND dedup_key='capacity_queued:xa_queued'", (task_id,),
+                ).fetchone()
+            if note is None:
+                time.sleep(0.01)
+        assert note is not None
+        capacity.release_confirmed(store, workers[0])
         thread.join(timeout=5)
         assert not thread.is_alive()
         assert len(outcome) == 1 and isinstance(outcome[0], str), outcome
@@ -111,6 +202,7 @@ def test_queued_worker_rechecks_capacity_without_split_saturation_reads(tmp_path
         thread.join(timeout=5)
         if outcome and isinstance(outcome[0], str):
             capacity.release_confirmed(store, outcome[0])
+        capacity.release_confirmed(store, workers[1])
         capacity.release_confirmed(store, coordinator)
 
 
