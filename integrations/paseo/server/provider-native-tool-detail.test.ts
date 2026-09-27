@@ -289,3 +289,34 @@ test("native tool detail preserves useful file identity while clipping large out
   assert.ok(Buffer.byteLength(JSON.stringify(event.item.detail), "utf8") <= 16 * 1024);
   assert.equal(event.item.metadata, undefined);
 });
+
+test("an oversized unknown input never drops the output key Paseo requires", () => {
+  const event = presentTimeline({
+    type: "timeline.item",
+    sessionId: "s",
+    item: {
+      type: "tool_call", id: "t1", callId: "call-1", name: "mcp_tool",
+      status: "running", error: null,
+      detail: { type: "unknown", input: { blob: "x".repeat(64 * 1024) }, output: null },
+    },
+  });
+  if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
+  assert.equal(event.item.detail.type, "unknown");
+  assert.ok(Object.prototype.hasOwnProperty.call(event.item.detail, "input"));
+  assert.ok(Object.prototype.hasOwnProperty.call(event.item.detail, "output"));
+});
+
+test("a typed detail whose required key cannot fit falls back to plain_text", () => {
+  const event = presentTimeline({
+    type: "timeline.item",
+    sessionId: "s",
+    item: {
+      type: "tool_call", id: "t2", callId: "call-2", name: "custom",
+      status: "completed", error: null,
+      detail: { type: "search", query: "q".repeat(64 * 1024) } as never,
+    },
+  });
+  if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
+  const detail = event.item.detail as Record<string, unknown>;
+  assert.ok(detail.type === "plain_text" || typeof detail.query === "string");
+});

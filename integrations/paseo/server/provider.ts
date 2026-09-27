@@ -313,6 +313,49 @@ function boundJsonValue(value: unknown, maxBytes: number): BoundedJson | undefin
   return visit(value, Math.max(0, Math.floor(maxBytes)), 0, new Set())?.value;
 }
 
+// Required keys of Paseo's ToolCallDetail union. The daemon closes the whole
+// provider connection on the first schema-invalid timeline item, so budget
+// trimming must never drop one of these.
+const TOOL_DETAIL_REQUIRED_KEYS: Record<string, readonly string[]> = {
+  shell: ["command"],
+  read: ["filePath"],
+  edit: ["filePath"],
+  write: ["filePath"],
+  search: ["query"],
+  fetch: ["url"],
+  worktree_setup: ["worktreePath", "branchName", "log", "commands"],
+  sub_agent: ["log"],
+  plain_text: [],
+  plan: ["text"],
+};
+
+const OMITTED_TOOL_DETAIL = {
+  type: "plain_text",
+  label: "Tool details",
+  text: "Tool details omitted to stay within the timeline budget.",
+} as const;
+
+function boundToolDetail(detail: unknown): BoundedJson {
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) return OMITTED_TOOL_DETAIL;
+  const source = detail as Record<string, unknown>;
+  if (source.type === "unknown") {
+    // Split the budget so an oversized input cannot starve the required output key.
+    const half = Math.floor((TIMELINE_DETAIL_MAX_BYTES - 64) / 2);
+    return {
+      type: "unknown",
+      input: boundJsonValue(source.input, half) ?? null,
+      output: boundJsonValue(source.output, half) ?? null,
+    };
+  }
+  const required = typeof source.type === "string" ? TOOL_DETAIL_REQUIRED_KEYS[source.type] : undefined;
+  const bounded = boundJsonValue(detail, TIMELINE_DETAIL_MAX_BYTES);
+  if (!required || !bounded || typeof bounded !== "object" || Array.isArray(bounded)
+    || required.some((key) => !Object.prototype.hasOwnProperty.call(bounded, key))) {
+    return OMITTED_TOOL_DETAIL;
+  }
+  return bounded;
+}
+
 function boundedWorkerResult(value: unknown): ReturnType<typeof parseWorkerResult> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const source = value as Record<string, unknown>;
@@ -402,8 +445,7 @@ export function presentTimeline(event: ProviderEvent): ProviderEvent {
   const rawInputSource = sourceItem.metadata?.cortexRawInput
     ?? (sourceItem.detail.type === "unknown" ? sourceItem.detail.input : sourceItem.detail);
   const boundedRawInput = boundJsonValue(rawInputSource, TIMELINE_DETAIL_MAX_BYTES);
-  const boundedSourceDetail = boundJsonValue(sourceItem.detail, TIMELINE_DETAIL_MAX_BYTES)
-    ?? { type: "plain_text", label: "Tool details", text: "Tool details omitted to stay within the timeline budget." };
+  const boundedSourceDetail = boundToolDetail(sourceItem.detail);
   const sourceRevertToken = sourceItem.revertToken === undefined
     ? undefined
     : boundJsonValue(sourceItem.revertToken, 1024);
@@ -423,8 +465,7 @@ export function presentTimeline(event: ProviderEvent): ProviderEvent {
   const rawInput = item.metadata?.cortexRawInput
     ?? (item.detail.type === "unknown" ? item.detail.input : item.detail);
   const semantics = presentToolSemantics({ name: item.name, rawInput });
-  const boundedDetail = boundJsonValue(item.detail, TIMELINE_DETAIL_MAX_BYTES)
-    ?? { type: "plain_text", label: "Tool details", text: "Tool details omitted to stay within the timeline budget." };
+  const boundedDetail = boundToolDetail(item.detail);
   const revertToken = item.revertToken === undefined
     ? undefined
     : boundJsonValue(item.revertToken, 1024);
