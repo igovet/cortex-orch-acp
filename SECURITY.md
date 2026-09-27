@@ -20,6 +20,20 @@ independent review. No model hint can waive review. A model tool call cannot
 select a task state, accept the task or directly create an engine session.
 Plan verification commands execute as literal argv without a shell. Submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses, so a plan cannot defer that syntax error until verification. Structural validation does not prove semantic correctness of a plan, review or implementation.\n\nA worker `passed` check is accepted only with an exact same-attempt `command_run` or user-confirmed `outside_command` receipt for one completed, nontrivial operation, complete untruncated output and exit code 0. Engine-native shell calls and file reads do not verify checks. Insufficient evidence stays `unverified`; observed nonzero exits stay `failed`. Earlier reports are not rewritten, and older evidence is marked weak when projected under the current rule. Check run history is retained; a failure closes only on a later exact verified rerun that remains the latest result for that command.\n\nTransport state is distinct from task outcome. A plugin disconnect records available session/task/attempt identities and history completeness; restart recovery reads persisted state and leaves actions with unknown outcomes unresolved. Until reload recovery is qualified for the deployed version, update the plugin between active tasks. A host SIGKILL without SIGTERM cannot be recorded, and native engine actions cannot be represented by the retained command receipt mechanism.
 
+ACP events sent to a host are bounded display projections. Worker cards omit
+transcript bodies and raw inputs; timeline tool details are capped, and
+oversized values carry truncation markers while the complete task record stays
+in project history. Each worker card also has a fixed event budget of at most
+13 updates, whatever the worker's tool count or duration. Coordinator and
+engine tool cards have a per-task total budget: the first 150 distinct calls
+get their own card, later calls are counted on one aggregate card with at most
+20 updates, and failed calls past the budget keep their own card up to 50 more.
+Session replay applies the same bound to older journals. Permission requests
+and user questions are separate host requests and are never folded. These limits
+constrain individual wire updates and the number of cards and updates per
+task, and avoid retransmitting cumulative content; durable task history and
+work remain proportional to the task.
+
 The Paseo client wraps its rendered panels, composer popover, and timeline card in per-surface error boundaries. If reading or coercing a thrown value fails while formatting the fallback, it uses `unknown error`. This is a UI recovery boundary, not an execution sandbox or a root-cause diagnosis.
 
 ## Tool access and containment

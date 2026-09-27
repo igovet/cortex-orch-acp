@@ -20,7 +20,8 @@
     "test:worker-history-concurrency": "node --experimental-strip-types server/worker-history-concurrency.test.ts",
     "test:worker-results": "node --experimental-strip-types server/worker-results.test.ts",
     "test:pipeline": "node --experimental-strip-types server/pipeline.test.ts",
-    "test:error-boundary": "node --experimental-strip-types client/plugin-error-boundary.test.ts"
+    "test:error-boundary": "node --experimental-strip-types client/plugin-error-boundary.test.ts",
+    "test:client-bundle": "node --experimental-strip-types client/client-bundle.test.ts"
   },
   "devDependencies": {
     "@getpaseo/client": "^0.9.1",

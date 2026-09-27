@@ -581,7 +581,10 @@ class TaskMachine:
                             encoded(node['dependencies']), encoded(node['scope']), 'execution', 'pending', None, None))
             event(db, channel.task_id, 'PLAN_ACCEPTED', dict(revision=revision, plan=plan), channel.channel_id)
             transition(db, channel.task_id, 'PLAN_READY')
-            result = dict(revision=revision, state='PLAN_READY', model_hints=previews)
+            result = dict(revision=revision, state='PLAN_READY', model_hints=previews,
+                          hint='Plan accepted; the runtime dispatches workers once this turn ends. '
+                               'End this turn now -- do not call task_get_context to wait for dispatch, '
+                               'the runtime resumes you when results arrive.')
             db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
                        (channel.task_id, request_key, channel.channel_id, 'plan_submit', digest, encoded(result)))
             db.commit()

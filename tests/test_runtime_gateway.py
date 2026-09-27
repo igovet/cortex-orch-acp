@@ -177,7 +177,7 @@ def test_a_project_hardlink_pair_stays_read_only_unless_every_link_is_writable(t
     assert first.read_text()=='private' and (root/'work'/'b').exists()
 
 
-def test_project_shapes_that_used_to_refuse_the_worker_now_run(tmp_path):
+def test_project_shapes_that_used_to_refuse_the_worker_now_run(tmp_path, monkeypatch):
     """A private-name symlink, a socket in scope, and the tree limit each
     stopped a worker from starting at all."""
     import socket, subprocess
@@ -185,7 +185,11 @@ def test_project_shapes_that_used_to_refuse_the_worker_now_run(tmp_path):
     root=tmp_path/'project';root.mkdir();scratch=tmp_path/'scratch';scratch.mkdir()
     (root/'shared').mkdir();(root/'shared'/'settings.json').write_text('secret')
     (root/'.claude').symlink_to(root/'shared')
-    server=socket.socket(socket.AF_UNIX);server.bind(str(root/'db.sock'))
+    # Bind by a relative name: an absolute path under a long TMPDIR exceeds
+    # the 108-byte AF_UNIX limit.
+    monkeypatch.chdir(root)
+    server=socket.socket(socket.AF_UNIX);server.bind('db.sock')
+    monkeypatch.undo()
     try:
         with gateway_command(root,scratch,['/bin/sh','-c','ls shared; echo done'],['.']) as (command,fds):
             done=subprocess.run(command,pass_fds=fds,capture_output=True,text=True,env={'PATH':'/usr/bin:/bin'})

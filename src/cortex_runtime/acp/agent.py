@@ -45,6 +45,7 @@ from .protocol import RpcError
 from .runtime import OrchestrationUnavailable, UnavailableRuntime
 from .transport import StdioTransport, EOF
 from . import replay_store as acp_replay_store
+from . import wire_budget as acp_wire_budget
 from . import questions_store as acp_questions_store
 from ..catalog import refresh as catalog_refresh
 from ..bootstrap import _current_owner_epoch_obj, append_source_event, bootstrap_task
@@ -1198,6 +1199,12 @@ class Agent:
             if filters is None:
                 filters = self._read_history_filters = {}
             update = filters.setdefault(session_id, ReadHistoryFilter()).project(update)
+            # Last-resort size guard: the host retains every event, so one
+            # oversized update must never reach it (or the replay journal).
+            capped = acp_wire_budget.cap_session_update(update)
+            if capped is not update:
+                observe(self.environ, "session/update", "truncated")
+                update = capped
             try:
                 persisted = self._record_host_update(session_id, update)
             except Exception:
@@ -1268,6 +1275,12 @@ class Agent:
                     raw_output=update.get("raw_output"),
                 )
             return self._persist_and_enqueue_update(session_id, notif["params"]["update"], cancel_event)
+        # The runtime sizes worker cards for the client that renders them
+        # (Paseo shows only title, status and result).
+        emit_tool_call.client_surface = self.client_info.get("name")
+        # The ACP session this feed writes to: a card created in one session
+        # must be created again, not updated, in another.
+        emit_tool_call.session_id = session_id
         return emit_tool_call
 
     def _current_language_for_session(self, store, session):
@@ -2655,12 +2668,20 @@ class Agent:
             history = acp_replay_store.replay_session(store, session_id)
         except ValueError as exc:
             raise RpcError(-32603, str(exc)) from None
-        for replay_index, entry in enumerate(history):
+        # The live per-task tool-card budget applies to replay too: a journal
+        # written before it existed can hold thousands of coordinator cards.
+        for replay_index, entry in enumerate(acp_wire_budget.fold_replayed_tool_cards(history, session_id)):
             if entry["kind"] == "update":
+                # Journals written before the per-update cap can hold
+                # multi-megabyte cumulative cards; replay the same bounded
+                # shape a live update has today.
+                replayed = acp_wire_budget.cap_session_update(entry["update"])
                 queued = self.transport.send_notification(
                     protocol.notification("session/update", dict(sessionId=session_id, update={
-                        **entry["update"], "_meta": {**entry["update"].get("_meta", {}),
-                            "cortexReplay": {"sessionId": session_id, "sequences": entry["source_sequences"]}},
+                        **replayed, "_meta": {**replayed.get("_meta", {}),
+                            "cortexReplay": {"sessionId": session_id, "sequences": entry["source_sequences"],
+                                             **({"foldedCards": entry["folded_cards"]}
+                                                if "folded_cards" in entry else {})}},
                     }))
                 )
                 if not queued:

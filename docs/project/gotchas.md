@@ -46,43 +46,14 @@ concluding a live "cortex" Paseo provisioning failure is a runtime defect,
 re-run it once through `outside_command` and only trust a failure that
 reproduces there too.
 
-A host-reported "Plugin failed: ..." on Paseo's Electron client and its phone
-client are not the same failure surface: the phone app's Pipeline bottom sheet
-is the composer pill's `kind: "popover"` branch (native `Platform.OS`), which
-renders `PipelinePanel` inside a different host container than the desktop
-`kind: "action"` branch's sidebar tab, so a report from one does not confirm
-the other renders the same tree. Exhaustive static review of every module the
-Pipeline surface imports (`index.client.tsx`, `client/pipeline-panel.tsx` and
-everything they pull in) found no unguarded reference to a browser/DOM-only
-global reachable on that path -- every `document`/`window`/`sessionStorage`/
-`TextEncoder` use is already `Platform.OS === "web"`-gated or wrapped in
-`try`/`catch`, and neither zod's schema construction nor its `.safeParse` on
-the exact shapes this plugin defines reaches its own known unguarded `File`
-global reference (only hit by `.min()`/`.max()`/`.size()` checks on `Set`/
-`Map`/`File`, none of which this plugin declares). To go beyond static review
-without a real device, `react-native-sdk`'s bundled linux `hermesc` compiles
-but cannot execute (`hermesc` only supports `-emit-binary`, not `-exec`;
-Linux ships no interpreter, only `osx-bin/hermes`), so this instead built the
-exact client entry with `esbuild` (aliasing `react-native` and
-`@getpaseo/plugin/client*` to minimal shims, `react` externalized to match
-`react-test-renderer`'s own copy) and rendered it with `react-test-renderer`
-in a Node process with `document`/`window`/`sessionStorage`/`localStorage`
-deleted -- including driving `contribute()` itself to obtain the real
-composer-pill `Content` component for the native branch, then rendering it
-and pressing every button. Nothing crashed. The schema-validation call site
-inside `client.addTimelineRenderer({schema, ...})` and the real `Icon`/
-`ScrollView` implementations behind `@getpaseo/plugin/client/react-native`
-(an empty `export {}` stub in the installed npm package; the host must
-substitute real ones during its own bundling) are both host-owned code with
-no source in this repository to inspect. Given no reachable first-party
-cause, `client/plugin-error-boundary.tsx` now wraps every plugin-rendered
-surface (`Workers`/`Pipeline` panels, the composer-pill popover, and the
-timeline card) so any surface that still crashes -- from this plugin's own
-code or from a host/dependency defect outside this repo -- degrades to a
-themed fallback message instead of taking down the whole plugin; it does not
-by itself prove or fix a specific root cause; the formatter uses `unknown
-error` if reading or coercing the thrown value fails. It is not verified
-against a real phone client.
+The Paseo phone's client bundle is evaluated from source by Hermes, so a
+desktop build or type-check does not establish phone compatibility. In the
+observed React Native 0.81 Hermes path, ES `class` declarations became
+`undefined`: both the plugin error boundary and shared poller failed. They
+were replaced with Hermes-compatible implementations and guarded by the
+`test:client-bundle` regression test. The fix passed off-device Hermes checks;
+a real phone remains the final confirmation.
+
 
 A crash exactly at that one call site (`acp.orchestrating_runtime
 ._open_coordinator_session`'s own `self._engine.open(...)`) leaves a task id
@@ -111,3 +82,18 @@ existing yet, but that row is committed before the engine session ever
 opens); it is now called unconditionally, relying on
 `pipeline_bootstrap.publish_initial_pipeline`'s own idempotent `reports`-row
 check instead.
+
+Codex can present MCP tool schemas as TypeScript declarations that omit JSON
+Schema constraints such as `minItems`, `maxItems`, and `pattern`, along with
+array item descriptions. Put array meaning, bounds and accepted forms in the
+field's own description; keep runtime validation authoritative and report all
+argument violations together so one correction can address them. For
+`plan_submit`, both `plan.tasks` and `plan.verification` are required (1–16
+items). Verification applies even to investigation-only and trivial plans. If
+project documentation has no verification command, the schema directs the model
+to propose the smallest literal-argv check that would fail when the requested
+result is wrong, using project files and standard tools. The Codex failure
+investigation found that the schema was visible; the actual gap was conflicting
+instructions that made an empty list appear to be the only compliant answer.
+The current contract puts the fallback at the start of each required array's
+description and repeats it in validation corrections.

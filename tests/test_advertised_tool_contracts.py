@@ -57,6 +57,15 @@ def _problems(tool, path, schema):
     if kind == "array":
         if "maxItems" not in schema:
             yield f"{tool} {path}: array without maxItems"
+        # A code-mode host (e.g. Codex) shows the model only this array-level
+        # description, never minItems/maxItems or the item schema's own
+        # description, so the bounds and the item's meaning must both live
+        # here (investigation r_af50d7468665).
+        if len(description) < 40 or description in GENERIC:
+            yield f"{tool} {path}: no real description"
+        min_items, max_items = schema.get("minItems", 0), schema.get("maxItems")
+        if min_items > 0 and not (str(min_items) in description and (max_items is None or str(max_items) in description)):
+            yield f"{tool} {path}: array description missing its minItems/maxItems bounds"
         yield from _problems(tool, f"{path}[]", schema.get("items"))
 
 
@@ -80,6 +89,14 @@ def test_no_channel_is_offered_a_tool_the_gateway_always_refuses(kind, role_id, 
     assert (names & writes == writes) if may_write else not names & writes
     may_run = kind == "worker" and "consultant" not in role_id
     assert ("command_run" in names) == may_run
+
+
+@pytest.mark.parametrize("kind,role_id,stage", [("coordinator", None, None)])
+def test_user_question_request_forbids_a_recap_after_the_call(kind, role_id, stage):
+    (tool,) = [t for t in mcp_tools.tool_definitions(kind, role_id=role_id, stage=stage) if t["name"] == "user_question_request"]
+    description = tool["inputSchema"]["properties"]["question"]["description"]
+    assert "exactly once" in description
+    assert "without restating" in description or "not restating" in description
 
 
 def test_verdict_is_offered_exactly_where_it_is_accepted():

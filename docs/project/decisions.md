@@ -1,3 +1,74 @@
+## 2026-09-27 per-task budget for coordinator tool cards
+
+Review `r_3fdf8c846b22` found that worker cards were bounded but
+coordinator/engine tool cards were not. A coordinator making N distinct calls
+sent N retained Paseo cards, and the emitter's `seen` set grew without bound.
+The fix adds a total budget per task, not per emitter. The first 150 distinct
+calls, or 4 MiB of their updates, get normal delta cards with at most 10
+updates each; the last slot is kept for the terminal update. Later calls are
+counted on one aggregate card. It is created at once, then updated at most
+once per 30 seconds, with the interval doubling after each update, and
+refreshed at turn end. It sends at most 20 updates per task. Failures past the
+budget keep their own card for up to 50 calls. The budget survives turns,
+emitter recreation and restarts because a new runtime seeds it from the host
+journal. Bookkeeping uses 1,024-entry LRU maps. `session/load` folds older
+journals to the same bound.
+
+Rejected alternatives: a per-turn budget (turns are unbounded), dropping
+folded calls silently (the user would lose the count), and an unbounded final
+count at every turn end (turns are unbounded). The trade-off: after 20
+aggregate updates, the card stops counting and says so. The complete list stays
+in durable task history. Permission requests and questions are host requests,
+not cards, and are never folded. Coordinator prose, thought, plan and usage
+updates are not covered by this budget.
+
+## 2026-09-26 bounded ACP emissions, schema visibility and mobile compatibility
+
+The approved change set is P1–P6, A1–A3 and B1–B5; P7 (compressing old
+journals) is excluded. Runtime worker cards omit transcripts and raw inputs,
+generic clients receive a rolling tail capped at 20 entries/4 KiB, result
+projections are capped at 16 KiB, coordinator tool fields at 16 KiB each, and
+serialized `session/update` payloads at 32 KiB. Each worker card also has a
+fixed event budget: forward-only status transitions are immediate; other
+changes are progress updates, the first immediate and then at most one per
+30 seconds and eight per card; and a settled card allows at most two further
+refinements. One card is therefore at most 13 updates, whatever the worker's
+size. Titles pass through one normalizer; two spellings of one long title had
+produced 296 worker updates in the live three-worker run, against 9 on the
+baseline. These are bounds on streamed projections; complete task history is
+still retained and grows with work performed. Paseo 0.9.2 retains provider
+events in session history until the session closes, which makes limiting each
+emitted event material to host memory use.
+
+The same release makes array contracts self-describing for Codex's MCP
+TypeScript-schema view, returns multiple argument validation errors together,
+and instructs the coordinator to write user-facing messages once without a
+short recap. A later Codex probe confirmed the schema reached the model; an
+undocumented project's empty `verification` list came from a missing fallback
+in the contract. Required array descriptions now reject empty lists up front,
+require verification for every plan, and define a project-local literal-argv
+fallback when no verification is documented. Validation corrections repeat
+the field guidance. The coordinator communication rule remains one complete
+user-facing message without a shorter recap.
+
+Timeline emission now sends only changed tool-card fields, drops exact
+MCP-text mirrors of structured results, suppresses no-op updates, and uses
+`same_as` references for repeated completed outputs with a bounded 64-key
+cache. An identical `task_get_context` poll returns a compact receipt, and the
+accepted-plan/context results advise the coordinator to end its turn when no
+action is needed. The hint reduces needless polling but is not enforced, and
+worker dispatch still begins after the coordinator turn ends. Scale tests show
+bounded event bytes for the tested 10- and 200-tool workload; they do not prove
+constant daemon memory or bound durable history. A live dev-Paseo heap run was
+not performed.
+
+Implementation evidence: runtime emission and race fix
+(`r_f4598d9817a2`), schema visibility and communication
+(`r_c5c2afa73253`), Paseo timeline bounds (`r_5bf00f25920a`), and the
+phone Hermes diagnosis and fix (`r_6ec2006f6af1`). Current contracts are
+documented in [ACP observability](../acp/observability.md#bounded-acp-event-projections)
+and the Codex schema rendering gotcha in [gotchas](gotchas.md).
+
 ## 2026-09-26 remove the Paseo Workers composer button and popover
 
 The user steered that the Paseo "Workers" composer pill and the popover it

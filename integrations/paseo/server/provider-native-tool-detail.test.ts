@@ -181,3 +181,111 @@ test("a worker card whose rawOutput is not the result shape embeds no metadata",
   if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
   assert.equal(event.item.metadata, undefined);
 });
+
+test("worker timeline history keeps only bounded card fields and its bounded result", () => {
+  const transcript = "secret-full-worker-transcript ".repeat(3000);
+  const hugeSummary = "🙂".repeat(12000);
+  const checks = Array.from({ length: 40 }, (_, index) => ({
+    name: "result-check-" + index,
+    outcome: "passed",
+  }));
+  const event = presentTimeline({
+    type: "timeline.item",
+    sessionId: "session-worker",
+    item: {
+      type: "tool_call",
+      id: "worker-id-1",
+      callId: "worker:assignment-1",
+      name: "W".repeat(5000),
+      status: "failed",
+      error: "worker failure ".repeat(500),
+      detail: {
+        type: "unknown",
+        input: { transcript },
+        output: { summary: hugeSummary, checks },
+      },
+      metadata: {
+        cortexRawInput: transcript,
+        cortexRawOutput: { transcript },
+        extraBody: transcript,
+      },
+    },
+  });
+  if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
+
+  assert.equal(event.item.id, "worker-id-1");
+  assert.equal(event.item.callId, "worker:assignment-1");
+  assert.equal(event.item.status, "failed");
+  assert.deepEqual(event.item.detail, { type: "plan", text: event.item.name });
+  assert.deepEqual(Object.keys(event.item.metadata ?? {}), ["cortexWorkerResult"]);
+  assert.ok(Buffer.byteLength(JSON.stringify(event.item.name), "utf8") <= 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify(event.item.error), "utf8") <= 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify(event.item.metadata?.cortexWorkerResult), "utf8") <= 16 * 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify(event), "utf8") <= 32 * 1024);
+  assert.equal(JSON.stringify(event).includes("secret-full-worker-transcript"), false);
+  const result = event.item.metadata?.cortexWorkerResult as { summary?: string; checks?: unknown[] } | undefined;
+  assert.equal(typeof result?.summary, "string");
+  assert.ok(result?.summary?.includes("[truncated"));
+  assert.ok((result?.checks?.length ?? 0) > 0);
+});
+
+test("generic tool timeline history removes raw metadata and caps retained detail bytes", () => {
+  const payload = "TOOL_PAYLOAD_DO_NOT_RETAIN ".repeat(3000);
+  const event = presentTimeline({
+    type: "timeline.item",
+    sessionId: "session-tool",
+    item: {
+      type: "tool_call",
+      id: "mcp-id-1",
+      callId: "mcp:call-1",
+      name: "Read report",
+      status: "completed",
+      error: null,
+      detail: {
+        type: "unknown",
+        input: { server: "cortex", tool: "read_report", arguments: { report_id: "r1", body: payload } },
+        output: { text: payload },
+      },
+      metadata: {
+        cortexRawInput: { body: payload },
+        cortexRawOutput: { body: payload },
+        otherUnneededBody: payload,
+      },
+    },
+  });
+  if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
+
+  assert.equal(event.item.id, "mcp-id-1");
+  assert.equal(event.item.callId, "mcp:call-1");
+  assert.equal(event.item.metadata, undefined);
+  assert.ok(Buffer.byteLength(JSON.stringify(event.item.detail), "utf8") <= 16 * 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify(event), "utf8") <= 24 * 1024);
+});
+
+test("native tool detail preserves useful file identity while clipping large output", () => {
+  const content = "read-output-" .repeat(6000);
+  const event = presentTimeline({
+    type: "timeline.item",
+    sessionId: "session-read",
+    item: {
+      type: "tool_call",
+      id: "read-id-1",
+      callId: "read:call-1",
+      name: "Read — seed.txt",
+      status: "completed",
+      error: null,
+      detail: {
+        type: "unknown",
+        input: { file_path: "/project/seed.txt" },
+        output: { content },
+      },
+    },
+  });
+  if (event.type !== "timeline.item" || event.item.type !== "tool_call") throw new Error("wrong event");
+
+  assert.equal(event.item.detail.type, "read");
+  if (event.item.detail.type !== "read") throw new Error("wrong native detail");
+  assert.equal(event.item.detail.filePath, "/project/seed.txt");
+  assert.ok(Buffer.byteLength(JSON.stringify(event.item.detail), "utf8") <= 16 * 1024);
+  assert.equal(event.item.metadata, undefined);
+});

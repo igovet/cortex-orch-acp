@@ -344,6 +344,15 @@ runtime evidence into a false host-delivery claim. Such a session replays its
 durable text transcript only; exact structured updates are available from the
 point at which this recording path is active.
 
+Replay applies the live per-task coordinator tool-card budget (see
+[bounded ACP event projections](observability.md#bounded-acp-event-projections)).
+Updates of the first 200 distinct coordinator cards in a session's journal
+replay as recorded. Later coordinator cards are counted onto one aggregate card
+appended after the history. That card is a count of recorded cards, not a
+synthesized runtime event: its `_meta.cortexReplay` has an empty `sequences`
+list and `foldedCards`. Journals written under the budget never exceed it and
+replay unchanged; the durable rows are never rewritten.
+
 `session/resume` stays unsupported (`protocol.UNSUPPORTED_METHODS`): its
 semantics (resuming a *live* engine turn, not display history) are a
 different, larger surface this task does not implement.

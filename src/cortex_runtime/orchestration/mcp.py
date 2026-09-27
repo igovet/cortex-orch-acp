@@ -3,11 +3,57 @@ from .contracts import COORDINATOR, WORKER, validate
 from .state import TaskMachine, event, transition, encoded
 import hashlib
 import json
+import threading
 from ..contracts import StoreError
 
 
 def schemas(role):
     return COORDINATOR if role == 'coordinator' else WORKER
+
+
+_NOTHING_NEEDED_HINT = (
+    'Nothing here needs you: workers are dispatched and the runtime decides next steps. '
+    'End this turn now instead of polling task_get_context again -- the runtime resumes '
+    'you with a fresh message when a result, question or decision needs you.'
+)
+# Per-channel digest of the last task_get_context read, so an unchanged repeat
+# poll (the same coordinator turn calling this over and over while nothing
+# progressed, see r_310cd92bc78e's 57-call regression) costs a small receipt
+# instead of resending the whole plan/nodes payload. Bounded like the wire
+# emitter's own repeat memory; a lost entry after eviction or restart only
+# costs one full resend, never a wrong answer.
+_CONTEXT_READ_MEMORY = 256
+_last_context_digest: dict[str, str] = {}
+_last_context_lock = threading.Lock()
+
+
+def _context_needs_nothing(value):
+    if value['state'] not in {'PLAN_READY', 'EXECUTING', 'REVIEWING'}:
+        return False
+    if value.get('ask_user_required'):
+        return False
+    return not any(n['status'] == 'failed' for n in value['nodes'])
+
+
+def _task_get_context(store, channel):
+    machine = TaskMachine(store)
+    value = machine.context(channel.task_id)
+    needs_nothing = _context_needs_nothing(value)
+    if needs_nothing:
+        value = dict(value, hint=_NOTHING_NEEDED_HINT)
+    digest = hashlib.sha256(encoded(value).encode()).hexdigest()
+    with _last_context_lock:
+        unchanged = _last_context_digest.get(channel.channel_id) == digest
+        _last_context_digest[channel.channel_id] = digest
+        while len(_last_context_digest) > _CONTEXT_READ_MEMORY:
+            _last_context_digest.pop(next(iter(_last_context_digest)))
+    if not unchanged:
+        return value
+    compact = dict(unchanged_since_last_read=True, state=value['state'],
+                   revision=value['revision'], review_cycle=value['review_cycle'])
+    if needs_nothing:
+        compact['hint'] = _NOTHING_NEEDED_HINT
+    return compact
 
 
 def dispatch(store, channel, operation, args):
@@ -32,7 +78,7 @@ def dispatch(store, channel, operation, args):
     machine = TaskMachine(store)
     from .gateway import _authority
     if operation == 'task_get_context':
-        return machine.context(channel.task_id)
+        return _task_get_context(store, channel)
     if operation == 'answer_submit':
         return machine.submit_answer(channel, args['text'], args['request_key'], authorization=lambda db: _authority(db,channel))
     if operation == 'plan_submit':

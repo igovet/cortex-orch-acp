@@ -27,12 +27,26 @@ def test_observed_titles_cannot_hide_actions_or_control_lifecycle(title):
     assert not cancel.is_set()
 
 
-def test_calls_are_never_collapsed_or_evicted():
+def test_calls_within_the_task_budget_are_never_collapsed_and_later_ones_are_counted():
+    """Paseo retains every card, so a task's cards are bounded in total: the
+    first COORDINATOR_CARD_BUDGET calls are complete own cards, later calls
+    are counted on one aggregate card and a failure still gets its own card."""
+    from cortex_runtime.acp import wire_budget
+    budget = wire_budget.COORDINATOR_CARD_BUDGET
     cards=[];emit=emitter(cards)
     for i in range(300):emit(str(i),'read','Inspect','completed',None,None,{'path':str(i)},{'body':'a'*5000})
-    assert len(cards)==300
-    assert len({c['tool_call_id'] for c in cards})==300
-    assert all(len(c['raw_output']['body'])==5000 for c in cards)
+    own=[c for c in cards if c['tool_call_id'].startswith('call:coordinator:')]
+    assert len(own)==len({c['tool_call_id'] for c in own})==budget
+    assert all(len(c['raw_output']['body'])==5000 for c in own)
+    folded=[c for c in cards if c['tool_call_id'].startswith(wire_budget.FOLDED_CARD_PREFIX)]
+    assert folded[0]['new'] is True and len(folded)==1
+    assert folded[0]['raw_output']['furtherToolCalls']==1
+    emit('late','edit','Edit','failed',None,None,{'path':'x'},{'error':'write conflict'})
+    assert cards[-1]['tool_call_id']=='call:coordinator:late' and cards[-1]['status']=='failed'
+    assert cards[-1]['raw_output']=={'error':'write conflict'}
+    emit.close_group()
+    assert cards[-1]['tool_call_id'].startswith(wire_budget.FOLDED_CARD_PREFIX)
+    assert cards[-1]['raw_output']['furtherToolCalls']==300-budget
 
 
 def test_secrets_are_redacted_without_losing_diff_or_error():

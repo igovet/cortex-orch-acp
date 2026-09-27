@@ -50,6 +50,107 @@ about every 750 ms. Exact lifecycle updates for one logical tool coalesce in
 the panel, while worker deltas are held until a tool boundary or turn end and
 persisted as complete message blocks. Each block carries a durable segment
 identity across all runtime tools, so live and replay views preserve ordering.
+
+### Bounded ACP event projections
+
+Worker activity is retained in the durable task event history, while the ACP
+timeline receives a bounded display projection. Worker tool cards omit
+transcripts and raw inputs. Paseo cards carry status and title, with a bounded
+failure line or terminal result; generic clients receive a rolling tail of at
+most 20 action lines and 4 KiB. Runtime worker prose is buffered by message
+block instead of being emitted per token.
+
+Each worker card also has a fixed event budget, because Paseo keeps every
+update however small. Status transitions move forward only (create as
+`pending`, start as `in_progress`, then `completed` or `failed`). Each is sent
+at once, and a stale earlier status never moves a card back. Any other change,
+such as a title or generic-client body, is a progress update. The first
+progress update is sent at once. Later ones are sent at most once per 30
+seconds and at most 8 times per card. A settled card may be refined at most
+twice more, for example with a later outcome label or result, and these
+refinements are not delayed. A card therefore sends at most 13 updates,
+whatever its tool count, output or duration. A withheld change is not lost:
+the latest state is recomputed on every call and sent with the next permitted
+update, and always with the terminal one. Every worker-card title passes
+through one normalizer (300 characters, outcome suffix kept), so two code
+paths cannot send two spellings of the same title. Live qualification
+(`r_a3d87956eb0f`) found that alternating clipped and unclipped copies of one
+long title caused 296 worker-card updates for three workers, against 9 on
+the baseline. On Paseo, whose cards carry no body, a worker sends exactly its
+three lifecycle updates. Workers' engine tool calls and context/usage updates
+are recorded only in durable task history for the Workers panel. They are
+never relayed to the host as separate events.
+
+Coordinator tool-call fields such as raw input, raw output, locations and
+content blocks are bounded to 16 KiB each. A serialized `session/update` has
+a 32 KiB hard cap. Oversized values are shortened with explicit truncation
+markers, leaving the full record in task history. These limits bound individual
+host events and avoid resending cumulative worker transcripts; total durable
+history still grows with the work performed.
+
+Coordinator and engine tool cards are emitted as partial updates: unchanged
+title, input and output fields are omitted, and a no-op update is suppressed.
+When an MCP result's text is exactly a JSON mirror of its `structuredContent`,
+the text copy is omitted because Paseo presents the structured value first;
+non-mirror text is retained. If a completed call repeats an earlier call's
+title, input and output exactly, the emitter sends a small
+`repeated_output: true` reference with `same_as` pointing to the first card
+instead of copying the output. The repeat cache retains at most 64
+(tool, input) keys; a cache miss sends the full bounded result again.
+
+The number of coordinator and engine tool cards is bounded per task, not only
+per card (`wire_budget.COORDINATOR_*`). The first 150 distinct calls of a task
+get their own card, unless those cards have already sent 4 MiB of serialized
+updates. Each card sends at most 10 updates, create included. The last slot is
+kept for its first terminal update, which also carries any change held back
+past the cap. Later calls are not sent as separate cards. They are counted on
+one aggregate card, `call:cortex-folded:<task>`, titled "N further tool calls
+not shown individually". It is created, as `completed`, at the first folded
+call. Updates follow at most once per 30 seconds, and the interval doubles
+after each update. The count is always refreshed when a coordinator turn ends.
+The card sends at most 20 updates per task, creates included, and its last
+update says the count is no longer updated. A call that fails after the budget
+still gets its own card, carrying its error, for up to 50 such failures.
+Later failures are counted on the aggregate card. Permission requests and user
+questions are `session/request_permission` host requests, not tool cards, so
+the budget never folds or drops them.
+
+The budget belongs to the task, not to an emitter, so it survives coordinator
+turns, the per-prompt emitter, a reopened coordinator session and a Cortex
+restart. A new runtime seeds the budget from the task's durable host journal
+with a SQLite substring prefilter. Its bookkeeping is bounded: open-card
+digests and per-call dispositions are 1,024-entry LRU maps. An evicted call
+that later receives an update is treated as a new call and spends budget like
+one. `session/load` applies the same bound. A journal written before the budget
+existed replays the first 200 coordinator cards as recorded and counts the rest
+on one aggregate card. That card's `_meta.cortexReplay` names no source
+sequence and gives `foldedCards`. Durable task history (task events, the Workers
+panel and reports) keeps every call. Only the live and replayed host stream is
+bounded.
+
+The regression scale test (`tests/test_emission_scale.py`) drives the real
+Agent over a pipe transport with a Paseo client, the fake engine and
+300-character worker titles. It records each repeated `task_get_context` poll
+at 481–483 bytes after the first read. Each worker card sends 3 updates and
+16,959 bytes for 10, 200 and 1,000 tools per worker, including with 20 KB
+writes, and for a 200-tool worker on a simulated multi-hour clock. The
+largest observed update was 16,108 bytes. With the title normalizer and event
+budget removed, the same fixture sent about 60, 1,100 and 5,500 updates per
+worker for 10, 200 and 1,000 tools. The same file drives a coordinator
+making 10, 500 and 5,000 distinct calls over four prompts: a question, its
+continuation, a follow-up turn and a follow-up after a runtime restart with
+`session/load`. Card updates were 20, 312 and 362, and card bytes 11,380,
+185,337 and 194,079. The aggregate card sent 8 and 12 updates, and the
+bookkeeping maps stayed at or under 1,024 entries. With the budget disabled,
+the 5,000-call case sent 9,563 card updates and 5,846,291 bytes. A journal
+holding 5,001 legacy cards replayed as 403 updates. These are test workload results, not a bound on the
+whole daemon's memory or on durable history. Paseo 0.9.2 retains provider
+events in a session's in-memory history until the session closes. Smaller and
+non-repeated events reduce the bytes Cortex contributes to that retained
+history. Tool cards are now bounded per task, but coordinator prose, relayed
+thought and plan updates, and usage updates still grow with the number of turns
+and the amount of text. None of this makes total host memory constant for other
+session data.
 Usage and thought updates can arrive between text chunks of one sentence;
 they do not insert paragraph breaks into worker prose. Tool calls remain
 observable message boundaries. Paseo compares the terminal response with complete

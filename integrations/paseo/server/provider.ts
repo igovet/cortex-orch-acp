@@ -167,28 +167,278 @@ function visibleTimeline(event: ProviderEvent): boolean {
     || event.item.type === "tool_call" && isHiddenOperation(event.item.name)));
 }
 
+const TIMELINE_DETAIL_MAX_BYTES = 16 * 1024;
+const TIMELINE_RESULT_MAX_BYTES = 16 * 1024;
+const TIMELINE_ERROR_MAX_BYTES = 1024;
+const TIMELINE_ID_MAX_BYTES = 512;
+const TIMELINE_LABEL_MAX_BYTES = 1024;
+const TIMELINE_SESSION_MAX_BYTES = 256;
+const TIMELINE_TIMESTAMP_MAX_BYTES = 128;
+const MAX_BOUNDED_COLLECTION_ITEMS = 256;
+const MAX_BOUNDED_DEPTH = 8;
+
+type BoundedJson = null | boolean | number | string | BoundedJson[] | { [key: string]: BoundedJson };
+type BoundedJsonResult = { value: BoundedJson; bytes: number };
+type TimelineItemEvent = Extract<ProviderEvent, { type: "timeline.item" }>;
+
+function jsonStringContentByteLength(character: string): number {
+  const codePoint = character.codePointAt(0) ?? 0;
+  if (codePoint === 0x22 || codePoint === 0x5c
+    || codePoint === 0x08 || codePoint === 0x09 || codePoint === 0x0a
+    || codePoint === 0x0c || codePoint === 0x0d) return 2;
+  if (codePoint < 0x20 || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return 6;
+  return codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+}
+
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function jsonStringByteLength(value: string): number {
+  if (!/["\\\u0000-\u001f]/.test(value) && !hasUnpairedSurrogate(value)) {
+    return Buffer.byteLength(value, "utf8") + 2;
+  }
+  let bytes = 2;
+  for (const character of value) bytes += jsonStringContentByteLength(character);
+  return bytes;
+}
+
+/** Clip a string so its JSON representation fits a byte budget without splitting UTF-8. */
+function clipJsonString(value: string, maxBytes: number): string {
+  const limit = Math.max(0, Math.floor(maxBytes));
+  if (jsonStringByteLength(value) <= limit) return value;
+  if (limit < 2) return "";
+  const totalUtf8Bytes = Buffer.byteLength(value, "utf8");
+  const fullMarker = "… [truncated " + totalUtf8Bytes + " bytes]";
+  const markerContentBytes = jsonStringByteLength(fullMarker) - 2;
+  if (markerContentBytes + 2 > limit) {
+    const prefix: string[] = [];
+    let contentBytes = 0;
+    for (const character of value) {
+      const nextBytes = jsonStringContentByteLength(character);
+      if (contentBytes + nextBytes + 2 > limit) break;
+      prefix.push(character);
+      contentBytes += nextBytes;
+    }
+    return prefix.join("");
+  }
+  const contentBudget = limit - 2 - markerContentBytes;
+  const prefix: string[] = [];
+  let contentBytes = 0;
+  let prefixUtf8Bytes = 0;
+  for (const character of value) {
+    const nextBytes = jsonStringContentByteLength(character);
+    if (contentBytes + nextBytes > contentBudget) break;
+    prefix.push(character);
+    contentBytes += nextBytes;
+    prefixUtf8Bytes += Buffer.byteLength(character, "utf8");
+  }
+  const omittedUtf8Bytes = Math.max(0, totalUtf8Bytes - prefixUtf8Bytes);
+  return prefix.join("") + "… [truncated " + omittedUtf8Bytes + " bytes]";
+}
+
+/** Preserve JSON shape while bounding the complete serialized value and its nesting. */
+function boundJsonValue(value: unknown, maxBytes: number): BoundedJson | undefined {
+  const visit = (input: unknown, budget: number, depth: number, ancestors: Set<object>): BoundedJsonResult | undefined => {
+    if (budget < 1 || depth > MAX_BOUNDED_DEPTH) return undefined;
+    if (input === null) return budget >= 4 ? { value: null, bytes: 4 } : undefined;
+    if (typeof input === "boolean") {
+      const bytes = input ? 4 : 5;
+      return budget >= bytes ? { value: input, bytes } : undefined;
+    }
+    if (typeof input === "number") {
+      const encoded = Number.isFinite(input) ? JSON.stringify(input) : "null";
+      if (encoded === undefined) return undefined;
+      const bytes = Buffer.byteLength(encoded, "utf8");
+      return budget >= bytes ? { value: Number.isFinite(input) ? input : null, bytes } : undefined;
+    }
+    if (typeof input === "string") {
+      const clipped = clipJsonString(input, budget);
+      const bytes = jsonStringByteLength(clipped);
+      return bytes <= budget ? { value: clipped, bytes } : undefined;
+    }
+    if (typeof input !== "object" || input === undefined || ancestors.has(input)) return undefined;
+    if (Array.isArray(input)) {
+      if (budget < 2) return undefined;
+      ancestors.add(input);
+      const output: BoundedJson[] = [];
+      let bytes = 2;
+      const count = Math.min(input.length, MAX_BOUNDED_COLLECTION_ITEMS);
+      for (let index = 0; index < count; index += 1) {
+        const separatorBytes = output.length === 0 ? 0 : 1;
+        const child = visit(input[index], budget - bytes - separatorBytes, depth + 1, ancestors);
+        if (!child) break;
+        output.push(child.value);
+        bytes += separatorBytes + child.bytes;
+      }
+      ancestors.delete(input);
+      return { value: output, bytes };
+    }
+
+    if (budget < 2) return undefined;
+    ancestors.add(input);
+    const output: Record<string, BoundedJson> = Object.create(null) as Record<string, BoundedJson>;
+    let bytes = 2;
+    let stored = 0;
+    let visited = 0;
+    for (const key in input as Record<string, unknown>) {
+      if (!Object.prototype.hasOwnProperty.call(input, key)) continue;
+      if (visited >= MAX_BOUNDED_COLLECTION_ITEMS) break;
+      visited += 1;
+      const separatorBytes = stored === 0 ? 0 : 1;
+      const keyBudget = Math.min(256, budget - bytes - separatorBytes - 3);
+      if (keyBudget < 2) break;
+      const boundedKey = clipJsonString(key, keyBudget);
+      const keyBytes = jsonStringByteLength(boundedKey);
+      const fixedBytes = separatorBytes + keyBytes + 1;
+      const child = visit((input as Record<string, unknown>)[key], budget - bytes - fixedBytes, depth + 1, ancestors);
+      if (!child || Object.prototype.hasOwnProperty.call(output, boundedKey)) continue;
+      output[boundedKey] = child.value;
+      bytes += fixedBytes + child.bytes;
+      stored += 1;
+    }
+    ancestors.delete(input);
+    return { value: output, bytes };
+  };
+  return visit(value, Math.max(0, Math.floor(maxBytes)), 0, new Set())?.value;
+}
+
+function boundedWorkerResult(value: unknown): ReturnType<typeof parseWorkerResult> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  if (source.summary !== null && typeof source.summary !== "string") return undefined;
+  if (!Array.isArray(source.checks)) return undefined;
+
+  // Keep room for check names and dispositions even when a legacy result has
+  // an unbounded summary. Drop checks from the tail when the fixed projection
+  // budget is reached, matching the runtime's result contract.
+  const summary = source.summary === null ? null : clipJsonString(source.summary, 4 * 1024);
+  const checks: Array<Record<string, string>> = [];
+  let encodedBytes = Buffer.byteLength(JSON.stringify({ summary, checks }), "utf8");
+  const optionalLimits = {
+    blocker: 1024,
+    closedBy: 512,
+    claimedOutcome: 256,
+    evidenceGap: 1024,
+  } as const;
+  const count = Math.min(source.checks.length, MAX_BOUNDED_COLLECTION_ITEMS);
+  for (let index = 0; index < count; index += 1) {
+    const candidate = source.checks[index];
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+    const checkSource = candidate as Record<string, unknown>;
+    if (typeof checkSource.name !== "string" || typeof checkSource.outcome !== "string") return undefined;
+    const check: Record<string, string> = {
+      name: clipJsonString(checkSource.name, 512),
+      outcome: clipJsonString(checkSource.outcome, 256),
+    };
+    for (const [key, limit] of Object.entries(optionalLimits)) {
+      const field = checkSource[key];
+      if (field === undefined) continue;
+      if (typeof field !== "string") return undefined;
+      check[key] = clipJsonString(field, limit);
+    }
+    const checkBytes = Buffer.byteLength(JSON.stringify(check), "utf8");
+    const addedBytes = checkBytes + (checks.length === 0 ? 0 : 1);
+    if (encodedBytes + addedBytes > TIMELINE_RESULT_MAX_BYTES) break;
+    checks.push(check);
+    encodedBytes += addedBytes;
+  }
+  return parseWorkerResult({ summary, checks });
+}
+
+function boundedTimelineEnvelope(event: TimelineItemEvent): Pick<TimelineItemEvent, "type" | "sessionId" | "timestamp"> {
+  return {
+    type: "timeline.item",
+    sessionId: clipJsonString(event.sessionId, TIMELINE_SESSION_MAX_BYTES),
+    ...(event.timestamp === undefined
+      ? {}
+      : { timestamp: clipJsonString(event.timestamp, TIMELINE_TIMESTAMP_MAX_BYTES) }),
+  };
+}
+
+function boundedToolError(item: ToolCallTimelineItem): BoundedJson | null {
+  if (item.status !== "failed") return null;
+  return boundJsonValue(item.error, TIMELINE_ERROR_MAX_BYTES) ?? "Tool call failed";
+}
+
 export function presentTimeline(event: ProviderEvent): ProviderEvent {
-  const projected = nativeToolDetail(restoreReplayUserMessage(repairFailedTimelineError(event)));
+  const repaired = restoreReplayUserMessage(repairFailedTimelineError(event));
+  if (repaired.type !== "timeline.item" || repaired.item.type !== "tool_call") return repaired;
+
+  const sourceItem = repaired.item;
+  if (sourceItem.callId.startsWith("worker:")) {
+    // Worker transcripts and raw runtime mirrors are unnecessary for both
+    // the inline row and the Workers panel (the panel reads durable history).
+    // Bound before validation so legacy runtimes and replay rows are safe too.
+    const resultSource = sourceItem.metadata?.cortexWorkerResult
+      ?? (sourceItem.detail.type === "unknown" ? sourceItem.detail.output : undefined);
+    const result = boundedWorkerResult(resultSource);
+    const name = clipJsonString(sourceItem.name, TIMELINE_LABEL_MAX_BYTES);
+    const workerItem = {
+      type: "tool_call" as const,
+      id: clipJsonString(sourceItem.id, TIMELINE_ID_MAX_BYTES),
+      callId: clipJsonString(sourceItem.callId, TIMELINE_ID_MAX_BYTES),
+      name,
+      status: sourceItem.status,
+      error: boundedToolError(sourceItem),
+      detail: { type: "plan" as const, text: name },
+      ...(result === undefined ? {} : { metadata: { cortexWorkerResult: result } }),
+    } as ToolCallTimelineItem;
+    return { ...boundedTimelineEnvelope(repaired), item: workerItem };
+  }
+
+  // Bound the incoming detail and label before formatting so legacy or
+  // replayed multi-megabyte tool payloads do not create a second large copy.
+  const rawInputSource = sourceItem.metadata?.cortexRawInput
+    ?? (sourceItem.detail.type === "unknown" ? sourceItem.detail.input : sourceItem.detail);
+  const boundedRawInput = boundJsonValue(rawInputSource, TIMELINE_DETAIL_MAX_BYTES);
+  const boundedSourceDetail = boundJsonValue(sourceItem.detail, TIMELINE_DETAIL_MAX_BYTES)
+    ?? { type: "plain_text", label: "Tool details", text: "Tool details omitted to stay within the timeline budget." };
+  const sourceRevertToken = sourceItem.revertToken === undefined
+    ? undefined
+    : boundJsonValue(sourceItem.revertToken, 1024);
+  const boundedSourceItem = {
+    ...sourceItem,
+    id: clipJsonString(sourceItem.id, TIMELINE_ID_MAX_BYTES),
+    ...(sourceRevertToken === undefined ? {} : { revertToken: sourceRevertToken }),
+    callId: clipJsonString(sourceItem.callId, TIMELINE_ID_MAX_BYTES),
+    name: clipJsonString(sourceItem.name, TIMELINE_LABEL_MAX_BYTES),
+    error: boundedToolError(sourceItem),
+    detail: boundedSourceDetail as unknown as ProviderToolCallDetail,
+    ...(boundedRawInput === undefined ? { metadata: undefined } : { metadata: { cortexRawInput: boundedRawInput } }),
+  } as ToolCallTimelineItem;
+  const projected = nativeToolDetail({ ...boundedTimelineEnvelope(repaired), item: boundedSourceItem });
   if (projected.type !== "timeline.item" || projected.item.type !== "tool_call") return projected;
   const item = projected.item;
-  // Paseo's overview mode never groups a `plan` detail. A worker card must
-  // stay its own row: grouped, it would become the run's visible latest call
-  // and the client's worker-row transform would hide every call before it.
-  if (item.callId.startsWith("worker:")) {
-    // The runtime embeds its terminal `{summary, checks}` projection as this
-    // card's rawOutput (orchestrating_runtime.py's `_emit_worker_card`),
-    // which lands here as `detail.output` while detail is still "unknown".
-    // Move it into `metadata` -- the one channel the client-side worker-row
-    // transformer can still read once `detail` becomes a bare "plan" below
-    // -- so a completed card renders its result with zero follow-up RPC.
-    const result = parseWorkerResult(item.detail.type === "unknown" ? item.detail.output : undefined);
-    return { ...projected, item: { ...item, detail: { type: "plan", text: item.name },
-      ...(result ? { metadata: { ...item.metadata, cortexWorkerResult: result } } : {}) } };
-  }
-  const rawInput = item.metadata?.cortexRawInput ?? (item.detail.type === "unknown" ? item.detail.input : item.detail);
+  const rawInput = item.metadata?.cortexRawInput
+    ?? (item.detail.type === "unknown" ? item.detail.input : item.detail);
   const semantics = presentToolSemantics({ name: item.name, rawInput });
-  return { ...projected, item: { ...item, name: semantics.label,
-    metadata: { ...item.metadata, cortexOriginalName: item.name } } };
+  const boundedDetail = boundJsonValue(item.detail, TIMELINE_DETAIL_MAX_BYTES)
+    ?? { type: "plain_text", label: "Tool details", text: "Tool details omitted to stay within the timeline budget." };
+  const revertToken = item.revertToken === undefined
+    ? undefined
+    : boundJsonValue(item.revertToken, 1024);
+  const toolItem = {
+    type: "tool_call" as const,
+    id: clipJsonString(item.id, TIMELINE_ID_MAX_BYTES),
+    ...(revertToken === undefined ? {} : { revertToken }),
+    callId: clipJsonString(item.callId, TIMELINE_ID_MAX_BYTES),
+    name: clipJsonString(semantics.label, TIMELINE_LABEL_MAX_BYTES),
+    status: item.status,
+    error: boundedToolError(item),
+    detail: boundedDetail as unknown as ProviderToolCallDetail,
+  } as ToolCallTimelineItem;
+  return { ...boundedTimelineEnvelope(projected), item: toolItem };
 }
 
 function nonEmptyArgv(parts: string[]): CommandArgv {

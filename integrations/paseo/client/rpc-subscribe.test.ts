@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { SharedPoller } from "./rpc-subscribe.ts";
+import { createSharedPoller } from "./rpc-subscribe.ts";
 
 const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -9,7 +9,7 @@ const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 {
   let calls = 0;
   const rpc = async (input: { workspaceId: string; agentId: string }) => { calls += 1; return { seen: calls, ...input }; };
-  const poller = new SharedPoller(rpc, (input) => `${input.workspaceId}\u0000${input.agentId}`);
+  const poller = createSharedPoller(rpc, (input) => `${input.workspaceId}\u0000${input.agentId}`);
   const results: unknown[] = [];
   const unsubA = poller.subscribe({ workspaceId: "ws", agentId: "agent" }, 20, (r) => results.push(["a", r]));
   const unsubB = poller.subscribe({ workspaceId: "ws", agentId: "agent" }, 20, (r) => results.push(["b", r]));
@@ -25,7 +25,7 @@ const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 {
   const seenKeys: string[] = [];
   const rpc = async (input: { id: string }) => { seenKeys.push(input.id); return input; };
-  const poller = new SharedPoller(rpc, (input) => input.id);
+  const poller = createSharedPoller(rpc, (input) => input.id);
   const unsubA = poller.subscribe({ id: "one" }, 1000, () => {});
   const unsubB = poller.subscribe({ id: "two" }, 1000, () => {});
   await tick(10);
@@ -38,7 +38,7 @@ const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 {
   let calls = 0;
   const rpc = async () => { calls += 1; return { calls }; };
-  const poller = new SharedPoller(rpc, () => "same-key");
+  const poller = createSharedPoller(rpc, () => "same-key");
   const unsubSlow = poller.subscribe({}, 1000, () => {});
   await tick(5);
   assert.equal(calls, 1, "the initial immediate refresh");
@@ -54,7 +54,7 @@ const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 {
   let attempts = 0;
   const rpc = async () => { attempts += 1; throw new Error("network"); };
-  const poller = new SharedPoller(rpc, () => "err-key");
+  const poller = createSharedPoller(rpc, () => "err-key");
   const results: unknown[] = [];
   const unsub = poller.subscribe({}, 20, (r) => results.push(r));
   await tick(10);
@@ -67,7 +67,7 @@ const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 {
   let calls = 0;
   const rpc = async () => { calls += 1; return {}; };
-  const poller = new SharedPoller(rpc, () => "stop-key");
+  const poller = createSharedPoller(rpc, () => "stop-key");
   const unsub = poller.subscribe({}, 15, () => {});
   await tick(10);
   const callsAtUnsub = calls;

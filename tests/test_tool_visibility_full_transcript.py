@@ -150,7 +150,7 @@ def test_delegate_is_represented_only_by_worker_card_in_coordinator_stream():
     assert [card["tool_call_id"] for card in cards] == ["call:coordinator:delegate", "call:coordinator:read"]
 
 
-def test_worker_lifecycle_card_contains_full_ordered_actions_without_worker_siblings():
+def _bounded_card_runtime(panel_modes=None):
     runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
     import threading
     runtime._lock = threading.RLock()
@@ -161,6 +161,14 @@ def test_worker_lifecycle_card_contains_full_ordered_actions_without_worker_sibl
     runtime._worker_card_emitters = {}
     runtime._worker_card_sent = {}
     runtime._emitted_worker_cards = set()
+    runtime._worker_card_panel_mode = dict(panel_modes or {})
+    return runtime
+
+
+def test_worker_lifecycle_card_keeps_ordered_bounded_actions_without_worker_siblings():
+    """The card shows ordered, bounded actions; full detail stays durable
+    (worker activity rows, see test_worker_activity_* below)."""
+    runtime = _bounded_card_runtime()
     cards = []
     long_command = "python3 -B -m pytest " + ("tests/test_long.py " * 500)
     runtime._emit_worker_card(
@@ -186,23 +194,15 @@ def test_worker_lifecycle_card_contains_full_ordered_actions_without_worker_sibl
     assert lifecycle
     body = lifecycle[-1]["text"]
     assert body.index("Tool: Command") < body.index("Error: Command failed") < body.index("[final response]")
-    assert len(body) > 10000
+    assert len(body.encode("utf-8")) <= 4 * 1024
+    assert all(len(line) <= 300 for line in body.splitlines())
     assert not any(card["tool_call_id"].startswith("worker-action:") for card in cards)
     assert "permission denied" in body
+    assert "raw_input" not in lifecycle[-1]
 
 
-def test_paseo_surface_keeps_history_durable_but_shows_final_and_panel_hint():
-    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
-    import threading
-    runtime._lock = threading.RLock()
-    runtime._worker_card_terminal = {}
-    runtime._worker_card_project_root = {}
-    runtime._worker_action_log = {}
-    runtime._worker_action_refs = {}
-    runtime._worker_card_emitters = {}
-    runtime._worker_card_sent = {}
-    runtime._emitted_worker_cards = set()
-    runtime._worker_panel_mode = {"assignment-paseo": True}
+def test_paseo_surface_card_has_no_body_and_keeps_result():
+    runtime = _bounded_card_runtime({"assignment-paseo": True})
     cards = []
     runtime._emit_worker_card(cards.append, "assignment-paseo", status="pending", title="Worker: explorer — Inspect")
     runtime._emit_worker_card(cards.append, "assignment-paseo", status="in_progress",
@@ -210,25 +210,17 @@ def test_paseo_surface_keeps_history_durable_but_shows_final_and_panel_hint():
                               entry_ref="worker-tool:skill")
     runtime._emit_worker_card(cards.append, "assignment-paseo", status="in_progress",
                               entry="[final response] Verified the result.", entry_ref="worker-final")
-    runtime._emit_worker_card(cards.append, "assignment-paseo", status="completed")
-    body = cards[-1]["text"]
-    assert "[final response] Verified the result." in body
+    runtime._emit_worker_card(cards.append, "assignment-paseo", status="completed",
+                              result_payload={"summary": "Verified the result.", "checks": []})
+    assert [card["status"] for card in cards] == ["pending", "in_progress", "completed"]
+    assert not any("text" in card or "raw_input" in card for card in cards)
+    assert cards[-1]["raw_output"] == {"summary": "Verified the result.", "checks": []}
+    # The runtime tail still exists for a generic client of the same task.
     assert "knowledge-harvest" in "\n".join(runtime._worker_action_log["assignment-paseo"])
-    assert "knowledge-harvest" in body
 
 
-def test_non_paseo_surface_keeps_full_worker_card_transcript():
-    runtime = OrchestratingRuntime.__new__(OrchestratingRuntime)
-    import threading
-    runtime._lock = threading.RLock()
-    runtime._worker_card_terminal = {}
-    runtime._worker_card_project_root = {}
-    runtime._worker_action_log = {}
-    runtime._worker_action_refs = {}
-    runtime._worker_card_emitters = {}
-    runtime._worker_card_sent = {}
-    runtime._emitted_worker_cards = set()
-    runtime._worker_panel_mode = {"assignment-zed": False}
+def test_non_paseo_surface_keeps_bounded_worker_card_tail():
+    runtime = _bounded_card_runtime({"assignment-zed": False})
     cards = []
     runtime._emit_worker_card(cards.append, "assignment-zed", status="pending")
     runtime._emit_worker_card(cards.append, "assignment-zed", status="completed",

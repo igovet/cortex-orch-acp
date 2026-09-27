@@ -328,6 +328,11 @@ class Server:
         if failure.field:data['field']=failure.field
         if failure.received is not None:data['received']=public(failure.received)
         if failure.expected is not None:data['expected']=public(failure.expected)
+        violations=getattr(failure,'violations',None)
+        if violations and len(violations)>1:
+            data['violations']=[dict(field=v['field'],received=public(v['received']),
+                                     expected=public(v['expected']),correction=public(v['correction']))
+                                for v in violations]
         data['write_state']='uncertain' if outcome_uncertain(code) else 'rejected'
         return dict(content=[dict(type='text',text=json.dumps(data))],isError=True)
 

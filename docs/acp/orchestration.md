@@ -6,6 +6,30 @@ results. The runtime chooses what executes and whether the task can complete.
 See [implementation status](runtime-rewrite-status.md) for retained test evidence
 and its automated evidence limits.
 
+## Plan submission and coordinator polling
+
+The advertised `plan_submit` contract requires both `plan.tasks` and
+`plan.verification` to contain 1–16 items; empty arrays are rejected. A
+verification command is required for every plan, including an investigation-only
+or trivial plan, because runtime verification still runs when no project change
+is observed. Copy commands exactly from documented project verification. If the
+project documents none, provide the smallest literal-argv command that fails
+when the requested result is wrong, using project files and standard tools; for
+an investigation-only plan, check the investigated files. Shell operators,
+pipes, redirection and substitution are not accepted. When Codex renders the
+MCP schema as TypeScript, the required count and meaning are repeated in the
+array's own description because it may omit JSON Schema item/count constraints
+and nested item descriptions. A count-validation correction repeats that field
+description, including the no-documentation fallback.
+
+After accepting a plan, `plan_submit` tells the coordinator that workers are
+dispatched after the current turn ends and to end the turn rather than poll.
+When `task_get_context` shows no coordinator action is needed, it gives the same
+turn-ending hint. An identical repeat read on that channel returns a compact
+unchanged-state receipt instead of resending the plan and nodes. The hint is
+advisory; the runtime does not force a model to end its turn. Worker dispatch
+timing remains at the turn boundary.
+
 `orchestration/state.py` stores task state, original goal, plan revision, dependency
 nodes, structured results, events and request receipts in `.cortex/cortex.sqlite3`.
 State changes and their events commit together. A plan is validated for exact fields,
@@ -204,6 +228,13 @@ CUA calls and generic/titleless tool updates retain readable, expandable details
 Credential redaction remains; a downstream terminal reference cannot be relayed as
 if it belonged to the incoming client's terminal namespace. Only actually exposed
 engine events can be forwarded—absent native events are never fabricated.
+Each worker has one timeline card with a fixed event budget of at most 13 updates,
+whatever its tool count, output or duration. Its complete activity lives in the
+durable Workers panel history, not in host timeline events. The coordinator's
+own tool cards share one per-task budget: after 150 distinct calls, further
+calls are counted on a single aggregate card, and failures keep their own card
+for another 50 calls. User questions and permission requests are never folded. See
+[bounded ACP event projections](observability.md#bounded-acp-event-projections).
 
 Engine processes run in the engine jail, where their native tools write only the
 assignment scope; native subagents are disabled. The runtime gateway

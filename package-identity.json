@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "1.0.0+sha256.3f60a77e044119de",
+  "version": "1.0.0+sha256.168c7123b66b4d8f",
   "description": "Durable runtime-owned ACP orchestration with immutable reports and complete observed tool transcripts.",
   "author": {
     "name": "igovet"

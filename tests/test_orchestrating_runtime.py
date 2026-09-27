@@ -75,10 +75,11 @@ def test_terminal_worker_card_keeps_first_terminal_outcome():
 
     assert [card["status"] for card in cards] == ["pending", "failed"]
     assert cards[-1]["text"] == "Worker failed"
-    # Paseo 0.8 maps failed timeline error from rawOutput and rejects null.
-    # The failure transcript is the same bounded, redacted detail shown in
-    # the card, so replay remains truthful and reloadable.
-    assert cards[-1]["raw_output"] == cards[-1]["raw_input"] == "Worker failed"
+    # Paseo maps failed timeline error from rawOutput and rejects null. The
+    # failure line is the same bounded, redacted detail shown in the card;
+    # no transcript mirror is sent as rawInput.
+    assert cards[-1]["raw_output"] == "Worker failed"
+    assert "raw_input" not in cards[-1]
 
 
 def _worker_card_runtime():
@@ -104,7 +105,7 @@ def test_worker_card_mirror_redacts_external_absolute_path_only_for_display():
     )
 
     assert cards[-1]["text"] == "Command — cat [external path]"
-    assert cards[-1]["raw_input"] == cards[-1]["text"]
+    assert "raw_input" not in cards[-1]
     assert "/etc/passwd" not in cards[-1]["text"]
 
 
@@ -125,7 +126,7 @@ def test_worker_card_mirror_keeps_project_command_and_bounds_rows_and_history():
         _project_root="/tmp/project", entry="Command — pytest tests/test_counter.py",
     )
     assert all(len(line) <= 80 for line in cards[-1]["text"].splitlines())
-    assert len(cards[-1]["raw_input"]) <= 1024 * 1024
+    assert len(cards[-1]["text"].encode("utf-8")) <= 4 * 1024
 
 
 def test_worker_card_title_over_the_cap_gets_a_clean_ellipsis_not_a_marker():
@@ -158,28 +159,36 @@ def test_assignment_failed_card_entry_over_the_cap_gets_a_clean_ellipsis():
     assert len(entry) <= _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS
 
 
-def test_worker_action_history_is_complete_and_ref_index_remains_usable():
+def test_worker_action_tail_is_bounded_and_ref_index_remains_usable():
+    """The in-memory card tail keeps the latest actions only; the complete
+    account is the durable worker activity (see
+    tests/test_worker_card_emission_budget.py)."""
     runtime = _worker_card_runtime()
     for index in range(60):
         runtime._append_worker_entry("assignment-1", f"Action {index}", f"ref-{index}")
 
     log = runtime._worker_action_log["assignment-1"]
     refs = runtime._worker_action_refs["assignment-1"]
-    assert len(log) == 60
-    assert log[0] == "Action 0"
-    assert refs["ref-0"] == 0
+    assert len(log) == 20
+    assert log[0] == "Action 40"
+    assert refs["ref-40"] == 40
     assert refs["ref-59"] == 59
+    assert "ref-0" not in refs
 
-    # A late update for a known provider ref replaces its logical row.
-    runtime._append_worker_entry("assignment-1", "stale Action 9", "ref-9")
-    assert len(runtime._worker_action_log["assignment-1"]) == 60
-    assert "stale Action 9" in runtime._worker_action_log["assignment-1"]
+    # A late update for a retained provider ref replaces its logical row.
+    runtime._append_worker_entry("assignment-1", "stale Action 49", "ref-49")
+    assert len(runtime._worker_action_log["assignment-1"]) == 20
+    assert "stale Action 49" in runtime._worker_action_log["assignment-1"]
 
     # A late status update for a retained logical call replaces its row and
-    # does not create a duplicate or lose any earlier transcript.
+    # does not create a duplicate row.
     runtime._append_worker_entry("assignment-1", "Action 59 complete", "ref-59")
-    assert len(runtime._worker_action_log["assignment-1"]) == 60
+    assert len(runtime._worker_action_log["assignment-1"]) == 20
     assert runtime._worker_action_log["assignment-1"][-1] == "Action 59 complete"
+
+    # An evicted ref cannot resurrect its row at the end of the card.
+    runtime._append_worker_entry("assignment-1", "stale Action 9", "ref-9")
+    assert "stale Action 9" not in runtime._worker_action_log["assignment-1"]
 
 
 

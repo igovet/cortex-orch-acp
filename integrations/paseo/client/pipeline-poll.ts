@@ -1,5 +1,5 @@
 import type { Pipeline } from "../shared/pipeline.ts";
-import { SharedPoller } from "./rpc-subscribe.ts";
+import { createSharedPoller, type SharedPoller } from "./rpc-subscribe.ts";
 
 type PipelineInput = { workspaceId: string; agentId: string };
 type PipelineRpc = (input: PipelineInput) => Promise<Pipeline>;
@@ -15,7 +15,7 @@ function keyOf(input: PipelineInput): string {
 let poller: SharedPoller<PipelineInput, Pipeline> | null = null;
 
 function sharedPoller(rpc: PipelineRpc): SharedPoller<PipelineInput, Pipeline> {
-  if (!poller) poller = new SharedPoller(rpc, keyOf);
+  if (!poller) poller = createSharedPoller(rpc, keyOf);
   return poller;
 }
 

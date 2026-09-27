@@ -223,7 +223,7 @@ ERROR_HELP = {
     "project_context_unavailable": "The supported native Codex index cannot establish this thread's project. Restore that host index and retry; do not supply a database path or fall back to another project or a global archive.",
     "project_context_conflict": "Native thread, parent or requested project locations disagree with the verified project binding. Continue in the original project or explicitly relocate its archive offline; changing the working directory cannot switch an existing task's database.",
     "project_storage_mismatch": "This project-local database contains a different project's metadata or is outside the canonical project storage path. Use the explicit stopped-access archive split into the correct project; no global database fallback is supported.",
-    "invalid_arguments": "Input does not match the advertised schema. Correct the named field using expected and correction, then retry once.",
+    "invalid_arguments": "Input does not match the advertised schema. Correct every listed field (see violations when present, otherwise field/expected/correction), then retry.",
     "request_too_large": "The encoded MCP request exceeds 2,000,000 bytes. Markdown bodies belong in the file returned by create_draft, not the request. Shorten metadata and publish the server-issued draft_id.",
     "invalid_project": "Use the absolute existing canonical project directory supplied by the host.",
     "invalid_draft_path": "The server-created draft moved or changed file type. Keep it at the exact create_draft path as an owned regular .md file; create a new draft if it cannot be restored safely.",
@@ -310,7 +310,7 @@ ERROR_HELP = {
     "invalid_dependencies": "dependencies is a list of unique task ids (strings); use [] for a task with none.",
     "unknown_dependency": "Every dependency must name the id of another task in the same plan.",
     "cyclic_plan": "Task dependencies form a cycle. Break it so every task can start after the ones it depends on.",
-    "verification_required": "plan.verification is a list of 1 to 16 commands, each an argv list, that prove the whole result.",
+    "verification_required": "plan.verification is a list of 1 to 16 commands, each an argv list, that prove the whole result: the project's documented verification, or when it documents none, the smallest command that exits nonzero if the requested result is wrong.",
     "invalid_verification_command": "Each verification command is an argv list of 1 to 64 non-empty strings (at most 4096 characters each, no NUL), for example [\"python3\", \"-m\", \"pytest\", \"-q\"].",
     "verification_shell_syntax": "Verification executes literal argv without a shell. Remove command substitution, backticks, redirection, pipes, shell operators or standalone parentheses; use a documented project command or script.",
     "storage_error": "Storage did not complete cleanly. Preserve the draft. Check disk space and access, then retry only the identical request and key because publication may be uncertain.",
@@ -332,9 +332,15 @@ ERROR_HELP = {
 
 class StoreError(Exception):
     """Structured, model-actionable tool failure."""
-    def __init__(self, code, field=None, received=None, expected=None, correction=None):
+    def __init__(self, code, field=None, received=None, expected=None, correction=None, violations=None):
         super().__init__(code)
         self.field=field; self.received=received; self.expected=expected; self.correction=correction
+        # Every violation collected in one validation pass (see
+        # orchestration.contracts.validate), each shaped like
+        # {field, received, expected, correction}; the first entry always
+        # matches this exception's own top-level field/received/expected/
+        # correction for callers that only look at those.
+        self.violations=violations
 
 
 def _received(value):

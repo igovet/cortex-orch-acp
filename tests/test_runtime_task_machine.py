@@ -1150,3 +1150,64 @@ def test_an_unobservable_project_always_requires_review(machine, monkeypatch):
                         lambda root: dict(kind='unavailable', head=None, dirty_digest=None, detail='cap', manifest=None))
     state.add_review(channel.task_id)
     assert state.context(channel.task_id)['state'] == 'REVIEWING'
+
+
+def test_plan_submit_result_tells_coordinator_to_end_turn(machine):
+    """r_310cd92bc78e: a coordinator polled task_get_context 57 times after
+    an accepted plan because dispatch only starts once its turn ends. The
+    accepted receipt now says so explicitly instead of leaving the model to
+    poll for a state change that needs its own turn to end first."""
+    state, channel = machine
+    accepted = state.submit_plan(channel, plan(), 'p1')
+    assert accepted['state'] == 'PLAN_READY'
+    assert 'end this turn' in accepted['hint'].lower()
+    # The idempotent retry returns the exact stored receipt, hint included.
+    assert accepted == state.submit_plan(channel, plan(), 'p1')
+
+
+def test_task_get_context_hints_end_turn_when_nothing_needs_coordinator(machine):
+    from cortex_runtime.orchestration import mcp as runtime_mcp
+    state, channel = machine
+    runtime_mcp._last_context_digest.clear()
+    context = runtime_mcp.dispatch(state.store, channel, 'task_get_context', {})
+    assert context['state'] == 'PLANNING'
+    assert 'hint' not in context
+    state.submit_plan(channel, plan(), 'p1')
+    context = runtime_mcp.dispatch(state.store, channel, 'task_get_context', {})
+    assert context['state'] == 'PLAN_READY'
+    assert 'end this turn' in context['hint'].lower()
+    # A failed node needs the coordinator's decision; the hint drops.
+    state.move(channel.task_id, 'EXECUTING')
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET status='failed',result_json=? WHERE task_id=? AND status IN ('pending','running')",
+                   (json.dumps(dict(report_ref='r', summary='broke', checks=[])), channel.task_id))
+        db.commit()
+    context = runtime_mcp.dispatch(state.store, channel, 'task_get_context', {})
+    assert any(n['status'] == 'failed' for n in context['nodes'])
+    assert 'hint' not in context
+
+
+def test_task_get_context_repeat_poll_returns_compact_unchanged(machine):
+    """An unchanged repeat poll (the same turn calling task_get_context again
+    while nothing progressed) gets a small receipt instead of the whole
+    plan/nodes payload again."""
+    from cortex_runtime.orchestration import mcp as runtime_mcp
+    state, channel = machine
+    runtime_mcp._last_context_digest.clear()
+    state.submit_plan(channel, plan(), 'p1')
+    first = runtime_mcp.dispatch(state.store, channel, 'task_get_context', {})
+    assert 'nodes' in first and 'unchanged_since_last_read' not in first
+    repeat = runtime_mcp.dispatch(state.store, channel, 'task_get_context', {})
+    assert repeat == dict(unchanged_since_last_read=True, state='PLAN_READY',
+                           revision=first['revision'], review_cycle=first['review_cycle'],
+                           hint=first['hint'])
+    # A different channel (e.g. a fresh coordinator session) is not affected
+    # by another channel's cached read.
+    other = SimpleNamespace(task_id=channel.task_id, channel_id='coordinator-2', role='coordinator')
+    fresh = runtime_mcp.dispatch(state.store, other, 'task_get_context', {})
+    assert 'unchanged_since_last_read' not in fresh
+    # Real progress invalidates the cached digest.
+    state.move(channel.task_id, 'EXECUTING')
+    progressed = runtime_mcp.dispatch(state.store, channel, 'task_get_context', {})
+    assert 'unchanged_since_last_read' not in progressed
+    assert progressed['state'] == 'EXECUTING'

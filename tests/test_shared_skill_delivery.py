@@ -54,6 +54,11 @@ def test_a_coordinator_is_told_which_skills_exist_and_when_to_read_one():
     assert "`read_skill` tool on the `cortex` MCP server" in composed
     assert "engine-native skill loader" in composed
     assert "live tool descriptions and schemas" in role.body_portable
+    # A commentary-then-final-answer host (e.g. Codex) otherwise treats a
+    # detailed pre-call message and the final answer as two separate,
+    # never-collapsed turns and repeats the content in both (investigation
+    # r_af50d7468665, session c2016029): tell the model explicitly not to.
+    assert "never follow it with a shorter recap or summary in the same turn" in " ".join(role.body_portable.split())
 
 
 def test_a_worker_is_told_which_skills_exist_and_when_to_read_one():

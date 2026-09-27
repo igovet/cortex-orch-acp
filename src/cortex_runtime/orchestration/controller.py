@@ -271,6 +271,8 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 fault_injection.checkpoint('t023_after_continuation_prompt')
             except Exception as error:
                 flush()
+                if tool_emitter:
+                    tool_emitter.close_group()
                 runtime._finalize_generation_delivery(session_ref, delivery_id,
                                                      failure_kind=type(error).__name__, stop_reason=None)
                 if cancel_event.is_set() or _transport_lost(runtime, task_id):
@@ -302,6 +304,9 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 events.mark_delivered(runtime._store,task_id,delivery_marker)
             runtime._finalize_generation_delivery(session_ref, delivery_id, failure_kind=None, stop_reason=outcome.stop_reason)
             flush()
+            if tool_emitter:
+                # Turn end: the aggregate tool-call card gets its final count.
+                tool_emitter.close_group()
             prompt_blocks = None
             if outcome.text and not streamed and machine.context(task_id)['state'] != 'ANSWER_READY':
                 emit_update(outcome.text)

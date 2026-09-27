@@ -6,6 +6,7 @@ models cannot invoke those services through the public MCP proposal interface.
 """
 from __future__ import annotations
 
+import collections
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 import re
@@ -59,6 +60,8 @@ def _question_answer_value(question, text: str) -> str:
             return options[index - 1]
     return text
 from . import steering as acp_steering
+from . import wire_budget as acp_wire_budget
+from .wire_budget import bound_value, clip_text, encoded_size
 
 COORDINATOR_ROLE_ID = "orchestrator"
 # Same-session follow-ups for a worker turn that ended without a result.
@@ -280,28 +283,192 @@ def worker_result_projection(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bounded_worker_result(projection: Mapping[str, Any]) -> dict[str, Any]:
+    """Cap the embedded result projection at ``_WORKER_CARD_RESULT_MAX_BYTES``.
+
+    Checks are dropped from the tail (``truncatedChecks`` counts them) before
+    the summary is touched; the full result stays in the worker's report.
+    """
+    result = dict(projection)
+    checks = list(result.get("checks") or [])
+    dropped = 0
+    while checks and encoded_size(result) > _WORKER_CARD_RESULT_MAX_BYTES:
+        checks.pop()
+        dropped += 1
+        result["checks"] = checks
+        result["truncatedChecks"] = dropped
+    if encoded_size(result) > _WORKER_CARD_RESULT_MAX_BYTES:
+        result = bound_value(result, _WORKER_CARD_RESULT_MAX_BYTES)
+    return result
+
+
 # A worker's card carries the one thing it is doing right now, not its
 # whole feed -- so this bounds a single line, not a transcript.
 _WORKER_ACTIVITY_MAX_CHARS = 300
 
-# How many past actions a worker's expanded card keeps.
-#: Keep every worker event on a new line inside its one assignment card.
+# Worker-card wire budget.  Paseo 0.9.2 retains every provider event of a
+# session, so a card that re-sent its whole growing transcript on every tool
+# event and streamed word grew quadratically and exhausted the daemon heap.
+# The durable Workers-panel history (task events) and the worker's report
+# keep the complete account; the streamed card carries only a bounded view:
+# no body at all on Paseo, and a short rolling tail on other clients.
+#: How many recent worker actions a generic client's card shows.
+_WORKER_CARD_TAIL_ENTRIES = 20
+#: Upper bound of a generic client's card body.
+_WORKER_CARD_BODY_MAX_BYTES = 4 * 1024
+#: Per-card event budget.  Bytes per update are capped above, but Paseo keeps
+#: every update, so the number of updates must be bounded too.  A status
+#: transition (create, start, completed/failed) is always sent at once; any
+#: other change (title, body) is a progress update, sent at most once per
+#: interval and at most this many times per card.  A held-back change is not
+#: lost: the latest state is recomputed on every call and goes out with the
+#: card's next permitted update, always with its terminal one.
+_WORKER_CARD_PROGRESS_MIN_INTERVAL_SECONDS = 30.0
+_WORKER_CARD_PROGRESS_MAX_UPDATES = 8
+#: Same-status revisions of a settled card (a later outcome label or result).
+_WORKER_CARD_TERMINAL_REVISIONS = 2
+#: Lifecycle order: a card moves forward only, so it has at most one create,
+#: one start and one terminal transition.  Per card on the wire, at most
+#: 3 + _WORKER_CARD_PROGRESS_MAX_UPDATES + _WORKER_CARD_TERMINAL_REVISIONS
+#: updates, whatever the worker's tool count, output or duration.
+_WORKER_CARD_STATUS_RANK = {"pending": 1, "in_progress": 2, "completed": 3, "failed": 3}
+#: A failed card's one-line failure detail (Paseo requires a non-null error).
+_WORKER_CARD_FAILURE_MAX_BYTES = 1024
+#: The completed card's embedded ``{summary, checks}`` projection.
+_WORKER_CARD_RESULT_MAX_BYTES = 16 * 1024
+#: Tombstones for refs evicted from the rolling tail, so a late provider
+#: update cannot resurrect an old row at the end of the card.
+_WORKER_ACTION_EVICTED_REFS_MAX = 256
+#: One ``key=value`` argument and one whole tool line on a worker card.
+_WORKER_TOOL_ARGUMENT_MAX_CHARS = 120
+_WORKER_TOOL_LINE_MAX_CHARS = 300
+#: Tool arguments that carry a payload rather than an identifier; the card
+#: names their size instead of embedding them (e.g. a whole written file).
+_WORKER_TOOL_ELIDED_ARGUMENTS = frozenset({"content", "text"})
+#: Coordinator tool cards: cap for each of rawInput, rawOutput and every
+#: content block on the wire.
+_COORDINATOR_CARD_FIELD_MAX_BYTES = 16 * 1024
+#: Recent (tool, input) -> output digests a coordinator emitter remembers to
+#: replace a repeated identical output with a reference to its first card.
+_COORDINATOR_REPEAT_MEMORY = 64
+#: Coordinator/engine tool-card ids whose disposition (own card or folded)
+#: and open-card field digests a task remembers.  An evicted id that gets a
+#: late update is treated as a new call and spends budget like one.
+_COORDINATOR_SEEN_MEMORY = 1024
 _WORKER_ACTION_SEPARATOR = "\n"
 
 
-def _joined_worker_actions(entries: list[str]) -> str:
-    """Render the complete observable worker transcript in event order.
+def _is_panel_surface(client_surface: Any) -> bool:
+    """Whether the ACP client is Paseo (same test as ``Agent._combined_model_picker``)."""
+    return str(client_surface or "").casefold() == "paseo"
 
-    Worker activity is already persisted as ordered ACP ``tool_call_update``
-    records by the host emitter.  Keeping the complete in-memory transcript
-    here is therefore important too: a later update must not replace the
-    beginning of the worker's account with only its most recent actions.
-    Preserve message formatting; the final ACP payload passes through the
-    ordinary redaction boundary.
+
+def _field_digest(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+class _CoordinatorCardBudget:
+    """One task's coordinator/engine tool-card budget (see ``wire_budget``).
+
+    Shared by every coordinator emitter of the task, so it survives coordinator
+    turns, emitter recreation and a reopened coordinator session.  A new
+    runtime seeds it from the task's durable host journal, so a restarted
+    Cortex does not grant the budget again.  All bookkeeping is bounded:
+    ``seen`` and ``sent`` are LRU maps of ``_COORDINATOR_SEEN_MEMORY`` ids and
+    ``outputs`` keeps ``_COORDINATOR_REPEAT_MEMORY`` keys.
     """
-    return _WORKER_ACTION_SEPARATOR.join(
-        line for entry in entries if (line := str(entry).strip())
-    )
+
+    def __init__(self, *, shown=0, errors_shown=0, shown_bytes=0, folded=0, folded_failed=0,
+                 folded_updates=0, folded_sessions=()):
+        self.lock = threading.Lock()
+        self.shown = shown
+        self.errors_shown = errors_shown
+        self.shown_bytes = shown_bytes
+        self.folded = folded
+        self.folded_failed = folded_failed
+        self.folded_sent = (folded, folded_failed)
+        self.folded_updates = folded_updates
+        self.folded_last_at: float | None = None
+        self.folded_sessions: set = set(folded_sessions)
+        # card id -> own card {"updates", "terminal", "held"} or folded call
+        # {"kind", "title", "failed"}.
+        self.seen: "collections.OrderedDict[str, dict]" = collections.OrderedDict()
+        # Open own cards: digests of the fields already sent.
+        self.sent: "collections.OrderedDict[str, dict[str, str]]" = collections.OrderedDict()
+        # (call identity digest) -> (output digest, first card id).
+        self.outputs: dict[str, tuple[str, str]] = {}
+
+    def remember(self, table, key, value):
+        table[key] = value
+        table.move_to_end(key)
+        while len(table) > _COORDINATOR_SEEN_MEMORY:
+            table.popitem(last=False)
+
+    def admit(self, status: str | None) -> bool:
+        """Whether a call first seen now gets its own card; else it is folded."""
+        if (self.shown < acp_wire_budget.COORDINATOR_CARD_BUDGET
+                and self.shown_bytes < acp_wire_budget.COORDINATOR_CARD_BYTES_BUDGET):
+            self.shown += 1
+            return True
+        if status == "failed" and self.errors_shown < acp_wire_budget.COORDINATOR_ERROR_CARD_BUDGET:
+            self.errors_shown += 1
+            return True
+        self.folded += 1
+        return False
+
+
+def _without_mcp_text_mirror(raw_output: Any) -> Any:
+    """Drop an MCP result's text blocks when they only repeat ``structuredContent``.
+
+    An MCP ``tools/call`` result carries the same JSON twice: as
+    ``structuredContent`` and serialized in ``content[].text``.  Engines
+    forward both in rawOutput, doubling every coordinator tool card.  Paseo
+    renders ``structuredContent`` first, so the text copy is removed only when
+    it parses to exactly the same value.
+    """
+    if not isinstance(raw_output, Mapping):
+        return raw_output
+    result = raw_output.get("result")
+    if not isinstance(result, Mapping):
+        return raw_output
+    structured = result.get("structuredContent")
+    blocks = result.get("content")
+    if structured is None or not isinstance(blocks, list) or not blocks:
+        return raw_output
+    if not all(isinstance(block, Mapping) and block.get("type") == "text"
+               and isinstance(block.get("text"), str) for block in blocks):
+        return raw_output
+    try:
+        mirrored = json.loads("".join(block["text"] for block in blocks))
+    except ValueError:
+        return raw_output
+    if mirrored != structured:
+        return raw_output
+    return {**raw_output, "result": {key: value for key, value in result.items() if key != "content"}}
+
+
+def _clip_chars(text: str, max_chars: int) -> str:
+    return text if len(text) <= max_chars else text[: max_chars - 1].rstrip() + "…"
+
+
+def _worker_card_tail_text(entries: list[str], earlier: int) -> str:
+    """Render a generic client's bounded card body: the latest actions.
+
+    Entries are already one scrubbed line each (see ``_append_worker_entry``).
+    Older ones are summarized by count; the complete account is the durable
+    Workers history and the worker's report.
+    """
+    lines = [line for line in entries if line]
+    omitted = earlier
+    while True:
+        head = [f"… {omitted} earlier actions in task history"] if omitted else []
+        body = _WORKER_ACTION_SEPARATOR.join(head + lines)
+        if len(body.encode("utf-8")) <= _WORKER_CARD_BODY_MAX_BYTES or not lines:
+            return body
+        lines = lines[1:]
+        omitted += 1
 
 
 def _human_tool_title(title: Any) -> str:
@@ -402,12 +569,30 @@ def _simple_read_command_path(command: Any) -> str | None:
     return args[0]
 
 
+def _tool_argument_text(key: Any, value: Any) -> str:
+    """One bounded ``key=value`` for a tool line.
+
+    Payload arguments are named by size, never embedded; other values are
+    scrubbed from a bounded prefix and clipped.  The durable worker activity
+    keeps the complete redacted arguments.
+    """
+    text = str(value)
+    if str(key) in _WORKER_TOOL_ELIDED_ARGUMENTS:
+        return f"{key}=<{len(text.encode('utf-8'))} bytes>"
+    limit = _WORKER_TOOL_ARGUMENT_MAX_CHARS
+    return f"{key}={_clip_chars(scrub_text(text[: limit * 4], max_chars=4000), limit)}"
+
+
 def _worker_tool_details(
     title: str, status: str | None, locations: Any, content: Any,
     raw_input: Any, raw_output: Any, project_root: str | None = None,
     *, kind: str | None = None,
 ) -> str:
-    """Render one compact worker tool line without protocol JSON or output."""
+    """Render one compact worker tool line without protocol JSON or output.
+
+    The line is bounded (``_WORKER_TOOL_LINE_MAX_CHARS``): it is a label on a
+    card, while the complete call stays in the durable worker activity.
+    """
     raw_title = _human_tool_title(title)
     label = scrub_display_text(raw_title, max_chars=max(4000, len(raw_title) * 2 + 1000))
     argument = None
@@ -422,7 +607,8 @@ def _worker_tool_details(
             if read_path is not None:
                 argument = _project_relative(read_path, project_root)
             else:
-                argument = scrub_text(command, max_chars=max(4000, len(command) * 2 + 1000))
+                prefix = str(command)[: _WORKER_TOOL_LINE_MAX_CHARS * 4]
+                argument = scrub_text(prefix, max_chars=max(4000, len(prefix) * 2 + 1000))
                 if str(kind or "").casefold() == "read":
                     # A read-kind payload that is not one simple file read is
                     # still shell activity (often a chained inspection
@@ -469,20 +655,25 @@ def _worker_tool_details(
                 argument = f"{server}.{tool}"
                 args = raw_input.get("arguments") or raw_input.get("input")
                 if isinstance(args, Mapping):
-                    values = []
-                    for key, value in args.items():
-                        if isinstance(value, (str, int, float, bool)):
-                            text = scrub_text(str(value), max_chars=max(4000, len(str(value)) * 2 + 1000))
-                            values.append(f"{key}={text}")
+                    values = [
+                        _tool_argument_text(key, value)
+                        for key, value in [
+                            item for item in args.items()
+                            if isinstance(item[1], (str, int, float, bool))
+                        ][:4]
+                    ]
                     if values:
-                        argument += " " + ", ".join(values[:4])
+                        argument += " " + ", ".join(values)
             else:
-                values = []
-                for key, value in raw_input.items():
-                    if isinstance(value, (str, int, float, bool)):
-                        values.append(f"{key}={scrub_text(str(value), max_chars=max(4000, len(str(value)) * 2 + 1000))}")
+                values = [
+                    _tool_argument_text(key, value)
+                    for key, value in [
+                        item for item in raw_input.items()
+                        if isinstance(item[1], (str, int, float, bool))
+                    ][:4]
+                ]
                 if values:
-                    argument = ", ".join(values[:4])
+                    argument = ", ".join(values)
     if locations:
         paths = [
             _project_relative(item["path"], project_root)
@@ -506,9 +697,13 @@ def _worker_tool_details(
         elif isinstance(raw_output, str):
             detail = raw_output
         if detail is not None:
-            line += "\nError: " + scrub_text(str(detail), max_chars=max(4000, len(str(detail)) * 2 + 1000))
+            # Keep room for the error beside a long command.
+            line = _clip_chars(line, _WORKER_TOOL_LINE_MAX_CHARS // 2)
+            detail_prefix = str(detail)[: _WORKER_TOOL_LINE_MAX_CHARS * 4]
+            line += "\nError: " + scrub_text(detail_prefix, max_chars=max(4000, len(detail_prefix) * 2 + 1000))
     suffix = " [failed]" if failed else ""
-    return scrub_display_text(line, max_chars=max(4000, len(line) * 2 + 1000)) + suffix
+    line = scrub_display_text(line, max_chars=max(4000, len(line) * 2 + 1000))
+    return _clip_chars(line, _WORKER_TOOL_LINE_MAX_CHARS - len(suffix)) + suffix
 
 
 def _compact_tool_line(
@@ -599,6 +794,19 @@ def _compact_text(value: Any, max_chars: int) -> str:
 
 # A worker card's title (role, work, and the action it is on right now).
 _WORKER_CARD_TITLE_MAX_CHARS = 300
+
+
+def _worker_card_title(base: Any, suffix: str | None = None) -> str:
+    """The one rendering of a worker card title, bounded with its suffix kept.
+
+    Every title a worker card sends passes through here, so two paths naming
+    the same card can never produce two spellings of one title: a clipped and
+    an unclipped copy of a long title used to alternate on every tool event,
+    each counted as a change and sent to a host that keeps every update.
+    Idempotent for its own output.
+    """
+    tail = f" · {suffix}" if suffix else ""
+    return _compact_text(base, _WORKER_CARD_TITLE_MAX_CHARS - len(tail)) + tail
 
 def _client_safe_content(content):
     """Forward portable tool-call content with credential redaction.
@@ -703,6 +911,19 @@ def _worker_mirror_text(value: Any, project_root: str | None = None) -> str:
     text = _project_relative(str(value), project_root) or ""
     text = scrub_text(text, max_chars=max(4000, len(text) * 2 + 1000))
     return _EXTERNAL_ABSOLUTE_PATH.sub("[external path]", text)
+
+
+def _worker_card_line(entry: Any, project_root: str | None = None) -> str:
+    """One display-safe, single-line, bounded worker-card entry.
+
+    Only a bounded prefix is scrubbed, so the cost is independent of how
+    large the underlying message or tool payload was.
+    """
+    text = str(entry or "").strip()
+    if not text:
+        return ""
+    safe = _worker_mirror_text(text[: _WORKER_ACTIVITY_MAX_CHARS * 4], project_root)
+    return _clip_chars(" ".join(safe.split()), _WORKER_ACTIVITY_MAX_CHARS)
 
 
 
@@ -1003,14 +1224,17 @@ class OrchestratingRuntime:
         # read by _continuation_loop's workers_running tick -- the tick
         # that already exists, never a second channel or a second card.
         self._worker_activity: dict[str, str] = {}
-        # Every action a worker has taken, in order -- the card's body,
-        # which a client shows only when the card is expanded. The title
-        # carries just the latest one, so the feed stays readable while
-        # the detail stays one click away.
+        # A worker's latest actions, one scrubbed bounded line each -- the
+        # rolling tail a generic client's card body shows. At most
+        # _WORKER_CARD_TAIL_ENTRIES lines; the complete account is durable
+        # worker activity (the Workers panel) and the worker's report.
         self._worker_action_log: dict[str, list[str]] = {}
-        # One rendered line per logical engine tool ref. Status updates revise
-        # that line instead of appending a second progress/completion row.
+        # One rendered line per logical engine tool ref, as an absolute
+        # position (evicted count + index). Status updates revise that line
+        # instead of appending a second progress/completion row.
         self._worker_action_refs: dict[str, dict[str, int]] = {}
+        # How many lines each worker's rolling tail has evicted.
+        self._worker_action_dropped: dict[str, int] = {}
         # Refs evicted from the rolling worker transcript are tombstoned for
         # bounded late-update suppression, so a stale provider update cannot
         # resurrect an old row at the end of the card.
@@ -1027,23 +1251,30 @@ class OrchestratingRuntime:
         # Each worker card's own base title (role and work), so an
         # activity update can extend it instead of replacing it.
         self._worker_card_title: dict[str, str] = {}
-        # The last card payload actually sent per assignment, so an
-        # unchanged one is never sent twice.
+        # Per card: a digest of each field last sent (never the payload
+        # itself) and when its body last changed, so an unchanged update is
+        # never sent twice and body-only redraws are rate limited.
         self._worker_card_sent: dict[str, dict[str, Any]] = {}
+        self._worker_card_clock: Callable[[], float] = time.monotonic
+        # Per task: the coordinator/engine tool-card budget shared by all of
+        # its coordinator emitters (see _CoordinatorCardBudget).
+        self._coordinator_card_budgets: dict[str, _CoordinatorCardBudget] = {}
+        self._coordinator_card_clock: Callable[[], float] = time.monotonic
         # Once a worker card reaches a terminal ACP status, a late activity
         # tick from the worker executor must not move it back to
         # ``in_progress``.  The activity watcher snapshots its input before
         # emitting, so merely clearing ``_worker_activity`` on completion is
         # racy; retain this terminal fence until the task runtime is gone.
         self._worker_card_terminal: dict[str, str] = {}
-        # Client surface is an explicit ACP session signal.  Paseo's Cortex
-        # plugin provides the durable Workers panel; other clients retain the
-        # richer lifecycle-card transcript.
+        # Client surface is an explicit ACP session signal (clientInfo.name).
+        # Paseo's Cortex plugin provides the durable Workers panel and renders
+        # only a worker card's title, status and result, so its cards carry no
+        # body; other clients get a bounded rolling tail.
         self._worker_panel_mode: dict[str, bool] = {}
         # The panel decision is made per coordinator task, but worker cards
         # are keyed by assignment.  Bind that decision at card creation so
-        # later worker callbacks (which do not carry the task id) cannot
-        # accidentally fall back to the full transcript presentation.
+        # later worker callbacks (which do not carry the task id) keep the
+        # surface of the connection that created the card.
         self._worker_card_panel_mode: dict[str, bool] = {}
         # Each worker card's route line (engine, model, effort), kept so
         # every later body update still says what it is running on.
@@ -1173,7 +1404,7 @@ class OrchestratingRuntime:
             # A new turn arrives over a live connection.
             self._host_disconnected.discard(task_id)
             self._session_task[session_id] = task_id
-            self._worker_panel_mode[task_id] = False
+            self._worker_panel_mode[task_id] = _is_panel_surface(client_surface)
             self._task_display_emitters[task_id] = emit_display_update
             # Every new turn identifies the connection that owns future
             # worker prompts.  An explicit ``None`` replaces an older
@@ -2918,7 +3149,7 @@ class OrchestratingRuntime:
                     with self._lock:
                         base_title = getattr(self, "_worker_card_title", {}).get(assignment_ref)
                     if base_title:
-                        fields["title"] = f"{base_title} · {outcome_label}"
+                        fields["title"] = _worker_card_title(base_title, outcome_label)
                 self._emit_worker_card(
                     emit_tool_call, assignment_ref,
                     entry=((outcome_label + ": " if outcome_label else "") + "Result: " +
@@ -2959,7 +3190,7 @@ class OrchestratingRuntime:
                 with self._lock:
                     base_title = getattr(self, "_worker_card_title", {}).get(event.assignment_ref)
                 if base_title:
-                    fields["title"] = f"{base_title} · Cancelled"
+                    fields["title"] = _worker_card_title(base_title, "Cancelled")
                 self._emit_worker_card(
                     emit_tool_call, event.assignment_ref,
                     entry=_compact_text(text, _ASSIGNMENT_FAILED_DETAIL_MAX_CHARS),
@@ -3110,24 +3341,53 @@ class OrchestratingRuntime:
         return model
 
     def _append_worker_entry(self, assignment_ref: str, entry: str, ref: str | None = None) -> None:
-        """Add one worker event, replacing the prior line for the same tool."""
-        line = str(entry).strip()
+        """Add one worker event to the rolling tail, replacing the prior line
+        for the same tool.
+
+        Each entry is scrubbed once here, as one bounded line, and the tail
+        keeps the latest ``_WORKER_CARD_TAIL_ENTRIES``: runtime memory and
+        per-update work are O(1) in the worker's length.
+        """
+        with self._lock:
+            project_root = getattr(self, "_worker_card_project_root", {}).get(assignment_ref)
+        line = _worker_card_line(entry, project_root)
         if not line:
             return
         with self._lock:
             log = self._worker_action_log.setdefault(assignment_ref, [])
+            refs = self._worker_action_refs.setdefault(assignment_ref, {})
+            dropped_by_card = getattr(self, "_worker_action_dropped", None)
+            if dropped_by_card is None:
+                dropped_by_card = self._worker_action_dropped = {}
+            evicted_by_card = getattr(self, "_worker_action_evicted_refs", None)
+            if evicted_by_card is None:
+                evicted_by_card = self._worker_action_evicted_refs = {}
+            dropped = dropped_by_card.get(assignment_ref, 0)
+            evicted = evicted_by_card.setdefault(assignment_ref, [])
             if ref:
-                refs = self._worker_action_refs.setdefault(assignment_ref, {})
-                index = refs.get(ref)
-                if index is not None and index < len(log):
-                    log[index] = line
+                position = refs.get(ref)
+                if position is not None and 0 <= position - dropped < len(log):
+                    log[position - dropped] = line
                     return
-                refs[ref] = len(log)
+                if ref in evicted:
+                    return
+                refs[ref] = dropped + len(log)
                 # Distinct refs are distinct logical calls even when their
                 # compact text happens to be identical.
                 log.append(line)
             elif not log or log[-1] != line:
                 log.append(line)
+            else:
+                return
+            overflow = len(log) - _WORKER_CARD_TAIL_ENTRIES
+            if overflow > 0:
+                del log[:overflow]
+                dropped += overflow
+                dropped_by_card[assignment_ref] = dropped
+                for stale in [key for key, position in refs.items() if position < dropped]:
+                    del refs[stale]
+                    evicted.append(stale)
+                del evicted[:-_WORKER_ACTION_EVICTED_REFS_MAX]
 
     def _record_worker_activity(
         self, task_id: str, assignment_ref: str, attempt_id: str | None,
@@ -3225,28 +3485,32 @@ class OrchestratingRuntime:
         # CPython runtime; callers that mutate the maps do so under the lock.
         return self._worker_card_emitters.get(assignment_ref) or self._task_tool_call_emitters.get(task_id)
 
+    # Match one worker card's rows inside SQLite: an exact substring
+    # prefilter (the journal stores compact sorted JSON) and then an exact
+    # JSON comparison, so no whole update row is loaded into Python.
+    _DURABLE_CARD_ROWS = (
+        "FROM host_updates h JOIN acp_host_sessions s ON s.session_id=h.session_id "
+        "WHERE s.task_id=? AND instr(h.update_json, ?) > 0 "
+        "AND CASE WHEN json_valid(h.update_json) "
+        "THEN json_extract(h.update_json, '$.toolCallId') END=? "
+    )
+
     def _durable_worker_card_sessions(self, task_id: str, assignment_ref: str) -> dict[str, str]:
         """Return each session's latest durable status for this exact card."""
         card_id = _worker_tool_call_id(assignment_ref)
-        result: dict[str, str] = {}
+        needle = json.dumps(card_id, ensure_ascii=False)
         try:
             with self._store.connection() as db:
                 rows = db.execute(
-                    "SELECT h.session_id, h.update_json FROM host_updates h "
-                    "JOIN acp_host_sessions s ON s.session_id=h.session_id "
-                    "WHERE s.task_id=? ORDER BY h.seq",
-                    (task_id,),
+                    "SELECT h.session_id AS session_id, MAX(h.seq) AS seq, "
+                    "json_extract(h.update_json, '$.status') AS status "
+                    + self._DURABLE_CARD_ROWS
+                    + "AND json_type(h.update_json, '$.status')='text' GROUP BY h.session_id",
+                    (task_id, needle, card_id),
                 ).fetchall()
-            for row in rows:
-                try:
-                    update = json.loads(row["update_json"] or "{}")
-                except (TypeError, ValueError):
-                    continue
-                if update.get("toolCallId") == card_id and isinstance(update.get("status"), str):
-                    result[row["session_id"]] = update["status"]
         except (sqlite3.Error, StoreError):
             return {}
-        return result
+        return {row["session_id"]: row["status"] for row in rows}
 
     def _worker_lost_to_host(self, task_id: str, assignment_ref: str) -> bool:
         """Whether recovery wrote this assignment off as lost to its host."""
@@ -3286,28 +3550,24 @@ class OrchestratingRuntime:
         without any status suffix. A replacement process never cached
         either in memory."""
         card_id = _worker_tool_call_id(assignment_ref)
-        seen = False
-        title = None
+        needle = json.dumps(card_id, ensure_ascii=False)
         try:
             with self._store.connection() as db:
-                rows = db.execute(
-                    "SELECT h.update_json FROM host_updates h "
-                    "JOIN acp_host_sessions s ON s.session_id=h.session_id "
-                    "WHERE s.task_id=? AND h.update_json LIKE ? ORDER BY h.seq",
-                    (task_id, f"%{card_id}%"),
-                ).fetchall()
+                seen = db.execute(
+                    "SELECT 1 " + self._DURABLE_CARD_ROWS + "LIMIT 1",
+                    (task_id, needle, card_id),
+                ).fetchone() is not None
+                row = db.execute(
+                    "SELECT json_extract(h.update_json, '$.title') AS title "
+                    + self._DURABLE_CARD_ROWS
+                    + "AND json_type(h.update_json, '$.title')='text' "
+                    "AND trim(json_extract(h.update_json, '$.title'))<>'' "
+                    "ORDER BY h.seq DESC LIMIT 1",
+                    (task_id, needle, card_id),
+                ).fetchone() if seen else None
         except (sqlite3.Error, StoreError):
             return False, None
-        for row in rows:
-            try:
-                update = json.loads(row["update_json"] or "{}")
-            except (TypeError, ValueError):
-                continue
-            if update.get("toolCallId") != card_id:
-                continue
-            seen = True
-            if isinstance(update.get("title"), str) and update["title"].strip():
-                title = update["title"]
+        title = row["title"] if row is not None else None
         return seen, (_WORKER_STATUS_SUFFIX.sub("", title) if title else None)
 
     def _emit_interrupted_worker_card(self, task_id: str, emit_tool_call, assignment_ref: str) -> None:
@@ -3329,7 +3589,7 @@ class OrchestratingRuntime:
         base_title = base_title or durable_title or self._worker_base_title(task_id, assignment_ref)
         fields: dict[str, Any] = {"status": "failed"}
         if base_title:
-            fields["title"] = f"{base_title} · Interrupted"
+            fields["title"] = _worker_card_title(base_title, "Interrupted")
         self._emit_worker_card(
             emit_tool_call, assignment_ref,
             entry=replay_store.interrupted_notice_text(self._store, task_id), **fields,
@@ -3418,39 +3678,43 @@ class OrchestratingRuntime:
                 resolved_title = getattr(self, "_worker_card_title", {}).get(assignment_ref)
             if resolved_title:
                 fields["title"] = resolved_title
+        if fields.get("title"):
+            fields["title"] = _worker_card_title(fields["title"])
         if entry:
             self._append_worker_entry(assignment_ref, entry, entry_ref)
-        fields.pop("text", None)
+        # The card body is not a caller's to set, and no transcript mirror is
+        # ever sent: the pre-fix card re-sent the whole growing transcript
+        # (twice, as content and rawInput) on every tool event and streamed
+        # word, which a host that retains every event could not survive.
+        for key in ("text", "raw_input", "content"):
+            fields.pop(key, None)
+        panel = self._worker_card_is_panel(emit_tool_call, assignment_ref)
         with self._lock:
-            transcript = list(self._worker_action_log.get(assignment_ref) or ())
-        body = _joined_worker_actions(transcript)
-        if body:
-            with self._lock:
-                project_root = getattr(self, "_worker_card_project_root", {}).get(assignment_ref)
-            mirror = _worker_mirror_text(body, project_root)
-            fields["text"] = mirror
-            # Paseo 0.8's ACP bridge drops ToolCallContent and renders object
-            # rawInput as JSON. Keep a plain-text cumulative mirror instead:
-            # the bridge preserves it, and Paseo displays the complete
-            # sequential worker rows (including a terminal Result line) as
-            # readable text without a separate Output section.
-            fields["raw_input"] = mirror
-            # Paseo 0.8 validates a failed timeline item with a non-null
-            # ``error`` and its supported ACP reducer obtains that value from
-            # rawOutput. Reuse the bounded, redacted failure transcript that
-            # is already recorded in this card. This is genuine assignment
-            # detail, not synthesized success/error evidence.
-            if incoming_status == "failed":
-                fields["raw_output"] = mirror
+            tail = list(self._worker_action_log.get(assignment_ref) or ())
+            earlier = getattr(self, "_worker_action_dropped", {}).get(assignment_ref, 0)
+            card_root = getattr(self, "_worker_card_project_root", {}).get(assignment_ref)
+        if not panel:
+            body = _worker_card_tail_text(tail, earlier)
+            if body:
+                fields["text"] = body
+        # Paseo validates a failed timeline item with a non-null ``error``,
+        # which its ACP reducer takes from rawOutput: one short, redacted
+        # failure line from this card, never a transcript.
+        if incoming_status == "failed":
+            failure = _worker_card_line(entry, card_root) if entry else (tail[-1] if tail else "")
+            if failure:
+                fields["raw_output"] = clip_text(failure, _WORKER_CARD_FAILURE_MAX_BYTES)
         # Embed the worker's terminal result projection (bounded summary +
         # checks) directly on the completed card's rawOutput, so a client
         # that persists/replays this ACP update can render the result
         # section with zero follow-up RPC. Only ever set for "completed"
-        # (a bare "failed" card already owns raw_output as its plain-text
-        # failure mirror above, and worker_card_outcome only maps to
-        # "failed" when there is no result at all).
+        # (a bare "failed" card owns raw_output as its failure line above,
+        # and worker_card_outcome only maps to "failed" when there is no
+        # result at all).
         if incoming_status == "completed" and isinstance(result_payload, Mapping):
-            fields["raw_output"] = _client_safe_raw(worker_result_projection(result_payload))
+            fields["raw_output"] = _bounded_worker_result(
+                _client_safe_raw(worker_result_projection(result_payload)),
+            )
         with self._lock:
             first = card_id not in self._emitted_worker_cards
             if first:
@@ -3468,51 +3732,378 @@ class OrchestratingRuntime:
             payload.setdefault("status", "pending")
             if not payload.get("title"):
                 payload["title"] = "Worker assignment"
-        # ACP updates are partial. Compare the effective rendered state,
-        # rather than each update's subset of fields: reattaching an
-        # unchanged title after a tool event must not redraw the card.
+        # ACP updates are partial. Compare the effective rendered state
+        # (per-field digests), rather than each update's subset of fields:
+        # reattaching an unchanged title after a tool event must not redraw
+        # the card.  Then apply the card's event budget: a status transition
+        # is sent at once; anything else is a progress update, limited in
+        # rate and in number (see _WORKER_CARD_PROGRESS_*).  Digests advance
+        # only for what is sent, so a held-back change rides the next
+        # permitted update and always the terminal transition.
+        clock = getattr(self, "_worker_card_clock", None) or time.monotonic
         with self._lock:
-            previous = self._worker_card_sent.get(card_id, {})
-            rendered = {**previous, **{k: v for k, v in payload.items() if k != "new"}}
-            if not first and rendered == previous:
+            sent = self._worker_card_sent.get(card_id) or {}
+            digests = dict(sent.get("fields") or {})
+            changed = {
+                key for key, value in payload.items()
+                if key not in {"new", "tool_call_id"} and digests.get(key) != _field_digest(value)
+            }
+            rank = _WORKER_CARD_STATUS_RANK.get(str(payload.get("status")), 0)
+            sent_rank = int(sent.get("rank") or 0)
+            if not first and "status" in changed and rank <= sent_rank:
+                # Only forward lifecycle moves are transitions; a stale
+                # earlier status (a late "pending") never regresses the card.
+                changed.discard("status")
+                payload.pop("status", None)
+                rank = sent_rank
+            if not first and not changed:
                 return
-            self._worker_card_sent[card_id] = rendered
+            now = clock()
+            progress = int(sent.get("progress") or 0)
+            revisions = int(sent.get("terminal_revisions") or 0)
+            if not first and "status" not in changed:
+                if incoming_status in {"completed", "failed"}:
+                    # A later path refining the settled card (its outcome
+                    # label or result) is not deferred: nothing would flush
+                    # it after the worker is done.
+                    if revisions >= _WORKER_CARD_TERMINAL_REVISIONS:
+                        return
+                    revisions += 1
+                else:
+                    progress_at = sent.get("progress_at")
+                    if progress >= _WORKER_CARD_PROGRESS_MAX_UPDATES:
+                        return
+                    if (progress_at is not None
+                            and now - progress_at < _WORKER_CARD_PROGRESS_MIN_INTERVAL_SECONDS):
+                        return
+                    progress += 1
+                    sent = {**sent, "progress_at": now}
+            for key in changed:
+                digests[key] = _field_digest(payload[key])
+            self._worker_card_sent[card_id] = {
+                "fields": digests,
+                "progress_at": sent.get("progress_at"),
+                "progress": progress,
+                "terminal_revisions": revisions,
+                "rank": max(rank, sent_rank),
+            }
+        if not first:
+            # Clients merge partial updates; an unchanged title (the longest
+            # field of a Paseo card) is not sent again with every status.
+            payload = {key: value for key, value in payload.items()
+                       if key in changed or key in {"new", "tool_call_id"}}
         emit_tool_call(payload)
 
+    def _mirror_durable_worker_result_card(self, task_id: str, assignment_ref: str) -> None:
+        """Settle a worker card from its durable ``worker_result``, if any.
+
+        A no-op when the card already reached a terminal status or no result
+        was published.
+        """
+        with self._lock:
+            if _worker_tool_call_id(assignment_ref) in self._worker_card_terminal:
+                return
+        try:
+            with self._store.connection() as db:
+                attempt_row = db.execute(
+                    "SELECT attempt_id FROM delegation_provisioning WHERE task_id=? "
+                    "AND idempotency_key=?",
+                    (task_id, assignment_ref),
+                ).fetchone()
+                result_refs = [assignment_ref]
+                if attempt_row is not None and attempt_row["attempt_id"]:
+                    result_refs.append(attempt_row["attempt_id"])
+                placeholders = ",".join("?" for _ in result_refs)
+                result_row = db.execute(
+                    "SELECT payload_json FROM task_events WHERE task_id=? "
+                    f"AND assignment_ref IN ({placeholders}) "
+                    "AND event_type='worker_result' AND superseded=0 "
+                    "ORDER BY id DESC LIMIT 1",
+                    (task_id, *result_refs),
+                ).fetchone()
+        except (sqlite3.Error, StoreError):
+            return
+        if result_row is None:
+            return
+        try:
+            result_payload = json.loads(result_row["payload_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            result_payload = {}
+        summary = result_payload.get("summary", "") if isinstance(result_payload, dict) else ""
+        with self._lock:
+            has_final_response = assignment_ref in self._worker_final_response_seen
+            pending_feed = self._worker_card_emitter(task_id, assignment_ref)
+        self._emit_worker_card(
+            pending_feed, assignment_ref, status="completed",
+            entry=("Result: " + _compact_text(summary, _WORKER_ACTIVITY_MAX_CHARS - 8)
+                   if summary and not has_final_response else None),
+            result_payload=result_payload if isinstance(result_payload, dict) else None,
+        )
+
+    def _worker_card_is_panel(self, emit_tool_call, assignment_ref: str) -> bool:
+        """Whether this card renders on Paseo (title/status/result only).
+
+        The surface bound at card creation wins; a card emitted before any
+        binding (e.g. a recovery path) uses the emitting connection's own
+        client surface when the host adapter exposes it.
+        """
+        with self._lock:
+            bound = getattr(self, "_worker_card_panel_mode", {}).get(assignment_ref)
+        if bound is not None:
+            return bool(bound)
+        return _is_panel_surface(getattr(emit_tool_call, "client_surface", None))
+
+
+    def _coordinator_card_budget(self, task_id: str | None) -> _CoordinatorCardBudget:
+        """The task's shared card budget, seeded once from its host journal."""
+        if task_id is None:
+            return _CoordinatorCardBudget()
+        with self._lock:
+            budget = self._coordinator_card_budgets.get(task_id)
+        if budget is not None:
+            return budget
+        seeded = self._seed_coordinator_card_budget(task_id)
+        with self._lock:
+            return self._coordinator_card_budgets.setdefault(task_id, seeded)
+
+    def _seed_coordinator_card_budget(self, task_id: str) -> _CoordinatorCardBudget:
+        """Count what earlier runtimes already sent for this task.
+
+        The journal stores compact sorted JSON, so an exact substring
+        prefilter selects candidate rows inside SQLite before any JSON is
+        parsed; no update row is loaded into Python.  An unreadable journal
+        starts from zero (the budget then bounds this runtime's lifetime).
+        """
+        needle = json.dumps(acp_wire_budget.COORDINATOR_CARD_PREFIX)[:-1]
+        folded_id = acp_wire_budget.FOLDED_CARD_PREFIX + task_id
+        rows = "FROM host_updates h JOIN acp_host_sessions s ON s.session_id=h.session_id WHERE s.task_id=? "
+        try:
+            with self._store.connection() as db:
+                distinct = db.execute(
+                    "SELECT COUNT(DISTINCT json_extract(h.update_json, '$.toolCallId')) " + rows
+                    + "AND instr(h.update_json, '\"sessionUpdate\":\"tool_call\",') > 0 "
+                    "AND instr(h.update_json, ?) > 0 AND json_valid(h.update_json) "
+                    "AND json_extract(h.update_json, '$.sessionUpdate')='tool_call' "
+                    "AND substr(json_extract(h.update_json, '$.toolCallId'), 1, ?)=?",
+                    (task_id, '"toolCallId":' + needle, len(acp_wire_budget.COORDINATOR_CARD_PREFIX),
+                     acp_wire_budget.COORDINATOR_CARD_PREFIX),
+                ).fetchone()[0] or 0
+                shown_bytes = db.execute(
+                    "SELECT COALESCE(SUM(LENGTH(CAST(h.update_json AS BLOB))), 0) " + rows
+                    + "AND instr(h.update_json, ?) > 0 AND json_valid(h.update_json) "
+                    "AND json_extract(h.update_json, '$.sessionUpdate') IN ('tool_call', 'tool_call_update') "
+                    "AND substr(json_extract(h.update_json, '$.toolCallId'), 1, ?)=? "
+                    "AND json_extract(h.update_json, '$.toolCallId') != ?",
+                    (task_id, '"toolCallId":' + needle, len(acp_wire_budget.COORDINATOR_CARD_PREFIX),
+                     acp_wire_budget.COORDINATOR_CARD_PREFIX, folded_id),
+                ).fetchone()[0] or 0
+                folded = db.execute(
+                    "SELECT COUNT(*) AS updates, "
+                    "MAX(json_extract(h.update_json, '$.rawOutput.furtherToolCalls')) AS further, "
+                    "MAX(json_extract(h.update_json, '$.rawOutput.failed')) AS failed " + rows
+                    + "AND instr(h.update_json, ?) > 0 AND json_valid(h.update_json) "
+                    "AND json_extract(h.update_json, '$.toolCallId')=?",
+                    (task_id, json.dumps(folded_id), folded_id),
+                ).fetchone()
+                sessions = [row[0] for row in db.execute(
+                    "SELECT DISTINCT h.session_id " + rows
+                    + "AND instr(h.update_json, ?) > 0 AND json_valid(h.update_json) "
+                    "AND json_extract(h.update_json, '$.toolCallId')=? "
+                    "AND json_extract(h.update_json, '$.sessionUpdate')='tool_call'",
+                    (task_id, json.dumps(folded_id), folded_id),
+                )]
+        except (sqlite3.Error, StoreError):
+            return _CoordinatorCardBudget()
+        budget = acp_wire_budget.COORDINATOR_CARD_BUDGET
+        return _CoordinatorCardBudget(
+            shown=min(distinct, budget),
+            errors_shown=min(max(0, distinct - budget), acp_wire_budget.COORDINATOR_ERROR_CARD_BUDGET),
+            shown_bytes=int(shown_bytes),
+            folded=int(folded["further"] or 0), folded_failed=int(folded["failed"] or 0),
+            folded_updates=int(folded["updates"] or 0), folded_sessions=sessions,
+        )
 
     def _engine_tool_call_emitter(
         self, emit_tool_call, *, prefix="", id_scope="coordinator", language="en",
         project_root=None, task_id=None, cancel_event=None,
     ):
-        """Mirror every observed tool lifecycle; policy never filters presentation."""
+        """Mirror observed tool lifecycles within the task's total card budget.
+
+        The on-wire rawInput, rawOutput and each content block are capped at
+        ``_COORDINATOR_CARD_FIELD_MAX_BYTES`` with an explicit truncation
+        marker; the host retains every event, and the engine session and
+        task history hold the full values.
+
+        The host keeps every card it is sent, so nothing is sent twice: an
+        update carries only the fields that changed since this card's last
+        update (ACP updates are partial and clients merge them), an MCP
+        result's text copy of its ``structuredContent`` is dropped, and a
+        completed call whose tool, input and output repeat an earlier call
+        exactly (a coordinator polling ``task_get_context``) references that
+        card instead of carrying the same output again.
+
+        Nor does the number of cards grow with the task: the task's first
+        ``COORDINATOR_CARD_BUDGET`` distinct calls get their own card, later
+        ones are counted on one aggregate card (``wire_budget``) that is
+        updated at most once per interval, a fixed number of times per task,
+        and once more when the turn ends (``close_group``).  A failed call
+        past the budget still gets its own card while the error budget
+        lasts.  Permission requests and user questions are separate host
+        requests and never pass through here.
+        """
         if emit_tool_call is None:
             return None
-        seen = set()
+        budget = self._coordinator_card_budget(task_id)
+        cap = _COORDINATOR_CARD_FIELD_MAX_BYTES
+        folded_id = acp_wire_budget.FOLDED_CARD_PREFIX + (task_id or id_scope)
+        host_session = getattr(emit_tool_call, "session_id", None)
+        clock = getattr(self, "_coordinator_card_clock", None) or time.monotonic
+
+        def emit_folded(*, turn_end: bool) -> None:
+            # Caller holds budget.lock.
+            if budget.folded_updates >= acp_wire_budget.COORDINATOR_FOLDED_MAX_UPDATES:
+                return
+            new = host_session not in budget.folded_sessions
+            counts = (budget.folded, budget.folded_failed)
+            if not new and counts == budget.folded_sent:
+                return
+            now = clock()
+            # The interval doubles after every update, so the fixed number
+            # of updates keeps counting through a long task.
+            interval = (acp_wire_budget.COORDINATOR_FOLDED_MIN_INTERVAL_SECONDS
+                        * 2 ** min(max(0, budget.folded_updates - 1), 16))
+            if (not new and not turn_end and budget.folded_last_at is not None
+                    and now - budget.folded_last_at < interval):
+                return
+            final = budget.folded_updates + 1 >= acp_wire_budget.COORDINATOR_FOLDED_MAX_UPDATES
+            card = acp_wire_budget.folded_card_fields(*counts, final=final)
+            fields = dict(tool_call_id=folded_id, new=new, status="completed",
+                          title=card["title"], raw_output=card["raw_output"])
+            if new:
+                fields["kind"] = "other"
+            budget.folded_updates += 1
+            budget.folded_last_at = now
+            budget.folded_sent = counts
+            budget.folded_sessions.add(host_session)
+            emit_tool_call(fields)
 
         def on_tool_call(ref, kind, title, status, locations=None, content=None,
                          raw_input=None, raw_output=None):
-            fields = dict(tool_call_id=f"call:{id_scope}:{ref}", new=ref not in seen)
-            seen.add(ref)
+            tool_call_id = f"call:{id_scope}:{ref}"
+            acp_status = _acp_tool_call_status(status) if status is not None else None
+            with budget.lock:
+                entry = budget.seen.get(tool_call_id)
+                new = entry is None
+                if new:
+                    entry = (dict(updates=0, terminal=False, held={}) if budget.admit(acp_status)
+                             else dict(kind=None, title=None, failed=False))
+                if "updates" not in entry:
+                    entry["kind"] = kind if kind is not None else entry["kind"]
+                    entry["title"] = (str(title)[:_WORKER_CARD_TITLE_MAX_CHARS]
+                                      if title is not None else entry["title"])
+                    if (acp_status == "failed"
+                            and budget.errors_shown < acp_wire_budget.COORDINATOR_ERROR_CARD_BUDGET):
+                        # A failure is shown on its own card: create it now,
+                        # complete, and stop counting it as folded.
+                        budget.errors_shown += 1
+                        budget.folded -= 1
+                        if entry["failed"]:
+                            budget.folded_failed -= 1
+                        new, kind, title = True, entry["kind"], entry["title"]
+                        entry = dict(updates=0, terminal=False, held={})
+                    else:
+                        if acp_status == "failed" and not entry["failed"]:
+                            entry["failed"] = True
+                            budget.folded_failed += 1
+                        budget.remember(budget.seen, tool_call_id, entry)
+                        emit_folded(turn_end=False)
+                        return
+                budget.remember(budget.seen, tool_call_id, entry)
+            fields = dict(tool_call_id=tool_call_id, new=new)
             if kind is not None or fields["new"]:
                 fields["kind"] = _acp_tool_call_kind(kind)
-            if status is not None:
-                fields["status"] = _acp_tool_call_status(status)
+            if acp_status is not None:
+                fields["status"] = acp_status
             if title is not None or fields["new"]:
                 label = str(title or f"Tool call {ref}")
                 resolved_prefix = prefix() if callable(prefix) else prefix
                 fields["title"] = scrub_display_text(
                     f"{resolved_prefix}{label}", max_chars=max(4000, len(label) * 2 + 1000))
             if content is not None:
-                fields["content"] = _client_safe_content(content)
+                safe_content = _client_safe_content(content)
+                fields["content"] = (
+                    [bound_value(block, cap) for block in safe_content]
+                    if isinstance(safe_content, list) else safe_content
+                )
             if raw_input is not None:
-                fields["raw_input"] = _client_safe_raw(raw_input)
+                fields["raw_input"] = bound_value(_client_safe_raw(raw_input), cap)
             if raw_output is not None:
-                fields["raw_output"] = _client_safe_raw(raw_output)
+                fields["raw_output"] = bound_value(
+                    _without_mcp_text_mirror(_client_safe_raw(raw_output)), cap)
             if locations is not None:
-                fields["locations"] = _client_safe_raw(locations)
-            emit_tool_call(fields)
+                fields["locations"] = bound_value(_client_safe_raw(locations), cap)
+            with budget.lock:
+                terminal = fields.get("status") in {"completed", "failed"}
+                limit = acp_wire_budget.COORDINATOR_CARD_MAX_UPDATES
+                first_terminal = terminal and not entry["terminal"]
+                if entry["updates"] >= limit or (entry["updates"] >= limit - 1 and not first_terminal):
+                    # Card update budget spent: the last slot is kept for the
+                    # first terminal update, which carries the latest held
+                    # change; nothing is sent past the cap.
+                    if not entry["terminal"]:
+                        entry["held"].update(
+                            (key, value) for key, value in fields.items() if key not in {"tool_call_id", "new"})
+                    return
+                if first_terminal and entry["held"]:
+                    fields = {**entry["held"], **fields}
+                    entry["held"] = {}
+                card = budget.sent.get(tool_call_id)
+                if card is None:
+                    card = {}
+                budget.remember(budget.sent, tool_call_id, card)
+                for key in ("title", "raw_input"):
+                    if key in fields:
+                        card["identity:" + key] = _field_digest(fields[key])
+                outputs = budget.outputs
+                if "raw_output" in fields and fields.get("status") == "completed":
+                    identity = _field_digest([card.get("identity:title"), card.get("identity:raw_input")])
+                    digest = _field_digest(fields["raw_output"])
+                    earlier = outputs.pop(identity, None)
+                    if earlier is not None and earlier[0] == digest and earlier[1] != tool_call_id:
+                        fields["raw_output"] = dict(
+                            repeated_output=True, same_as=earlier[1],
+                            note="Same output as the earlier identical call; full result in task history.",
+                        )
+                        outputs[identity] = earlier
+                    else:
+                        outputs[identity] = (digest, tool_call_id)
+                    while len(outputs) > _COORDINATOR_REPEAT_MEMORY:
+                        outputs.pop(next(iter(outputs)))
+                if not fields["new"]:
+                    for key in [key for key in fields if key not in {"tool_call_id", "new"}]:
+                        if card.get(key) == _field_digest(fields[key]):
+                            del fields[key]
+                    if len(fields) == 2:
+                        if terminal:
+                            budget.sent.pop(tool_call_id, None)
+                        return
+                for key, value in fields.items():
+                    if key not in {"tool_call_id", "new"}:
+                        card[key] = _field_digest(value)
+                if terminal:
+                    entry["terminal"] = True
+                    budget.sent.pop(tool_call_id, None)
+                entry["updates"] += 1
+                budget.shown_bytes += encoded_size(fields)
+                emit_tool_call(fields)
 
-        on_tool_call.close_group = lambda: None
+        def close_group():
+            """Turn end: send the aggregate card's latest count, if it changed."""
+            with budget.lock:
+                if budget.folded or budget.folded_failed:
+                    emit_folded(turn_end=True)
+
+        on_tool_call.close_group = close_group
         return on_tool_call
 
     def _emit_worker_activity_tool_calls(
@@ -3535,17 +4126,14 @@ class OrchestratingRuntime:
             return
         with self._lock:
             activity = dict(self._worker_activity)
-            titles = dict(self._worker_card_title)
         for assignment_ref, latest in activity.items():
             latest = " ".join(latest.split())
             if not latest:
                 continue
             fields: dict[str, Any] = dict(status="in_progress")
-            base = titles.get(assignment_ref)
-            if base:
-                # The title names the worker and its assignment and stays
-                # put while the card body accumulates its complete activity.
-                fields["title"] = _compact_text(base, _WORKER_CARD_TITLE_MAX_CHARS)
+            # The title (names the worker and its assignment) is resolved and
+            # normalized by _emit_worker_card itself; a second spelling of it
+            # here would be a change on every tick.
             # _emit_worker_card renders and de-duplicates the lifecycle
             # body -- this runs on every wait tick
             # and a worker is not doing something new on every tick.
@@ -4383,8 +4971,10 @@ class OrchestratingRuntime:
 
                 def _on_worker_delta(chunk_text: str) -> bool:
                     # Buffer contiguous chunks so a credential split across
-                    # ACP updates can be redacted before the worker card is
-                    # updated. The coordinator's text channel stays clear.
+                    # ACP updates can be redacted. The coordinator's text
+                    # channel stays clear, and the card is not redrawn per
+                    # streamed token: the block reaches it once, at the next
+                    # tool boundary or turn end (_flush_worker_message_block).
                     nonlocal worker_delta_seen, worker_delta_sequence
                     if chunk_text:
                         worker_delta_sequence += 1
@@ -4394,13 +4984,6 @@ class OrchestratingRuntime:
                             return True
                         with self._lock:
                             worker_message_buffer.append(safe_chunk)
-                            feed = self._worker_card_emitter(task_id, assignment_ref)
-                        if feed is not None:
-                            self._emit_worker_card(
-                                feed, assignment_ref, status='in_progress',
-                                entry='[worker message] '+''.join(worker_message_buffer),
-                                entry_ref=f'{worker_message_turn_id}:segment:{worker_message_segment}',
-                            )
                     return True
 
                 def _on_worker_display_update(update: dict, _ref: str = assignment_ref) -> None:
@@ -4849,38 +5432,7 @@ class OrchestratingRuntime:
                         # finally block's pending-slot check.  Mirror its
                         # terminal card here so the result is visible even
                         # if the event waiter observes it after this turn.
-                        with self._store.connection() as db:
-                            attempt_row = db.execute(
-                                "SELECT attempt_id FROM delegation_provisioning WHERE task_id=? "
-                                "AND idempotency_key=?",
-                                (task_id, assignment_ref),
-                            ).fetchone()
-                            result_refs = [assignment_ref]
-                            if attempt_row is not None and attempt_row["attempt_id"]:
-                                result_refs.append(attempt_row["attempt_id"])
-                            placeholders = ",".join("?" for _ in result_refs)
-                            result_row = db.execute(
-                                "SELECT payload_json FROM task_events WHERE task_id=? "
-                                f"AND assignment_ref IN ({placeholders}) "
-                                "AND event_type='worker_result' AND superseded=0 "
-                                "ORDER BY id DESC LIMIT 1",
-                                (task_id, *result_refs),
-                            ).fetchone()
-                        if result_row is not None:
-                            try:
-                                result_payload = json.loads(result_row["payload_json"])
-                            except (TypeError, ValueError, json.JSONDecodeError):
-                                result_payload = {}
-                            summary = result_payload.get("summary", "") if isinstance(result_payload, dict) else ""
-                            with self._lock:
-                                has_final_response = assignment_ref in self._worker_final_response_seen
-                                pending_feed = self._worker_card_emitter(task_id, assignment_ref)
-                            self._emit_worker_card(
-                                pending_feed, assignment_ref, status="completed",
-                                entry=("Result: " + _compact_text(summary, _WORKER_ACTIVITY_MAX_CHARS - 8)
-                                       if summary and not has_final_response else None),
-                                result_payload=result_payload if isinstance(result_payload, dict) else None,
-                            )
+                        self._mirror_durable_worker_result_card(task_id, assignment_ref)
                 with self._lock:
                     # The first-turn fence was held through the durable
                     # result/publication check.  Every non-continuation
@@ -4888,6 +5440,33 @@ class OrchestratingRuntime:
                     # returning to the coordinator wait loop.
                     self._worker_turns_in_flight.discard(assignment_ref)
                     self._worker_recoveries_in_flight.discard(assignment_ref)
+                    # The event-claim path parks a result it observes while
+                    # this fence is held, and decides that under this same
+                    # lock.  A result published as the turn's last action
+                    # can be parked after both checks above; release and
+                    # pop atomically so it always reaches the card.
+                    parked_result = getattr(self, "_pending_worker_results", {}).pop(
+                        assignment_ref, None
+                    )
+                if parked_result is not None:
+                    self._close_assignment(task_id, assignment_ref)
+                    summary = parked_result.get("summary", "")
+                    with self._lock:
+                        has_final_response = assignment_ref in self._worker_final_response_seen
+                        pending_feed = self._worker_card_emitter(task_id, assignment_ref)
+                    self._emit_worker_card(
+                        pending_feed, assignment_ref, status="completed",
+                        entry=("Result: " + _compact_text(summary, _WORKER_ACTIVITY_MAX_CHARS - 8)
+                               if summary and not has_final_response else None),
+                        result_payload=parked_result,
+                    )
+                elif pending_result is None and outcome.stop_reason == StopReason.END_TURN:
+                    # The coordinator's own delivery path can consume the
+                    # worker_result event (it is coordinator input as well),
+                    # so neither the card claim path nor the checks above
+                    # need ever see it.  A durable result must still settle
+                    # this card; the terminal fence keeps this idempotent.
+                    self._mirror_durable_worker_result_card(task_id, assignment_ref)
                 break
             except EngineTurnFailed as failure:
                 # T017: a worker's own engine turn failing (transport
