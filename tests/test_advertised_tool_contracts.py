@@ -84,7 +84,7 @@ def test_every_offered_tool_is_fully_described(kind, role_id, stage):
 @pytest.mark.parametrize("kind,role_id,stage", PROFILES[:-1])
 def test_no_channel_is_offered_a_tool_the_gateway_always_refuses(kind, role_id, stage):
     names = {t["name"] for t in mcp_tools.tool_definitions(kind, role_id=role_id, stage=stage)}
-    writes = {"project_write", "project_mkdir", "project_delete", "outside_write", "outside_command"}
+    writes = {"project_write", "project_mkdir", "project_delete", "project_skill_link", "outside_write", "outside_command"}
     may_write = kind == "worker" and stage != "review" and role_id not in READ_ONLY
     assert (names & writes == writes) if may_write else not names & writes
     may_run = kind == "worker" and "consultant" not in role_id

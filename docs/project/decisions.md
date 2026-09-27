@@ -1,3 +1,41 @@
+## 2026-09-28 paid live checks only on an explicit owner request
+
+The owner revoked the 2026-09-24 standing paid-call approval. Live QA through
+Paseo Desktop took hours per change, mostly on GUI driving rather than on the
+model run. Default verification is now no-paid: targeted pytest, the Paseo
+plugin type-check and `test:*` scripts, and the no-paid smoke harness. A paid
+live check runs only when the owner explicitly requests it for the current work
+and names the mode: `cli` (headless through the guarded Paseo CLI, checked
+against the disposable project's `.cortex` store) or `desktop` (the Electron
+app, for rendered behavior). Without a request, an applicable live check is
+reported as not run with the blocker "paid live check not requested by the
+owner", never as passing. The isolated dev Paseo, production-account and model
+rules are unchanged. The probe scripts still enforce both flags; the approval
+reference names the request instead of `owner-standing-2026-09-24`.
+
+Rejected alternatives: keeping the standing approval and moving the checks to
+the CLI, which still spends paid calls on every change; and treating `cli`
+output as rendered GUI evidence, which it is not.
+
+## 2026-09-27 proactive skill proposals use the durable question
+
+The explicit `/skill-management` workflow gained an approved proactive phase.
+The coordinator may propose one project skill per task. It uses
+`user_question_request` with `skill_proposal`, never a worker `ask_question`,
+because that stops workers. The runtime validates 2-5 ordinary retained
+reports as evidence, checks the action against `.agents/skills/<name>`, refuses
+duplicates across the project, and derives approval only from the exact first
+option or its displayed number. Approval passes the same workflow instruction
+as the explicit command to the next planning turn. A decline or unclear answer
+writes nothing. The data lives in `runtime_events` payloads and
+`pending_questions`, so no storage format change was needed.
+
+Rejected alternatives: a suggestion only in coordinator prose, which gives no
+durable answer and no duplicate control; free-text approval matching, which is
+language-dependent guessing; and gating plans on the decision, because the
+runtime cannot read plan intent and the explicit command leaves no durable
+marker.
+
 ## 2026-09-27 per-task budget for coordinator tool cards
 
 Review `r_3fdf8c846b22` found that worker cards were bounded but
@@ -124,6 +162,9 @@ blocker. The runtime renders the list into the stored synthesis. This prevents
 silent omission while leaving the coordinator able to replan verifiable gaps.
 
 ## 2026-09-24 standing live-call approval and isolated Paseo decision
+
+Superseded on 2026-09-28: paid live checks now need an explicit owner request
+naming `cli` or `desktop`; the isolation rules below still apply.
 
 The owner authorized paid model calls by default for live verification and
 directed that such testing run through the isolated dev Paseo instance. For

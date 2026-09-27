@@ -101,12 +101,41 @@ def _select_debug_port(requested_port: int | None) -> int:
         return int(probe.getsockname()[1])
 
 
+def _live_singleton_owner(user_data_dir: Path) -> int | None:
+    """Return the live local PID holding Electron's profile lock, if any.
+
+    Paseo calls requestSingleInstanceLock() keyed by its userData directory and
+    quits with status 0 when another instance holds it, so a second launch on
+    the same profile never exposes its own DevTools port.
+    """
+    try:
+        target = os.readlink(user_data_dir / "SingletonLock")
+    except OSError:
+        return None
+    host, _, pid_text = target.rpartition("-")
+    if host != socket.gethostname() or not pid_text.isdigit():
+        return None
+    pid = int(pid_text)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass
+    return pid
+
+
 def main(argv: list[str]) -> int:
     # Check if this is a gui subcommand invocation
     if argv and argv[0] == "gui":
         parser = argparse.ArgumentParser(description=__doc__, add_help=True)
         parser.add_argument("--paseo", default="/opt/Paseo/Paseo", help="Paseo Electron executable path")
         parser.add_argument("--home", default=str(Path.home() / ".paseo-dev"), help="isolated Paseo home")
+        parser.add_argument(
+            "--user-data-dir",
+            default=str(Path.home() / ".config" / "Paseo-dev"),
+            help="isolated Electron profile (default: ~/.config/Paseo-dev)",
+        )
         parser.add_argument("--port", type=int, help="Chrome DevTools Protocol port (default: choose a free port)")
         parser.add_argument("--xvfb", action="store_true", help="launch a private Xvfb display for this GUI invocation")
 
@@ -141,6 +170,15 @@ def _run_gui(args) -> int:
         print("cortex_paseo_dev gui: refusing production Paseo home", file=sys.stderr)
         return 2
 
+    try:
+        user_data_dir = resolved(args.user_data_dir)
+    except ValueError:
+        print("cortex_paseo_dev gui: --user-data-dir must be an absolute path", file=sys.stderr)
+        return 2
+    if user_data_dir == (Path.home() / ".config" / "Paseo").resolve(strict=False):
+        print("cortex_paseo_dev gui: refusing production Paseo Electron profile", file=sys.stderr)
+        return 2
+
     paseo = Path(args.paseo)
     if not paseo.is_absolute() or not paseo.is_file() or not os.access(paseo, os.X_OK):
         print(f"cortex_paseo_dev gui: --paseo must name an executable absolute path (got {args.paseo})", file=sys.stderr)
@@ -149,6 +187,15 @@ def _run_gui(args) -> int:
     if args.port is not None and (args.port < 1 or args.port > 65535):
         print(f"cortex_paseo_dev gui: --port must be 1-65535 (got {args.port})", file=sys.stderr)
         return 2
+
+    owner = _live_singleton_owner(user_data_dir)
+    if owner is not None:
+        print(
+            f"cortex_paseo_dev gui: Paseo PID {owner} already holds {user_data_dir}; "
+            "a second launch would quit at once without DevTools. Reuse or stop that instance first.",
+            file=sys.stderr,
+        )
+        return 3
 
     try:
         port = _select_debug_port(args.port)
@@ -165,7 +212,7 @@ def _run_gui(args) -> int:
 
     env = isolated_environment(home)
     env["PASEO_HOME"] = str(home)
-    env["PASEO_ELECTRON_USER_DATA_DIR"] = str(Path.home() / ".config" / "Paseo-dev")
+    env["PASEO_ELECTRON_USER_DATA_DIR"] = str(user_data_dir)
     env["PASEO_ELECTRON_FLAGS"] = " ".join(flags)
 
     # Do not set ELECTRON_RUN_AS_NODE; it interferes with isolation
@@ -195,7 +242,16 @@ def _run_gui(args) -> int:
     }
     try:
         electron_process = subprocess.Popen([str(paseo)], env=env, start_new_session=True)
-        return electron_process.wait()
+        returncode = electron_process.wait()
+        owner = _live_singleton_owner(user_data_dir)
+        if owner is not None and owner != electron_process.pid:
+            print(
+                f"cortex_paseo_dev gui: Paseo exited because PID {owner} holds {user_data_dir}; "
+                f"no DevTools endpoint is available on port {port}.",
+                file=sys.stderr,
+            )
+            return 3
+        return returncode
     finally:
         for sig, handler in previous_handlers.items():
             signal.signal(sig, handler)

@@ -63,6 +63,10 @@ SCHEMAS = {
                               content=text('Complete new UTF-8 file content.',1000000),
                               expected_sha256=text('Lowercase hex SHA-256 of the file as it is now (project_read returns it as sha256), or the literal string "absent" to create a new file. A mismatch refuses the write and changes nothing.',64),
                               request_key=text('Unique action identity. Exact retries reuse the retained result.',128))),
+    'project_skill_link': obj(dict(action=dict(type='string',enum=['link','unlink'],description='link: make .claude/skills/<name> the relative symlink ../../.agents/skills/<name>, creating .claude/skills when absent; an exact existing link is left unchanged. unlink: remove only that exact link (the skill in .agents/skills stays).'),
+                                   name=text('Skill directory name under .agents/skills: 1-64 lowercase letters, digits and single hyphens. For link, .agents/skills/<name> must be a real directory holding a regular SKILL.md.',64),
+                                   replace_symlink_target=text('link only, and only to replace an existing symlink at .claude/skills/<name> with a different target: its exact current link text (a refusal names it). The user confirms the replacement. Omit otherwise; a file or directory there is never replaced.',4096),
+                                   request_key=text('Unique action identity.',128)), required=['action','name','request_key']),
     'draft_write': obj(dict(draft_id=text('Exact unpublished draft_id owned by this channel.',14),
                             content=text('Complete Markdown including the required first line from create_draft.',1000000),
                             request_key=text('Unique action identity.',128))),
@@ -356,9 +360,23 @@ def dispatch(store,channel,operation,args):
                 raise StoreError('gateway_read_failure', 'path', args['path'],
                     'a readable regular file or directory',
                     'The project read failed; no mutation was attempted. Check the path, file type and read access.') from error
-        if operation in {'project_write','project_mkdir','project_delete'} and (
-                not _matches(args['path'],scopes) or _matches(args['path'],write_denials(db,channel.task_id))):
-            raise StoreError('gateway_scope_denied')
+        if operation in {'project_write','project_mkdir','project_delete'}:
+            # A private path is refused before anything else (a deletion
+            # there once asked the user to confirm what was then refused).
+            _parts(args['path'])
+            if not _matches(args['path'],scopes) or _matches(args['path'],write_denials(db,channel.task_id)):
+                raise StoreError('gateway_scope_denied')
+        if operation=='project_skill_link':
+            # The one .claude write: a skill link, never a generic grant
+            # (skill_links). It needs the whole-project write grant, and a
+            # user deny-write path covering the link refuses it.
+            from .skill_links import check_name, link_path
+            if args['action']=='unlink' and 'replace_symlink_target' in args:
+                raise StoreError('invalid_arguments','replace_symlink_target',args['replace_symlink_target'][:40],
+                                 'omitted for unlink','Remove replace_symlink_target; it applies only to link.')
+            linked=link_path(check_name(args['name']))
+            if '.' not in scopes or _matches(linked,write_denials(db,channel.task_id)):
+                raise StoreError('gateway_scope_denied')
         if operation in {'outside_write','outside_command'} and not scopes:
             raise StoreError('gateway_scope_denied')  # writing workers only
         role=db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',(channel.attempt_id,)).fetchone() if channel.attempt_id else None
@@ -399,6 +417,23 @@ def dispatch(store,channel,operation,args):
                     with store.connection() as db: _authority(db,channel)
                 if not consent.request(store,channel,'project_delete',args['path'],still_allowed=still_allowed):
                     raise StoreError('deletion_not_confirmed')
+            from . import skill_links
+            if (operation=='project_skill_link' and 'replace_symlink_target' in args
+                    and args['replace_symlink_target']!=skill_links.link_target(args['name'])):
+                # Replacing another link is the user's to confirm. The link
+                # must still be exactly the confirmed one when it is replaced
+                # (skill_links.apply observes it again below).
+                from . import consent
+                observed=skill_links.inspect(root,args['name'])
+                if observed!=('symlink',args['replace_symlink_target']):
+                    raise StoreError('skill_link_conflict','replace_symlink_target',args['replace_symlink_target'][:160],
+                                     observed[1] or observed[0],'Nothing was replaced. Pass the exact current link text, or omit it.')
+                def still_allowed():
+                    with store.connection() as db: _authority(db,channel)
+                subject=(f"{skill_links.link_path(args['name'])} -> {args['replace_symlink_target']}"
+                         f" becomes -> {skill_links.link_target(args['name'])}")
+                if not consent.request(store,channel,'project_skill_link',subject,still_allowed=still_allowed):
+                    raise StoreError('skill_link_replace_not_confirmed')
             with store.connection() as db:
                 db.execute('BEGIN IMMEDIATE')
                 scopes,owner=_authority(db,channel)
@@ -416,6 +451,8 @@ def dispatch(store,channel,operation,args):
                     result=dict(created=True)
                 elif operation=='project_write':
                     result=_write(root,args)
+                elif operation=='project_skill_link':
+                    result=skill_links.apply(root,args,effects)
                 else:
                     draft,path=store._draft_source(db,channel.task_id,channel.principal_thread_id,args['draft_id'])
                     data=args['content'].encode('utf-8')
@@ -429,6 +466,10 @@ def dispatch(store,channel,operation,args):
                         stream.truncate(); stream.write(data); stream.flush(); os.fsync(stream.fileno())
                     result=dict(sha256=hashlib.sha256(data).hexdigest(),byte_count=len(data))
                 db.commit()
+            if operation=='project_skill_link' and args['action']=='link':
+                # Observed after the commit: a git subprocess never runs
+                # under the store's write lock. Read-only and never raises.
+                result['git']=skill_links.git_retention(root,args['name'])
     except StoreError as error:
         if effects['possible']:
             # Execution may have succeeded even when evidence persistence failed.

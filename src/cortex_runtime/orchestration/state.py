@@ -498,6 +498,9 @@ class TaskMachine:
             value['verification_attempts'] = db.execute(
                 "SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='VERIFICATION_REVISED'", (task_id,)).fetchone()[0]
         value['user_answers'] = [dict(answer) for answer in answers]
+        from .skill_proposals import task_proposals
+        with self.store.connection() as db:
+            value['skill_proposals'] = task_proposals(db, task_id)
         value['plan'] = json.loads(value.pop('plan_json') or 'null')
         value['nodes'] = [{**dict(n), 'dependencies': json.loads(n['dependencies_json']),
                            'scope': json.loads(n['scope_json']),

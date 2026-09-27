@@ -81,6 +81,7 @@ _TITLES = {
     'outside_write': {'en': 'Confirm: write {subject}', 'ru': 'Confirm: запись {subject}'},
     'outside_command': {'en': 'Confirm: {subject}', 'ru': 'Confirm: {subject}'},
     'project_delete': {'en': 'Confirm: delete {subject}', 'ru': 'Confirm: удаление {subject}'},
+    'project_skill_link': {'en': 'Confirm: replace skill link {subject}', 'ru': 'Confirm: замена ссылки на скилл {subject}'},
 }
 
 

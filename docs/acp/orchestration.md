@@ -15,7 +15,9 @@ or trivial plan, because runtime verification still runs when no project change
 is observed. Copy commands exactly from documented project verification. If the
 project documents none, provide the smallest literal-argv command that fails
 when the requested result is wrong, using project files and standard tools; for
-an investigation-only plan, check the investigated files. Shell operators,
+an investigation-only plan, check the investigated files. `plan.verification`
+is the one place the project's whole documented suite runs; worker objectives
+name only the tests covering each task's change. Shell operators,
 pipes, redirection and substitution are not accepted. When Codex renders the
 MCP schema as TypeScript, the required count and meaning are repeated in the
 array's own description because it may omit JSON Schema item/count constraints
@@ -47,6 +49,12 @@ though it can cap aggregate workers across connections. Scope overlap
 serializes writing nodes; review-stage nodes and READ_ONLY roles neither block nor are blocked by overlapping scopes. Runtime routing resolves model and
 effort from the current tier, policy, catalog and plan usage; plan hints remain
 advisory. All 23 specialist/consultant profiles remain available.
+
+### Worker brief assembly
+
+Each reserved assignment receives a compact JSON brief capped at 16,000 Unicode characters, measured after encoding with the same serializer used by the runtime. The assignment objective, scope and dependency report references stay complete. If those required fields alone exceed the cap, dispatch fails closed with a provisioning error.
+
+The original task goal and review git evidence use whatever room remains. A shortened field is marked with `truncated: true`, original character and UTF-8 byte counts, shown character count, and a source reference. Workers can read the full task goal from the `constraints` section of `read_capsule`. Review evidence points to `project_git` with its exact `status` or `diff` kind and, when captured already, to the exact `read_large_output` id. Brief previews are informational; the worker can inspect the full source through these existing worker tools.
 
 The runtime inserts an independent code reviewer after execution whenever the
 planned work changed the project. When a plan revision starts executing, the runtime
@@ -195,7 +203,9 @@ Every synthesis `not_verified` item requires a nonblank concrete blocker.
 Command verification runs literal argv
 in an explicit Linux namespace sandbox with no user home, inherited credentials,
 network, or access to the real runtime store. Missing isolation, failed commands,
-incomplete output or a changed project digest cannot establish a pass.
+incomplete output or a changed project digest cannot establish a pass. Each
+command runs until it exits, with no runtime time limit; stopping the task ends
+it, and that interrupted run cannot establish a pass.
 
 Completion of planned work requires current completed nodes, an approving review
 (or the runtime's `REVIEW_NOT_REQUIRED` record for an unchanged project), complete passing
@@ -261,5 +271,6 @@ stops the work under its own name and is never retried. See
 and idle deadlines. Scope reservations remain occupied until engine termination
 is observed. A task waiting for another task's capacity remains pending with a
 bounded wait. Senior escalation inserts a read-only consultant routed automatically
-by the runtime. Three accepted automatic replans and three review cycles bound the
-respective loops; exhausted limits require user input or a new plan.
+by the runtime. Three accepted automatic replans since the latest user message or
+answer and three review cycles bound the respective loops; exhausted limits require
+user input or a new plan, and any user message or answer restores the replan budget.

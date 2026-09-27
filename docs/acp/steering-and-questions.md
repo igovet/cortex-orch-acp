@@ -28,6 +28,11 @@ with its own review and verification. If the user chose to finish, it closes
 the task with a short `answer_submit`. The coordinator uses `synthesis_submit`
 only when nothing is left for the user to decide.
 
+A question can carry a `skill_proposal` for a reusable project skill. The
+runtime validates it, shows its own evidence list, and derives an approve,
+decline or unclear decision from the exact answer; see
+[project skill management](skill-management.md#proposed-skills-from-repeated-work).
+
 In Paseo the question is a card with its options and an "Other..." field for
 an answer of the user's own. Paseo's stock ACP bridge can answer a card only
 with one of its options, so the Cortex provider
@@ -96,7 +101,8 @@ the message again. An explicit Stop
 (`session/cancel`) or `/cortex-stop` remains an interruption: the former
 moves the task to RECOVERING and fences unfinished work; the latter
 permanently cancels it. Worker questions enter the persisted question protocol;
-scope, replan and escalation requests retain their three-revision bound. Each enters
+scope, replan and escalation requests share a bound of three accepted requests since
+the user last spoke; a follow-up message or a question answer restores it. Each enters
 `RECOVERING`; the coordinator ends its turn and waits for the runtime to stop workers
 and request the replacement plan before submitting it. See
 [qualification status](runtime-rewrite-status.md).

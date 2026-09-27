@@ -60,6 +60,9 @@ from ..trusted_channel import ChannelContext
 from . import contracts as delegation_contracts
 from . import revision as delegation_revision
 
+WORKER_BRIEF_MAX_CHARS = 16000
+
+
 STEP_ORDER = (
     # "assignment" and "attempt" are pure local id allocation (see
     # _validate_prefixed_id prefixes "a_"/"xa_" in portable.identity) with no
@@ -404,7 +407,7 @@ class ProvisioningService:
                 field="channel",
             )
         # The scheduler supplies these bounded values; none is a public spawn API.
-        for field, value, bound in (("title", title, 200), ("brief", brief, 16000),
+        for field, value, bound in (("title", title, 200), ("brief", brief, WORKER_BRIEF_MAX_CHARS),
                                     ("role", role, 80), ("acceptance", acceptance, 4000),
                                     ("request_key", request_key, 128)):
             if not isinstance(value, str) or not 1 <= len(value) <= bound:

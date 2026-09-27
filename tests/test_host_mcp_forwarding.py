@@ -426,3 +426,69 @@ def test_runtime_dir_variables_cannot_redirect_the_sandbox(tmp_path, names):
     with pytest.raises(PortableError) as excinfo:
         load_mcp_servers(tmp_path, client_servers=[], environ=env)
     assert excinfo.value.code == "invalid_mcp_registry"
+
+
+def test_claude_system_prompt_names_attached_external_servers():
+    from cortex_runtime.engine.claude_adapter_acp import (
+        build_claude_session_new_meta, external_mcp_instructions, with_external_mcp_instructions,
+    )
+
+    assert external_mcp_instructions([]) is None
+    meta = build_claude_session_new_meta("Role text.")
+    merged = with_external_mcp_instructions(meta, ["playwright", "codebase-memory-mcp"])
+    append = merged["systemPrompt"]["append"]
+    assert append.startswith("Role text.\n\n")
+    assert "codebase-memory-mcp, playwright." in append and "ToolSearch" in append
+    assert "structural code discovery" in append
+    assert meta["systemPrompt"]["append"] == "Role text."
+    assert merged["claudeCode"] == meta["claudeCode"]
+    other = with_external_mcp_instructions(meta, ["playwright"])["systemPrompt"]["append"]
+    assert "playwright." in other and "structural code discovery" not in other
+
+
+@pytest.mark.parametrize("engine", ["claude-agent-acp", "codex-acp"])
+def test_only_claude_session_new_carries_the_external_server_note(tmp_path, engine):
+    import json
+    from cortex_runtime.engine.session_manager import EngineSessionManager
+    from cortex_runtime.portable.engine_contract import EngineCapability
+    from engine_fakes import (
+        default_scenario, fake_launch_command, isolated_environ,
+        make_connection_record, new_connection_id, write_scenario,
+    )
+
+    environ = isolated_environ(tmp_path)
+    dump_path = tmp_path / "session-new-note.json"
+    scenario = write_scenario(tmp_path, default_scenario(session_new_params_dump_path=str(dump_path)))
+    record = make_connection_record(
+        new_connection_id(), launch_command=fake_launch_command(scenario), engine=engine, environ=environ,
+    )
+    manager = EngineSessionManager(
+        record, str(tmp_path), environ=environ,
+        channel_credentials=("ch_" + "0" * 12, "a" * 20, str(tmp_path)),
+        host_mcp_servers=[{"name": "codebase-memory-mcp", "allowed_tools": ["inspect"], "command": "/bin/true"}],
+        mcp_role="worker", call_timeout=5,
+    )
+    try:
+        manager.negotiate((EngineCapability.SESSION_CREATION, EngineCapability.PROMPT_STREAMING))
+        session = manager.create_session("t_" + "a" * 12, "xr_" + "0" * 24,
+                                         session_new_meta={"systemPrompt": {"append": "Role text."}})
+        wire = json.loads(dump_path.read_text(encoding="utf-8"))
+        assert manager.sent_session_new_meta(session) == wire["_meta"]
+    finally:
+        manager.shutdown(grace=2)
+    append = wire["_meta"]["systemPrompt"]["append"]
+    if engine == "claude-agent-acp":
+        assert append.startswith("Role text.\n\nExternal MCP servers attached to this session: codebase-memory-mcp.")
+    else:
+        assert append == "Role text."
+
+
+def test_registry_always_load_tools_must_be_granted(tmp_path):
+    from cortex_runtime.portable.errors import PortableError
+
+    environ = _registry(tmp_path, dict(always_load_tools=["inspect"]))
+    (entry,) = load_mcp_servers(tmp_path, environ=environ)
+    assert entry["always_load_tools"] == ["inspect"]
+    environ = _registry(tmp_path, dict(always_load_tools=["trace"]))
+    with pytest.raises(PortableError):
+        load_mcp_servers(tmp_path, environ=environ)

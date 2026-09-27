@@ -80,7 +80,7 @@ Guarded.
 | | Guarded (default) | Auto |
 | --- | --- | --- |
 | Native deletion reported to the bridge | permission card | runtime selects the offered allow option |
-| `project_delete`, `outside_write`, `outside_command` (`orchestration.consent`) | permission card | runtime allows |
+| `project_delete`, `outside_write`, `outside_command`, replacing a different link with `project_skill_link` (`orchestration.consent`) | permission card | runtime allows |
 | No client connected | refused | allowed |
 | Worker engine mode | floor: Claude `default`, Codex `agent` | most permissive offered: Claude `bypassPermissions` → `acceptEdits` → `default`; Codex `agent-full-access` → `agent` |
 | Coordinator engine mode | floor | floor |
@@ -121,9 +121,55 @@ non-UTF-8 regular file returns only its SHA-256, byte size and `binary: true`.
 requires `absent`. `project_delete` supports binary files and checks their raw-byte
 SHA-256 before unlinking. File operations use no-follow directory descriptors and
 reject symlinks, hardlinks and private components `.cortex`, `.git`, `.codex`,
-`.claude`. `draft_write` accepts only the exact owned, unpublished draft ID and
-marker. Publication rechecks channel authority inside its transaction; published
-reports are immutable.
+`.claude`. A private path is refused before anything else, so a deletion there
+never asks the user first. `draft_write` accepts only the exact owned, unpublished
+draft ID and marker. Publication rechecks channel authority inside its
+transaction; published reports are immutable.
+
+### Project skill links
+
+`project_skill_link` (`orchestration.skill_links`) is the only write `.claude`
+accepts, and it is not a path grant: plan scopes, `project_read`,
+`project_write`, `project_mkdir` and `project_delete` still refuse every
+`.claude` path, the native shell still sees `.claude` read-only and
+`command_run` still masks it. It creates or removes exactly one directory
+symlink, `.claude/skills/<name>` -> `../../.agents/skills/<name>`, so Claude
+Code (which loads project skills only from `.claude/skills`) sees a skill kept
+in the shared `.agents/skills` directory.
+
+- Who: a worker whose assignment may write (the whole-project grant). The
+  coordinator, consultants, reviewers and read-only roles are refused and are
+  not offered the tool. A user deny-write path matching the link refuses it.
+- `name`: 1-64 lowercase letters, digits and single hyphens
+  (`skill_link_name_invalid`); it is never a path.
+- `link` requires `.agents`, `.agents/skills` and `.agents/skills/<name>` to be
+  real directories in the project (no symlinked component) and `SKILL.md` a
+  regular file (`skill_source_missing`). `.claude` and `.claude/skills` must be
+  real directories and are created when absent; a symlinked or non-directory
+  component is never followed (`skill_link_parent_unsafe`).
+- Existing entry at the link path: the exact link is left unchanged
+  (`changed: false`); a regular file, directory or other non-link is never
+  replaced (`skill_link_collision`); a symlink with a different target (stale or
+  foreign) is refused with its exact text (`skill_link_occupied`) and replaced
+  only when the call passes that exact text as `replace_symlink_target` and the
+  user confirms on a permission card (`skill_link_replace_not_confirmed`
+  otherwise). A mismatched text never reaches the user (`skill_link_conflict`);
+  the link is observed again after confirmation and replaced atomically.
+- `unlink` removes only the exact managed link (`skill_link_not_managed`
+  otherwise, and `changed: false` when absent); the skill in `.agents/skills`
+  stays, so it is not a deletion and asks no confirmation.
+- Git: the link text is relative and inside the project, so Git stores it as
+  a symlink (mode 120000) that resolves in every clone. A `link` result carries
+  `git.link_ignored`/`git.source_ignored` from a read-only sandboxed
+  `git check-ignore`, or `null` outside a checkout; that sandbox masks
+  `.claude`, so an ignore file inside `.claude` itself is not seen. The
+  operation never edits `.gitignore`, stages or commits. `project_git`
+  status/diff still exclude `.claude`.
+- Receipts: like every gateway mutation it has a durable started receipt; a
+  failure after a directory or link may have been created is an uncertain
+  outcome that is never re-executed automatically.
+
+Covered by `tests/test_project_skill_links.py`.
 
 `command_run` requires Linux bubblewrap. It runs as the owner (read-only real
 HOME with its tool caches writable, credential-free environment, shared network)
@@ -167,7 +213,7 @@ the whole project is granted:
 | Other linked worktrees' metadata, `modules/` (submodule repositories) | read-only | denied |
 | The project's `.git` for reviewers and read-only roles | read-only | denied |
 | `.cortex` | hidden | denied |
-| `.codex`, `.claude` | hidden in `command_run`, read-only in the native shell | denied |
+| `.codex`, `.claude` | hidden in `command_run`, read-only in the native shell | denied (only `project_skill_link` may create or remove the exact `.claude/skills/<name>` link, see [Project skill links](#project-skill-links)) |
 | Tool state in the project (`.venv`, `node_modules/.cache`, `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, `build/`, ...) | writable | allowed (ordinary project files) |
 
 Those protected git entries configure or redirect git runs the owner makes later,

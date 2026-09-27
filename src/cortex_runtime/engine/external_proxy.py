@@ -23,7 +23,7 @@ from cortex_runtime.orchestration.gateway import _authority, channel_authority, 
 from cortex_runtime.orchestration.sandbox import allow_network, gateway_command
 from cortex_runtime.orchestration.state import event, encoded
 from cortex_runtime.contracts import StoreError
-from cortex_runtime.engine.mcp_bridge import coordinator_tools
+from cortex_runtime.engine.mcp_bridge import always_load, coordinator_tools
 
 
 def _ready(fd, event, timeout):
@@ -125,6 +125,7 @@ def main():
             allowed=[tool for tool in allowed if tool in config.get('read_only_tools',[])]
         if channel.role=='coordinator':
             allowed=[tool for tool in allowed if tool in coordinator_tools(config)]
+    eager=set(config.get('always_load_tools') or ())
     with tempfile.TemporaryDirectory(prefix='cortex-external-') as scratch:
         with gateway_command(root,scratch,[config['command'],*config.get('args',[])],scopes) as (command,fds):
             # Administrator-owned registry values are the only extra grants.
@@ -229,7 +230,8 @@ def main():
                                 print(describe_mismatch(method,identifier,reply),file=sys.stderr,flush=True)
                                 raise StoreError('external_mcp_response_identity_mismatch')
                             if method=='tools/list' and 'result' in reply:
-                                reply['result']['tools']=[t for t in reply['result'].get('tools',[]) if t.get('name') in allowed]
+                                reply['result']['tools']=[always_load(t) if t.get('name') in eager else t
+                                                          for t in reply['result'].get('tools',[]) if t.get('name') in allowed]
                             if method=='tools/call':
                                 with store.connection() as db:
                                     db.execute('BEGIN IMMEDIATE')

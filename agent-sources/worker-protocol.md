@@ -50,9 +50,14 @@ assignment and relevant evidence from the runtime.
 
 ## Evidence and verification
 
-Verify every surface your assignment changes with the means actually available (tests, the isolated dev environments the project documents, real installs, authorized calls) and retain their actual outcomes. Leave a check unrun or unverified only when a concrete blocker makes it impossible, and state that blocker; "not run" or "out of scope" is not a reason. If an authorization would unblock it, ask for it rather than leaving a gap.
+Verify every behavior your assignment changes with the means actually available (tests, the isolated dev environments the project documents, real installs, authorized calls) and retain their actual outcomes. Leave a check unrun or unverified only when a concrete blocker makes it impossible, and state that blocker; "not run" or "out of scope" is not a reason. If an authorization would unblock it, ask for it rather than leaving a gap.
 Unrun, failed, truncated and unverifiable checks remain explicit. A successful
 model turn or tool response is not proof that the project works.
+Run the checks that exercise what your assignment changed: the tests you added or
+modified and the existing tests of the code, contracts and documents you touched.
+Do not run the project's whole test suite; the runtime runs the plan's final
+verification once after review. Run a broader check only when the assignment
+names it or a specific cross-cutting risk requires it, and state that reason.
 
 ## Report and handoff
 

@@ -12,6 +12,7 @@ import threading
 import time
 
 from .state import TaskMachine, encoded, event, now, transition
+from .worker_brief import build_worker_brief
 from ..contracts import StoreError
 from ..delegation import events
 from ..delegation import revision
@@ -29,7 +30,7 @@ _COORDINATOR_SESSION_DEAD_KINDS = frozenset({
 
 
 def _verification(runtime, task_id, machine, emit_tool_call, cancel):
-    """Run retained literal argv commands, with bounded time and complete output.
+    """Run retained literal argv commands to completion with complete output.
 
     The root filesystem is read-only; checks can write only in
     their private temporary directory. The real runtime store is inaccessible.
@@ -83,10 +84,11 @@ def _verification(runtime, task_id, machine, emit_tool_call, cancel):
                 finally:
                     for extra in set(launch_fds) - set(fds):
                         os.close(extra)
-                deadline = time.monotonic() + 300
+                # No time limit, as for a worker's command_run: a project's
+                # full suite runs to completion; only a task stop ends it.
                 interrupted = False
                 while proc.poll() is None:
-                    if cancel.wait(.1) or time.monotonic() >= deadline:
+                    if cancel.wait(.1):
                         interrupted = True
                         proc.kill()
                         break
@@ -192,6 +194,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                        'Runtime schedules planned workers, then independent review whenever the project changed, then verification. '
                        + _released_request(runtime, task_id)
                        + _unknown_outcome_request(runtime, task_id)
+                       + _skill_proposal_request(context)
                        + (_ask_user_request(context) or _verification_repair_request(context)
                           or _failed_worker_request(context))
                        if state == 'PLANNING' else
@@ -360,8 +363,14 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                         review_evidence.append(observed)
                         if emit_tool_call:
                             emit_tool_call(dict(tool_call_id=ref,new=False,status='completed' if observed['available'] else 'failed',raw_output=observed))
-                brief = encoded(dict(review_evidence=review_evidence,objective=node['objective'], scope=json.loads(node['scope_json']),
-                                     dependency_reports=inputs, original_goal=context['goal']))
+                brief = build_worker_brief(
+                    objective=node['objective'],
+                    scope=json.loads(node['scope_json']),
+                    dependency_reports=inputs,
+                    original_goal=context['goal'],
+                    review_evidence=review_evidence,
+                    assignment_ref=node['assignment_ref'],
+                )
                 from .scheduler import dispatch_assignment
                 dispatch_assignment(runtime._store, channel, dict(
                     title=node['objective'][:200], brief=brief, role=node['role'],
@@ -459,6 +468,9 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             question = pending(runtime._store, task_id)
             if question.get('blocker'):
                 question = _stop_question(question, context, language)
+            elif question.get('skill_proposal'):
+                from .skill_proposals import question_text
+                question = question_text(question, language)
             if runtime._handle_ask_user(task_id, session_id, emit_update, language, question, host_elicitor):
                 if resume_answered(runtime._store, task_id):
                     prompted.pop((question['resume_state'], context['revision']),None)
@@ -522,6 +534,11 @@ def _ask_user_request(context):
             "user_question_request, in the user's language: say plainly what failed and why (use the verification "
             "output, failed checks and reports in context), what was already tried, and offer 2-4 concrete next "
             "actions as options; the user may also answer in their own words. Do not submit a plan before the answer. ")
+
+
+def _skill_proposal_request(context):
+    from .skill_proposals import planning_instruction
+    return planning_instruction(context)
 
 
 def _failed_worker_request(context):

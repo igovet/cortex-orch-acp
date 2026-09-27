@@ -36,7 +36,7 @@ def test_gui_validates_port_range(tmp_path):
 
     # Test port too high
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo), "--port", "99999"],
+        [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(tmp_path / "electron-profile"), "--paseo", str(fake_paseo), "--port", "99999"],
         capture_output=True, text=True, cwd=str(ROOT)
     )
 
@@ -45,7 +45,7 @@ def test_gui_validates_port_range(tmp_path):
 
     # Test port too low
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo), "--port", "0"],
+        [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(tmp_path / "electron-profile"), "--paseo", str(fake_paseo), "--port", "0"],
         capture_output=True, text=True, cwd=str(ROOT)
     )
 
@@ -68,13 +68,13 @@ def test_gui_sets_environment_correctly(tmp_path):
     fake_paseo.chmod(0o755)
 
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo), "--home", str(dev_home)],
+        [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(tmp_path / "electron-profile"), "--paseo", str(fake_paseo), "--home", str(dev_home)],
         capture_output=True, text=True, cwd=str(ROOT)
     )
 
     assert result.returncode == 0
     assert f"PASEO_HOME={dev_home}" in result.stdout
-    assert "PASEO_ELECTRON_USER_DATA_DIR=" in result.stdout
+    assert f"PASEO_ELECTRON_USER_DATA_DIR={(tmp_path / 'electron-profile').resolve()}" in result.stdout
     assert "--remote-debugging-address=127.0.0.1" in result.stdout
     port_line = next(line for line in result.stdout.splitlines() if "Chrome DevTools Protocol:" in line)
     selected_port = int(port_line.rsplit(":", 1)[1])
@@ -113,7 +113,7 @@ def test_gui_uses_a_private_xvfb_display_when_requested(tmp_path):
         "DISPLAY": ":user-desktop",
     })
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo),
+        [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(tmp_path / "electron-profile"), "--paseo", str(fake_paseo),
          "--home", str(dev_home), "--xvfb"],
         capture_output=True, text=True, cwd=str(ROOT), env=environment,
     )
@@ -161,7 +161,7 @@ def test_gui_terminates_xvfb_and_electron_children_on_sigterm(tmp_path):
     })
 
     wrapper = subprocess.Popen(
-        [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo),
+        [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(tmp_path / "electron-profile"), "--paseo", str(fake_paseo),
          "--home", str(dev_home), "--xvfb"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         cwd=str(ROOT), env=environment,
@@ -206,7 +206,7 @@ def test_gui_xvfb_fails_closed_when_xvfb_is_unavailable(tmp_path):
     environment = dict(os.environ)
     environment["PATH"] = "/nonexistent"
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo),
+        [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(tmp_path / "electron-profile"), "--paseo", str(fake_paseo),
          "--home", str(dev_home), "--xvfb"],
         capture_output=True, text=True, cwd=str(ROOT), env=environment,
     )
@@ -227,7 +227,7 @@ def test_gui_custom_port(tmp_path):
     fake_paseo.chmod(0o755)
 
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo),
+        [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(tmp_path / "electron-profile"), "--paseo", str(fake_paseo),
          "--home", str(dev_home), "--port", "8888"],
         capture_output=True, text=True, cwd=str(ROOT)
     )
@@ -248,12 +248,101 @@ def test_gui_refuses_busy_explicit_port_before_starting_xvfb(tmp_path):
         occupied.listen()
         port = occupied.getsockname()[1]
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo),
+            [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(tmp_path / "electron-profile"), "--paseo", str(fake_paseo),
              "--home", str(dev_home), "--port", str(port), "--xvfb"],
             capture_output=True, text=True, cwd=str(ROOT),
         )
     assert result.returncode == 2
     assert f"--port {port} is unavailable on 127.0.0.1" in result.stderr
+
+
+def _live_lock_fixture(tmp_path):
+    """A profile whose Electron SingletonLock names a live local process."""
+    profile = tmp_path / "electron-profile"
+    profile.mkdir()
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    os.symlink(f"{socket.gethostname()}-{holder.pid}", profile / "SingletonLock")
+    fake_paseo = tmp_path / "Paseo"
+    fake_paseo.write_text("#!/bin/sh\necho LAUNCHED\n")
+    fake_paseo.chmod(0o755)
+    return profile, holder, fake_paseo
+
+
+def test_gui_refuses_profile_held_by_a_live_instance_before_launch(tmp_path):
+    """Paseo quits with 0 when its profile is locked; the helper must fail closed instead."""
+    dev_home = tmp_path / "dev-home"
+    dev_home.mkdir()
+    profile, holder, fake_paseo = _live_lock_fixture(tmp_path)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(profile),
+             "--paseo", str(fake_paseo), "--home", str(dev_home)],
+            capture_output=True, text=True, cwd=str(ROOT),
+        )
+    finally:
+        holder.kill()
+        holder.wait()
+    assert result.returncode == 3
+    assert f"Paseo PID {holder.pid} already holds {profile}" in result.stderr
+    assert "LAUNCHED" not in result.stdout
+    assert "Chrome DevTools Protocol" not in result.stdout
+
+
+def test_gui_reports_lock_taken_during_launch(tmp_path):
+    """A lock acquired by another instance while launching is not reported as success."""
+    dev_home = tmp_path / "dev-home"
+    dev_home.mkdir()
+    profile = tmp_path / "electron-profile"
+    profile.mkdir()
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    fake_paseo = tmp_path / "Paseo"
+    fake_paseo.write_text(
+        "#!/bin/sh\n"
+        f'ln -s "{socket.gethostname()}-{holder.pid}" "$PASEO_ELECTRON_USER_DATA_DIR/SingletonLock"\n'
+        "exit 0\n"
+    )
+    fake_paseo.chmod(0o755)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(profile),
+             "--paseo", str(fake_paseo), "--home", str(dev_home)],
+            capture_output=True, text=True, cwd=str(ROOT),
+        )
+    finally:
+        holder.kill()
+        holder.wait()
+    assert result.returncode == 3
+    assert f"Paseo exited because PID {holder.pid} holds {profile}" in result.stderr
+
+
+def test_gui_ignores_stale_profile_lock(tmp_path):
+    """A lock naming a dead process is Chromium's to reclaim, so launch proceeds."""
+    dev_home = tmp_path / "dev-home"
+    dev_home.mkdir()
+    profile, holder, fake_paseo = _live_lock_fixture(tmp_path)
+    holder.kill()
+    holder.wait()
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(profile),
+         "--paseo", str(fake_paseo), "--home", str(dev_home)],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    assert result.returncode == 0
+    assert "LAUNCHED" in result.stdout
+
+
+def test_gui_refuses_production_electron_profile(tmp_path):
+    fake_paseo = tmp_path / "Paseo"
+    fake_paseo.write_text("#!/bin/sh\necho LAUNCHED\n")
+    fake_paseo.chmod(0o755)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(Path.home() / ".config" / "Paseo"),
+         "--paseo", str(fake_paseo), "--home", str(tmp_path / "dev-home")],
+        capture_output=True, text=True, cwd=str(ROOT),
+    )
+    assert result.returncode == 2
+    assert "refusing production Paseo Electron profile" in result.stderr
+    assert "LAUNCHED" not in result.stdout
 
 
 def test_cli_refuses_home_override(tmp_path):
@@ -349,7 +438,7 @@ def test_gui_uses_private_cortex_xdg_paths_and_current_source_root(tmp_path):
     dev_home = tmp_path / "dev-home"
     dev_home.mkdir()
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), "gui", "--paseo", str(fake_paseo),
+        [sys.executable, str(SCRIPT), "gui", "--user-data-dir", str(tmp_path / "electron-profile"), "--paseo", str(fake_paseo),
          "--home", str(dev_home)],
         capture_output=True, text=True, cwd=str(ROOT),
     )

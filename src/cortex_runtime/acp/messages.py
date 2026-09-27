@@ -178,6 +178,14 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Options:",
         "ru": "Варианты ответа:",
     },
+    "skill_proposal_evidence": {
+        "en": "Proposed project skill `{name}` ({action}). Repeated cases in retained reports:",
+        "ru": "Предлагаемый навык проекта `{name}` ({action}). Повторяющиеся случаи в сохранённых отчётах:",
+    },
+    "skill_proposal_note": {
+        "en": "Nothing is created or changed unless you choose the first option.",
+        "ru": "Ничего не создаётся и не меняется, если вы не выберете первый вариант.",
+    },
     "stop_question": {
         "en": "The task stopped: {reason}.{details}\n\nWhat should happen next? You can also reply in your own words.",
         "ru": "Задача остановилась: {reason}.{details}\n\nЧто делать дальше? Можно ответить своими словами.",

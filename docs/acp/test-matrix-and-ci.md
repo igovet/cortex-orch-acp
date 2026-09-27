@@ -1,6 +1,6 @@
 # Automated test matrix and CI commands
 
-This page documents the no-paid automated suite and its limits. Applicable paid live checks use the isolated dev Paseo environment documented separately.
+This page documents the no-paid automated suite and its limits. Paid live checks run only on an explicit owner request naming `cli` or `desktop`, through the isolated dev Paseo environment documented separately.
 
 Current candidate coverage includes deterministic DAG scheduling, authenticated
 file/command/external MCP gateways, mandatory review, exact revision verification,

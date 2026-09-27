@@ -346,7 +346,7 @@ Only the store is shared. The session records the worktree it was opened in
 the same transaction (`task_workspaces`, see `cortex_runtime/task_workspace.py`).
 The binding is permanent. Every file-side consumer uses the task's tree: the
 coordinator and worker engines' cwd, the gateway's `project_read`/`project_write`/
-`project_delete`/`project_mkdir`/`command_run`/`project_git`, verification,
+`project_delete`/`project_mkdir`/`project_skill_link`/`command_run`/`project_git`, verification,
 review/completion revision captures, project docs catalogues and `resource_link`
 containment. `tasks.project_root` and every store key stay the main repository.
 A task without a binding (created before this existed, or opened directly in the

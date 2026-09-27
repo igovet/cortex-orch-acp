@@ -124,6 +124,12 @@ brief and acceptance text. The former line-based compact mode could
 silently remove an unmarked constraint, so budget overflow must be handled
 explicitly by the caller without shortening the assignment on its own.
 
+## 8. Worker brief provisioning budget
+
+Worker provisioning keeps its 16,000-character `brief` validation. The runtime measures the final JSON-encoded brief with its shared serializer, so JSON escaping and Unicode are included exactly as provisioning will count them. The assignment objective, scope and dependency report references are mandatory and remain whole; if they cannot fit, dispatch fails closed with a clear provisioning error.
+
+The original task goal and git review evidence are optional context fitted into the remaining budget. Any shortened value is a structured preview marked `truncated: true`, with original character and UTF-8 byte counts, shown character count and a worker-readable reference. The full goal is available via `read_capsule` under `constraints`; git evidence links to the existing `project_git` `status`/`diff` operation and to the captured `read_large_output` identity when present. Prefix selection is deterministic and slices Unicode code points, so it does not split a UTF-8 character.
+
 ## New schema
 
 `recovery.budget_store.LARGE_OUTPUT_SCHEMA` adds `large_outputs` and

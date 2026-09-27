@@ -1928,6 +1928,11 @@ class Agent:
         if command_id == acp_commands.CORTEX_NEW_TASK:
             self._run_cortex_new_task(request_id, session_id, session, argument, cancel_event)
             return
+        if command_id == acp_commands.SKILL_MANAGEMENT:
+            self._run_skill_management(
+                request_id, session_id, session, argument, cancel_event, _reply,
+            )
+            return
         if command_id in (acp_commands.HARVEST, acp_commands.HARVEST_REFRESH):
             self._run_harvest(
                 request_id, session_id, session, argument, cancel_event,
@@ -2088,6 +2093,21 @@ class Agent:
             return
         self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(reason.value)))
         observe(self.environ, "session/prompt", "command:" + acp_commands.CORTEX_ANSWER)
+
+    def _run_skill_management(self, request_id, session_id, session, argument, cancel_event, reply):
+        """Run one explicitly requested project skill-management workflow."""
+        request = argument.strip()
+        if not request:
+            reply("Usage: /skill-management <request>")
+            return
+        from ..orchestration.skill_proposals import workflow_instruction
+        instruction = "The user explicitly invoked /skill-management. " + workflow_instruction(
+            "the user invoked the registered command")
+        self._run_prompt_body(
+            request_id, session_id, session,
+            f"{request}\n\n{instruction}",
+            cancel_event,
+        )
 
     def _run_harvest(self, request_id, session_id, session, argument, cancel_event, *, refresh=False):
         """T035: `/harvest` -- an explicit knowledge-harvest request for the

@@ -164,6 +164,11 @@ def _normalize_entries(raw: object, path: Path) -> list[dict[str, object]]:
             if not isinstance(lookup,list) or any(tool not in readonly for tool in lookup):
                 raise _error('invalid_mcp_registry',f'{path}: {name}.coordinator_tools must be a subset of read_only_tools.')
             entry['coordinator_tools']=list(lookup)
+        if 'always_load_tools' in spec:
+            eager=spec['always_load_tools']
+            if not isinstance(eager,list) or any(tool not in allowed_tools for tool in eager):
+                raise _error('invalid_mcp_registry',f'{path}: {name}.always_load_tools must be a subset of allowed_tools.')
+            entry['always_load_tools']=list(eager)
         if roles is not None:
             # Private Cortex routing metadata; never forward as an ACP field.
             entry["roles"] = list(roles)

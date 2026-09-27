@@ -191,10 +191,11 @@ Fields:
 - `read_paths`, `write_paths`: optional arrays of absolute paths, default `[]`. Writes are limited to explicit grants and the engine jail's scope.
 - `network`: optional boolean, default `false`.
 - `runtime_dir_env`: optional unique array of environment-variable names. The runtime provides a private per-server directory through these names. `PATH`, `HOME`, `TMPDIR`, and `XDG_RUNTIME_DIR` are reserved.
+- `always_load_tools`: optional array, subset of `allowed_tools`. The gateway marks these tools with MCP `_meta` `"anthropic/alwaysLoad": true` in `tools/list`, so Claude keeps their schemas in the prompt instead of deferring them behind `ToolSearch`. Codex ignores the mark. Each listed schema costs prompt context in every Claude session that receives the tool.
 - `roles`: optional non-empty unique subset of `coordinator`, `worker`.
 - `engines`: optional non-empty unique subset of `codex-acp`, `claude-agent-acp`.
 
-Cortex-owned entries take precedence over client-supplied MCP entries with the same name; other client entries pass through for that session. MCP server values are loaded into memory for engine sessions, not copied into task reports. External tools still pass the gateway's channel, role, tool, path and network checks. Read [permissions and containment](acp/permissions-and-containment.md) for the enforcement boundary.
+Cortex-owned entries take precedence over client-supplied MCP entries with the same name; other client entries pass through for that session. MCP server values are loaded into memory for engine sessions, not copied into task reports. External tools still pass the gateway's channel, role, tool, path and network checks. Claude defers MCP tool schemas behind its native `ToolSearch`. Cortex marks every tool of its own `cortex` server channel catalogue as always loaded, and external tools only when listed in `always_load_tools`. A Claude session that receives external servers also gets a short system-prompt note naming them and telling the model to load their tools with `ToolSearch`; when `codebase-memory-mcp` is among them, the note prefers its graph tools for structural code discovery. Codex sessions list the tools directly and get no note. Read [permissions and containment](acp/permissions-and-containment.md) for the enforcement boundary.
 
 ## ssh from workers
 

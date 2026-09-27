@@ -267,7 +267,7 @@ PLUGIN = Path(__file__).resolve().parents[3]
 HOST_DISCONNECTED = "host_disconnected"
 # Gateway operations whose effect may already exist when their receipt is open.
 MUTATING_OPERATIONS = ("command_run", "outside_command", "outside_write", "project_write",
-                       "project_mkdir", "project_delete", "draft_write", "external_call")
+                       "project_mkdir", "project_delete", "project_skill_link", "draft_write", "external_call")
 MAX_LISTED = 50
 
 

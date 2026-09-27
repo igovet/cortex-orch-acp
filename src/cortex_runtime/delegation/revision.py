@@ -563,10 +563,10 @@ def git_metadata_dirs(root: str) -> list[str] | None:
     return list(dict.fromkeys(dirs))
 
 
-def sandboxed_git(root: str, args: list[str], timeout: float = 20) -> bytes | None:
+def sandboxed_git(root: str, args: list[str], timeout: float = 20, ok_codes: tuple[int, ...] = (0,)) -> bytes | None:
     """stdout of a read-only ``git <args>`` in the verification sandbox (no
     network, no home, fsmonitor and hooks off), or ``None`` when ``root`` is
-    not a usable git checkout or git failed."""
+    not a usable git checkout or git exited outside ``ok_codes``."""
     import subprocess
     import tempfile
     from ..orchestration.sandbox import verification_command
@@ -587,7 +587,7 @@ def sandboxed_git(root: str, args: list[str], timeout: float = 20) -> bytes | No
                                   env={"PATH": "/usr/bin:/bin"}, timeout=timeout)
     except Exception:  # noqa: BLE001 - callers fall back
         return None
-    return done.stdout if done.returncode == 0 else None
+    return done.stdout if done.returncode in ok_codes else None
 
 
 def _git_listed_paths(root: str):

@@ -27,7 +27,7 @@
 
 ## What Cortex is
 
-Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts. A worker check is marked passed only when its exact same-attempt `command_run` or user-confirmed `outside_command` receipt proves a complete, nontrivial command exited 0. Engine shell calls, reads and incomplete output cannot verify a check; older reports remain intact and weak historic evidence is marked separately when read.
+Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Worker briefs keep objectives, scope and dependency report references complete; long task goals and review evidence use marked previews with links to the full source. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts. The runtime runs them once after review, each until it exits, so the project's whole suite belongs there; workers run only the tests covering their own change. A worker check is marked passed only when its exact same-attempt `command_run` or user-confirmed `outside_command` receipt proves a complete, nontrivial command exited 0. Engine shell calls, reads and incomplete output cannot verify a check; older reports remain intact and weak historic evidence is marked separately when read.
 
 ACP timeline updates use bounded display projections to avoid repeatedly sending growing worker transcripts. Worker cards keep a 20-action, 4 KiB tail for generic clients; per-update and field size limits and a fixed per-card event budget (forward-only status transitions plus at most 8 progress updates, one per 30 s, so at most 13 updates per worker whatever its size) bound host event volume. Coordinator cards send changed fields only, suppress no-op updates, omit an identical MCP text mirror, and reference repeated identical outputs; unchanged context polls return a compact receipt. Coordinator and engine tool cards also have a per-task total budget: the first 150 distinct calls (or 4 MiB of card updates) get their own card with at most 10 updates each; later calls are counted on one aggregate card, sent at most 20 times per task; and up to 50 failed calls past the budget keep their own cards. The budget persists across turns and restarts, and `session/load` replays older journals within the same bound. In the scale test, 5,000 coordinator calls over four turns and a restart sent 362 card updates and 194,079 bytes, against 312 updates for 500 calls. In the recorded scale test, repeated polls were 481–483 bytes, and each Paseo worker card sent 3 updates and 16,959 bytes for 10-, 200- and 1,000-tool workloads. These limits reduce emitted event volume; they do not cap durable task history or guarantee constant total daemon memory. See [ACP observability and resource limits](docs/acp/observability.md#bounded-acp-event-projections).
 
@@ -88,6 +88,10 @@ Use the client’s ACP agent registration settings. See [the ACP documentation i
 
 See the [configuration guide](docs/configuration.md) for JSON configuration files and their locations, MCP server setup, engine connections, routing rules, and the default Haiku exclusion with conditional Luna routing. ssh from workers uses your own ssh-agent and `~/.ssh/config`; see [ssh from workers](docs/configuration.md#ssh-from-workers).
 
+### Project skills
+
+Codex can discover repository skills under `.agents/skills`; Claude Code discovers project skills under `.claude/skills`. Cortex's [`/skill-management <request>` workflow](docs/acp/skill-management.md) stores each skill in `.agents/skills/<name>/` and can expose it to Claude through a guarded relative symlink. Availability does not guarantee an engine will select or use a skill; that depends on the engine, its session policy, the model, and the task.
+
 ## Further documentation
 
 - [Packaging and onboarding](docs/acp/packaging-and-onboarding.md): install, first-run setup, diagnostics
@@ -96,5 +100,7 @@ See the [configuration guide](docs/configuration.md) for JSON configuration file
 - [Routing and fallback](docs/acp/routing-and-fallback.md): worker routing and multi-provider fallback
 - [Project storage and recovery](docs/project/storage.md): task storage, format upgrades, recovery
 - [Security](SECURITY.md): the sandbox and permission boundary
+- [Project skill management](docs/acp/skill-management.md): the explicit `/skill-management <request>` command, user-approved skill proposals from repeated work, and guarded Codex/Claude skill layout
 - [Verification guidance](docs/project/verification.md): check evidence rules and test commands
+- [Orchestration and worker briefs](docs/acp/orchestration.md): scheduling, review and bounded assignment context
 - [ACP documentation index](docs/acp/index.md): full reference

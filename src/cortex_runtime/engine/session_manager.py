@@ -266,6 +266,7 @@ class EngineSessionManager:
         # header values are its secrets (see engine.mcp_bridge
         # .host_mcp_servers).
         self._host_mcp_servers = list(host_mcp_servers or ())
+        self._sent_session_new_meta: dict[str, dict | None] = {}
         if mcp_role not in (None, "coordinator", "worker"):
             raise ValueError("mcp_role must be coordinator or worker.")
         self._mcp_role = mcp_role
@@ -650,6 +651,11 @@ class EngineSessionManager:
             self._negotiated = tuple(cap for cap in requested_capabilities if cap in granted)
             return self._negotiated
 
+    def sent_session_new_meta(self, session_id: str) -> dict | None:
+        """The ``_meta`` this manager actually sent on ``session_id``'s
+        ``session/new`` (it may extend the caller's), or ``None``."""
+        return self._sent_session_new_meta.get(session_id)
+
     def create_session(self, task_id: str, route_id: str, *, session_new_meta: dict | None = None) -> str:
         """``route_id`` is accepted for signature/traceability parity with
         every other caller (never itself sent over the wire here).
@@ -695,6 +701,12 @@ class EngineSessionManager:
             if not isinstance(session_new_meta, dict):
                 raise _fail("invalid_field", "session_new_meta must be a dict.", field="session_new_meta")
             params["_meta"] = session_new_meta
+        if external_servers and session_new_meta is not None and self._record.engine == "claude-agent-acp":
+            # Claude defers MCP tool schemas behind ToolSearch; name the
+            # servers actually attached here so the model knows to load them.
+            from .claude_adapter_acp import with_external_mcp_instructions
+            params["_meta"] = with_external_mcp_instructions(
+                session_new_meta, [server["name"] for server in external_servers])
         with self._lock:
             result = self._client.call("session/new", params, timeout=self._call_timeout)
             wire_session_id = result.get("sessionId")
@@ -703,6 +715,7 @@ class EngineSessionManager:
             portable_session_id = new_id("es_")
             self.correlation.register_session(portable_session_id, wire_session_id)
             self._session_config_options[portable_session_id] = result.get("configOptions") or []
+            self._sent_session_new_meta[portable_session_id] = params.get("_meta")
             names = sorted({str(server["name"]) for server in external_servers})
             self._session_external_mcp_inventory[portable_session_id] = {
                 "role": self._mcp_role,

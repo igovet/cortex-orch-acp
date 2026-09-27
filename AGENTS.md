@@ -98,8 +98,15 @@ Cortex XDG config/state remain disposable. Do not create test engine accounts,
 copy credentials, or run an isolated engine login. Check native login status
 without printing credentials before relying on either engine.
 
-The owner's standing approval authorizes paid model calls by default for
-applicable live verification. Run live checks needing paid calls only through
+Default verification is no-paid: targeted pytest, the Paseo plugin type-check
+and `npm --prefix integrations/paseo run test:*` scripts, and the no-paid smoke
+harness. The 2026-09-24 standing approval is revoked. Run a paid live check
+only when the owner explicitly requests it for the current work and names the
+mode: `cli` (headless, through the guarded Paseo CLI) or `desktop` (the Paseo
+Electron app). Without such a request, do not launch a paid model call or a
+live Paseo run; report each applicable live check as not run with the blocker
+"paid live check not requested by the owner". A request covers only the named
+mode and the work it names. Run requested paid checks only through
 the isolated dev Paseo setup: the permanent `~/.paseo-dev` daemon, its separate
 Electron profile at `~/.config/Paseo-dev`, a disposable project, and the Cortex
 runtime launched by that daemon from the explicit absolute checkout plugin path.
@@ -113,9 +120,9 @@ The no-paid default automated suite
 `docs/acp/test-matrix-and-ci.md`) cannot reach a paid engine and is not a
 substitute for live qualification. The only paid probes are
 `scripts/cortex_codex_probe.py` and `scripts/cortex_claude_probe.py`; both
-continue to require `--i-authorize-paid-call` and `--approval-ref`. The
-standing approval authorizes using approval reference
-`owner-standing-2026-09-24`. `scripts/cortex_acp_smoke.py` is the no-paid
+continue to require `--i-authorize-paid-call` and `--approval-ref`; run them
+only on an explicit owner request and pass a reference naming that request
+(for example `owner-request-<date>-cli`). `scripts/cortex_acp_smoke.py` is the no-paid
 startup smoke harness (schema-validated launch/protocol surface only, not GUI
 evidence).
 
@@ -140,16 +147,26 @@ overrides. If the installed build cannot be shown to isolate every required stat
 the daemon endpoint, do not launch Paseo or install the plugin; report the missing
 evidence.
 
+### Requested live modes: `cli` and `desktop`
+
+Both modes run only on an explicit owner request naming the mode (see above).
+In `cli` mode, drive a Cortex agent headlessly through the guarded wrapper
+(`run`, `send`, `permit`, `wait`, `inspect`) and check outcomes against the
+disposable project's `.cortex` store; it establishes runtime and protocol
+behavior, not rendered GUI behavior. In `desktop` mode, use the Electron app as
+described below. See the dev Paseo environment guide for the `cli` commands.
+
 ### Dev Paseo GUI verification
 
-Use the persistent isolated dev home with the Paseo Electron Desktop application as
-the standard GUI validation mode. Paseo 0.9.2 does not provide a browser-based web
+For a requested `desktop` check, use the persistent isolated dev home with the
+Paseo Electron Desktop application. Paseo 0.9.2 does not provide a browser-based web
 client or local HTTP UI; its daemon exposes a WebSocket endpoint, which is not a
 browser UI. The installed `paseo --help` lists CLI commands and the plugin
 reference lists directory, Git and npm plugin sources. No supported web-client
 launch command or daemon-served UI was found. Use the Electron app connected to
-the isolated dev daemon for rendered behavior. Until recovery is qualified for the deployed version, apply plugin updates between active tasks. A host SIGKILL without SIGTERM cannot be recorded; native engine actions have no retained command receipt. CLI is secondary and covers
-daemon health, plugin registration and logs only.
+the isolated dev daemon for rendered behavior. Until recovery is qualified for the deployed version, apply plugin updates between active tasks. A host SIGKILL without SIGTERM cannot be recorded; native engine actions have no retained command receipt. Outside a
+requested `cli` check, CLI use is secondary and covers daemon health, plugin
+registration and logs only.
 
 Before testing, install plugin dev dependencies and pass type-check:
 

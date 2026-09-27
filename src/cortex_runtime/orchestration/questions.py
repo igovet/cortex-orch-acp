@@ -8,6 +8,8 @@ from .state import encoded, event, now, transition
 
 
 def request(store, channel, args):
+    if args.get('skill_proposal') is not None and channel.role != 'coordinator':
+        raise StoreError('skill_proposal_not_allowed', 'skill_proposal', channel.role, 'the coordinator')
     digest = hashlib.sha256(encoded(args).encode()).hexdigest()
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -36,6 +38,11 @@ def request(store, channel, args):
             resume_state='PLANNING'
             db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')",(channel.task_id,))
             db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",(now(),channel.task_id))
+        if args.get('skill_proposal') is not None:
+            # A proposal is checked before the question exists and retained
+            # with it; nothing here touches the project.
+            from .skill_proposals import validate
+            details['skill_proposal'] = validate(db, store.project_root, channel, args)
         question_id = new_id('pq_')
         db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at) VALUES(?,?,?,?,?,'open',?)",
                    (question_id, channel.task_id, f'runtime:{channel.channel_id}:{args["request_key"]}',
@@ -73,6 +80,8 @@ def resume_answered(store, task_id):
         if not answer or answer['status'] != 'answered':
             return False
         event(db, task_id, 'USER_ANSWER_RECEIVED', dict(question_id=saved['question_id'], answer=answer['answer_text']))
+        from .skill_proposals import record_decision
+        record_decision(db, task_id, saved, answer['answer_text'])
         transition(db, task_id, saved['resume_state'])
         db.commit()
     return True

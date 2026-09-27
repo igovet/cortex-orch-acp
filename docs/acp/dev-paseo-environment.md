@@ -25,14 +25,17 @@ Until plugin-reload recovery is qualified for the deployed version, apply plugin
 
 To reproduce a reload with an active worker, run `plugin reload cortex-acp` through the guarded wrapper while a worker runs. Paseo 0.9.2 closes the provider connection, the shim forwards SIGTERM, and Cortex records `host_disconnected` with `trigger: sigterm`; Paseo does not reload the session until the next prompt. Start the daemon and the `gui` helper outside the Cortex command sandbox (a Cortex worker uses `outside_command`), because the sandboxed runner cannot write the dev home. The `gui` helper blocks until Electron exits, so run it detached; SIGTERM to the helper stops its Electron and Xvfb.
 
-## Standing approval for paid live testing
+## Paid live testing only on request
 
-The owner has granted standing approval for paid model calls required by live
-verification. Run those calls through the isolated dev Paseo instance below:
-the `~/.paseo-dev` daemon, its separate Electron profile, a disposable project,
-and the Cortex runtime launched by that daemon from the explicit absolute
-checkout plugin path. Never send paid prompts through production `~/.paseo`
-or the production Cortex agent.
+Default verification is no-paid. The 2026-09-24 standing approval was revoked
+on 2026-09-28. Run a paid live check only when the owner explicitly requests it
+for the current work and names the mode: `cli` or `desktop` (see below).
+Without a request, report each applicable live check as not run with the
+blocker "paid live check not requested by the owner". Run requested checks
+through the isolated dev Paseo instance below: the `~/.paseo-dev` daemon, its
+separate Electron profile, a disposable project, and the Cortex runtime launched
+by that daemon from the explicit absolute checkout plugin path. Never send paid
+prompts through production `~/.paseo` or the production Cortex agent.
 
 The existing production Codex and Claude native accounts remain the approved
 engine accounts. Do not create test accounts, copy credentials, or run isolated
@@ -40,17 +43,43 @@ engine login. Before relying on an engine, check its native login status without
 printing credentials. Default live model is `gpt-5.6-luna` at medium/high effort;
 heavy models remain prohibited in routine live qualification.
 
-For the guarded paid probe scripts, supply both required flags and the standing
-reference `owner-standing-2026-09-24`:
+For a requested guarded paid probe, supply both required flags and a reference
+naming the owner's request:
 
 ~~~bash
-scripts/cortex_codex_probe.py --i-authorize-paid-call --approval-ref owner-standing-2026-09-24
-scripts/cortex_claude_probe.py --i-authorize-paid-call --approval-ref owner-standing-2026-09-24
+scripts/cortex_codex_probe.py --i-authorize-paid-call --approval-ref owner-request-<date>-cli
+scripts/cortex_claude_probe.py --i-authorize-paid-call --approval-ref owner-request-<date>-cli
 ~~~
 
-This approval does not add paid calls to the default automated test suite, which
-remains no-paid. It does not change the evidence standard: every live result must
-be observed and retained for the exact surface being checked.
+The default automated test suite remains no-paid. A request does not change the
+evidence standard: every live result must be observed and retained for the
+exact surface being checked.
+
+## Requested `cli` mode
+
+`cli` mode drives a Cortex agent headlessly through the guarded wrapper, without
+Electron. The Paseo 0.9.2 help lists the commands and flags used here, and the
+dev daemon reports the `cortex` provider with `gpt-5.6-luna` among its models.
+Start the daemon and check the plugin as in the setup section, then, from a
+disposable project directory outside this checkout:
+
+~~~bash
+W="python3 -B $CHECKOUT/scripts/cortex_paseo_dev.py --"
+$W run --provider cortex --model gpt-5.6-luna --thinking medium \
+  --cwd "$PROJECT" --background --json "<scenario prompt>"
+$W permit ls --json                      # pending permission requests
+$W permit allow <agent-id> <request-id>  # or: permit deny
+$W send <agent-id> --prompt "<steering message>" --no-wait
+$W wait <agent-id> --timeout 1800 --json
+$W inspect <agent-id> --json
+~~~
+
+Check outcomes against the disposable project's `.cortex/cortex.sqlite3`
+store, opened read-only: tasks, reports, review and verification records.
+On 2026-09-28, `logs <agent-id> --json` on 0.9.2 printed a text timeline, not
+JSON, so do not parse it as structured evidence; use it only under the
+retained-history rules below. A `cli` check establishes runtime and protocol
+behavior only; it is never evidence of rendered GUI behavior.
 
 ## Create or refresh the persistent clone
 
@@ -126,6 +155,20 @@ and `-nolisten` flags, gives only the Electron child that new `DISPLAY`, and sto
 that Xvfb when the GUI exits. It never inherits a desktop `DISPLAY` in this mode.
 The command fails before launching Paseo when Xvfb is absent or cannot provide a
 private display.
+
+Paseo 0.9.2 calls Electron's `requestSingleInstanceLock()` per `userData`
+directory; a second launch on a profile already held by a live instance quits
+with status 0 after briefly opening its DevTools port, and Paseo forwards the
+launch to the holder as an extra window. The helper therefore reads the
+profile's `SingletonLock` before launch and exits 3, naming the holder PID,
+when a live local process holds it; it also exits 3 instead of 0 if the lock
+was taken by another instance while Electron started. Reuse that instance
+through the DevTools URL its own launch printed (a failed second launch can
+overwrite the profile's `DevToolsActivePort` file with a dead port) or stop it
+by sending SIGTERM to its `gui` helper. `--user-data-dir <absolute path>`
+selects another isolated profile; the production `~/.config/Paseo` profile is
+refused.
+
 After a GUI check, stop the isolated daemon:
 
 ~~~bash
@@ -134,7 +177,7 @@ python3 -B scripts/cortex_paseo_dev.py -- daemon stop --timeout 15 --json
 
 In Paseo Desktop inspect the rendered timeline and the specific behavior under
 test. CLI output, logs and CDP inspection alone do not establish a rendered GUI
-result.
+result. Run the GUI only for a requested `desktop` check.
 
 ## Secondary CLI diagnostics
 

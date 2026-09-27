@@ -2,7 +2,7 @@
 client that omits ``SessionConfigOption``/``session/set_config_option``
 support (see ``config_options.py``).
 
-Four commands, never a separate configuration implementation of their own:
+Configuration selectors share their existing implementation; explicit workflow commands use the same prompt path:
 
 - ``/cortex-status`` -- report the current/pending model + thought_level,
   connection setup state, and the engine execution mode; no input,
@@ -55,13 +55,14 @@ CORTEX_LANGUAGE = "cortex-language"
 # name, not a `cortex-` prefixed one.
 HARVEST = "harvest"
 HARVEST_REFRESH = "harvest-refresh"
+SKILL_MANAGEMENT = "skill-management"
 
-# Trigger text as typed by a user, in recognition priority order (longest
-# first so "/cortex-model" is never mistaken for a shorter prefix).
+# Trigger text as typed by a user, in recognition priority order (longest first to avoid prefix overlaps).
 _TRIGGERS: tuple[tuple[str, str], ...] = (
     ("/cortex-status", CORTEX_STATUS),
     ("/cortex-new-task", CORTEX_NEW_TASK),
     ("/cortex-language", CORTEX_LANGUAGE),
+    ("/skill-management", SKILL_MANAGEMENT),
     ("/harvest-refresh", HARVEST_REFRESH),
     ("/harvest", HARVEST),
     ("/cortex-model", CORTEX_MODEL),
@@ -82,6 +83,7 @@ AVAILABLE_COMMANDS: tuple[dict, ...] = (
     dict(name=CORTEX_LANGUAGE, description="Set the language Cortex uses for its own status/question/stop lines: auto, en, or ru.", input=dict(hint="auto|en|ru")),
     dict(name=HARVEST, description="Start or continue an explicit knowledge harvest. Optional text narrows the documentation scope; bare command covers the project.", input=dict(hint="<optional scope>")),
     dict(name=HARVEST_REFRESH, description="Explicitly refresh project documentation from current source. Text is an optional scope.", input=dict(hint="<optional scope>")),
+    dict(name=SKILL_MANAGEMENT, description="Create, revise, or import a project skill. Use only when the user explicitly invokes this command.", input=dict(hint="<request>")),
 )
 
 

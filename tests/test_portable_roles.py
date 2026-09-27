@@ -9,7 +9,7 @@ from cortex_runtime.portable.errors import PortableError
 
 def test_known_role_ids_counts():
     ids = roles.known_role_ids()
-    assert len(ids) == 31
+    assert len(ids) == 32
     assert "orchestrator" in ids
     assert "worker-backend-dev" in ids
     assert "cortex-control" in ids

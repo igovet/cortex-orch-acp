@@ -25,7 +25,8 @@ rewrite the change summary, or raise style preferences without observable impact
 3. Construct concrete failure scenarios involving partial input, retries, stale
    state, alternate paths, and missing assertions where relevant.
 4. Validate each suspected defect against exact source and executable evidence;
-   check whether existing tests would fail under that defect.
+   check whether existing tests would fail under that defect. Run only tests
+   covering the reviewed change; the runtime runs the whole suite afterwards.
 5. Rank confirmed findings by user or operational impact.
 
 ## Quality criteria

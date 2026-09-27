@@ -11,6 +11,25 @@ sets out GUI, installation, runtime and documentation coverage. Close every
 check that can be performed in the authorized environment. An unrun or
 unverified check needs a concrete blocker, and synthesis discloses it.
 
+## Targeted tests for a task
+
+Workers run only the tests covering their change: the test files they added or
+changed and the existing tests of the modules, contracts and documents they
+touched, selected with the default suite's command and explicit paths:
+
+```
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_<module>.py
+```
+
+Changes to a shared contract include its cross-cutting tests: advertised tool
+schemas (`tests/test_advertised_tool_contracts.py`,
+`tests/test_all_mcp_advertised_contracts.py`), profile sources
+(`tests/test_portable_roles.py`, `tests/test_instruction_sources_portable.py`
+and the profile-generation check below) and package payload
+(`tests/test_package.py` after stamping). Workers do not run the whole suite:
+it belongs in `plan.verification`, which the runtime runs once after review,
+with no time limit.
+
 ## No-paid default test suite
 
 ```
@@ -83,9 +102,12 @@ python3 -B scripts/cortex_acp_setup.py status
 python3 -B scripts/cortex_acp_setup.py add-connection --help
 ```
 
-## Standing approval for paid live verification
+## Paid live verification on request
 
-Applicable paid live checks are authorized by the owner by default. Run them
+Default verification is no-paid. A paid live check runs only when the owner
+explicitly requests it for the current work and names the mode, `cli` or
+`desktop`; without a request, report each applicable live check as not run with
+the blocker "paid live check not requested by the owner". Run a requested check
 only through the isolated dev Paseo environment described in
 [`docs/acp/dev-paseo-environment.md`](../acp/dev-paseo-environment.md):
 the permanent `~/.paseo-dev` daemon, separate `~/.config/Paseo-dev` Electron
@@ -96,16 +118,17 @@ Codex/Claude account and credential-isolation rules. Check login status without
 printing credentials. Use `gpt-5.6-luna` at medium/high effort; heavy models
 remain prohibited in routine live qualification.
 
-The paid probes retain their safety guard and require both flags. The standing
-approval supplies the approval reference shown here:
+The paid probes retain their safety guard and require both flags, with an
+approval reference naming the owner's request:
 
 ```
-scripts/cortex_codex_probe.py --i-authorize-paid-call --approval-ref owner-standing-2026-09-24
-scripts/cortex_claude_probe.py --i-authorize-paid-call --approval-ref owner-standing-2026-09-24
+scripts/cortex_codex_probe.py --i-authorize-paid-call --approval-ref owner-request-<date>-cli
+scripts/cortex_claude_probe.py --i-authorize-paid-call --approval-ref owner-request-<date>-cli
 ```
 
-This approval does not make paid probes part of pytest: the default automated
-suite remains no-paid. A probe or GUI observation supports only the exact surface it exercises.
+The default automated suite remains no-paid. A `cli` check establishes runtime
+and protocol behavior only; a probe or GUI observation supports only the exact
+surface it exercises.
 
 `scripts/cortex_acp_smoke.py` is the no-paid startup smoke harness
 (schema-validated launch/protocol surface only, not GUI evidence).

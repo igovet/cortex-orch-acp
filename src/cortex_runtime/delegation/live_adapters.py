@@ -1875,9 +1875,14 @@ class EngineSessionManagerAdapter:
         )
         ledger = InstructionBundleLedger(self._store)
         ledger.save_intended(bundle)
-        meta = _session_new_meta_for(record.engine, version, instructions, role=recipient,
-                                     project_root=getattr(manager, "_workspace_root", None),
-                                     effort=_sdk_effort_for(record, launch))
+        # Record what the manager really sent: it may append to this meta
+        # (the Claude note naming attached external MCP servers).
+        sent = getattr(manager, "sent_session_new_meta", None)
+        meta = sent(session_id) if sent is not None else None
+        if meta is None:
+            meta = _session_new_meta_for(record.engine, version, instructions, role=recipient,
+                                         project_root=getattr(manager, "_workspace_root", None),
+                                         effort=_sdk_effort_for(record, launch))
         if meta is not None:
             import json
 

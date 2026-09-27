@@ -40,6 +40,19 @@ def allowed_mcp_servers(role: str) -> tuple[str, ...]:
     return ("cortex",)
 
 
+#: Claude Code's per-tool MCP ``_meta`` key that keeps a tool's schema in the
+#: prompt instead of deferring it behind ``ToolSearch`` (read by the bundled
+#: CLI of the installed claude-agent-acp 0.81.x; its ACP layer drops a
+#: server-level ``alwaysLoad``). Codex ignores it.
+ALWAYS_LOAD_META_KEY = "anthropic/alwaysLoad"
+
+
+def always_load(tool: dict) -> dict:
+    """A copy of one advertised MCP tool marked to load without ToolSearch."""
+    meta = tool.get("_meta")
+    return {**tool, "_meta": {**(meta if isinstance(meta, dict) else {}), ALWAYS_LOAD_META_KEY: True}}
+
+
 def coordinator_tools(entry) -> list[str]:
     """The tools a coordinator may call on a registry server:
     ``coordinator_tools`` when set, else ``read_only_tools``."""

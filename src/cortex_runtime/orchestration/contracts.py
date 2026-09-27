@@ -31,6 +31,7 @@ def required_bounds(minimum, maximum):
 # nothing to send but [].
 VERIFICATION_SOURCE = (
     'Required for every plan, including an investigation-only or trivial one: verification runs even when nothing changed. '
+    'The runtime runs these commands once after review, each until it exits; this is where the project\'s whole documented suite belongs. '
     'Copy each command exactly from the project\'s documented verification (docs/project/verification.md, AGENTS.md, CLAUDE.md, '
     'Makefile or package.json scripts), interpreter included, e.g. [["python3","-B","-m","pytest","-q"]]. '
     'When the project documents no verification, send the smallest command that exits nonzero if the requested result is wrong, '
@@ -47,7 +48,7 @@ def obj(properties, required=None):
 
 
 NODE = obj(dict(id=text('Unique plan node name: a letter, then letters, digits, \'_\' or \'-\', at most 64 characters.', 64), role=text('Specialist role. Runtime resolves its profile and route.', 80),
-                objective=text('One bounded implementation or investigation objective. After all proposed tasks the runtime automatically adds independent code review whenever it observes that the project changed, and final verification; do not duplicate those stages in this plan. Put any scope note or rationale here: a task has no other free-text field.'),
+                objective=text('One bounded implementation or investigation objective. After all proposed tasks the runtime automatically adds independent code review whenever it observes that the project changed, and final verification; do not duplicate those stages in this plan, and ask a worker only for tests covering its change, never the project\'s whole suite, which final verification runs. Put any scope note or rationale here: a task has no other free-text field.'),
                 dependencies=array(text('Predecessor node name.', 64),
                                    'Names (the id values) of predecessor tasks in this same plan.'),
                 scope=array(text('Requested project-relative path or glob; \'.\' is the whole project. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write. Runtime policy decides access.', 512),
@@ -91,9 +92,26 @@ COORDINATOR = {
     'user_question_request': obj(dict(question=text('One short line naming the decision, e.g. "Approve the plan above?". Put the details, evidence and each option\'s consequences in your message text before this call, not here. Write them exactly once: every message you write, including text before a tool call, is shown to the user in full and never collapsed, so after this call end the turn without restating, shortening or summarizing them.', 4000),
                                      options=array(text('One short answer the user can pick, e.g. "Approve the plan" or "Do it in a separate task".', 1000),
                                                   'Short answers the user can pick between.', maximum=8),
-                                     request_key=text('Unique question delivery key. Exact retries preserve question identity.', 128)),
+                                     request_key=text('Unique question delivery key. Exact retries preserve question identity.', 128),
+                                     skill_proposal=obj(dict(
+                                         name=text('Lowercase kebab-case skill directory name under .agents/skills, 1-64 characters.', 64),
+                                         action=dict(type='string', enum=['create', 'update'],
+                                                     description='create for a skill that does not exist yet in .agents/skills; update for an existing one.'),
+                                         purpose=text('What the skill does and when it applies. On approval it becomes the /skill-management request.', 1000),
+                                         evidence=array(obj(dict(
+                                             report_id=text('Exact report_id of one ordinary published report of this project that shows the case.', 14),
+                                             case=text('One line naming the repeated case this report shows.', 300))),
+                                             'The repeated cases, each a distinct retained report.', maximum=5, minimum=2)),
+                                         required=['name', 'action', 'purpose', 'evidence'])),
                                  required=['question', 'request_key']),
 }
+_PROPOSAL = COORDINATOR['user_question_request']['properties']['skill_proposal']
+_PROPOSAL['description'] = (
+    'Optional. Only to propose a reusable project skill after retained reports show the same procedure repeated. '
+    'Explain the cases and benefit in your message first; send exactly two options, the first approves and the second '
+    'declines. The runtime checks the evidence and duplicates, and records the decision from the exact answer: only '
+    'the first option approves. Nothing is created unless the user approves; a decline leaves the project unchanged.')
+_PROPOSAL['properties']['evidence']['items']['properties']['report_id']['pattern'] = r'^r_[0-9a-f]{12}$'
 RESULT = obj(dict(
     report_ref=text('Exact immutable report_id from write_report for this worker attempt.', 14),
     summary=text('What was found or changed, in plain words: the conclusion first, then what supports it. At most 4000 characters.', 4000),

@@ -157,6 +157,20 @@ def resume_planning(store,task_id):
         db.commit()
 
 
+REPLAN_LIMIT=3
+
+
+def replans_since_user_input(db,task_id):
+    """Accepted replans since the user last spoke (a message or an answer).
+
+    The limit bounds autonomous replanning; any later user input is the
+    user's decision and starts a fresh budget."""
+    spoke=db.execute("SELECT MAX(id) FROM runtime_events WHERE task_id=? AND type IN ('USER_STEERING','USER_ANSWER_RECEIVED')",
+                     (task_id,)).fetchone()[0] or 0
+    return db.execute("SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED' AND id>?",
+                      (task_id,spoke)).fetchone()[0]
+
+
 def propose_replan(store,channel,operation,args):
     import hashlib
     from .state import encoded,validate_scope
@@ -172,8 +186,7 @@ def propose_replan(store,channel,operation,args):
         _authority(db,channel)
         if operation=='scope_request':
             validate_scope(args['scope']);validate_grants(db,channel.task_id,args['scope'])
-        count=db.execute("SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED'",(channel.task_id,)).fetchone()[0]
-        if count>=3: raise StoreError('replan_limit_requires_user_input')
+        if replans_since_user_input(db,channel.task_id)>=REPLAN_LIMIT: raise StoreError('replan_limit_requires_user_input')
         transition(db,channel.task_id,'RECOVERING')
         db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')",(channel.task_id,))
         db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",(now(),channel.task_id))

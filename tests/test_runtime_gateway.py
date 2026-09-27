@@ -86,6 +86,20 @@ def test_replan_recovery_explains_the_next_turn_and_preserves_receipts(context):
     assert mcp_tools.dispatch(store,ch,'plan_submit',dict(plan=plan,request_key='resumed-plan'))['state']=='PLAN_READY'
 
 
+
+def test_replan_budget_restores_after_user_input(context):
+    from cortex_runtime.orchestration.policy import steer
+    store,ch,_,_=context
+    def replan(key):
+        receipt=mcp_tools.dispatch(store,ch,'replan_request',dict(reason='More evidence needed.',request_key=key))
+        resume_planning(store,ch.task_id)
+        return receipt
+    for key in ('one','two','three'): assert replan(key)['accepted']
+    with pytest.raises(StoreError,match='replan_limit_requires_user_input'): replan('four')
+    assert steer(store,ch.task_id,'Continue with the remaining checks.','user:test:continue')
+    for key in ('five','six','seven'): assert replan(key)['accepted']
+    with pytest.raises(StoreError,match='replan_limit_requires_user_input'): replan('eight')
+
 @pytest.mark.parametrize('state',['BLOCKED','WAITING_USER'])
 def test_blocked_and_waiting_tasks_remain_inactive(context,state):
     store,ch,_,_=context

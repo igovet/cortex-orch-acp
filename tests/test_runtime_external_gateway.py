@@ -268,3 +268,15 @@ for line in sys.stdin:
         assert info['mode']=='0o700' and info['writable']
     assert one['dir']!=two['dir']
     assert not list((home/'.cache'/'cortex-mcp-runtime').iterdir())
+
+
+def test_external_gateway_marks_only_configured_tools_always_load(proxy):
+    store,task,machine,root,start=proxy
+    proc=start(dict(allowed_tools=['inspect','forbidden'],read_only_tools=['inspect','forbidden'],always_load_tools=['inspect']))
+    try:
+        assert 'result' in call(proc,1,'initialize')
+        tools={t['name']:t for t in call(proc,2,'tools/list')['result']['tools']}
+        assert tools['inspect']['_meta']=={'anthropic/alwaysLoad':True}
+        assert '_meta' not in tools['forbidden']
+    finally:
+        close(proc)

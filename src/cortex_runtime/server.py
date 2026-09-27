@@ -22,6 +22,7 @@ from .contracts import BY_NAME, MAX_REQUEST_BYTES, StoreError, TOOLS, error_help
 from .channeled_tools import channeled_base_tools
 from .delegation import contracts as delegation_contracts
 from .delegation import mcp_tools as delegation_mcp_tools
+from .engine.mcp_bridge import always_load
 from .store import Store, private_directory
 from .project_storage import migrate_legacy_project_storage, project_store_directory, canonical_project
 from .trusted_channel import resolve_channel
@@ -199,8 +200,10 @@ class Server:
             if channel is None:
                 return dict(tools=TOOLS)
             role_id, stage = delegation_mcp_tools.assignment_profile(self.store, channel)
-            return dict(tools=list(channeled_base_tools()) + delegation_mcp_tools.tool_definitions(
-                channel.role, role_id=role_id, stage=stage))
+            # A channel's catalogue is the runtime contract its model works
+            # through; keep Claude from hiding it behind ToolSearch.
+            return dict(tools=[always_load(tool) for tool in list(channeled_base_tools()) + delegation_mcp_tools.tool_definitions(
+                channel.role, role_id=role_id, stage=stage)])
         if method != 'tools/call':
             raise ProtocolError(-32601,'Unknown method. Use initialize, ping, tools/list or tools/call; discover tool names through tools/list.')
         if not isinstance(params, dict) or set(params)-{'name','arguments','_meta'} or not isinstance(params.get('name'), str) or ('arguments' in params and not isinstance(params['arguments'],dict)):

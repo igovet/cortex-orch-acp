@@ -50,7 +50,7 @@ def test_every_advertised_tool_uses_its_current_validator_and_read_classificatio
     expected_delegation = set(delegation_contracts.schemas_for(role))
     # A coordinator has no write grant and may not execute: the gateway
     # refuses those tools every time, so they are not offered to it.
-    never_usable = ({"project_write", "project_mkdir", "project_delete", "outside_write", "outside_command",
+    never_usable = ({"project_write", "project_mkdir", "project_delete", "project_skill_link", "outside_write", "outside_command",
                      "command_run"} if role == "coordinator" else set())
     expected_names = expected_base | (expected_delegation - never_usable)
     # Keep this contract-derived: adding a new role operation must not leave a

@@ -20,6 +20,7 @@ The no-paid startup smoke in `scripts/cortex_acp_smoke.py` launches the producti
 
 - [Current orchestration contract](orchestration.md)
 - [Roles, delegation and instruction delivery](roles-and-delegation.md)
+- [Commands and project skill management](skill-management.md)
 - [Completion and resource lifecycle](completion-and-lifecycle.md)
 - [Steering, stop and questions](steering-and-questions.md)
 - [Failures, cancellation and disconnects](failures-and-cancellation.md)
@@ -42,4 +43,4 @@ The no-paid startup smoke in `scripts/cortex_acp_smoke.py` launches the producti
 - [Permissions and containment](permissions-and-containment.md)
 - [Security boundary audit](security-boundaries.md)
 
-A client must explicitly select or launch Cortex as its agent. Finding a `.cortex` directory does not activate orchestration. Every project has one `.cortex` store. For paid live checks use the isolated dev Paseo environment and a disposable project; see [the dev Paseo guide](dev-paseo-environment.md).
+A client must explicitly select or launch Cortex as its agent. Finding a `.cortex` directory does not activate orchestration. Every project has one `.cortex` store. Paid live checks run only on an explicit owner request naming `cli` or `desktop`, through the isolated dev Paseo environment and a disposable project; see [the dev Paseo guide](dev-paseo-environment.md).

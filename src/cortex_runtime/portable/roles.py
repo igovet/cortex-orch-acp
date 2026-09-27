@@ -54,6 +54,7 @@ SHARED_ROLE_IDS = frozenset({
     "knowledge-harvest",
     "documentation-sync",
     "context-compaction",
+    "skill-management",
 })
 #: Shared skills restricted to the coordinator: a worker or the consultant
 #: (also a "worker"-kind channel) may never see or read these by
@@ -68,6 +69,7 @@ SHARED_ROLE_IDS = frozenset({
 COORDINATOR_ONLY_SHARED_ROLE_IDS = frozenset({
     "cortex-control",
     "coordinator-communication",
+    "skill-management",
 })
 
 # Agent-profile short names (agents/*.toml stems, one per T001 specialist)
@@ -360,7 +362,7 @@ def load_role(role_hint: object) -> RoleInstructionSet:
 NAMED_SKILLS: dict[str, tuple[str, ...]] = {
     "coordinator": ("tool-discipline", "coordinator-communication", "content-safety",
                     "context-compaction", "documentation-sync", "knowledge-harvest",
-                    "cortex-control"),
+                    "cortex-control", "skill-management"),
     "worker": ("tool-discipline", "content-safety", "report-publication", "code-and-evidence",
                "interactive-resources", "index", "context-compaction", "documentation-sync",
                "knowledge-harvest"),
@@ -393,6 +395,7 @@ _SKILL_TRIGGERS = {
     "coordinator-communication": "you write to the user and the wording matters",
     "documentation-sync": "your change makes existing documentation wrong",
     "knowledge-harvest": "you were asked to collect what a codebase already knows",
+    "skill-management": "the user invoked /skill-management or approved a skill proposal, or retained reports repeat a procedure",
     "cortex-control": "the user asked for the `clear N days` retention command",
     "report-publication": "you draft and publish your report and result",
     "code-and-evidence": "you locate code (code index first) or need saved report detail",

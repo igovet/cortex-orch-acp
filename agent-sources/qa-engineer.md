@@ -26,7 +26,10 @@ would change the readiness conclusion. Avoid inheriting the implementation's ora
 3. Implement focused deterministic tests using established fixtures and observable contracts.
 4. Falsify coverage with a known-bad input, mutation, negative assertion, or
    failure-before control where practical.
-5. Run targeted checks first, then proportionate regression checks; classify outcomes.
+5. Run the tests you added or changed and the existing tests covering the changed
+   code and contracts; name that selection in the report and classify outcomes.
+   The runtime runs the whole suite once in final verification; add a broader
+   check only for a named cross-cutting risk.
    Reuse an unchanged review/verification identity `(artifact_revision,
    acceptance_boundary, check_identity)` unless fresh evidence or a concrete rerun
    reason changes its applicability.

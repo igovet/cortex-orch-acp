@@ -75,7 +75,7 @@ def retry_lost(runtime,task_id,node):
             raise StoreError('worker_retry_limit'+(':'+reason if reason else ''))
         if provision:
             receipts=db.execute("SELECT r.result_json FROM runtime_requests r JOIN trusted_channels c ON c.channel_id=r.actor "
-                                "WHERE r.task_id=? AND c.attempt_id=? AND r.operation IN ('command_run','project_write','project_mkdir','project_delete','draft_write','external_call')",
+                                "WHERE r.task_id=? AND c.attempt_id=? AND r.operation IN ('command_run','project_write','project_mkdir','project_delete','project_skill_link','draft_write','external_call')",
                                 (task_id,provision['attempt_id'])).fetchall()
             if any(not json.loads(row[0]).get('complete') for row in receipts):
                 raise StoreError('lost_worker_action_outcome_unknown')
