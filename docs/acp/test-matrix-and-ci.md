@@ -29,6 +29,23 @@ runs to them:
   as a user home, and a scratch home under a user directory that is itself a
   dotfiles repository produces false failures far from their cause.
 
+### Parallel run
+
+With [pytest-xdist](https://pypi.org/project/pytest-xdist/) installed
+(`pip install --user pytest-xdist`), the same suite runs across all cores:
+
+```
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q -n auto --dist loadgroup
+```
+
+Use `--dist loadgroup`. It spreads tests one by one and keeps tests marked
+`xdist_group` on one worker. `tests/test_emission_scale.py` uses those marks
+so each module-scoped scale run happens once per session, not once per
+worker. On a 20-thread workstation the serial run takes about 6 minutes and
+the parallel run about 65 seconds. The two commands select the same tests.
+Without pytest-xdist, the serial command still works and the `xdist_group`
+marker has no effect.
+
 For a release-grade run, verify in a throwaway clone rather than the working
 checkout: `git clone --no-hardlinks`, overlay the working diff, stamp there
 (`python3 -B scripts/cortex_package.py stamp`), then run the command above.
