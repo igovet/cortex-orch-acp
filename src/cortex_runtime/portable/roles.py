@@ -404,6 +404,31 @@ _SKILL_TRIGGERS = {
 }
 
 
+#: Skills whose case arises in nearly every session of that kind, delivered in
+#: full with the role instead of named for ``read_skill``. Naming them was not
+#: enough: on 2026-09-28, sessions of one engine read them, while sessions of
+#: the other engine given the same text (coordinators and workers alike) never
+#: called ``read_skill`` and located code with shell search instead of the code
+#: index those skills describe. Delivering them makes every engine start from
+#: the same procedures. Kept short: about 9 KB for a worker, 5 KB for the
+#: coordinator; the situational skills stay one ``read_skill`` call away.
+INLINED_SKILLS: dict[str, tuple[str, ...]] = {
+    "coordinator": ("tool-discipline", "content-safety", "coordinator-communication"),
+    "worker": ("tool-discipline", "content-safety", "report-publication", "code-and-evidence"),
+    "shared": (),
+}
+
+
+def _inlined_skill_text(skill_id: str, role_kind: str) -> str | None:
+    """The same text ``read_skill`` returns for ``skill_id``, or ``None``."""
+    try:
+        if skill_id in WORKER_REFERENCE_IDS or skill_id in COORDINATOR_REFERENCE_IDS:
+            return read_reference(skill_id, role_kind=role_kind)
+        return load_role(skill_id).body_portable
+    except PortableError:
+        return None
+
+
 def composed_instructions(role_set: RoleInstructionSet) -> str:
     """One role's instructions as an engine should receive them: its own
     body, then the always-on shared skills for its kind.
@@ -426,6 +451,20 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
         loadable = tuple(skill_id for skill_id in loadable
                           if skill_id not in CONSULTANT_EXCLUDED_NAMED_SKILLS)
     parts = [role_set.body_portable]
+    inlined = []
+    for skill_id in INLINED_SKILLS.get(role_set.kind, ()):
+        text = _inlined_skill_text(skill_id, role_set.kind)
+        if text and text.strip():
+            inlined.append((skill_id, text.strip()))
+    if inlined:
+        parts.append(
+            "## Skills already included\n\n"
+            "These skills apply to almost every session of your kind, so the runtime includes them here in "
+            "full. Follow them from your first action; do not read them again with `read_skill`.\n\n"
+            + "\n\n".join(f"### Skill `{skill_id}`\n\n{text}" for skill_id, text in inlined)
+        )
+    included = {skill_id for skill_id, _ in inlined}
+    loadable = tuple(skill_id for skill_id in loadable if skill_id not in included)
     if loadable:
         # Named, not pasted. Handing every shared skill over with the role
         # made the delivered text half again as long before the work even

@@ -61,11 +61,11 @@ _BODY = """\
 # Cortex skills
 
 - Cortex skills are procedures the runtime keeps for you, read with `read_skill` on the `cortex` server. The engine's own skill loaders, if any, are not part of this session; project and user skills, when there are any, are listed under Project and user skills below.
-- Your role instructions list the skills available to you, each with its trigger. When a trigger matches what you are about to do, read that skill with `read_skill` before doing it and follow it. Reading a matching skill is part of the work, not an optional extra. Do not read skills whose trigger does not apply.
+- The skills that apply to almost every session are already included in full in your role instructions; follow them from your first action. The other skills are listed there with their triggers: when a trigger matches what you are about to do, read that skill with `read_skill` before doing it and follow it. Reading a matching skill is part of the work, not an optional extra.
 
 # Finding code
 
-- When a code index MCP server is attached (for example `codebase-memory-mcp`), use it first for structural questions: definitions, callers, dependencies, impact and architecture. Then read the exact snippets it points to. Read the `code-and-evidence` skill before your first code discovery if your role lists it.
+- When a code index MCP server is attached (for example `codebase-memory-mcp`), use it first for structural questions: definitions, callers, dependencies, impact and architecture. Then read the exact snippets it points to. Follow the `code-and-evidence` skill for the exact procedure when your role instructions include it.
 - Use text search for literal strings, configuration and documentation, or when the index does not cover the code. Prefer a fast text search such as `rg` when it is available.
 
 # Changing the project

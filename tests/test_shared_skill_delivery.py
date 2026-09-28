@@ -23,7 +23,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from cortex_runtime.contracts import StoreError  # noqa: E402
 from cortex_runtime.delegation.mcp_tools import _enumerate_skills, _shared_read_skill  # noqa: E402
 from cortex_runtime.portable.roles import (  # noqa: E402
-    COORDINATOR_ONLY_SHARED_ROLE_IDS, NAMED_SKILLS, SHARED_ROLE_IDS, composed_instructions,
+    COORDINATOR_ONLY_SHARED_ROLE_IDS, INLINED_SKILLS, NAMED_SKILLS, SHARED_ROLE_IDS, composed_instructions,
     load_role, read_reference,
 )
 from cortex_runtime.portable.errors import PortableError  # noqa: E402
@@ -35,52 +35,51 @@ def _read(skill_id, kind):
     return _shared_read_skill(None, channel, {"skill": skill_id})["body"]
 
 
-def test_a_coordinator_is_told_which_skills_exist_and_when_to_read_one():
-    """Named with their occasion, not pasted.
-
-    Handing every relevant skill over with the role made the delivered text
-    half again as long before the work started, and most of it did not
-    apply to the assignment in hand. "Load these skills" is a ritual; a
-    reason to read one is not.
-    """
-    role = load_role("orchestrator")
+def _check_split(role_id, kind):
+    """The skills of almost every session arrive in full, exactly as
+    `read_skill` returns them; the situational ones are named with their
+    occasion and stay one read away."""
+    role = load_role(role_id)
     composed = composed_instructions(role)
     assert composed.startswith(role.body_portable.strip()[:80]), "the role's own body comes first"
-    for skill_id in NAMED_SKILLS["coordinator"]:
-        assert f"`{skill_id}`" in composed, f"{skill_id} was never named"
-        # Named, and never pasted: the body stays one read away.
-        assert _read(skill_id, "coordinator").strip()[:200] not in composed, skill_id
-    assert 'read_skill' in composed
+    for skill_id in INLINED_SKILLS[kind]:
+        assert f"### Skill `{skill_id}`\n\n" + _read(skill_id, kind).strip() in composed, skill_id
+    for skill_id in NAMED_SKILLS[kind]:
+        if skill_id in INLINED_SKILLS[kind]:
+            continue
+        assert f"`{skill_id}` --" in composed, f"{skill_id} was never named"
+        assert _read(skill_id, kind).strip()[:200] not in composed, skill_id
+    assert "do not read them again with `read_skill`" in composed
     assert "`read_skill` tool on the `cortex` MCP server" in composed
     assert "engine-native skill loader" in composed
+    return role, composed
+
+
+def test_a_coordinator_gets_its_everyday_skills_and_is_told_when_to_read_the_rest():
+    role, composed = _check_split("orchestrator", "coordinator")
     assert "live tool descriptions and schemas" in role.body_portable
-    # A commentary-then-final-answer host (e.g. Codex) otherwise treats a
-    # detailed pre-call message and the final answer as two separate,
-    # never-collapsed turns and repeats the content in both (investigation
-    # r_af50d7468665, session c2016029): tell the model explicitly not to.
+    # A commentary-then-final-answer host otherwise treats a detailed
+    # pre-call message and the final answer as two separate, never-collapsed
+    # turns and repeats the content in both (investigation r_af50d7468665,
+    # session c2016029): tell the model explicitly not to.
     assert "never follow it with a shorter recap or summary in the same turn" in " ".join(role.body_portable.split())
 
 
-def test_a_worker_is_told_which_skills_exist_and_when_to_read_one():
-    role = load_role("worker-backend-dev")
-    composed = composed_instructions(role)
-    for skill_id in NAMED_SKILLS["worker"]:
-        assert f"`{skill_id}`" in composed, skill_id
-        assert _read(skill_id, "worker").strip()[:200] not in composed, skill_id
-    # Each one comes with the case that calls for it, so a worker with no
-    # such case spends nothing on it.
-    assert "a tool refused you" in composed
+def test_a_worker_gets_its_everyday_skills_and_is_told_when_to_read_the_rest():
+    _, composed = _check_split("worker-backend-dev", "worker")
     # Not the coordinator's own communication rules: a worker never talks
     # to the user.
     assert "coordinator-communication" not in NAMED_SKILLS["worker"]
-    assert "`read_skill` tool on the `cortex` MCP server" in composed
+    assert "coordinator-communication" not in INLINED_SKILLS["worker"]
+    assert "you need a browser, device, port or server session" in composed
 
 
-def test_the_delivered_text_stays_close_to_the_role_itself():
-    """The whole point of naming rather than pasting."""
+def test_the_delivered_text_is_the_role_plus_its_everyday_skills():
+    """Only the everyday skills are added; nothing else grows the text."""
     role = load_role("worker-backend-dev")
     composed = composed_instructions(role)
-    assert len(composed) < len(role.body_portable) * 1.2, len(composed)
+    inlined = sum(len(_read(skill_id, "worker")) for skill_id in INLINED_SKILLS["worker"])
+    assert len(composed) < len(role.body_portable) + inlined + 2500, len(composed)
 
 
 def test_the_situational_skills_are_not_carried_on_every_turn():

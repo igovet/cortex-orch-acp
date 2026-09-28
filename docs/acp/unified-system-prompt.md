@@ -61,6 +61,11 @@ tool; the engine jail keeps the host, including the owner's home, readable. The
 listing is content placed in the system prompt, as each engine's own catalog was
 before.
 
+The role instructions that follow the prompt carry the everyday Cortex skills in
+full (see [roles and delegation](roles-and-delegation.md)); the prompt tells the
+model to follow them from its first action and to read the situational ones with
+`read_skill` when their trigger matches.
+
 ## Delivery
 
 | | Claude (claude-agent-acp) | Codex (codex-acp, private adapter) |
