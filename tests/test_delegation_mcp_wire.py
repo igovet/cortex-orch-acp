@@ -110,7 +110,8 @@ def test_roles_advertise_only_the_new_protocol(tmp_path):
         assert 'documentation-sync: before assessing documentation impact' in read_skill['description']
         assert 'documentation-sync: before assessing documentation impact' in (
             read_skill['inputSchema']['properties']['skill']['description'])
-        assert 'documentation-sync' in read_skill['inputSchema']['properties']['skill']['enum']
+        named = read_skill['inputSchema']['properties']['skill']['anyOf'][0]
+        assert 'documentation-sync' in named['enum']
 
 
 def test_result_submit_wire_advertises_and_rejects_missing_report(tmp_path):

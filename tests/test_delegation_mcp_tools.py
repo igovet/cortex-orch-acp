@@ -75,6 +75,59 @@ def _worker_report(store, worker, body="Worker's own result.", request_key=None)
     return result["report_id"]
 
 
+def test_result_submit_description_names_every_required_check_field_and_argv():
+    from cortex_runtime.orchestration.contracts import RESULT
+
+    description = next(tool["description"] for tool in mcp_tools.tool_definitions("worker")
+                       if tool["name"] == "result_submit")
+    required = RESULT["properties"]["checks"]["items"]["required"]
+    assert all(field in description for field in required)
+    assert "argv" in description
+
+
+def test_write_report_description_names_result_submit_report_ref():
+    from cortex_runtime.contracts import TOOLS
+
+    description = next(tool["description"] for tool in TOOLS if tool["name"] == "write_report")
+    assert "result_submit.report_ref" in description
+
+
+@pytest.mark.parametrize("report_count, expects_hint", [(0, False), (1, True), (2, False)])
+def test_missing_result_report_ref_hints_only_one_unclaimed_own_report(tmp_path, report_count, expects_hint):
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator)
+    reports = [_worker_report(store, worker, request_key=f"report-{number}")
+               for number in range(report_count)]
+
+    with pytest.raises(StoreError) as caught:
+        mcp_tools.dispatch(store, worker, "result_submit", dict(
+            summary="Observed", checks=[], request_key="result",
+        ))
+
+    correction = caught.value.correction
+    assert (reports[0] in correction) is expects_hint if reports else True
+    if not expects_hint:
+        assert not any(report in correction for report in reports)
+
+
+def test_submission_rejection_retains_every_safe_violation_field(tmp_path):
+    from cortex_runtime.observability import events as observability_events
+
+    store, task_id, coordinator = _task(tmp_path)
+    worker = _worker_channel(store, task_id, coordinator)
+    with pytest.raises(StoreError):
+        mcp_tools.dispatch(store, worker, "result_submit", dict(
+            report=dict(title="Work", markdown="# Work"), summary="Observed", request_key="bad-result",
+            checks=[dict(status="passed", command="pytest")],
+        ))
+
+    event = observability_events.list_events(store, task_id, category="submission_rejection", limit=10)[0]
+    assert event["detail"]["fields"] == [
+        "arguments.checks[0].name", "arguments.checks[0].outcome",
+        "arguments.checks[0].status", "arguments.checks[0].command",
+    ]
+
+
 
 
 

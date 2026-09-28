@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 from cortex_runtime.configuration.service import ConfigurationRejected
-from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter, _option_mapping_for, _session_new_meta_for
+from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter, _option_mapping_for, _session_new_meta_for, base_prompt_mode
 from cortex_runtime.engine.claude_adapter_acp import claude_option_mapping
 from cortex_runtime.engine.codex_adapter_acp import codex_option_mapping
 from cortex_runtime.portable.identity import ConfigurationRevision, ExecutionRoute
@@ -84,6 +84,23 @@ def test_session_new_meta_uses_native_prompts_and_skill_catalogs_when_switch_dis
         'claudeCode': {'options': NATIVE_SKILLS},
     }
     assert "Cortex unified base prompt disabled" in caplog.text
+
+
+def test_base_prompt_mode_classifies_pinned_engine_metadata():
+    unified_codex = _session_new_meta_for('codex-acp', '1.12.0', 'Be helpful.')
+    native_codex = _session_new_meta_for(
+        'codex-acp', '1.12.0', 'Be helpful.', environ={'CORTEX_UNIFIED_BASE_PROMPT': '0'},
+    )
+    unified_claude = _session_new_meta_for('claude-agent-acp', '0.78.0', 'Be helpful.')
+    native_claude = _session_new_meta_for(
+        'claude-agent-acp', '0.78.0', 'Be helpful.', environ={'CORTEX_UNIFIED_BASE_PROMPT': '0'},
+    )
+
+    assert base_prompt_mode(unified_codex) == 'unified'
+    assert base_prompt_mode(native_codex) == 'native'
+    assert base_prompt_mode(unified_claude) == 'unified'
+    assert base_prompt_mode(native_claude) == 'native'
+    assert base_prompt_mode(None) == 'unknown'
 
 
 def test_every_claude_role_disallows_native_gateway_alternatives():

@@ -815,9 +815,9 @@ class TaskMachine:
                  and set(json.loads(n['dependencies_json'])) <= completed]
         if not ready:
             return task, []
-        # Only this task's own in-flight workers hold a write scope. No
-        # worker-count limit, and no other task -- live, blocked or long
-        # dead -- can keep this one from starting. An earlier revision's
+        # Only this task's own in-flight workers hold a write scope or a
+        # worker slot; no other task -- live, blocked or long dead -- can
+        # keep this one from starting. An earlier revision's
         # node still marked 'running' holds scope only while its worker
         # is not yet released; a stale marker alone never blocks a new plan.
         active_nodes = db.execute("""SELECT n.scope_json, n.role, n.stage FROM runtime_nodes n WHERE n.task_id=? AND (
@@ -862,7 +862,28 @@ class TaskMachine:
             selected.append(candidate)
             if not read_only:
                 occupied.append(scope)
-        return task, selected
+        # At most MAX_WORKERS_PER_SESSION workers of this chat session run
+        # at once, whatever their engine or role; the rest stay pending.
+        from ..delegation.capacity import MAX_WORKERS_PER_SESSION
+        free = MAX_WORKERS_PER_SESSION - TaskMachine._session_worker_slots(db, task_id, task['revision'])
+        return task, selected[:max(0, free)]
+
+    @staticmethod
+    def _session_worker_slots(db, task_id, revision):
+        """Worker slots this task holds: every claimed, unfinished node of
+        the current revision (queued, opening or working), plus every worker
+        whose engine still holds a capacity reservation after its node
+        finished or its revision was replaced. A reservation is released or
+        reclaimed once its engine is observed gone, so a finished worker
+        never holds a slot for good."""
+        return db.execute("""SELECT COUNT(*) FROM (
+            SELECT COALESCE(assignment_ref, 'node:'||node_id) FROM runtime_nodes
+             WHERE task_id=? AND revision=? AND status='running'
+            UNION
+            SELECT COALESCE(p.idempotency_key, 'attempt:'||r.attempt_id) FROM capacity_reservations r
+              LEFT JOIN delegation_provisioning p ON p.attempt_id=r.attempt_id
+             WHERE r.task_id=? AND r.kind='worker' AND r.state IN ('reserved','ambiguous'))""",
+            (task_id, revision, task_id)).fetchone()[0]
 
     def claim_ready(self, task_id, channel_id):
         """Reserve dependency-ready nodes atomically.

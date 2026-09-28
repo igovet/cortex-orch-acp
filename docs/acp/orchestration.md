@@ -40,17 +40,21 @@ verification commands. Verification commands run as literal argv without a shell
 
 `orchestration/controller.py` drives planning, execution, independent review,
 verification and synthesis. Only dependency-ready nodes are reserved for execution.
-Reservations commit before provisioning. Each connection's
-`max_concurrent_sessions` limit (default 4, configurable from 1 through 64)
-applies separately to coordinator and worker sessions, so the combined count
-may exceed that value. The project worker pool is sized to 64, the validated
-per-connection maximum; it does not tighten any single connection's limit,
-though it can cap aggregate workers across connections. A worker queued for a
-full connection waits in bounded periods (`capacity_queue_timeout_seconds`,
-600 s); a period ends in `capacity_timeout` only when some slot is held by a
-reservation that is ambiguous or whose session is not observed alive. While every
-slot is held by a live session, the wait continues, because that work will release
-the slot. Cancellation still ends the wait at once. Scope overlap
+Reservations commit before provisioning. A single chat session (the ACP session
+and task it drives) can run at most four workers at once across all engines,
+roles and connections. The scheduler claims only as many dependency-ready nodes
+as that session has free slots; remaining nodes stay `pending`. Atomic capacity
+reservation enforces the same session-wide ceiling. A connection's validated
+`max_concurrent_sessions` (default 4, configurable from 1 through 64) can only
+lower that session's worker share on that connection; it neither raises the
+four-worker session cap nor pools unused slots across chat sessions.
+Coordinator reservations do not consume worker slots and retain their own
+per-connection limit. A worker queued for available session or connection
+capacity waits in bounded periods (`capacity_queue_timeout_seconds`, 600 s);
+cancellation ends the wait at once. A finished worker continues to occupy its
+session slot until its engine is confirmed gone and its reservation is released
+or safely reclaimed. Scope overlap serializes writing nodes; review-stage nodes
+and READ_ONLY roles neither block nor are blocked by overlapping scopes. Scope overlap
 serializes writing nodes; review-stage nodes and READ_ONLY roles neither block nor are blocked by overlapping scopes. Runtime routing resolves model and
 effort from the current tier, policy, catalog and plan usage; plan hints remain
 advisory. All 23 specialist/consultant profiles remain available.
@@ -147,6 +151,22 @@ with an exit code. Qualitative review remarks, read files and inspected code bel
 in the report body, not in `checks`. The advertised `result_submit` schema carries
 this contract in its property descriptions; `delegation.evidence.assess_check`
 enforces it.
+
+A worker result must contain exactly one report form: `report_ref` naming a report
+published for that worker attempt, or inline `report: {title, markdown}`; do not
+send both. When publishing a draft with `write_report`, pass its returned
+`report_id` as the later `result_submit.report_ref`. Without a draft, inline
+submission publishes the report as part of the result. If neither form is given,
+the correction may suggest a report only when exactly one eligible own published
+report is available; this hint does not bind the report, and the worker must still
+submit an explicit `report_ref` or inline report. A report identifier is not a
+check receipt.
+
+The advertised check object uses `name` and `outcome` (not `status`), with
+`passed`, `failed`, `not_run` or `unverified`. Non-passing checks require a
+concrete `blocker`; a `passed` check requires same-attempt receipt evidence as
+described below. Optional argv-form `command` is descriptive, not proof. Malformed
+submissions return field-path corrections where available.
 For a verified pass, copy `tool_call_ref` from a completed, exit-0
 `command_run` or confirmed `outside_command` result of the same attempt.
 `closed_by` is supplied by the runtime for a failed check closed by an exact

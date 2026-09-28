@@ -110,8 +110,11 @@ connection once lost three of them to `capacity_timeout` →
 `fallback_refused:no_untried_authorized_route` after 600 s, while the four
 holders were live and still working. A queued open now keeps waiting while
 every slot is held by a live session. A capacity-class fallback refusal is also
-retried within `MAX_ATTEMPT_RETRIES`. Size plans to the connection's
-`max_concurrent_sessions`, or expect queuing.
+retried within `MAX_ATTEMPT_RETRIES`. A chat session can run at most four
+workers across engines and connections; a connection's
+`max_concurrent_sessions` can only lower that session's share. Excess ready
+nodes remain pending, and queued worker opens wait for capacity. Plan size does
+not raise the session cap.
 
 A read-only role (ux-designer, architect, …) can never write its output file,
 whatever scope the plan gives it: its `command_run` jail binds nothing

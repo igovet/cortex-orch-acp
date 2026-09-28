@@ -106,7 +106,10 @@ def _repeat_calls(store, task_id: str) -> dict:
 
 
 def _schema_validation_errors(store, task_id: str) -> dict:
-    rows = observability_events.list_events(store, task_id, category="validation", limit=500)
+    rows = [
+        row for category in ("validation", "submission_rejection")
+        for row in observability_events.list_events(store, task_id, category=category, limit=500)
+    ]
     return dict(unit="count", availability="available", basis="observed", total=len(rows))
 
 
@@ -127,6 +130,20 @@ def _duplicate_publications(store, task_id: str) -> dict:
     rows = observability_events.list_events(store, task_id, category="publication", limit=500)
     duplicates = [row for row in rows if row["outcome"] == "duplicate_attempt"]
     return dict(unit="count", availability="available", basis="observed", total=len(duplicates))
+
+
+def _base_prompt(store, task_id: str) -> dict:
+    rows = observability_events.list_events(store, task_id, category="base_prompt", limit=500)
+    counts: dict[str, int] = {}
+    for row in rows:
+        mode = row["outcome"]
+        counts[mode] = counts.get(mode, 0) + 1
+    if not rows:
+        return dict(
+            unit="sessions", availability="unavailable_reason", basis="observed", counts=counts,
+            reason="no recorded base-prompt mode for this task",
+        )
+    return dict(unit="sessions", availability="available", basis="observed", counts=counts)
 
 
 def _tokens(store, task_id: str) -> dict:
@@ -413,6 +430,7 @@ def diagnostics_summary(store, task_id: str) -> dict:
         schema_validation_errors=_schema_validation_errors(store, task_id),
         manual_interventions=_manual_interventions(store, task_id),
         duplicate_publications=_duplicate_publications(store, task_id),
+        base_prompt=_base_prompt(store, task_id),
         tokens=_tokens(store, task_id),
         concurrency=_concurrency(store, task_id),
         **route_outcome_metrics(store, task_id),

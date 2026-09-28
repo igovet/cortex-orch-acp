@@ -278,17 +278,19 @@ def test_cannot_skip_review_or_complete_with_chat(machine):
     assert state.context(channel.task_id)['state'] == 'EXECUTING'
 
 
-def test_scheduler_respects_dependencies_with_no_worker_limit(machine):
+def test_scheduler_respects_dependencies_and_the_session_worker_cap(machine):
     state, channel = machine
     proposed = plan(8)
     proposed['tasks'][1]['dependencies'] = ['N0']
     state.submit_plan(channel, proposed, 'p1')
     state.move(channel.task_id, 'EXECUTING')
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [pool.submit(state.claim_ready, channel.task_id, channel.channel_id) for _ in range(2)]
+    # Concurrent scheduler passes of one session never claim past its four
+    # worker slots, and never claim the same node twice.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(state.claim_ready, channel.task_id, channel.channel_id) for _ in range(4)]
         nodes = [n for future in futures for n in future.result()]
-    assert len(nodes) == 7
-    assert len({n['assignment_ref'] for n in nodes}) == 7
+    assert len(nodes) == 4
+    assert len({n['assignment_ref'] for n in nodes}) == 4
     assert 'N1' not in {n['node_id'] for n in nodes}
 
 
@@ -894,8 +896,8 @@ def test_another_tasks_stale_running_node_never_blocks_this_one(machine):
     state.submit_plan(other_channel, wide, 'other'); state.move(other.task_id, 'EXECUTING')
     assert state.claim_ready(other.task_id, 'coordinator')
     state.move(other.task_id, 'BLOCKED', blocker='worker_failure')
-    state.submit_plan(ch, plan(5), 'mine'); state.move(ch.task_id, 'EXECUTING')
-    assert len(state.claim_ready(ch.task_id, ch.channel_id)) == 5
+    state.submit_plan(ch, plan(4), 'mine'); state.move(ch.task_id, 'EXECUTING')
+    assert len(state.claim_ready(ch.task_id, ch.channel_id)) == 4
 
 
 def test_stop_asks_the_user_and_only_their_answer_lets_the_coordinator_close(machine):
@@ -1350,3 +1352,40 @@ def test_task_get_context_repeat_poll_returns_compact_unchanged(machine):
     progressed = runtime_mcp.dispatch(state.store, channel, 'task_get_context', {})
     assert 'unchanged_since_last_read' not in progressed
     assert progressed['state'] == 'EXECUTING'
+
+
+def test_scheduler_runs_at_most_four_workers_per_session_and_the_rest_wait(machine):
+    """Owner rule (2026-09-28): at most four workers of any engine or role
+    run at once within one chat session; each session has its own four.
+    Twenty-six ready nodes were once all claimed at once and six workers
+    ran on two engines in one session."""
+    from cortex_runtime.delegation import capacity
+
+    state, ch = machine
+    state.submit_plan(ch, plan(6), 'six'); state.move(ch.task_id, 'EXECUTING')
+    first = state.claim_ready(ch.task_id, ch.channel_id)
+    assert len(first) == 4
+    assert state.claim_ready(ch.task_id, ch.channel_id) == []
+    other = bootstrap_task(state.store, SourceEvent(origin='test', event_id='two'), 'Second chat', 'owner')
+    state.create(other.task_id, 'Second chat')
+    other_channel = SimpleNamespace(task_id=other.task_id, channel_id='coordinator', role='coordinator')
+    state.submit_plan(other_channel, plan(6), 'other'); state.move(other.task_id, 'EXECUTING')
+    assert len(state.claim_ready(other.task_id, 'coordinator')) == 4
+    with state.store.connection() as db:
+        statuses = [row[0] for row in db.execute(
+            "SELECT status FROM runtime_nodes WHERE task_id=? ORDER BY rowid", (ch.task_id,))]
+    assert statuses.count('running') == 4 and statuses.count('pending') == 2
+
+    # A finished node whose engine still holds its reservation keeps the
+    # slot; the fifth node starts only once that slot is released.
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET status='completed' WHERE task_id=? AND assignment_ref=?",
+                   (ch.task_id, first[0]['assignment_ref']))
+        db.commit()
+    lingering = capacity.reserve(state.store, 'cn_claude', ch.task_id, 'xa_lingering', 'worker')
+    assert lingering is not None
+    assert state.claim_ready(ch.task_id, ch.channel_id) == []
+    capacity.release_confirmed(state.store, lingering)
+    fifth = state.claim_ready(ch.task_id, ch.channel_id)
+    assert len(fifth) == 1
+    assert state.claim_ready(ch.task_id, ch.channel_id) == []

@@ -108,12 +108,14 @@ any engine process is launched. It refuses, with a concrete
   (`routing.store.count_task_attempts`, counted from the audit table
   itself — every past attempt, authorized or fallback, counts).
 
-`delegation.capacity.reserve` atomically enforces each connection's
-`max_concurrent_sessions` limit (default 4, configurable from 1 through 64)
-separately for coordinator and worker reservations. Reservations of the other
-kind do not consume that kind's slots, so the combined active count can exceed
-the configured value. A worker waits for worker capacity to become available;
-coordinator reservations cannot consume worker slots.
+`delegation.capacity.reserve` atomically enforces a four-worker cap per chat
+session (the ACP session and task it drives), counting reservations across all
+engines and connections. The connection's `max_concurrent_sessions` limit
+(default 4, configurable from 1 through 64) can further restrict that session's
+workers on that connection; it cannot raise the session cap or combine capacity
+across sessions. Coordinator reservations remain separate and are counted per
+connection. When capacity is full, a worker waits; the scheduler leaves excess
+ready nodes `pending` instead of claiming them as running.
 Only `PolicyCeiling.limits['attempts']` is enforced anywhere in this task
 (both pre-dispatch, via `authorize_dispatch`, and pre-fallback, via
 `authorize_fallback` — a fallback attempt is still an attempt, counted by

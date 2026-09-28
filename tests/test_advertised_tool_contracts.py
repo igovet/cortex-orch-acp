@@ -164,7 +164,8 @@ def test_every_offered_skill_id_is_actually_readable(tmp_path):
     store, coordinator, worker = _channels(tmp_path)
     for channel, kind in ((coordinator, "coordinator"), (worker, "worker")):
         (tool,) = [t for t in mcp_tools.tool_definitions(kind) if t["name"] == "read_skill"]
-        for skill in tool["inputSchema"]["properties"]["skill"]["enum"]:
+        named, _listed_paths = tool["inputSchema"]["properties"]["skill"]["anyOf"]
+        for skill in named["enum"]:
             result = mcp_tools.dispatch(store, channel, "read_skill", dict(skill=skill))
             assert result["body"].strip(), (kind, skill)
 
@@ -180,7 +181,10 @@ def test_read_skill_advertises_only_matching_situational_triggers(kind, role_id)
                 if t["name"] == "read_skill"]
     selector = entry["inputSchema"]["properties"]["skill"]
     assert entry["inputSchema"]["required"] == ["skill"]
-    assert set(selector["enum"]) >= {skill for skill, _ in situational_skill_triggers(kind, role_id)}
+    assert "enum" not in selector  # project/user paths are session-specific
+    named, listed_paths = selector["anyOf"]
+    assert set(named["enum"]) >= {skill for skill, _ in situational_skill_triggers(kind, role_id)}
+    assert "session" in listed_paths["description"]
     for skill, trigger in situational_skill_triggers(kind, role_id):
         assert f"{skill}: {trigger}" in entry["description"]
         assert f"{skill}: {trigger}" in selector["description"]

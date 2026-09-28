@@ -2,14 +2,15 @@
 
 The ACP client's canonical project root is the destination for all worker changes.
 There are no hidden candidate copies or model-controlled integration operations.
-The runtime reserves dependency-ready scopes. Each connection's
-`max_concurrent_sessions` limit (default 4, configurable from 1 through 64)
-applies separately to coordinator and worker sessions, so mixed-kind sessions
-can exceed the configured number. The project worker pool is sized to 64; it
-can cap aggregate workers across connections. Overlapping write scopes are
+The runtime reserves dependency-ready scopes and runs at most four workers in
+one chat session across all engines, roles and connections. Excess dependency-
+ready nodes remain pending until a worker slot is free. A connection's
+`max_concurrent_sessions` limit (default 4, configurable from 1 through 64) can
+further lower the session's worker capacity on that connection; coordinator
+reservations have a separate per-connection limit. Overlapping write scopes are
 serialized, while review-stage nodes and READ_ONLY roles do not participate in
-scope-overlap conflicts. A finished node continues to occupy its reservation
-until its engine session is observed absent.
+scope-overlap conflicts. A finished worker keeps its session slot until its
+engine is confirmed gone and the reservation is released or safely reclaimed.
 
 All project operations use the authenticated runtime gateway. Native engine action
 tools are disabled. Coordinator, consultant and review roles are read-only; other

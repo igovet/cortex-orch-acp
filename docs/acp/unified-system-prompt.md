@@ -4,8 +4,11 @@ The unified Cortex base prompt is enabled by default. Set
 `CORTEX_UNIFIED_BASE_PROMPT=0` in the environment before starting Cortex to
 disable it for newly created session metadata. This restores the engines'
 pre-existing native base-prompt path; it does not roll back unrelated runtime
-optimizations or routing changes. The selected mode is logged at session
-metadata creation. The switch changes prompt construction, not permissions or
+optimizations or routing changes. After sent session metadata is recorded, Cortex best-effort records a secret-free
+`base_prompt` observability event; the diagnostics summary counts observed
+`unified`, `native` and `unknown` modes. Event recording can fail without
+blocking session delivery, so absence is not evidence of a mode. It does not
+record prompt text or the environment variable value. The switch changes prompt construction, not permissions or
 runtime authority. Real-model behavior with the unified prompt has not been
 compared in a paid live qualification, so any quality improvement remains
 unverified.
@@ -17,11 +20,6 @@ base-prompt path. The unified text lives in
 `src/cortex_runtime/engine/unified_system_prompt.py` (`cortex_system_prompt`),
 and `delegation.live_adapters._session_new_meta_for` selects the mode when
 building session metadata.
-Every Cortex engine session, coordinator or worker, on Codex or Claude, starts
-from one Cortex-owned base prompt instead of the engine's own. The text lives in
-`src/cortex_runtime/engine/unified_system_prompt.py` (`cortex_system_prompt`),
-and `delegation.live_adapters._session_new_meta_for` builds it for both
-engines at session creation.
 
 ## Why
 
@@ -67,26 +65,37 @@ directory and each installed engine pointed at a local stub endpoint:
 
 The prompt catalog reads only bounded top-level `name` and `description`
 frontmatter scalars; it is not a general YAML parser. The reader accepts plain,
-single-quoted and JSON-compatible double-quoted scalars, indented plain
+single-quoted and JSON-compatible double-quoted scalars, including single- and
+double-quoted scalars continued across indented physical lines, indented plain
 continuations, and literal (`|`) or folded (`>`) block scalars with optional
-`+`/`-` chomping and explicit indentation indicators. Frontmatter reads are
-limited to 16 KiB, the closing delimiter must be an exact `---` line, and the
-rendered description is capped at 1024 characters. Unsupported node types and
-malformed or incomplete frontmatter produce an empty field rather than being
-interpreted as general YAML. No YAML package is required.
+`+`/`-` chomping and explicit indentation indicators. Continued quoted
+scalars follow the reader's bounded folding rules; this is not general YAML
+parsing. Frontmatter reads are limited to 16 KiB, the closing delimiter must be
+an exact `---` line, and the rendered description is capped at 1024 characters.
+Unsupported node types and malformed or incomplete frontmatter produce an
+empty field rather than being interpreted as general YAML. No YAML package is
+required.
 
-Cortex lists every `<dir>/<name>/SKILL.md` below all six read directories,
-project first, with its frontmatter `name` (or the directory name) and
-`description` (cut at the Agent Skills limit of 1024 characters) and its path:
-relative for project skills, absolute for the owner's. There is no limit on the
-number of skills. Hidden entries such as Codex's bundled `.system` set are
-skipped. A symlinked directory or file counts only when it resolves inside the
-same project, home or `$CODEX_HOME` directory, and one real `SKILL.md` is listed
-once however many links reach it (a `.claude/skills` link to `.agents/skills`
-appears once). The model reads a matching `SKILL.md` with its ordinary file read
-tool; the engine jail keeps the host, including the owner's home, readable. The
-listing is content placed in the system prompt, as each engine's own catalog was
-before.
+Cortex lists bounded `<dir>/<name>/SKILL.md` files from the configured
+project and user skill roots (project roots: `.agents/skills`, `.claude/skills`,
+`.codex/skills`; user roots: `.agents/skills`, `.claude/skills`). Entries are
+filtered to regular, single-link files inside an allowed root; hidden names,
+duplicates and paths beyond the path-length limit are excluded. File size is
+capped at 65,536 bytes, frontmatter inspection at 16 KiB and rendered
+`description` at 1,024 characters. Project paths are relative and user paths are
+absolute. The matching description and path appear in the prompt; Cortex does
+not paste the full skill body there.
+
+The read route is Cortex MCP `read_skill`, not an engine-native general file
+read: a session may request only an exact listed skill path bound to that
+session's sent prompt and attempt, or a supported shared skill/reference ID.
+Project paths are relative and user paths absolute as listed. The runtime reads
+the original canonical `SKILL.md` as a bounded UTF-8 regular file without
+following symlinks, and fails closed if the listed target changes. It grants no
+general file access, globs, sibling files or arbitrary paths; sessions without a
+matching catalog snapshot cannot use the path form. Native catalogs are disabled
+for the unified prompt, so Cortex's listing and this explicit read route form
+the supported skill-discovery flow.
 
 When `codebase-memory-mcp` is attached and Cortex can resolve the project
 root to a known indexed-project name, the prompt names that project so workers
@@ -96,12 +105,27 @@ no project identity is guessed.
 
 Workers are told to work without narration, including before the first tool and after tool results. The runtime also discards worker prose at tool boundaries from the public worker card and its replay history, retaining only the post-tool terminal response; underlying engine events remain available for evidence. Coordinator text still streams because it is the user's task view. This is a presentation boundary, not a claim that either model stops generating interim text. A direct 2026-09-28 re-check counted ten between-tool Claude assistant text blocks and one Codex block; an earlier count of 83 Codex blocks conflated reasoning records with visible messages.
 
-The tool section distinguishes three sources: Cortex MCP owns retained reports,
-conditional skills, scoped project operations, report publication, worker check
-receipts and lifecycle submissions; attached external MCP servers such as
-`codebase-memory-mcp` own their domain queries; engine-native workspace tools
-cannot supply Cortex publication or passed-check receipts. Argument shapes stay
-in the live tool schemas, not in this prompt.
+The attached-server section renders the exact available tools under each MCP
+server name. Cortex MCP owns lifecycle, report reads/publication, conditional
+skills, scoped project operations, command receipts and result submissions; it
+does not provide code-search, graph or index operations. External MCP servers
+own their own domain tools (for example `codebase-memory-mcp` owns its graph and
+search operations). Use a tool only from the server that advertises it; do not
+invent a Cortex search tool or assume a tool belongs to another server. The
+prompt names the `mcp__<server>__<tool>` form when the engine exposes that
+naming convention, and directs workers to use engine tool search for an attached
+server tool absent from their available list.
+
+For structural code questions (definitions, callers, dependencies, impact and
+architecture), use an available code index first and inspect the pointed-to
+source. For literal strings, configuration and documentation, use text search;
+when the index search tool is granted, the prompt names its owning server, and
+known-file reads use Cortex `project_read`. When no native shell/file search is
+available, use the granted external `search_code` or a known-file
+`project_read`, not an unavailable Cortex search operation. Follow the
+code-index tool's own coverage and pagination guidance; a missing result is not
+proof of absence. Tool argument contracts remain in live schemas, not this
+prompt.
 
 The role instructions that follow the prompt carry the everyday Cortex skills in
 full (see [roles and delegation](roles-and-delegation.md)); the prompt tells the
@@ -109,8 +133,8 @@ model to follow them from its first action and, before an action matching a
 situational trigger, to call Cortex MCP `read_skill` with that id. The prompt
 gives concrete examples for documentation-impact planning, affected documentation
 edits and interactive sessions and
-explicitly says not to re-read inlined skills or pre-load unmatched skills.
-The same conditional catalogue is also in the role-scoped `read_skill` tool
+explicitly says not to re-read inlined skills or pre-load unmatched skills. The
+same conditional catalogue is also in the role-scoped `read_skill` tool
 description and `skill` selector description; this makes the trigger visible
 at tool-selection time rather than only near the end of a long role prompt.
 Neither prompt nor schema calls the tool on the model's behalf, so actual

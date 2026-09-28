@@ -493,8 +493,13 @@ def test_every_engine_session_new_carries_the_attached_server_note(tmp_path, eng
     prompt = wire["_meta"]["systemPrompt"]["append"]
     assert prompt.startswith("Role text.\n\n# Attached MCP servers\n\nExternal MCP servers attached to this "
                              "session: `codebase-memory-mcp`.")
+    assert "Tools by server:\n- `codebase-memory-mcp`: `inspect`" in prompt
     assert "only these granted tools: `inspect`" in prompt
     assert "Call `list_projects`" not in prompt
+    if engine == "claude-agent-acp":
+        assert "`mcp__<server>__<tool>`" in prompt
+    else:
+        assert "`mcp__<server>__<tool>`" not in prompt
 
 
 def test_registry_always_load_tools_must_be_granted(tmp_path):

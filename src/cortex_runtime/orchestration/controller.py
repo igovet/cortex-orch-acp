@@ -389,7 +389,14 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             continue
         if state in {'EXECUTING', 'REVIEWING'}:
             runtime._terminate_completed_workers(task_id)
-            # Start only dependency-ready nodes reserved by the runtime scheduler.
+            if any(n['status'] == 'pending' for n in context['nodes']):
+                # A worker slot whose engine is gone must not keep the rest
+                # of the plan waiting.
+                reclaim = getattr(runtime, '_reclaim_stale_worker_capacity', None)
+                if reclaim is not None:
+                    reclaim(task_id)
+            # Start only dependency-ready nodes reserved by the runtime
+            # scheduler, at most MAX_WORKERS_PER_SESSION at once.
             for node in machine.claim_ready(task_id, channel.channel_id):
                 dependencies = set(json.loads(node['dependencies_json']))
                 inputs = [dict(node=n['node_id'], report_ref=n['result']['report_ref'])

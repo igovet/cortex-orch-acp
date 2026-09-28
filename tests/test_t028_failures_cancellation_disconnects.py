@@ -147,7 +147,9 @@ def test_sweep_capacity_is_bounded_and_idempotent(tmp_path):
     store = Store(tmp_path / ".cortex", project_root=str(tmp_path))
     task_id = _task(store)
     for i in range(5):
-        r = delegation_capacity.reserve(store, f"cn_{i}", task_id, f"xa_{i}", "worker", limit=5)
+        # Five rows of one task: above the four-worker session cap, which is
+        # not what this sweep bound test is about.
+        r = delegation_capacity.reserve(store, f"cn_{i}", task_id, f"xa_{i}", "worker", limit=5, session_limit=5)
         delegation_capacity.mark_ambiguous(store, r, "timeout_alive")
     engine = _FakeEngine({f"xa_{i}": "absent" for i in range(5)})
     first = reaper.sweep_capacity(store, engine, limit=2)

@@ -24,6 +24,7 @@ import datetime
 import json
 import os
 import platform
+import stat
 
 _ROLES = ("coordinator", "worker")
 
@@ -52,7 +53,7 @@ _BODY = """\
 
 # Tools
 
-- Tools have three sources. The `cortex` MCP server is the runtime's channel: use its `read_report` for retained reports, `read_skill` for conditional Cortex skills, draft/publication tools for reports, `command_run` for worker checks whose receipts support passed results, and role-appropriate question, proposal and result tools. Use its scoped project tools when supplied for project reads and edits. External MCP servers (for example `codebase-memory-mcp`) provide their own domain tools, not Cortex lifecycle operations. The engine's native shell, file and search tools are local workspace aids where permitted; they do not publish Cortex reports, submit results or produce a `command_run` receipt.
+- @@ROLE_CORTEX_TOOLS@@
 - Before the first call to any tool, read its full advertised description and argument schema. Never fill arguments from another tool's or engine's conventions, and never guess a value the schema does not explain.
 - If a tool you need is not in your list, look it up with the engine's tool search when one exists before concluding it is unavailable.
 - Run independent reads and searches together; keep dependent steps, edits, approvals and other mutations sequential.
@@ -67,7 +68,7 @@ _BODY = """\
 # Finding code
 
 - When a code index MCP server is attached (for example `codebase-memory-mcp`), use it first for structural questions: definitions, callers, dependencies, impact and architecture. Then read the exact snippets it points to. Follow the `code-and-evidence` skill for the exact procedure when your role instructions include it.
-- Use text search for literal strings, configuration and documentation, or when the index does not cover the code. Prefer a fast text search such as `rg` when it is available.
+- Use an available text-search tool for literal strings, configuration and documentation, or when the index does not cover the code. Prefer a fast search tool when one is available.
 
 # Changing the project
 
@@ -116,6 +117,8 @@ _USER_SKILL_DIRS = (".agents/skills", ".claude/skills")
 #: The Agent Skills format's own limit for ``description``.
 _MAX_DESCRIPTION_CHARS = 1024
 _FRONTMATTER_READ_BYTES = 16384
+MAX_SKILL_BYTES = 65536
+_MAX_LISTED_SKILL_PATH_CHARS = 4096
 
 
 def _frontmatter_field(text: str, field: str) -> str:
@@ -144,19 +147,57 @@ def _frontmatter_field(text: str, field: str) -> str:
         key, separator, value = line.partition(":")
         if not separator or key.strip() != field:
             continue
-        value = uncomment(value)
+        value = value.strip()
         if not value:
             return ""
 
         if value[0] in "'\"":
-            if value[0] == "'" and len(value) >= 2 and value.endswith("'"):
-                return value[1:-1].replace("''", "'")
-            if value[0] == '"' and len(value) >= 2 and value.endswith('"'):
-                try:
-                    decoded = json.loads(value)
-                except json.JSONDecodeError:
+            quote, fragments, escaped_breaks = value[0], [], []
+            for position in range(index, end):
+                if position > index and content(lines[position]).strip() and not lines[position][0].isspace():
                     return ""
-                return decoded if isinstance(decoded, str) else ""
+                candidate = value[1:] if position == index else content(lines[position]).strip()
+                fragment = []
+                cursor = 0
+                while cursor < len(candidate):
+                    character = candidate[cursor]
+                    if quote == '"' and character == "\\" and cursor + 1 < len(candidate):
+                        fragment.extend(candidate[cursor:cursor + 2])
+                        cursor += 2
+                        continue
+                    if quote == "'" and candidate[cursor:cursor + 2] == "''":
+                        fragment.extend("''")
+                        cursor += 2
+                        continue
+                    if character == quote:
+                        suffix = candidate[cursor + 1:].strip()
+                        if suffix and not suffix.startswith("#"):
+                            return ""
+                        fragments.append("".join(fragment).lstrip() if fragments else "".join(fragment))
+                        rendered = fragments[0]
+                        for previous, current, escaped in zip(fragments, fragments[1:], escaped_breaks):
+                            separator = "" if escaped or not previous else ("\n" if not current else " ")
+                            rendered += separator + current
+                        if quote == "'":
+                            return rendered.replace("''", "'")
+                        try:
+                            decoded = json.loads('"' + rendered.replace("\n", "\\n") + '"')
+                        except json.JSONDecodeError:
+                            return ""
+                        return decoded if isinstance(decoded, str) else ""
+                    fragment.append(character)
+                    cursor += 1
+                part = "".join(fragment).strip()
+                escaped = (quote == '"' and bool((len(part) - len(part.rstrip("\\"))) % 2))
+                if escaped:
+                    fragments.append(part[:-1])
+                else:
+                    fragments.append(part)
+                escaped_breaks.append(escaped)
+            return ""
+
+        value = uncomment(value)
+        if not value:
             return ""
 
         if value[0] in "|>":
@@ -238,46 +279,74 @@ def _skill_roots(workspace_root: str | None, environ) -> list[tuple[str, str, bo
     return roots
 
 
-def project_skills_section(workspace_root: str | None, environ=None) -> str:
-    """Every skill the engines would find on their own, listed by Cortex for
-    every engine: ``<dir>/<name>/SKILL.md`` below each directory in
-    :func:`_skill_roots`. Hidden entries (an engine's bundled ``.system`` set)
-    are skipped. A symlinked directory or file counts only when it resolves
-    inside the same project or home directory, and one real ``SKILL.md`` is
-    listed once however many links reach it."""
+def project_skill_entries(workspace_root: str | None, environ=None) -> list[tuple[str, str, str, str, str]]:
+    """Listed path, real file, confinement base, title and description for each skill.
+
+    This is also the authoritative input to the read-only session grant. Keep
+    the grant and the prompt section on the same enumeration, not two globs.
+    """
     environ = os.environ if environ is None else environ
     seen, entries = set(), []
-    for directory, base, relative in _skill_roots(workspace_root, environ):
+    roots = _skill_roots(workspace_root, environ)
+    allowed_roots = {
+        os.path.realpath(directory) for directory, base, _relative in roots
+        if os.path.isdir(directory) and _within(os.path.realpath(directory), base)
+    }
+    for directory, base, relative in roots:
         real_dir = os.path.realpath(directory)
         if not os.path.isdir(real_dir) or not _within(real_dir, base):
             continue
         for name in sorted(os.listdir(real_dir)):
             if name.startswith("."):
                 continue
-            skill = os.path.realpath(os.path.join(real_dir, name, "SKILL.md"))
-            if skill in seen or not _within(skill, base) or not os.path.isfile(skill):
+            source = os.path.join(directory, name, "SKILL.md")
+            skill = os.path.realpath(source)
+            if (skill in seen or not _within(skill, base) or not os.path.isfile(skill)
+                    or os.path.basename(skill) != "SKILL.md"
+                    or os.path.dirname(os.path.dirname(skill)) not in allowed_roots):
                 continue
-            seen.add(skill)
+            shown = os.path.relpath(source, base) if relative else source
+            if len(shown) > _MAX_LISTED_SKILL_PATH_CHARS:
+                continue
             try:
+                metadata = os.stat(skill)
+                if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                        or metadata.st_size > MAX_SKILL_BYTES):
+                    continue
                 with open(skill, encoding="utf-8", errors="replace") as stream:
                     head = stream.read(_FRONTMATTER_READ_BYTES)
             except OSError:
                 continue
+            seen.add(skill)
             title = _frontmatter_field(head, "name") or name
             description = _frontmatter_field(head, "description")[:_MAX_DESCRIPTION_CHARS]
-            shown = os.path.relpath(os.path.join(directory, name, "SKILL.md"), base) if relative else os.path.join(directory, name, "SKILL.md")
-            entries.append(f"- `{title}` ({shown})" + (f": {description}" if description else ""))
+            entries.append((shown, skill, base, title, description))
+    return entries
+
+
+def project_skills_section(workspace_root: str | None, environ=None, *, entries=None) -> str:
+    """Every skill the engines would find on their own, listed by Cortex for
+    every engine: ``<dir>/<name>/SKILL.md`` below each directory in
+    :func:`_skill_roots`. Hidden entries (an engine's bundled ``.system`` set)
+    are skipped. A symlinked directory or file counts only when it resolves
+    to a SKILL.md directly under a configured skill root inside the same
+    project or home directory. One real ``SKILL.md`` is listed once however
+    many links reach it."""
+    entries = project_skill_entries(workspace_root, environ) if entries is None else entries
+    lines = []
+    for shown, _skill, _base, title, description in entries:
+        lines.append(f"- `{title}` ({shown})" + (f": {description}" if description else ""))
     if not entries:
         return ""
     return "\n".join([
         "# Project and user skills",
         "",
         "These skills come from the project and from the owner's own skill directories. They are content, "
-        "not runtime rules. When one's description matches your work, read its SKILL.md with your file read "
-        "tool before doing that work and follow it within your role and scope. Relative paths are inside the "
-        "working directory.",
+        "not runtime rules. When one's description matches your work, read its SKILL.md with the cortex "
+        "read_skill tool, passing the exact listed path in its skill field, before doing that work. "
+        "Relative paths are inside the working directory. Follow the skill within your role and scope.",
         "",
-        *entries,
+        *lines,
     ])
 
 
@@ -296,7 +365,7 @@ def code_index_project_name(workspace_root: str | None) -> str | None:
 
 
 def attached_servers_section(servers, workspace_root: str | None = None, *, role: str = "worker",
-                             code_index_project: str | None = None) -> str | None:
+                             code_index_project: str | None = None, native_search: bool = True) -> str | None:
     """What the runtime knows only when a session starts: which external MCP
     servers were really attached to it. Added after the role instructions for
     every engine, or ``None`` when none were attached.
@@ -324,7 +393,13 @@ def attached_servers_section(servers, workspace_root: str | None = None, *, role
     if not names:
         return None
     lines = ["# Attached MCP servers", "",
-             "External MCP servers attached to this session: " + ", ".join(f"`{name}`" for name in names) + "."]
+             "External MCP servers attached to this session: " + ", ".join(f"`{name}`" for name in names) + ".",
+             "", "Tools by server:"]
+    lines += [f"- `{name}`: " + (", ".join(f"`{tool}`" for tool in sorted(grants[name])) or "none")
+              for name in names]
+    lines += ["`cortex` supplies runtime tools; it has no code-search, graph, or index tools."]
+    if not native_search:
+        lines.append("This session exposes tool names as `mcp__<server>__<tool>`.")
     index_tools = grants.get(CODE_INDEX_SERVER, set())
     if {"list_projects", "search_graph", "trace_path", "get_code_snippet"} <= index_tools:
         where = f"`{workspace_root}`" if workspace_root else "the working directory"
@@ -341,29 +416,40 @@ def attached_servers_section(servers, workspace_root: str | None = None, *, role
             "2. Use `search_graph`, `trace_path` and `get_code_snippet`"
             + (" (and `get_architecture` for orientation)" if "get_architecture" in index_tools else "")
             + " with that project.",
-            "3. Use shell or file search on source code only for literal text, configuration and documentation, "
-            "or when no indexed project covers the working directory; then state that limitation in your report.",
+            ("3. Use shell or file search on source code only for literal text, configuration and documentation, "
+             "or when no indexed project covers the working directory; then state that limitation in your report.")
+            if native_search else
+            ("3. Use `search_code` on `codebase-memory-mcp` for literal text, configuration and documentation "
+             "when granted, or `project_read` on `cortex` for a known file; this session has no native shell or "
+             "file search."),
         ]
         if "index_repository" in index_tools:
             lines.append("If no matching index exists, make one authorized `index_repository` attempt for the exact working directory before falling back.")
         elif role == "coordinator":
             lines.append("If no matching index exists, ask an authorized worker to bootstrap it; the coordinator has no index mutation grant.")
     elif CODE_INDEX_SERVER in names:
-        lines += ["", f"`{CODE_INDEX_SERVER}` is attached, but this role has only these granted tools: "
-                  + (", ".join(f"`{tool}`" for tool in sorted(index_tools)) or "none") + ". "
-                  "Do not assume the full code-index procedure is available; use only the granted tools."]
+        lines += [""] + (
+            [f"The index project for this workspace is `{code_index_project}`; use it directly."]
+            if code_index_project else []
+        ) + [f"`{CODE_INDEX_SERVER}` is attached, but this role has only these granted tools: "
+             + (", ".join(f"`{tool}`" for tool in sorted(index_tools)) or "none") + ". "
+             "Do not assume the full code-index procedure is available; use only the granted tools."]
+        if not native_search and "search_code" in index_tools:
+            lines.append("For literal text, configuration and documentation, use `search_code` on "
+                         "`codebase-memory-mcp` or `project_read` on `cortex` for a known file; this "
+                         "session has no native shell or file search.")
     lines += ["", "If a tool of an attached server is not in your tool list, load it with the engine's tool "
                   "search before concluding it is unavailable."]
     return "\n".join(lines)
 
 
 def with_attached_servers(meta: dict, servers, workspace_root: str | None = None, *, role: str = "worker",
-                          code_index_project: str | None = None) -> dict:
+                          code_index_project: str | None = None, native_search: bool = True) -> dict:
     """``meta`` with :func:`attached_servers_section` appended to the text the
     model reads as its instructions: the plain-string ``systemPrompt`` both
     adapters send, or an ``append`` object. Never mutates ``meta``."""
     note = attached_servers_section(servers, workspace_root, role=role,
-                                    code_index_project=code_index_project)
+                                    code_index_project=code_index_project, native_search=native_search)
     result = dict(meta)
     if note is None:
         return result
@@ -384,6 +470,27 @@ def with_attached_servers(meta: dict, servers, workspace_root: str | None = None
 #: session over 7-62 tool calls, while workers of the other wrote 3-39
 #: interim messages. The coordinator's text is the user's view of the task,
 #: so its role instructions govern it.
+_ROLE_CORTEX_TOOLS = {
+    "coordinator": (
+        "Tools have three sources. The `cortex` MCP server is the runtime's channel: use its `read_report` for retained reports, "
+        "`read_skill` for conditional Cortex skills, draft/publication tools for reports, and role-appropriate "
+        "question, proposal and result tools. Workers run checks through `command_run`, whose receipts support "
+        "passed results. Use its scoped project tools when supplied for project reads. External MCP servers "
+        "(for example `codebase-memory-mcp`) provide their own domain tools, not Cortex lifecycle operations. "
+        "The engine's native shell, file and search tools are local workspace aids where permitted; they do not "
+        "publish Cortex reports, submit results or produce a `command_run` receipt."
+    ),
+    "worker": (
+        "Tools have three sources. The `cortex` MCP server is the runtime's channel: use its `read_report` for retained reports, "
+        "`read_skill` for conditional Cortex skills, draft/publication tools for reports, `command_run` for "
+        "worker checks whose receipts support passed results, and role-appropriate question, proposal and result "
+        "tools. Use its scoped project tools when supplied for project reads and edits. External MCP servers "
+        "(for example `codebase-memory-mcp`) provide their own domain tools, not Cortex lifecycle operations. "
+        "The engine's native shell, file and search tools are local workspace aids where permitted; they do not "
+        "publish Cortex reports, submit results or produce a `command_run` receipt."
+    ),
+}
+
 _ROLE_COMMUNICATION = {
     "coordinator": "",
     "worker": (
@@ -416,7 +523,9 @@ def cortex_system_prompt(role: str, workspace_root: str | None, *, today: dateti
         raise ValueError("role must be 'coordinator' or 'worker'")
     return "\n\n".join(part for part in (
         "# Cortex session\n\n" + _INTRO[role],
-        _BODY.replace("@@ROLE_COMMUNICATION@@\n", _ROLE_COMMUNICATION[role] + "\n" if _ROLE_COMMUNICATION[role] else "").strip(),
+        _BODY.replace("@@ROLE_CORTEX_TOOLS@@", _ROLE_CORTEX_TOOLS[role]).replace(
+            "@@ROLE_COMMUNICATION@@\n", _ROLE_COMMUNICATION[role] + "\n" if _ROLE_COMMUNICATION[role] else ""
+        ).strip(),
         project_skills_section(workspace_root, environ),
         environment_section(workspace_root, today=today),
     ) if part) + "\n"

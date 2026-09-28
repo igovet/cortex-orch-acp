@@ -99,6 +99,42 @@ def test_frontmatter_reader_supports_plain_and_quoted_scalars(scalar, expected):
     assert _frontmatter_field(f"---\ndescription: {scalar}\n---\n", "description") == expected
 
 
+@pytest.mark.parametrize(
+    ("scalar", "expected"),
+    [
+        ('"Inspect code and\n  tests."', "Inspect code and tests."),
+        ("'Inspect code and\n  tests.'", "Inspect code and tests."),
+        ('"Inspect code\\\n  and tests."', "Inspect codeand tests."),
+        ('"Inspect code # and\n  tests."', "Inspect code # and tests."),
+        ('"Inspect code\n\n  and tests."', "Inspect code\nand tests."),
+    ],
+)
+def test_frontmatter_reader_supports_multiline_quoted_scalars(scalar, expected):
+    assert _frontmatter_field(f"---\ndescription: {scalar}\n---\n", "description") == expected
+
+
+def test_multiline_quoted_description_reaches_skill_catalog(tmp_path):
+    skill = tmp_path / ".agents/skills/audit/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text('---\nname: audit\ndescription: "Inspect code and\n  tests."\n---\n')
+    prompt = cortex_system_prompt("worker", str(tmp_path), environ={})
+    assert "- `audit` (.agents/skills/audit/SKILL.md): Inspect code and tests." in prompt
+
+
+@pytest.mark.parametrize("scalar", ['"unfinished\n  value', "'unfinished\n  value"])
+def test_frontmatter_reader_rejects_unclosed_multiline_quotes(scalar):
+    assert _frontmatter_field(f"---\ndescription: {scalar}\n---\n", "description") == ""
+
+
+def test_frontmatter_reader_rejects_unindented_quoted_continuation():
+    text = '---\ndescription: "Inspect code\nname: other"\n---\n'
+    assert _frontmatter_field(text, "description") == ""
+
+
+def test_frontmatter_reader_treats_a_comment_only_field_as_empty():
+    assert _frontmatter_field("---\ndescription: # comment\n---\n", "description") == ""
+
+
 def test_frontmatter_reader_folds_plain_continuations():
     text = "---\ndescription: Inspect code\n  and tests.\n  Use for reviews.\n---\n"
     assert _frontmatter_field(text, "description") == "Inspect code and tests. Use for reviews."
@@ -166,6 +202,16 @@ def test_attached_server_section_without_a_resolved_project_keeps_the_lookup_tex
     assert "1. Call `list_projects` once and take the project whose root path is `/workspace/project`" in section
     assert "The index project for this workspace is" not in section
 
+def test_role_specific_cortex_tool_guidance_keeps_worker_permissions_out_of_coordinator_text():
+    worker = cortex_system_prompt("worker", None, environ={})
+    coordinator = cortex_system_prompt("coordinator", None, environ={})
+    assert "`command_run` for worker checks" in worker
+    assert "project reads and edits" in worker
+    assert "Workers run checks through `command_run`" in coordinator
+    assert "project reads and edits" not in coordinator
+    assert "@@" not in worker + coordinator
+
+
 def test_only_workers_are_told_to_work_without_narration():
     worker = cortex_system_prompt("worker", None, environ={})
     coordinator = cortex_system_prompt("coordinator", None, environ={})
@@ -182,3 +228,33 @@ def test_conditional_skill_instruction_is_imperative_but_not_eager(role):
     assert "before assessing documentation impact for a plan or updating affected docs" in prompt
     assert "Do not read a conditional skill when its trigger has not arisen" in prompt
     assert "do not re-read them" in prompt
+
+
+def test_attached_server_section_without_native_search_names_granted_literal_search_and_prefixes():
+    section = attached_servers_section(
+        [{"name": "codebase-memory-mcp", "allowed_tools": [
+            "list_projects", "search_graph", "trace_path", "get_code_snippet", "search_code",
+        ]}],
+        "/workspace/project",
+        native_search=False,
+    )
+    assert "Tools by server:" in section
+    assert "`codebase-memory-mcp`: `get_code_snippet`, `list_projects`, `search_code`, `search_graph`, `trace_path`" in section
+    assert "`cortex` supplies runtime tools; it has no code-search, graph, or index tools." in section
+    assert "`search_code` on `codebase-memory-mcp`" in section
+    assert "`project_read` on `cortex` for a known file" in section
+    assert "no native shell or file search" in section
+    assert "`mcp__<server>__<tool>`" in section
+    assert "Use shell or file search" not in section
+
+
+def test_partial_code_index_grant_keeps_resolved_project_name():
+    section = attached_servers_section(
+        [{"name": "codebase-memory-mcp", "allowed_tools": ["search_code"]}],
+        "/workspace/project",
+        code_index_project="workspace-project",
+        native_search=False,
+    )
+    assert "The index project for this workspace is `workspace-project`; use it directly." in section
+    assert "`search_code` on `codebase-memory-mcp`" in section
+    assert "`project_read` on `cortex` for a known file" in section

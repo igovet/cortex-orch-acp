@@ -87,7 +87,7 @@ def test_prompt_and_tool_share_one_situational_catalogue(role_id, kind):
     for skill_id, trigger in situational_skill_triggers(kind, role_id):
         assert f"`{skill_id}` -- {trigger}" in composed
         assert f"{skill_id}: {trigger}" in advertised["description"]
-        assert skill_id in advertised["enum"]
+        assert skill_id in advertised["description"]
     if role_id == "worker-senior-consultant":
         assert "`documentation-sync` --" not in composed
 
@@ -157,13 +157,16 @@ def test_coordinator_only_shared_skills_are_hidden_from_a_worker_and_the_consult
     consultant_schema = _enumerate_skills(schema, "worker", "worker-senior-consultant")
     coordinator_schema = _enumerate_skills(schema, "coordinator", None)
     for skill_id in COORDINATOR_ONLY_SHARED_ROLE_IDS:
-        assert skill_id not in worker_schema["properties"]["skill"]["enum"]
-        assert skill_id not in consultant_schema["properties"]["skill"]["enum"]
-        assert skill_id in coordinator_schema["properties"]["skill"]["enum"]
+        assert skill_id not in worker_schema["properties"]["skill"]["description"]
+        assert skill_id not in consultant_schema["properties"]["skill"]["description"]
+        assert skill_id in coordinator_schema["properties"]["skill"]["description"]
 
 
 def test_reference_inventory_is_bounded_and_role_scoped():
     assert "# Assignment planning" in read_reference("worker-routing", role_kind="coordinator")
+    from types import SimpleNamespace
+    assert _shared_read_skill(None, SimpleNamespace(role="coordinator"),
+                              {"skill": "references/worker-routing.md"})["skill"] == "worker-routing"
     assert "# Report publication" in read_reference("report-publication", role_kind="worker")
     assert "# " in read_reference("report-example", role_kind="worker")
     for reference_id, role_kind in (

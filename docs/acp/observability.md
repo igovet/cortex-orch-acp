@@ -37,9 +37,25 @@ Two real append sites exist today:
 - `delegation.mcp_tools.dispatch` records a `validation`/`<error code>` row
   whenever a channel's own tool-call arguments fail
   `delegation.contracts.validate` — the "schema/validation errors" metric.
+- Rejected worker submissions also produce `submission_rejection` rows. The
+  event records the safe error code and bounded field-path diagnostics, not
+  rejected values or report content. This includes result-schema corrections
+  and observable situational-skill gate refusals; exact field paths are capped
+  by the runtime's violation bound.
+- After sent session metadata is recorded, a best-effort `base_prompt` event
+  records only the mode (`unified`, `native` or `unknown`) and session
+  identifiers. It does not store the prompt or environment values. Because
+  recording is best-effort, a missing event does not establish which prompt was
+  used.
 
 `observability.events.list_events(store, task_id, category=..., after=...)`
 is the cursor-paginated read.
+
+The diagnostics summary's `schema_validation_errors` is an observed count across
+both `validation` and `submission_rejection` events. Its `base_prompt` field
+counts observed session modes in recorded `base_prompt` events; it reports
+`unavailable_reason` when none were recorded. This diagnostic is event-backed,
+not an INFO log or a record of prompt text.
 
 Worker-panel history uses the existing durable `task_events` stream rather
 than a second transcript store. Each redacted `progress` row carrying

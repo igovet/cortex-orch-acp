@@ -301,7 +301,8 @@ def _shared_read_skill(store, channel: ChannelContext, args: Mapping[str, Any]) 
     checks it."""
     result = _read_skill_body(store, channel, args)
     from ..orchestration.skill_gate import record_skill_read
-    record_skill_read(store, channel, result["skill"])
+    if "/" not in result["skill"]:
+        record_skill_read(store, channel, result["skill"])
     return result
 
 
@@ -312,6 +313,11 @@ def _read_skill_body(store, channel: ChannelContext, args: Mapping[str, Any]) ->
     )
 
     requested = args.get("skill")
+    if (isinstance(requested, str) and "/" in requested
+            and not (requested.startswith("references/") and requested.endswith(".md"))):
+        from .session_skills import read_session_skill
+
+        return read_session_skill(store, channel, requested)
     skill_id = requested if isinstance(requested, str) else ""
     # Skills link their references as `references/<id>.md`; accept that link form.
     skill_id = skill_id.strip().removeprefix("references/").removesuffix(".md")
@@ -458,16 +464,19 @@ _OPERATION_DESCRIPTIONS = dict(
     verification_submit="After the runtime verification failed and the work itself is fine: replace only the verification commands and verify again, without redoing the reviewed work.",
     synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. Accepted only after every task, the review and the verification finished. Every retained not_run or unverified worker check must be verified first or listed in not_verified with its concrete blocker. The runtime then completes the task, so use it only when nothing is left for the user to decide; otherwise ask with user_question_request.",
     user_question_request="Request user input while planning or reconciling. Write the details in your message first; the question itself is one short line with short answer options. The runtime persists the question before elicitation and resumes only after a real answer. A question asked while reconciling (approve a proposed plan, choose how to continue) keeps the task open, and the answer returns it to planning: submit a plan for the chosen work, or answer_submit a short close when the user chose to finish. With skill_proposal it proposes one reusable project skill backed by retained report evidence. Use exactly one accepted action-matched pair, approval first: create: [Create the skill, Not now], [Создать навык, Не сейчас], [Approve creating the skill, Decline creating the skill], [Одобрить создание навыка, Отклонить создание навыка]; update: [Update the skill, Not now], [Обновить навык, Не сейчас], [Approve updating the skill, Decline updating the skill], [Одобрить обновление навыка, Отклонить обновление навыка]. Only an exact pair is accepted; 1 selects its approval label, 2 its decline label, and any other answer is unclear. An arbitrary first option never approves.",
-    result_submit="Submit this worker attempt's report, summary and observed checks. Exactly one report path: (1) send report={title,markdown} inline and omit report_ref; or (2) create_draft, draft_write, write_report, then copy write_report.report_id into report_ref and omit report. Use checks=[] only if no automated command ran. For a verified passed check, run command_run first, inspect its complete exit-0 result, and copy its tool_call_ref into one check. Engine-native shell calls and report ids are not command evidence. A checks[].command supplied with passed or failed is descriptive only and cannot verify the check; do not send closed_by, which the runtime derives. Every not_run or unverified check needs a concrete blocker. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. Reviewers must include verdict=APPROVE, REQUEST_CHANGES or BLOCK (lowercase forms normalize); other workers omit verdict. This cannot accept the task. Top-level write_report-only fields such as artifacts are ignored. "
+    result_submit="Submit this worker attempt's report, summary and observed checks. Exactly one report path: (1) send report={title,markdown} inline and omit report_ref; or (2) create_draft, draft_write, write_report, then copy write_report.report_id into report_ref and omit report. Use checks=[] only if no automated command ran. Each checks item has name (a stable check name) and outcome (passed|failed|not_run|unverified; there is no status field); passed or failed needs tool_call_ref, not_run or unverified needs blocker, and command is optional as an argv array of strings. For a verified passed check, run command_run first, inspect its complete exit-0 result, and copy its tool_call_ref into one check. Engine-native shell calls and report ids are not command evidence. A checks[].command supplied with passed or failed is descriptive only and cannot verify the check; do not send closed_by, which the runtime derives. Every not_run or unverified check needs a concrete blocker. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. Reviewers must include verdict=APPROVE, REQUEST_CHANGES or BLOCK (lowercase forms normalize); other workers omit verdict. This cannot accept the task. Top-level write_report-only fields such as artifacts are ignored. "
                   "The runtime compares the project with how it was when this attempt started: when the changes match a "
                   "situational skill's trigger ({gates}) and this attempt has not read that skill with read_skill, the "
                   "result is refused with situational_skill_required and nothing is recorded; read the skill, re-check "
                   "the edits against it, then submit again.",
     ask_question="Ask the user for information this assignment cannot finish without. It stops every running worker and returns the task to planning; after the answer the coordinator re-plans with it.",
     read_skill=(
-        "Read one shared skill or role-scoped reference. The input object has exactly one "
-        "accepted field, `skill`; pass the exact skill/reference id there (for example "
-        "skill='documentation-sync' or skill='knowledge-harvest'). Do not send `topic`, "
+        "Read one shared skill, role-scoped reference, or session-listed project/user SKILL.md. "
+        "The input object has exactly one accepted field, `skill`; pass the exact shared id "
+        "(for example skill='documentation-sync') or the exact path shown in the session's "
+        "Project and user skills list (for example skill='.agents/skills/review/SKILL.md' "
+        "or skill='/home/user/.codex/skills/review/SKILL.md'). No globs, sibling files, "
+        "or unlisted paths are accepted. Do not send `topic`, "
         "`name`, or `id`; those fields are invalid. A worker's successful read is retained for its attempt; "
         "result_submit refuses a result whose observed changes match an unread situational skill's trigger "
         "({gates})."
@@ -560,9 +569,7 @@ def _narrow_result_submit(schema: dict, stage: str | None) -> dict:
 
 
 def _enumerate_skills(schema: dict, role_kind: str, role_id: str | None) -> dict:
-    """Offer exactly the ids read_skill accepts from this role, so a guessed
-    id is no longer possible (a coordinator once asked for `orchestrator`
-    before its own role became readable)."""
+    """Describe role-scoped ids; path grants are checked per session at read."""
     from ..acp.orchestrating_runtime import COORDINATOR_ROLE_ID
     from ..portable.roles import (
         COORDINATOR_ONLY_SHARED_ROLE_IDS, COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS,
@@ -579,8 +586,16 @@ def _enumerate_skills(schema: dict, role_kind: str, role_id: str | None) -> dict
     properties = dict(schema["properties"])
     triggers = situational_skill_triggers(role_kind, role_id)
     properties["skill"] = dict(
-        properties["skill"], enum=sorted(ids),
-        description=properties["skill"].get("description", "Exact skill id.") + " Situational ids and when to read them: "
+        properties["skill"],
+        anyOf=[
+            dict(enum=sorted(ids), description="Named Cortex shared or reference skill id for this role."),
+            dict(description="Exact project/user SKILL.md path listed in this session; the runtime checks its session grant."),
+        ],
+        description=properties["skill"].get("description", "Exact skill id or listed path.")
+        + " Shared/reference ids for this role: " + ", ".join(sorted(ids))
+        + ". The enumerated named-Cortex branch covers the built-in shared/reference choices; the other branch "
+        "accepts exact session-listed project/user SKILL.md paths and checks them against the session grant."
+        + ". Situational ids and when to read them: "
         + "; ".join(f"{skill_id}: {trigger}" for skill_id, trigger in triggers)
         + ". Read only a matching skill; the always-needed skills are already included in the role instructions.",
     )
@@ -649,17 +664,43 @@ def dispatch(store, channel: ChannelContext, operation: str, args: Mapping[str, 
             return runtime_mcp.dispatch(store, channel, operation, dict(args))
         except StoreError as error:
             if operation == "result_submit":
+                if (error.field == "arguments.report_ref, arguments.report"
+                        and error.received == "neither supplied"):
+                    with store.connection() as db:
+                        rows = db.execute(
+                            "SELECT r.id FROM reports r JOIN drafts d ON d.published_report_id=r.id "
+                            "WHERE r.task_id=? AND d.owner_thread_id=?",
+                            (channel.task_id, channel.principal_thread_id),
+                        ).fetchall()
+                        claimed = {
+                            json.loads(row["payload_json"]).get("report_ref")
+                            for row in db.execute(
+                                "SELECT payload_json FROM task_events WHERE task_id=? AND event_type='worker_result'",
+                                (channel.task_id,),
+                            ).fetchall()
+                        }
+                    candidates = [row["id"] for row in rows if row["id"] not in claimed]
+                    if len(candidates) == 1:
+                        error.correction += f" This attempt published {candidates[0]}; send it as report_ref."
                 # Retain only a code and safe field path, never rejected
                 # arguments, report bodies, receipts or raw error messages.
                 try:
                     from ..observability.events import append_event as _append_observability_event
+                    from ..orchestration.contracts import MAX_VIOLATIONS
 
-                    field = error.field if isinstance(error.field, str) and (
-                        error.field.startswith("arguments.") or error.field in {"report_ref", "request_key"}
-                    ) else "arguments"
+                    fields = [
+                        item.get("field") for item in (error.violations or ())
+                        if isinstance(item, dict) and isinstance(item.get("field"), str)
+                        and item["field"].startswith("arguments.")
+                    ]
+                    if not fields:
+                        fields = [error.field] if isinstance(error.field, str) and (
+                            error.field.startswith("arguments.") or error.field in {"report_ref", "request_key"}
+                        ) else ["arguments"]
                     _append_observability_event(
                         store, channel.task_id, "submission_rejection", str(error), "observed",
-                        attempt_id=channel.attempt_id, detail=dict(operation=operation, field=field),
+                        attempt_id=channel.attempt_id,
+                        detail=dict(operation=operation, field=fields[0], fields=fields[:MAX_VIOLATIONS]),
                     )
                 except Exception:
                     pass

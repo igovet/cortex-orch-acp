@@ -711,7 +711,8 @@ class EngineSessionManager:
                                   else None)
             params["_meta"] = with_attached_servers(
                 session_new_meta, external_servers, self._workspace_root, role=self._mcp_role,
-                code_index_project=code_index_project)
+                code_index_project=code_index_project,
+                native_search=self._record.engine != "claude-agent-acp")
         with self._lock:
             result = self._client.call("session/new", params, timeout=self._call_timeout)
             wire_session_id = result.get("sessionId")

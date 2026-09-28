@@ -44,6 +44,7 @@ import threading
 import time
 import os
 import stat
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -344,6 +345,24 @@ def _session_new_meta_for(
     return meta
 
 
+def base_prompt_mode(meta) -> str:
+    """Return the safely observable base-prompt mode from sent session metadata."""
+    if not isinstance(meta, Mapping):
+        return "unknown"
+    if "cortexBaseInstructions" in meta:
+        return "unified"
+    # Codex metadata always carries one of these markers.  Check them before
+    # ``systemPrompt`` because that field is role text in both Codex modes.
+    if "cortexNativeContext" in meta or "cortexRole" in meta:
+        return "native"
+    system_prompt = meta.get("systemPrompt")
+    if isinstance(system_prompt, str):
+        return "unified"
+    if isinstance(system_prompt, Mapping) and "append" in system_prompt:
+        return "native"
+    return "unknown"
+
+
 def _resolve_route_model_name(connection_id: str, model: str, environ: dict[str, str] | None) -> str | None:
     """T035: this route's real, engine-observed model display name -- the
     identical resolution ``acp.config_options.presented_entries`` applies to
@@ -581,10 +600,15 @@ class EngineSessionManagerAdapter:
     only once the underlying process's exit is *positively observed*
     (``EngineProcess.wait_exited``); an unconfirmed termination (grace
     expired with the process still not observed exited) is marked
-    ``ambiguous`` instead and keeps counting against the limit. The limit
-    is the resolved connection's own ``max_concurrent_sessions`` (default
-    4), applied separately to coordinator and worker reservations; an
-    explicit ``capacity_limit`` can only lower it.
+    ``ambiguous`` instead and keeps counting against the limit. A worker
+    runs only while its chat session (the task) holds fewer than
+    ``delegation.capacity.MAX_WORKERS_PER_SESSION`` workers on every
+    connection together; the resolved connection's own
+    ``max_concurrent_sessions`` (default 4) can only lower how many of that
+    session's workers use the connection. Coordinators keep their own
+    per-connection count; an explicit ``capacity_limit`` can only lower it.
+    A queued open reclaims a slot whose holder is observed gone
+    (:meth:`reclaim_stale_capacity`) instead of waiting on it forever.
     """
 
     def __init__(
@@ -650,6 +674,10 @@ class EngineSessionManagerAdapter:
         # cancellation promptly instead of polling forever.
         self._cancelled_attempts: set[str] = set()
         self._cancelled_tasks: set[str] = set()
+        # Attempts between their capacity reservation and their session
+        # registration: their reservation has no process record yet and is
+        # never reclaimed as stale (see reclaim_stale_capacity).
+        self._opening: set[str] = set()
         self._shutdown_event = threading.Event()
         # T022: context-generation/delivery tracking, active only when
         # ``store`` is supplied (same gate T017's capacity tracking uses --
@@ -868,13 +896,20 @@ class EngineSessionManagerAdapter:
         if self._store is not None:
             self._authorize_dispatch(record, task_id, launch, project_root=project_root)
         reservation_id = None
+        with self._lock:
+            self._opening.add(attempt_id)
         if self._store is not None:
             from . import capacity as delegation_capacity
 
-            reservation_id = self._reserve_capacity_blocking(
-                record.id, task_id, attempt_id, launch,
-                limit=delegation_capacity.limit_for_connection(record, self._capacity_limit),
-            )
+            try:
+                reservation_id = self._reserve_capacity_blocking(
+                    record.id, task_id, attempt_id, launch,
+                    limit=delegation_capacity.limit_for_connection(record, self._capacity_limit),
+                )
+            except BaseException:
+                with self._lock:
+                    self._opening.discard(attempt_id)
+                raise
         # EXT-01 #8 ("startup cleanup"): from here on a real process may
         # exist (``EngineSessionManager._ensure_started`` spawns it lazily,
         # inside ``negotiate()``) before this method ever reaches its own
@@ -983,12 +1018,15 @@ class EngineSessionManagerAdapter:
             if workspace_lock is not None:
                 workspace_lock.__exit__(None, None, None)
             self._cleanup_failed_open(manager, reservation_id)
+            with self._lock:
+                self._opening.discard(attempt_id)
             if is_worker and manager is not None:
                 self._record_dispatch_route_failure(error, record, route_model, task_id, attempt_id)
             raise
         with self._lock:
             self._managers[attempt_id] = manager
             self._sessions[attempt_id] = session_id
+            self._opening.discard(attempt_id)
             self._session_to_attempt[session_id] = attempt_id
             self._attempt_task[attempt_id] = task_id
             if is_worker:
@@ -1927,6 +1965,22 @@ class EngineSessionManagerAdapter:
             ledger.record_sent(bundle, json.dumps(meta, sort_keys=True, ensure_ascii=False),
                                engine=record.engine, engine_version=version,
                                attempt_id=attempt_id, session_ref=session_id)
+            try:
+                from ..observability import events as observability_events
+
+                observability_events.append_event(
+                    self._store, task_id, "base_prompt", base_prompt_mode(meta), "observed",
+                    attempt_id=attempt_id, engine_session_ref=session_id, route_engine=record.engine,
+                )
+            except Exception:
+                pass
+        from .session_skills import record_session_skills
+
+        record_session_skills(
+            self._store, task_id=task_id, attempt_id=attempt_id, session_ref=session_id,
+            project_root=getattr(manager, "_workspace_root", None), environ=self._environ,
+            sent_meta=meta,
+        )
         with self._lock:
             self._session_meta[session_id] = dict(
                 task_id=task_id, attempt_id=attempt_id, engine=record.engine, version=version,
@@ -2091,8 +2145,11 @@ class EngineSessionManagerAdapter:
         ``limit`` is the resolved connection's own ``max_concurrent_sessions``
         (:func:`delegation.capacity.limit_for_connection`, which :meth:`open`
         passes); when omitted, only this adapter's explicit ``capacity_limit``
-        or the default applies. Only reservations of this open's own kind
-        count against it, so a coordinator never takes a worker slot."""
+        or the default applies. A worker also waits while its session
+        already runs ``MAX_WORKERS_PER_SESSION`` workers on any connection.
+        Only reservations of this open's own kind count, so a coordinator
+        never takes a worker slot. A refused reserve first reclaims the
+        session's slots whose holders are observed gone."""
         from . import capacity as delegation_capacity
         from . import events as delegation_events
 
@@ -2114,11 +2171,19 @@ class EngineSessionManagerAdapter:
             )
             if reservation_id is not None:
                 return reservation_id
+            if kind == "worker" and self.reclaim_stale_capacity(task_id):
+                continue
             if not queued_note_recorded:
+                note = (
+                    f"Attempt {attempt_id} is queued: this session already runs "
+                    f"{delegation_capacity.MAX_WORKERS_PER_SESSION} workers, or connection "
+                    f"{connection_id!r} is at its own limit."
+                    if kind == "worker" else
+                    f"Attempt {attempt_id} is queued: connection {connection_id!r} capacity is full."
+                )
                 delegation_events.append_event(
                     self._store, task_id, "progress", f"capacity_queued:{attempt_id}",
-                    dict(note=f"Attempt {attempt_id} is queued: connection {connection_id!r} capacity is full."),
-                    origin="runtime",
+                    dict(note=note), origin="runtime",
                 )
                 queued_note_recorded = True
             # No coordinator-starvation fast-fail: coordinator reservations
@@ -2132,7 +2197,7 @@ class EngineSessionManagerAdapter:
                 # workers here after 600 s while four live siblings worked
                 # (2026-09-28). Only a slot whose holder is not observed
                 # alive (ambiguous, leaked) ends the wait.
-                if self._capacity_held_by_live_sessions(connection_id, kind):
+                if self._capacity_held_by_live_sessions(connection_id, kind, task_id):
                     deadline = time.monotonic() + self._queue_timeout_seconds
                     continue
                 raise QueuedOpenCancelled("capacity_timeout")
@@ -2140,20 +2205,87 @@ class EngineSessionManagerAdapter:
                 self._activity_cond.wait(timeout=backoff)
             backoff = min(backoff * 2, 1.0)
 
-    def _capacity_held_by_live_sessions(self, connection_id: str, kind: str) -> bool:
-        """True when every active reservation of ``kind`` on the connection
-        is ``reserved`` by a session :meth:`lookup_owned` observes alive.
-        An ambiguous reservation or a holder not observed alive (absent,
-        unknown) is not progress to wait for."""
+    def _capacity_held_by_live_sessions(self, connection_id: str, kind: str, task_id: str | None = None) -> bool:
+        """True when every active reservation the queued open waits behind
+        (a worker: its session's workers; a coordinator: the connection's
+        coordinators) is ``reserved`` by a session :meth:`lookup_owned`
+        observes alive. An ambiguous reservation or a holder not observed
+        alive (absent, unknown) is not progress to wait for."""
         from . import capacity as delegation_capacity
 
         if self._store is None:
             return False
-        holders = delegation_capacity.active_holders(self._store, connection_id, kind)
+        holders = delegation_capacity.active_holders(self._store, connection_id, kind, task_id)
         return bool(holders) and all(
             state == "reserved" and self.lookup_owned(attempt_id) == "alive"
             for attempt_id, state in holders
         )
+
+    def reclaim_stale_capacity(self, task_id: str) -> int:
+        """Release session ``task_id``'s worker slots whose holder is
+        observed gone; returns how many were released.
+
+        A slot is reclaimed only on evidence that its worker no longer runs:
+        this adapter's own engine process observed exited; a durable process
+        record (``recovery.registry``) probed absent; or, with no process
+        record at all, a reservation older than
+        ``UNRECORDED_RESERVATION_EXPIRY_SECONDS`` that no open of this
+        adapter is still working on. A holder observed alive, or unknown,
+        keeps its slot -- ambiguous included. Each reclaim appends a
+        ``capacity_reclaimed`` progress event naming the attempt,
+        reservation and evidence (no engine output)."""
+        from . import capacity as delegation_capacity
+        from . import events as delegation_events
+        from ..recovery import registry as recovery_registry
+
+        if self._store is None:
+            return 0
+        opening = getattr(self, "_opening", set())
+        reclaimed = 0
+        for row in delegation_capacity.active_reservations(self._store, task_id, "worker"):
+            attempt_id = row["attempt_id"]
+            with self._lock:
+                if attempt_id in opening:
+                    continue
+                owned = attempt_id in self._sessions
+                manager = self._managers.get(attempt_id) if owned else None
+            if owned:
+                process = getattr(manager, "_process", None)
+                if process is None or not process.wait_exited(0):
+                    continue
+                evidence = "owned_process_exited"
+            else:
+                process_row = recovery_registry.lookup_process(self._store, attempt_id)
+                if process_row is None:
+                    try:
+                        reserved_at = datetime.fromisoformat(row["reserved_at"])
+                    except (TypeError, ValueError):
+                        continue
+                    age = (datetime.now(timezone.utc) - reserved_at).total_seconds()
+                    if age < delegation_capacity.UNRECORDED_RESERVATION_EXPIRY_SECONDS:
+                        continue
+                    evidence = "unrecorded_reservation_expired"
+                elif recovery_registry.probe_liveness(process_row) != "absent":
+                    continue
+                else:
+                    evidence = "process_absent"
+            if not delegation_capacity.release_confirmed(
+                self._store, row["reservation_id"], f"reclaimed:{evidence}",
+            ):
+                continue
+            reclaimed += 1
+            delegation_events.append_event(
+                self._store, task_id, "progress", f"capacity_reclaimed:{row['reservation_id']}",
+                dict(
+                    note=f"Worker slot of attempt {attempt_id} reclaimed: {evidence}.",
+                    kind="capacity_reclaimed", attempt_id=attempt_id,
+                    reservation_id=row["reservation_id"], prior_state=row["state"], evidence=evidence,
+                ),
+                origin="runtime",
+            )
+        if reclaimed:
+            self._notify_activity()
+        return reclaimed
 
     def _notify_activity(self) -> None:
         with self._activity_cond:

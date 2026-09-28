@@ -196,7 +196,11 @@ def test_report_ref_and_inline_report_are_mutually_exclusive(tmp_path, both, err
                          (task.task_id,)).fetchone()
     assert row['outcome'] == error
     detail = json.loads(row['detail_json'])
-    assert detail == {'operation': 'result_submit', 'field': 'arguments.report_ref, arguments.report'}
+    assert detail == {
+        'operation': 'result_submit',
+        'field': 'arguments.report_ref, arguments.report',
+        'fields': ['arguments.report_ref, arguments.report'],
+    }
 
 
 def test_an_inline_report_with_an_unfilled_template_placeholder_is_refused_before_any_result(tmp_path):

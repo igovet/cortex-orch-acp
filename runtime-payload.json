@@ -80,6 +80,7 @@
     "src/cortex_runtime/delegation/provisioning.py",
     "src/cortex_runtime/delegation/report_reads.py",
     "src/cortex_runtime/delegation/revision.py",
+    "src/cortex_runtime/delegation/session_skills.py",
     "src/cortex_runtime/delegation/store.py",
     "src/cortex_runtime/delegation/work_graph.py",
     "src/cortex_runtime/delegation/workspace_isolation.py",

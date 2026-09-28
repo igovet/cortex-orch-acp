@@ -101,8 +101,10 @@ def test_skill_management_guidance_is_coordinator_only_and_covers_import_review(
         {"properties": {"skill": {"type": "string"}}}, "coordinator", None)
     worker_schema = _enumerate_skills(
         {"properties": {"skill": {"type": "string"}}}, "worker", "worker-general")
-    assert "skill-management" in coordinator_schema["properties"]["skill"]["enum"]
-    assert "skill-management" not in worker_schema["properties"]["skill"]["enum"]
+    named = coordinator_schema["properties"]["skill"]["anyOf"][0]
+    assert "skill-management" in named["enum"]
+    worker_named = worker_schema["properties"]["skill"]["anyOf"][0]
+    assert "skill-management" not in worker_named["enum"]
 
     body = _shared_read_skill(
         None, SimpleNamespace(role="coordinator"), {"skill": "skill-management"})

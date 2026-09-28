@@ -15,7 +15,7 @@ SHARED = {
     'read_source': obj(dict(source_ref=text('Exact source_ref from list_sources: an entry source_ref or an answered_questions source_ref.',64),
                             offset=integer('Character offset.',0,100000000),
                             limit=integer('Maximum chunk size.',1,65536)), required=['source_ref']),
-    'read_skill': obj(dict(skill=text('Exact shared skill or role-scoped reference id.',80))),
+    'read_skill': obj(dict(skill=text('Exact shared skill/reference id, or exact SKILL.md path listed in this session\'s Project and user skills section (relative to the project or absolute for a user skill). No globs or other files.',4096))),
     'read_capsule': obj(dict(at_revision=integer('Optional source revision upper bound.')), required=[]),
     'read_large_output': obj(dict(large_output_id=text('Exact retained output identifier.',20),
                                  offset=integer('Byte offset.'), limit=integer('Maximum chunk size.',1,65536)),

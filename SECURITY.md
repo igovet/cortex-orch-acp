@@ -19,11 +19,25 @@ Any project change, every fix cycle, or an unobservable project still requires
 independent review. No model hint can waive review. A model tool call cannot
 select a task state, accept the task or directly create an engine session.
 
-The worker result schema requires one owned report form and distinguishes
-check blockers from command evidence. Rejected result calls attempt to record only an
-error code and safe field path in observability events; report bodies and
-rejected arguments are not retained there. A well-shaped `tool_call_ref` alone
-never verifies a check.
+The worker result schema requires exactly one owned report form: an explicit
+`report_ref` for an already published report, or inline `report: {title, markdown}`.
+When a draft was published through `write_report`, its returned `report_id` is
+passed as `result_submit.report_ref`; a unique own-report suggestion is only a
+correction hint and does not bind a report. Check blockers and command evidence
+are distinct. Rejected submissions retain only a safe error code and bounded
+field-path diagnostics in observability events; rejected values and report bodies
+are not retained there. Submission rejections contribute to the
+`schema_validation_errors` diagnostic alongside argument-validation failures.
+A well-shaped `tool_call_ref` alone never verifies a check.
+
+Cortex's read-only `read_skill` route can read shared skill/reference IDs and
+exact `SKILL.md` paths listed in that engine session's sent prompt, bound to the
+session and worker attempt. It accepts no glob or arbitrary path, and does not
+grant general file access. Listed paths are read from their original canonical
+files with bounded UTF-8 regular-file checks and symlink-safe traversal; changed
+targets and unlisted paths fail closed. The route is not available as a
+session-path grant when that session did not receive the corresponding skill
+catalog. See [the unified system prompt](docs/acp/unified-system-prompt.md).
 
 Owner-initiated force-finish is a separate, non-acceptance outcome: an exact
 `/cortex-finish` command captured from the ACP/Paseo host or an exact answered

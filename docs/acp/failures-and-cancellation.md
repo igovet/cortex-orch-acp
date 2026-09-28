@@ -193,7 +193,22 @@ host kill can still leave an ambiguous registry row; the next
 `session/load` only applies the read-only card correction described in
 `input-history-and-replay.md`.
 
-## 5. Owned-resource reaper
+## 5. Session worker capacity and stale-slot reclamation
+
+One chat session (the ACP session and task it drives) runs at most four workers
+across engines and connections. The scheduler leaves excess dependency-ready
+nodes pending. Confirmed worker termination releases a reservation exactly
+once; conditional reservation transitions prevent a late ambiguous-state update
+from resurrecting a released slot. A slot is reclaimed only with evidence that
+the worker is gone: the owning adapter observed its process exit, the durable
+process registry reports the identity absent, or (when no process record exists)
+the unrecorded reservation is older than one hour and is not currently opening.
+An alive or unknown process remains reserved. Reclaims emit a safe
+`capacity_reclaimed:<reservation_id>` diagnostic event. The scheduler retries
+stale-capacity reclamation while pending work exists, and a queued open reclaims
+eligible dead holders before waiting; unavailable evidence does not free a slot.
+
+## 6. Owned-resource reaper
 
 `engine.reaper.sweep(store, engine)` — two bounded, idempotent sweeps,
 invoked once per project at first runtime use
@@ -214,7 +229,7 @@ Both are bounded (`limit`, default 200 rows) and never touch a process or
 path this Cortex process (or a durable prior-process record) did not
 itself launch/own.
 
-## 6. Fault injection
+## 7. Fault injection
 
 New `t028_*` checkpoints (`_fault_injection.checkpoint`, same
 env-var-gated `os._exit(137)` mechanism as T019/T023):

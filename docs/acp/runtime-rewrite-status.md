@@ -8,10 +8,12 @@ immutable reports. All 23 specialist/consultant profiles remain available.
 Implemented production paths:
 
 - Transactional task state, plan revisions, validated DAG, original goal and event
-  history in the single project-local store; per-connection coordinator and
-  worker limits (default 4, configurable 1–64) plus a 64-worker project pool.
-  Writing nodes with overlapping scopes are serialized; review-stage and
-  READ_ONLY nodes do not conflict by scope.
+  history in the single project-local store. The scheduler and atomic capacity
+  store enforce at most four concurrent workers per chat session across engines;
+  per-connection worker limits can only lower that session's share. Coordinator
+  reservations keep a separate per-connection limit. Excess ready nodes stay
+  pending. Writing nodes with overlapping scopes are serialized; review-stage
+  and READ_ONLY nodes do not conflict by scope.
 - Closed plan/result/question/scope/replan/escalation/synthesis tools. No public
   delegate, decide, integrate, acceptance or model/effort selection API.
   `result_submit` accepts either a published `report_ref` or the report inline,

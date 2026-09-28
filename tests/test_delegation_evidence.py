@@ -295,3 +295,16 @@ def test_result_submit_schema_states_the_evidence_contract():
     assert 'gateway:' in ref and 'engine shell call' in ref and 'one check only' in ref
     assert 'recorded as unverified with evidence_gap' in outcome and 'always kept as failed' in outcome
     assert 'qualitative review remarks' in check['description'] and 'report body' in check['description']
+
+
+def test_status_only_tool_result_inherits_earliest_kind_and_title(tmp_path):
+    store, task, _, worker, _ = _fixture(tmp_path, 'status-inheritance')
+    record_tool_result_observed(store, task.task_id, worker.attempt_id, 'tc_status', 'execute', 'Run tests', 'pending')
+    record_tool_result_observed(store, task.task_id, worker.attempt_id, 'tc_status', None, None, 'failed')
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT kind, title, status FROM tool_result_observations "
+            "WHERE task_id=? AND attempt_id=? AND tool_call_ref=? ORDER BY rowid DESC LIMIT 1",
+            (task.task_id, worker.attempt_id, 'tc_status'),
+        ).fetchone()
+    assert dict(row) == dict(kind='execute', title='Run tests', status='failed')

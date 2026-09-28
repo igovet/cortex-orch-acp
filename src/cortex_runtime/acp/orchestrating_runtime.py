@@ -75,14 +75,14 @@ DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS = 3
 # Kept as a settable parameter so a test can still bound a loop.
 DEFAULT_MAX_TOTAL_CONTINUATIONS = None
 # Worker threads per project runtime. Each dispatched worker holds one
-# thread for its whole life, including while it waits in the per-connection
-# capacity queue, so this pool must never be the binding limit: the real
-# limit is each connection's own ``max_concurrent_sessions``
-# (``connections.model.ConnectionRecord``), enforced across processes by
-# ``delegation.capacity``. The pool is sized to that field's validated
-# maximum, so it is never tighter than any single connection's configured
-# limit, and stays a fixed, deterministic bound; only when several
-# connections' limits together exceed it does it cap the project's total.
+# thread for its whole life, including while it waits in the capacity queue,
+# so this pool must never be the binding limit: the real limit is
+# ``delegation.capacity.MAX_WORKERS_PER_SESSION`` workers per chat session
+# (the scheduler claims no more; ``delegation.capacity`` enforces it
+# atomically), which each connection's own ``max_concurrent_sessions`` can
+# only lower. Several sessions share one project runtime, so the pool is
+# sized to that field's validated maximum and stays a fixed, deterministic
+# bound on the project's total.
 # ``ThreadPoolExecutor`` starts threads on demand, so idle headroom is free.
 DEFAULT_WORKER_POOL_SIZE = MAX_CONCURRENT_SESSIONS_LIMIT
 DEFAULT_WAIT_TIMEOUT_SECONDS = 5.0
@@ -4455,6 +4455,19 @@ class OrchestratingRuntime:
             self._cleanup_isolated_workspace_if_integrated(task_id, attempt_id)
         if newly_terminal:
             self._notify()
+
+    def _reclaim_stale_worker_capacity(self, task_id: str) -> None:
+        """Free this task's worker slots whose engine is observed gone
+        (see ``EngineSessionManagerAdapter.reclaim_stale_capacity``); an
+        engine without that capability holds no capacity to reclaim."""
+        reclaim = getattr(self._engine, "reclaim_stale_capacity", None)
+        if reclaim is None:
+            return
+        try:
+            if reclaim(task_id):
+                self._notify()
+        except Exception:  # noqa: BLE001 - a reclaim retries on the next pass; never crash the turn
+            pass
 
     def _cleanup_isolated_workspace_if_integrated(self, task_id: str, attempt_id: str) -> None:
         """T025 design decision 5: remove only a Cortex-owned isolated

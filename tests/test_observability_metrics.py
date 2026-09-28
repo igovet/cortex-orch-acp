@@ -103,7 +103,7 @@ def test_diagnostics_summary_returns_every_declared_metric(tmp_path):
     for key in (
         "resource_caps", "recovery_latency", "repeat_calls", "schema_validation_errors",
         "manual_interventions", "duplicate_publications", "tokens", "concurrency",
-        "route_acceptance_latency", "route_fix_cycles",
+        "route_acceptance_latency", "route_fix_cycles", "base_prompt",
     ):
         assert key in summary
     # No configuration revision recorded yet -> honestly unavailable, never fabricated.
@@ -115,6 +115,25 @@ def test_diagnostics_summary_returns_every_declared_metric(tmp_path):
     assert summary["route_fix_cycles"]["total_review_fix_cycles"] == 0
     # No usage recorded at all yet -> unavailable, never treated as 0 tokens used.
     assert summary["tokens"]["availability"] == "unavailable_reason"
+
+
+def test_base_prompt_summary_counts_secret_free_events(tmp_path):
+    store, task_id = _task(tmp_path)
+    observability_events.append_event(
+        store, task_id, "base_prompt", "unified", "observed",
+        attempt_id="attempt-1", route_engine="codex-acp",
+    )
+    observability_events.append_event(
+        store, task_id, "base_prompt", "native", "observed",
+        attempt_id="attempt-2", route_engine="claude-agent-acp",
+    )
+
+    events = observability_events.list_events(store, task_id, category="base_prompt")
+    assert [event["detail"] for event in events] == [{}, {}]
+    assert observability_metrics.diagnostics_summary(store, task_id)["base_prompt"] == {
+        "unit": "sessions", "availability": "available", "basis": "observed",
+        "counts": {"unified": 1, "native": 1},
+    }
 
 
 def test_route_outcome_metrics_group_accepted_results_and_fix_cycles(tmp_path):
@@ -219,6 +238,13 @@ def test_schema_validation_errors_and_duplicate_publications_are_counted(tmp_pat
     summary = observability_metrics.diagnostics_summary(store, task_id)
     assert summary["schema_validation_errors"] == dict(unit="count", availability="available", basis="observed", total=2)
     assert summary["duplicate_publications"]["total"] == 1
+
+
+def test_schema_validation_errors_include_submission_rejections(tmp_path):
+    store, task_id = _task(tmp_path)
+    observability_events.append_event(store, task_id, "submission_rejection", "invalid_arguments", "observed")
+    summary = observability_metrics.diagnostics_summary(store, task_id)
+    assert summary["schema_validation_errors"] == dict(unit="count", availability="available", basis="observed", total=1)
 
 
 def test_repeat_calls_and_tokens_reflect_usage_records(tmp_path):

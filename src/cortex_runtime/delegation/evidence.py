@@ -44,11 +44,26 @@ def record_tool_result_observed(
         return
     bounded_title = (title or "")[:200] or None
     bounded_kind = (kind or "")[:64] or None
-    store.immediate_write(lambda db: db.execute(
-        "INSERT INTO tool_result_observations (task_id, attempt_id, tool_call_ref, kind, title, status, created_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (task_id, attempt_id, tool_call_ref, bounded_kind, bounded_title, status, _now()),
-    ))
+
+    def write(db):
+        nonlocal bounded_kind, bounded_title
+        if bounded_kind is None or bounded_title is None:
+            earlier = db.execute(
+                "SELECT kind, title FROM tool_result_observations "
+                "WHERE task_id=? AND attempt_id=? AND tool_call_ref=? "
+                "ORDER BY rowid ASC LIMIT 1",
+                (task_id, attempt_id, tool_call_ref),
+            ).fetchone()
+            if earlier is not None:
+                bounded_kind = bounded_kind or earlier["kind"]
+                bounded_title = bounded_title or earlier["title"]
+        db.execute(
+            "INSERT INTO tool_result_observations (task_id, attempt_id, tool_call_ref, kind, title, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (task_id, attempt_id, tool_call_ref, bounded_kind, bounded_title, status, _now()),
+        )
+
+    store.immediate_write(write)
 
 
 # Every reason a passed (or failed) claim is not verified. The code is stored
