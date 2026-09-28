@@ -504,3 +504,61 @@ def test_a_provably_gone_attempt_gives_its_capacity_slot_back(tmp_path):
         ).fetchone()
     assert row["state"] == "released"
     assert row["release_observation"] == "recovery_worker_absent"
+
+
+def test_large_task_recovery_delivery_is_not_blocked_with_capsule_oversize(tmp_path, monkeypatch):
+    """Regression for a real coordinator session stuck on ``capsule_oversize``:
+    a task whose verbatim critical capsule sections exceed HARD_CAP_BYTES
+    (tens of assignments with long briefs, many long user messages) still
+    delivers its recovery capsule on the first attempt -- compacted to exact
+    references -- and the engine is prompted."""
+    from cortex_runtime.acp.orchestrating_runtime import COORDINATOR_ROLE_ID
+    from cortex_runtime.delegation import deliveries as delegation_deliveries
+    from cortex_runtime.delegation import generations as delegation_generations
+    from cortex_runtime.portable.engine_contract import StopReason as _StopReason
+    from cortex_runtime.acp.orchestrating_runtime import PromptOutcome
+    from cortex_runtime.recovery import capsule as capsule_mod
+    from test_context_generations import _make_runtime, _task_with_store
+    from test_recovery_capsule import _add_assignment
+
+    def coordinator_behavior(store, channel, session_ref, message, call_index):
+        return PromptOutcome(_StopReason.END_TURN, "ok")
+
+    def router(store, channel, session_ref, launch, instructions):
+        return coordinator_behavior if channel is not None and channel.role == "coordinator" else None
+
+    store, task_id = _task_with_store(tmp_path)
+    runtime, engine = _make_runtime(store, router)
+    cancel_event = threading.Event()
+    runtime.start_prompt(task_id, "s1", "Build a page.", lambda text: True, cancel_event)
+    session_ref = runtime._coordinator_sessions[task_id]
+    for index in range(40):
+        _add_assignment(store, task_id, index, f"Brief {index}: " + ("restated objective and goal. " * 600))
+    engine.trigger_compaction(session_ref, "tc-large-task", phase="completed")
+    monkeypatch.setattr(engine, "context_window", lambda _session_ref: 1_000_000, raising=False)
+
+    from cortex_runtime.contracts import StoreError
+
+    # Verbatim-only packaging (the pre-fix behavior) refuses this task.
+    with monkeypatch.context() as patch:
+        patch.setattr(capsule_mod, "_COMPACTION_LEVELS", (None,))
+        with pytest.raises(StoreError) as excinfo:
+            capsule_mod.build_capsule(store, task_id, dict(role="coordinator"))
+    assert str(excinfo.value) == "capsule_oversize"
+    capsule = capsule_mod.build_capsule(store, task_id, dict(role="coordinator"))
+    assert capsule["compaction"]["uncompacted_critical_bytes"] > capsule_mod.HARD_CAP_BYTES
+
+    seen = []
+    prompt_text, delivery_id, blocked = runtime._begin_generation_delivery(
+        task_id, session_ref, COORDINATOR_ROLE_ID, "continue", emit_update=seen.append,
+    )
+    assert not blocked
+    assert delivery_id is not None
+    assert "CORTEX_CAPSULE_DATA_BEGIN" in prompt_text
+    assert '"status":"referenced"' in prompt_text
+    assert capsule["capsule_revision"] in prompt_text
+    generation = delegation_generations.latest_generation(store, session_ref)
+    deliveries = delegation_deliveries.for_generation(store, "coordinator", generation["id"])
+    assert [d["state"] for d in deliveries] == ["transmitted"]
+    assert all(d["reason"] != "capsule_oversize" for d in deliveries)
+    assert not any("capsule" in text.lower() and "cap" in text.lower() for text in seen)

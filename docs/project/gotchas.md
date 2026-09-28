@@ -97,3 +97,36 @@ investigation found that the schema was visible; the actual gap was conflicting
 instructions that made an empty list appear to be the only compliant answer.
 The current contract puts the fallback at the start of each required array's
 description and repeats it in validation corrections.
+
+A recovery capsule is not always verbatim. When its critical sections exceed
+`CRITICAL_BUDGET_BYTES`, fields with `status: "referenced"` carry only a
+preview. Read the full text through the named `retrieve` tool, and verify it
+against `sha256`, before relying on anything past the preview. Never treat a
+preview as the complete requirement. `<key>_omitted` records list entries that
+were left out of a long list.
+
+A full connection is not a failure. Seven parallel workers on a four-slot
+connection once lost three of them to `capacity_timeout` →
+`fallback_refused:no_untried_authorized_route` after 600 s, while the four
+holders were live and still working. A queued open now keeps waiting while
+every slot is held by a live session. A capacity-class fallback refusal is also
+retried within `MAX_ATTEMPT_RETRIES`. Size plans to the connection's
+`max_concurrent_sessions`, or expect queuing.
+
+A read-only role (ux-designer, architect, …) can never write its output file,
+whatever scope the plan gives it: its `command_run` jail binds nothing
+writable, and `project_write` refuses. `plan_submit` refuses a read-only
+task whose scope names a path that does not exist yet
+(`read_only_scope_not_writable`). An existing directory in its scope does not
+make it writable either. Have the task return content in its report and give
+the file to a writing role in a dependent task.
+
+A review binds to an exact project digest. If another writer (the owner or
+another agent session) edits the same checkout during review, the verdict is
+refused and the review is re-bound to the new digest, at most
+`MAX_REVIEW_REBINDS` times. Avoid editing a checkout while its task is in
+review.
+
+A Paseo "cancel" (`session/cancel`) pauses the whole task and cancels every
+running and queued worker (`turn_interrupted`). That is by design, not a
+worker failure. A cancelled queued worker is reported only as cancelled.

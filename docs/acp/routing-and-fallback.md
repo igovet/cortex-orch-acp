@@ -567,6 +567,12 @@ Retries (`orchestration.recovery.retry_lost`):
   `invalid_routing_overrides`, `route_denied`) is never retried. It becomes the
   named blocker `worker_failure_not_retryable:<code>: <remediation>`, which the
   coordinator and the stop question show.
+- A `fallback_refused:<code>` failure is not retried
+  (`worker_failure_not_retryable`), except when its `failure_class` is
+  `capacity_unavailable`: a worker whose capacity wait ended and found no
+  alternate route. The same route can serve that worker again once a slot
+  frees, so it is retried as an ordinary retry, bounded by
+  `MAX_ATTEMPT_RETRIES`.
 - A failure whose attempt has a `ROUTE_UNAVAILABLE` record (matched by attempt
   id, not by error text) is retried with `route_failure=true` on the
   `ASSIGNMENT_RETRIED` event. Such a retry:

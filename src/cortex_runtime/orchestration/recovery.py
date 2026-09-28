@@ -54,7 +54,12 @@ def retry_lost(runtime,task_id,node):
         failure=db.execute("SELECT payload_json FROM task_events WHERE task_id=? AND assignment_ref=? AND event_type='assignment_failed' AND superseded=0 ORDER BY id DESC LIMIT 1",(task_id,assignment)).fetchone()
         payload=json.loads(failure[0]) if failure else {}
         reason=payload.get('error','')
-        if reason in {'refusal','authorization_loss','provider_restriction','cancellation'} or reason.startswith('fallback_refused:'):
+        # A refused fallback after a capacity wait is transient: the same
+        # route serves again once a slot frees, so it is retried (bounded by
+        # MAX_ATTEMPT_RETRIES) instead of failing the worker for good.
+        transient = payload.get('failure_class')=='capacity_unavailable'
+        if reason in {'refusal','authorization_loss','provider_restriction','cancellation'} or (
+                reason.startswith('fallback_refused:') and not transient):
             raise StoreError('worker_failure_not_retryable:'+reason)
         if reason in ROUTING_REFUSALS:
             # Named with the routes and why, so the coordinator and the user
@@ -139,7 +144,7 @@ def reconcile_results(store, task_id):
                            for c in observed.get('checks', [])]
         if observed.get('summary') != result['summary'] or observed_checks != result['checks']:
             raise StoreError('result_publication_mismatch')
-        TaskMachine(store).record_result(task_id, saved['assignment_ref'], result)
+        TaskMachine(store).record_result(task_id, saved['assignment_ref'], result, request['request_key'])
         saved.update(complete=True, receipt=dict(recorded=True, cursor=matching[0]['id'], superseded=False))
         with store.connection() as db:
             db.execute('BEGIN IMMEDIATE')

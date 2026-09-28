@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 import re
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
@@ -66,6 +67,9 @@ TRANSITIONS = {
 TERMINAL = {'FAILED', 'CANCELLED', 'COMPLETED'}
 MAX_NODES = 64
 MAX_REVIEW_CYCLES = 3
+# Times one review assignment is re-bound to a project that changed under it
+# (another writer in the same checkout) before its result is refused for good.
+MAX_REVIEW_REBINDS = 3
 # Automatic returns of a failed verification to the coordinator, per task.
 MAX_VERIFICATION_REPAIRS = 3
 # Automatic returns of a failed worker result to the coordinator, per task.
@@ -686,10 +690,22 @@ class TaskMachine:
             if task is None or task['state'] != 'PLANNING':
                 raise StoreError('plan_not_expected')
             from .policy import validate_grants
+            project = db.execute('SELECT project_root FROM tasks WHERE id=?', (channel.task_id,)).fetchone()
             for node in plan['tasks']:
                 from .gateway import READ_ONLY
                 if resolve_role(node['role']) not in READ_ONLY:
                     validate_grants(db, channel.task_id, node['scope'])
+                elif project is not None:
+                    # A read-only role's jail and tools never write, so a path
+                    # that does not exist yet can only be an output it cannot
+                    # create; accepted silently, its worker did the work and
+                    # then fought the read-only project to save it.
+                    for scope in node['scope']:
+                        if not any(mark in scope for mark in '*?[') and not os.path.lexists(os.path.join(project[0], scope)):
+                            raise StoreError('read_only_scope_not_writable', f"tasks[{node['id']}].scope", scope,
+                                             'an existing path to read',
+                                             f"{node['role']} is read-only: have it return the content in its report and "
+                                             'give the file to a writing role in a dependent task.')
             proposed_nodes=plan['tasks']
             request=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED' ORDER BY id DESC LIMIT 1",(channel.task_id,)).fetchone()
             escalation=json.loads(request[0]) if request else {}
@@ -875,7 +891,54 @@ class TaskMachine:
             db.commit()
         return ready
 
-    def record_result(self, task_id, assignment_ref, result):
+    def check_review_binding(self, task_id, assignment_ref, request_key=None):
+        """Refuse a review result whose project changed since its review
+        started, before anything of that result is published."""
+        with self.store.connection() as db:
+            db.execute('BEGIN IMMEDIATE')
+            digest = self._review_binding_tx(db, task_id, assignment_ref, request_key)
+            db.commit()
+        return digest
+
+    def _review_binding_tx(self, db, task_id, assignment_ref, request_key=None):
+        """The exact project revision a review result binds to.
+
+        The verdict binds to the revision the reviewer was told to review.
+        When the project changed since (another writer in the same checkout),
+        the review is re-bound to the current revision and this result is
+        refused with that reason: the reviewer re-checks the changes and
+        submits again with a new request_key. A refused request_key never
+        records a verdict later. Bounded by MAX_REVIEW_REBINDS; before this
+        a single change refused every later submission of the review for good.
+        """
+        from ..delegation.revision import capture_revision
+        observed = capture_revision(task_workspace.task_root(db, task_id))
+        bindings = [b for b in (json.loads(r[0]) for r in db.execute(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED' ORDER BY id", (task_id,)))
+            if b.get('assignment_ref') == assignment_ref]
+        if observed['kind'] != 'observed' or not bindings:
+            raise StoreError('review_project_revision_changed')
+        binding = bindings[-1]
+        if request_key is not None and any(b.get('refused_request_key') == request_key for b in bindings):
+            raise StoreError('review_resubmit_required', 'request_key', request_key,
+                             'a new request_key for a verdict on the current project revision',
+                             'This request was refused because the project changed during the review. Re-check the '
+                             'changes (project_git diff), then submit your verdict with a new request_key.')
+        if binding['revision_digest'] == observed['dirty_digest']:
+            return observed['dirty_digest']
+        rebinds = len(bindings) - 1
+        if rebinds >= MAX_REVIEW_REBINDS:
+            raise StoreError('review_project_revision_unstable')
+        event(db, task_id, 'REVIEW_STARTED', dict(
+            assignment_ref=assignment_ref, revision_digest=observed['dirty_digest'],
+            rebound_from=binding['revision_digest'], rebind=rebinds + 1, refused_request_key=request_key))
+        db.commit()
+        raise StoreError('review_project_revision_changed', 'project revision', binding['revision_digest'],
+                         'the project revision this review is bound to',
+                         'The project changed while you reviewed it; the review is now bound to the current revision. '
+                         'Re-check what changed (project_git diff), then submit your verdict again with a new request_key.')
+
+    def record_result(self, task_id, assignment_ref, result, request_key=None):
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
@@ -923,13 +986,7 @@ class TaskMachine:
             if node['stage'] == 'review' and result.get('verdict') not in {'APPROVE', 'REQUEST_CHANGES', 'BLOCK'}:
                 raise StoreError('review_verdict_required')
             if node['stage'] == 'review':
-                from ..delegation.revision import capture_revision
-                observed = capture_revision(task_workspace.task_root(db, task_id))
-                started = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED' ORDER BY id DESC", (task_id,)).fetchall()
-                binding = next((json.loads(r[0]) for r in started if json.loads(r[0]).get('assignment_ref') == assignment_ref), None)
-                if observed['kind'] != 'observed' or binding is None or binding['revision_digest'] != observed['dirty_digest']:
-                    raise StoreError('review_project_revision_changed')
-                result['project_digest'] = observed['dirty_digest']
+                result['project_digest'] = self._review_binding_tx(db, task_id, assignment_ref, request_key)
             db.execute('UPDATE runtime_nodes SET status=?,result_json=? WHERE task_id=? AND revision=? AND node_id=?',
                        (status, encoded(result), task_id, task['revision'], node['node_id']))
             event(db, task_id, 'WORKER_COMPLETED' if not failed else 'WORKER_FAILED',

@@ -126,6 +126,23 @@ def test_plan_wire_is_idempotent_and_does_not_start_a_worker(tmp_path):
     assert machine.context(task)['state']=='PLAN_READY'
 
 
+def test_a_read_only_role_is_refused_an_output_file_it_could_never_write(tmp_path):
+    from cortex_runtime.orchestration.state import TaskMachine
+    project,store,task,ch,secret=_bootstrap(tmp_path)
+    machine=TaskMachine(store);machine.create(task,'Review the concept.')
+    (Path(project)/'docs').mkdir(exist_ok=True)
+    node=dict(id='review',role='ux-designer',objective='Audit the concept.',dependencies=[],model='auto')
+    def submit(scope,key):
+        plan=dict(tasks=[dict(node,scope=scope)],verification=[['true']])
+        return _call(project,ch,secret,_init_and('tools/call',dict(name='plan_submit',arguments=dict(plan=plan,request_key=key))),tmp_path)[-1]
+    refused=submit(['docs','docs/review-output.md'],'with-output')
+    assert 'read_only_scope_not_writable' in json.dumps(refused), refused
+    assert machine.context(task)['state']!='PLAN_READY'
+    accepted=submit(['docs','src/**'],'read-only')
+    assert 'error' not in accepted and not accepted['result'].get('isError'), accepted
+    assert machine.context(task)['state']=='PLAN_READY'
+
+
 def test_worker_gateway_publication_and_result_cross_real_mcp_process(tmp_path):
     from cortex_runtime.trusted_channel import resolve_channel
     from runtime_scenarios import reserve_assignment

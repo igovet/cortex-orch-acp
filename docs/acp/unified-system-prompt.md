@@ -61,10 +61,23 @@ tool; the engine jail keeps the host, including the owner's home, readable. The
 listing is content placed in the system prompt, as each engine's own catalog was
 before.
 
+Workers are told to work without narration: no text between tool calls, then one final message after the last tool call, while the report and structured result still go through the runtime's tools. On 2026-09-28 Codex workers already wrote exactly one final message per session over 7-62 tool calls, while Claude workers wrote 3-39 interim messages. The coordinator has no such rule, because its text is the user's view of the task. No engine option forbids interim text; this is an instruction, and thinking is unaffected.
+
 The role instructions that follow the prompt carry the everyday Cortex skills in
 full (see [roles and delegation](roles-and-delegation.md)); the prompt tells the
 model to follow them from its first action and to read the situational ones with
 `read_skill` when their trigger matches.
+
+After the role instructions, a session that receives external MCP servers gets an
+"Attached MCP servers" section built when the session starts
+(`attached_servers_section`), the same for every engine. It names the attached
+servers; when `codebase-memory-mcp` is among them it gives the index's first step
+bound to the session's working directory (`list_projects`, the project whose root
+path is that directory, then `search_graph`, `trace_path`, `get_code_snippet`) and
+makes shell search on source code the stated fallback. A conditional "prefer the
+index when available" was not enough: on 2026-09-28 Claude sessions with the index
+attached and its lookup tools loaded still searched source with the shell, and the
+project lookup tool they would have needed first was deferred.
 
 ## Delivery
 

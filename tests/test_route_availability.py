@@ -135,7 +135,7 @@ def _running_node(machine, channel):
     return machine.claim_ready(channel.task_id, channel.channel_id)[0]
 
 
-def _fail(store, task_id, node, attempt_id, *, error, detail=None, route=None):
+def _fail(store, task_id, node, attempt_id, *, error, detail=None, route=None, failure_class=None):
     """One provisioned attempt of ``node`` that failed with ``error`` --
     and, when ``route`` is given, whose route the runtime recorded."""
     with store.connection() as db:
@@ -148,7 +148,8 @@ def _fail(store, task_id, node, attempt_id, *, error, detail=None, route=None):
         db.commit()
     delegation_events.append_event(
         store, task_id, "assignment_failed", f"assignment_failed:{node['assignment_ref']}",
-        dict(error=error, **({"detail": detail} if detail else {})), origin="runtime",
+        dict(error=error, **({"detail": detail} if detail else {}),
+             **({"failure_class": failure_class} if failure_class else {})), origin="runtime",
         assignment_ref=node["assignment_ref"],
     )
     if route:
@@ -214,3 +215,30 @@ def test_a_routing_refusal_is_a_named_blocker_never_retried(executing, code):
     with store.connection() as db:
         assert db.execute("SELECT 1 FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'",
                           (channel.task_id,)).fetchone() is None
+
+
+def test_a_fallback_refused_after_a_capacity_wait_is_retried_within_the_bound(executing):
+    """2026-09-28: three queued workers ended with
+    fallback_refused:no_untried_authorized_route (failure_class
+    capacity_unavailable); retry_lost refused them for good although the same
+    route serves again once a slot frees."""
+    store, machine, channel, runtime = executing
+    for index in range(MAX_ATTEMPT_RETRIES):
+        node = _running_node(machine, channel)
+        _fail(store, channel.task_id, node, f"xa_{index}", error="fallback_refused:no_untried_authorized_route",
+              failure_class="capacity_unavailable")
+        retry_lost(runtime, channel.task_id, node)
+    node = _running_node(machine, channel)
+    _fail(store, channel.task_id, node, "xa_last", error="fallback_refused:no_untried_authorized_route",
+          failure_class="capacity_unavailable")
+    with pytest.raises(StoreError, match="worker_retry_limit:fallback_refused:no_untried_authorized_route"):
+        retry_lost(runtime, channel.task_id, node)
+
+
+def test_a_fallback_refused_for_another_failure_class_is_still_not_retried(executing):
+    store, machine, channel, runtime = executing
+    node = _running_node(machine, channel)
+    _fail(store, channel.task_id, node, "xa_0", error="fallback_refused:no_untried_authorized_route",
+          failure_class="rate_limited")
+    with pytest.raises(StoreError, match="worker_failure_not_retryable:fallback_refused:no_untried_authorized_route"):
+        retry_lost(runtime, channel.task_id, node)

@@ -170,8 +170,12 @@ def dispatch(store, channel, operation, args):
                            (encoded(dict(saved, accepted=accepted)),
                             channel.task_id, channel.channel_id, args['request_key']))
                 db.commit()
+        if node['stage'] == 'review':
+            # A review of a project that changed since it started is re-bound
+            # and refused before its result is published (never accepted).
+            machine.check_review_binding(channel.task_id, provision['idempotency_key'], args['request_key'])
         result = _worker_publish_result(store, channel, {key: value for key, value in accepted.items() if key not in {'verdict', 'findings'}})
-        machine.record_result(channel.task_id, provision['idempotency_key'], accepted)
+        machine.record_result(channel.task_id, provision['idempotency_key'], accepted, args['request_key'])
         # The receipt shows the worker every check the runtime did not accept as claimed.
         result = dict(result, report_ref=accepted['report_ref'], checks=[{key: check[key] for key in ('name', 'outcome', 'claimed_outcome', 'evidence_gap', 'blocker', 'closed_by')
                                        if key in check} for check in accepted['checks']])

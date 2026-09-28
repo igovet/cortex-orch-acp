@@ -116,6 +116,19 @@ def reservation_for_attempt(store, attempt_id: str) -> str | None:
     return row["reservation_id"] if row is not None else None
 
 
+def active_holders(store, connection_id: str, kind: str) -> list[tuple[str, str]]:
+    """``(attempt_id, state)`` of every active (``reserved``/``ambiguous``)
+    reservation of ``kind`` on the connection: what a queued open waits
+    behind."""
+    with store.connection() as db:
+        rows = db.execute(
+            "SELECT attempt_id, state FROM capacity_reservations "
+            "WHERE connection_id=? AND kind=? AND state IN ('reserved','ambiguous')",
+            (connection_id, kind),
+        ).fetchall()
+    return [(row["attempt_id"], row["state"]) for row in rows]
+
+
 def count_active(store, connection_id: str, kind: str | None = None) -> int:
     """Active (``reserved``+``ambiguous``) reservations for the connection;
     all kinds unless ``kind`` names one."""

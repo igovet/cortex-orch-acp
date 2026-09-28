@@ -77,7 +77,11 @@ Paseo steer, which uses a concurrent configuration request and does not call
 `session/cancel`. The cancellation path records `TURN_INTERRUPTED`, not
 `USER_STEERING`; `turn_interrupted` classifies as `cancellation` even when
 an adapter prefixes it with `engine_error`, and a cancelled worker never
-enters fallback routing. A later user
+enters fallback routing. A worker whose engine open was still queued, or still
+starting, when its node was cancelled ends with `attempt` or `channel_revoked`.
+That worker gets only its `assignment_cancelled` event, never an
+`assignment_failed` as well. Its runtime node is durably `cancelled` first. A
+later user
 prompt can resume planning from durable state. That RECOVERING pass cancels
 the same assignments again (reason `replanning`); the work graph keeps an
 attempt that is already failed with its first reason and records no

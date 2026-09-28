@@ -45,7 +45,12 @@ Reservations commit before provisioning. Each connection's
 applies separately to coordinator and worker sessions, so the combined count
 may exceed that value. The project worker pool is sized to 64, the validated
 per-connection maximum; it does not tighten any single connection's limit,
-though it can cap aggregate workers across connections. Scope overlap
+though it can cap aggregate workers across connections. A worker queued for a
+full connection waits in bounded periods (`capacity_queue_timeout_seconds`,
+600 s); a period ends in `capacity_timeout` only when some slot is held by a
+reservation that is ambiguous or whose session is not observed alive. While every
+slot is held by a live session, the wait continues, because that work will release
+the slot. Cancellation still ends the wait at once. Scope overlap
 serializes writing nodes; review-stage nodes and READ_ONLY roles neither block nor are blocked by overlapping scopes. Runtime routing resolves model and
 effort from the current tier, policy, catalog and plan usage; plan hints remain
 advisory. All 23 specialist/consultant profiles remain available.
@@ -95,7 +100,17 @@ unavailable observation, or a revision that already has a reviewer (a fix cycle)
 schedules review. Retried nodes and fix nodes are covered because the decision
 compares the whole project, not individual worker claims. No model argument or
 hint can waive review; `EXECUTING → VERIFYING` is refused without the runtime's own
-record. APPROVE proceeds
+record. A review result binds to the project digest recorded in `REVIEW_STARTED`.
+If the project changed while the review ran, for example because another writer
+edited the same checkout, `result_submit` refuses the verdict with
+`review_project_revision_changed` before publishing anything. It then records a new
+`REVIEW_STARTED` for the current digest (`rebound_from`, `rebind`,
+`refused_request_key`). The reviewer re-checks the changes and submits with a new
+request_key. The refused request_key never records a verdict
+(`review_resubmit_required`). After `MAX_REVIEW_REBINDS` (3) re-bindings, a further
+change is refused as `review_project_revision_unstable`. Before this, the binding
+was never refreshed, so one change refused every later submission of that review.
+APPROVE proceeds
 to verification; REQUEST_CHANGES creates fix nodes followed by a fresh reviewer;
 BLOCK stops acceptance. Three unsuccessful review cycles block further automatic
 work. The loop never treats an ordinary final model message as a worker result.

@@ -79,3 +79,10 @@ def test_long_descriptions_are_cut_at_the_agent_skills_limit(tmp_path):
     _skill(tmp_path, ".agents/skills", "long", "x" * 3000)
     line = next(l for l in cortex_system_prompt("worker", str(tmp_path), environ={}).splitlines() if "`long`" in l)
     assert line.endswith(": " + "x" * 1024)
+
+
+def test_only_workers_are_told_to_work_without_narration():
+    worker = cortex_system_prompt("worker", None, environ={})
+    coordinator = cortex_system_prompt("coordinator", None, environ={})
+    assert "Work without narration" in worker and "write one final message" in worker
+    assert "Work without narration" not in coordinator and "@@" not in worker + coordinator

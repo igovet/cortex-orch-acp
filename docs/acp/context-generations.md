@@ -88,7 +88,11 @@ initiated on the same session — evidence of continuation, not of use).
   its own token/turn-request limit right after the delivery turn both mark
   the delivery `blocked` with a named reason; `record_built` bounds retries
   (`MAX_DELIVERY_RETRIES = 3`) on the next ordinary continuation — never an
-  automatic loop within one turn.
+  automatic loop within one turn. The capsule's critical sections are
+  bounded by deterministic compaction (see
+  [recovery capsules](recovery-capsules.md#size-bounds)), so
+  `capsule_oversize` is a last-resort guard that the shipped compaction
+  levels cannot reach.
 
 A model's own turn text is never consulted by any of the above — every
 transition takes an explicit `evidence_source` naming the technical channel

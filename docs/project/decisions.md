@@ -1,3 +1,66 @@
+## 2026-09-28 queued, cancelled and re-reviewed workers recover instead of failing
+
+Paseo session 7bda9342 (task t_e1ff07ff2819) lost workers in three ways. All
+evidence was read from a copy of the project store.
+
+- **Capacity.** Seven Opus workers ran on a four-slot connection. The three queued
+  workers timed out after 600 s (`capacity_timeout`) while the four live holders
+  still worked. With no alternate route, fallback was refused, and `retry_lost`
+  treated `fallback_refused:*` as final. A queued open now extends its wait while
+  every slot is held by a live session. The timeout still applies behind an
+  ambiguous or unobserved holder. A capacity-class fallback refusal is retried
+  within `MAX_ATTEMPT_RETRIES`.
+- **Read-only roles given output files.** The ux-designer workers finished their
+  audits and then could not save them: the role is read-only, so its jail binds
+  nothing writable. A concurrent change to this checkout now makes
+  `plan_submit` refuse nonexistent paths in a read-only task's scope
+  (`read_only_scope_not_writable`).
+- **User cancel.** A Paseo cancel at 08:36:19 UTC cancelled the remaining
+  workers by design. The two still queued were also reported as
+  `assignment_failed` (`attempt`, `channel_revoked`); that duplicate report is
+  now suppressed for a durably cancelled node.
+
+Separately, a review result was refused for good once the project changed during
+review, because the `REVIEW_STARTED` binding was never refreshed. A changed
+project now re-binds the review, refuses that request before publication and
+asks for a new submission. This is bounded by `MAX_REVIEW_REBINDS`.
+
+## 2026-09-28 bounded recovery-capsule critical sections
+
+A long coordinator task got stuck on `capsule_oversize`. Its critical capsule
+sections held about 515 KB, above the 400 KB hard cap. Most of that, about
+450 KB, was 40 inlined assignment briefs. The size is deterministic, so bounded
+delivery retries could never succeed. The critical sections are now bounded by
+construction:
+
+- Content within 96 KB is delivered verbatim.
+- Otherwise, a deterministic escalating compaction level replaces large text
+  with exact references: sha256, size, a bounded preview, a `truncated` marker
+  and the retrieving tool.
+- Only at the later levels are long lists trimmed. Trimmed entries are named in
+  explicit `<key>_omitted` records.
+- The latest user message and the task goal keep the largest inline (`protected`)
+  allowance among the tiered fields.
+- The hard cap remains only a last-resort guard.
+- The delivery retry path is unchanged.
+
+**2026-09-28 follow-up (P1 fix, review r_f5018dc7eebf):** a worker recipient's
+own `own_assignment.title`/`brief`/`acceptance` and its own runtime node's
+`objective` are never subject to the tiered inline allowances above -- no
+worker-available tool can retrieve them, so compacting them into a
+`status="referenced"`/`retrieve.tool=null` object would strip a recovered
+worker of the only readable copy of its mandatory objective. Those fields now
+stay byte-for-byte verbatim at every compaction level regardless of size;
+everything else in the critical sections compacts harder in their place to
+still fit `CRITICAL_BUDGET_BYTES`. Only if the worker's own assignment text
+alone still exceeds `HARD_CAP_BYTES` after the most aggressive level does
+`build_capsule` raise the explicit `capsule_oversize` error -- never a silent
+reference. A coordinator's cross-referenced assignment brief/node objective is
+unaffected (still resolvable via `task_get_context`, so it still compacts
+normally).
+
+See `docs/acp/recovery-capsules.md` ("Size bounds").
+
 ## 2026-09-28 orchestration overhead and evidence optimizations
 
 The completed optimization set keeps durable task state and existing evidence

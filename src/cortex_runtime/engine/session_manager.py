@@ -701,12 +701,12 @@ class EngineSessionManager:
             if not isinstance(session_new_meta, dict):
                 raise _fail("invalid_field", "session_new_meta must be a dict.", field="session_new_meta")
             params["_meta"] = session_new_meta
-        if external_servers and session_new_meta is not None and self._record.engine == "claude-agent-acp":
-            # Claude defers MCP tool schemas behind ToolSearch; name the
-            # servers actually attached here so the model knows to load them.
-            from .claude_adapter_acp import with_external_mcp_instructions
-            params["_meta"] = with_external_mcp_instructions(
-                session_new_meta, [server["name"] for server in external_servers])
+        if external_servers and session_new_meta is not None:
+            # Name the servers really attached here, for every engine, with the
+            # code index's first step bound to this session's working directory.
+            from .unified_system_prompt import with_attached_servers
+            params["_meta"] = with_attached_servers(
+                session_new_meta, [server["name"] for server in external_servers], self._workspace_root)
         with self._lock:
             result = self._client.call("session/new", params, timeout=self._call_timeout)
             wire_session_id = result.get("sessionId")

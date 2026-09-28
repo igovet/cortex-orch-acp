@@ -4747,6 +4747,16 @@ class OrchestratingRuntime:
         )
         return new_session_ref, True, new_attempt_id
 
+    def _assignment_node_cancelled(self, task_id: str, assignment_ref: str) -> bool:
+        """The runtime node carrying ``assignment_ref`` was durably cancelled
+        (turn interruption, replanning, stop)."""
+        with self._store.connection() as db:
+            row = db.execute(
+                "SELECT 1 FROM runtime_nodes WHERE task_id=? AND assignment_ref=? AND status='cancelled'",
+                (task_id, assignment_ref),
+            ).fetchone()
+        return row is not None
+
     def _provision_and_prompt(self, task_id, coordinator_channel, payload, cancel_event):
         from ..orchestration.limits import assignment_current
         if not assignment_current(self._store,task_id,payload['assignment_ref']): return
@@ -4811,6 +4821,12 @@ class OrchestratingRuntime:
                 failure_code = str(error)
             if failure_code is None:
                 raise
+            if self._assignment_node_cancelled(task_id, assignment_ref):
+                # A cancelled assignment's queued open ends with the cancel
+                # itself (``attempt``) or its revoked channel: the durable
+                # cancellation already says what happened. Reporting it
+                # also as a failure showed cancelled workers as errored.
+                return
             result = None
             if failure_code == "capacity_timeout":
                 # T027: this delegation's own attempt was allocated before

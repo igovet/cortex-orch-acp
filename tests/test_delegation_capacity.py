@@ -225,3 +225,71 @@ def test_reserve_rejects_unknown_kind(tmp_path):
     except ValueError:
         return
     raise AssertionError("expected ValueError for an unknown reservation kind")
+
+
+def _queue_behind(adapter, connection_id, task_id, attempt_id):
+    outcome = []
+
+    def open_queued():
+        try:
+            outcome.append(adapter._reserve_capacity_blocking(
+                connection_id, task_id, attempt_id, {"assignment_id": "as_queued"}, limit=2,
+            ))
+        except BaseException as error:
+            outcome.append(error)
+
+    thread = threading.Thread(target=open_queued)
+    thread.start()
+    return thread, outcome
+
+
+def test_queued_worker_keeps_waiting_while_live_sessions_hold_every_slot(tmp_path, monkeypatch):
+    """2026-09-28: seven parallel workers on a four-slot connection; the three
+    queued ones failed with capacity_timeout after 600 s while the four live
+    siblings were still working. Live holders now extend the wait."""
+    store, task_id = _task(tmp_path)
+    connection_id = "cn_live_holders"
+    holders = [capacity.reserve(store, connection_id, task_id, f"xa_live_{i}", "worker", limit=2) for i in range(2)]
+    assert all(holders)
+    adapter = EngineSessionManagerAdapter(
+        lambda _: None, lambda _: str(tmp_path), store=store, capacity_queue_timeout_seconds=0.1,
+    )
+    monkeypatch.setattr(adapter, "lookup_owned", lambda attempt_id: "alive" if attempt_id.startswith("xa_live_") else "absent")
+    thread, outcome = _queue_behind(adapter, connection_id, task_id, "xa_waiting")
+    try:
+        time.sleep(0.8)  # eight queue periods
+        assert thread.is_alive() and outcome == [], outcome
+        capacity.release_confirmed(store, holders[0])
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert len(outcome) == 1 and isinstance(outcome[0], str), outcome
+    finally:
+        adapter.shutdown()
+        thread.join(timeout=5)
+
+
+def test_queued_worker_still_times_out_behind_a_holder_not_observed_alive(tmp_path, monkeypatch):
+    from cortex_runtime.delegation.live_adapters import QueuedOpenCancelled
+
+    store, task_id = _task(tmp_path)
+    for connection_id, dead_state in (("cn_absent", "reserved"), ("cn_ambiguous", "ambiguous")):
+        live = capacity.reserve(store, connection_id, task_id, f"xa_live_{connection_id}", "worker", limit=2)
+        other = capacity.reserve(store, connection_id, task_id, f"xa_other_{connection_id}", "worker", limit=2)
+        assert live and other
+        if dead_state == "ambiguous":
+            capacity.mark_ambiguous(store, other)
+        adapter = EngineSessionManagerAdapter(
+            lambda _: None, lambda _: str(tmp_path), store=store, capacity_queue_timeout_seconds=0.1,
+        )
+        # An ambiguous holder may even look alive: it is never waited on.
+        monkeypatch.setattr(adapter, "lookup_owned", lambda attempt_id, cid=connection_id, state=dead_state: (
+            "alive" if attempt_id.startswith("xa_live_") or state == "ambiguous" else "absent"))
+        thread, outcome = _queue_behind(adapter, connection_id, task_id, f"xa_waiting_{connection_id}")
+        try:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+            assert len(outcome) == 1 and isinstance(outcome[0], QueuedOpenCancelled), outcome
+            assert outcome[0].kind == "capacity_timeout"
+        finally:
+            adapter.shutdown()
+            thread.join(timeout=5)

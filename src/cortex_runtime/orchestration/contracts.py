@@ -42,6 +42,12 @@ VERIFICATION_SOURCE = (
 )
 
 
+#: Roles that never change the project: their engine jail and tools are
+#: read-only whatever scope a plan requests for them.
+READ_ONLY = {'worker-architect', 'worker-ux-designer', 'worker-code-reviewer', 'worker-senior-consultant', 'senior-consultant',
+             'worker-explorer', 'worker-planner', 'worker-security-auditor', 'worker-accessibility-auditor'}
+
+
 def obj(properties, required=None):
     return dict(type='object', description='Structured fields; use the exact advertised properties.', properties=properties,
                 required=list(properties) if required is None else required, additionalProperties=False)
@@ -52,7 +58,9 @@ NODE = obj(dict(id=text('Unique plan node name: a letter, then letters, digits, 
                 dependencies=array(text('Predecessor node name.', 64),
                                    'Names (the id values) of predecessor tasks in this same plan.'),
                 scope=array(text('Requested project-relative path or glob; \'.\' is the whole project. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write. Runtime policy decides access.', 512),
-                            'Project-relative paths or globs this task needs to read or change; required even for an investigation-only task (\'.\' is the whole project). Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git.',
+                            'Project-relative paths or globs this task needs to read or change; required even for an investigation-only task (\'.\' is the whole project). Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. '
+                            'Read-only roles (' + ', '.join(sorted({r.removeprefix('worker-') for r in READ_ONLY})) + ') never create or change files, so their scope names only existing paths to read; '
+                            'when such a task must produce a file, have it return the content in its report and give the file to a writing role in a dependent task.',
                             minimum=1),
                 complexity=dict(type='string', enum=['low', 'normal', 'high'],
                                 description='How hard this task is, judged from the work itself: low for a narrow lookup or mechanical change, '

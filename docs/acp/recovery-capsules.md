@@ -31,6 +31,9 @@ returns a plain JSON-serializable dict:
   "capsule_revision": "sha256...", # over the canonical JSON of everything
                                     # above plus every section
   "sections": { ...nine sections, see below... },
+  "compaction": {"level": 0..7, "max_level": 7, "critical_budget_bytes": 96000,
+                 "uncompacted_critical_bytes": N, "referenced_fields": N,
+                 "omitted_entries": N, "note": "..."},  # see "Size bounds"
   "size_estimate": {"bytes": N, "approx_tokens": N//4, "critical_bytes": N, "oversize": false},
 }
 ```
@@ -186,16 +189,107 @@ cannot change any of them
 
 ## Size bounds
 
-`HARD_CAP_BYTES` (400 KB) bounds the four **critical** sections (`identity`,
-`constraints`, `pipeline_and_assignments`, `drafts_and_open_actions`)
-together; if they alone exceed the cap, `build_capsule` raises
-`StoreError('capsule_oversize', ...)` with the actual byte count rather
-than ever truncating a critical constraint. Non-critical sections
-(`publications_and_checks`, `newer_events`) already store only bounded
-refs+digests (never raw report bodies), and `newer_events`/coordinator
-decisions are additionally capped at 50 entries with an explicit
-`truncated`/`total` note pointing at the paginated `list_events`/
-`list_sources` tools for the rest.
+The four **critical** sections (`identity`, `constraints`,
+`pipeline_and_assignments`, `drafts_and_open_actions`) are bounded by
+construction, so a long task can no longer get stuck on
+`capsule_oversize`. A real coordinator session reached that state after
+~40 assignments: `pipeline_and_assignments.assignments` inlined every
+assignment's full `brief`. That came to about 450 KB of a 515 KB critical
+payload, and because the size is deterministic, the bounded delivery
+retries could never succeed.
+
+`build_capsule` first measures the verbatim critical sections. If their
+canonical JSON is at most `CRITICAL_BUDGET_BYTES` (96 KB), the capsule is
+verbatim (compaction level 0). Otherwise it applies the first of the
+deterministic, escalating levels in `_COMPACTION_LEVELS` that fits:
+
+| Level | Large text inline allowance (protected / active / other) | Lists |
+| --- | --- | --- |
+| 0 | verbatim | every entry |
+| 1 | 64 KB / 16 KB / 4 KB | every entry |
+| 2 | 32 KB / 4 KB / 512 B | every entry |
+| 3 | 16 KB / 1 KB / reference only | every entry |
+| 4 | 16 KB / reference only / reference only | every entry |
+| 5 | 8 KB / reference only / reference only | 50 kept, up to 500 omitted refs named |
+| 6 | 8 KB / reference only / reference only | 20 kept, up to 200 omitted refs named |
+| 7 | 4 KB / reference only / reference only | 5 kept, first/last omitted ref named |
+
+Priority tiers keep the most important content inline for longest:
+
+- **protected**: the latest user message and the latest unsuperseded
+  one, the latest answered question, and the task goal.
+- **active**: other unsuperseded user messages, answered questions,
+  unfinished assignments, pending/running/failed nodes and open
+  questions.
+- **other**: superseded messages, and assignments and nodes that are
+  finished or cancelled.
+
+A worker recipient's own `own_assignment.title`/`brief`/`acceptance` and
+its own `pipeline_and_assignments.runtime.nodes[].objective` (the runtime
+filters that list to exactly this worker's own node) are never subject
+to any of the tiers above: no worker-available, channel-authorized tool
+returns those fields, so replacing them with a `retrieve.tool=null`
+reference would strip a recovered worker of the only readable copy of
+its mandatory objective. They stay byte-for-byte verbatim at *every*
+compaction level, however large, while every other critical-section
+field compacts harder in their place to still fit under
+`CRITICAL_BUDGET_BYTES`. Only if the worker's own assignment text alone
+still exceeds `HARD_CAP_BYTES` after the most aggressive level does
+`build_capsule` raise the explicit `capsule_oversize` error described
+below -- never a silent reference. (A coordinator's cross-referenced
+assignment brief and node objective, by contrast, are resolvable via
+`task_get_context`, so they still compact normally.)
+
+Every other string is clamped by a generic per-level allowance (32 KB
+down to 512 B). Text of 512 bytes or less always stays inline.
+
+Nothing is dropped silently:
+
+- A text over its allowance becomes a reference record
+  `{"status": "referenced", "truncated": true, "trust_label", "sha256",
+  "size_bytes", "preview", "preview_bytes", "retrieve"}`. `sha256` and
+  `size_bytes` identify the exact full text, and `preview` is its prefix.
+  `retrieve` names the tool that returns the full text:
+  - a user message: `read_source` with `<report_id>:-1`;
+  - an answered question: `read_source` with `<question_id>:answer`;
+  - the goal: `read_source`, when it equals a user message;
+  - a coordinator's assignment brief, node objective or goal:
+    `task_get_context`.
+
+  When no tool is available to the recipient, `retrieve` says so
+  explicitly with `tool: null`. A worker's own `own_assignment`
+  title/brief/acceptance and its own node's `objective` are never turned
+  into such a `tool: null` reference (see above) -- `tool: null` remains
+  possible for other fields, such as a worker's own open-question text.
+- A trimmed list keeps its highest-priority, newest entries in original
+  order. A sibling `<key>_omitted` record (`status: "omitted"`) states the
+  omitted `count`, `total`, their `sha256` digest, their refs (or only the
+  first/last at the last level) and the listing tool. The latest user
+  message is always kept.
+- `render_capsule` prints the reference header as plain structure. It
+  wraps the preview in the usual data block with the original field's
+  trust label, so fences and delimiter defanging still apply.
+- `capsule["compaction"]` records the applied level and counts. The level
+  and every reference are part of the `capsule_revision` digest. They
+  are a pure function of durable state (no wall clock), so identical
+  state gives an identical revision and rendered text, including after a
+  restart.
+
+The last level is bounded by a constant independent of task size.
+Measured results:
+
+- The real task above lands on level 2 at about 94 KB.
+- A synthetic production-shaped task (40 long briefs, about 760 KB
+  verbatim) lands on level 4 with every entry listed.
+- Synthetic tasks of 2 MB and 14 MB verbatim land on level 6 at
+  60–77 KB. `HARD_CAP_BYTES`
+(400 KB) stays only as a last-resort guard: `capsule_oversize` is raised
+only if even the most aggressive level exceeds it, which cannot happen
+with the shipped levels. Non-critical sections (`publications_and_checks`,
+`newer_events`) already store only bounded refs and digests (never raw
+report bodies). `newer_events` and coordinator decisions are additionally
+capped at 50 entries, with an explicit `truncated`/`total` note pointing
+at the paginated `list_events`/`list_sources` tools for the rest.
 
 ## `read_capsule` MCP tool
 

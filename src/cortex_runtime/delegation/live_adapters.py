@@ -2098,10 +2098,34 @@ class EngineSessionManagerAdapter:
             # so a queued worker only ever waits for another worker's
             # release, the bounded queue deadline, or cancellation.
             if time.monotonic() > deadline:
+                # Slots held by sessions still observed alive are real work
+                # that will release them: keep waiting another period. Seven
+                # parallel audits on a four-slot connection failed three
+                # workers here after 600 s while four live siblings worked
+                # (2026-09-28). Only a slot whose holder is not observed
+                # alive (ambiguous, leaked) ends the wait.
+                if self._capacity_held_by_live_sessions(connection_id, kind):
+                    deadline = time.monotonic() + self._queue_timeout_seconds
+                    continue
                 raise QueuedOpenCancelled("capacity_timeout")
             with self._activity_cond:
                 self._activity_cond.wait(timeout=backoff)
             backoff = min(backoff * 2, 1.0)
+
+    def _capacity_held_by_live_sessions(self, connection_id: str, kind: str) -> bool:
+        """True when every active reservation of ``kind`` on the connection
+        is ``reserved`` by a session :meth:`lookup_owned` observes alive.
+        An ambiguous reservation or a holder not observed alive (absent,
+        unknown) is not progress to wait for."""
+        from . import capacity as delegation_capacity
+
+        if self._store is None:
+            return False
+        holders = delegation_capacity.active_holders(self._store, connection_id, kind)
+        return bool(holders) and all(
+            state == "reserved" and self.lookup_owned(attempt_id) == "alive"
+            for attempt_id, state in holders
+        )
 
     def _notify_activity(self) -> None:
         with self._activity_cond:

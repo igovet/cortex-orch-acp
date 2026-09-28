@@ -347,50 +347,12 @@ def claude_native_subagent_restriction_meta(*, role: str = "worker", effort: str
     return {"claudeCode": {"options": options}}
 
 
-CODEBASE_MEMORY_SERVER = "codebase-memory-mcp"
-
-
-def external_mcp_instructions(server_names) -> str | None:
-    """A short system-prompt note naming the external MCP servers actually
-    attached to one Claude session, or ``None`` when there are none.
-
-    Claude defers MCP tool schemas behind its native ``ToolSearch``, so an
-    attached server's tools are invisible until the model looks them up;
-    observed Claude workers almost never did, while Codex workers (which see
-    the tools directly) used the code graph routinely. Only names are
-    listed; argument contracts stay in each server's advertised schemas.
-    """
-    names = sorted({name for name in server_names or () if isinstance(name, str) and name})
-    if not names:
-        return None
-    lines = [
-        "External MCP servers attached to this session: " + ", ".join(names) + ".",
-        "Their tools are deferred: load them with ToolSearch (query the server name) before first use.",
-    ]
-    if CODEBASE_MEMORY_SERVER in names:
-        lines.append(
-            "Prefer codebase-memory-mcp graph tools for structural code discovery (definitions, "
-            "callers, dependencies, impact) before broad grep or whole-file reads."
-        )
-    return "\n".join(lines)
-
-
-def with_external_mcp_instructions(meta: dict, server_names) -> dict:
-    """The qualified ``session/new`` ``meta`` with
-    :func:`external_mcp_instructions` appended to its ``systemPrompt``
-    append form (created when absent). Never mutates ``meta``."""
-    note = external_mcp_instructions(server_names)
-    result = dict(meta)
-    if note is None:
-        return result
-    prompt = result.get("systemPrompt")
-    if prompt is None:
-        result["systemPrompt"] = {"append": note}
-    elif isinstance(prompt, str):
-        result["systemPrompt"] = prompt + "\n\n" + note
-    elif isinstance(prompt, dict) and isinstance(prompt.get("append"), str):
-        result["systemPrompt"] = {**prompt, "append": prompt["append"] + "\n\n" + note}
-    return result
+# The attached-server note is engine-neutral now; kept importable here.
+from .unified_system_prompt import (  # noqa: E402
+    CODE_INDEX_SERVER as CODEBASE_MEMORY_SERVER,
+    attached_servers_section as external_mcp_instructions,
+    with_attached_servers as with_external_mcp_instructions,
+)
 
 
 #: What the unified Cortex prompt replaces that Claude Code would still add on

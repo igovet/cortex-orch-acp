@@ -37,6 +37,14 @@ worker's user-constraints section always includes every retained
 attachment mechanism in this codebase -- see ``constraints`` section
 docstring below for the documented consequence of that gap).
 
+Size (see ``_COMPACTION_LEVELS``/``_bounded_sections``): the critical
+sections are verbatim while they fit :data:`CRITICAL_BUDGET_BYTES`;
+beyond that a deterministic escalating compaction level replaces large text
+with an exact reference (sha256, size, bounded preview, ``truncated``
+marker, retrieving tool) and, only at the later levels, trims long lists
+into explicit ``<key>_omitted`` records -- never a silent drop and never an
+unconditional ``capsule_oversize`` refusal for a large task.
+
 Untrusted content (a worker's own report title/summary/checks, a source
 attachment's descriptor) is only ever included as bounded fields/refs, and
 :func:`render_capsule` wraps every piece of recipient-supplied *text*
@@ -67,11 +75,46 @@ from .token_budget import estimate_tokens as _estimate_tokens
 
 CAPSULE_FORMAT_VERSION = 1
 
-# A capsule whose *critical* sections alone exceed this many bytes refuses
-# outright (``capsule_oversize``) rather than ever dropping/truncating a
-# critical section (identity, constraints, the recipient's own scope, and
-# open/uncertain actions -- see ``_CRITICAL_SECTION_NAMES``).
+# Last-resort guard: a capsule whose *critical* sections still exceed this
+# many bytes after the most aggressive compaction level refuses outright
+# (``capsule_oversize``). Bounded compaction (see ``_COMPACTION_LEVELS``)
+# keeps the critical sections under :data:`CRITICAL_BUDGET_BYTES` for any
+# task size, so this guard is unreachable in practice.
 HARD_CAP_BYTES = 400_000
+
+# Target size of the canonical JSON of the critical sections. The capsule is
+# built verbatim when it fits; otherwise the first compaction level that fits
+# is used (see ``_compact_critical_sections``). Well under HARD_CAP_BYTES so
+# the delivery token budget keeps headroom too.
+CRITICAL_BUDGET_BYTES = 96_000
+
+# Deterministic escalating compaction levels. Level 0 is the verbatim
+# capsule. Each later level lowers the inline byte allowance of large text
+# fields by priority tier -- ``protected`` (the latest user constraint and
+# answer, the task goal, the recipient's own assignment/node), ``active``
+# (unsuperseded constraints, answered questions, unresolved assignments and
+# nodes, open questions) and ``other`` (superseded constraints, finished
+# assignments/nodes) -- and the byte allowance of every other string
+# (``generic``). Level 4 references every non-protected large text while
+# still listing every entry. Only from level 5 do long lists keep just
+# ``keep`` entries (highest priority first, newest first) and list the
+# omitted ones in a sibling ``<key>_omitted`` record; ``omitted_refs`` bounds
+# how many omitted identifiers that record names (the last level names only
+# the first/last). The last level is bounded by a constant independent of
+# task size, so the HARD_CAP_BYTES guard below it cannot trigger in practice.
+# Text over its allowance becomes an exact reference (see ``_text_ref``):
+# sha256 and byte size of the full text, a bounded preview, an explicit
+# ``truncated`` marker and the tool that returns the full text.
+_COMPACTION_LEVELS = (
+    None,
+    dict(protected=65_536, active=16_384, other=4_096, generic=32_768, keep=None, omitted_refs=None),
+    dict(protected=32_768, active=4_096, other=512, generic=8_192, keep=None, omitted_refs=None),
+    dict(protected=16_384, active=1_024, other=0, generic=2_048, keep=None, omitted_refs=None),
+    dict(protected=16_384, active=0, other=0, generic=1_024, keep=None, omitted_refs=None),
+    dict(protected=8_192, active=0, other=0, generic=512, keep=50, omitted_refs=500),
+    dict(protected=8_192, active=0, other=0, generic=512, keep=20, omitted_refs=200),
+    dict(protected=4_096, active=0, other=0, generic=512, keep=5, omitted_refs=0),
+)
 
 # Non-critical sections (publications/checks, newer events, role/tool
 # access) are bounded to this many *entries* before switching to a
@@ -955,6 +998,337 @@ def _apply_candidate_summary(sections: dict, recipient: Mapping[str, Any], candi
 
 
 # --------------------------------------------------------------------
+# bounded critical sections
+# --------------------------------------------------------------------
+
+_TERMINAL_ASSIGNMENT_STATES = frozenset({"result_published", "cancelled"})
+_ACTIVE_NODE_STATUSES = frozenset({"pending", "running", "failed"})
+# Text at or under this size always stays inline: a reference record costs
+# about as much as the text itself.
+_MIN_REFERENCE_BYTES = 512
+_NO_TOOL_NOTE = (
+    "No tool available to this recipient returns this exact field; the sha256 and size_bytes "
+    "identify the full text."
+)
+
+
+def _critical_bytes(sections: Mapping[str, Any]) -> int:
+    return len(_canonical_json({name: sections[name] for name in _CRITICAL_SECTION_NAMES}).encode("utf-8"))
+
+
+def _is_marker(value: Any) -> bool:
+    return isinstance(value, dict) and value.get("status") in ("referenced", "omitted")
+
+
+def _text_ref(text: Any, cap: int | None, trust_label: str, retrieve: dict) -> Any:
+    """``text`` unchanged when it fits ``cap`` bytes (or is too small for a
+    reference to save space); otherwise an exact reference to it with a
+    preview of at most ``cap`` bytes."""
+    if cap is None or not isinstance(text, str):
+        return text
+    data = text.encode("utf-8")
+    if len(data) <= max(cap, _MIN_REFERENCE_BYTES):
+        return text
+    preview = data[:cap].decode("utf-8", errors="ignore")
+    return dict(
+        status="referenced", truncated=True, trust_label=trust_label,
+        sha256=_sha256_hex(data), size_bytes=len(data),
+        preview=preview, preview_bytes=len(preview.encode("utf-8")), retrieve=retrieve,
+    )
+
+
+class _Handled(set):
+    """``(id(container), key)`` of every field a field-specific pass already
+    bounded, so the generic safety net never re-clamps a protected text."""
+
+    def bound(self, container: dict, key: str, cap: int | None, trust_label: str, retrieve: dict) -> None:
+        if key not in container:
+            return
+        container[key] = _text_ref(container.get(key), cap, trust_label, retrieve)
+        self.add((id(container), key))
+
+
+def _select_entries(items: list, keep: int | None, priority, ref_of, omitted_refs: int | None, retrieve: dict):
+    """Keep at most ``keep`` entries of ``items`` (lowest ``priority(index)``
+    value first, then newest), preserving their original order. Returns the kept
+    list and an explicit omission record (or ``None``) naming what was left
+    out and where to read it."""
+    if keep is None or len(items) <= keep:
+        return items, None, list(range(len(items)))
+    order = sorted(range(len(items)), key=lambda index: (priority(index), -index))
+    kept_indices = sorted(order[:keep])
+    kept_set = set(kept_indices)
+    omitted = [items[index] for index in range(len(items)) if index not in kept_set]
+    refs = [ref_of(item) for item in omitted]
+    record = dict(
+        status="omitted", count=len(omitted), total=len(items), kept=len(kept_indices),
+        sha256=_digest_of(omitted), retrieve=retrieve,
+    )
+    if omitted_refs:
+        record["refs"] = refs[:omitted_refs]
+        record["refs_truncated"] = len(refs) > omitted_refs
+    else:
+        record["first_ref"] = refs[0]
+        record["last_ref"] = refs[-1]
+    return [items[index] for index in kept_indices], record, kept_indices
+
+
+def _goal_retrieve(goal: Any, constraints: Mapping[str, Any], recipient: dict) -> dict:
+    """The exact source text the goal equals, when there is one; otherwise
+    the coordinator's task context (workers have no such tool)."""
+    if isinstance(goal, str):
+        digest = _sha256_hex(goal.encode("utf-8"))
+        for item in constraints.get("items", []) if isinstance(constraints, dict) else ():
+            if item.get("digest") == digest and item.get("report_id"):
+                return dict(tool="read_source", source_ref=f"{item['report_id']}:-1")
+    if recipient["role"] == "coordinator":
+        return dict(tool="task_get_context", field="goal")
+    return dict(tool=None, note=_NO_TOOL_NOTE)
+
+
+def _compact_constraints(section: dict, level: dict, handled: _Handled) -> None:
+    items = section.get("items") or []
+    if items:
+        latest = max(range(len(items)), key=lambda index: items[index]["revision"])
+        unsuperseded = [index for index, item in enumerate(items) if not item.get("superseded")]
+        latest_live = unsuperseded[-1] if unsuperseded else latest
+        tiers = [
+            0 if index in (latest, latest_live) else (1 if not item.get("superseded") else 2)
+            for index, item in enumerate(items)
+        ]
+        kept, record, kept_indices = _select_entries(
+            items, level["keep"], tiers.__getitem__, lambda item: f"{item['report_id']}:-1",
+            level["omitted_refs"], dict(tool="list_sources", then="read_source"),
+        )
+        for index, item in zip(kept_indices, kept):
+            cap = (level["protected"], level["active"], level["other"])[tiers[index]]
+            if isinstance(item.get("text"), str):
+                handled.bound(
+                    item, "text", cap, item.get("trust_label", "user_direct"),
+                    dict(tool="read_source", source_ref=f"{item['report_id']}:-1"),
+                )
+        section["items"] = kept
+        if record is not None:
+            section["items_omitted"] = record
+    answers = section.get("answered_questions") or []
+    if answers:
+        latest_answer = len(answers) - 1
+        kept, record, kept_indices = _select_entries(
+            answers, level["keep"], lambda index: 0 if index == latest_answer else 1,
+            lambda answer: answer.get("source_ref"), level["omitted_refs"],
+            dict(tool="list_sources", then="read_source"),
+        )
+        for index, answer in zip(kept_indices, kept):
+            cap = level["protected"] if index == latest_answer else level["active"]
+            retrieve = dict(tool="read_source", source_ref=answer.get("source_ref"))
+            handled.bound(answer, "question_text", cap, "derived_summary", retrieve)
+            handled.bound(answer, "answer_text", cap, answer.get("trust_label", "user_direct"), retrieve)
+        section["answered_questions"] = kept
+        if record is not None:
+            section["answered_questions_omitted"] = record
+
+
+def _compact_pipeline(section: dict, constraints: Mapping[str, Any], recipient: dict, level: dict, handled: _Handled) -> None:
+    coordinator = recipient["role"] == "coordinator"
+    runtime = section.get("runtime")
+    if isinstance(runtime, dict):
+        handled.bound(
+            runtime, "goal", level["protected"], "user_direct", _goal_retrieve(runtime.get("goal"), constraints, recipient),
+        )
+        nodes = runtime.get("nodes") or []
+
+        def node_tier(node):
+            if not coordinator:
+                return 0
+            return 1 if node.get("status") in _ACTIVE_NODE_STATUSES else 2
+
+        def node_retrieve(node):
+            if coordinator:
+                return dict(tool="task_get_context", field="nodes", node_id=node.get("node_id"))
+            return dict(tool=None, note=_NO_TOOL_NOTE)
+
+        kept, record, _ = _select_entries(
+            nodes, level["keep"], lambda index: node_tier(nodes[index]), lambda node: node.get("node_id"), level["omitted_refs"],
+            dict(tool="task_get_context", field="nodes") if coordinator else dict(tool=None, note=_NO_TOOL_NOTE),
+        )
+        for node in kept:
+            if not coordinator:
+                # The runtime filters ``nodes`` to exactly this worker's own
+                # node (see ``_section_pipeline_and_assignments``'s
+                # ``assignment_ref``-scoped SQL) -- its ``objective`` is the
+                # same class of mandatory, unresolvable-without-a-tool text as
+                # ``own_assignment`` below (no worker tool returns it), so it
+                # must never be compacted into a ``retrieve.tool=None``
+                # reference either. Stays verbatim at every level (cap=None).
+                handled.bound(node, "objective", None, "derived_summary", node_retrieve(node))
+                continue
+            cap = (level["protected"], level["active"], level["other"])[node_tier(node)]
+            handled.bound(node, "objective", cap, "derived_summary", node_retrieve(node))
+        runtime["nodes"] = kept
+        if record is not None:
+            runtime["nodes_omitted"] = record
+    assignments = section.get("assignments")
+    if isinstance(assignments, list) and assignments:
+
+        def assignment_tier(entry):
+            return 2 if entry.get("state") in _TERMINAL_ASSIGNMENT_STATES else 1
+
+        kept, record, _ = _select_entries(
+            assignments, level["keep"], lambda index: assignment_tier(assignments[index]),
+            lambda entry: entry.get("assignment_ref"),
+            level["omitted_refs"], dict(tool="task_get_context", field="nodes"),
+        )
+        for entry in kept:
+            cap = (level["protected"], level["active"], level["other"])[assignment_tier(entry)]
+            # The brief restates this node's objective and scope and the task goal.
+            retrieve = dict(tool="task_get_context", field="nodes", assignment_ref=entry.get("assignment_ref"))
+            for key in ("title", "brief", "acceptance"):
+                handled.bound(entry, key, cap, "derived_summary", retrieve)
+        section["assignments"] = kept
+        if record is not None:
+            section["assignments_omitted"] = record
+    own = section.get("own_assignment")
+    if isinstance(own, dict) and own.get("status") != "unavailable":
+        # P1 fix: no worker-available, channel-authorized tool returns this
+        # recipient's own assignment title/brief/acceptance (unlike a *coordinator*
+        # cross-referenced assignment brief, resolvable via ``task_get_context``,
+        # or another worker's constraint text, resolvable via ``read_source``).
+        # Compacting it into a ``status="referenced"`` object with
+        # ``retrieve.tool=None`` would silently strip the recovered worker's
+        # only readable copy of its mandatory objective. So these three fields
+        # always stay verbatim (cap=None) at *every* compaction level,
+        # regardless of size -- never truncated, never referenced. Everything
+        # else in the critical sections compacts harder instead to still fit
+        # under CRITICAL_BUDGET_BYTES. Only if the own assignment's own text
+        # alone still exceeds HARD_CAP_BYTES after the most aggressive level
+        # does ``_bounded_sections`` raise the explicit ``capsule_oversize``
+        # error -- never a silent reference.
+        retrieve = dict(tool=None, note=_NO_TOOL_NOTE)
+        for key in ("title", "brief", "acceptance"):
+            handled.bound(own, key, None, "derived_summary", retrieve)
+
+
+def _compact_open_actions(section: dict, level: dict, handled: _Handled) -> None:
+    questions = section.get("open_questions")
+    if isinstance(questions, list):
+        for question in questions:
+            handled.bound(
+                question, "text", max(level["active"], level["generic"]), "derived_summary",
+                dict(tool=None, note=_NO_TOOL_NOTE),
+            )
+
+
+def _clamp_generic(value: Any, level: dict, path: str, handled: _Handled) -> Any:
+    """Safety net over every critical section: any string or list the
+    field-specific passes did not already bound is bounded here, with the
+    same explicit reference/omission records."""
+    if isinstance(value, dict):
+        if _is_marker(value):
+            return value
+        result = {}
+        for key, item in value.items():
+            child_path = f"{path}.{key}"
+            if (id(value), key) in handled:
+                result[key] = item
+            elif isinstance(item, list) and level["keep"] is not None and len(item) > level["keep"] \
+                    and f"{key}_omitted" not in value:
+                kept, record, _ = _select_entries(
+                    item, level["keep"], lambda _index: 0, lambda entry: _digest_of(entry),
+                    level["omitted_refs"], dict(tool=None, note=_NO_TOOL_NOTE, path=child_path),
+                )
+                result[key] = [_clamp_generic(entry, level, f"{child_path}[]", handled) for entry in kept]
+                result[f"{key}_omitted"] = record
+            else:
+                result[key] = _clamp_generic(item, level, child_path, handled)
+        return result
+    if isinstance(value, list):
+        return [_clamp_generic(item, level, f"{path}[]", handled) for item in value]
+    if isinstance(value, str):
+        trust = "user_direct" if path.endswith(".text") else "derived_summary"
+        return _text_ref(value, level["generic"], trust, dict(tool=None, note=_NO_TOOL_NOTE, path=path))
+    return value
+
+
+def _count_markers(value: Any) -> tuple[int, int]:
+    referenced = omitted = 0
+    if isinstance(value, dict):
+        if value.get("status") == "referenced":
+            return 1, 0
+        if value.get("status") == "omitted":
+            return 0, value.get("count", 0)
+        for item in value.values():
+            ref_count, omit_count = _count_markers(item)
+            referenced += ref_count
+            omitted += omit_count
+    elif isinstance(value, list):
+        for item in value:
+            ref_count, omit_count = _count_markers(item)
+            referenced += ref_count
+            omitted += omit_count
+    return referenced, omitted
+
+
+def _compact_critical_sections(sections: dict, recipient: dict, level_index: int) -> dict:
+    """A compacted deep copy of ``sections`` at ``level_index`` (pure and
+    deterministic: identical input always yields identical output)."""
+    level = _COMPACTION_LEVELS[level_index]
+    compacted = dict(sections)
+    if level is None:
+        return compacted
+    working = {name: json.loads(_canonical_json(sections[name])) for name in _CRITICAL_SECTION_NAMES}
+    handled = _Handled()
+    constraints = working["constraints"]
+    original_constraints = sections["constraints"]
+    if isinstance(constraints, dict) and constraints.get("status") != "unavailable":
+        _compact_constraints(constraints, level, handled)
+    pipeline = working["pipeline_and_assignments"]
+    if isinstance(pipeline, dict):
+        _compact_pipeline(pipeline, original_constraints, recipient, level, handled)
+    actions = working["drafts_and_open_actions"]
+    if isinstance(actions, dict):
+        _compact_open_actions(actions, level, handled)
+    for name in _CRITICAL_SECTION_NAMES:
+        compacted[name] = _clamp_generic(working[name], level, name, handled)
+    return compacted
+
+
+def _bounded_sections(sections: dict, recipient: dict) -> tuple[dict, dict]:
+    """Pick the first compaction level whose critical sections fit
+    :data:`CRITICAL_BUDGET_BYTES`; the most aggressive level otherwise.
+    Raises ``capsule_oversize`` only when even that level exceeds
+    :data:`HARD_CAP_BYTES`."""
+    uncompacted_bytes = _critical_bytes(sections)
+    chosen, chosen_bytes, chosen_level = sections, uncompacted_bytes, 0
+    for level_index in range(len(_COMPACTION_LEVELS)):
+        candidate = sections if level_index == 0 else _compact_critical_sections(sections, recipient, level_index)
+        candidate_bytes = uncompacted_bytes if level_index == 0 else _critical_bytes(candidate)
+        chosen, chosen_bytes, chosen_level = candidate, candidate_bytes, level_index
+        if candidate_bytes <= CRITICAL_BUDGET_BYTES:
+            break
+    if chosen_bytes > HARD_CAP_BYTES:
+        raise StoreError(
+            "capsule_oversize", "critical_sections_bytes", chosen_bytes, f"<= {HARD_CAP_BYTES}",
+            "Critical capsule sections (identity, constraints, pipeline_and_assignments, "
+            "drafts_and_open_actions) exceed the hard cap even at the most aggressive compaction "
+            f"level {len(_COMPACTION_LEVELS) - 1}; nothing is silently dropped. Raise "
+            "recovery.capsule.HARD_CAP_BYTES for a deployment that needs a larger bound.",
+        )
+    referenced, omitted = _count_markers({name: chosen[name] for name in _CRITICAL_SECTION_NAMES})
+    compaction = dict(
+        level=chosen_level, max_level=len(_COMPACTION_LEVELS) - 1,
+        critical_budget_bytes=CRITICAL_BUDGET_BYTES, uncompacted_critical_bytes=uncompacted_bytes,
+        referenced_fields=referenced, omitted_entries=omitted,
+        note=(
+            "Verbatim." if chosen_level == 0 else
+            "Fields with status=referenced are truncated: their full text is identified by sha256/size_bytes "
+            "and returned by the named retrieve tool. Records with status=omitted list entries left out of "
+            "a long list."
+        ),
+    )
+    return chosen, compaction
+
+
+# --------------------------------------------------------------------
 # assembly
 # --------------------------------------------------------------------
 
@@ -1000,11 +1374,20 @@ def build_capsule(
     constraint or fabricated completion claim can never change any other
     section's already-computed, authoritative content.
 
+    The critical sections (identity, constraints, pipeline_and_assignments,
+    drafts_and_open_actions) are bounded: when their canonical JSON exceeds
+    :data:`CRITICAL_BUDGET_BYTES` the first deterministic compaction level
+    that fits is applied (see ``_COMPACTION_LEVELS``). Compacted text is
+    replaced by an exact reference (sha256, size, bounded preview,
+    ``truncated`` marker, retrieving tool) and trimmed list entries are
+    named in a sibling ``<key>_omitted`` record -- nothing is dropped
+    silently. The latest user constraint, the task goal and the recipient's
+    own assignment keep the largest inline allowance. ``capsule["compaction"]``
+    records the applied level.
+
     Raises ``StoreError('unknown_task', ...)`` for an unknown ``task_id``
-    and ``StoreError('capsule_oversize', ...)`` when the critical sections
-    alone (identity, constraints, pipeline_and_assignments,
-    drafts_and_open_actions) exceed :data:`HARD_CAP_BYTES` -- never
-    silently drops a critical constraint to fit.
+    and, only as a last-resort guard, ``StoreError('capsule_oversize', ...)``
+    when even the most aggressive level exceeds :data:`HARD_CAP_BYTES`.
     """
     normalized = _normalize_recipient(recipient)
     with store.connection() as db:
@@ -1022,26 +1405,20 @@ def build_capsule(
     # already held. The exact task_id is still present, nested, inside
     # ``sections.identity.task_id`` -- this rename only avoids a false
     # positive on that generic top-level guard, and changes no content.
+    sections, compaction = _bounded_sections(sections, normalized)
+    critical_bytes = _critical_bytes(sections)
     digest_input = dict(
         capsule_format_version=CAPSULE_FORMAT_VERSION, for_task_id=task_id, recipient=normalized,
         at_revision=at_revision, source_high_watermark=watermark, sections=sections,
+        compaction=compaction,
     )
-    critical_bytes = len(_canonical_json({name: sections[name] for name in _CRITICAL_SECTION_NAMES}).encode("utf-8"))
-    if critical_bytes > HARD_CAP_BYTES:
-        raise StoreError(
-            "capsule_oversize", "critical_sections_bytes", critical_bytes, f"<= {HARD_CAP_BYTES}",
-            "Critical capsule sections (identity, constraints, pipeline_and_assignments, "
-            "drafts_and_open_actions) alone exceed the hard cap; they are never truncated. "
-            "Reduce retained source/assignment volume for this task before requesting a capsule, "
-            "or raise recovery.capsule.HARD_CAP_BYTES for a deployment that needs a larger bound.",
-        )
     capsule_revision = _digest_of(digest_input)
     total_bytes_estimate = len(_canonical_json(digest_input).encode("utf-8"))
     capsule = dict(
         capsule_format_version=CAPSULE_FORMAT_VERSION,
         for_task_id=task_id, recipient=normalized, at_revision=at_revision,
         source_high_watermark=watermark, capsule_revision=capsule_revision,
-        sections=sections,
+        sections=sections, compaction=compaction,
         size_estimate=dict(
             bytes=total_bytes_estimate,
             approx_tokens=_estimate_tokens(total_bytes_estimate),
@@ -1088,6 +1465,8 @@ def render_capsule(capsule: Mapping[str, Any]) -> str:
     lines.append(f"recipient: {json.dumps(capsule['recipient'], sort_keys=True)}")
     lines.append(f"capsule_revision: {capsule['capsule_revision']}")
     lines.append(f"source_high_watermark: {json.dumps(capsule['source_high_watermark'], sort_keys=True)}")
+    if capsule.get("compaction") is not None:
+        lines.append(f"compaction: {json.dumps(capsule['compaction'], sort_keys=True)}")
     lines.append("")
     for name in (
         "identity", "route_and_config", "constraints", "pipeline_and_assignments",
@@ -1109,12 +1488,16 @@ def render_capsule(capsule: Mapping[str, Any]) -> str:
                     f"requirement_revision={item['requirement_revision']}"
                 )
                 text = item["text"]
-                if isinstance(text, dict):
+                if isinstance(text, dict) and text.get("status") == "referenced":
+                    lines.append("  " + _render_referenced(text, item["report_id"]).replace("\n", "\n  "))
+                elif isinstance(text, dict):
                     lines.append(f"  text: (status={text['status']}, reason={text.get('reason')})")
                 else:
                     lines.append("  " + _render_data_block(item["trust_label"], item["report_id"], text).replace("\n", "\n  "))
                 for attachment in item.get("attachments", []):
                     lines.append(f"  attachment: {json.dumps(attachment, sort_keys=True)}")
+            if section.get("items_omitted"):
+                lines.append(f"items_omitted: {json.dumps(section['items_omitted'], sort_keys=True)}")
             lines.append(f"answered_questions: {section.get('answered_question_count', 0)}")
             for answer in section.get("answered_questions", []):
                 lines.append(
@@ -1125,18 +1508,40 @@ def render_capsule(capsule: Mapping[str, Any]) -> str:
                 )
                 # The question was written by whoever asked it; only the
                 # answer is the user's own text.
-                lines.append("  question: " + _render_data_block(
+                lines.append("  question: " + _render_text_value(
                     "derived_summary", answer["question_id"] + ":question", answer["question_text"],
                 ).replace("\n", "\n  "))
                 if answer.get("options"):
                     lines.append("  options: " + _defang(json.dumps(answer["options"], ensure_ascii=False)))
-                lines.append("  answer: " + _render_data_block(
+                lines.append("  answer: " + _render_text_value(
                     answer["trust_label"], answer["source_ref"], answer["answer_text"],
                 ).replace("\n", "\n  "))
+            if section.get("answered_questions_omitted"):
+                lines.append(
+                    f"answered_questions_omitted: {json.dumps(section['answered_questions_omitted'], sort_keys=True)}"
+                )
         else:
             lines.append(_render_json_with_data_blocks(section))
         lines.append("")
     return "\n".join(lines)
+
+
+def _referenced_header(value: Mapping[str, Any]) -> dict:
+    return {key: item for key, item in value.items() if key != "preview"}
+
+
+def _render_referenced(value: Mapping[str, Any], ref: str) -> str:
+    """A referenced (truncated) text: its exact reference, then its bounded
+    preview inside a data block labeled with the original trust label."""
+    header = json.dumps(_referenced_header(value), sort_keys=True)
+    block = _render_data_block(value.get("trust_label", "derived_summary"), ref, value.get("preview", ""))
+    return f"text_truncated: {header}\n{block}"
+
+
+def _render_text_value(trust_label: str, ref: str, value: Any) -> str:
+    if isinstance(value, dict) and value.get("status") == "referenced":
+        return _render_referenced(value, ref)
+    return _render_data_block(trust_label, ref, value)
 
 
 _TEXT_FIELD_TRUST = {
@@ -1161,6 +1566,12 @@ def _render_json_with_data_blocks(value: Any) -> str:
 
 
 def _mark_text_fields(value: Any) -> Any:
+    if isinstance(value, dict) and value.get("status") == "referenced" and isinstance(value.get("preview"), str):
+        # A truncated text keeps its data fence: the preview is wrapped with
+        # the original field's trust label; the reference fields stay plain.
+        marked = _referenced_header(value)
+        marked["preview"] = _render_data_block(value.get("trust_label", "derived_summary"), "preview", value["preview"])
+        return marked
     if isinstance(value, dict):
         result = {}
         for key, item in value.items():

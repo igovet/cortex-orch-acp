@@ -23,8 +23,8 @@ from .contracts import obj, text, array, validate
 from .state import encoded, event, TERMINAL
 
 from .project_paths import PRIVATE, permitted_path
-READ_ONLY = {'worker-architect', 'worker-ux-designer', 'worker-code-reviewer', 'worker-senior-consultant', 'senior-consultant',
-             'worker-explorer', 'worker-planner', 'worker-security-auditor', 'worker-accessibility-auditor'}
+# The read-only roles live with the plan contract that has to name them.
+from .contracts import READ_ONLY  # noqa: E402
 
 
 def integer(description, maximum):

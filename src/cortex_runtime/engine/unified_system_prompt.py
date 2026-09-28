@@ -56,7 +56,7 @@ _BODY = """\
 - If a tool you need is not in your list, look it up with the engine's tool search when one exists before concluding it is unavailable.
 - Run independent reads and searches together; keep dependent steps, edits, approvals and other mutations sequential.
 - Treat shell command text as code: quote arguments, never expose a secret through command output, and avoid blocking waits longer than a minute.
-- A refused tool call is a decision, not a glitch. Change the approach instead of retrying the same call.
+- A refused tool call, a permission denial or a read-only error is a decision, not a glitch. Do not retry it and do not reach the same effect another way (another tool, a shell command, a copy or a temporary file). If your assignment needs what was refused, ask for it with the runtime's scope request or report it as a blocker.
 
 # Cortex skills
 
@@ -93,6 +93,7 @@ _BODY = """\
 
 - Write plainly and concisely in the language your role instructions select. Use GitHub-flavored Markdown; reference code as `path:line`.
 - Say what you did, what you found and what remains. No filler, praise or recap of what you already wrote.
+@@ROLE_COMMUNICATION@@
 
 # Context
 
@@ -192,6 +193,83 @@ def project_skills_section(workspace_root: str | None, environ=None) -> str:
     ])
 
 
+CODE_INDEX_SERVER = "codebase-memory-mcp"
+
+
+def attached_servers_section(server_names, workspace_root: str | None = None) -> str | None:
+    """What the runtime knows only when a session starts: which external MCP
+    servers were really attached to it. Added after the role instructions for
+    every engine, or ``None`` when none were attached.
+
+    A conditional "when a code index is available, prefer it" was not
+    enough: on 2026-09-28 sessions of one engine searched source with the
+    shell while the index server was attached and loaded, and the index
+    procedure's first step (finding the project) needed a lookup they never
+    made. So the section states the fact and the first step. Only tool names
+    appear here; arguments stay in each tool's advertised schema.
+    """
+    names = sorted({name for name in server_names or () if isinstance(name, str) and name})
+    if not names:
+        return None
+    lines = ["# Attached MCP servers", "",
+             "External MCP servers attached to this session: " + ", ".join(f"`{name}`" for name in names) + "."]
+    if CODE_INDEX_SERVER in names:
+        where = f"`{workspace_root}`" if workspace_root else "the working directory"
+        lines += [
+            "",
+            f"`{CODE_INDEX_SERVER}` is the code index for this session. For every question about code (where "
+            "something is defined, what calls it, what a change affects, how a subsystem fits together) use it "
+            "before shell search:",
+            f"1. Call `list_projects` once and take the project whose root path is {where}, or the closest "
+            "root that contains it.",
+            "2. Use `search_graph`, `trace_path` and `get_code_snippet` (and `get_architecture` for orientation) "
+            "with that project.",
+            "3. Use shell or file search on source code only for literal text, configuration and documentation, "
+            "or when no indexed project covers the working directory; then state that limitation in your report.",
+        ]
+    lines += ["", "If a tool of an attached server is not in your tool list, load it with the engine's tool "
+                  "search before concluding it is unavailable."]
+    return "\n".join(lines)
+
+
+def with_attached_servers(meta: dict, server_names, workspace_root: str | None = None) -> dict:
+    """``meta`` with :func:`attached_servers_section` appended to the text the
+    model reads as its instructions: the plain-string ``systemPrompt`` both
+    adapters send, or an ``append`` object. Never mutates ``meta``."""
+    note = attached_servers_section(server_names, workspace_root)
+    result = dict(meta)
+    if note is None:
+        return result
+    prompt = result.get("systemPrompt")
+    if prompt is None:
+        result["systemPrompt"] = {"append": note}
+    elif isinstance(prompt, str):
+        result["systemPrompt"] = prompt.rstrip() + "\n\n" + note
+    elif isinstance(prompt, dict) and isinstance(prompt.get("append"), str):
+        result["systemPrompt"] = {**prompt, "append": prompt["append"] + "\n\n" + note}
+    return result
+
+
+#: How each role spends text between tool calls. A worker's reader is the
+#: runtime and the coordinator, which take its report and structured result;
+#: text between its tool calls reaches nobody who acts on it. Observed on
+#: 2026-09-28: workers of one engine wrote exactly one final message per
+#: session over 7-62 tool calls, while workers of the other wrote 3-39
+#: interim messages. The coordinator's text is the user's view of the task,
+#: so its role instructions govern it.
+_ROLE_COMMUNICATION = {
+    "coordinator": "",
+    "worker": (
+        "- Work without narration. Call tools one after another and write no text between tool calls: no plans, "
+        "status updates, announcements of the next step or summaries of what a tool returned. Think as much as you "
+        "need; only visible text is left out.\n"
+        "- After your last tool call, write one final message: what you did, what you found, which checks ran with "
+        "their outcome, and what remains. Your report and structured result still go through the runtime's tools; "
+        "the final message does not replace them."
+    ),
+}
+
+
 def environment_section(workspace_root: str | None, *, today: datetime.date | None = None) -> str:
     """The session facts an engine used to add on its own, now from the runtime."""
     today = today or datetime.datetime.now(datetime.timezone.utc).date()
@@ -211,7 +289,7 @@ def cortex_system_prompt(role: str, workspace_root: str | None, *, today: dateti
         raise ValueError("role must be 'coordinator' or 'worker'")
     return "\n\n".join(part for part in (
         "# Cortex session\n\n" + _INTRO[role],
-        _BODY.strip(),
+        _BODY.replace("@@ROLE_COMMUNICATION@@\n", _ROLE_COMMUNICATION[role] + "\n" if _ROLE_COMMUNICATION[role] else "").strip(),
         project_skills_section(workspace_root, environ),
         environment_section(workspace_root, today=today),
     ) if part) + "\n"
