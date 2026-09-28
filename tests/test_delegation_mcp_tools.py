@@ -163,6 +163,8 @@ def test_coordinator_read_diagnostics_omits_technical_ids(tmp_path):
     result = mcp_tools.dispatch(store, coordinator, "read_diagnostics", {})
 
     assert result["resource_caps"]["availability"] == "unavailable_reason"
+    assert result["route_acceptance_latency"]["availability"] == "unavailable_reason"
+    assert result["route_fix_cycles"]["total_review_fix_cycles"] == 0
     assert "task_id" not in result
     assert "task_id" not in result["resource_caps"]
     assert "config_revision_id" not in result["resource_caps"]

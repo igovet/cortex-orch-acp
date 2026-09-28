@@ -25,7 +25,9 @@ accept state transitions or task acceptance decisions.
 
 Only an immutable, attempt-owned report and its structured result close a node.
 A reviewer, required whenever the project changed, submits APPROVE, REQUEST_CHANGES or BLOCK. Changes produce
-a new fix node and another review, with a three-cycle ceiling. Verification is a
+fix nodes and another review, with a three-cycle ceiling. Structured review findings confine fixes to the
+named plan tasks when the runtime can verify them; otherwise every original plan task receives a fix
+(see [targeted review fixes](orchestration.md#targeted-review-fixes)). Verification is a
 runtime command observation, independent of model review. Nonzero exit, incomplete
 output or project drift prevents a passing verification event.
 

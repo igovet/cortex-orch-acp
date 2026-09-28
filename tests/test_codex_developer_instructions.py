@@ -606,3 +606,67 @@ def test_installed_private_adapter_resets_custom_tool_ids_each_turn(tmp_path):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate(timeout=3)
+
+
+def test_installed_private_adapter_can_drop_codex_native_prompt(tmp_path):
+    from cortex_runtime.engine.codex_adapter_acp import build_codex_session_new_meta
+
+    package_text = os.environ.get("CORTEX_CODEX_ACP_TEST_PACKAGE")
+    if not package_text:
+        pytest.skip("set CORTEX_CODEX_ACP_TEST_PACKAGE to run the real-bundle no-paid trace")
+    package = Path(package_text).resolve()
+    version = json.loads((package / "package.json").read_text())["version"]
+    assert version in QUALIFIED_ADAPTER_VERSIONS["codex-acp"], version
+    original = package / "dist" / "index.js"
+    source = original.read_bytes()
+    install = SimpleNamespace(
+        package_version=version, adapter_entry=str(original), package_json=str(package / "package.json"),
+        adapter_entry_sha256=hashlib.sha256(source).hexdigest(),
+    )
+    environ = isolated_environ(tmp_path)
+    copied = Path(_prepare_codex_manual_review_adapter(install, new_connection_id(), environ))
+    fake_binary = tmp_path / "fake-codex"
+    fake_binary.write_text(FAKE_APP_SERVER, encoding="utf-8")
+    fake_binary.chmod(0o700)
+    trace = tmp_path / "app-server-trace.jsonl"
+    process_env = dict(environ, CODEX_PATH=str(fake_binary), CORTEX_APP_SERVER_TRACE=str(trace),
+                       CORTEX_TEST_NATIVE="omit", NO_BROWSER="1")
+    proc = subprocess.Popen(
+        [shutil.which("node"), str(copied)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, env=process_env, cwd=tmp_path, bufsize=1,
+    )
+    metas = [
+        build_codex_session_new_meta("Cortex role rule.", native_prompt=False),
+        build_codex_session_new_meta("Cortex role rule."),
+        {"systemPrompt": "Cortex role rule.", "cortexBaseInstructions": 7},
+    ]
+    try:
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": 1, "clientCapabilities": {}, "clientInfo": {"name": "cortex-trace", "version": "1"},
+        }}) + "\n")
+        proc.stdin.flush()
+        assert "error" not in _read_response(proc, 1)
+        replies = []
+        for index, meta in enumerate(metas, 2):
+            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": index, "method": "session/new", "params": {
+                "cwd": str(tmp_path), "mcpServers": [], "_meta": meta,
+            }}) + "\n")
+            proc.stdin.flush()
+            replies.append(_read_response(proc, index))
+        assert "error" not in replies[0] and "error" not in replies[1]
+        assert "error" in replies[2]
+        dropped, kept = [json.loads(line)["params"] for line in trace.read_text(encoding="utf-8").splitlines()]
+    finally:
+        proc.terminate()
+        try:
+            proc.communicate(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=3)
+    assert dropped["baseInstructions"] == "" and dropped["developerInstructions"] == "Cortex role rule."
+    for key in ("include_permissions_instructions", "include_apps_instructions",
+                "include_collaboration_mode_instructions", "include_environment_context"):
+        assert dropped["config"][key] is False
+    assert dropped["config"]["skills"]["include_instructions"] is False
+    assert "baseInstructions" not in kept and "include_environment_context" not in kept["config"]

@@ -128,4 +128,6 @@ def test_claude_agent_acp_coordinator_session_runs_through_the_real_session_mana
     import json
 
     dumped = json.loads(session_new_dump.read_text(encoding="utf-8"))
-    assert dumped.get("_meta", {}).get("systemPrompt", {}).get("append", "").startswith("---\nname: orchestrator")
+    prompt = dumped["_meta"]["systemPrompt"]
+    assert prompt.startswith("# Cortex session\n\nYou are the Cortex coordinator")
+    assert "\n\n---\nname: orchestrator" in prompt

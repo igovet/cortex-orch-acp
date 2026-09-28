@@ -6,6 +6,7 @@ network I/O.
 """
 from __future__ import annotations
 
+import json
 import uuid
 
 from cortex_runtime.bootstrap import bootstrap_task
@@ -23,6 +24,61 @@ def _task(tmp_path):
     store = Store(tmp_path / ".cortex", project_root=tmp_path)
     result = bootstrap_task(store, SourceEvent(origin="cli", event_id=str(uuid.uuid4())), "Build a page.", "owner-1")
     return store, result.task_id
+
+
+def _insert_plan_event(store, task_id, tasks, *, revision=1):
+    payload = json.dumps({"revision": revision, "plan": {"tasks": tasks}})
+    with store.connection() as db:
+        db.execute(
+            "INSERT OR IGNORE INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES(?,?,?,?,?)",
+            (task_id, "PLANNING", "Build a page.", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        db.execute(
+            "INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES(?,?,?,?,?)",
+            (task_id, "PLAN_ACCEPTED", "coordinator", payload, "2026-01-01T00:00:00+00:00"),
+        )
+
+
+def _insert_route_assignment(
+    store, task_id, *, node_id, assignment_ref, attempt_id, dispatched_at,
+    accepted_at, engine="codex-acp", model="gpt-5.6", role="worker-backend-dev",
+    revision=1, route_audit=True, event_node_id=None,
+):
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (task_id, revision, node_id, role, "Implement the assigned task.", "[]", "[]",
+             "execution", "completed", assignment_ref, "{}"),
+        )
+        db.execute(
+            "INSERT INTO delegation_provisioning "
+            "(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (assignment_ref, task_id, attempt_id, role, "complete", "ready", 1, dispatched_at, dispatched_at),
+        )
+        db.execute(
+            "INSERT INTO task_events "
+            "(task_id,event_type,assignment_ref,dedup_key,payload_json,origin,created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (task_id, "delegation_requested", assignment_ref, f"dispatch:{assignment_ref}", "{}", "runtime", dispatched_at),
+        )
+        if route_audit:
+            db.execute(
+                "INSERT INTO attempt_route_audit "
+                "(id,attempt_id,task_id,role,engine,connection_id,model,params_fingerprint,"
+                "config_revision_id,decision,decision_detail_json,predecessor_attempt_id,recorded_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"audit:{attempt_id}", attempt_id, task_id, role, engine, "connection-1", model,
+                 "fingerprint", None, "authorized", "{}", None, dispatched_at),
+            )
+        if accepted_at is not None:
+            db.execute(
+                "INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES(?,?,?,?,?)",
+                (
+                    task_id, "WORKER_COMPLETED", "runtime",
+                    json.dumps({"node": event_node_id or node_id, "assignment_ref": assignment_ref, "result": {}}), accepted_at,
+                ),
+            )
 
 
 def _insert_revision(store, task_id, ceiling, *, revision=1):
@@ -47,14 +103,92 @@ def test_diagnostics_summary_returns_every_declared_metric(tmp_path):
     for key in (
         "resource_caps", "recovery_latency", "repeat_calls", "schema_validation_errors",
         "manual_interventions", "duplicate_publications", "tokens", "concurrency",
+        "route_acceptance_latency", "route_fix_cycles",
     ):
         assert key in summary
     # No configuration revision recorded yet -> honestly unavailable, never fabricated.
     assert summary["resource_caps"]["availability"] == "unavailable_reason"
     # No fallback attempts recorded yet -> honestly unavailable.
     assert summary["recovery_latency"]["availability"] == "unavailable_reason"
+    assert summary["route_acceptance_latency"]["availability"] == "unavailable_reason"
+    # The complete task event query observed no requested review fix cycles.
+    assert summary["route_fix_cycles"]["total_review_fix_cycles"] == 0
     # No usage recorded at all yet -> unavailable, never treated as 0 tokens used.
     assert summary["tokens"]["availability"] == "unavailable_reason"
+
+
+def test_route_outcome_metrics_group_accepted_results_and_fix_cycles(tmp_path):
+    store, task_id = _task(tmp_path)
+    _insert_plan_event(store, task_id, [{"id": "alpha", "role": "worker-backend-dev", "complexity": "normal"}])
+    _insert_route_assignment(
+        store, task_id, node_id="alpha", assignment_ref="assignment-alpha", attempt_id="attempt-alpha",
+        dispatched_at="2026-01-01T00:00:00+00:00", accepted_at="2026-01-01T00:00:12+00:00",
+    )
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES(?,?,?,?,?)",
+            (
+                task_id, "REVIEW_CHANGES_REQUESTED", "runtime",
+                json.dumps({"review": "_review_1", "fixes": ["_fix_1_alpha"]}),
+                "2026-01-01T00:00:13+00:00",
+            ),
+        )
+    _insert_route_assignment(
+        store, task_id, node_id="_fix_1_alpha", assignment_ref="assignment-alpha-fix-1",
+        attempt_id="attempt-alpha-fix-1", dispatched_at="2026-01-01T00:00:15+00:00",
+        accepted_at="2026-01-01T00:00:20+00:00", engine="claude-agent-acp", model="opus",
+    )
+
+    summary = observability_metrics.diagnostics_summary(store, task_id)
+    latency = summary["route_acceptance_latency"]
+    assert latency["availability"] == "available"
+    assert latency["basis"] == "derived"
+    assert latency["sample_count"] == 2
+    by_model = {group["model"]: group for group in latency["groups"]}
+    assert by_model["gpt-5.6"]["mean_seconds"] == 12
+    assert by_model["opus"]["mean_seconds"] == 5
+    assert by_model["opus"]["complexity"] == "normal"
+    assert by_model["opus"]["role"] == "worker-backend-dev"
+
+    cycles = summary["route_fix_cycles"]
+    assert cycles["total_review_fix_cycles"] == 1
+    assert cycles["attributed_review_fix_cycles"] == 1
+    assert cycles["unattributed_review_fix_cycles"] == 0
+    assert cycles["groups"] == [{
+        "engine": "claude-agent-acp", "model": "opus", "role": "worker-backend-dev",
+        "complexity": "normal", "fix_cycle_count": 1, "fix_assignment_count": 1,
+    }]
+
+
+def test_route_acceptance_latency_discloses_missing_route_evidence(tmp_path):
+    store, task_id = _task(tmp_path)
+    _insert_plan_event(store, task_id, [{"id": "alpha", "role": "worker-backend-dev"}])
+    _insert_route_assignment(
+        store, task_id, node_id="alpha", assignment_ref="assignment-alpha", attempt_id="attempt-alpha",
+        dispatched_at="2026-01-01T00:00:00+00:00", accepted_at="2026-01-01T00:00:12+00:00",
+        route_audit=False,
+    )
+
+    metric = observability_metrics.diagnostics_summary(store, task_id)["route_acceptance_latency"]
+    assert metric["availability"] == "unavailable_reason"
+    assert metric["sample_count"] == 0
+    assert metric["excluded"]["missing_route_audit"] == 1
+    assert "mean_seconds" not in metric
+
+
+def test_route_acceptance_latency_requires_exact_node_binding(tmp_path):
+    store, task_id = _task(tmp_path)
+    _insert_plan_event(store, task_id, [{"id": "alpha", "role": "worker-backend-dev"}])
+    _insert_route_assignment(
+        store, task_id, node_id="alpha", assignment_ref="assignment-alpha", attempt_id="attempt-alpha",
+        dispatched_at="2026-01-01T00:00:00+00:00", accepted_at="2026-01-01T00:00:12+00:00",
+        event_node_id="other-node",
+    )
+
+    metric = observability_metrics.diagnostics_summary(store, task_id)["route_acceptance_latency"]
+    assert metric["availability"] == "unavailable_reason"
+    assert metric["sample_count"] == 0
+    assert metric["excluded"]["missing_node_binding"] == 1
 
 
 def test_resource_caps_never_reports_a_monetary_cap_without_enforceability(tmp_path):

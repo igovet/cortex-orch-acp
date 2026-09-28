@@ -169,12 +169,15 @@ token bytes were not retained, so that individual case cannot be proved
 byte-for-byte after the fact.
 
 Every Cortex-created session at this pinned version, coordinator or worker,
-keeps Claude's native tool preset and sends `skills: "all"`,
-`strictMcpConfig: true`, empty `plugins`, `managedSettings.disableAllHooks`, and
-disallows `Agent`, `Task`, `Workflow`, `TeamCreate`, `TeamDelete` and
-`SendMessage`. `settingSources` is not sent, so the adapter default (`user`,
-`project`, `local`) applies and Claude Code loads `CLAUDE.md`/`AGENTS.md` and
-discovers skills natively. The process runs in Cortex's engine jail, which bounds
+keeps Claude's native tools and sends `strictMcpConfig: true`, empty `plugins`,
+`managedSettings.disableAllHooks`, and disallows `Agent`, `Task`, `Workflow`,
+`TeamCreate`, `TeamDelete` and `SendMessage`. A session with role instructions
+sends the [unified system prompt](unified-system-prompt.md) and the role text as
+one plain-string `systemPrompt`, replacing the `claude_code` preset, with
+`skills: []` and a `settings` layer that empties commit/PR attribution and turns
+off git instructions; a session without role instructions keeps the preset and
+`skills: "all"`. `settingSources` is not sent, so the adapter default (`user`,
+`project`, `local`) applies and Claude Code loads `CLAUDE.md`/`AGENTS.md`. The process runs in Cortex's engine jail, which bounds
 native tools to the assignment scope (see
 [containment](permissions-and-containment.md)). A 2026-09-22 no-paid check started
 the installed adapter inside the jail and created a session; no model turn has

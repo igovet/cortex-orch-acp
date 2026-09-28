@@ -22,6 +22,8 @@ def _sample(rule):
     kind = rule["type"]
     if kind == "integer":
         return rule["minimum"]
+    if kind == "boolean":
+        return False
     if kind == "array":
         return [_sample(rule["items"]) for _ in range(rule.get("minItems", 0))]
     if kind == "object":
@@ -94,3 +96,21 @@ def test_every_advertised_tool_uses_its_current_validator_and_read_classificatio
 
 def test_every_delegation_read_bypasses_mutation_epoch_gate():
     assert DELEGATION_READ_OPERATIONS == READ_NAMES - {"read_draft", "list_reports", "read_report", "project_git"}
+
+
+def test_review_findings_contract_agrees_with_its_validator():
+    """The optional review findings (with a boolean) are checked the same way
+    by the advertised JSON Schema and the runtime validator."""
+    (entry,) = [t for t in mcp_tools.tool_definitions("worker", role_id="worker-code-reviewer", stage="review")
+                if t["name"] == "result_submit"]
+    schema = entry["inputSchema"]
+    finding_schema = schema["properties"]["findings"]["items"]
+    finding = {name: _sample(finding_schema["properties"][name]) for name in finding_schema["required"]}
+    args = dict({key: _sample(schema["properties"][key]) for key in schema["required"]}, findings=[finding])
+    assert not list(Draft202012Validator(schema).iter_errors(args))
+    delegation_contracts.validate("worker", "result_submit", args)
+    for bad in (dict(finding, cross_cutting="false"), dict(finding, files=[]), dict(finding, node="_fix_1_x")):
+        wrong = dict(args, findings=[bad])
+        assert list(Draft202012Validator(schema).iter_errors(wrong))
+        with pytest.raises(StoreError, match="invalid_arguments"):
+            delegation_contracts.validate("worker", "result_submit", wrong)

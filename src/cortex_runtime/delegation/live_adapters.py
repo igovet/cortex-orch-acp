@@ -262,7 +262,7 @@ def _effort_within(effort: str | None, offered) -> str | None:
 
 def _session_new_meta_for(
     engine: str, version: str, instructions: str | None, *, role: str = "worker", project_root: str | None = None,
-    effort: str | None = None,
+    effort: str | None = None, environ: dict[str, str] | None = None,
 ):
     """The ``session/new`` ``_meta`` payload this engine's own qualified
     delivery mechanism builds for ``instructions``, or ``None``.
@@ -282,6 +282,8 @@ def _session_new_meta_for(
 
             return claude_native_subagent_restriction_meta(role=role, effort=effort)
         return None
+    from ..engine.unified_system_prompt import cortex_system_prompt
+
     if engine == "claude-agent-acp" and version == "0.78.0":
         rules = project_rules_for_claude(project_root)
         if rules:
@@ -292,7 +294,8 @@ def _session_new_meta_for(
         # the launch role is already known.
         from ..engine.claude_adapter_acp import build_claude_session_new_meta
 
-        return build_claude_session_new_meta(instructions, role=role, effort=effort)
+        return build_claude_session_new_meta(instructions, role=role, effort=effort,
+                                             base_prompt=cortex_system_prompt(role, project_root, environ=environ))
     from ..engine.instruction_delivery_registry import delivery_for
     from ..portable.instruction_delivery import DeliveryQualification
 
@@ -301,6 +304,13 @@ def _session_new_meta_for(
     if plan.qualification != DeliveryQualification.QUALIFIED:
         return None
     meta = plan.session_new_meta
+    if engine == "codex-acp" and meta is not None:
+        # The same unified Cortex prompt the Claude branch sends, in place of
+        # Codex's own base prompt and native context sections.
+        from ..engine.codex_adapter_acp import build_codex_session_new_meta
+
+        meta = {**meta, **build_codex_session_new_meta(
+            instructions, base_instructions=cortex_system_prompt(role, project_root, environ=environ))}
     if engine == "codex-acp" and version == "1.12.0" and meta is not None:
         return {**meta, "cortexRole": role}
     return meta
@@ -929,7 +939,7 @@ class EngineSessionManagerAdapter:
             # metadata. Codex also receives its tagged generation prompt.
             session_new_meta = _session_new_meta_for(
                 record.engine, _pinned_version_for(record.engine, record), instructions, role=recipient,
-                project_root=workspace_root, effort=_sdk_effort_for(record, launch),
+                project_root=workspace_root, effort=_sdk_effort_for(record, launch), environ=self._environ,
             )
             session_id = manager.create_session(
                 task_id, launch.get("assignment_id") or attempt_id, session_new_meta=session_new_meta,
@@ -1882,7 +1892,7 @@ class EngineSessionManagerAdapter:
         if meta is None:
             meta = _session_new_meta_for(record.engine, version, instructions, role=recipient,
                                          project_root=getattr(manager, "_workspace_root", None),
-                                         effort=_sdk_effort_for(record, launch))
+                                         effort=_sdk_effort_for(record, launch), environ=self._environ)
         if meta is not None:
             import json
 

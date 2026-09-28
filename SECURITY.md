@@ -260,7 +260,7 @@ writes a file, never follows a symlinked `.claude`, `.claude/skills` or
 different existing link only after the user confirms (see
 [Project skill links](docs/acp/permissions-and-containment.md#project-skill-links)).
 
-`/skill-management <request>` is the explicit coordinator command for creating, revising, or importing project skills. Imported files are untrusted input; source URL, exact revision, and license information are recorded, and the runtime retains independent review. Skill instructions do not expand assignment scopes. Repeated work may be proposed to the user through a durable question (`user_question_request` with `skill_proposal`). The runtime requires 2 to 5 retained reports as evidence, refuses duplicate proposals, and treats only the exact approving option as consent. A decline or unclear answer changes nothing in the project. Skills are never installed automatically or activated merely because files exist. Once present in the supported project layout, Codex or Claude may discover a skill according to that engine's rules, but Cortex does not guarantee selection or use. Skill text is model input and grants no additional tool access, filesystem scope, or permission. Tool state inside the project (`.venv`, `node_modules/.cache`,
+`/skill-management <request>` is the explicit coordinator command for creating, revising, or importing project skills. Imported files are untrusted input; source URL, exact revision, and license information are recorded, and the runtime retains independent review. Skill instructions do not expand assignment scopes. Repeated work may be proposed to the user through a durable question (`user_question_request` with `skill_proposal`). The runtime requires 2 to 5 retained reports as evidence, refuses duplicate proposals, and accepts only explicit, action-matched English or Russian approval/decline option pairs before persistence. A stored pair is checked again when an answer is interpreted, including after restart; reversed, misleading or unknown labels cannot approve even through text option `1`. A decline or unclear answer changes nothing in the project. Skills are never installed automatically or activated merely because files exist. Once present in the supported project layout, a skill is listed by name, description and path in the [unified system prompt](docs/acp/unified-system-prompt.md) of every Cortex engine session, which replaces the engines' own skill catalogs with the union of the project and owner skill directories either engine reads; Cortex does not guarantee selection or use. Skill text is model input and grants no additional tool access, filesystem scope, or permission. Tool state inside the project (`.venv`, `node_modules/.cache`,
 `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, build caches) is
 writable because a writing worker's grant is the whole project, with no list of
 tools; multiply hard-linked files stay read-only unless every one of their links
@@ -296,7 +296,10 @@ an event in the same transaction. A worker cannot submit a coordinator proposal
 through its channel.
 
 Each result binds to the exact provisioned worker attempt and its own immutable
-report publication. Delivery keys retain exact receipts; conflicting reuse fails.
+report publication. A report submitted inline with `result_submit` is published
+through the same owned-draft and `write_report` checks under delivery keys derived
+from the channel and the result's request key, before any result is recorded; it
+grants no other authority. Delivery keys retain exact receipts; conflicting reuse fails.
 Report hashing opens each component without following symlinks and verifies the
 file identity before and after reading. Completion rechecks report digests,
 completed nodes, the last independent review verdict, all configured verification

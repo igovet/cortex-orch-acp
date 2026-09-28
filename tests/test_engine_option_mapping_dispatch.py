@@ -47,11 +47,19 @@ def test_option_mapping_for_dispatches_by_engine_name():
 
 
 GATEWAY_ONLY = dict(disallowedTools=['Agent','Task','Workflow','TeamCreate','TeamDelete','SendMessage','ScheduleWakeup','Monitor','CronCreate','CronDelete','CronList','RemoteTrigger'],strictMcpConfig=True,skills='all',plugins=[],managedSettings=dict(disableAllHooks=True))
+# With the unified Cortex prompt Claude's own skill listing, attribution and
+# git instructions are switched off as well.
+UNIFIED = dict(GATEWAY_ONLY, skills=[], settings=dict(attribution=dict(commit='', pr=''), includeGitInstructions=False))
 
 
 def test_session_new_meta_for_pinned_engines_builds_a_payload():
-    assert _session_new_meta_for('codex-acp','1.12.0','Be helpful.') == {'systemPrompt':'Be helpful.','cortexRole':'worker'}
-    assert _session_new_meta_for('claude-agent-acp','0.78.0','Be helpful.') == dict(systemPrompt=dict(append='Be helpful.'),claudeCode=dict(options=GATEWAY_ONLY))
+    from cortex_runtime.engine.unified_system_prompt import cortex_system_prompt
+
+    base = cortex_system_prompt('worker', None)
+    assert _session_new_meta_for('codex-acp','1.12.0','Be helpful.') == {
+        'systemPrompt':'Be helpful.','cortexRole':'worker','cortexBaseInstructions':base,'cortexNativeContext':False}
+    assert _session_new_meta_for('claude-agent-acp','0.78.0','Be helpful.') == dict(
+        systemPrompt=base.rstrip()+'\n\nBe helpful.',claudeCode=dict(options=UNIFIED))
     assert _session_new_meta_for('claude-agent-acp','0.11.0','Be helpful.') is None
     for text in [None,'']:
         assert _session_new_meta_for('claude-agent-acp','0.78.0',text) == dict(claudeCode=dict(options=GATEWAY_ONLY))
@@ -60,8 +68,9 @@ def test_session_new_meta_for_pinned_engines_builds_a_payload():
 def test_every_claude_role_keeps_native_tools_but_not_subagents_mcp_plugins_or_hooks():
     for role in ['worker','coordinator']:
         meta=_session_new_meta_for('claude-agent-acp','0.78.0','Role instructions',role=role)
-        assert meta['claudeCode']['options']==GATEWAY_ONLY
-        assert meta['systemPrompt']==dict(append='Role instructions')
+        assert meta['claudeCode']['options']==UNIFIED
+        assert meta['systemPrompt'].startswith('# Cortex session\n\nYou are ' + ('the Cortex coordinator' if role=='coordinator' else 'a Cortex worker'))
+        assert meta['systemPrompt'].endswith('\n\nRole instructions')
 
 
 def _open_one(tmp_path, engine, config_options):
@@ -147,7 +156,9 @@ def test_each_pinned_adapter_gets_its_own_session_new_meta(tmp_path):
         manager.shutdown(grace=2.0)
 
     dumped = json.loads(session_new_dump.read_text(encoding="utf-8"))
-    assert dumped.get('_meta') == dict(systemPrompt=dict(append='You are a backend developer.'),claudeCode=dict(options=GATEWAY_ONLY))
+    assert dumped['_meta']['claudeCode'] == dict(options=UNIFIED)
+    assert dumped['_meta']['systemPrompt'].startswith('# Cortex session\n\nYou are the Cortex coordinator')
+    assert dumped['_meta']['systemPrompt'].endswith('\n\nYou are a backend developer.')
 
     # The verified private Codex adapter forwards this metadata to App Server.
     # Role text is not repeated in an ordinary user prompt; recovery carries
@@ -175,4 +186,9 @@ def test_each_pinned_adapter_gets_its_own_session_new_meta(tmp_path):
         manager.shutdown(grace=2.0)
 
     dumped_codex = json.loads(session_new_dump_codex.read_text(encoding="utf-8"))
-    assert dumped_codex.get("_meta") == {"systemPrompt": "You are a backend developer.","cortexRole":"coordinator"}
+    meta_codex = dumped_codex.get("_meta")
+    assert meta_codex["systemPrompt"] == "You are a backend developer." and meta_codex["cortexRole"] == "coordinator"
+    assert meta_codex["cortexNativeContext"] is False
+    assert meta_codex["cortexBaseInstructions"].startswith("# Cortex session\n\nYou are the Cortex coordinator")
+    # Both engines receive the same unified text ahead of the same role text.
+    assert dumped['_meta']['systemPrompt'] == meta_codex["cortexBaseInstructions"].rstrip() + "\n\n" + meta_codex["systemPrompt"]

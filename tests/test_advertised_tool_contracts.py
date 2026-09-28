@@ -13,6 +13,8 @@ import pytest
 
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.delegation import mcp_tools
+from cortex_runtime.orchestration import skill_proposals
+from cortex_runtime.orchestration.contracts import COORDINATOR
 from cortex_runtime.orchestration.gateway import READ_ONLY
 from cortex_runtime.ownership import current_owner_epoch
 from cortex_runtime.portable.identity import SourceEvent
@@ -99,6 +101,25 @@ def test_user_question_request_forbids_a_recap_after_the_call(kind, role_id, sta
     assert "without restating" in description or "not restating" in description
 
 
+def test_skill_proposal_guidance_matches_the_enforced_action_pairs():
+    from pathlib import Path
+
+    (tool,) = [t for t in mcp_tools.tool_definitions("coordinator")
+               if t["name"] == "user_question_request"]
+    schema = COORDINATOR["user_question_request"]["properties"]["skill_proposal"]["description"]
+    advertised = tool["description"]
+    root = Path(__file__).resolve().parents[1]
+    surfaces = [
+        schema, advertised,
+        (root / "skills/skill-management/SKILL.md").read_text(encoding="utf-8"),
+        (root / "docs/project/decisions.md").read_text(encoding="utf-8"),
+    ]
+    for action, accepted in skill_proposals._SAFE_OPTION_PAIRS.items():
+        for approval, decline in accepted:
+            exact_pair = f"[{approval}, {decline}]"
+            assert all(exact_pair in surface for surface in surfaces), (action, exact_pair)
+
+
 def test_verdict_is_offered_exactly_where_it_is_accepted():
     def result_schema(stage):
         (tool,) = [t for t in mcp_tools.tool_definitions("worker", role_id="worker-debugger", stage=stage)
@@ -107,6 +128,10 @@ def test_verdict_is_offered_exactly_where_it_is_accepted():
     review, execution = result_schema("review"), result_schema("execution")
     assert "verdict" in review["properties"] and "verdict" in review["required"]
     assert "verdict" not in execution["properties"] and "verdict" not in execution["required"]
+    # Structured findings route fixes; like verdict they are review-only,
+    # and optional there.
+    assert "findings" in review["properties"] and "findings" not in review["required"]
+    assert "findings" not in execution["properties"]
 
 
 def _channels(tmp_path):

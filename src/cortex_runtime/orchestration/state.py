@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from ..connections.model import SUPPORTED_ENGINES
@@ -376,6 +376,53 @@ def review_provider_preference(store, task_id, attempt_id):
     return None, "no_audited_execution_provider"
 
 
+def targeted_fixes(tasks, scopes, findings, report_ref=None):
+    """Fixes a review's findings can be confined to, or None and why not.
+
+    A fix goes only to the plan tasks the findings name when every finding
+    names one of them, is not cross-cutting and lists only files the runtime
+    finds inside that task's scope. Anything else -- no findings, an unknown
+    task, a cross-cutting problem, a file outside the scope, or findings too
+    long to deliver as one objective -- keeps the conservative fix of every
+    original task. Contract changes are never guessed: a reviewer marks them
+    cross_cutting. Each targeted fix waits for the fixes of the plan tasks it
+    (transitively) depended on, so related fixes keep the plan's order.
+    """
+    from .gateway import _matches
+    from .project_paths import permitted_path
+    if not findings:
+        return None, 'no_findings'
+    grouped = {}
+    for finding in findings:
+        node = finding.get('node')
+        if finding.get('cross_cutting') is not False:
+            return None, 'cross_cutting'
+        if node not in scopes:
+            return None, 'unknown_node'
+        files = finding.get('files') or []
+        if not files or any(not isinstance(path, str) or not path or not permitted_path(path)
+                            or not _matches(PurePosixPath(path).as_posix(), scopes[node]) for path in files):
+            return None, 'files_outside_scope'
+        grouped.setdefault(node, []).append(finding)
+    parents = {t['id']: list(t['dependencies']) for t in tasks}
+    order = [t['id'] for t in tasks]
+    targets = {}
+    for node, items in grouped.items():
+        seen, pending = set(), list(parents.get(node, []))
+        while pending:
+            current = pending.pop()
+            if current not in seen:
+                seen.add(current)
+                pending.extend(parents.get(current, []))
+        reference = f' (review report: {report_ref})' if report_ref else ''
+        objective = (f'Address these review findings within the assigned scope{reference}:\n' + '\n'.join(
+            f"- Files: {', '.join(item['files'])}\n  Fix: {item['fix']}" for item in items))
+        if len(objective) > 8000:
+            return None, 'findings_too_long'
+        targets[node] = dict(objective=objective, after=[n for n in order if n in seen and n in grouped])
+    return targets, None
+
+
 def validate_scope(scope):
     if not isinstance(scope, list) or not scope or len(scope) > 64:
         raise StoreError('invalid_assignment_scope')
@@ -470,55 +517,133 @@ class TaskMachine:
             db.commit()
         return self.context(task_id)
 
-    def context(self, task_id):
+    def get_state(self, task_id):
+        """Read only the durable orchestration state for a task."""
         with self.store.connection() as db:
+            task = db.execute(
+                'SELECT state FROM runtime_tasks WHERE task_id=?', (task_id,)
+            ).fetchone()
+        if task is None:
+            raise StoreError('runtime_task_missing')
+        return task['state']
+
+    def context(self, task_id):
+        # A single explicit read transaction keeps every part of the context
+        # on the same SQLite snapshot.
+        with self.store.connection() as db:
+            db.execute('BEGIN')
             task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
             if task is None:
                 raise StoreError('runtime_task_missing')
-            nodes = db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid',
-                               (task_id, task['revision'])).fetchall()
-            answers = db.execute("SELECT id,text,answer_text FROM pending_questions WHERE task_id=? AND status='answered' ORDER BY created_at", (task_id,)).fetchall()
-            steering = db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_STEERING' ORDER BY id DESC LIMIT 64", (task_id,)).fetchall()
-            proposals=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED' ORDER BY id DESC LIMIT 3",(task_id,)).fetchall()
-            verification=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED') ORDER BY id DESC LIMIT 1",(task_id,)).fetchone()
+            task_value = dict(task)
+            nodes = db.execute(
+                'SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid',
+                (task_id, task['revision']),
+            ).fetchall()
+            answers = db.execute(
+                "SELECT id,text,answer_text FROM pending_questions "
+                "WHERE task_id=? AND status='answered' ORDER BY created_at",
+                (task_id,),
+            ).fetchall()
+            steering = db.execute(
+                "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_STEERING' "
+                "ORDER BY id DESC LIMIT 64",
+                (task_id,),
+            ).fetchall()
+            proposals = db.execute(
+                "SELECT payload_json FROM runtime_events WHERE task_id=? "
+                "AND type='REPLAN_REQUEST_ACCEPTED' ORDER BY id DESC LIMIT 3",
+                (task_id,),
+            ).fetchall()
+            verification = db.execute(
+                "SELECT payload_json FROM runtime_events WHERE task_id=? "
+                "AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED') ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
             from .policy import denied_paths
-            denials = denied_paths(db,task_id)
+            denials = denied_paths(db, task_id)
             waiver = current_review_waiver(db, task_id)
-        value = dict(task)
+
+            asked = db.execute(
+                "SELECT id,payload_json FROM runtime_events WHERE task_id=? "
+                "AND type='ASK_USER_REQUIRED' ORDER BY id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            answered = db.execute(
+                "SELECT MAX(id) FROM runtime_events WHERE task_id=? "
+                "AND type IN ('USER_ANSWER_RECEIVED','PLAN_ACCEPTED')",
+                (task_id,),
+            ).fetchone()[0]
+            verification_attempts = db.execute(
+                "SELECT COUNT(*) FROM runtime_events WHERE task_id=? "
+                "AND type='VERIFICATION_REVISED'",
+                (task_id,),
+            ).fetchone()[0]
+
+            from .skill_proposals import task_proposals
+            skill_proposals = task_proposals(db, task_id)
+
+            value_nodes = [
+                {
+                    **dict(node),
+                    'dependencies': json.loads(node['dependencies_json']),
+                    'scope': json.loads(node['scope_json']),
+                    'result': json.loads(node['result_json'] or 'null'),
+                }
+                for node in nodes
+            ]
+            for node in value_nodes:
+                for key in ('dependencies_json', 'scope_json', 'result_json'):
+                    node.pop(key)
+
+            # Resolve all assignment attempts in one query. The evidence
+            # annotator still validates each result against its own attempt.
+            assignment_refs = list(dict.fromkeys(
+                node['assignment_ref'] for node in value_nodes
+                if node['assignment_ref']
+            ))
+            attempts_by_assignment = {}
+            if assignment_refs:
+                placeholders = ','.join('?' for _ in assignment_refs)
+                attempt_rows = db.execute(
+                    "SELECT idempotency_key,attempt_id FROM delegation_provisioning "
+                    f"WHERE task_id=? AND idempotency_key IN ({placeholders}) ORDER BY rowid",
+                    (task_id, *assignment_refs),
+                ).fetchall()
+                for row in attempt_rows:
+                    attempts_by_assignment.setdefault(
+                        row['idempotency_key'], row['attempt_id']
+                    )
+
+            from ..delegation.evidence import annotate_checks
+            for node in value_nodes:
+                result = node['result']
+                if isinstance(result, dict) and result.get('checks'):
+                    attempt_id = attempts_by_assignment.get(node['assignment_ref'])
+                    result['checks'] = annotate_checks(
+                        db, task_id, attempt_id, result['checks']
+                    )
+
+        value = task_value
         value['review_not_required'] = waiver
-        value['runtime_proposals']=[json.loads(row[0]) for row in reversed(proposals)]
-        value['steering'] = [json.loads(row[0]) for row in reversed(steering)]
+        value['runtime_proposals'] = [
+            json.loads(row[0]) for row in reversed(proposals)
+        ]
+        value['steering'] = [
+            json.loads(row[0]) for row in reversed(steering)
+        ]
         value['policy'] = dict(deny_write=denials, native_tools=True)
-        value['verification']=json.loads(verification[0]) if verification else None
-        with self.store.connection() as db:
-            asked = db.execute("SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type='ASK_USER_REQUIRED' ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
-            answered = db.execute("SELECT MAX(id) FROM runtime_events WHERE task_id=? AND type IN ('USER_ANSWER_RECEIVED','PLAN_ACCEPTED')", (task_id,)).fetchone()[0]
-        value['ask_user_required'] = json.loads(asked[1])['blocker'] if asked and (answered is None or answered < asked[0]) else None
-        with self.store.connection() as db:
-            value['verification_attempts'] = db.execute(
-                "SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='VERIFICATION_REVISED'", (task_id,)).fetchone()[0]
+        value['verification'] = json.loads(verification[0]) if verification else None
+        value['ask_user_required'] = (
+            json.loads(asked[1])['blocker']
+            if asked and (answered is None or answered < asked[0])
+            else None
+        )
+        value['verification_attempts'] = verification_attempts
         value['user_answers'] = [dict(answer) for answer in answers]
-        from .skill_proposals import task_proposals
-        with self.store.connection() as db:
-            value['skill_proposals'] = task_proposals(db, task_id)
+        value['skill_proposals'] = skill_proposals
         value['plan'] = json.loads(value.pop('plan_json') or 'null')
-        value['nodes'] = [{**dict(n), 'dependencies': json.loads(n['dependencies_json']),
-                           'scope': json.loads(n['scope_json']),
-                           'result': json.loads(n['result_json'] or 'null')} for n in nodes]
-        for n in value['nodes']:
-            for key in ('dependencies_json', 'scope_json', 'result_json'):
-                n.pop(key)
-        # Derived now, never stored: each check's evidence_strength under the
-        # current rule, so a result accepted under an older, weaker rule shows
-        # its weak evidence beside the retained outcome.
-        from ..delegation.evidence import annotate_checks
-        with self.store.connection() as db:
-            for n in value['nodes']:
-                if isinstance(n['result'], dict) and n['result'].get('checks'):
-                    attempt = db.execute('SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?',
-                                         (task_id, n['assignment_ref'])).fetchone()
-                    n['result']['checks'] = annotate_checks(db, task_id, attempt['attempt_id'] if attempt else None,
-                                                            n['result']['checks'])
+        value['nodes'] = value_nodes
         return value
 
     def submit_plan(self, channel, plan, request_key, *, authorization=None):
@@ -640,54 +765,106 @@ class TaskMachine:
                 transition(db, task_id, 'CANCELLED')
             db.commit()
 
-    def claim_ready(self, task_id, channel_id):
-        """Reserve dependency-ready nodes atomically."""
+    def change_fingerprint(self, task_id):
+        """One cheap read that changes whenever scheduler input may have.
+
+        The controller skips its full pass while this value is unchanged. It is
+        a comparison token only, never state: the database stays the source of
+        truth and a periodic full pass covers anything it does not capture.
+        """
         with self.store.connection() as db:
-            db.execute('BEGIN IMMEDIATE')
-            task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
-            if task is None or task['state'] not in {'EXECUTING', 'REVIEWING'}:
+            row = db.execute(
+                "SELECT t.state,t.revision,t.updated_at,t.review_cycle,t.blocker,"
+                "length(t.plan_json),length(t.synthesis),"
+                "(SELECT MAX(id) FROM runtime_events WHERE task_id=t.task_id),"
+                "(SELECT MAX(id) FROM task_events WHERE task_id=t.task_id),"
+                "(SELECT COUNT(*)||':'||COALESCE(group_concat(node_id||'/'||status||'/'"
+                "||COALESCE(assignment_ref,'')||'/'||(result_json IS NOT NULL),','),'') "
+                "FROM runtime_nodes WHERE task_id=t.task_id AND revision=t.revision) "
+                "FROM runtime_tasks t WHERE t.task_id=?", (task_id,),
+            ).fetchone()
+        return tuple(row) if row is not None else None
+
+    @staticmethod
+    def _ready_nodes(db, task_id):
+        """Select reservable nodes without writing; longest remaining chain first."""
+        task = db.execute('SELECT * FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
+        if task is None or task['state'] not in {'EXECUTING', 'REVIEWING'}:
+            return task, []
+        nodes = [dict(n) for n in db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid',
+                                            (task_id, task['revision']))]
+        completed = {n['node_id'] for n in nodes if n['status'] == 'completed'}
+        stage = 'review' if task['state'] == 'REVIEWING' else 'execution'
+        ready = [n for n in nodes if n['status'] == 'pending' and n['stage'] == stage
+                 and set(json.loads(n['dependencies_json'])) <= completed]
+        if not ready:
+            return task, []
+        # Only this task's own in-flight workers hold a write scope. No
+        # worker-count limit, and no other task -- live, blocked or long
+        # dead -- can keep this one from starting. An earlier revision's
+        # node still marked 'running' holds scope only while its worker
+        # is not yet released; a stale marker alone never blocks a new plan.
+        active_nodes = db.execute("""SELECT n.scope_json, n.role, n.stage FROM runtime_nodes n WHERE n.task_id=? AND (
+            (n.status='running' AND (n.revision=? OR NOT EXISTS (
+                SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='WORKER_RELEASED'
+                AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref)))
+            OR (n.assignment_ref IS NOT NULL AND EXISTS (
+                SELECT 1 FROM delegation_provisioning p WHERE p.idempotency_key=n.assignment_ref
+            ) AND NOT EXISTS (
+                SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='WORKER_RELEASED'
+                AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref
+            )))""", (task_id, task['revision'])).fetchall()
+        # Start first what unblocks the longest remaining dependency chain;
+        # ties keep plan (rowid) order. Graph structure only, no model call.
+        dependents = {}
+        for n in nodes:
+            for dependency in json.loads(n['dependencies_json']):
+                dependents.setdefault(dependency, []).append(n['node_id'])
+        chain = {}
+
+        def remaining(node_id, visiting=frozenset()):
+            if node_id not in chain:
+                below = [remaining(d, visiting | {node_id}) for d in dependents.get(node_id, ())
+                         if d not in visiting]
+                chain[node_id] = 1 + max(below, default=0)
+            return chain[node_id]
+
+        ready.sort(key=lambda n: -remaining(n['node_id']))
+        from .policy import overlaps
+        # Import lazily: gateway imports this module for shared state helpers.
+        from .gateway import READ_ONLY
+        occupied = [
+            json.loads(n['scope_json']) for n in active_nodes
+            if n['stage'] != 'review' and n['role'] not in READ_ONLY
+        ]
+        selected = []
+        for candidate in ready:
+            scope = json.loads(candidate['scope_json'])
+            read_only = candidate['stage'] == 'review' or candidate['role'] in READ_ONLY
+            if not read_only and any(overlaps(a,b) for grant in occupied for a in grant for b in scope):
+                continue
+            selected.append(candidate)
+            if not read_only:
+                occupied.append(scope)
+        return task, selected
+
+    def claim_ready(self, task_id, channel_id):
+        """Reserve dependency-ready nodes atomically.
+
+        A plain read looks for candidates first, so an idle scheduler pass
+        never takes the write lock; the selection is repeated under it.
+        """
+        with self.store.connection() as db:
+            if not self._ready_nodes(db, task_id)[1]:
                 return []
-            nodes = [dict(n) for n in db.execute('SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid',
-                                                (task_id, task['revision']))]
-            completed = {n['node_id'] for n in nodes if n['status'] == 'completed'}
-            # Only this task's own in-flight workers hold a write scope. No
-            # worker-count limit, and no other task -- live, blocked or long
-            # dead -- can keep this one from starting. An earlier revision's
-            # node still marked 'running' holds scope only while its worker
-            # is not yet released; a stale marker alone never blocks a new plan.
-            active_nodes = db.execute("""SELECT n.scope_json, n.role, n.stage FROM runtime_nodes n WHERE n.task_id=? AND (
-                (n.status='running' AND (n.revision=? OR NOT EXISTS (
-                    SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='WORKER_RELEASED'
-                    AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref)))
-                OR (n.assignment_ref IS NOT NULL AND EXISTS (
-                    SELECT 1 FROM delegation_provisioning p WHERE p.idempotency_key=n.assignment_ref
-                ) AND NOT EXISTS (
-                    SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='WORKER_RELEASED'
-                    AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref
-                )))""", (task_id, task['revision'])).fetchall()
-            stage = 'review' if task['state'] == 'REVIEWING' else 'execution'
-            ready = [n for n in nodes if n['status'] == 'pending' and n['stage'] == stage
-                     and set(json.loads(n['dependencies_json'])) <= completed]
-            from .policy import overlaps
-            # Import lazily: gateway imports this module for shared state helpers.
-            from .gateway import READ_ONLY
-            occupied = [
-                json.loads(n['scope_json']) for n in active_nodes
-                if n['stage'] != 'review' and n['role'] not in READ_ONLY
-            ]
-            selected = []
-            for candidate in ready:
-                scope = json.loads(candidate['scope_json'])
-                read_only = candidate['stage'] == 'review' or candidate['role'] in READ_ONLY
-                if not read_only and any(overlaps(a,b) for grant in occupied for a in grant for b in scope):
-                    continue
-                selected.append(candidate)
-                if not read_only:
-                    occupied.append(scope)
-            ready = selected
+            db.execute('BEGIN IMMEDIATE')
+            task, ready = self._ready_nodes(db, task_id)
+            if not ready:
+                return []
+            retries = [json.loads(row[0]) for row in db.execute(
+                "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'", (task_id,))]
             for node in ready:
-                retries=db.execute("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'",(task_id,)).fetchall()
-                retry=sum(json.loads(row[0]).get('node')==node['node_id'] and json.loads(row[0]).get('revision')==task['revision'] for row in retries)
+                retry = sum(p.get('node') == node['node_id'] and p.get('revision') == task['revision'] for p in retries)
                 key = f"runtime:{task['revision']}:{node['node_id']}:{retry}"
                 assignment = hashlib.sha256(f'{task_id}|{channel_id}|{key}'.encode()).hexdigest()
                 db.execute('UPDATE runtime_nodes SET status=?,assignment_ref=? WHERE task_id=? AND revision=? AND node_id=?',
@@ -807,19 +984,29 @@ class TaskMachine:
             if task['review_cycle'] >= MAX_REVIEW_CYCLES:
                 transition(db, task_id, 'BLOCKED', blocker='review_cycle_limit')
             else:
-                original={n['id'] for n in json.loads(task['plan_json'])['tasks']}
-                implementations=db.execute("SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='execution' ORDER BY rowid",
-                                           (task_id,task['revision'])).fetchall()
+                tasks=json.loads(task['plan_json'])['tasks']
+                original={n['id'] for n in tasks}
+                implementations=[n for n in db.execute("SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='execution' ORDER BY rowid",
+                                                       (task_id,task['revision'])).fetchall() if n['node_id'] in original]
+                targets,fallback=targeted_fixes(tasks,{n['node_id']: json.loads(n['scope_json']) for n in implementations},
+                                                review['result'].get('findings'),review['result'].get('report_ref'))
+                keys={n['node_id']: f"_fix_{task['review_cycle']}_{n['node_id']}" for n in implementations}
                 fixes=[]
                 for implementation in implementations:
-                    if implementation['node_id'] not in original: continue
-                    key=f"_fix_{task['review_cycle']}_{implementation['node_id']}"
+                    node_id=implementation['node_id']
+                    if targets is None:
+                        objective='Address review findings within the assigned scope: '+review['result']['summary']
+                        dependencies=[review['node_id']]
+                    elif node_id in targets:
+                        objective,dependencies=targets[node_id]['objective'],[review['node_id'],*(keys[n] for n in targets[node_id]['after'])]
+                    else:
+                        continue
                     db.execute('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                               (task_id,task['revision'],key,implementation['role'],
-                                'Address review findings within the assigned scope: '+review['result']['summary'],
-                                encoded([review['node_id']]),implementation['scope_json'],'execution','pending',None,None))
-                    fixes.append(key)
-                event(db,task_id,'REVIEW_CHANGES_REQUESTED',dict(review=review['node_id'],fixes=fixes))
+                               (task_id,task['revision'],keys[node_id],implementation['role'],objective,
+                                encoded(dependencies),implementation['scope_json'],'execution','pending',None,None))
+                    fixes.append(keys[node_id])
+                event(db,task_id,'REVIEW_CHANGES_REQUESTED',dict(review=review['node_id'],fixes=fixes,
+                                                                  targeted=targets is not None,fallback=fallback))
                 transition(db, task_id, 'EXECUTING')
             db.commit()
 
@@ -835,13 +1022,54 @@ class TaskMachine:
                 return ' '.join(str(name).split()).casefold()
 
             rows = db.execute(
-                'SELECT result_json FROM runtime_nodes WHERE task_id=? AND revision=? AND result_json IS NOT NULL',
+                'SELECT node_id,assignment_ref,result_json FROM runtime_nodes '
+                'WHERE task_id=? AND revision=? AND result_json IS NOT NULL',
                 (channel.task_id, task['revision']),
             ).fetchall()
-            checks = [check for row in rows for check in json.loads(row[0]).get('checks', [])]
-            passed = {normalized(check['name']) for check in checks if check.get('outcome') == 'passed'}
-            gaps = {normalized(check['name']): check['name'] for check in checks
-                    if check.get('outcome') in {'not_run', 'unverified'} and normalized(check['name']) not in passed}
+            from ..delegation.evidence import assess_checks, current_outcomes
+
+            checks = []
+            for row in rows:
+                result_checks = json.loads(row['result_json']).get('checks', [])
+                provision = db.execute(
+                    'SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?',
+                    (channel.task_id, row['assignment_ref']),
+                ).fetchone() if row['assignment_ref'] else None
+                outcomes = current_outcomes(db, channel.task_id, provision['attempt_id'], result_checks) if provision else None
+                assessments = assess_checks(db, channel.task_id, provision['attempt_id'], result_checks) if provision else None
+                for index, check in enumerate(result_checks):
+                    checks.append((row['node_id'], check, outcomes[index] if outcomes else None,
+                                   assessments[index] if assessments else None))
+
+            def fix_origin(node):
+                match = re.fullmatch(r'_fix_(\d+)_([A-Za-z][A-Za-z0-9_-]*)', node)
+                return (match.group(2), int(match.group(1))) if match else (node, -1)
+
+            def same_lineage(gap_node, pass_node):
+                if gap_node == pass_node:
+                    return True
+                gap_origin, gap_cycle = fix_origin(gap_node)
+                pass_origin, pass_cycle = fix_origin(pass_node)
+                return gap_origin == pass_origin and pass_cycle >= 0 and pass_cycle >= gap_cycle
+
+            passes = [(node, check, current, assessment) for node, check, current, assessment in checks
+                      if check.get('outcome') == 'passed' and current is not None
+                      and current['outcome'] == 'passed' and assessment['strength'] == 'verified']
+            gaps = {}
+            for node, check, _, _ in checks:
+                if check.get('outcome') not in {'not_run', 'unverified'}:
+                    continue
+                name = normalized(check['name'])
+                command = check.get('command')
+                resolved = any(
+                    (same_lineage(node, passed_node) and normalized(passed_check['name']) == name)
+                    or (isinstance(command, list) and command
+                        and passed_current is not None and passed_assessment['strength'] == 'verified'
+                        and passed_assessment.get('identity') == ('command_run', tuple(command), None))
+                    for passed_node, passed_check, passed_current, passed_assessment in passes
+                )
+                if not resolved:
+                    gaps[name] = check['name']
             for index, item in enumerate(not_verified):
                 if not item['blocker'].strip():
                     raise StoreError('synthesis_blocker_required', f'arguments.not_verified[{index}].blocker',

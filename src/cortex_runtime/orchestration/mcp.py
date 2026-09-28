@@ -94,7 +94,14 @@ def dispatch(store, channel, operation, args):
         from .policy import propose_replan
         return propose_replan(store,channel,operation,args)
     if operation == 'result_submit':
-        from ..delegation.mcp_tools import _worker_publish_result
+        from ..delegation.mcp_tools import _worker_publish_result, inline_report_form, publish_inline_report
+        if ('report_ref' in args) == ('report' in args):
+            both = 'report_ref' in args
+            raise StoreError('result_report_conflict' if both else 'result_report_required',
+                             'report_ref, report', 'both' if both else 'neither',
+                             'exactly one of report_ref or report',
+                             'Send either report_ref from your own write_report or the report itself in report, never both.'
+                             if both else 'Add report (title and markdown), or report_ref from your own write_report.')
         with store.connection() as db:
             provision = db.execute('SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
                                    (channel.task_id, channel.attempt_id)).fetchone()
@@ -104,7 +111,12 @@ def dispatch(store, channel, operation, args):
             raise StoreError('runtime_assignment_missing')
         if (node['stage'] == 'review') != ('verdict' in args):
             raise StoreError('review_verdict_required' if node['stage'] == 'review' else 'reviewer_only_verdict')
-        digest = hashlib.sha256(encoded(args).encode()).hexdigest()
+        if 'findings' in args and node['stage'] != 'review':
+            raise StoreError('reviewer_only_findings')
+        # An inline report's body lives in its published file; the request
+        # retains and digests its SHA-256 (a changed body still conflicts).
+        request = inline_report_form(args)
+        digest = hashlib.sha256(encoded(request).encode()).hexdigest()
         with store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             previous = db.execute('SELECT * FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
@@ -125,28 +137,48 @@ def dispatch(store, channel, operation, args):
                     if not gap and 'blocker' in check:
                         raise StoreError('check_blocker_unexpected', f'arguments.checks[{index}].blocker', check['outcome'],
                                          'no blocker on a passed or failed check', 'Remove blocker from checks that passed or failed.')
+                    if not gap and 'command' in check:
+                        raise StoreError('check_command_unexpected', f'arguments.checks[{index}].command', check['outcome'],
+                                         'command only on a not_run or unverified check',
+                                         'Remove command from checks that passed or failed; their command comes from tool_call_ref.')
                 # A pass the runtime cannot verify is kept unverified (or
                 # failed, when its cited command exited nonzero) with the
                 # structured gap; a failure an exact later rerun closed keeps
                 # closed_by. The original claim stays in the digest.
-                accepted = dict(args, checks=accept_checks(db, channel.task_id, channel.attempt_id, args['checks']))
+                accepted = dict(request, checks=accept_checks(db, channel.task_id, channel.attempt_id, args['checks']))
                 db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
                            (channel.task_id, args['request_key'], channel.channel_id, operation, digest,
-                            encoded(dict(complete=False, assignment_ref=provision['idempotency_key'], result=args,
+                            encoded(dict(complete=False, assignment_ref=provision['idempotency_key'], result=request,
                                          accepted=accepted))))
             else:
                 saved = json.loads(previous['result_json'])
                 accepted = saved.get('accepted', saved['result'])
             db.commit()
-        result = _worker_publish_result(store, channel, {key: value for key, value in accepted.items() if key != 'verdict'})
+        if 'report' in args and 'report_ref' not in accepted:
+            # Publish before any result is visible: a crash here leaves at
+            # most an unpublished draft or a report without a result, and
+            # this same request's retry replays both deliveries.
+            report_ref = publish_inline_report(store, channel, args['request_key'], args['report'], args['summary'])
+            accepted = dict({key: value for key, value in accepted.items() if key != 'report'}, report_ref=report_ref)
+            with store.connection() as db:
+                db.execute('BEGIN IMMEDIATE')
+                saved = json.loads(db.execute('SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                                              (channel.task_id, channel.channel_id, args['request_key'])).fetchone()[0])
+                if saved.get('complete'):
+                    return saved['receipt']
+                db.execute('UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?',
+                           (encoded(dict(saved, accepted=accepted)),
+                            channel.task_id, channel.channel_id, args['request_key']))
+                db.commit()
+        result = _worker_publish_result(store, channel, {key: value for key, value in accepted.items() if key not in {'verdict', 'findings'}})
         machine.record_result(channel.task_id, provision['idempotency_key'], accepted)
         # The receipt shows the worker every check the runtime did not accept as claimed.
-        result = dict(result, checks=[{key: check[key] for key in ('name', 'outcome', 'claimed_outcome', 'evidence_gap', 'blocker', 'closed_by')
+        result = dict(result, report_ref=accepted['report_ref'], checks=[{key: check[key] for key in ('name', 'outcome', 'claimed_outcome', 'evidence_gap', 'blocker', 'closed_by')
                                        if key in check} for check in accepted['checks']])
         with store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute('UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?',
-                       (encoded(dict(complete=True, receipt=result, assignment_ref=provision['idempotency_key'], result=args,
+                       (encoded(dict(complete=True, receipt=result, assignment_ref=provision['idempotency_key'], result=request,
                                      accepted=accepted)),
                         channel.task_id, channel.channel_id, args['request_key']))
             db.commit()

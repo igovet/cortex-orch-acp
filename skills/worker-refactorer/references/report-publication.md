@@ -7,9 +7,10 @@ explicit; prose cannot manufacture a successful observation. Every unrun or
 unverified check in the report names its concrete blocker.
 
 Use the current advertised draft and publication operations and their exact
-receipts. Publish the immutable report, then submit the structured result using
-that report reference. An uncertain delivery is retried only according to the
-operation's idempotency contract. A later attempt publishes a new report rather
+receipts. Either submit the finished report together with the structured result
+in one call, which publishes it as your immutable report, or publish it first
+and submit the result with that report reference. An uncertain delivery is
+retried only according to the operation's idempotency contract. A later attempt publishes a new report rather
 than rewriting a published result.
 
 Runtime state controls review, verification and completion. A final chat message

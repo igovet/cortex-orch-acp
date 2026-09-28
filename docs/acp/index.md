@@ -40,6 +40,7 @@ The no-paid startup smoke in `scripts/cortex_acp_smoke.py` launches the producti
 
 - [Codex ACP adapter](codex-acp-adapter.md)
 - [Claude ACP adapter](claude-agent-acp-adapter.md)
+- [Unified system prompt](unified-system-prompt.md)
 - [Permissions and containment](permissions-and-containment.md)
 - [Security boundary audit](security-boundaries.md)
 

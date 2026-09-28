@@ -155,7 +155,7 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     assert detail["decision_detail"]["route_basis"] == "auto"
     assert detail["decision_detail"]["effort"] == "high"
     decision = detail["decision_detail"]["route_decision"]
-    assert decision["rank_version"] == 6
+    assert decision["rank_version"] == 7
     assert "balance" not in decision
     assert decision["used_percent_compared"] is False
     assert decision["usage"] == dict(compared=False, margin=10.0, least_used_percent=None)
@@ -672,16 +672,22 @@ def test_exact_model_hint_and_reason_are_audited(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("trigger", ["retry", "review_fix"])
-def test_normal_development_retry_and_review_fix_dispatch_luna_max(tmp_path, trigger):
+def test_normal_testing_retry_and_review_fix_dispatch_luna_max(tmp_path, trigger):
     from cortex_runtime.orchestration.state import TaskMachine, event
     from test_runtime_task_machine import plan
 
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
         tmp_path, model_a="gpt-6-luna", model_b="claude-sonnet-5",
         efforts=("low", "medium", "high", "xhigh", "max"))
+    # Testing has no default engine lean; name one so the engine-order
+    # tie between the two connections cannot decide.
+    (project / ".cortex").mkdir(exist_ok=True)
+    (project / ".cortex" / "routing.json").write_text(json.dumps({"engine_affinity": {"testing": "codex-acp"}}))
     machine = TaskMachine(store)
-    machine.create(channel.task_id, "Implement ordinary backend work")
-    machine.submit_plan(channel, plan(), "normal-plan")
+    machine.create(channel.task_id, "Test ordinary backend work")
+    testing_plan = plan()
+    testing_plan["tasks"][0]["role"] = "qa-engineer"
+    machine.submit_plan(channel, testing_plan, "normal-plan")
     machine.move(channel.task_id, "EXECUTING")
     node = machine.claim_ready(channel.task_id, channel.channel_id)[0]
     with store.connection() as db:
@@ -693,7 +699,7 @@ def test_normal_development_retry_and_review_fix_dispatch_luna_max(tmp_path, tri
                        ("_fix_1_" + node["node_id"], channel.task_id, node["assignment_ref"]))
         db.commit()
 
-    result = provisioning.delegate(channel, "Fix", "Fix ordinary backend work.", "backend-dev",
+    result = provisioning.delegate(channel, "Fix", "Fix the ordinary backend tests.", "qa-engineer",
                                    "Tests pass.", node["request_key"])
     assert result.status == "ready"
     try:
@@ -706,5 +712,36 @@ def test_normal_development_retry_and_review_fix_dispatch_luna_max(tmp_path, tri
         assert decision["luna"]["status"] == "standard_candidate"
         assert decision["luna"]["chosen"] is True
         assert decision["effort_basis"] == "luna:standard:escalated"
+    finally:
+        adapter.terminate_owned(result.attempt_id)
+
+
+def test_normal_development_retry_never_dispatches_luna(tmp_path):
+    from cortex_runtime.orchestration.state import TaskMachine, event
+    from test_runtime_task_machine import plan
+
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
+        tmp_path, model_a="gpt-6-luna", model_b="claude-sonnet-5",
+        efforts=("low", "medium", "high", "xhigh", "max"))
+    machine = TaskMachine(store)
+    machine.create(channel.task_id, "Implement ordinary backend work")
+    machine.submit_plan(channel, plan(), "normal-plan")
+    machine.move(channel.task_id, "EXECUTING")
+    node = machine.claim_ready(channel.task_id, channel.channel_id)[0]
+    with store.connection() as db:
+        event(db, channel.task_id, "ASSIGNMENT_RETRIED",
+              dict(node=node["node_id"], revision=node["revision"], retry=1))
+        db.commit()
+
+    result = provisioning.delegate(channel, "Fix", "Fix ordinary backend work.", "backend-dev",
+                                   "Tests pass.", node["request_key"])
+    assert result.status == "ready"
+    try:
+        assert _read_log(log_a) == []
+        audit = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]
+        assert audit["model"] == "claude-sonnet-5"
+        decision = audit["decision_detail"]["route_decision"]
+        assert decision["base_role_tier"] == "standard" and decision["role_tier"] == "deep"
+        assert decision["luna"]["status"] == "excluded:deep_work"
     finally:
         adapter.terminate_owned(result.attempt_id)

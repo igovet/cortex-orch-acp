@@ -17,10 +17,10 @@ light model even if the hinted engine has none there. A hint is ignored when
 the hinted route is excluded, exhausted, or its plan is at least 85% used
 while another candidate's is not. When you name an exact route, copy one that
 `list_route_options` marks `auto_eligible`. Codex Luna is cheap and strong: the
-runtime runs it at `high` to `max` and ranks it for light work and for ordinary
-standard-tier development, never for `complexity: high`, deep or flagship work.
-An exact Luna hint is reasonable for simple or ordinary implementation, testing
-or debugging; do not use it to push hard work down a tier.
+runtime runs it at `high` to `max` and ranks it for light work and, in the
+standard tier, only for testing work; never for other standard-tier work,
+`complexity: high`, deep or flagship work. An exact Luna hint is reasonable for
+light work or ordinary testing; do not use it to push other work onto Luna.
 
 ## Specialist catalogue
 

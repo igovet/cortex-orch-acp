@@ -12,9 +12,11 @@ and exactly two options (approve, decline). The runtime
 - refuses duplicates: an open proposal for the same name anywhere in the
   project, an already answered proposal with the same name and action, or a
   second proposal in the same task;
-- derives the decision only from the exact recorded answer: the first option
-  approves, the second declines, anything else is ``unclear`` and never
-  approves;
+- accepts only explicit, action-matched approval/decline label pairs in
+  supported user languages; ambiguous or legacy unsafe labels never approve;
+- derives the decision only from the exact recorded answer: the validated
+  approval label (or its displayed number) approves, and anything else is
+  declined or ``unclear``;
 - records ``SKILL_PROPOSAL_DECIDED`` in the same transaction that resumes the
   task after the answer, so a restart either sees both or neither.
 
@@ -35,6 +37,23 @@ MAX_EVIDENCE = 5
 _TITLE_LIMIT = 200
 DECISIONS = ('approved', 'declined', 'unclear')
 
+# Only these displayed labels may authorize a skill change.
+# The existing English creation pair remains valid for older saved questions.
+_SAFE_OPTION_PAIRS = {
+    'create': (
+        ('Create the skill', 'Not now'),
+        ('Создать навык', 'Не сейчас'),
+        ('Approve creating the skill', 'Decline creating the skill'),
+        ('Одобрить создание навыка', 'Отклонить создание навыка'),
+    ),
+    'update': (
+        ('Update the skill', 'Not now'),
+        ('Обновить навык', 'Не сейчас'),
+        ('Approve updating the skill', 'Decline updating the skill'),
+        ('Одобрить обновление навыка', 'Отклонить обновление навыка'),
+    ),
+}
+
 
 def workflow_instruction(source):
     """The one activation text for the skill-management workflow.
@@ -50,9 +69,23 @@ def normalized(text):
     return ' '.join(str(text).split()).casefold()
 
 
-def decide(options, answer_text):
-    """``approved`` only for the exact first option (or its displayed
-    number ``1`` in the text fallback); never a guess."""
+def _safe_options(options, action):
+    """Match a complete, known approval/decline pair before interpreting 1/2."""
+    if not isinstance(options, (list, tuple)) or len(options) != 2:
+        return False
+    pair = tuple(normalized(option) for option in options)
+    return pair in {tuple(normalized(label) for label in safe)
+                    for safe in _SAFE_OPTION_PAIRS.get(action, ())}
+
+
+def decide(options, answer_text, action):
+    """Only a known, action-matched displayed approval can approve.
+
+    Old persisted questions with arbitrary labels fail closed after restart,
+    including numeric replies to a misleading first option.
+    """
+    if not _safe_options(options, action):
+        return 'unclear'
     answer = normalized(answer_text or '')
     if answer and answer in (normalized(options[0]), '1'):
         return 'approved'
@@ -85,13 +118,13 @@ def _skill_state(project_root, name):
         os.close(root_fd)
 
 
-def _status(db, question_id, options):
+def _status(db, question_id, options, action):
     row = db.execute('SELECT status, answer_text FROM pending_questions WHERE id=?', (question_id,)).fetchone()
     if row is None or row['status'] in ('superseded', 'cancelled'):
         return 'withdrawn'
     if row['status'] == 'open':
         return 'pending'
-    return decide(options, row['answer_text'])
+    return decide(options, row['answer_text'], action)
 
 
 def _asked(db, *, name=None, task_id=None):
@@ -104,7 +137,7 @@ def _asked(db, *, name=None, task_id=None):
                       values).fetchall()
     for row in rows:
         payload = json.loads(row['payload_json'])
-        yield row['id'], row['task_id'], payload, _status(db, payload['question_id'], payload['options'])
+        yield row['id'], row['task_id'], payload, _status(db, payload['question_id'], payload['options'], payload['skill_proposal']['action'])
 
 
 def validate(db, project_root, channel, args):
@@ -117,9 +150,11 @@ def validate(db, project_root, channel, args):
         raise StoreError('skill_proposal_project_unknown', 'skill_proposal', 'no project root',
                          'a project-bound runtime store')
     options = args.get('options') or []
-    if len(options) != 2 or normalized(options[0]) == normalized(options[1]) or not all(normalized(o) for o in options):
-        raise StoreError('skill_proposal_options', 'options', f'{len(options)} options', 'exactly two different options',
-                         'Send options [approve, decline] in the user\'s language: the first approves, the second declines.')
+    if not _safe_options(options, proposal['action']):
+        raise StoreError('skill_proposal_options', 'options', f'{len(options)} options',
+                         'an exact, action-matched approval/decline pair',
+                         'For create use [Create the skill, Not now] or [Создать навык, Не сейчас]; '
+                         'for update use [Update the skill, Not now] or [Обновить навык, Не сейчас].')
     name = check_name(proposal['name'])
     refs = [item['report_id'] for item in proposal['evidence']]
     if len(set(refs)) != len(refs) or not MIN_EVIDENCE <= len(refs) <= MAX_EVIDENCE:
@@ -168,7 +203,7 @@ def record_decision(db, task_id, saved, answer_text):
         return None
     from .state import event
     proposal = saved['skill_proposal']
-    decision = decide(saved['options'], answer_text)
+    decision = decide(saved['options'], answer_text, proposal['action'])
     payload = dict(question_id=saved['question_id'], name=proposal['name'], action=proposal['action'],
                    decision=decision, revision=saved.get('revision'))
     if decision == 'approved':

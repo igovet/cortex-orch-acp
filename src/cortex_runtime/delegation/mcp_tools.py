@@ -30,6 +30,93 @@ def _worker_ask_question(store, channel: ChannelContext, args: Mapping[str, Any]
     return request(store,channel,dict(args))
 
 
+# The template whose placeholder comments an inline report must not contain;
+# publication rejects any it finds, exactly as for a draft filled by hand.
+INLINE_REPORT_TEMPLATE = "general"
+
+
+def inline_report_keys(channel_id: str, request_key: str) -> tuple[str, str]:
+    """The store delivery keys of one result_submit's inline report.
+
+    Derived only from the channel and the result's own request_key, so a
+    retry of the same result -- after any crash -- replays the same draft and
+    the same publication instead of creating a second report. The prefix
+    keeps them apart from model-chosen keys, which the server hashes as
+    ``channel_id + NUL + key`` (a channel id never equals this prefix).
+    """
+    import hashlib
+
+    base = "result_submit.report\0" + channel_id + "\0" + request_key
+    return (hashlib.sha256((base + "\0draft").encode()).hexdigest(),
+            hashlib.sha256((base + "\0publish").encode()).hexdigest())
+
+
+def inline_report_form(args: Mapping[str, Any]) -> dict:
+    """``args`` as retained in runtime_requests: an inline report's Markdown
+    is replaced by its SHA-256. The report file keeps the body; the request
+    digest still binds it (a changed body is a request_key conflict)."""
+    import hashlib
+
+    if "report" not in args:
+        return dict(args)
+    report = args["report"]
+    return dict(args, report=dict(
+        title=report["title"], markdown_sha256=hashlib.sha256(report["markdown"].encode("utf-8")).hexdigest()))
+
+
+def publish_inline_report(store, channel: ChannelContext, request_key: str,
+                          report: Mapping[str, Any], summary: str) -> str:
+    """Publish a result_submit inline report through the ordinary
+    create_draft/write_report path as this channel's own draft; idempotent.
+
+    Each step is its own durable, keyed delivery, so a crash at any point
+    leaves at most an unpublished draft or a published report without a
+    result, and the retry of the same result continues from there: the
+    draft and the publication replay, and a published draft is never
+    rewritten. The file system and SQLite are never assumed to commit
+    together.
+    """
+    from ..contracts import clip_summary_preview
+    from ..orchestration.gateway import _authority, write_draft
+
+    def authorize(db):
+        _authority(db, channel)
+
+    draft_key, publish_key = inline_report_keys(channel.channel_id, request_key)
+    draft = store.call("create_draft", dict(template=INLINE_REPORT_TEMPLATE, request_key=draft_key),
+                       channel.principal_thread_id, channel.parent_principal_thread_id,
+                       trusted=True, authorization=authorize)
+    draft_id = draft["draft_id"]
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        authorize(db)
+        row = db.execute("SELECT published_report_id, role_id FROM drafts d LEFT JOIN delegation_provisioning p "
+                         "ON p.task_id=d.task_id AND p.attempt_id=? WHERE d.id=? AND d.task_id=?",
+                         (channel.attempt_id, draft_id, channel.task_id)).fetchone()
+        if row is None:
+            raise StoreError("draft_not_found", "draft_id", draft_id)
+        if row["published_report_id"] is None:
+            write_draft(store, db, channel, draft_id,
+                        f"Cortex draft ID: `{draft_id}`\n\n" + report["markdown"])
+        db.commit()
+    author = (row["role_id"] or "worker")[:120]
+    published = store.call("write_report", dict(
+        draft_id=draft_id, title=report["title"], author=author, request_key=publish_key,
+        summary=clip_summary_preview("write_report", dict(summary=summary))["summary"]),
+        channel.principal_thread_id, channel.parent_principal_thread_id,
+        trusted=True, authorization=authorize)
+    return published["report_id"]
+
+
+def inline_report_ref(db, task_id: str, actor: str, request_key: str) -> str | None:
+    """The report the inline publication of one result_submit produced, from
+    its durable write_report delivery; None before that delivery committed."""
+    _draft_key, publish_key = inline_report_keys(actor, request_key)
+    row = db.execute("SELECT response FROM deliveries WHERE scope=? AND operation='write_report' AND delivery_key=?",
+                     (task_id, publish_key)).fetchone()
+    return None if row is None else json.loads(row["response"]).get("report_id")
+
+
 def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
     report_ref = args["report_ref"]
     with store.connection() as db:
@@ -359,8 +446,8 @@ _OPERATION_DESCRIPTIONS = dict(
     plan_submit="For changes or substantial delegated work, submit a dependency plan for runtime validation. Accepted only while the task is planning. The runtime chooses routes, schedules assignments, requires review and runs verification. plan.tasks and plan.verification each need at least one item; [] is rejected for either.",
     verification_submit="After the runtime verification failed and the work itself is fine: replace only the verification commands and verify again, without redoing the reviewed work.",
     synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. Accepted only after every task, the review and the verification finished. Every retained not_run or unverified worker check must be verified first or listed in not_verified with its concrete blocker. The runtime then completes the task, so use it only when nothing is left for the user to decide; otherwise ask with user_question_request.",
-    user_question_request="Request user input while planning or reconciling. Write the details in your message first; the question itself is one short line with short answer options. The runtime persists the question before elicitation and resumes only after a real answer. A question asked while reconciling (approve a proposed plan, choose how to continue) keeps the task open, and the answer returns it to planning: submit a plan for the chosen work, or answer_submit a short close when the user chose to finish. With skill_proposal it proposes one reusable project skill backed by retained report evidence; only the first option approves it.",
-    result_submit="Submit this worker attempt's exact immutable report reference, summary and observed checks. Every not_run or unverified check names its concrete blocker. Reviewers must include a verdict. This cannot accept the task.",
+    user_question_request="Request user input while planning or reconciling. Write the details in your message first; the question itself is one short line with short answer options. The runtime persists the question before elicitation and resumes only after a real answer. A question asked while reconciling (approve a proposed plan, choose how to continue) keeps the task open, and the answer returns it to planning: submit a plan for the chosen work, or answer_submit a short close when the user chose to finish. With skill_proposal it proposes one reusable project skill backed by retained report evidence. Use exactly one accepted action-matched pair, approval first: create: [Create the skill, Not now], [Создать навык, Не сейчас], [Approve creating the skill, Decline creating the skill], [Одобрить создание навыка, Отклонить создание навыка]; update: [Update the skill, Not now], [Обновить навык, Не сейчас], [Approve updating the skill, Decline updating the skill], [Одобрить обновление навыка, Отклонить обновление навыка]. Only an exact pair is accepted; 1 selects its approval label, 2 its decline label, and any other answer is unclear. An arbitrary first option never approves.",
+    result_submit="Submit this worker attempt's report, summary and observed checks in one call: pass the report itself (title and Markdown) and the runtime publishes it as your immutable report, or pass report_ref from your own earlier write_report. Exactly one of the two. An exact retry with the same request_key returns the same report and result. Every not_run or unverified check names its concrete blocker. Reviewers must include a verdict. This cannot accept the task.",
     ask_question="Ask the user for information this assignment cannot finish without. It stops every running worker and returns the task to planning; after the answer the coordinator re-plans with it.",
     read_skill=(
         "Read one shared skill or role-scoped reference. The input object has exactly one "
@@ -441,7 +528,8 @@ def _offered(name: str, role_kind: str, role_id: str | None, stage: str | None) 
 def _narrow_result_submit(schema: dict, stage: str | None) -> dict:
     """``verdict`` is required on a review stage and refused on every other:
     offer it only where it is accepted. Workers that were shown it as an
-    optional field sent it anyway and failed with reviewer_only_verdict."""
+    optional field sent it anyway and failed with reviewer_only_verdict.
+    ``findings`` is likewise review-only (optional there)."""
     if stage is None:
         return schema
     properties = dict(schema["properties"])
@@ -450,6 +538,7 @@ def _narrow_result_submit(schema: dict, stage: str | None) -> dict:
         required.append("verdict")
     else:
         properties.pop("verdict", None)
+        properties.pop("findings", None)
     return dict(schema, properties=properties, required=required)
 
 

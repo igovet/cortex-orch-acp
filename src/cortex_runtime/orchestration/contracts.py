@@ -85,7 +85,7 @@ COORDINATOR = {
     'synthesis_submit': obj(dict(
         text=text('Final synthesis grounded in current reports and runtime verification. Only when nothing is left for the user to decide: it completes the task.', 32000),
         not_verified=array(obj(dict(
-            item=text('What stayed unverified. For a retained not_run or unverified worker check, its exact check name; otherwise the changed surface.', 200),
+            item=text('What stayed unverified. For a retained not_run or unverified worker check, its exact check name; otherwise the changed surface. A name match from an unrelated node does not close a gap.', 200),
             blocker=text('The concrete blocker that made verification impossible in this task. "Not run", "out of scope" or "not requested" is not a blocker: verify it instead.', 1000))),
             'Items this task changed but could not verify, each with its concrete blocker.', maximum=32)),
         required=['text']),
@@ -108,20 +108,41 @@ COORDINATOR = {
 _PROPOSAL = COORDINATOR['user_question_request']['properties']['skill_proposal']
 _PROPOSAL['description'] = (
     'Optional. Only to propose a reusable project skill after retained reports show the same procedure repeated. '
-    'Explain the cases and benefit in your message first; send exactly two options, the first approves and the second '
-    'declines. The runtime checks the evidence and duplicates, and records the decision from the exact answer: only '
-    'the first option approves. Nothing is created unless the user approves; a decline leaves the project unchanged.')
+    'Explain the cases and benefit in your message first. Use exactly one accepted action-matched pair, with approval first: '
+    'create: [Create the skill, Not now], [Создать навык, Не сейчас], [Approve creating the skill, Decline creating the skill], '
+    '[Одобрить создание навыка, Отклонить создание навыка]; update: [Update the skill, Not now], [Обновить навык, Не сейчас], '
+    '[Approve updating the skill, Decline updating the skill], [Одобрить обновление навыка, Отклонить обновление навыка]. '
+    'Only an exact pair is accepted; 1 selects its approval label, 2 its decline label, and any other answer is unclear. '
+    'An arbitrary first option never approves. Nothing is created unless the user approves; a decline leaves the project unchanged.')
 _PROPOSAL['properties']['evidence']['items']['properties']['report_id']['pattern'] = r'^r_[0-9a-f]{12}$'
+FINDING = obj(dict(
+    node=text('Exact id of the one original plan task whose work must change, as written in the accepted plan; never a runtime id such as _review_1 or _fix_1_api.', 64),
+    files=array(text('Project-relative path of one file the fix changes, inside that plan task\'s scope.', 512),
+                'Project-relative files the fix changes, each inside the scope of the plan task named in node. The runtime checks every path against that scope itself.',
+                maximum=16, minimum=1),
+    fix=text('What must change and how the change is confirmed, in plain words.', 2000),
+    cross_cutting=dict(type='boolean', description='true when the problem spans several plan tasks or changes an interface, contract or file other tasks depend on; the runtime then sends a fix to every original plan task. false for a problem local to the named task.'),
+), required=['node', 'files', 'fix', 'cross_cutting'])
+FINDING['properties']['node']['pattern'] = r'^[A-Za-z][A-Za-z0-9_-]{0,63}$'
+INLINE_REPORT = obj(dict(
+    title=text('Readable English report title.', 200),
+    markdown=text('Complete report Markdown: the opening decision brief (conclusion, observed evidence, checks, contradictions, limits, next action), then the detailed evidence. No draft marker and no template placeholder comments; the runtime adds the marker.', 1000000),
+))
 RESULT = obj(dict(
-    report_ref=text('Exact immutable report_id from write_report for this worker attempt.', 14),
+    report_ref=text('Exact immutable report_id from write_report for this worker attempt. Send exactly one of report_ref or report.', 14),
+    report=dict(INLINE_REPORT, description='The report itself, instead of report_ref: send exactly one of the two. The runtime publishes it as this attempt\'s own immutable report, bound to this request_key, then records the result. An exact retry with the same request_key reuses the same report and never publishes a second one.'),
     summary=text('What was found or changed, in plain words: the conclusion first, then what supports it. At most 4000 characters.', 4000),
     verdict=dict(type='string', enum=['APPROVE', 'REQUEST_CHANGES', 'BLOCK'], description='The review decision: APPROVE when the change is correct, REQUEST_CHANGES for fixable problems, BLOCK when it must not proceed.'),
+    findings=array(FINDING, 'Review only, optional, used only with verdict REQUEST_CHANGES and ignored with any other verdict. One entry per problem, each naming the original plan task that must fix it. When every finding names a task of the accepted plan, is not cross_cutting and lists only files inside that task\'s scope, the runtime creates fixes only for the named tasks, each receiving only its own findings and this review\'s report_ref, ordered as in the plan. Otherwise, or when omitted, every original plan task receives a fix with this summary.', maximum=16),
     checks=array(obj(dict(name=text('What the check verified, e.g. "unit tests for services/trading" or "ruff on the changed files".',200), outcome=dict(type='string', enum=['passed','failed','not_run','unverified'], description='passed: you ran it in this attempt with command_run (or a user-confirmed outside_command) and it exited 0; requires tool_call_ref (see its evidence rule). failed: it ran and failed; always kept as failed, and it fails the assignment unless a later passed check of this same result cites a rerun of exactly the same command (same argv, and for outside_command the same cwd) that is the latest run of that command in this attempt: then it stays as history with closed_by. Report a fixed failure that way, never by dropping it. not_run: a real blocker prevented running it. unverified: it ran but its result could not be established. not_run and unverified require blocker. A passed claim the runtime cannot verify is recorded as unverified with evidence_gap, or as failed when its cited command or a later run of the same command exited nonzero; the result receipt lists each such check.'),
                          blocker=text('Required for not_run and unverified, omitted for passed and failed: the concrete blocker that made running or establishing this check impossible in this attempt. "Not run", "out of scope" or "not requested" is not a blocker.', 1000),
+                         command=array(dict(type='string', description='One literal argument of the command this not_run or unverified check would run.', maxLength=4096),
+                                       'Optional only for not_run or unverified: exact literal argv of the blocked check. A verified passed command_run with identical argv in this plan revision can close this gap across nodes; a name alone cannot.',
+                                       maximum=128, minimum=1),
                          tool_call_ref=text('Required for passed. The exact tool_call_ref returned by a command_run or user-confirmed outside_command of this same attempt that ran this check. It verifies passed only when that call completed (not pending, interrupted or timed out), exited 0, retained its complete untruncated output, and is not a trivial stand-in: pwd, ls, echo, cat, grep, find, true, git status or plain git diff, or a sh -c script whose exit status comes only from such commands. Refs of another attempt or task, of reads, writes, searches, listings or reports, and of your own engine shell calls (their exit code and output are not retained) never verify a check; cite each ref for one check only. A nonzero exit supports failed.',128)), required=['name','outcome']),
                   'Automated checks this attempt actually ran.', maximum=20),
     request_key=text('Unique result delivery key.',128),
-), required=['report_ref','summary','checks','request_key'])
+), required=['summary','checks','request_key'])
 RESULT['properties']['report_ref']['pattern'] = r'^r_[0-9a-f]{12}$'
 REQUESTS = {
     'replan_request': obj(dict(reason=text('Evidence requiring a new decomposition or additional investigation.'),request_key=text('Unique proposal identity.',128))),
@@ -136,8 +157,8 @@ COORDINATOR['verification_submit'] = obj(dict(
     verification=dict(PLAN['properties']['verification'], description=required_bounds(1, 16) + ' Corrected verification commands. Only after the runtime verification failed and the work itself is fine: it verifies again without redoing the reviewed work. When the code is wrong, submit a new plan instead. ' + VERIFICATION_SOURCE),
     request_key=text('Unique proposal identity.',128)))
 COORDINATOR.update(REQUESTS)
-RESULT['properties']['checks']['description'] = 'Automated checks this attempt actually ran, up to 20; [] when there were none. Each is one executed command with an exit code, not a judgement: qualitative review remarks, read files and inspected code belong in the report body, not here. A failed check fails the assignment unless an exact later passing rerun of the same command closes it; not_run or unverified checks each need their blocker and are kept as disclosed gaps for review and synthesis.'
-COORDINATOR['synthesis_submit']['properties']['not_verified']['description'] = ('Every item this task changed but could not verify, each with its concrete blocker; [] or omit when everything was verified. Every retained not_run or unverified worker check that no other result of this plan revision passed under the same name must appear here by its exact name. Prefer verifying a gap (replan_request) over listing it.')
+RESULT['properties']['checks']['description'] = 'Automated checks this attempt actually ran, up to 20; [] when there were none. Each is one executed command with an exit code, not a judgement: qualitative review remarks, read files and inspected code belong in the report body, not here. A failed check fails the assignment unless an exact later passing rerun of the same command closes it; not_run or unverified checks each need their blocker and may declare exact command argv. Synthesis closes a gap by a same-name pass in the same node or its fix, or by a verified command_run whose argv matches the declared command.'
+COORDINATOR['synthesis_submit']['properties']['not_verified']['description'] = ('Every item this task changed but could not verify, each with its concrete blocker; [] or omit when everything was verified. Every retained not_run or unverified worker check not closed by a same-name passed check in its own node or a later fix of that node, or by a verified command_run whose argv exactly matches the gap\'s declared command, must appear here by its exact name. Same-name passes from unrelated nodes do not close gaps. Prefer verifying a gap (replan_request) over listing it.')
 WORKER = {'result_submit': RESULT, **REQUESTS}
 
 
@@ -193,6 +214,9 @@ def _collect(schema, value, field, violations):
                       f'integer of at least {low}' if low is not None else
                       f'integer of at most {high}' if high is not None else 'integer')
             violations.append(dict(field=field, received=repr(value)[:40], expected=target, correction=f'Send {field} as an {target}.'))
+    elif kind == 'boolean':
+        if type(value) is not bool:
+            violations.append(dict(field=field, received=type(value).__name__, expected='JSON boolean', correction=f'Send {field} as true or false.'))
     elif kind == 'string':
         if not isinstance(value,str):
             violations.append(dict(field=field, received=type(value).__name__, expected='JSON string', correction=f'Send {field} as a JSON string.'))

@@ -209,12 +209,12 @@ def test_a_draft_written_by_replacing_the_file_still_publishes(publication):
     store,task,base,_=publication
     draft,source,complete=make_draft(store,task,'general','evidence','recreated')
     original=source.stat()
-    source.unlink()
-    # Force a distinct allocated identity before recreating the server path,
-    # so this really is a different file object and not inode reuse.
-    tombstone=source.with_name('.draft-recreation-tombstone')
-    tombstone.write_bytes(b'occupied replacement identity')
-    source.write_bytes(complete)
+    # Write the replacement while the original still exists, then move it
+    # over the server path: both inodes are live at once, so the result is a
+    # different file object rather than a freed inode handed back.
+    replacement=source.with_name('.draft-replacement')
+    replacement.write_bytes(complete)
+    os.replace(replacement,source)
     assert source.stat().st_dev!=original.st_dev or source.stat().st_ino!=original.st_ino
 
     publish(store,base,draft,key='recreated')

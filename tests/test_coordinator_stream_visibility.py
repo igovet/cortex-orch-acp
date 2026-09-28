@@ -84,13 +84,13 @@ def test_coordinator_text_chunks_stream_before_the_turn_ends(tmp_path):
     try:
         channel, session_ref = runtime._ensure_coordinator(task_id)
 
-        arrivals: list[tuple[float, str]] = []
+        arrivals: list[tuple[float, str, bool]] = []
         start = time.monotonic()
 
         turn_finished = threading.Event()
 
         def on_update(chunk_text):
-            arrivals.append((time.monotonic() - start, chunk_text))
+            arrivals.append((time.monotonic() - start, chunk_text, turn_finished.is_set()))
             return True
 
         result_box = []
@@ -105,17 +105,23 @@ def test_coordinator_text_chunks_stream_before_the_turn_ends(tmp_path):
 
         prompt_thread = threading.Thread(target=run_prompt)
         prompt_thread.start()
-        threading.Event().wait(0.2)
-        assert not turn_finished.is_set()
-        assert arrivals, "coordinator text was hidden until turn completion"
-        prompt_thread.join(timeout=3.0)
+        prompt_thread.join(timeout=30.0)
         assert not prompt_thread.is_alive(), "fake engine turn did not finish"
         result = result_box[0]
 
         assert result == StopReason.END_TURN
         assert len(arrivals) >= 6  # both chunks from each bounded proposal request
-        assert "Checking in now." in "".join(text for _t, text in arrivals)
+        assert "Checking in now." in "".join(text for _t, text, _done in arrivals)
         assert arrivals[0][1] == "Checking "
+        assert not arrivals[0][2]
+        # Streamed, not buffered: the first chunk reached the client while the
+        # engine still held back the second one for 0.6 s.  Buffered text
+        # would arrive in one burst at the end of the engine turn.  Measured
+        # between the two chunks, so engine start-up time under load does
+        # not matter.
+        first = next(t for t, text, _done in arrivals if text == "Checking ")
+        second = next(t for t, text, _done in arrivals if text == "in now. ")
+        assert second - first >= 0.3, "coordinator text was hidden until turn completion"
 
         # A later host replay uses only the accepted final chunk.
     finally:

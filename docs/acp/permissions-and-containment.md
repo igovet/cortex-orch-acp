@@ -47,10 +47,13 @@ the boundary) and approval `untrusted`, pinned by the adapter patch in
 `engine.process`, so each command still reaches the permission bridge. The user's account configuration and credentials
 are not rewritten.
 
-Claude ACP 0.78.0 keeps its native tool preset and `settingSources` default and
-receives `skills: "all"`, `strictMcpConfig: true`, empty `plugins`, disabled
-hooks, and disallowed `Agent`, `Task`, `Workflow` and agent-team tools. Every role
-receives the same options; roles differ only in their jail scopes.
+Claude ACP 0.78.0 keeps its native tools and `settingSources` default and
+receives `strictMcpConfig: true`, empty `plugins`, disabled hooks, and
+disallowed `Agent`, `Task`, `Workflow` and agent-team tools. A session with role
+instructions also receives the [unified system prompt](unified-system-prompt.md)
+in place of Claude Code's preset, with `skills: []` and attribution and git
+instructions switched off. Every role receives the same options; roles differ
+only in their jail scopes.
 
 ACP permission requests for native tools are allowed, since the jail bounds them,
 except a deletion, which the user confirms in Guarded mode (see

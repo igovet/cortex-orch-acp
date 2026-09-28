@@ -51,9 +51,11 @@ def project(tmp_path):
     return SimpleNamespace(root=tmp_path, store=store, channel=first, reports=reports)
 
 
-def _args(project, *, key='ask-1', name='release-notes', action='create', options=OPTIONS, reports=None):
+def _args(project, *, key='ask-1', name='release-notes', action='create', options=None, reports=None):
     evidence = [dict(report_id=ref, case=f'Release notes assembled by hand ({index})')
                 for index, ref in enumerate(reports or project.reports)]
+    if options is None:
+        options = OPTIONS if action == 'create' else ['Update the skill', 'Not now']
     return dict(question='Create the release-notes skill?', options=list(options), request_key=key,
                 skill_proposal=dict(name=name, action=action,
                                     purpose='Assemble release notes from verified changes.', evidence=evidence))
@@ -294,3 +296,91 @@ def test_controller_asks_with_evidence_and_resumes_after_restart(tmp_path, reply
     assert ('read_skill' in planning_messages[0]) == (reply == 'Create the skill')
     assert len(_decided(store, task_id)) == 1
     assert _tree(tmp_path) == before
+
+
+@pytest.mark.parametrize('options', [
+    ['Not now', 'Create the skill'],
+    ['Decline creating the skill', 'Approve creating the skill'],
+    ['Do not create the skill', 'Create the skill'],
+    ['Не сейчас', 'Создать навык'],
+    ['Approve creating the skill', 'Not now'],
+])
+def test_reversed_or_misleading_labels_are_refused_before_persistence(project, options):
+    with pytest.raises(StoreError, match='skill_proposal_options'):
+        dispatch(project.store, project.channel, 'user_question_request',
+                 _args(project, options=options))
+    assert TaskMachine(project.store).context(project.channel.task_id)['state'] == 'PLANNING'
+    assert TaskMachine(project.store).context(project.channel.task_id)['skill_proposals'] == []
+
+
+@pytest.mark.parametrize('options, reply, decision', [
+    (['Create the skill', 'Not now'], 'Create the skill', 'approved'),
+    (['Create the skill', 'Not now'], '1', 'approved'),
+    (['Create the skill', 'Not now'], 'Not now', 'declined'),
+    (['Создать навык', 'Не сейчас'], 'Создать навык', 'approved'),
+    (['Создать навык', 'Не сейчас'], '2', 'declined'),
+    (['Создать навык', 'Не сейчас'], 'да, но позже', 'unclear'),
+])
+def test_action_matched_labels_bind_displayed_and_text_answers(project, options, reply, decision):
+    store, channel = project.store, project.channel
+    question = dispatch(store, channel, 'user_question_request', _args(project, options=options))
+    saved = pending(store, channel.task_id)
+    assert saved['options'] == options
+    with store.connection() as db:
+        saved_options = json.loads(db.execute('SELECT options_json FROM pending_questions WHERE id=?',
+                                              (question['question_id'],)).fetchone()[0])
+    assert saved_options == options
+    assert answer(store, question['question_id'], reply, 'text')
+    assert resume_answered(store, channel.task_id)
+    assert _decided(store, channel.task_id)[0]['decision'] == decision
+
+
+@pytest.mark.parametrize('options, reply', [
+    (['Not now', 'Create the skill'], 'Not now'),
+    (['Not now', 'Create the skill'], '1'),
+    (['Create the skill', 'Not now'], '1'),
+    (['Approve creating the skill', 'Not now'], '1'),
+])
+def test_unsafe_persisted_question_fails_closed_after_restart(project, options, reply):
+    store, channel = project.store, project.channel
+    question = dispatch(store, channel, 'user_question_request', _args(project))
+    # Model a question saved by an older runtime. For the third case, an
+    # update question has a creation label, which must not authorize update.
+    action = 'update' if options == ['Create the skill', 'Not now'] else 'create'
+    with store.connection() as db:
+        row = db.execute(
+            "SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED'",
+            (channel.task_id,)).fetchone()
+        payload = json.loads(row['payload_json'])
+        payload['options'] = options
+        payload['skill_proposal']['action'] = action
+        db.execute('UPDATE runtime_events SET payload_json=? WHERE id=?',
+                   (json.dumps(payload), row['id']))
+        db.execute('UPDATE pending_questions SET options_json=? WHERE id=?',
+                   (json.dumps(options), question['question_id']))
+        db.commit()
+    assert answer(store, question['question_id'], reply, 'text')
+    restarted = Store(project.root / '.cortex', project_root=project.root)
+    assert resume_answered(restarted, channel.task_id)
+    assert not resume_answered(restarted, channel.task_id)
+    decided = _decided(restarted, channel.task_id)
+    assert [item['decision'] for item in decided] == ['unclear']
+    assert 'request' not in decided[0]
+    assert TaskMachine(restarted).context(channel.task_id)['skill_proposals'][0]['status'] == 'unclear'
+
+
+@pytest.mark.parametrize('options, reply, expected', [
+    (['Update the skill', 'Not now'], '1', 'approved'),
+    (['Обновить навык', 'Не сейчас'], 'Не сейчас', 'declined'),
+])
+def test_update_options_match_action_and_decision(project, options, reply, expected):
+    skill = project.root / '.agents' / 'skills' / 'release-notes'
+    skill.mkdir(parents=True)
+    (skill / 'SKILL.md').write_text('---\nname: release-notes\ndescription: x\n---\n', encoding='utf-8')
+    store, channel = project.store, project.channel
+    question = dispatch(store, channel, 'user_question_request',
+                        _args(project, action='update', options=options))
+    assert pending(store, channel.task_id)['options'] == options
+    assert answer(store, question['question_id'], reply, 'text')
+    assert resume_answered(store, channel.task_id)
+    assert _decided(store, channel.task_id)[0]['decision'] == expected

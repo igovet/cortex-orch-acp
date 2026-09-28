@@ -54,12 +54,13 @@ available -- replaces the hand-maintained per-role ``route-policy.json``.
    its own rule: never below ``high`` (:data:`LUNA_EFFORT_FLOOR`, also for
    a pin or a worker's requested effort), and its effort follows how hard
    the work is (:data:`LUNA_EFFORTS`): ``high`` for light work, ``xhigh``
-   for ordinary standard-tier development, ``max`` for work above that --
-   standard-tier work that is a retry or a fix after review requested
+   for ordinary standard-tier testing, ``max`` for work above that --
+   standard-tier testing that is a retry or a fix after review requested
    changes (``escalate``) -- which still does not justify a deep model.
-   Besides the light tier, Luna is a candidate for standard-tier
-   development work (:data:`LUNA_WORK_KINDS`) next to the tier's own
-   models, and the rank decides between them (:func:`luna_status`). It is
+   Besides the light tier, Luna is a candidate only for standard-tier
+   testing work (:data:`LUNA_WORK_KINDS`) next to the tier's own models,
+   and the rank decides between them (:func:`luna_status`). Every other
+   standard-tier kind of work stays on the tier's own models. It is
    never used for ``complexity`` ``high`` work, deep or flagship work, or a
    deep role, not even as a fallback; a ``tiers`` override that moves a
    Luna model out of the light tier removes it from this rule except for
@@ -68,9 +69,10 @@ available -- replaces the hand-maintained per-role ``route-policy.json``.
 5. The work moves the role's tier: the coordinator's planned
    ``complexity`` (``low``/``high``) shifts it one step cheaper/stronger,
    and a retried attempt or a fix after review requested changes runs one
-   more step up (``escalate``). Standard development instead stays in
-   the standard candidate pool: Luna targets max, other models raise effort
-   one step. Explicit high complexity and deep roles still move up. If a
+   more step up (``escalate``). Standard testing instead stays in the
+   standard candidate pool: Luna targets max, other models raise effort
+   one step. Other standard work, explicit high complexity and deep roles
+   still move up. If a
    tier cannot rise (explorer), effort rises one supported step.
 
 Only engine-confirmed catalogs are used -- a connection whose models were
@@ -164,14 +166,15 @@ FLAGSHIP_FAMILIES = ("astra", "fable")
 _FLAGSHIP_CEILING = "high"
 # The Codex Luna line is very cheap and very effective: below high its
 # answers are not worth even their small cost, and at high..max it handles
-# simple and ordinary development work. Its effort steps with the work:
-# light work, standard-tier work, standard-tier work that fell short once.
+# light work and standard-tier testing. Its effort steps with the work:
+# light work, standard-tier testing, standard-tier testing that fell short once.
 LUNA_LINES = frozenset({"luna"})
 LUNA_EFFORT_FLOOR = "high"
 LUNA_EFFORTS = ("high", "xhigh", "max")
-# Development work Luna may take in the standard tier. Design and review
-# (judgement) and planning/writing/analysis stay on the tier's own models.
-LUNA_WORK_KINDS = frozenset({"implementation", "operations", "debugging", "testing"})
+# The only standard-tier work Luna may take. Implementation, operations,
+# debugging, design, review, planning, writing and analysis stay on the
+# tier's own models.
+LUNA_WORK_KINDS = frozenset({"testing"})
 # Haiku repeatedly submitted arguments that contradicted advertised Cortex
 # tool schemas in real worker sessions. Keep it available for an explicit pin,
 # while excluding it from automatic worker selection.
@@ -260,7 +263,7 @@ def is_luna(model: str) -> bool:
 def luna_status(role: str | None, role_tier: str, complexity: str = "normal") -> str:
     """Whether a light-tier Luna model may take this work, and why:
     ``light_tier`` (its own tier), ``standard_candidate`` (standard-tier
-    development work, ranked with the tier's own models), or
+    testing work, ranked with the tier's own models), or
     ``excluded:<reason>``. ``excluded`` is absolute -- not even a fallback."""
     if role_tier == "light":
         return "light_tier"
@@ -279,7 +282,7 @@ def luna_status(role: str | None, role_tier: str, complexity: str = "normal") ->
 def hint_serves_tier(model: str, model_tier: str | None, role: str | None, role_tier: str,
                      complexity: str = "normal") -> bool:
     """Whether a model of ``model_tier`` can take ``role_tier`` work: its own
-    tier, or a light Luna model on standard-tier development work."""
+    tier, or a light Luna model on standard-tier testing work."""
     return model_tier == role_tier or (
         model_tier == "light" and is_luna(model)
         and luna_status(role, role_tier, complexity) == "standard_candidate")
@@ -409,7 +412,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             blocked[entry.route.id] = record
     base_role_tier = tier_for(role, False, complexity)
     role_tier = tier_for(role, escalate, complexity)
-    # A standard development retry is the intermediate Luna-max band.
+    # A standard testing retry is the intermediate Luna-max band.
     # Decide from the original work before generic escalation labels it deep.
     # Explicit high complexity and deep roles still fail luna_status here.
     if escalate and luna_status(role, base_role_tier, complexity) == "standard_candidate":
@@ -579,7 +582,10 @@ def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 # (more than USAGE_MARGIN points) than an available alternative's usage,
 # rather than solely for crossing the band. The 100% exhaustion exclusion is
 # unchanged.
-RANK_VERSION = 6
+# 7: Luna is a standard-tier candidate only for testing work; other
+# standard-tier development (implementation, operations, debugging) no
+# longer ranks Luna and, on a retry or review fix, escalates as before 5.
+RANK_VERSION = 7
 # The rank key's parts in order, named for the decision's ``decided_by``.
 # ``quota`` moved from right after ``hint`` to right before ``used_percent``
 # in rank version 6: it is now a late tie breaker rather than an early hard

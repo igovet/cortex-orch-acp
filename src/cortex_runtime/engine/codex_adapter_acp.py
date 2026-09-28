@@ -236,10 +236,20 @@ def build_codex_evidence_status(revision_id: str, evidence_ref: str) -> CodexEvi
     return CodexEvidenceStatus(selected=revision_id, configuration_applied=evidence_ref)
 
 
-def build_codex_session_new_meta(instructions_text: str) -> dict:
+def build_codex_session_new_meta(instructions_text: str, *, native_prompt: bool = True,
+                                 base_instructions: str | None = None) -> dict:
     """Cortex's private codex-acp 1.12.0 copy forwards this extension to
     App Server's developerInstructions on each new thread. No role text is
     inserted into a user prompt; recovery sends only the task capsule.
+
+    ``native_prompt=False`` also asks that private adapter to drop what Codex
+    itself adds: an empty ``baseInstructions`` removes the model's base
+    prompt, and ``cortexNativeContext=False`` removes the permissions, apps,
+    collaboration-mode, skills-catalog and environment-context sections.
+    The role text then reaches the model alone.
+
+    ``base_instructions`` (the unified Cortex prompt) does the same removal
+    but puts that text in the base prompt's place, ahead of the role text.
     """
     if not isinstance(instructions_text, str) or not instructions_text.strip():
         raise PortableError(
@@ -247,4 +257,15 @@ def build_codex_session_new_meta(instructions_text: str) -> dict:
             remediation="'instructions_text' must be a non-empty string.",
             retry_eligible=False, field="instructions_text",
         )
+    if base_instructions is not None:
+        if not isinstance(base_instructions, str) or not base_instructions.strip():
+            raise PortableError(
+                category=PortableErrorCategory.VALIDATION, code="invalid_field",
+                remediation="'base_instructions' must be a non-empty string.",
+                retry_eligible=False, field="base_instructions",
+            )
+        return {"systemPrompt": instructions_text, "cortexBaseInstructions": base_instructions,
+                "cortexNativeContext": False}
+    if not native_prompt:
+        return {"systemPrompt": instructions_text, "cortexBaseInstructions": "", "cortexNativeContext": False}
     return {"systemPrompt": instructions_text}

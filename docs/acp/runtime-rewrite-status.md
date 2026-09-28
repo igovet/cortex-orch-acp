@@ -14,9 +14,13 @@ Implemented production paths:
   READ_ONLY nodes do not conflict by scope.
 - Closed plan/result/question/scope/replan/escalation/synthesis tools. No public
   delegate, decide, integrate, acceptance or model/effort selection API.
+  `result_submit` accepts either a published `report_ref` or the report inline,
+  which the runtime publishes idempotently through the ordinary owned-draft path
+  (see [publications](publications-and-consistency.md)).
 - Independent review whenever the observed project differs from its execution
   baseline, or for every fix cycle and any unobservable state; unchanged state is
-  recorded as `REVIEW_NOT_REQUIRED`. Scoped fixes, three review cycles, contained
+  recorded as `REVIEW_NOT_REQUIRED`. Scoped fixes (targeted to the plan tasks named
+  by runtime-checked review findings, otherwise every original task), three review cycles, contained
   verification and completion remain bound to exact report and project digests.
 - Pre-execution gateway checks for files, commands, drafts and external MCP tools;
   native tools bounded by the engine jail in both supported pinned adapters. Unknown execution

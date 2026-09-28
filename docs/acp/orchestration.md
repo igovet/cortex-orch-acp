@@ -50,6 +50,32 @@ serializes writing nodes; review-stage nodes and READ_ONLY roles neither block n
 effort from the current tier, policy, catalog and plan usage; plan hints remain
 advisory. All 23 specialist/consultant profiles remain available.
 
+For streamed coordinator text, the controller reads only the task's durable
+state; it does not rebuild the full context for each delta. A full
+`TaskMachine.context()` read uses one SQLite read transaction, and assignment
+attempt lookups for result checks are batched.
+
+While workers run, an unchanged database change fingerprint skips the expensive
+scheduler pass. Worker completion and runtime notifications can wake it sooner;
+a periodic full reconciliation still runs at least every 2 seconds. Permission
+card relay keeps its 0.1-second cadence. The database remains authoritative.
+`claim_ready()` first checks for candidates with a read-only query, then takes
+a write transaction only when candidates exist and rechecks them there. Ready
+nodes are ordered by longest remaining dependency chain, with original row
+order as the tie-breaker. Retry-history reads are batched per claim. A change
+missed by the fingerprint can therefore wait up to the 2-second reconciliation
+interval.
+
+### Coordinator prompt context
+
+Coordinator prompts compact nodes superseded by earlier review cycles. The
+current implementation batch and its latest reviewer remain full; each older
+node keeps its `node_id`, role, status, report reference and verdict.
+Historical `not_run`, `unverified` and open `failed` checks remain in
+`historical_check_gaps`. Only the prompt's `nodes` projection changes:
+all other context fields stay intact, and `task_get_context` continues to
+return the full persisted state.
+
 ### Worker brief assembly
 
 Each reserved assignment receives a compact JSON brief capped at 16,000 Unicode characters, measured after encoding with the same serializer used by the runtime. The assignment objective, scope and dependency report references stay complete. If those required fields alone exceed the cap, dispatch fails closed with a provisioning error.
@@ -70,9 +96,28 @@ schedules review. Retried nodes and fix nodes are covered because the decision
 compares the whole project, not individual worker claims. No model argument or
 hint can waive review; `EXECUTING → VERIFYING` is refused without the runtime's own
 record. APPROVE proceeds
-to verification; REQUEST_CHANGES creates a fix node followed by a fresh reviewer;
+to verification; REQUEST_CHANGES creates fix nodes followed by a fresh reviewer;
 BLOCK stops acceptance. Three unsuccessful review cycles block further automatic
 work. The loop never treats an ordinary final model message as a worker result.
+
+### Targeted review fixes
+
+A reviewer may add optional structured `findings` to a REQUEST_CHANGES result:
+each names one original plan task (`node`), the `files` the fix changes, the
+`fix` itself and whether the problem is `cross_cutting`. The field is offered and
+accepted only on a review assignment (`reviewer_only_findings` otherwise) and is
+ignored with any other verdict. `TaskMachine.add_fix()` confines fixes to the named
+tasks only when every finding names a task of the accepted plan, is
+`cross_cutting: false`, and lists only files the runtime itself finds inside that
+task's scope (the same path rules and scope matcher as the gateway). Each such
+fix receives only its own findings and the review's `report_ref`, and depends on
+the review plus the fixes of the selected tasks it transitively depended on in
+the plan, so related fixes keep the plan's order. In every other case — no
+findings, an unknown task, a cross-cutting finding, a file outside the scope or
+findings too long for one objective — the runtime keeps the conservative fix of
+every original plan task with the review summary. It never infers a contract
+change; a reviewer marks one `cross_cutting`. `REVIEW_CHANGES_REQUESTED` records
+`targeted` and the `fallback` reason. The three-cycle ceiling is unchanged.
 
 Worker results bind to a published report owned by the exact provisioned attempt.
 The result receipt retains a content digest.
@@ -129,8 +174,8 @@ verify a check; run checks through `command_run`.
 **Insufficient evidence is kept, never refused silently and never promoted.** A
 `passed` claim that is not verified is recorded as `outcome: "unverified"` with
 `claimed_outcome: "passed"`, the structured `evidence_gap` code and a runtime
-blocker; it is a disclosed gap that synthesis must list in `not_verified` unless a
-later result of the same plan revision passes a check of the same name. A `passed`
+blocker; it is a disclosed gap that synthesis must list in `not_verified` unless
+a later result closes it under the check identity rule below. A `passed`
 claim whose cited command exited nonzero is recorded as `failed` (an observed
 failure is never softened) with `evidence_gap: "nonzero_exit"`. A claimed `failed`
 check is always kept as `failed`. The result receipt returned to the worker lists
@@ -150,6 +195,13 @@ fixes the code, and the rerun passes. The runtime keeps that run history
 separate from each check's current outcome
 (`delegation.evidence.current_outcomes`, over `command_history`, the
 attempt's gateway command runs in `TOOL_AUTHORIZED` order).
+
+Verification subprocess output is streamed from its temporary file into the
+private large-output store, preserving the complete bytes. The tool event
+carries a bounded tail excerpt and the output record ID, rather than the full
+log. The excerpt is display-only; the retained output remains the complete
+verification evidence. Existing exit-code, interruption and project-integrity
+checks still determine whether verification passes.
 
 A command's **identity** is its operation, its exact `argv` and its scope:
 `command_run` always runs in the task's working tree; an `outside_command`
@@ -199,7 +251,16 @@ disclosure), so an older pass that, for example, relied on an engine `pwd` shows
 as `passed` with `evidence_strength: "weak"`. Receipts written before `argv` was
 recorded read as `command_unrecorded`.
 
-Every synthesis `not_verified` item requires a nonblank concrete blocker.
+At synthesis, a retained `not_run` or `unverified` check remains a gap unless a
+passed check with the same normalized name belongs to that node or one of its
+later fix nodes. A gap may also declare optional `command` as literal argv; a
+verified, still-current `command_run` pass with exactly that argv in the same
+plan revision closes it across nodes. The runtime reads argv from the cited
+`tool_call_ref` receipt and keeps the existing task and attempt evidence checks.
+An unrelated node's matching check name alone does not close a gap. An
+`outside_command` has a separate working directory and cannot close a gap
+by argv alone. Every remaining synthesis `not_verified` item requires the
+gap's exact check name and a nonblank concrete blocker.
 Command verification runs literal argv
 in an explicit Linux namespace sandbox with no user home, inherited credentials,
 network, or access to the real runtime store. Missing isolation, failed commands,

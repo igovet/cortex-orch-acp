@@ -132,18 +132,19 @@ The regression scale test (`tests/test_emission_scale.py`) drives the real
 Agent over a pipe transport with a Paseo client, the fake engine and
 300-character worker titles. It records each repeated `task_get_context` poll
 at 481–483 bytes after the first read. Each worker card sends 3 updates and
-16,959 bytes for 10, 200 and 1,000 tools per worker, including with 20 KB
-writes, and for a 200-tool worker on a simulated multi-hour clock. The
-largest observed update was 16,108 bytes. With the title normalizer and event
-budget removed, the same fixture sent about 60, 1,100 and 5,500 updates per
-worker for 10, 200 and 1,000 tools. The same file drives a coordinator
-making 10, 500 and 5,000 distinct calls over four prompts: a question, its
-continuation, a follow-up turn and a follow-up after a runtime restart with
-`session/load`. Card updates were 20, 312 and 362, and card bytes 11,380,
-185,337 and 194,079. The aggregate card sent 8 and 12 updates, and the
-bookkeeping maps stayed at or under 1,024 entries. With the budget disabled,
-the 5,000-call case sent 9,563 card updates and 5,846,291 bytes. A journal
-holding 5,001 legacy cards replayed as 403 updates. These are test workload results, not a bound on the
+16,959 bytes for 10, 60 and 300 tools per worker, including with 20 KB
+writes, and for a 60-tool worker on a simulated clock that advances 20 s per
+card decision. The largest observed update was 16,108 bytes. An earlier run
+of this fixture at 10, 200 and 1,000 tools, with the title normalizer and
+event budget removed, sent about 60, 1,100 and 5,500 updates per worker. The
+same file drives a coordinator making 10, 500 and 1,500 distinct calls over
+four prompts: a question, its continuation, a follow-up turn and a follow-up
+after a runtime restart with `session/load`. Card updates were 20, 312 and
+324, and card bytes 11,380, 185,337 and 187,517. The aggregate card sent 8
+and 10 updates, and the bookkeeping maps stayed at or under 1,024 entries;
+the 1,500-call case fills them. An earlier 5,000-call run with the budget
+disabled sent 9,563 card updates and 5,846,291 bytes. A journal holding 501
+legacy cards replayed as 403 updates. These are test workload results, not a bound on the
 whole daemon's memory or on durable history. Paseo 0.9.2 retains provider
 events in a session's in-memory history until the session closes. Smaller and
 non-repeated events reduce the bytes Cortex contributes to that retained
@@ -226,12 +227,19 @@ silently omitted or defaulted to zero:
 | --- | --- | --- |
 | `resource_caps` | `configuration_revisions.ceiling_snapshot` (`PolicyCeiling`) | call/token/concurrency counts; monetary cap only when `spend_limit_enforceable` |
 | `recovery_latency` | `attempt_route_audit` fallback rows (`recorded_at` deltas) | seconds |
+| `route_acceptance_latency` | `delegation_requested` to `WORKER_COMPLETED`, joined to `attempt_route_audit` and accepted-plan complexity | seconds, grouped by engine/model/role/complexity |
+| `route_fix_cycles` | `REVIEW_CHANGES_REQUESTED` plus dispatched fix nodes and `attempt_route_audit` | review cycles, grouped by engine/model/role/complexity |
 | `repeat_calls` | `usage_records` (`call_sequence` > 1 per engine session) | count |
 | `schema_validation_errors` | `observability_events` category=`validation` | count |
 | `manual_interventions` | `pending_questions`; permission dialogs declared `unavailable_reason` (JSONL-only, not indexed by task) | count |
 | `duplicate_publications` | `observability_events` category=`publication` | count |
 | `tokens` | `usage_records` (`usage_summary`) | tokens, per reported field name |
 | `concurrency` | `capacity_reservations` (`state='reserved'`) | count |
+
+Route metrics are task-local, descriptive observations; they do not feed routing decisions.
+`route_acceptance_latency` measures from the `delegation_requested` event to the runtime's `WORKER_COMPLETED` event for execution assignments. The latter is the accepted worker-result boundary in `TaskMachine.record_result`; it does not mean the whole task was approved or completed. Reviewer nodes, failed results, and samples missing dispatch time, route audit, or a valid non-negative duration are excluded and counted. Routes are taken from the exact provisioned attempt's `attempt_route_audit`; complexity comes from that revision's `PLAN_ACCEPTED` plan, using `normal` when the optional hint was omitted.
+
+`route_fix_cycles` counts durable `REVIEW_CHANGES_REQUESTED` events. Its route groups count distinct cycles with at least one fix assignment dispatched on that engine/model/role/complexity. One review cycle can appear in multiple groups when its fixes use different routes, so group counts are not additive. Pending fixes and dispatched fixes without route audits remain explicit in the attribution counters. Both grouped outputs cap the displayed group list at 100 and set `groups_truncated` when more groups exist.
 
 `resource_caps` never presents an exact monetary cap unless
 `configuration.policy.PolicyCeiling.spend_limit_enforceable` is `True` —

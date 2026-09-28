@@ -69,6 +69,22 @@ def test_blocker_is_retained_in_result_and_publication(tmp_path):
     assert mcp_tools.dispatch(store, worker, 'result_submit', args) == receipt
 
 
+def test_gap_command_is_retained_and_pass_command_is_rejected(tmp_path):
+    store, task, worker, assignment, report = setup_worker(tmp_path)
+    command = ['python3', '-B', '-m', 'pytest', 'tests/test_api.py']
+    invalid = dict(report_ref=report, summary='Observed', checks=[
+        dict(name='tests', outcome='passed', command=command)], request_key='invalid-command')
+    with pytest.raises(StoreError, match='check_command_unexpected'):
+        mcp_tools.dispatch(store, worker, 'result_submit', invalid)
+    valid = dict(report_ref=report, summary='Observed', checks=[
+        dict(name='tests', outcome='not_run', blocker='Test environment unavailable', command=command)],
+        request_key='valid-command')
+    assert mcp_tools.dispatch(store, worker, 'result_submit', valid)['recorded']
+    node = next(n for n in TaskMachine(store).context(task.task_id)['nodes']
+                if n['assignment_ref'] == assignment)
+    assert node['result']['checks'][0]['command'] == command
+
+
 def test_recovery_accepts_publication_with_blocker(tmp_path):
     store, task, worker, assignment, report = setup_worker(tmp_path)
     args = dict(report_ref=report, summary='Observed',

@@ -309,6 +309,18 @@ installed bundle and native account are unchanged. The same private copy also
 selects `user` instead of `auto_review` as the `agent` reviewer; both exact call
 sites must match the verified pinned source before launch.
 
+Two more Cortex-owned `_meta` fields remove what Codex adds on its own. The
+runtime sends both with the [unified system prompt](unified-system-prompt.md)
+(`build_codex_session_new_meta(..., base_instructions=...)`). A
+string `cortexBaseInstructions` becomes `thread/start.baseInstructions` and
+replaces the model's base prompt; `""` removes it. `cortexNativeContext: false`
+sets `include_permissions_instructions`, `include_apps_instructions`,
+`include_collaboration_mode_instructions`, `include_environment_context` and
+`skills.include_instructions` to `false` in that thread's config. A request
+with both fields sent to Codex CLI 0.155.1 against a local stub endpoint
+carried only the Cortex developer message, the tool list and the user
+message. Model behavior without the native prompt has not been qualified.
+
 The no-paid adapter trace establishes the outgoing `thread/start` payload only;
 it does not prove model visibility or compliance. Native Codex compaction
 persistence remains unqualified. Cortex does not use a separate user-prompt

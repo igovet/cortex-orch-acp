@@ -6,18 +6,21 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
 
 from .state import TaskMachine, encoded, event, now, transition
+from .prompt_context import coordinator_prompt_context
 from .worker_brief import build_worker_brief
 from ..contracts import StoreError
 from ..delegation import events
 from ..delegation import revision
 from ..portable.engine_contract import StopReason
 from ..observability.redact import StreamingRedactor
+from ..acp.wire_budget import SESSION_UPDATE_MAX_BYTES, bound_value, truncation_marker
 
 # Coordinator engine failure kinds that mean the session can never be prompted
 # again (the process/transport is gone), as distinct from a slow-but-alive
@@ -27,6 +30,30 @@ from ..observability.redact import StreamingRedactor
 _COORDINATOR_SESSION_DEAD_KINDS = frozenset({
     'transport_eof', 'poisoned', 'process_exit', 'process_crashed', 'nonzero_exit',
 })
+
+# While workers run, the scheduler repeats its full pass (context rebuild,
+# claim_ready, event processing) only when the task's change fingerprint moves,
+# a worker future of this task ends, or a runtime notification arrives -- and
+# in any case at least every _RECONCILE_SECONDS, which also recovers a change
+# the fingerprint does not cover. Permission cards keep the _POLL_SECONDS tick.
+_POLL_SECONDS = .1
+_RECONCILE_SECONDS = 2.0
+
+
+_VERIFICATION_OUTPUT_TAIL_BYTES = 2500
+_VERIFICATION_RAW_OUTPUT_MAX_BYTES = SESSION_UPDATE_MAX_BYTES // 2
+
+
+def _verification_output_tail(output):
+    """Read a bounded tail from the temporary output without loading it whole."""
+    output.seek(0, os.SEEK_END)
+    total_bytes = output.tell()
+    start = max(0, total_bytes - _VERIFICATION_OUTPUT_TAIL_BYTES)
+    output.seek(start)
+    tail = output.read(_VERIFICATION_OUTPUT_TAIL_BYTES).decode("utf-8", errors="replace")
+    if start:
+        tail = truncation_marker(start) + "\n" + tail
+    return tail
 
 
 def _verification(runtime, task_id, machine, emit_tool_call, cancel):
@@ -93,24 +120,31 @@ def _verification(runtime, task_id, machine, emit_tool_call, cancel):
                         proc.kill()
                         break
                 code = proc.wait()
+                after = revision.capture_revision(str(root))
+                unchanged = (after.get('dirty_digest') or after.get('digest')) == digest
+                from ..recovery.large_output_store import persist_output_stream
                 output.seek(0)
-                data = output.read()
-                body = data.decode('utf-8', errors='replace')
-        after = revision.capture_revision(str(root))
-        unchanged = (after.get('dirty_digest') or after.get('digest')) == digest
-        from ..recovery.large_output_store import persist_output
-        saved=persist_output(runtime._store,task_id=task_id,owner_scope='coordinator',source_kind='terminal',
-                             source_ref=ref,data=data,exit_code=code,
-                             failure='interrupted' if interrupted else None)
+                saved = persist_output_stream(
+                    runtime._store, task_id=task_id, owner_scope='coordinator',
+                    source_kind='terminal', source_ref=ref, stream=output,
+                    exit_code=code, failure='interrupted' if interrupted else None,
+                )
+                output_tail = _verification_output_tail(output)
+        failed = interrupted or code != 0 or not unchanged
         observed = dict(argv=argv,exit_code=code,complete=not interrupted and unchanged,
                         revision_digest=digest,large_output_id=saved['id'],
-                        # What the coordinator needs to repair a failing check.
-                        output_tail=body[-3000:] if code != 0 or interrupted or not unchanged else None)
+                        # The full output is retained separately; this excerpt is only for repair context.
+                        output_tail=output_tail if failed else None)
         checks.append(observed)
         if emit_tool_call:
-            emit_tool_call(dict(tool_call_id=ref, new=False, status='completed' if code == 0 and observed['complete'] else 'failed',
-                                raw_output=dict(observed,output=body)))
-        if interrupted or code != 0 or not unchanged:
+            raw_output = {key: value for key, value in observed.items() if key != 'output_tail'}
+            raw_output['output'] = output_tail
+            emit_tool_call(dict(
+                tool_call_id=ref, new=False,
+                status='completed' if code == 0 and observed['complete'] else 'failed',
+                raw_output=bound_value(raw_output, _VERIFICATION_RAW_OUTPUT_MAX_BYTES),
+            ))
+        if failed:
             break
     machine.record_verification(task_id, checks, digest)
 
@@ -142,10 +176,14 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
     while True:
         if cancel_event.is_set() or _transport_lost(runtime, task_id):
             return _stop_turn(runtime, task_id, machine, emit_tool_call)
+        # Read before the pass: a change committed during it moves the value.
+        fingerprint = machine.change_fingerprint(task_id)
         context = machine.context(task_id)
         state = context['state']
         from .policy import apply_pending_steering
-        if apply_pending_steering(runtime._store, task_id):
+        # Steering applies only at a boundary; in EXECUTING/REVIEWING the call
+        # is a no-op that would still take the write lock on every pass.
+        if state not in {'EXECUTING', 'REVIEWING'} and apply_pending_steering(runtime._store, task_id):
             prompted.clear()
             continue
         if state == 'ANSWER_READY':
@@ -209,7 +247,13 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             delivery_marker=f'runtime-coordinator:{time.monotonic_ns()}'
             pending_events=events.claim_unconsumed(runtime._store,task_id,delivery_marker)
             from ..acp import messages as localized_messages
-            message = localized_messages.render('answer_in_language',language)+'\n'+request + '\n' + encoded(context)
+            prompt_context = coordinator_prompt_context(context)
+            message = localized_messages.render('answer_in_language',language)+'\n'+request
+            if prompt_context is not context:
+                message += ('\nEarlier review-cycle nodes are compact summaries; '
+                           'historical_check_gaps retains older non-passing check records. '
+                           'Full node history remains available through task_get_context. ')
+            message += '\n' + encoded(prompt_context)
             if pending_events:
                 message += '\nRetained events:\n'+encoded([dict(type=e.event_type,payload=e.payload) for e in pending_events])
             if state == 'PLANNING':
@@ -242,7 +286,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 nonlocal answer_pending
                 # Some adapters deliver text before the tool lifecycle callback.
                 # The committed proposal is the authority for suppressing its echo.
-                answer_pending = answer_pending or machine.context(task_id)['state'] == 'ANSWER_READY'
+                answer_pending = answer_pending or machine.get_state(task_id) == 'ANSWER_READY'
                 if answer_pending: return True
                 streamed.append(text)
                 safe = redactor.push(text)
@@ -251,7 +295,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             def on_tool(*args):
                 nonlocal answer_pending
                 tool_seen.append(True)
-                answer_pending = machine.context(task_id)['state'] == 'ANSWER_READY'
+                answer_pending = machine.get_state(task_id) == 'ANSWER_READY'
                 flush()
                 if tool_emitter:
                     tool_emitter(*args)
@@ -311,7 +355,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 # Turn end: the aggregate tool-call card gets its final count.
                 tool_emitter.close_group()
             prompt_blocks = None
-            if outcome.text and not streamed and machine.context(task_id)['state'] != 'ANSWER_READY':
+            if outcome.text and not streamed and machine.get_state(task_id) != 'ANSWER_READY':
                 emit_update(outcome.text)
             if outcome.stop_reason == StopReason.CANCELLED:
                 return _stop_turn(runtime, task_id, machine, emit_tool_call)
@@ -384,7 +428,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             # next planning turn; the scheduler consumes only lifecycle rows.
             batch = events.claim_unconsumed(
                 runtime._store, task_id, marker, exclude_types=("user_message",),
-            )
+            ) if _unconsumed_lifecycle(runtime._store, task_id) else []
             runtime._emit_assignment_tool_calls(task_id, emit_tool_call, batch)
             if batch:
                 events.mark_delivered(runtime._store, task_id, marker)
@@ -392,7 +436,8 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             if context['state']!=state: continue
             nodes = context['nodes']
             with runtime._lock:
-                running = bool(runtime._running.get(task_id))
+                workers = frozenset(runtime._running.get(task_id, ()))
+            running = bool(workers)
             # A worker ends early when its turn is cancelled or its host
             # connection closes; that is not a lost worker to retry here.
             if cancel_event.is_set() or _transport_lost(runtime, task_id):
@@ -403,9 +448,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 if running and any(n['status'] in ('running', 'pending') for n in nodes):
                     # Let parallel workers finish; the coordinator decides
                     # with every result in hand.
-                    from .consent import relay
-                    relay(runtime, task_id, language)
-                    cancel_event.wait(.1)
+                    _wait_for_change(runtime, machine, task_id, fingerprint, workers, cancel_event, language, relay_requests=True)
                     continue
                 # A failed check (often unrelated, pre-existing) is the
                 # coordinator's to handle, not a stop: it replans or notes it.
@@ -416,9 +459,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 capacity_wait_started = None
                 # A worker waiting on the user (a deletion, a write outside
                 # the project) gets its permission card here.
-                from .consent import relay
-                relay(runtime, task_id, language)
-                cancel_event.wait(.1)
+                _wait_for_change(runtime, machine, task_id, fingerprint, workers, cancel_event, language, relay_requests=True)
                 continue
             if any(n['status'] == 'running' for n in nodes):
                 from .recovery import retry_lost
@@ -451,7 +492,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             if any(n['status']=='pending' for n in nodes):
                 capacity_wait_started = capacity_wait_started or time.monotonic()
                 if time.monotonic()-capacity_wait_started < 1800:
-                    cancel_event.wait(.1)
+                    _wait_for_change(runtime, machine, task_id, fingerprint, workers, cancel_event, language, relay_requests=False)
                     continue
                 machine.move(task_id,'BLOCKED',blocker='scheduler_capacity_timeout')
             else:
@@ -484,6 +525,58 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             emit_update('\n\n' + (labels[state] if language == 'ru' else f"Runtime: {state}") + (f" — {context['blocker']}" if context['blocker'] else ''))
             return StopReason.CANCELLED if state == 'CANCELLED' else failure_stop_reason
         machine.move(task_id, 'BLOCKED', blocker='recovery_required')
+
+
+def _wait_for_change(runtime, machine, task_id, fingerprint, started, cancel_event, language, *, relay_requests):
+    """Hold the scheduler until its full pass can observe something new.
+
+    ``fingerprint`` was read before the pass and ``started`` is the worker set
+    the pass saw. The in-memory notification only shortens the wait; the
+    database stays the source of truth, and the deadline bounds any missed
+    wake-up.
+    """
+    cond = getattr(runtime, '_cond', None)
+    deadline = time.monotonic() + _RECONCILE_SECONDS
+    if relay_requests:
+        _relay_pending(runtime, task_id, language)
+    while True:
+        if cond is None:
+            notified = cancel_event.wait(_POLL_SECONDS)
+        else:
+            # _on_worker_done and capacity releases notify this condition.
+            with cond:
+                notified = cond.wait(_POLL_SECONDS)
+        with runtime._lock:
+            # A worker that ended before the wait began is seen here.
+            ended = frozenset(runtime._running.get(task_id, ())) != started
+        if (notified or ended or cancel_event.is_set() or _transport_lost(runtime, task_id)
+                or time.monotonic() >= deadline):
+            return
+        if relay_requests:
+            _relay_pending(runtime, task_id, language)
+        if machine.change_fingerprint(task_id) != fingerprint:
+            return
+
+
+def _relay_pending(runtime, task_id, language):
+    """Show new permission requests; claim them only when some exist."""
+    try:
+        with runtime._store.connection() as db:
+            pending = db.execute("SELECT 1 FROM consent_requests WHERE task_id=? AND status='pending' LIMIT 1",
+                                 (task_id,)).fetchone()
+    except sqlite3.OperationalError as error:
+        # The table is created with the first request; anything else: claim.
+        pending = 'no such table' not in str(error)
+    if pending:
+        from .consent import relay
+        relay(runtime, task_id, language)
+
+
+def _unconsumed_lifecycle(store, task_id):
+    """Whether events.claim_unconsumed would claim anything for the scheduler."""
+    with store.connection() as db:
+        return db.execute("SELECT 1 FROM task_events WHERE task_id=? AND consumed_by IS NULL AND superseded=0 "
+                          "AND event_type<>'user_message' LIMIT 1", (task_id,)).fetchone() is not None
 
 
 def _stop_question(question, context, language):

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import base64
 import os
+from typing import BinaryIO
 
 from ..portable.identity import new_id
 from ..store import private_directory, regular, sync_directory
@@ -49,24 +50,19 @@ def _large_outputs_dir(store, db, task_id: str):
     return private_directory(directory)
 
 
-def persist_output(
-    store, *, task_id: str, owner_scope: str, source_kind: str, data: bytes,
+def _persist_output(
+    store, *, task_id: str, owner_scope: str, source_kind: str,
+    data: bytes | None, source: BinaryIO | None,
     source_ref: str | None = None, exit_code: int | None = None, signal: str | None = None,
     failure: str | None = None, truncated: bool = False,
 ) -> dict:
-    """Persist ``data`` (the exact bytes already captured by the caller) to
-    one new owner-private file and record its metadata row. Returns the
-    metadata dict (``id``, ``byte_count``, ``truncated``, ``exit_code``,
-    ``signal``, ``failure``, ``filename``).
-
-    ``source_kind`` is ``"terminal"`` or ``"tool_result"``. ``owner_scope``
-    is ``"coordinator"`` or a specific ``assignment_ref`` string -- never
-    both/ambiguous (see module docstring).
-    """
+    """Persist exact output bytes to one owner-private file and record metadata."""
     if source_kind not in ("terminal", "tool_result"):
         raise LargeOutputError("invalid_source_kind")
     if not owner_scope:
         raise LargeOutputError("invalid_owner_scope")
+    if (data is None) == (source is None):
+        raise LargeOutputError("invalid_output_source")
     record_id = new_id("lo_")
     filename = record_id + ".bin"
     # Resolve the directory and write the file OUTSIDE any write transaction:
@@ -80,11 +76,32 @@ def persist_output(
         directory = _large_outputs_dir(store, db, task_id)
     path = directory / filename
     fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    byte_count = 0
+
+    def write_all(destination, chunk: bytes) -> None:
+        nonlocal byte_count
+        view = memoryview(chunk)
+        while view:
+            written = destination.write(view)
+            if written is None or written <= 0:
+                raise OSError("short write while persisting large output")
+            byte_count += written
+            view = view[written:]
+
     try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
+        with os.fdopen(fd, "wb") as destination:
+            if source is None:
+                write_all(destination, data)
+            else:
+                while True:
+                    chunk = source.read(DEFAULT_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    if not isinstance(chunk, bytes):
+                        raise LargeOutputError("invalid_output_stream")
+                    write_all(destination, chunk)
+            destination.flush()
+            os.fsync(destination.fileno())
     except BaseException:
         try:
             path.unlink()
@@ -96,13 +113,42 @@ def persist_output(
         "INSERT INTO large_outputs "
         "(id, task_id, owner_scope, source_kind, source_ref, filename, byte_count, "
         " truncated, exit_code, signal, failure, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (record_id, task_id, owner_scope, source_kind, source_ref, filename, len(data),
+        (record_id, task_id, owner_scope, source_kind, source_ref, filename, byte_count,
          1 if truncated else 0, exit_code, signal, failure, store._now()),
     ))
     return dict(
         id=record_id, task_id=task_id, owner_scope=owner_scope, source_kind=source_kind,
-        source_ref=source_ref, filename=filename, byte_count=len(data), truncated=truncated,
+        source_ref=source_ref, filename=filename, byte_count=byte_count, truncated=truncated,
         exit_code=exit_code, signal=signal, failure=failure,
+    )
+
+
+def persist_output(
+    store, *, task_id: str, owner_scope: str, source_kind: str, data: bytes,
+    source_ref: str | None = None, exit_code: int | None = None, signal: str | None = None,
+    failure: str | None = None, truncated: bool = False,
+) -> dict:
+    """Persist the exact bytes already captured by the caller."""
+    return _persist_output(
+        store, task_id=task_id, owner_scope=owner_scope, source_kind=source_kind,
+        data=data, source=None, source_ref=source_ref, exit_code=exit_code,
+        signal=signal, failure=failure, truncated=truncated,
+    )
+
+
+def persist_output_stream(
+    store, *, task_id: str, owner_scope: str, source_kind: str, stream: BinaryIO,
+    source_ref: str | None = None, exit_code: int | None = None, signal: str | None = None,
+    failure: str | None = None, truncated: bool = False,
+) -> dict:
+    """Persist a binary stream in bounded chunks without buffering it whole.
+
+    The stream is read from its current position and remains open for its caller.
+    """
+    return _persist_output(
+        store, task_id=task_id, owner_scope=owner_scope, source_kind=source_kind,
+        data=None, source=stream, source_ref=source_ref, exit_code=exit_code,
+        signal=signal, failure=failure, truncated=truncated,
     )
 
 

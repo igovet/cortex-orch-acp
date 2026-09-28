@@ -105,7 +105,19 @@ def reconcile_results(store, task_id):
         # The checks the runtime accepted at submission (older rows carry
         # only the claim; record_result still refuses an unverified pass).
         result = saved.get('accepted', saved['result'])
-        if (result['report_ref'], result['summary']) != (saved['result']['report_ref'], saved['result']['summary']):
+        if 'report' in saved['result']:
+            # An inline report: its report_ref is recorded only after its
+            # publication, and must be the one this request's own keyed
+            # write_report delivery produced. Before that nothing is
+            # published for the result; a live worker's retry continues.
+            if 'report_ref' not in result:
+                continue
+            from ..delegation.mcp_tools import inline_report_ref
+            with store.connection() as db:
+                expected_ref = inline_report_ref(db, task_id, request['actor'], request['request_key'])
+        else:
+            expected_ref = saved['result']['report_ref']
+        if (result['report_ref'], result['summary']) != (expected_ref, saved['result']['summary']):
             raise StoreError('result_receipt_digest_mismatch')
         with store.connection() as db:
             provision = db.execute('SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=?',

@@ -26,6 +26,7 @@ capability.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 
 from ..configuration.service import ConfigurationRejected
@@ -385,13 +386,23 @@ def with_external_mcp_instructions(meta: dict, server_names) -> dict:
     prompt = result.get("systemPrompt")
     if prompt is None:
         result["systemPrompt"] = {"append": note}
+    elif isinstance(prompt, str):
+        result["systemPrompt"] = prompt + "\n\n" + note
     elif isinstance(prompt, dict) and isinstance(prompt.get("append"), str):
         result["systemPrompt"] = {**prompt, "append": prompt["append"] + "\n\n" + note}
     return result
 
 
+#: What the unified Cortex prompt replaces that Claude Code would still add on
+#: its own with a string system prompt, each through an option or setting of
+#: the installed SDK: its native skill listing (``skills: []``), its commit
+#: and pull-request attribution reminder and its git workflow instructions
+#: (the ``settings`` layer; ``managedSettings`` drops these keys).
+CLAUDE_UNIFIED_PROMPT_SETTINGS = {"attribution": {"commit": "", "pr": ""}, "includeGitInstructions": False}
+
+
 def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker",
-                                  effort: str | None = None) -> dict:
+                                  effort: str | None = None, base_prompt: str | None = None) -> dict:
     """``_meta`` payload for ``session/new`` appending Cortex instructions.
 
     The real, statically-confirmed claude-agent-acp 0.78.0 instructions
@@ -418,6 +429,11 @@ def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker
     real turn has run through this channel, so nothing here confirms the
     spawned CLI actually *honors* the delivered text as opposed to merely
     receiving it (as documented by the adapter's installed capability evidence).
+
+    ``base_prompt`` (the unified Cortex prompt) uses the plain-string form
+    instead: base prompt then role instructions become the whole system
+    prompt, replacing Claude Code's preset, and the native additions listed
+    in :data:`CLAUDE_UNIFIED_PROMPT_SETTINGS` are switched off.
     """
     if not isinstance(instructions_text, str) or not instructions_text.strip():
         raise PortableError(
@@ -425,7 +441,16 @@ def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker
             remediation="'instructions_text' must be a non-empty string.",
             retry_eligible=False, field="instructions_text",
         )
-    return {
-        "systemPrompt": {"append": instructions_text},
-        **claude_native_subagent_restriction_meta(role=role, effort=effort),
-    }
+    meta = claude_native_subagent_restriction_meta(role=role, effort=effort)
+    if base_prompt is None:
+        return {"systemPrompt": {"append": instructions_text}, **meta}
+    if not isinstance(base_prompt, str) or not base_prompt.strip():
+        raise PortableError(
+            category=PortableErrorCategory.VALIDATION, code="invalid_field",
+            remediation="'base_prompt' must be a non-empty string.",
+            retry_eligible=False, field="base_prompt",
+        )
+    options = meta["claudeCode"]["options"]
+    options["skills"] = []
+    options["settings"] = json.loads(json.dumps(CLAUDE_UNIFIED_PROMPT_SETTINGS))
+    return {"systemPrompt": base_prompt.rstrip() + "\n\n" + instructions_text, **meta}

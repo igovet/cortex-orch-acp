@@ -114,7 +114,10 @@ def test_skill_management_guidance_is_coordinator_only_and_covers_import_review(
     assert "Do not create it automatically" in body["body"]
     assert "whole-project write scope (`.`)" in body["body"]
     assert "user_question_request carrying skill_proposal" in body["body"]
-    assert "Only the first option" in body["body"]
+    assert "Only an exact listed pair is accepted" in body["body"]
+    assert "[Create the skill, Not now]" in body["body"]
+    assert "[Update the skill, Not now]" in body["body"]
+    assert "An arbitrary first option never approves" in body["body"]
     assert "merely because skill files or directories exist" in body["body"]
     with pytest.raises(StoreError, match="unknown_skill"):
         _shared_read_skill(None, SimpleNamespace(role="worker", attempt_id=None), {"skill": "skill-management"})

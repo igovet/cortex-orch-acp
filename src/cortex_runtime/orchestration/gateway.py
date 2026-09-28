@@ -454,17 +454,7 @@ def dispatch(store,channel,operation,args):
                 elif operation=='project_skill_link':
                     result=skill_links.apply(root,args,effects)
                 else:
-                    draft,path=store._draft_source(db,channel.task_id,channel.principal_thread_id,args['draft_id'])
-                    data=args['content'].encode('utf-8')
-                    if not args['content'].startswith(f"Cortex draft ID: `{args['draft_id']}`\n"):
-                        raise StoreError('gateway_draft_marker_required')
-                    fd=os.open(path,os.O_WRONLY|os.O_NOFOLLOW)
-                    with os.fdopen(fd,'wb') as stream:
-                        info=os.fstat(stream.fileno())
-                        if info.st_nlink!=1 or not stat.S_ISREG(info.st_mode):
-                            raise StoreError('gateway_regular_file_required')
-                        stream.truncate(); stream.write(data); stream.flush(); os.fsync(stream.fileno())
-                    result=dict(sha256=hashlib.sha256(data).hexdigest(),byte_count=len(data))
+                    result=write_draft(store,db,channel,args['draft_id'],args['content'])
                 db.commit()
             if operation=='project_skill_link' and args['action']=='link':
                 # Observed after the commit: a git subprocess never runs
@@ -495,6 +485,23 @@ def dispatch(store,channel,operation,args):
         event(db,channel.task_id,'TOOL_COMPLETED',dict(operation=operation,tool_call_ref=ref,result=result),channel.channel_id)
         db.commit()
     return result
+
+
+def write_draft(store,db,channel,draft_id,content):
+    """Replace one of this channel's own unpublished drafts, inside the
+    caller's open transaction. Shared by draft_write and the inline report of
+    result_submit, so both keep the same ownership, marker and file checks."""
+    draft,path=store._draft_source(db,channel.task_id,channel.principal_thread_id,draft_id)
+    data=content.encode('utf-8')
+    if not content.startswith(f"Cortex draft ID: `{draft_id}`\n"):
+        raise StoreError('gateway_draft_marker_required')
+    fd=os.open(path,os.O_WRONLY|os.O_NOFOLLOW)
+    with os.fdopen(fd,'wb') as stream:
+        info=os.fstat(stream.fileno())
+        if info.st_nlink!=1 or not stat.S_ISREG(info.st_mode):
+            raise StoreError('gateway_regular_file_required')
+        stream.truncate(); stream.write(data); stream.flush(); os.fsync(stream.fileno())
+    return dict(sha256=hashlib.sha256(data).hexdigest(),byte_count=len(data))
 
 
 def verified_check(db,task_id,attempt_id,ref,outcome='passed'):

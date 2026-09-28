@@ -29,8 +29,9 @@ the task with a short `answer_submit`. The coordinator uses `synthesis_submit`
 only when nothing is left for the user to decide.
 
 A question can carry a `skill_proposal` for a reusable project skill. The
-runtime validates it, shows its own evidence list, and derives an approve,
-decline or unclear decision from the exact answer; see
+runtime validates action-matched approval and decline labels before persistence,
+shows its own evidence list, and derives an approve, decline or unclear decision
+from the exact answer. Persisted unsafe labels fail closed after restart; see
 [project skill management](skill-management.md#proposed-skills-from-repeated-work).
 
 In Paseo the question is a card with its options and an "Other..." field for

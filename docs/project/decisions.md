@@ -1,3 +1,89 @@
+## 2026-09-28 orchestration overhead and evidence optimizations
+
+The completed optimization set keeps durable task state and existing evidence
+checks authoritative while reducing repeated reads and oversized event payloads.
+The no-paid overhead harness was run before and after the changes. These are
+controlled, single-host observations, not provider latency or end-to-end task
+duration measurements.
+
+| Scenario | Baseline | After | Interpretation |
+| --- | --- | --- | --- |
+| 1,000 coordinator text deltas | 5,054 store connections; 1,005 full contexts; 18 immediate write transactions | 1,036 connections; 5 full contexts around the run; 1,005 state reads including setup (one per delta); 18 write transactions | The delta callbacks use a state-only query and build no full contexts. The remaining five context builds are controller work outside individual callbacks. |
+| Idle execution window, about 2 seconds | 120 connections; 41 contexts; 78 `BEGIN IMMEDIATE` statements | 51 connections; 6 contexts; 0 immediate transactions during the 2.045-second idle window | The after-run had 62 connections, 11 contexts and 2 immediate transactions over the whole scenario; those two were setup and cancellation. Full passes reconcile at least every 2 seconds. |
+| Verification output, 5 MiB | 5,242,880 bytes persisted and sent in the event; 10,505,717-byte Python allocation peak | All 5,242,880 bytes persisted; 2,563-byte tool-card body; 156,555-byte Python allocation peak | Full output is streamed to durable large-output storage; the event carries a bounded excerpt and record ID. |
+
+The baseline verification case used mocked sandbox gateway helpers, as did the
+harness's output measurement; it tests output buffering and payload size, not
+sandbox isolation or process-wide memory. The idle case uses a scope-blocked
+fake worker. The harness records zero retry-history reads in both its idle
+case and the measured coordinator path; that does not establish retry-query
+counts for ready-node workloads.
+
+### Adopted behavior
+
+- **#2, state reads and consistent context:** coordinator text checks read only
+  the durable task state. Full context uses one SQLite read transaction and
+  batches assignment-attempt lookup. No in-memory task-state cache was added.
+- **#4, reduced scheduler polling:** a database fingerprint gates expensive
+  scheduler passes, with worker completion and runtime notifications able to
+  wake it sooner. A full reconciliation still occurs at least every 2 seconds;
+  permission-card relay retains its 0.1-second cadence. `claim_ready` uses a
+  read-only candidate check before taking a write lock, rechecks inside the
+  transaction, and batches retry-history reads.
+- **#8, launch order and route diagnostics:** ready nodes are prioritized by
+  longest remaining dependency chain, with row order breaking ties.
+  Task-scoped accepted-result latency and review fix-cycle aggregates are
+  descriptive diagnostics only; they do not affect route selection.
+- **#5, verification logs:** complete output is persisted from a stream and
+  only a bounded tail plus its output record ID is sent in the event. Command
+  exit, interruption and project-integrity checks remain in force; verification
+  commands remain sequential.
+- **#1, review findings:** a fully runtime-validated set of local findings
+  creates fixes only for named plan tasks, with their plan-order dependencies.
+  Missing, invalid, out-of-scope or cross-cutting findings retain the broad
+  all-task fix fallback. Contract impact is not inferred automatically.
+- **#7, check identity:** a same-name check on an unrelated node cannot close
+  a synthesis gap. Closure requires the same node/fix lineage or a current,
+  verified `command_run` whose recorded argv exactly matches the declared
+  command; evidence ownership and receipt validation remain enforced.
+- **#3, inline result reports:** `result_submit` accepts exactly one of the
+  existing `report_ref` or inline `report` forms. Inline publication uses
+  the worker's owned-draft and existing publication path, keyed to the result
+  request so retries reuse the same report; existing authority and evidence
+  validation remains.
+- **#6, compact coordinator context:** prompts retain the active cycle in full
+  and compact superseded nodes while preserving historical check gaps and all
+  other context fields. Persisted context and `task_get_context` remain full.
+
+### Rejected approaches and trade-offs
+
+- An in-memory state cache was rejected because MCP updates commit to SQLite
+  independently and a cache would need a correctness protocol; a direct durable
+  state read is small and sees those updates.
+- A separate state-version/event system was rejected. The existing database
+  fingerprint, notifications and periodic reconciliation cover local wakeups
+  while the database remains authoritative.
+- Parallel verification was rejected because commands can share ignored build,
+  dependency and cache paths, making write conflicts and attribution ambiguous;
+  command counts are typically small and parallel resource contention can also
+  produce misleading timeouts.
+- Automatic route selection by time-to-accepted-result was rejected for lack of
+  enough comparable observations. The new aggregates expose descriptive data
+  while current routing rules remain unchanged.
+- A context-delta protocol over generation delivery was rejected as unnecessary
+  complexity for the bounded review-cycle projection. Full context remains
+  available for recovery and decisions.
+- Automatic expansion to contract-dependent fix areas was rejected because the
+  runtime has no reliable signal for inferring contract impact. Reviewers mark
+  cross-cutting findings explicitly, which trigger the conservative broad fix
+  cycle.
+- A scheduler pass that the fingerprint does not trigger may now wait up to
+  the 2-second reconciliation interval. Worker completion and runtime
+  notifications can wake the scheduler earlier; this bounded delay is the
+  trade-off for avoiding repeated full passes.
+
+The measurements do not estimate total task-time savings or provider behavior.
+
 ## 2026-09-28 paid live checks only on an explicit owner request
 
 The owner revoked the 2026-09-24 standing paid-call approval. Live QA through
@@ -23,12 +109,23 @@ The explicit `/skill-management` workflow gained an approved proactive phase.
 The coordinator may propose one project skill per task. It uses
 `user_question_request` with `skill_proposal`, never a worker `ask_question`,
 because that stops workers. The runtime validates 2-5 ordinary retained
-reports as evidence, checks the action against `.agents/skills/<name>`, refuses
-duplicates across the project, and derives approval only from the exact first
-option or its displayed number. Approval passes the same workflow instruction
-as the explicit command to the next planning turn. A decline or unclear answer
-writes nothing. The data lives in `runtime_events` payloads and
-`pending_questions`, so no storage format change was needed.
+reports as evidence, checks the action against `.agents/skills/<name>`, and
+refuses duplicates across the project. It accepts only these exact
+action-matched option pairs, with approval first:
+
+- create: [Create the skill, Not now]; [Создать навык, Не сейчас];
+  [Approve creating the skill, Decline creating the skill];
+  [Одобрить создание навыка, Отклонить создание навыка]
+- update: [Update the skill, Not now]; [Обновить навык, Не сейчас];
+  [Approve updating the skill, Decline updating the skill];
+  [Одобрить обновление навыка, Отклонить обновление навыка]
+
+Answer 1 selects the displayed pair's approval label; answer 2 selects its
+decline label. Other answers are unclear, and an arbitrary first option never
+approves. Approval passes the same workflow instruction as the explicit
+command to the next planning turn. A decline or unclear answer writes nothing.
+The data lives in `runtime_events` payloads and `pending_questions`, so no
+storage format change was needed.
 
 Rejected alternatives: a suggestion only in coordinator prose, which gives no
 durable answer and no duplicate control; free-text approval matching, which is

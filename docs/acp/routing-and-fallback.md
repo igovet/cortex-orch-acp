@@ -254,8 +254,9 @@ choice and remains strict.
 
 The role tier starts from `ROLE_TIERS` and is shifted by complexity (low moves
 cheaper; high moves stronger). On escalation, the runtime normally advances the tier;
-`flagship` is reserved for escalation. Ordinary standard-tier development
-retries and review fixes retain the standard candidate pool described below. If no usable candidate exists in the
+`flagship` is reserved for escalation. Ordinary standard-tier testing
+retries and review fixes retain the standard candidate pool described below;
+other standard-tier retries escalate normally. If no usable candidate exists in the
 requested tier, the configured fallback order searches other tiers. Explorer
 remains light at every complexity and escalation; because its tier cannot rise,
 escalation raises its effort one supported step (normally low to medium; on
@@ -288,7 +289,7 @@ readable.
 The Codex Luna line (`gpt-6-luna`, `gpt-5.6-luna`, and any later
 `gpt-<n>-luna`; the newest non-denied version is routed) is very cheap and
 very effective, so it has its own rule in `routing.auto_route` (rank version
-5). The rule is hard-coded: `routing.json` classifies models by tier, and has
+7). The rule is hard-coded: `routing.json` classifies models by tier, and has
 no per-work-kind or per-complexity setting that would fit it.
 
 - **Effort floor.** Luna never runs below `high` (`LUNA_EFFORT_FLOOR`). The
@@ -297,30 +298,31 @@ no per-work-kind or per-complexity setting that would fit it.
   when a `tiers` override moves it out of the light tier. A Luna build that
   offers nothing at or above `high` keeps what it offers.
 - **Effort by work** (`LUNA_EFFORTS`, `luna_effort`): `high` for light work;
-  `xhigh` for ordinary standard-tier development; `max` for standard-tier work
+  `xhigh` for ordinary standard-tier testing; `max` for standard-tier testing
   that is a retry or a fix after review requested changes (`escalate`). That
   work has already proved harder than planned but does not justify a deep
   model. Eligibility uses the base task tier before generic escalation:
-  normal standard-tier development stays in the standard pool on a retry or
+  normal standard-tier testing stays in the standard pool on a retry or
   review fix. Luna targets `max`; another selected model raises effort one
   step (normally medium to high). Retry diversification and quota still
   apply, and an unusable standard pool falls back through the usual tier
   order. The audit retains `base_role_tier` as well as the effective
-  `role_tier`. Explicit high complexity and deep roles retain their normal
-  escalation and Luna exclusions. Escalated light work (explorer) gets `xhigh`.
+  `role_tier`. Other standard-tier work, explicit high complexity and deep
+  roles retain their normal escalation and Luna exclusions. Escalated light work (explorer) gets `xhigh`.
 - **Candidacy** (`luna_status`, recorded as `luna.status`). Luna remains the
-  light tier's model (`light_tier`). For standard-tier development work
-  (`LUNA_WORK_KINDS`: implementation, operations, debugging, testing), it also
-  ranks next to the tier's own models, such as `gpt-5.6-terra` and Claude
-  Sonnet (`standard_candidate`). The ordinary rank then decides: preference,
+  light tier's model (`light_tier`). In the standard tier it is a candidate
+  only for testing work (`LUNA_WORK_KINDS`: testing, that is `qa-engineer` and
+  `build-verification`), where it ranks next to the tier's own models, such as
+  `gpt-5.6-terra` and Claude Sonnet (`standard_candidate`). The ordinary rank then decides: preference,
   hint, plan usage, diversify, affinity, quota band, used percent, engine
   order. Luna is not always chosen. A Claude plan at least 10 points less
   used, a much hotter Codex plan than the alternative, or a hint for another
   model all move the work away from it. On one
   Codex plan with equal affinity, Codex's own list order (newest generation
-  first) puts `gpt-6-luna` ahead of the older `gpt-5.6-terra`. Standard-tier
-  design, review, planning, writing and analysis work stays on the tier's own
-  models (`not_candidate:work_kind_<kind>`).
+  first) puts `gpt-6-luna` ahead of the older `gpt-5.6-terra`. All other
+  standard-tier work -- implementation, operations, debugging, design,
+  review, planning, writing and analysis -- stays on the tier's own models
+  (`not_candidate:work_kind_<kind>`).
 - **Never Luna** (`excluded:<reason>`): `complexity: high` work, deep or
   flagship work, and a deep role (architect, database architect, security
   auditor, senior consultant) even at `complexity: low`. This applies even as
@@ -330,7 +332,7 @@ no per-work-kind or per-complexity setting that would fit it.
   route like any model of that tier. Only its effort floor and `max` still
   apply.
 
-An exact Luna hint on standard-tier development work is not a tier mismatch,
+An exact Luna hint on standard-tier testing work is not a tier mismatch,
 either at plan submission (`hint_serves_tier`) or at dispatch.
 
 Only the newest version of each model family per engine is routed
@@ -462,7 +464,9 @@ after `hint`) to a late tie breaker (right before `used_percent`), behind
 plan usage, retry diversification and engine affinity, and made the
 preference/hint quota exclusion require the excluded route's usage to be
 both hot and meaningfully worse (`USAGE_MARGIN`) than an available
-alternative's, not merely at or above `HOT_PERCENT`. Older rows keep their own fields
+alternative's, not merely at or above `HOT_PERCENT`; 7 narrowed Luna's
+standard-tier candidacy to testing work only, so other standard-tier retries
+and review fixes escalate as before version 5. Older rows keep their own fields
 (`balance`, `balance_excess`, `cross_tier`, `chosen_cross_tier`) and still
 render. These fields are evidence of runtime decisions, not proof of
 the exact observed live surface.

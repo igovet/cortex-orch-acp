@@ -29,6 +29,36 @@ def plan(count=1):
                 verification=[['python3', '-B', '-m', 'pytest', '-q']])
 
 
+def _verified_pass_for_node(state, coordinator, node_id, command):
+    from uuid import uuid4
+    from cortex_runtime.trusted_channel import issue_channel_tx, resolve_channel
+    from cortex_runtime.delegation import mcp_tools
+    from cortex_runtime.portable.roles import resolve_role
+
+    attempt = 'xa_' + uuid4().hex[:12]
+    with state.store.connection() as db:
+        node = db.execute('SELECT assignment_ref FROM runtime_nodes WHERE task_id=? AND node_id=?',
+                          (coordinator.task_id, node_id)).fetchone()
+        assignment = node['assignment_ref'] or uuid4().hex
+        db.execute("UPDATE runtime_nodes SET status='running',assignment_ref=? WHERE task_id=? AND node_id=?",
+                   (assignment, coordinator.task_id, node_id))
+        assignment_id = 'a_' + uuid4().hex[:12]
+        worker_id, secret = issue_channel_tx(db, coordinator.task_id, 'worker', coordinator.owner_epoch,
+                                             parent_channel_id=coordinator.channel_id,
+                                             assignment_id=assignment_id, attempt_id=attempt)
+        stamp = state.store._now()
+        db.execute('INSERT INTO delegation_provisioning VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                   (assignment, coordinator.task_id, assignment_id, attempt,
+                    resolve_role('backend-dev'), 'ready', 'ready', 'shared_project_root', worker_id,
+                    None, None, None, 'qualified', None, coordinator.owner_epoch, stamp, stamp))
+        db.commit()
+    worker = resolve_channel(state.store, worker_id, secret)
+    receipt = mcp_tools.dispatch(state.store, worker, 'command_run',
+                                 dict(argv=command, request_key='synthesis-command'))
+    assert receipt['exit_code'] == 0
+    return receipt['tool_call_ref']
+
+
 def test_plan_atomic_and_idempotent(machine):
     state, channel = machine
     accepted = state.submit_plan(channel, plan(), 'p1')
@@ -114,7 +144,7 @@ def test_synthesis_discloses_retained_gap_with_blocker(machine):
         state.submit_synthesis(channel, 'Done', [dict(item='Live GUI', blocker='Different reason')])
 
 
-def test_same_revision_pass_resolves_synthesis_gap(machine):
+def test_unrelated_same_name_pass_does_not_resolve_synthesis_gap(machine):
     state, channel = machine
     state.submit_plan(channel, plan(2), 'gap-plan')
     with state.store.connection() as db:
@@ -124,11 +154,74 @@ def test_same_revision_pass_resolves_synthesis_gap(machine):
         db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N1'",
                    ('{"checks":[{"name":"  live   gui ","outcome":"passed"}]}', channel.task_id))
         db.commit()
-    assert state.submit_synthesis(channel, 'Verified')['recorded']
+    with pytest.raises(StoreError, match='synthesis_gaps_undisclosed'):
+        state.submit_synthesis(channel, 'Verified')
+    assert state.submit_synthesis(channel, 'Gap disclosed',
+                                  [dict(item='Live GUI', blocker='The frontend check was not run.')])['recorded']
     with state.store.connection() as db:
         stored = db.execute('SELECT synthesis FROM runtime_tasks WHERE task_id=?',
                             (channel.task_id,)).fetchone()[0]
-    assert stored == 'Verified'
+    assert 'Live GUI' in stored
+
+
+def test_fix_node_pass_with_same_name_resolves_original_gap(tmp_path):
+    from cortex_runtime.trusted_channel import resolve_channel
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin='synthesis', event_id='fix'), 'Verify', 'owner')
+    state = TaskMachine(store)
+    state.create(task.task_id, 'Verify')
+    channel = resolve_channel(store, task.channel_id, task.secret)
+    state.submit_plan(channel, plan(), 'fix-gap-plan')
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N0'",
+                   (json.dumps({'checks': [{'name': 'tests', 'outcome': 'not_run', 'blocker': 'Pending fix'}]}),
+                    channel.task_id))
+        db.execute('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                   (channel.task_id, 1, '_fix_0_N0', 'backend-dev', 'Fix tests', '[]', '["tests/**"]',
+                    'execution', 'pending', None, None))
+        db.commit()
+    ref = _verified_pass_for_node(state, channel, '_fix_0_N0',
+                                  ['python3', '-B', '-c', 'print("fixed")'])
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?", (channel.task_id,))
+        db.execute("UPDATE runtime_nodes SET status='completed', result_json=? WHERE task_id=? AND node_id='_fix_0_N0'",
+                   (json.dumps({'checks': [{'name': ' TESTS ', 'outcome': 'passed', 'tool_call_ref': ref}]}),
+                    channel.task_id))
+        db.commit()
+    assert state.submit_synthesis(channel, 'Verified')['recorded']
+
+
+def test_exact_verified_command_closes_only_its_declared_gap(tmp_path):
+    from cortex_runtime.trusted_channel import resolve_channel
+
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin='synthesis', event_id='command'), 'Verify', 'owner')
+    state = TaskMachine(store)
+    state.create(task.task_id, 'Verify')
+    channel = resolve_channel(store, task.channel_id, task.secret)
+    state.submit_plan(channel, plan(3), 'command-gap-plan')
+    state.move(channel.task_id, 'EXECUTING')
+    state.claim_ready(channel.task_id, channel.channel_id)
+    command = ['python3', '-B', '-c', 'print("verified")']
+    ref = _verified_pass_for_node(state, channel, 'N1', command)
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?", (channel.task_id,))
+        db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N0'",
+                   (json.dumps({'checks': [{'name': 'backend tests', 'outcome': 'not_run',
+                                            'blocker': 'Blocked earlier', 'command': command},
+                                           {'name': 'frontend tests', 'outcome': 'not_run',
+                                            'blocker': 'Blocked earlier', 'command': command + ['frontend']}]}),
+                    channel.task_id))
+        db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N1'",
+                   (json.dumps({'checks': [{'name': 'frontend tests', 'outcome': 'passed',
+                                            'tool_call_ref': ref}]}), channel.task_id))
+        db.commit()
+    with pytest.raises(StoreError, match='synthesis_gaps_undisclosed') as error:
+        state.submit_synthesis(channel, 'Verified')
+    assert 'frontend tests' in error.value.correction
+    assert 'backend tests' not in error.value.correction
+    assert state.submit_synthesis(channel, 'Verified',
+                                  [dict(item='frontend tests', blocker='The frontend command did not run.')])['recorded']
 
 
 def test_cannot_skip_review_or_complete_with_chat(machine):
@@ -984,19 +1077,21 @@ def test_exact_model_hint_requires_live_menu_and_reports_tier_mismatch(machine, 
         'tier_now': 'standard', 'preview_status': 'ignored:tier_mismatch'}]
 
 
-def test_a_luna_hint_on_standard_development_work_is_not_a_tier_mismatch(machine, monkeypatch):
+def test_a_luna_hint_serves_only_standard_testing_work(machine, monkeypatch):
     from cortex_runtime.routing import auto_route
     state, channel = machine
-    proposal = plan(2)
+    proposal = plan(3)
     for node in proposal['tasks']:
         node.update(model='codex-acp/gpt-6-luna', model_reason='Cheap and strong enough.')
-    proposal['tasks'][1]['complexity'] = 'high'
+    proposal['tasks'][0]['role'] = 'qa-engineer'
+    proposal['tasks'][2].update(role='qa-engineer', complexity='high')
     monkeypatch.setattr(auto_route, 'route_menu', lambda *_: {
         'tiers': {'flagship': [], 'deep': [], 'standard': [],
                   'light': [{'route': 'codex-acp/gpt-6-luna'}]}})
     receipt = state.submit_plan(channel, proposal, 'luna-preview')
     assert [(hint['tier_now'], hint['preview_status']) for hint in receipt['model_hints']] == [
-        ('standard', 'pending_dispatch'), ('deep', 'ignored:tier_mismatch')]
+        ('standard', 'pending_dispatch'), ('standard', 'ignored:tier_mismatch'),
+        ('deep', 'ignored:tier_mismatch')]
 
 
 def test_unknown_exact_model_and_missing_reason_are_rejected(machine, monkeypatch):

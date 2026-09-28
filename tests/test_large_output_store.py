@@ -9,7 +9,9 @@ import pytest
 
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.portable.identity import SourceEvent
-from cortex_runtime.recovery.large_output_store import LargeOutputError, persist_output, read_output
+from cortex_runtime.recovery.large_output_store import (
+    LargeOutputError, persist_output, persist_output_stream, read_output,
+)
 from cortex_runtime.store import Store
 
 
@@ -89,3 +91,57 @@ def test_persisted_file_is_owner_only_mode(tmp_path):
     import stat
     mode = path.stat().st_mode
     assert stat.S_IMODE(mode) == 0o600
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param(b"x" * (2 * 1024 * 1024), id="multi-megabyte"),
+        pytest.param(bytes(range(256)) * 8192, id="non-utf8"),
+    ],
+)
+def test_stream_persistence_is_byte_exact(tmp_path, data):
+    store, task_id = _task(tmp_path)
+    source_path = tmp_path / "verification-output.bin"
+    source_path.write_bytes(data)
+
+    with source_path.open("rb") as source:
+        record = persist_output_stream(
+            store, task_id=task_id, owner_scope="coordinator",
+            source_kind="terminal", source_ref="verification:test", stream=source,
+            exit_code=0,
+        )
+        assert source.tell() == len(data)
+
+    with store.connection() as db:
+        directory = store._task_directory(db, task_id) / "large_outputs"
+    persisted = (directory / record["filename"]).read_bytes()
+    assert persisted == data
+    assert record["byte_count"] == len(data)
+
+
+def test_stream_read_failure_removes_partial_output_file(tmp_path):
+    store, task_id = _task(tmp_path)
+
+    class FailingStream:
+        def __init__(self):
+            self.calls = 0
+
+        def read(self, _size):
+            self.calls += 1
+            if self.calls == 1:
+                return b"partial output"
+            raise OSError("simulated source failure")
+
+    with pytest.raises(OSError, match="simulated source failure"):
+        persist_output_stream(
+            store, task_id=task_id, owner_scope="coordinator",
+            source_kind="terminal", stream=FailingStream(),
+        )
+
+    with store.connection() as db:
+        directory = store._task_directory(db, task_id) / "large_outputs"
+        rows = db.execute(
+            "SELECT COUNT(*) FROM large_outputs WHERE task_id=?", (task_id,),
+        ).fetchone()[0]
+    assert list(directory.iterdir()) == []
+    assert rows == 0

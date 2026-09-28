@@ -61,6 +61,12 @@ _CODEX_AGENT_REVIEWER_MANUAL = _CODEX_AGENT_REVIEWER_SOURCE.replace(
 # Cortex-owned; upstream 1.12.0 otherwise ignores systemPrompt. App Server's
 # thread/start developerInstructions is a request-level override of native
 # config, so read and retain the effective native developer instructions.
+# Two further Cortex-owned _meta fields, both absent by default: a string
+# cortexBaseInstructions becomes thread/start baseInstructions and replaces
+# Codex's model base prompt ("" removes it); cortexNativeContext=false turns
+# off the permissions, apps, collaboration-mode, skills-catalog and
+# environment-context sections through that thread's config. Both were
+# observed against Codex CLI 0.155.1's own App Server schema and requests.
 _CODEX_NEW_SESSION_SOURCE = b'''    const response = await this.codexClient.threadStart({
       config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers),
       modelProvider: this.getModelProvider(),
@@ -87,11 +93,29 @@ _CODEX_NEW_SESSION_PATCHED = b'''    const sessionConfig = await this.createSess
       }
       developerInstructions = nativeInstructions ? nativeInstructions + "\\n\\n" + cortexInstructions : cortexInstructions;
     }
+    const cortexBaseInstructions = request._meta?.cortexBaseInstructions;
+    if (cortexBaseInstructions !== void 0 && typeof cortexBaseInstructions !== "string") {
+      throw RequestError.invalidParams({}, "Cortex base instructions must be a string");
+    }
+    const cortexNativeContext = request._meta?.cortexNativeContext;
+    if (cortexNativeContext !== void 0 && typeof cortexNativeContext !== "boolean") {
+      throw RequestError.invalidParams({}, "Cortex native context flag must be a boolean");
+    }
+    if (cortexNativeContext === false) {
+      Object.assign(sessionConfig, {
+        include_permissions_instructions: false,
+        include_apps_instructions: false,
+        include_collaboration_mode_instructions: false,
+        include_environment_context: false,
+        skills: { ...(sessionConfig.skills ?? {}), include_instructions: false }
+      });
+    }
     const response = await this.codexClient.threadStart({
       config: sessionConfig,
       modelProvider: this.getModelProvider(),
       cwd: request.cwd,
-      ...(developerInstructions === void 0 ? {} : { developerInstructions })
+      ...(developerInstructions === void 0 ? {} : { developerInstructions }),
+      ...(cortexBaseInstructions === void 0 ? {} : { baseInstructions: cortexBaseInstructions })
     });
     this.cortexSessionRoles ??= new Map();
     this.cortexSessionRoles.set(response.thread.id, cortexRole);'''
