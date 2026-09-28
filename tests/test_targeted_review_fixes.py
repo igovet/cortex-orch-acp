@@ -31,14 +31,14 @@ def machine(tmp_path):
 
 
 def chain_plan():
-    """api <- service <- ui, plus an independent docs task."""
+    """api <- service <- ui, plus an independent x task."""
     def node(key, dependencies, scope):
         return dict(id=key, role='backend-dev', objective=f'Implement {key}', dependencies=dependencies,
                     scope=scope, model='auto')
     return dict(tasks=[node('api', [], ['src/api/**']),
                        node('service', ['api'], ['src/service']),
                        node('ui', ['service'], ['src/ui/*.py']),
-                       node('docs', [], ['docs/guide.md'])],
+                       node('x', [], ['src/x/*.py'])],
                 verification=[['python3', '-B', '-m', 'pytest', '-q']])
 
 
@@ -97,7 +97,7 @@ def test_a_local_finding_creates_a_single_fix_with_only_its_findings(machine):
 
 def test_targeted_fixes_keep_the_plan_order_between_them(machine):
     """ui depends on api only through service; with service unselected the
-    ui fix still waits for the api fix. docs stays untouched."""
+    ui fix still waits for the api fix. x stays untouched."""
     state, channel, tmp_path = machine
     review = _review(state, channel, tmp_path, [finding('ui', ['src/ui/view.py']),
                                                 finding('api', ['src/api/v1/routes.py'])])
@@ -130,12 +130,30 @@ def test_unconfinable_findings_fall_back_to_fixing_every_original_task(machine, 
     review = _review(state, channel, tmp_path, findings)
     state.add_fix(channel.task_id, review)
     fixes = _fixes(state, channel.task_id)
-    assert list(fixes) == ['_fix_1_api', '_fix_1_service', '_fix_1_ui', '_fix_1_docs']
+    assert list(fixes) == ['_fix_1_api', '_fix_1_service', '_fix_1_ui', '_fix_1_x']
+    expected_dependencies = {
+        '_fix_1_api': ['_review_1'],
+        '_fix_1_service': ['_review_1', '_fix_1_api'],
+        '_fix_1_ui': ['_review_1', '_fix_1_service'],
+        '_fix_1_x': ['_review_1'],
+    }
     for fix in fixes.values():
-        assert fix['dependencies'] == ['_review_1']
+        assert fix['dependencies'] == expected_dependencies[fix['node_id']]
         assert fix['objective'] == 'Address review findings within the assigned scope: The shared summary of every problem.'
     (requested,) = _requested(state, channel.task_id)
     assert requested['targeted'] is False and requested['fallback'] == reason
+
+
+def test_cross_cutting_fallback_keeps_direct_plan_dependencies(machine):
+    state, channel, tmp_path = machine
+    review = _review(state, channel, tmp_path, [finding('api', ['src/api/x.py'], cross_cutting=True)])
+    state.add_fix(channel.task_id, review)
+    fixes = _fixes(state, channel.task_id)
+    assert set(fixes) == {'_fix_1_api', '_fix_1_service', '_fix_1_ui', '_fix_1_x'}
+    assert fixes['_fix_1_api']['dependencies'] == ['_review_1']
+    assert fixes['_fix_1_service']['dependencies'] == ['_review_1', '_fix_1_api']
+    assert fixes['_fix_1_ui']['dependencies'] == ['_review_1', '_fix_1_service']
+    assert fixes['_fix_1_x']['dependencies'] == ['_review_1']
 
 
 def test_the_review_cycle_ceiling_is_unchanged_for_targeted_findings(machine):

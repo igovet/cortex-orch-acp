@@ -7,6 +7,7 @@ from cortex_runtime.project_docs import (
     MAX_SCANNED_PATHS,
     build_catalog,
     render_catalog,
+    render_worker_catalog,
 )
 
 
@@ -167,3 +168,10 @@ def test_flat_directory_is_capped_without_unbounded_scan(tmp_path: Path):
     assert catalog["truncated"] is True
     assert len(catalog["entries"]) == MAX_FILES
     assert any(item["reason"] == "catalog_scan_limit" for item in catalog["skipped"])
+
+
+def test_worker_catalog_defers_index_and_broad_discovery_when_known_locations_exist(tmp_path: Path):
+    rendered = render_worker_catalog(tmp_path)
+    assert "when the brief includes Known locations" in rendered
+    assert "start by reading those current sources directly" in rendered
+    assert "only if those locations are insufficient or the change touches a contract or documentation surface" in rendered

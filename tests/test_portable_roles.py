@@ -112,3 +112,13 @@ def test_situational_catalogue_excludes_inlined_and_consultant_mutation_skills()
     assert "report-publication" not in worker and "code-and-evidence" not in worker
     assert set(consultant) == {"index", "context-compaction"}
     assert "skill-management" in dict(roles.situational_skill_triggers("coordinator"))
+
+
+def test_known_location_handoff_guidance_is_delivered_to_workers_and_coordinator():
+    worker = " ".join(roles.load_role("worker-backend-dev").body_portable.split())
+    coordinator = " ".join(roles.load_role("orchestrator").body_portable.split())
+    assert "When its brief includes `Known locations`, begin with those locations" in worker
+    assert "read the current source directly before editing; the hints can be stale" in worker
+    assert "Read a relevant documentation index and do broad discovery only when" in worker
+    assert "For each task objective, include a short `Known locations` block only when you" in coordinator
+    assert "do not investigate further merely to produce hints" in coordinator

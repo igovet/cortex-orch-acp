@@ -3,6 +3,12 @@
 Read this reference only for structural repository discovery or when saved report
 detail is needed.
 
+If the assignment brief names `Known locations`, treat them as focused
+references from coordinator orientation, not as proof that the source is current.
+Read those current sources directly before editing or drawing conclusions. Start
+documentation-index reading and broad discovery only when the named locations are
+insufficient or the change touches a contract or documentation surface.
+
 When an external code-index MCP server (such as `codebase-memory-mcp`) is attached,
 use its own tools first for every code discovery question: definitions, callers, dependencies,
 impact and implementation reads. Use repository-native search or file reads only

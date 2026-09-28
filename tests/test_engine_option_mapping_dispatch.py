@@ -50,6 +50,12 @@ GATEWAY_ONLY = dict(disallowedTools=['Agent','Task','Workflow','TeamCreate','Tea
 # With the unified Cortex prompt Claude's own skill listing, attribution and
 # git instructions are switched off as well.
 UNIFIED = dict(GATEWAY_ONLY, skills=[], settings=dict(attribution=dict(commit='', pr=''), includeGitInstructions=False))
+NATIVE_SKILLS = {
+    key: value for key, value in GATEWAY_ONLY.items() if key != "skills"
+}
+NATIVE_SKILLS["disallowedTools"] = [
+    tool for tool in GATEWAY_ONLY["disallowedTools"] if tool != "Skill"
+]
 
 
 def test_session_new_meta_for_pinned_engines_builds_a_payload():
@@ -63,6 +69,21 @@ def test_session_new_meta_for_pinned_engines_builds_a_payload():
     assert _session_new_meta_for('claude-agent-acp','0.11.0','Be helpful.') is None
     for text in [None,'']:
         assert _session_new_meta_for('claude-agent-acp','0.78.0',text) == dict(claudeCode=dict(options=GATEWAY_ONLY))
+
+
+def test_session_new_meta_uses_native_prompts_and_skill_catalogs_when_switch_disabled(caplog):
+    caplog.set_level("INFO")
+    environ = {"CORTEX_UNIFIED_BASE_PROMPT": "0"}
+
+    codex = _session_new_meta_for('codex-acp', '1.12.0', 'Be helpful.', environ=environ)
+    assert codex == {'systemPrompt': 'Be helpful.', 'cortexRole': 'worker'}
+
+    claude = _session_new_meta_for('claude-agent-acp', '0.78.0', 'Be helpful.', environ=environ)
+    assert claude == {
+        'systemPrompt': {'append': 'Be helpful.'},
+        'claudeCode': {'options': NATIVE_SKILLS},
+    }
+    assert "Cortex unified base prompt disabled" in caplog.text
 
 
 def test_every_claude_role_disallows_native_gateway_alternatives():

@@ -130,8 +130,11 @@ the review plus the fixes of the selected tasks it transitively depended on in
 the plan, so related fixes keep the plan's order. In every other case — no
 findings, an unknown task, a cross-cutting finding, a file outside the scope or
 findings too long for one objective — the runtime keeps the conservative fix of
-every original plan task with the review summary. It never infers a contract
-change; a reviewer marks one `cross_cutting`. `REVIEW_CHANGES_REQUESTED` records
+every original plan task with the review summary. These broad fallback fixes
+retain the original plan's direct dependency edges: each fix depends on the
+review and on generated fixes for its direct plan parents. Independent branches
+remain parallel. It never infers a contract change; a reviewer marks one
+`cross_cutting`. `REVIEW_CHANGES_REQUESTED` records
 `targeted` and the `fallback` reason. The three-cycle ceiling is unchanged.
 
 Worker results bind to a published report owned by the exact provisioned attempt.
@@ -277,16 +280,20 @@ disclosure), so an older pass that, for example, relied on an engine `pwd` shows
 as `passed` with `evidence_strength: "weak"`. Receipts written before `argv` was
 recorded read as `command_unrecorded`.
 
-At synthesis, a retained `not_run` or `unverified` check remains a gap unless a
-passed check with the same normalized name belongs to that node or one of its
-later fix nodes. A gap may also declare optional `command` as literal argv; a
-verified, still-current `command_run` pass with exactly that argv in the same
-plan revision closes it across nodes. The runtime reads argv from the cited
-`tool_call_ref` receipt and keeps the existing task and attempt evidence checks.
-An unrelated node's matching check name alone does not close a gap. An
-`outside_command` has a separate working directory and cannot close a gap
-by argv alone. Every remaining synthesis `not_verified` item requires the
-gap's exact check name and a nonblank concrete blocker.
+At synthesis, a retained `not_run` or `unverified` check remains a gap unless
+closed by one of two explicitly distinct rules. When the gap declares a
+non-empty `command` as literal argv, only a verified, still-current
+`command_run` pass with exactly matching argv in the same plan revision closes
+it, including across nodes; the runtime reads argv from the cited
+`tool_call_ref` receipt and keeps the task and attempt evidence checks. A
+same-name passing check in the original node or one of its later fix nodes does
+not override a different or missing command. For a legacy gap without a
+command, the compatibility rule allows a same-name passing check in that node's
+fix lineage to close it; a same-name result on an unrelated node is
+insufficient. An `outside_command` has a separate working directory and cannot
+close a command-bearing gap by argv alone. Every remaining synthesis
+`not_verified` item requires the gap's exact check name and a nonblank concrete
+blocker.
 Command verification runs literal argv
 in an explicit Linux namespace sandbox with no user home, inherited credentials,
 network, or access to the real runtime store. Missing isolation, failed commands,

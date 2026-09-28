@@ -14,6 +14,26 @@ The build-verification profile is retained among these 23 but is runtime-reserve
 it is not plannable and the current runtime does not dispatch it, since command
 verification is executed by the runtime itself.
 
+## Coordinator-to-worker location hand-off
+
+When the coordinator has actually looked up relevant source locations, the
+assignment objective can include a compact **Known locations** block with
+`path:line`, symbol and a one-line relevance note. It is optional and must not
+be manufactured through deep investigation: the coordinator still orients but
+does not investigate just to populate hints. Workers treat locations as
+staleable pointers, read the current source before editing, and begin there.
+They broaden discovery or consult project/feature indexes when the hints are
+insufficient or the change affects a contract or documentation surface. This
+passes specific findings, not coordinator transcripts or engine sessions.
+
+The attached code-index prompt can also provide the pre-resolved indexed-project
+name for the current root; use it directly and list projects only as fallback.
+These prompt-level hand-offs do not validate location freshness, enforce a
+worker's choices, or establish reduced latency or improved model outcomes.
+Structured, digest-bound locations (F3) and discovery-time measurement (F4)
+remain deferred unless the prompt-only approach proves insufficient and the
+measurement is observable.
+
 ## Instruction delivery
 
 Read-only roles (`orchestration.contracts.READ_ONLY`: architect, ux-designer, code-reviewer, senior-consultant, explorer, planner, security-auditor, accessibility-auditor) never change the project, whatever scope a plan requests. `plan_submit` therefore refuses a read-only task whose scope names a path that does not exist yet (`read_only_scope_not_writable`): such a path can only be an output the worker could never write. On 2026-09-28 a plan gave seven Opus ux-designer tasks an output file each; every worker did the work and then failed to save it against the read-only project. The task returns content in its report and a dependent writing task creates the file.

@@ -29,6 +29,10 @@ index lookups (symbols, files, architecture) and the relevant feature docs. Do
 not read implementations to understand the logic, root-cause a defect or walk
 directories. If two or three lookups do not locate it, or no code index is
 available, delegate now and make locating it the first assignment's objective.
+For each task objective, include a short `Known locations` block only when you
+actually looked up a location. Each entry gives a `path:line`, symbol, and
+one-line reason it is relevant. Omit the block when no location was looked up;
+do not investigate further merely to produce hints.
 
 For work that needs a plan, submit it using
 the advertised proposal API. Include concrete objectives, dependency relationships,

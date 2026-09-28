@@ -21,6 +21,7 @@ this text.
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import platform
 
@@ -118,15 +119,102 @@ _FRONTMATTER_READ_BYTES = 16384
 
 
 def _frontmatter_field(text: str, field: str) -> str:
-    if not text.startswith("---\n"):
+    lines = text[:_FRONTMATTER_READ_BYTES].splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
         return ""
-    end = text.find("\n---", 4)
-    for line in text[4:end if end != -1 else 0].splitlines():
-        key, _, value = line.partition(":")
-        if key.strip() == field:
-            return " ".join(value.strip().strip("\"'").split())
-    return ""
+    try:
+        end = next(index for index, line in enumerate(lines[1:], 1)
+                   if line.rstrip("\r\n") == "---")
+    except StopIteration:
+        return ""
 
+    def content(line: str) -> str:
+        return line.rstrip("\r\n")
+
+    def uncomment(value: str) -> str:
+        for index, character in enumerate(value):
+            if character == "#" and (index == 0 or value[index - 1].isspace()):
+                return value[:index].rstrip()
+        return value.strip()
+
+    for index in range(1, end):
+        line = content(lines[index])
+        if not line or line[0].isspace():
+            continue
+        key, separator, value = line.partition(":")
+        if not separator or key.strip() != field:
+            continue
+        value = uncomment(value)
+        if not value:
+            return ""
+
+        if value[0] in "'\"":
+            if value[0] == "'" and len(value) >= 2 and value.endswith("'"):
+                return value[1:-1].replace("''", "'")
+            if value[0] == '"' and len(value) >= 2 and value.endswith('"'):
+                try:
+                    decoded = json.loads(value)
+                except json.JSONDecodeError:
+                    return ""
+                return decoded if isinstance(decoded, str) else ""
+            return ""
+
+        if value[0] in "|>":
+            style, modifiers = value[0], value[1:].strip()
+            chomp, indentation = "", 0
+            for modifier in modifiers:
+                if modifier in "+-" and not chomp:
+                    chomp = modifier
+                elif modifier in "123456789" and not indentation:
+                    indentation = int(modifier)
+                else:
+                    return ""
+            if not indentation:
+                for candidate in lines[index + 1:end]:
+                    candidate = content(candidate)
+                    if candidate.strip():
+                        indentation = len(candidate) - len(candidate.lstrip(" "))
+                        break
+                if not indentation:
+                    return ""
+
+            block = []
+            for candidate in lines[index + 1:end]:
+                candidate = content(candidate)
+                if candidate.strip():
+                    leading = len(candidate) - len(candidate.lstrip(" "))
+                    if leading < indentation:
+                        break
+                    block.append(candidate[indentation:])
+                else:
+                    block.append("")
+            rendered = "\n".join(block)
+            if block:
+                rendered += "\n"
+            if style == ">":
+                folded = []
+                for position, item in enumerate(block):
+                    folded.append(item)
+                    if position + 1 < len(block):
+                        folded.append("\n" if not item or not block[position + 1] else " ")
+                rendered = "".join(folded) + ("\n" if block else "")
+            if chomp == "-":
+                return rendered.rstrip("\n")
+            if chomp == "+":
+                return rendered
+            return rendered.rstrip("\n") + ("\n" if rendered else "")
+
+        if value[0] in "[{*&!" or value.startswith("- ") or ": " in value:
+            return ""
+        parts = [value]
+        for continuation in lines[index + 1:end]:
+            continuation = content(continuation)
+            if continuation and not continuation[0].isspace():
+                break
+            if continuation.strip():
+                parts.append(uncomment(continuation.strip()))
+        return " ".join(part for part in parts if part)
+    return ""
 
 def _within(path: str, base: str) -> bool:
     return path == base or path.startswith(base.rstrip(os.sep) + os.sep)
@@ -196,7 +284,19 @@ def project_skills_section(workspace_root: str | None, environ=None) -> str:
 CODE_INDEX_SERVER = "codebase-memory-mcp"
 
 
-def attached_servers_section(servers, workspace_root: str | None = None, *, role: str = "worker") -> str | None:
+def code_index_project_name(workspace_root: str | None) -> str | None:
+    """Return the observed installed code-index naming convention, if applicable."""
+    if not isinstance(workspace_root, str) or not os.path.isabs(workspace_root):
+        return None
+    parts = [part for part in os.path.realpath(workspace_root).split(os.sep) if part]
+    allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+    if not parts or any(any(character not in allowed for character in part) for part in parts):
+        return None
+    return "-".join(parts)
+
+
+def attached_servers_section(servers, workspace_root: str | None = None, *, role: str = "worker",
+                             code_index_project: str | None = None) -> str | None:
     """What the runtime knows only when a session starts: which external MCP
     servers were really attached to it. Added after the role instructions for
     every engine, or ``None`` when none were attached.
@@ -233,8 +333,11 @@ def attached_servers_section(servers, workspace_root: str | None = None, *, role
             f"`{CODE_INDEX_SERVER}` is the code index for this session. For every question about code (where "
             "something is defined, what calls it, what a change affects, how a subsystem fits together) use it "
             "before shell search:",
-            f"1. Call `list_projects` once and take the project whose root path is {where}, or the closest "
-            "root that contains it.",
+            (f"1. The index project for this workspace is `{code_index_project}`; use it directly. If that "
+             "project is not found, call `list_projects` once and take the project whose root path is "
+             f"{where}, or the closest root that contains it.") if code_index_project else
+            (f"1. Call `list_projects` once and take the project whose root path is {where}, or the closest "
+             "root that contains it."),
             "2. Use `search_graph`, `trace_path` and `get_code_snippet`"
             + (" (and `get_architecture` for orientation)" if "get_architecture" in index_tools else "")
             + " with that project.",
@@ -254,11 +357,13 @@ def attached_servers_section(servers, workspace_root: str | None = None, *, role
     return "\n".join(lines)
 
 
-def with_attached_servers(meta: dict, servers, workspace_root: str | None = None, *, role: str = "worker") -> dict:
+def with_attached_servers(meta: dict, servers, workspace_root: str | None = None, *, role: str = "worker",
+                          code_index_project: str | None = None) -> dict:
     """``meta`` with :func:`attached_servers_section` appended to the text the
     model reads as its instructions: the plain-string ``systemPrompt`` both
     adapters send, or an ``append`` object. Never mutates ``meta``."""
-    note = attached_servers_section(servers, workspace_root, role=role)
+    note = attached_servers_section(servers, workspace_root, role=role,
+                                    code_index_project=code_index_project)
     result = dict(meta)
     if note is None:
         return result

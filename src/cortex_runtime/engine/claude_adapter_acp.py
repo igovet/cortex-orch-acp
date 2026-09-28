@@ -315,7 +315,9 @@ def sdk_unknown_model(model: str, model_name: str | None) -> bool:
     return bool(model) and (model_name or model) == model
 
 
-def claude_native_subagent_restriction_meta(*, role: str = "worker", effort: str | None = None) -> dict:
+def claude_native_subagent_restriction_meta(
+    *, role: str = "worker", effort: str | None = None, native_skills: bool = False,
+) -> dict:
     """Build the Claude tool policy for either Cortex role.
 
     Native shell, file and skill alternatives are disallowed in favor of the
@@ -338,9 +340,14 @@ def claude_native_subagent_restriction_meta(*, role: str = "worker", effort: str
             category=PortableErrorCategory.VALIDATION, code="invalid_field",
             remediation=f"'effort' must be one of {SDK_EFFORTS}.", retry_eligible=False, field="effort",
         )
-    options = {"strictMcpConfig": True, "skills": [],
+    gateway_alternatives = CLAUDE_GATEWAY_ALTERNATIVES
+    if native_skills:
+        gateway_alternatives = tuple(tool for tool in gateway_alternatives if tool != "Skill")
+    options = {"strictMcpConfig": True,
                "plugins": [], "managedSettings": {"disableAllHooks": True},
-               "disallowedTools": list(CLAUDE_SUBAGENT_TOOLS + CLAUDE_GATEWAY_ALTERNATIVES)}
+               "disallowedTools": list(CLAUDE_SUBAGENT_TOOLS + gateway_alternatives)}
+    if not native_skills:
+        options["skills"] = []
     if effort is not None:
         options["effort"] = effort
     return {"claudeCode": {"options": options}}
@@ -363,7 +370,8 @@ CLAUDE_UNIFIED_PROMPT_SETTINGS = {"attribution": {"commit": "", "pr": ""}, "incl
 
 
 def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker",
-                                  effort: str | None = None, base_prompt: str | None = None) -> dict:
+                                  effort: str | None = None, base_prompt: str | None = None,
+                                  native_skills: bool = False) -> dict:
     """``_meta`` payload for ``session/new`` appending Cortex instructions.
 
     The real, statically-confirmed claude-agent-acp 0.78.0 instructions
@@ -402,7 +410,9 @@ def build_claude_session_new_meta(instructions_text: str, *, role: str = "worker
             remediation="'instructions_text' must be a non-empty string.",
             retry_eligible=False, field="instructions_text",
         )
-    meta = claude_native_subagent_restriction_meta(role=role, effort=effort)
+    meta = claude_native_subagent_restriction_meta(
+        role=role, effort=effort, native_skills=native_skills,
+    )
     if base_prompt is None:
         return {"systemPrompt": {"append": instructions_text}, **meta}
     if not isinstance(base_prompt, str) or not base_prompt.strip():

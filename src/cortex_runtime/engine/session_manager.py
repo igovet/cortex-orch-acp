@@ -702,11 +702,16 @@ class EngineSessionManager:
                 raise _fail("invalid_field", "session_new_meta must be a dict.", field="session_new_meta")
             params["_meta"] = session_new_meta
         if external_servers and session_new_meta is not None:
-            # Name the servers really attached here, for every engine, with the
-            # code index's first step bound to this session's working directory.
-            from .unified_system_prompt import with_attached_servers
+            # Resolve the index name once from the installed server's observed
+            # path convention; absent or unrecognized servers keep the fallback.
+            from .unified_system_prompt import CODE_INDEX_SERVER, code_index_project_name, with_attached_servers
+
+            code_index_project = (code_index_project_name(self._workspace_root)
+                                  if any(server.get("name") == CODE_INDEX_SERVER for server in external_servers)
+                                  else None)
             params["_meta"] = with_attached_servers(
-                session_new_meta, external_servers, self._workspace_root, role=self._mcp_role)
+                session_new_meta, external_servers, self._workspace_root, role=self._mcp_role,
+                code_index_project=code_index_project)
         with self._lock:
             result = self._client.call("session/new", params, timeout=self._call_timeout)
             wire_session_id = result.get("sessionId")

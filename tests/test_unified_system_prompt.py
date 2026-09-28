@@ -6,7 +6,9 @@ import datetime
 import pytest
 
 from cortex_runtime.delegation.live_adapters import _session_new_meta_for
-from cortex_runtime.engine.unified_system_prompt import cortex_system_prompt
+from cortex_runtime.engine.unified_system_prompt import (
+    _frontmatter_field, attached_servers_section, code_index_project_name, cortex_system_prompt,
+)
 
 
 def test_prompt_is_role_specific_engine_neutral_and_carries_the_environment(tmp_path):
@@ -83,6 +85,86 @@ def test_long_descriptions_are_cut_at_the_agent_skills_limit(tmp_path):
     line = next(l for l in cortex_system_prompt("worker", str(tmp_path), environ={}).splitlines() if "`long`" in l)
     assert line.endswith(": " + "x" * 1024)
 
+
+
+@pytest.mark.parametrize(
+    ("scalar", "expected"),
+    [
+        ("plain scalar", "plain scalar"),
+        ("'single ''quote'''", "single 'quote'"),
+        (r'"double\nquote"', "double\nquote"),
+    ],
+)
+def test_frontmatter_reader_supports_plain_and_quoted_scalars(scalar, expected):
+    assert _frontmatter_field(f"---\ndescription: {scalar}\n---\n", "description") == expected
+
+
+def test_frontmatter_reader_folds_plain_continuations():
+    text = "---\ndescription: Inspect code\n  and tests.\n  Use for reviews.\n---\n"
+    assert _frontmatter_field(text, "description") == "Inspect code and tests. Use for reviews."
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("|", "Inspect code\nUse for reviews.\n"),
+        ("|-", "Inspect code\nUse for reviews."),
+        ("|+", "Inspect code\nUse for reviews.\n"),
+        (">", "Inspect code Use for reviews.\n"),
+        (">-", "Inspect code Use for reviews."),
+        (">2+", "Inspect code Use for reviews.\n"),
+    ],
+)
+def test_frontmatter_reader_supports_block_scalars_and_chomping(header, expected):
+    text = f"---\ndescription: {header}\n  Inspect code\n  Use for reviews.\n---\n"
+    assert _frontmatter_field(text, "description") == expected
+
+
+@pytest.mark.parametrize("value", ["", "child: value", "- item", "[item]", "{key: value}", "*alias", "&anchor value", "!tag value"])
+def test_frontmatter_reader_rejects_unsupported_yaml_nodes(value):
+    text = f"---\ndescription: {value}\n  nested: value\n---\n"
+    assert _frontmatter_field(text, "description") == ""
+
+
+def test_frontmatter_reader_requires_an_exact_closing_delimiter():
+    missing = "---\ndescription: valid\nBody.\n"
+    four_dashes = "---\ndescription: valid\n----\nBody.\n"
+    assert _frontmatter_field(missing, "description") == ""
+    assert _frontmatter_field(four_dashes, "description") == ""
+
+
+def test_code_index_project_name_uses_the_observed_absolute_path_convention():
+    assert code_index_project_name("/home/igovet/Web_Projects/cortex-orch-acp") == \
+        "home-igovet-Web_Projects-cortex-orch-acp"
+
+
+@pytest.mark.parametrize("workspace_root", [None, "relative/project", "/workspace/unsafe name"])
+def test_code_index_project_name_falls_back_when_the_convention_does_not_apply(workspace_root):
+    assert code_index_project_name(workspace_root) is None
+
+
+def test_attached_server_section_uses_a_resolved_code_index_project_directly():
+    section = attached_servers_section(
+        [{"name": "codebase-memory-mcp", "allowed_tools": [
+            "list_projects", "search_graph", "trace_path", "get_code_snippet",
+        ]}],
+        "/home/igovet/Web_Projects/cortex-orch-acp",
+        code_index_project="home-igovet-Web_Projects-cortex-orch-acp",
+    )
+    assert "The index project for this workspace is `home-igovet-Web_Projects-cortex-orch-acp`; use it directly." in section
+    assert "If that project is not found, call `list_projects` once" in section
+    assert "1. Call `list_projects` once" not in section
+
+
+def test_attached_server_section_without_a_resolved_project_keeps_the_lookup_text():
+    section = attached_servers_section(
+        [{"name": "codebase-memory-mcp", "allowed_tools": [
+            "list_projects", "search_graph", "trace_path", "get_code_snippet",
+        ]}],
+        "/workspace/project",
+    )
+    assert "1. Call `list_projects` once and take the project whose root path is `/workspace/project`" in section
+    assert "The index project for this workspace is" not in section
 
 def test_only_workers_are_told_to_work_without_narration():
     worker = cortex_system_prompt("worker", None, environ={})

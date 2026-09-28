@@ -344,3 +344,31 @@ authorizes the paid probe flags with approval reference
 `--i-authorize-paid-call` and `--approval-ref`. The default automated pytest
 suite remains no-paid. General evidence rules still apply: never mark an
 unobserved check as passed.
+
+## 2026-09-28 review follow-ups, prompt rollback and worker hand-off
+
+The follow-up defects and operational improvements from `r_d164a457ebcb` were
+implemented in source before this documentation update; see the linked behavior
+contracts in [ACP orchestration](../acp/orchestration.md), [unified system
+prompt](../acp/unified-system-prompt.md), [roles and delegation](../acp/roles-and-delegation.md)
+and [observability](../acp/observability.md).
+
+- Synthesis gaps with an explicit command require a current verified exact-argv
+  `command_run`; same-name fix-lineage closure is reserved for command-less
+  legacy gaps. Broad fallback fix cycles preserve direct plan dependency edges
+  while retaining parallelism between independent branches.
+- The skill-catalog frontmatter reader remains a bounded stdlib scalar reader,
+  not a general YAML parser or new YAML dependency.
+- `CORTEX_UNIFIED_BASE_PROMPT` stays on by default; setting it to `0` before
+  startup restores native base-prompt paths for new sessions. Real-model behavior
+  with the unified prompt remains unverified by paid comparison. This is separate
+  from runtime performance and routing changes.
+- Coordinator hand-off is prompt-only and evidence-based: include only locations
+  actually looked up, and workers still inspect current source. Use the resolved
+  code-index project directly when available, with `list_projects` as fallback.
+  Do not forward coordinator transcripts. Structured digest-bound location
+  fields (F3) and pre-first-write discovery metrics (F4) are deferred.
+- No in-memory task-state cache, parallel verification, self-learning routing or
+  controller rewrite is adopted. Durable SQLite reads and current polling and
+  reconciliation remain; route metrics remain diagnostic only, not automatic
+  model-selection evidence.

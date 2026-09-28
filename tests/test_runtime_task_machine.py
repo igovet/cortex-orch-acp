@@ -144,15 +144,24 @@ def test_synthesis_discloses_retained_gap_with_blocker(machine):
         state.submit_synthesis(channel, 'Done', [dict(item='Live GUI', blocker='Different reason')])
 
 
-def test_unrelated_same_name_pass_does_not_resolve_synthesis_gap(machine):
-    state, channel = machine
+def test_unrelated_same_name_pass_does_not_resolve_synthesis_gap(tmp_path):
+    from cortex_runtime.trusted_channel import resolve_channel
+
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin='synthesis', event_id='unrelated'), 'Verify', 'owner')
+    state = TaskMachine(store)
+    state.create(task.task_id, 'Verify')
+    channel = resolve_channel(store, task.channel_id, task.secret)
     state.submit_plan(channel, plan(2), 'gap-plan')
+    ref = _verified_pass_for_node(state, channel, 'N1',
+                                  ['python3', '-B', '-c', 'print("unrelated")'])
     with state.store.connection() as db:
         db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?", (channel.task_id,))
         db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N0'",
                    ('{"checks":[{"name":"Live GUI","outcome":"unverified"}]}', channel.task_id))
         db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N1'",
-                   ('{"checks":[{"name":"  live   gui ","outcome":"passed"}]}', channel.task_id))
+                   (json.dumps({'checks': [{'name': '  live   gui ', 'outcome': 'passed',
+                                            'tool_call_ref': ref}]}), channel.task_id))
         db.commit()
     with pytest.raises(StoreError, match='synthesis_gaps_undisclosed'):
         state.submit_synthesis(channel, 'Verified')
@@ -189,6 +198,41 @@ def test_fix_node_pass_with_same_name_resolves_original_gap(tmp_path):
                     channel.task_id))
         db.commit()
     assert state.submit_synthesis(channel, 'Verified')['recorded']
+
+
+def test_fix_node_same_name_different_command_leaves_gap_open(tmp_path):
+    from cortex_runtime.trusted_channel import resolve_channel
+
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin='synthesis', event_id='different-command'), 'Verify', 'owner')
+    state = TaskMachine(store)
+    state.create(task.task_id, 'Verify')
+    channel = resolve_channel(store, task.channel_id, task.secret)
+    state.submit_plan(channel, plan(), 'different-command-plan')
+    blocked_command = ['python3', '-B', '-c', 'print("frontend")']
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND node_id='N0'",
+                   (json.dumps({'checks': [{'name': 'tests', 'outcome': 'not_run',
+                                            'command': blocked_command, 'blocker': 'Pending fix'}]}),
+                    channel.task_id))
+        db.execute('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                   (channel.task_id, 1, '_fix_0_N0', 'backend-dev', 'Fix tests', '[]', '["tests/**"]',
+                    'execution', 'pending', None, None))
+        db.commit()
+    ref = _verified_pass_for_node(state, channel, '_fix_0_N0',
+                                  ['python3', '-B', '-c', 'print("backend")'])
+    with state.store.connection() as db:
+        db.execute("UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id=?", (channel.task_id,))
+        db.execute("UPDATE runtime_nodes SET status='completed', result_json=? WHERE task_id=? AND node_id='_fix_0_N0'",
+                   (json.dumps({'checks': [{'name': ' TESTS ', 'outcome': 'passed', 'tool_call_ref': ref}]}),
+                    channel.task_id))
+        db.commit()
+    with pytest.raises(StoreError, match='synthesis_gaps_undisclosed') as error:
+        state.submit_synthesis(channel, 'Verified')
+    assert 'tests' in error.value.correction
+    assert 'exactly matching argv' in error.value.correction
+    assert state.submit_synthesis(channel, 'Gap disclosed',
+                                  [dict(item='tests', blocker='The frontend command did not run.')])['recorded']
 
 
 def test_exact_verified_command_closes_only_its_declared_gap(tmp_path):

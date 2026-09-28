@@ -39,6 +39,7 @@ shortcut. No test in this repository launches a real engine.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import os
@@ -59,6 +60,17 @@ _PINNED_ENGINE_VERSION: dict[str, str] = {
     "codex-acp": "1.12.0",
     "claude-agent-acp": "0.78.0",
 }
+
+
+def unified_base_prompt_enabled(environ: Mapping[str, str] | None = None) -> bool:
+    """Whether sessions replace engine base prompts with Cortex\'s unified prompt.
+
+    This process-scoped rollout switch defaults to the current unified mode.
+    Set CORTEX_UNIFIED_BASE_PROMPT=0 before launching Cortex to retain each
+    engine\'s native base prompt and skill catalog for newly created sessions.
+    """
+    source = os.environ if environ is None else environ
+    return source.get("CORTEX_UNIFIED_BASE_PROMPT") != "0"
 
 
 def _installed_version_for(record) -> str | None:
@@ -282,7 +294,11 @@ def _session_new_meta_for(
 
             return claude_native_subagent_restriction_meta(role=role, effort=effort)
         return None
-    from ..engine.unified_system_prompt import cortex_system_prompt
+    unified_base_prompt = unified_base_prompt_enabled(environ)
+    logging.getLogger(__name__).info(
+        "Cortex unified base prompt %s for engine session metadata",
+        "enabled" if unified_base_prompt else "disabled",
+    )
 
     if engine == "claude-agent-acp" and version == "0.78.0":
         rules = project_rules_for_claude(project_root)
@@ -294,8 +310,15 @@ def _session_new_meta_for(
         # the launch role is already known.
         from ..engine.claude_adapter_acp import build_claude_session_new_meta
 
-        return build_claude_session_new_meta(instructions, role=role, effort=effort,
-                                             base_prompt=cortex_system_prompt(role, project_root, environ=environ))
+        base_prompt = None
+        if unified_base_prompt:
+            from ..engine.unified_system_prompt import cortex_system_prompt
+
+            base_prompt = cortex_system_prompt(role, project_root, environ=environ)
+        return build_claude_session_new_meta(
+            instructions, role=role, effort=effort, base_prompt=base_prompt,
+            native_skills=not unified_base_prompt,
+        )
     from ..engine.instruction_delivery_registry import delivery_for
     from ..portable.instruction_delivery import DeliveryQualification
 
@@ -309,8 +332,13 @@ def _session_new_meta_for(
         # Codex's own base prompt and native context sections.
         from ..engine.codex_adapter_acp import build_codex_session_new_meta
 
+        base_instructions = None
+        if unified_base_prompt:
+            from ..engine.unified_system_prompt import cortex_system_prompt
+
+            base_instructions = cortex_system_prompt(role, project_root, environ=environ)
         meta = {**meta, **build_codex_session_new_meta(
-            instructions, base_instructions=cortex_system_prompt(role, project_root, environ=environ))}
+            instructions, base_instructions=base_instructions)}
     if engine == "codex-acp" and version == "1.12.0" and meta is not None:
         return {**meta, "cortexRole": role}
     return meta

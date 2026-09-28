@@ -1048,12 +1048,14 @@ class TaskMachine:
                 targets,fallback=targeted_fixes(tasks,{n['node_id']: json.loads(n['scope_json']) for n in implementations},
                                                 review['result'].get('findings'),review['result'].get('report_ref'))
                 keys={n['node_id']: f"_fix_{task['review_cycle']}_{n['node_id']}" for n in implementations}
+                parents={task['id']: task['dependencies'] for task in tasks}
                 fixes=[]
                 for implementation in implementations:
                     node_id=implementation['node_id']
                     if targets is None:
                         objective='Address review findings within the assigned scope: '+review['result']['summary']
-                        dependencies=[review['node_id']]
+                        dependencies=[review['node_id'],*(keys[parent] for parent in parents[node_id]
+                                                          if parent in keys)]
                     elif node_id in targets:
                         objective,dependencies=targets[node_id]['objective'],[review['node_id'],*(keys[n] for n in targets[node_id]['after'])]
                     else:
@@ -1118,13 +1120,17 @@ class TaskMachine:
                     continue
                 name = normalized(check['name'])
                 command = check.get('command')
-                resolved = any(
-                    (same_lineage(node, passed_node) and normalized(passed_check['name']) == name)
-                    or (isinstance(command, list) and command
-                        and passed_current is not None and passed_assessment['strength'] == 'verified'
-                        and passed_assessment.get('identity') == ('command_run', tuple(command), None))
-                    for passed_node, passed_check, passed_current, passed_assessment in passes
-                )
+                if command:
+                    resolved = isinstance(command, list) and any(
+                        assessment.get('identity') == ('command_run', tuple(command), None)
+                        for _, _, _, assessment in passes
+                    )
+                else:
+                    # Compatibility for retained gaps without a declared command.
+                    resolved = any(
+                        same_lineage(node, passed_node) and normalized(passed_check['name']) == name
+                        for passed_node, passed_check, _, _ in passes
+                    )
                 if not resolved:
                     gaps[name] = check['name']
             for index, item in enumerate(not_verified):
@@ -1137,7 +1143,7 @@ class TaskMachine:
             if missing:
                 raise StoreError('synthesis_gaps_undisclosed', 'arguments.not_verified', ', '.join(missing)[:160],
                                  'every retained not_run or unverified check by its exact name, each with its blocker',
-                                 'Close these gaps with replan_request if they can be verified; otherwise list each exact name in not_verified with its concrete blocker: ' + '; '.join(missing))
+                                 'A gap with a declared command closes only after a verified command_run with exactly matching argv; a command-less gap may close by a verified same-name pass in its node or later fix. Close these gaps with replan_request if they can be verified; otherwise list each exact name in not_verified with its concrete blocker: ' + '; '.join(missing))
             stored = text if not not_verified else (
                 text.rstrip() + '\n\n## Not verified\n\n' +
                 '\n'.join(f"- {item['item']} — blocker: {item['blocker']}" for item in not_verified)

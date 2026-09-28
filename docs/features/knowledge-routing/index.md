@@ -31,6 +31,16 @@ without loading every page into the prompt. The coordinator follows only links
 relevant to the task. A missing or ambiguous catalog is reported as such; it
 cannot stand in for a successful read of the documents.
 
+The coordinator may pass already-known source pointers in a **Known locations**
+block (`path:line`, symbol and brief relevance). Workers read those sources
+first and expand discovery only if the hints are insufficient or the task
+affects a contract or documentation. Hints are not freshness proofs; workers
+check current source. The code-index project name is pre-resolved into the prompt
+when available, with `list_projects` retained as fallback. This avoids forwarding
+coordinator transcripts. Structured digest-bound locations and discovery-time
+metrics are deferred; prompt delivery alone does not establish a latency or
+quality improvement.
+
 Each new worker attempt also receives a fresh bounded, versioned catalog in
 the actual worker engine prompt, including planned assignments, continuation
 attempts and mixed-engine teams. It advises the worker to read a relevant

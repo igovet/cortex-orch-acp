@@ -1,5 +1,22 @@
 # Unified system prompt
 
+The unified Cortex base prompt is enabled by default. Set
+`CORTEX_UNIFIED_BASE_PROMPT=0` in the environment before starting Cortex to
+disable it for newly created session metadata. This restores the engines'
+pre-existing native base-prompt path; it does not roll back unrelated runtime
+optimizations or routing changes. The selected mode is logged at session
+metadata creation. The switch changes prompt construction, not permissions or
+runtime authority. Real-model behavior with the unified prompt has not been
+compared in a paid live qualification, so any quality improvement remains
+unverified.
+
+By default, every Cortex engine session, coordinator or worker, on Codex or
+Claude, starts from one Cortex-owned base prompt instead of the engine's own.
+When the switch above disables it, each adapter uses its documented native
+base-prompt path. The unified text lives in
+`src/cortex_runtime/engine/unified_system_prompt.py` (`cortex_system_prompt`),
+and `delegation.live_adapters._session_new_meta_for` selects the mode when
+building session metadata.
 Every Cortex engine session, coordinator or worker, on Codex or Claude, starts
 from one Cortex-owned base prompt instead of the engine's own. The text lives in
 `src/cortex_runtime/engine/unified_system_prompt.py` (`cortex_system_prompt`),
@@ -48,6 +65,16 @@ directory and each installed engine pointed at a local stub endpoint:
 | `$CODEX_HOME/skills` (default `~/.codex/skills`) | not read | read |
 | `<project>/skills`, nested project directories | not read | not read |
 
+The prompt catalog reads only bounded top-level `name` and `description`
+frontmatter scalars; it is not a general YAML parser. The reader accepts plain,
+single-quoted and JSON-compatible double-quoted scalars, indented plain
+continuations, and literal (`|`) or folded (`>`) block scalars with optional
+`+`/`-` chomping and explicit indentation indicators. Frontmatter reads are
+limited to 16 KiB, the closing delimiter must be an exact `---` line, and the
+rendered description is capped at 1024 characters. Unsupported node types and
+malformed or incomplete frontmatter produce an empty field rather than being
+interpreted as general YAML. No YAML package is required.
+
 Cortex lists every `<dir>/<name>/SKILL.md` below all six read directories,
 project first, with its frontmatter `name` (or the directory name) and
 `description` (cut at the Agent Skills limit of 1024 characters) and its path:
@@ -60,6 +87,12 @@ appears once). The model reads a matching `SKILL.md` with its ordinary file read
 tool; the engine jail keeps the host, including the owner's home, readable. The
 listing is content placed in the system prompt, as each engine's own catalog was
 before.
+
+When `codebase-memory-mcp` is attached and Cortex can resolve the project
+root to a known indexed-project name, the prompt names that project so workers
+can use it directly instead of repeating `list_projects`. If resolution fails or
+the named project is unavailable, workers use the normal project-list fallback;
+no project identity is guessed.
 
 Workers are told to work without narration, including before the first tool and after tool results. The runtime also discards worker prose at tool boundaries from the public worker card and its replay history, retaining only the post-tool terminal response; underlying engine events remain available for evidence. Coordinator text still streams because it is the user's task view. This is a presentation boundary, not a claim that either model stops generating interim text. A direct 2026-09-28 re-check counted ten between-tool Claude assistant text blocks and one Codex block; an earlier count of 83 Codex blocks conflated reasoning records with visible messages.
 
