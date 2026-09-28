@@ -27,11 +27,46 @@
 
 ## What Cortex is
 
+For `result_submit`, send exactly one of an inline `report` or the `report_id`
+returned by this worker's `write_report` as `report_ref`. The advertised schema
+specifies check fields and receipt sources; rejected result submissions attempt to retain
+only a code and safe field path for diagnostics, not the submitted content.
+Review workers must send a verdict (`APPROVE`, `REQUEST_CHANGES` or `BLOCK`;
+lowercase forms normalize). A supplied `command` on a passed or failed check is
+descriptive only; it never replaces the same-attempt `tool_call_ref` evidence.
+A worker whose own changes pair documentation (`docs/**.md`, `README.md`,
+`SECURITY.md`) with source or other behavior files must have read
+`documentation-sync` through Cortex `read_skill` first; otherwise the result is
+refused with `situational_skill_required` and nothing is recorded.
+
 Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Worker briefs keep objectives, scope and dependency report references complete; long task goals and review evidence use marked previews with links to the full source. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts. The runtime runs them once after review, each until it exits, so the project's whole suite belongs there; workers run only the tests covering their own change. A worker check is marked passed only when its exact same-attempt `command_run` or user-confirmed `outside_command` receipt proves a complete, nontrivial command exited 0. Engine shell calls, reads and incomplete output cannot verify a check; older reports remain intact and weak historic evidence is marked separately when read.
+
+To close a task immediately at your own decision, send `/cortex-finish` with no arguments, even while a Paseo turn is active. Cortex stops its owned work and records the closure as terminal `CANCELLED`, **not** verified `COMPLETED`; unfinished review, checks, and synthesis are not claimed as passed. An explicit close-as-is answer to a task-closure question has the same effect. See [completion and lifecycle](docs/acp/completion-and-lifecycle.md).
+
+Paseo questions without preset choices still show a card: type the answer under
+"Other..." or reply in chat. The instructional card action does not answer the
+question. See [questions and steering](docs/acp/steering-and-questions.md).
 
 ACP timeline updates use bounded display projections to avoid repeatedly sending growing worker transcripts. Worker cards keep a 20-action, 4 KiB tail for generic clients; per-update and field size limits and a fixed per-card event budget (forward-only status transitions plus at most 8 progress updates, one per 30 s, so at most 13 updates per worker whatever its size) bound host event volume. Coordinator cards send changed fields only, suppress no-op updates, omit an identical MCP text mirror, and reference repeated identical outputs; unchanged context polls return a compact receipt. Coordinator and engine tool cards also have a per-task total budget: the first 150 distinct calls (or 4 MiB of card updates) get their own card with at most 10 updates each; later calls are counted on one aggregate card, sent at most 20 times per task; and up to 50 failed calls past the budget keep their own cards. The budget persists across turns and restarts, and `session/load` replays older journals within the same bound. In the scale test, 1,500 coordinator calls over four turns and a restart sent 324 card updates and 187,517 bytes, against 312 updates for 500 calls. In the recorded scale test, repeated polls were 481–483 bytes, and each Paseo worker card sent 3 updates and 16,959 bytes for 10-, 60- and 300-tool workloads. These limits reduce emitted event volume; they do not cap durable task history or guarantee constant total daemon memory. See [ACP observability and resource limits](docs/acp/observability.md#bounded-acp-event-projections).
 
 Worker routes and effort are selected from observed models by the task (role tier, complexity, work-kind engine affinity configurable with `engine_affinity` in `routing.json`, and the coordinator's hint) and each engine's subscription plan usage; how often an engine was used before is not a factor. Light work stays on light models and hard work gets stronger ones. Codex Luna runs at high to max effort; beyond light work it competes only for ordinary standard-tier testing, never for other standard-tier work. A normal standard-tier testing retry or review fix keeps the standard candidate pool and targets Luna at max; other standard-tier retries, explicit high-complexity work and deep roles still escalate and exclude Luna. Plan model hints are constrained recommendations; explicit routing rules remain authoritative.
+
+Claude Cortex sessions disallow native shell, file/search/edit, notebook edit and
+Skill alternatives through adapter options, leaving the scoped Cortex MCP tools
+and granted code-index MCP tools for that work. This does not change Codex's
+native tool policy. Effective behavior in Claude 0.81.2 remains subject to a
+fresh owner-authorized live check.
+
+The unified role prompt keeps everyday Cortex procedures inlined. Conditional
+procedures are named with action triggers in the role and `read_skill` tool
+descriptions; the model is told to call Cortex MCP `read_skill` only when a
+trigger arises, before that action. Documentation-impact planning as well as
+affected edits trigger `documentation-sync`. The prompt distinguishes Cortex MCP
+reports, skills, checks and submissions from external code-index MCP queries and
+native workspace tools; argument contracts remain in the live tool schemas.
+This is an instruction and advertised
+contract, not proof that either model complies in a live turn. See the
+[role delivery contract](docs/acp/roles-and-delegation.md#instruction-delivery).
 
 ## Install
 

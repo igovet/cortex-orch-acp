@@ -100,8 +100,8 @@ async function paseoSteer(wrapped: any, input: any, expectedTurnId: string) {
   assert.ok(!seen.some((event) => event.type === "session.notice"));
 }
 
-// Cortex refuses the capture: a truthful warning naming Cortex's reason, and
-// Paseo is told the send failed, so it neither interrupts nor replaces the turn.
+// Cortex refuses the capture: Paseo displays the send error itself. The
+// provider must not also emit a notice, and the active turn is untouched.
 {
   const { sent, emit, wrapped, seen } = bridge((input, emit) =>
     queueMicrotask(() => emit({ type: "request.failed", requestId: input.requestId,
@@ -115,11 +115,8 @@ async function paseoSteer(wrapped: any, input: any, expectedTurnId: string) {
   assert.ok(!sent.some((item) => item.type === "session.interrupt"));
   assert.ok(!seen.some((event) => event.type === "session.prompt_result"));
   assert.ok(!seen.some((event) => event.type === "timeline.item"));
-  const notice = seen.find((event) => event.type === "session.notice")?.notice;
-  assert.equal(notice?.severity, "warning");
-  assert.equal(notice?.title, "Message was not queued");
-  assert.match(notice?.description, /no longer owns the task/);
-  assert.match(notice?.description, /Nothing was sent/);
+  assert.ok(!seen.some((event) => event.type === "session.notice"));
+  assert.match(outcome.message!, /Nothing was sent/);
 }
 
 // The bridge itself rejects the configure request.
@@ -128,7 +125,9 @@ async function paseoSteer(wrapped: any, input: any, expectedTurnId: string) {
   const outcome = await paseoSteer(wrapped, { ...prompt, prompt: { ...prompt.prompt, clientMessageId: "closed-1" } },
     "acp:running");
   assert.equal(outcome.disposition, "error");
-  assert.match(seen.find((event) => event.type === "session.notice")?.notice.description, /ACP transport is closed/);
+  assert.match(outcome.message!, /ACP transport is closed/);
+  assert.match(outcome.message!, /Send the message again/);
+  assert.ok(!seen.some((event) => event.type === "session.notice"));
 }
 
 // Image content sent during an active turn: durably queued (not refused),
@@ -176,7 +175,7 @@ async function paseoSteer(wrapped: any, input: any, expectedTurnId: string) {
   ]);
 }
 
-// Unsupported attachment content: warned and refused, never passed to
+// Unsupported attachment content: refused once by the host, never passed to
 // Paseo's cancel-and-replace fallback.
 {
   const { sent, emit, wrapped, seen } = bridge(() => assert.fail("unsupported content must not be configured"));
@@ -187,8 +186,10 @@ async function paseoSteer(wrapped: any, input: any, expectedTurnId: string) {
     }] },
   } }, "acp:running");
   assert.equal(outcome.disposition, "error");
+  assert.match(outcome.message!, /This content cannot be queued/);
+  assert.match(outcome.message!, /Nothing was sent/);
   assert.equal(sent.length, 0);
   assert.ok(!seen.some((event) => event.type === "session.prompt_result"));
-  assert.equal(seen.find((event) => event.type === "session.notice")?.notice.severity, "warning");
+  assert.ok(!seen.some((event) => event.type === "session.notice"));
 }
 console.log("ok");

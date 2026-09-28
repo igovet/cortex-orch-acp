@@ -19,7 +19,7 @@ Paseo home, daemon, or cortex-acp plugin. All Paseo and plugin work must use
 `scripts/update-paseo-plugin.sh`: it does not establish a dev-only daemon boundary.
 
 Run Paseo through [scripts/cortex_paseo_dev.py](../../scripts/cortex_paseo_dev.py).
-A read-only `--check` run on 2026-09-26 selected `/home/igovet/.paseo-dev`, reported `/home/igovet/.paseo` as the protected production home, and exited 0. The wrapper defaults to `~/.paseo-dev`, rejects the resolved production home, and rejects per-command `--home` and `--host` overrides. It sets Cortex XDG config/state below the dev home and passes the checkout root for the local plugin. The check validates selection and does not launch or inspect a daemon.
+A read-only `--check` run on 2026-09-26 selected `/home/igovet/.paseo-dev`, reported `/home/igovet/.paseo` as the protected production home, and exited 0. The wrapper defaults to `~/.paseo-dev`, rejects the resolved production home, and rejects per-command `--home` and `--host` overrides. It sets Cortex XDG config/state below the dev home and passes the checkout root for the local plugin. CLI calls also discard inherited `PASEO_AGENT_ID` and `PASEO_AGENT_CWD`, so a command launched from another Paseo agent cannot accidentally target that agent. The check validates selection and does not launch or inspect a daemon.
 
 Until plugin-reload recovery is qualified for the deployed version, apply plugin updates between active tasks. Recovery uses persisted Cortex state and does not automatically repeat actions with an unknown outcome. A host SIGKILL without SIGTERM leaves no disconnect record (a later reader identifies the interrupted worker from its provably gone owning process), and native engine actions have no retained command receipt.
 

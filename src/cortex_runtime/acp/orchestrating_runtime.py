@@ -1450,6 +1450,14 @@ class OrchestratingRuntime:
                 # ``_release_task_host_requesters``.
                 self._task_fs_requesters.pop(task_id, None)
 
+    def active_session_owner_epoch(self, task_id: str, session_id: str) -> int | None:
+        """Expose only the channel this runtime opened for this active host turn."""
+        with self._lock:
+            if task_id not in self._active_tasks or self._task_requester_sessions.get(task_id) != session_id:
+                return None
+            channel = self._coordinator_channels.get(task_id)
+            return channel.owner_epoch if channel is not None else None
+
     def cancel(self, session_id: str) -> None:
         """T028 (session/cancel, distinct from the task-wide ``/cortex-stop``
         in :meth:`stop_task`): best-effort, in-process only.
@@ -2529,7 +2537,8 @@ class OrchestratingRuntime:
     def stop_task(
         self, task_id: str, session_id: str, emit_update: Callable[[str], bool],
         emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
-        *, stop_source: str = "cortex_stop_command",
+        *, stop_source: str = "cortex_stop_command", question_id: str | None = None,
+        source_origin: str | None = None, source_event_id: str | None = None,
     ) -> bool:
         """T020 ``/cortex-stop``: an urgent safety stop, routed through
         cancellation -- never a normal steering queue entry. Takes
@@ -2554,6 +2563,7 @@ class OrchestratingRuntime:
         try:
             transitioned = acp_steering.mark_stopped(
                 self._store, task_id, source=stop_source, session_id=session_id,
+                question_id=question_id, source_origin=source_origin, source_event_id=source_event_id,
             )
         except LookupError:
             raise PortableError(
@@ -2562,7 +2572,20 @@ class OrchestratingRuntime:
                 retry_eligible=False,
             ) from None
         if not transitioned:
-            return False
+            # A crash may have persisted the stop marker before the separate
+            # runtime-state transition or process cleanup. A repeated owner
+            # request must finish that work instead of leaving a stopped but
+            # non-terminal task forever. Keep the first observed source.
+            with self._store.connection() as db:
+                state_row = db.execute("SELECT state FROM runtime_tasks WHERE task_id=?", (task_id,)).fetchone()
+                source_row = db.execute(
+                    "SELECT payload_json FROM task_events WHERE task_id=? AND dedup_key='task_stop_observed' "
+                    "ORDER BY id LIMIT 1", (task_id,),
+                ).fetchone()
+            if state_row is None or state_row["state"] in {"COMPLETED", "FAILED", "CANCELLED"}:
+                return False
+            if source_row is not None:
+                stop_source = json.loads(source_row["payload_json"])["source"]
         from ..orchestration.state import TaskMachine
         TaskMachine(self._store).cancel(task_id)
         self._release_task_host_requesters(task_id)
@@ -2652,7 +2675,9 @@ class OrchestratingRuntime:
                 continue
             self._cancel_assignment(
                 task_id, assignment_ref,
-                "Paseo session/cancel" if stop_source == "paseo_session_cancel" else "urgent stop (/cortex-stop)",
+                "Paseo session/cancel" if stop_source == "paseo_session_cancel" else
+                "user force finish" if stop_source in {"cortex_finish_command", "user_answer_force_finish"} else
+                "urgent stop (/cortex-stop)",
                 session_id=session_id, emit_tool_call=emit_tool_call,
             )
             questions_store.cancel_for_assignment(self._store, task_id, assignment_ref, "task stopped")
@@ -2683,12 +2708,18 @@ class OrchestratingRuntime:
             task_id, "stopped", wait_reason="stopped",
             wait_detail=dict(
                 explanation=("Stopped by Paseo session/cancel."
-                             if stop_source == "paseo_session_cancel" else "Stopped by /cortex-stop."),
+                             if stop_source == "paseo_session_cancel" else
+                             "Closed at the user's request without certifying unfinished work."
+                             if stop_source in {"cortex_finish_command", "user_answer_force_finish"}
+                             else "Stopped by /cortex-stop."),
                 source=stop_source, session_id=session_id,
             ),
         )
         language = self._resolve_language(task_id)
-        emit_update(acp_messages.render("stop_confirmed", language))
+        emit_update(acp_messages.render(
+            "force_finish_confirmed" if stop_source in {"cortex_finish_command", "user_answer_force_finish"}
+            else "stop_confirmed", language,
+        ))
         return True
 
     def _terminate_coordinator_attempt(self, task_id: str) -> None:
@@ -4970,9 +5001,9 @@ class OrchestratingRuntime:
                 worker_delta_seen = False
                 worker_terminal_text = False
                 # ``TURN_DELTA`` callbacks carry text only in the portable
-                # runtime contract. Keep chunks in memory until the next
-                # observable tool boundary or the turn end. The worker panel
-                # receives complete message blocks, never token-sized rows.
+                # runtime contract. Keep chunks in memory; tool boundaries
+                # discard interim prose, while a normal turn end may retain
+                # only the terminal segment.
                 worker_delta_sequence = 0
                 # ACP message chunks do not survive the portable engine
                 # adapter with their provider messageId. Keep an explicit
@@ -4989,8 +5020,8 @@ class OrchestratingRuntime:
                     # Buffer contiguous chunks so a credential split across
                     # ACP updates can be redacted. The coordinator's text
                     # channel stays clear, and the card is not redrawn per
-                    # streamed token: the block reaches it once, at the next
-                    # tool boundary or turn end (_flush_worker_message_block).
+                    # streamed token: interim blocks are discarded at tool
+                    # boundaries and only a terminal response reaches the card.
                     nonlocal worker_delta_seen, worker_delta_sequence
                     if chunk_text:
                         worker_delta_sequence += 1
@@ -5019,7 +5050,6 @@ class OrchestratingRuntime:
                         return
                     with self._lock:
                         feed = self._worker_card_emitter(task_id, _ref)
-                    _flush_worker_message_block(feed=feed)
                     kind = str(update.get("sessionUpdate") or update.get("type") or "display")
                     text_value = _worker_display_text(update)
                     if not text_value:
@@ -5049,10 +5079,10 @@ class OrchestratingRuntime:
                     # the last tool can become the terminal final message.
                     with self._lock:
                         feed = self._worker_card_emitter(task_id, _ref)
-                    # Finalize the ordinary message before changing its
-                    # segment identity. This also applies to hidden runtime
-                    # tools, whose own card is intentionally omitted.
-                    _flush_worker_message_block(feed=feed)
+                    # Interim worker prose is not part of the public card.
+                    # Discard it at every tool boundary, including hidden
+                    # tools, while retaining the engine's underlying events.
+                    worker_stream_redactor.flush()
                     boundary_ref = str(ref) if ref else f"anonymous:{worker_message_segment + 1}"
                     if boundary_ref not in worker_message_boundary_refs:
                         worker_message_boundary_refs.add(boundary_ref)
@@ -5203,12 +5233,10 @@ class OrchestratingRuntime:
                         )
 
                 def _flush_worker_message_block(*, feed, final_response: bool = False) -> None:
-                    """Persist and render one complete worker prose block.
+                    """Persist a delta-only terminal response after normal end_turn.
 
-                    This is the only worker-delta emission point. A tool
-                    boundary or normal turn end closes the block, so live
-                    cards and replayed history contain the same message-sized
-                    records and never expose token-sized fragments.
+                    Interim segments are discarded at tool boundaries. Live
+                    cards and replayed history never expose token fragments.
                     """
                     nonlocal worker_message_block_sequence
                     pending_stream_text = worker_stream_redactor.flush()
@@ -5274,14 +5302,27 @@ class OrchestratingRuntime:
                     # provider that reports the same final both ways, and to
                     # recover a final returned only after interim chatter.
                     if outcome.text:
+                        pending_stream_text = worker_stream_redactor.flush()
+                        if pending_stream_text:
+                            worker_message_buffer.append(pending_stream_text)
+                        # The adapter returns only the post-tool segment for
+                        # workers. Scripted runtimes may return a final text
+                        # without streaming it, so that value is authoritative.
+                        final_text = outcome.text
                         worker_message_buffer.clear()
+                        if not final_text.strip():
+                            worker_terminal_text = False
+                        else:
+                            worker_terminal_text = True
                         with self._lock:
-                            self._worker_final_response_seen.add(assignment_ref)
+                            if worker_terminal_text:
+                                self._worker_final_response_seen.add(assignment_ref)
                         attempt_id = str(getattr(result, "attempt_id", None) or result.engine_session_ref)
-                        worker_message_block_sequence += 1
-                        if not self._record_worker_activity(
+                        if worker_terminal_text:
+                            worker_message_block_sequence += 1
+                        if worker_terminal_text and not self._record_worker_activity(
                             task_id, assignment_ref, attempt_id, "final-response",
-                            f"[final response] {scrub_text(outcome.text, max_chars=max(4000, len(outcome.text) * 2 + 1000))}",
+                            f"[final response] {scrub_text(final_text, max_chars=max(4000, len(final_text) * 2 + 1000))}",
                             status="in_progress",
                             stream_sequence=worker_message_block_sequence,
                             message_id=f"{worker_message_turn_id}:segment:{worker_message_segment}",
@@ -5289,10 +5330,11 @@ class OrchestratingRuntime:
                             return
                         with self._lock:
                             _final_worker_feed = self._worker_card_emitter(task_id, assignment_ref)
-                        self._emit_worker_card(
-                            _final_worker_feed, assignment_ref, status="in_progress",
-                            entry=f"[final response] {scrub_text(outcome.text, max_chars=max(4000, len(outcome.text) * 2 + 1000))}",
-                        )
+                        if worker_terminal_text:
+                            self._emit_worker_card(
+                                _final_worker_feed, assignment_ref, status="in_progress",
+                                entry=f"[final response] {scrub_text(final_text, max_chars=max(4000, len(final_text) * 2 + 1000))}",
+                            )
                 finally:
                     pending_stream_text = worker_stream_redactor.flush()
                     if pending_stream_text:

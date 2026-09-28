@@ -2691,6 +2691,11 @@ class EngineSessionManagerAdapter:
                         manager.cancel(session_ref)
                     if event.kind == EngineEventKind.TOOL_CALL_OBSERVED:
                         _saw_tool_boundary[0] = True
+                        # A worker's terminal answer is only the text after
+                        # its last tool. Keep earlier deltas in engine event
+                        # evidence, not in PromptOutcome handed to the card.
+                        if (getattr(self, "_session_meta", {}).get(session_ref) or {}).get("recipient") == "worker":
+                            text_parts.clear()
                     if event.kind == EngineEventKind.TURN_DELTA and event.delta_text:
                         text_parts.append(event.delta_text)
                         if on_delta is not None:

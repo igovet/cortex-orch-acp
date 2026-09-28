@@ -113,8 +113,11 @@ def test_an_exact_retry_returns_the_same_report_and_result(tmp_path):
     assert mcp_tools.dispatch(store, worker, 'result_submit', inline_args()) == receipt
     assert report_count(store, task.task_id) == count
     assert len(worker_results(store, task, worker)) == 1
-    with pytest.raises(StoreError, match='request_key_conflict'):
+    with pytest.raises(StoreError, match='request_key_conflict') as rejected:
         mcp_tools.dispatch(store, worker, 'result_submit', inline_args(markdown=MARKDOWN + '\nChanged.\n'))
+    assert rejected.value.field == 'arguments.request_key'
+    assert 'different operation or payload' in rejected.value.received
+    assert 'new key' in rejected.value.correction
 
 
 @pytest.mark.parametrize('module, name, after', [
@@ -175,7 +178,7 @@ def test_recovery_refuses_an_inline_result_not_bound_to_its_own_delivery(tmp_pat
         reconcile_results(store, task.task_id)
 
 
-@pytest.mark.parametrize('both, error', [(True, 'result_report_conflict'), (False, 'result_report_required')])
+@pytest.mark.parametrize('both, error', [(True, 'invalid_arguments'), (False, 'invalid_arguments')])
 def test_report_ref_and_inline_report_are_mutually_exclusive(tmp_path, both, error):
     store, task, worker, assignment = setup_worker(tmp_path)
     report = publish_fixture_report(store, worker)
@@ -188,6 +191,12 @@ def test_report_ref_and_inline_report_are_mutually_exclusive(tmp_path, both, err
     with store.connection() as db:
         assert db.execute("SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND operation='result_submit'",
                           (task.task_id, worker.channel_id)).fetchone() is None
+        row = db.execute("SELECT outcome, detail_json FROM observability_events "
+                         "WHERE task_id=? AND category='submission_rejection' ORDER BY created_at DESC LIMIT 1",
+                         (task.task_id,)).fetchone()
+    assert row['outcome'] == error
+    detail = json.loads(row['detail_json'])
+    assert detail == {'operation': 'result_submit', 'field': 'arguments.report_ref, arguments.report'}
 
 
 def test_an_inline_report_with_an_unfilled_template_placeholder_is_refused_before_any_result(tmp_path):

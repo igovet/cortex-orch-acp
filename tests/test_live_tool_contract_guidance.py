@@ -85,11 +85,13 @@ def test_worker_gateway_refusal_lists_only_real_problems_and_optional_fields():
                   required=["a"])
     with pytest.raises(StoreError) as caught:
         validate_proposal(schema, {"a": "x", "c": "y"})
-    assert caught.value.received == "unexpected: c"
-    assert caught.value.expected == "required field(s): a; optional field(s): b"
+    assert caught.value.field == "arguments.c"
+    assert caught.value.received == "unexpected field"
+    assert caught.value.expected == "one of a, b"
     with pytest.raises(StoreError) as caught:
         validate_proposal(schema, {})
-    assert caught.value.received == "missing: a"
+    assert caught.value.field == "arguments.a"
+    assert caught.value.received == "missing"
 
 
 def test_failed_read_keeps_value_free_reason_but_no_body():

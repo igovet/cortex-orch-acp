@@ -12,8 +12,22 @@ publishes it through the same `create_draft`/`write_report` path as the worker's
 draft before recording the result. By reference: the worker creates an owned
 draft, fills it through `draft_write`, publishes using `write_report`, and submits
 the exact returned `report_id` as `result_submit.report_ref`. Exactly one form is
-accepted (`result_report_conflict`, `result_report_required`). The channel binds
+accepted (`invalid_arguments` identifies both or neither form). The channel binds
 the task, owner epoch and attempt.
+
+The advertised `result_submit` JSON schema expresses this exclusive choice and
+the check-field combinations: `not_run`/`unverified` require `blocker`, while
+`passed`/`failed` omit `blocker` and `command`. A new result needs a fresh
+`request_key`; retry an uncertain delivery only with identical arguments.
+The worker copies `write_report.report_id` into `result_submit.report_ref`, not
+the draft id or a command receipt. New rejected `result_submit` calls attempt
+to retain only their error code and safe field path in `submission_rejection`
+observability events, never the rejected arguments or report body. That
+includes `situational_skill_required`: a worker whose observed changes pair
+documentation with behavior files without a retained `read_skill` of
+`documentation-sync` is refused before any request, report or result is
+recorded, and may retry with the same key after reading it (see
+[roles and delegation](roles-and-delegation.md)).
 
 An inline report is bound to the result's request key: its draft and publication
 use store delivery keys derived from the channel and that key, and the retained

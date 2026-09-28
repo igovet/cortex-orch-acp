@@ -46,7 +46,7 @@ def test_option_mapping_for_dispatches_by_engine_name():
     assert _option_mapping_for("some-future-engine") is None
 
 
-GATEWAY_ONLY = dict(disallowedTools=['Agent','Task','Workflow','TeamCreate','TeamDelete','SendMessage','ScheduleWakeup','Monitor','CronCreate','CronDelete','CronList','RemoteTrigger'],strictMcpConfig=True,skills='all',plugins=[],managedSettings=dict(disableAllHooks=True))
+GATEWAY_ONLY = dict(disallowedTools=['Agent','Task','Workflow','TeamCreate','TeamDelete','SendMessage','ScheduleWakeup','Monitor','CronCreate','CronDelete','CronList','RemoteTrigger','Bash','Read','Edit','Write','Grep','Glob','Skill','NotebookEdit'],strictMcpConfig=True,skills=[],plugins=[],managedSettings=dict(disableAllHooks=True))
 # With the unified Cortex prompt Claude's own skill listing, attribution and
 # git instructions are switched off as well.
 UNIFIED = dict(GATEWAY_ONLY, skills=[], settings=dict(attribution=dict(commit='', pr=''), includeGitInstructions=False))
@@ -65,7 +65,7 @@ def test_session_new_meta_for_pinned_engines_builds_a_payload():
         assert _session_new_meta_for('claude-agent-acp','0.78.0',text) == dict(claudeCode=dict(options=GATEWAY_ONLY))
 
 
-def test_every_claude_role_keeps_native_tools_but_not_subagents_mcp_plugins_or_hooks():
+def test_every_claude_role_disallows_native_gateway_alternatives():
     for role in ['worker','coordinator']:
         meta=_session_new_meta_for('claude-agent-acp','0.78.0','Role instructions',role=role)
         assert meta['claudeCode']['options']==UNIFIED

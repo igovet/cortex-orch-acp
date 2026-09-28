@@ -144,6 +144,17 @@ with an exit code. Qualitative review remarks, read files and inspected code bel
 in the report body, not in `checks`. The advertised `result_submit` schema carries
 this contract in its property descriptions; `delegation.evidence.assess_check`
 enforces it.
+For a verified pass, copy `tool_call_ref` from a completed, exit-0
+`command_run` or confirmed `outside_command` result of the same attempt.
+`closed_by` is supplied by the runtime for a failed check closed by an exact
+later passing rerun; workers do not submit it. A missing or weak receipt does
+not become a pass merely because its string has the right shape or a worker
+also supplies `checks[].command`. That argv is
+accepted as descriptive text on a passed or failed check but omitted from the
+retained accepted check; only the gateway receipt establishes the run. Reviewers
+must send `verdict` as `APPROVE`, `REQUEST_CHANGES` or `BLOCK` (the lowercase
+spellings are normalized); other workers must omit it. Malformed submissions
+report the exact argument field path and accepted form where available.
 
 A `passed` check is **verified** only when its `tool_call_ref` names exactly one
 gateway receipt that is:

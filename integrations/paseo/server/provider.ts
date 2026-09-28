@@ -914,16 +914,11 @@ export function wrapCortexConnection(
     input: Extract<Parameters<typeof connection.send>[0], { type: "session.prompt" }>,
   ) {
     const content = queuedContent(input);
-    // Paseo accepts a steer only as a `steer` result for the turn it
-    // expects; any other result makes it cancel that turn and resend the
-    // message as a new prompt. A refused queue attempt therefore fails the
-    // send, which Paseo reports without touching the running turn.
+    // Paseo accepts only a matching `steer` result without replacing the
+    // running turn. A refused capture must fail the send rather than claim
+    // delivery. Paseo displays that failure itself, so do not also emit a
+    // notice: it would render the same error twice.
     const refuse = (description: string): never => {
-      listeners.forEach((listener) => listener({
-        type: "session.notice", sessionId: input.sessionId,
-        notice: { id: `cortex-queue:${input.prompt.clientMessageId}`,
-          severity: "warning", title: "Message was not queued", description },
-      }));
       throw new Error(`Message was not queued. ${description}`);
     };
     if (content === null) {

@@ -283,6 +283,11 @@ CLAUDE_SUBAGENT_TOOLS = ("Agent", "Task", "Workflow", "TeamCreate", "TeamDelete"
                          # its turn, and never resumes.
                          "ScheduleWakeup", "Monitor", "CronCreate", "CronDelete", "CronList", "RemoteTrigger")
 
+# The Cortex gateway supplies scoped file access, code discovery and command
+# receipts. Keep Claude's native alternatives out of Cortex sessions so they
+# cannot bypass the workflow while the corresponding MCP tools remain available.
+CLAUDE_GATEWAY_ALTERNATIVES = ("Bash", "Read", "Edit", "Write", "Grep", "Glob", "Skill", "NotebookEdit")
+
 
 # A model claude-agent-acp's bundled SDK does not know (an id an
 # ``availableModels`` allowlist names, e.g. ``claude-opus-5[1m]``) keeps its
@@ -311,21 +316,15 @@ def sdk_unknown_model(model: str, model_name: str | None) -> bool:
 
 
 def claude_native_subagent_restriction_meta(*, role: str = "worker", effort: str | None = None) -> dict:
-    """Build the pinned Claude native-tool policy for one Cortex role.
+    """Build the Claude tool policy for either Cortex role.
 
-    Claude keeps its whole native tool preset, native context loading
-    (``settingSources`` is left to the adapter's user/project/local default,
-    so ``CLAUDE.md``/``AGENTS.md`` load) and its skills (``skills: "all"``
-    makes the SDK allow ``Skill``). The engine process runs inside Cortex's
-    engine jail, which bounds what those tools can reach; roles differ only
-    in the scopes that jail grants, not in tools.
-
-    Removed are what the owner excluded: native subagents (``Agent``/``Task``,
-    ``Workflow`` and agent-team tools) via ``disallowedTools``, which the
-    installed claude-agent-acp 0.78.0 forwards as ``--disallowedTools``;
-    user/project MCP via ``strictMcpConfig`` (only the session's explicit
-    ``mcpServers`` load); hooks via managed ``disableAllHooks``; plugins via
-    an empty ``plugins`` option and a hidden plugin directory in the jail.
+    Native shell, file and skill alternatives are disallowed in favor of the
+    scoped Cortex gateway and external MCP index. Native subagents stay
+    disallowed. The engine jail remains a backstop for any remaining tools.
+    The installed adapter forwards ``disallowedTools`` to its SDK; MCP tools
+    are not in this list. Native context loading remains at the adapter's
+    user/project/local default. User/project MCP, hooks and plugins are still
+    disabled by their separate options.
     """
     if role not in {"coordinator", "worker"}:
         raise PortableError(
@@ -339,9 +338,9 @@ def claude_native_subagent_restriction_meta(*, role: str = "worker", effort: str
             category=PortableErrorCategory.VALIDATION, code="invalid_field",
             remediation=f"'effort' must be one of {SDK_EFFORTS}.", retry_eligible=False, field="effort",
         )
-    options = {"strictMcpConfig": True, "skills": "all",
+    options = {"strictMcpConfig": True, "skills": [],
                "plugins": [], "managedSettings": {"disableAllHooks": True},
-               "disallowedTools": list(CLAUDE_SUBAGENT_TOOLS)}
+               "disallowedTools": list(CLAUDE_SUBAGENT_TOOLS + CLAUDE_GATEWAY_ALTERNATIVES)}
     if effort is not None:
         options["effort"] = effort
     return {"claudeCode": {"options": options}}

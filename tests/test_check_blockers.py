@@ -25,9 +25,9 @@ def setup_worker(tmp_path):
 
 
 @pytest.mark.parametrize('outcome, blocker, error', [
-    ('not_run', None, 'check_blocker_required'),
-    ('unverified', '   ', 'check_blocker_required'),
-    ('passed', 'Unavailable host', 'check_blocker_unexpected'),
+    ('not_run', None, 'invalid_arguments'),
+    ('unverified', '   ', 'invalid_arguments'),
+    ('passed', 'Unavailable host', 'invalid_arguments'),
 ])
 def test_invalid_blocker_rejected_before_request_or_publication(tmp_path, outcome, blocker, error):
     store, task, worker, assignment, report = setup_worker(tmp_path)
@@ -69,20 +69,26 @@ def test_blocker_is_retained_in_result_and_publication(tmp_path):
     assert mcp_tools.dispatch(store, worker, 'result_submit', args) == receipt
 
 
-def test_gap_command_is_retained_and_pass_command_is_rejected(tmp_path):
+def test_gap_command_is_retained_but_passed_and_failed_commands_are_not(tmp_path):
     store, task, worker, assignment, report = setup_worker(tmp_path)
     command = ['python3', '-B', '-m', 'pytest', 'tests/test_api.py']
-    invalid = dict(report_ref=report, summary='Observed', checks=[
-        dict(name='tests', outcome='passed', command=command)], request_key='invalid-command')
-    with pytest.raises(StoreError, match='check_command_unexpected'):
-        mcp_tools.dispatch(store, worker, 'result_submit', invalid)
-    valid = dict(report_ref=report, summary='Observed', checks=[
-        dict(name='tests', outcome='not_run', blocker='Test environment unavailable', command=command)],
-        request_key='valid-command')
-    assert mcp_tools.dispatch(store, worker, 'result_submit', valid)['recorded']
+    checks = [
+        dict(name='passed without receipt', outcome='passed', command=command),
+        dict(name='failed check', outcome='failed', command=command),
+        dict(name='blocked check', outcome='not_run', blocker='Test environment unavailable', command=command),
+    ]
+    receipt = mcp_tools.dispatch(store, worker, 'result_submit', dict(
+        report_ref=report, summary='Observed', checks=checks, request_key='command-retention'))
+    assert receipt['recorded']
     node = next(n for n in TaskMachine(store).context(task.task_id)['nodes']
                 if n['assignment_ref'] == assignment)
-    assert node['result']['checks'][0]['command'] == command
+    retained = {check['name']: check for check in node['result']['checks']}
+    assert retained['passed without receipt']['outcome'] == 'unverified'
+    assert retained['passed without receipt']['evidence_gap'] == 'tool_call_ref_missing'
+    assert retained['failed check']['outcome'] == 'failed'
+    assert 'command' not in retained['passed without receipt']
+    assert 'command' not in retained['failed check']
+    assert retained['blocked check']['command'] == command
 
 
 def test_recovery_accepts_publication_with_blocker(tmp_path):

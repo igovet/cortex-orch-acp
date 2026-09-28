@@ -89,6 +89,9 @@ attempt that is already failed with its first reason and records no
 
 `/cortex-stop` permanently marks the task CANCELLED before cleanup. It closes
 pending questions, fences late publications and cancels capacity-queued opens.
+A captured `/cortex-finish` command or explicit owner answer to close the task
+as-is uses the same cancellation cleanup, but also records `USER_FORCE_FINISHED`
+with unfinished work. It is terminal `CANCELLED`, never verified `COMPLETED`.
 A worker opened concurrently with cancellation is closed before its first prompt.
 Reservations release only on observed process absence. Unknown engine liveness
 remains a blocker; a terminal event alone never proves process exit. Terminal card

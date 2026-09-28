@@ -135,6 +135,7 @@
     "src/cortex_runtime/orchestration/recovery.py",
     "src/cortex_runtime/orchestration/sandbox.py",
     "src/cortex_runtime/orchestration/scheduler.py",
+    "src/cortex_runtime/orchestration/skill_gate.py",
     "src/cortex_runtime/orchestration/skill_links.py",
     "src/cortex_runtime/orchestration/skill_proposals.py",
     "src/cortex_runtime/orchestration/ssh_askpass.py",

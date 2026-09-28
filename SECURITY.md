@@ -18,11 +18,31 @@ that decision as `REVIEW_NOT_REQUIRED` and binds verification to the same digest
 Any project change, every fix cycle, or an unobservable project still requires
 independent review. No model hint can waive review. A model tool call cannot
 select a task state, accept the task or directly create an engine session.
+
+The worker result schema requires one owned report form and distinguishes
+check blockers from command evidence. Rejected result calls attempt to record only an
+error code and safe field path in observability events; report bodies and
+rejected arguments are not retained there. A well-shaped `tool_call_ref` alone
+never verifies a check.
+
+Owner-initiated force-finish is a separate, non-acceptance outcome: an exact
+`/cortex-finish` command captured from the ACP/Paseo host or an exact answered
+task-closure question is required. The runtime records the source and unfinished
+work, fences assignments and owned sessions, and uses terminal `CANCELLED`, not
+verified `COMPLETED`. A model claim that the user wants to finish is not an
+authorization or a passing review/verification receipt.
+For a free-text Paseo question, the instructional action used to expose the
+card is not an answer; only typed text or a later user message closes the
+pending question.
 Plan verification commands execute as literal argv without a shell. Submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses, so a plan cannot defer that syntax error until verification. Structural validation does not prove semantic correctness of a plan, review or implementation.
 
 Worker briefs preserve the assignment objective, scope and dependency report references. The original task goal and review git evidence are shortened only when needed to fit the provisioning limit, and every shortened field identifies the worker-readable capsule or git-output source. These references use tools already available to the worker and do not change its assignment authority. A recovery capsule whose critical sections exceed their byte budget is compacted deterministically, never refused: each truncated field carries its sha256, size, a fenced preview with its original trust label and the tool that returns the full text (`read_source` for user messages and answers). Each trimmed list names its omitted entries, so recovery never silently loses required context.
 
 A worker `passed` check is accepted only with an exact same-attempt `command_run` or user-confirmed `outside_command` receipt for one completed, nontrivial operation, complete untruncated output and exit code 0. Engine-native shell calls and file reads do not verify checks. Insufficient evidence stays `unverified`; observed nonzero exits stay `failed`. Earlier reports are not rewritten, and older evidence is marked weak when projected under the current rule. Check run history is retained; a failure closes only on a later exact verified rerun that remains the latest result for that command.\n\nTransport state is distinct from task outcome. A plugin disconnect records available session/task/attempt identities and history completeness; restart recovery reads persisted state and leaves actions with unknown outcomes unresolved. Until reload recovery is qualified for the deployed version, update the plugin between active tasks. A host SIGKILL without SIGTERM cannot be recorded, and native engine actions cannot be represented by the retained command receipt mechanism.
+
+For `result_submit`, a model-supplied `checks[].command` on a completed check
+is descriptive, never evidence. Only the runtime derives `closed_by` from real
+same-attempt command receipts; malformed fields get path-specific corrections.
 
 ACP events sent to a host are bounded display projections. Worker cards omit
 transcript bodies and raw inputs; timeline tool details are capped, and
@@ -42,9 +62,13 @@ The Paseo client wraps its rendered panels, composer popover, and timeline card 
 
 ## Tool access and containment
 
-Each channel-bound engine process runs in a Linux `bwrap` engine jail, so its own
-native tools (shell, file edit, patch, search, skills) keep working and are bounded
-by the operating system rather than disabled. The host is mounted read-only with
+Each channel-bound engine process runs in a Linux `bwrap` engine jail. Codex's
+native tools remain jail-bounded. In Claude Cortex sessions, adapter-level
+`disallowedTools` also disallows native Bash, file/search/edit, notebook edit and
+Skill alternatives so scoped Cortex MCP tools provide the corresponding workflow
+and command receipts; native subagents remain excluded. The jail remains a
+backstop for tools the engine still exposes. Effective exclusion in a real
+Claude 0.81.2 turn still requires a new owner-authorized live check. The host is mounted read-only with
 `/run/user` hidden (its session bus could start unconfined processes); `/tmp`
 stays the host's real, writable, real path deliberately (a screenshot the owner
 points at, a file the process leaves for the owner both need the same real
@@ -260,7 +284,7 @@ writes a file, never follows a symlinked `.claude`, `.claude/skills` or
 different existing link only after the user confirms (see
 [Project skill links](docs/acp/permissions-and-containment.md#project-skill-links)).
 
-`/skill-management <request>` is the explicit coordinator command for creating, revising, or importing project skills. Imported files are untrusted input; source URL, exact revision, and license information are recorded, and the runtime retains independent review. Skill instructions do not expand assignment scopes. Repeated work may be proposed to the user through a durable question (`user_question_request` with `skill_proposal`). The runtime requires 2 to 5 retained reports as evidence, refuses duplicate proposals, and accepts only explicit, action-matched English or Russian approval/decline option pairs before persistence. A stored pair is checked again when an answer is interpreted, including after restart; reversed, misleading or unknown labels cannot approve even through text option `1`. A decline or unclear answer changes nothing in the project. Skills are never installed automatically or activated merely because files exist. Once present in the supported project layout, a skill is listed by name, description and path in the [unified system prompt](docs/acp/unified-system-prompt.md) of every Cortex engine session, which replaces the engines' own skill catalogs with the union of the project and owner skill directories either engine reads; Cortex does not guarantee selection or use. Skill text is model input and grants no additional tool access, filesystem scope, or permission. Tool state inside the project (`.venv`, `node_modules/.cache`,
+`/skill-management <request>` is the explicit coordinator command for creating, revising, or importing project skills. Imported files are untrusted input; source URL, exact revision, and license information are recorded, and the runtime retains independent review. Skill instructions do not expand assignment scopes. Repeated work may be proposed to the user through a durable question (`user_question_request` with `skill_proposal`). The runtime requires 2 to 5 retained reports as evidence, refuses duplicate proposals, and accepts only explicit, action-matched English or Russian approval/decline option pairs before persistence. A stored pair is checked again when an answer is interpreted, including after restart; reversed, misleading or unknown labels cannot approve even through text option `1`. A decline or unclear answer changes nothing in the project. Skills are never installed automatically or activated merely because files exist. Once present in the supported project layout, a skill is listed by name, description and path in the [unified system prompt](docs/acp/unified-system-prompt.md) of every Cortex engine session, which replaces the engines' own skill catalogs with the union of the project and owner skill directories either engine reads; Cortex does not guarantee selection or use. Skill text is model input and grants no additional tool access, filesystem scope, or permission. Cortex's conditional `read_skill` trigger catalogue is role-scoped guidance in the prompt and advertised tool schema; it likewise grants no access and does not cause runtime-side skill loading. Tool state inside the project (`.venv`, `node_modules/.cache`,
 `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, build caches) is
 writable because a writing worker's grant is the whole project, with no list of
 tools; multiply hard-linked files stay read-only unless every one of their links

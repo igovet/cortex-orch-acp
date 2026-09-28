@@ -281,6 +281,7 @@ ERROR_HELP = {
     "reviewer_only_verdict": "Only a review assignment gives a verdict. Remove verdict and resubmit.",
     "review_verdict_required": "A review assignment must give a verdict: APPROVE, REQUEST_CHANGES or BLOCK.",
     "review_project_revision_changed": "The project changed while you reviewed it, so this verdict was not recorded. The review is now bound to the current project revision: re-check what changed (project_git diff), then submit your verdict again with a new request_key.",
+    "situational_skill_required": "Refused before anything was recorded: this attempt's observed project changes match a situational skill's trigger and the attempt has not read that skill. Call the cortex MCP read_skill tool with the skill id named in expected/correction, re-check your edits against it, then call result_submit again (the same request_key may be reused).",
     "review_resubmit_required": "This request_key was refused because the project changed during the review; it never records a verdict. Re-check the changes, then submit with a new request_key.",
     "review_project_revision_unstable": "The project kept changing during this review (another writer is editing the same checkout), so no verdict can be bound to one revision. Nothing was recorded; report that in your final message and end your turn.",
     "reviewer_only_findings": "Only a review assignment gives findings. Remove findings and resubmit.",

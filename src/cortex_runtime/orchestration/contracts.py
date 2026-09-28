@@ -137,21 +137,31 @@ INLINE_REPORT = obj(dict(
     markdown=text('Complete report Markdown: the opening decision brief (conclusion, observed evidence, checks, contradictions, limits, next action), then the detailed evidence. No draft marker and no template placeholder comments; the runtime adds the marker.', 1000000),
 ))
 RESULT = obj(dict(
-    report_ref=text('Exact immutable report_id from write_report for this worker attempt. Send exactly one of report_ref or report.', 14),
-    report=dict(INLINE_REPORT, description='The report itself, instead of report_ref: send exactly one of the two. The runtime publishes it as this attempt\'s own immutable report, bound to this request_key, then records the result. An exact retry with the same request_key reuses the same report and never publishes a second one.'),
+    report_ref=text('Send exactly one of report_ref or report. Use report_ref only after this worker publishes its own filled draft with write_report: copy that call\'s report_id exactly (r_ plus 12 lowercase hex characters) into result_submit.report_ref. Do not use draft_id, a report from another attempt, or a tool_call_ref. Omit report when sending report_ref.', 14),
+    report=dict(INLINE_REPORT, description='Send exactly one of report or report_ref. Simpler alternative to the draft flow: send this title and complete Markdown as result_submit.report, with no report_ref. The runtime publishes it as this attempt\'s immutable report before recording the result. Retry an uncertain delivery with exactly the same request_key and entire payload; a changed report needs a new logical delivery.'),
     summary=text('What was found or changed, in plain words: the conclusion first, then what supports it. At most 4000 characters.', 4000),
-    verdict=dict(type='string', enum=['APPROVE', 'REQUEST_CHANGES', 'BLOCK'], description='The review decision: APPROVE when the change is correct, REQUEST_CHANGES for fixable problems, BLOCK when it must not proceed.'),
+    verdict=dict(type='string', enum=['APPROVE', 'REQUEST_CHANGES', 'BLOCK', 'approve', 'request_changes', 'block'], description='Required for a review-stage worker, omitted for other workers. Send APPROVE (or approve) when correct, REQUEST_CHANGES (or request_changes) for fixable problems, BLOCK (or block) when the task must not proceed. Lowercase forms normalize to the uppercase decision.'),
     findings=array(FINDING, 'Review only, optional, used only with verdict REQUEST_CHANGES and ignored with any other verdict. One entry per problem, each naming the original plan task that must fix it. When every finding names a task of the accepted plan, is not cross_cutting and lists only files inside that task\'s scope, the runtime creates fixes only for the named tasks, each receiving only its own findings and this review\'s report_ref, ordered as in the plan. Otherwise, or when omitted, every original plan task receives a fix with this summary.', maximum=16),
-    checks=array(obj(dict(name=text('What the check verified, e.g. "unit tests for services/trading" or "ruff on the changed files".',200), outcome=dict(type='string', enum=['passed','failed','not_run','unverified'], description='passed: you ran it in this attempt with command_run (or a user-confirmed outside_command) and it exited 0; requires tool_call_ref (see its evidence rule). failed: it ran and failed; always kept as failed, and it fails the assignment unless a later passed check of this same result cites a rerun of exactly the same command (same argv, and for outside_command the same cwd) that is the latest run of that command in this attempt: then it stays as history with closed_by. Report a fixed failure that way, never by dropping it. not_run: a real blocker prevented running it. unverified: it ran but its result could not be established. not_run and unverified require blocker. A passed claim the runtime cannot verify is recorded as unverified with evidence_gap, or as failed when its cited command or a later run of the same command exited nonzero; the result receipt lists each such check.'),
-                         blocker=text('Required for not_run and unverified, omitted for passed and failed: the concrete blocker that made running or establishing this check impossible in this attempt. "Not run", "out of scope" or "not requested" is not a blocker.', 1000),
-                         command=array(dict(type='string', description='One literal argument of the command this not_run or unverified check would run.', maxLength=4096),
-                                       'Optional only for not_run or unverified: exact literal argv of the blocked check. A verified passed command_run with identical argv in this plan revision can close this gap across nodes; a name alone cannot.',
+    checks=array(obj(dict(name=text('Specific stable name of this automated command check, e.g. "unit tests for services/trading" or "ruff on changed files". Reuse exactly the same name for a later passing rerun that closes this check; do not use a report title, task name, or qualitative review remark.',200), outcome=dict(type='string', enum=['passed','failed','not_run','unverified'], description='passed: you ran it in this attempt with command_run (or a user-confirmed outside_command) and it exited 0; requires tool_call_ref (see its evidence rule). failed: it ran and failed; always kept as failed, and it fails the assignment unless a later passed check of this same result cites a rerun of exactly the same command (same argv, and for outside_command the same cwd) that is the latest run of that command in this attempt: then it stays as history with closed_by. Report a fixed failure that way, never by dropping it. not_run: a real blocker prevented running it. unverified: it ran but its result could not be established. not_run and unverified require blocker. A passed claim the runtime cannot verify is recorded as unverified with evidence_gap, or as failed when its cited command or a later run of the same command exited nonzero; the result receipt lists each such check.'),
+                         blocker=text('Required and non-whitespace for not_run and unverified; forbidden for passed and failed. State the concrete condition that prevented running or establishing this specific check (for example, a named unavailable host). "Not run", "out of scope" or "not requested" alone is not a blocker.', 1000),
+                         command=array(dict(type='string', description='One literal argument of the command this check ran or would run.', maxLength=4096),
+                                       'Optional literal argv. This command is retained only for not_run or unverified gap checks; it identifies the blocked command and lets a later verified identical run close the gap. For passed or failed, it is descriptive only: the runtime derives the actual command and pass/fail evidence exclusively from tool_call_ref, never from this array.',
                                        maximum=128, minimum=1),
-                         tool_call_ref=text('Required for passed. The exact tool_call_ref returned by a command_run or user-confirmed outside_command of this same attempt that ran this check. It verifies passed only when that call completed (not pending, interrupted or timed out), exited 0, retained its complete untruncated output, and is not a trivial stand-in: pwd, ls, echo, cat, grep, find, true, git status or plain git diff, or a sh -c script whose exit status comes only from such commands. Refs of another attempt or task, of reads, writes, searches, listings or reports, and of your own engine shell calls (their exit code and output are not retained) never verify a check; cite each ref for one check only. A nonzero exit supports failed.',128)), required=['name','outcome']),
+                         tool_call_ref=text('For a verified passed check, copy the exact tool_call_ref field from the completed command_run (or user-confirmed outside_command) result of this same attempt; engine shell calls never verify a check, and their exit code or output is not retained. Never derive the receipt from a command, draft, report or engine shell call. A real gateway receipt has gateway: followed by 32 lowercase hex characters, but its shape alone proves nothing. Cite one receipt for one check only, after confirming complete=true, exit_code=0 and untruncated retained output. A missing, foreign, pending, failed, truncated, replayed or trivial receipt makes a claimed pass unverified or failed, not accepted as passed. A failed check may cite its nonzero command receipt; a later same-command passing rerun closes it and the runtime supplies closed_by in the result (do not send closed_by).',128)), required=['name','outcome']),
                   'Automated checks this attempt actually ran.', maximum=20),
-    request_key=text('Unique result delivery key.',128),
+    request_key=text('New unique key for this logical result_submit delivery, distinct from keys used for prior mutations on this channel. Generate it once and retain it with the exact report/summary/checks payload; reuse it only to retry an uncertain delivery with identical arguments. Changed content requires a new key and, for a by-reference result, a new owned report.',128),
 ), required=['summary','checks','request_key'])
 RESULT['properties']['report_ref']['pattern'] = r'^r_[0-9a-f]{12}$'
+RESULT['properties']['checks']['items']['properties']['blocker']['pattern'] = r'[\s\S]*\S[\s\S]*'
+RESULT['oneOf'] = [
+    {'required': ['report_ref'], 'not': {'required': ['report']}},
+    {'required': ['report'], 'not': {'required': ['report_ref']}},
+]
+RESULT['properties']['checks']['items']['allOf'] = [{
+    'if': {'properties': {'outcome': {'enum': ['not_run', 'unverified']}}, 'required': ['outcome']},
+    'then': {'required': ['blocker']},
+    'else': {'not': {'required': ['blocker']}},
+}]
 REQUESTS = {
     'replan_request': obj(dict(reason=text('Evidence requiring a new decomposition or additional investigation.'),request_key=text('Unique proposal identity.',128))),
     'scope_request': obj(dict(reason=text('Why the current scope prevents completion.'),
@@ -165,7 +175,7 @@ COORDINATOR['verification_submit'] = obj(dict(
     verification=dict(PLAN['properties']['verification'], description=required_bounds(1, 16) + ' Corrected verification commands. Only after the runtime verification failed and the work itself is fine: it verifies again without redoing the reviewed work. When the code is wrong, submit a new plan instead. ' + VERIFICATION_SOURCE),
     request_key=text('Unique proposal identity.',128)))
 COORDINATOR.update(REQUESTS)
-RESULT['properties']['checks']['description'] = 'Automated checks this attempt actually ran, up to 20; [] when there were none. Each is one executed command with an exit code, not a judgement: qualitative review remarks, read files and inspected code belong in the report body, not here. A failed check fails the assignment unless an exact later passing rerun of the same command closes it; not_run or unverified checks each need their blocker and may declare exact command argv. Synthesis closes a gap by a same-name pass in the same node or its fix, or by a verified command_run whose argv matches the declared command.'
+RESULT['properties']['checks']['description'] = 'Automated command checks, up to 20; [] when no command ran and no check was blocked. Each item needs name and outcome (passed, failed, not_run, unverified). A passed check needs tool_call_ref copied from an exit-0 command_run or confirmed outside_command of this attempt; command argv alone never verifies it. A failed check may cite its nonzero receipt. not_run or unverified require a concrete blocker; command argv is retained only for these gap checks and may identify the exact blocked command. A supplied command on passed/failed is ignored as evidence; the runtime derives the command from the receipt. Do not send closed_by: the runtime calculates it. These are not qualitative review remarks: read files and inspected code belong in the report body, not checks.'
 COORDINATOR['synthesis_submit']['properties']['not_verified']['description'] = ('Every item this task changed but could not verify, each with its concrete blocker; [] or omit when everything was verified. Every retained not_run or unverified worker check not closed by a same-name passed check in its own node or a later fix of that node, or by a verified command_run whose argv exactly matches the gap\'s declared command, must appear here by its exact name. Same-name passes from unrelated nodes do not close gaps. Prefer verifying a gap (replan_request) over listing it.')
 WORKER = {'result_submit': RESULT, **REQUESTS}
 
@@ -183,6 +193,22 @@ def _received_fields(schema, value):
 MAX_VIOLATIONS = 8
 
 
+def _matches_presence_rule(rule, value):
+    """Evaluate the small presence/enum subset used by RESULT combinators."""
+    if not isinstance(value, dict):
+        return False
+    if not set(rule.get('required', ())) <= set(value):
+        return False
+    if any(name in value and value[name] not in child['enum']
+           for name, child in rule.get('properties', {}).items() if 'enum' in child):
+        return False
+    if 'not' in rule and _matches_presence_rule(rule['not'], value):
+        return False
+    if 'anyOf' in rule and not any(_matches_presence_rule(part, value) for part in rule['anyOf']):
+        return False
+    return True
+
+
 def _collect(schema, value, field, violations):
     """Append every violation found in one pass, up to MAX_VIOLATIONS.
 
@@ -195,14 +221,49 @@ def _collect(schema, value, field, violations):
         return
     kind = schema.get('type', 'object' if 'properties' in schema else None)
     if kind == 'object':
-        if not isinstance(value, dict) or set(value) - set(schema['properties']) or set(schema['required']) - set(value):
+        if not isinstance(value, dict):
             violations.append(dict(field=field, received=_received_fields(schema, value),
                                    expected=expected_fields(schema), correction='Use the advertised fields exactly.'))
             return
+        for name in sorted(set(schema['required']) - set(value)):
+            violations.append(dict(field=f'{field}.{name}', received='missing',
+                                   expected=f'required field: {schema["properties"][name].get("description", name)}',
+                                   correction=f'Add {name} in the advertised form.'))
+            if len(violations) >= MAX_VIOLATIONS:
+                return
+        for name in sorted(set(value) - set(schema['properties'])):
+            violations.append(dict(field=f'{field}.{name}', received='unexpected field',
+                                   expected='one of ' + ', '.join(schema['properties']),
+                                   correction=f'Omit {name}; use only fields listed in this tool\'s live schema.'))
+            if len(violations) >= MAX_VIOLATIONS:
+                return
         for name, child in value.items():
+            if name not in schema['properties']:
+                continue
             _collect(schema['properties'][name], child, f'{field}.{name}', violations)
             if len(violations) >= MAX_VIOLATIONS:
                 return
+        if 'oneOf' in schema and sum(_matches_presence_rule(part, value) for part in schema['oneOf']) != 1:
+            present = [name for name in ('report_ref', 'report') if name in value]
+            violations.append(dict(
+                field=f'{field}.report_ref, {field}.report',
+                received='both supplied' if len(present) == 2 else 'neither supplied',
+                expected='exactly one of report_ref or report',
+                correction='Send report={title, markdown} inline, or copy report_id from this worker\'s write_report into report_ref; omit the other field.',
+            ))
+        for conditional in schema.get('allOf', ()):  # checks[].blocker/command combinations
+            branch = conditional['then'] if _matches_presence_rule(conditional['if'], value) else conditional['else']
+            if _matches_presence_rule(branch, value):
+                continue
+            if 'required' in branch:
+                violations.append(dict(field=f'{field}.blocker', received='missing',
+                                       expected='non-whitespace blocker for not_run or unverified',
+                                       correction='Run this check and report its outcome, or name the concrete condition that prevented it.'))
+            else:
+                forbidden = 'blocker' if 'blocker' in value else 'command'
+                violations.append(dict(field=f'{field}.{forbidden}', received=f'present for {value.get("outcome")}',
+                                       expected=f'{forbidden} omitted for passed or failed',
+                                       correction=f'Remove {forbidden}; a passed or failed check gets command evidence from tool_call_ref.'))
     elif kind == 'array':
         if not isinstance(value, list) or not schema.get('minItems',0) <= len(value) <= schema['maxItems']:
             target = f"array of {schema.get('minItems',0)} to {schema['maxItems']} items"
@@ -235,12 +296,17 @@ def _collect(schema, value, field, violations):
                                    correction=f'Rewrite {field} {target} and verify its character count.'))
             return
         if 'pattern' in schema and re.fullmatch(schema['pattern'],value) is None:
-            violations.append(dict(field=field, received=value[:40], expected=schema['pattern'],
-                                   correction='Copy the server-issued identifier unchanged from its authoritative receipt.'))
+            if field.endswith('.blocker'):
+                violations.append(dict(field=field, received='whitespace-only string',
+                                       expected='a non-whitespace concrete blocker',
+                                       correction='Name the specific condition that prevented this check from running or being established.'))
+            else:
+                violations.append(dict(field=field, received=f'malformed string ({len(value)} characters)', expected=schema['pattern'],
+                                       correction='Copy the server-issued identifier unchanged from its authoritative receipt; do not alter its prefix or length.'))
             return
         if 'enum' in schema and value not in schema['enum']:
             allowed = ', '.join(schema['enum'])
-            violations.append(dict(field=field, received=value[:40], expected=allowed, correction=f'Choose exactly one advertised value: {allowed}.'))
+            violations.append(dict(field=field, received='unrecognized string value', expected=allowed, correction=f'Choose exactly one advertised value: {allowed}.'))
     else:
         raise StoreError('invalid_schema')
 

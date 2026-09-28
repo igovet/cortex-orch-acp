@@ -946,6 +946,7 @@ def test_available_commands_update_sent_after_session_new(tmp_path, monkeypatch)
     assert names == {acp_commands.CORTEX_STATUS, acp_commands.CORTEX_MODEL,
                       acp_commands.CORTEX_EFFORT, acp_commands.CORTEX_SETUP,
                       acp_commands.CORTEX_NEW_TASK, acp_commands.CORTEX_STOP,
+                      acp_commands.CORTEX_FINISH,
                       acp_commands.CORTEX_ANSWER, acp_commands.CORTEX_LANGUAGE,
                       acp_commands.HARVEST, acp_commands.HARVEST_REFRESH,
                       acp_commands.SKILL_MANAGEMENT}

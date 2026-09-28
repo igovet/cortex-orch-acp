@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import threading
 import uuid
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -73,6 +74,13 @@ def test_unknown_slash_command_is_not_recognized():
     assert acp_commands.recognize([dict(type="text", text="just a normal prompt")]) is None
 
 
+def test_finish_is_exactly_one_text_block_and_has_no_argument():
+    assert acp_commands.recognize([dict(type="text", text="/cortex-finish")]) == (acp_commands.CORTEX_FINISH, "")
+    assert acp_commands.recognize([dict(type="text", text="/cortex-finish later")]) == (acp_commands.CORTEX_FINISH, "later")
+    assert acp_commands.recognize([dict(type="text", text="/cortex-finished")]) is None
+    assert acp_commands.recognize([dict(type="text", text="/cortex-finish"), dict(type="text", text="more")]) is None
+
+
 def test_resolve_model_argument_by_route_id_or_label(tmp_path, monkeypatch):
     environ = _isolate(tmp_path, monkeypatch)
     record = _configured_connection(environ=environ)
@@ -116,6 +124,17 @@ class _NoopRuntime:
 
     def cancel(self, session_id):
         return None
+
+
+class _FinishRuntime(_NoopRuntime):
+    def __init__(self):
+        self.stops = []
+
+    def stop_task(self, task_id, session_id, emit_update, *, project_root,
+                  stop_source, source_origin, source_event_id):
+        self.stops.append((task_id, session_id, project_root, stop_source,
+                           source_origin, source_event_id))
+        return True
 
 
 class _HarvestRuntime:
@@ -268,6 +287,56 @@ def _bootstrap(agent, session_id):
     session["owner_epoch"] = result.owner_epoch
     acp_sessions.bind_task(store, session_id, result.task_id)
     return store, result.task_id
+
+
+def test_finish_command_captures_real_source_before_runtime_stop(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = _FinishRuntime()
+    agent = Agent(runtime, environ=environ)
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store, task_id = _bootstrap(agent, session_id)
+
+    agent._run_command_body(41, session_id, agent.sessions[session_id],
+                            (acp_commands.CORTEX_FINISH, "later"), threading.Event())
+    assert not runtime.stops
+    agent._run_command_body(42, session_id, agent.sessions[session_id],
+                            (acp_commands.CORTEX_FINISH, ""), threading.Event())
+    assert len(runtime.stops) == 1
+    _, _, _, source, origin, event_id = runtime.stops[0]
+    assert source == "cortex_finish_command"
+    with store.connection() as db:
+        assert db.execute("SELECT 1 FROM source_events WHERE task_id=? AND origin=? AND event_id=?",
+                          (task_id, origin, event_id)).fetchone() is not None
+    assert any("not certified" in str(n) for n in transport.notifications)
+
+
+def test_paseo_queued_finish_is_not_delayed_as_steering(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = _FinishRuntime()
+    agent = Agent(runtime, environ=environ)
+    transport = _RecordingTransport()
+    agent.bind_transport(transport)
+    agent.initialized = True
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store, task_id = _bootstrap(agent, session_id)
+    agent._queue_paseo_message(43, session_id, agent.sessions[session_id], json.dumps(dict(
+        clientMessageId="owner-finish-1", content=[dict(type="text", text="/cortex-finish")],
+    )))
+    assert len(runtime.stops) == 1
+    assert runtime.stops[0][3:] == ("cortex_finish_command", f"paseo-steer:{session_id}", "owner-finish-1")
+    with store.connection() as db:
+        assert db.execute("SELECT 1 FROM source_events WHERE task_id=? AND origin=? AND event_id=?",
+                          (task_id, f"paseo-steer:{session_id}", "owner-finish-1")).fetchone() is not None
+        assert db.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND event_type='user_message'",
+                          (task_id,)).fetchone()[0] == 0
+    assert not agent.sessions[session_id].get("queued_messages")
 
 
 def test_cortex_model_command_reaches_same_configuration_service_outcome(tmp_path, monkeypatch):

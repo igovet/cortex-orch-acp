@@ -164,7 +164,11 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
     context = machine.context(task_id)
     if context['state'] == 'WAITING_USER':
         from .questions import resume_answered
-        resume_answered(runtime._store, task_id)
+        resumed = resume_answered(runtime._store, task_id)
+        if isinstance(resumed, tuple) and resumed[0] == 'force_finish':
+            runtime.stop_task(task_id, session_id, emit_update, emit_tool_call=emit_tool_call,
+                              stop_source='user_answer_force_finish', question_id=resumed[1])
+            return StopReason.CANCELLED
     if context['state'] == 'BLOCKED':
         # A task stopped before stops became questions: ask now.
         machine.move(task_id, 'BLOCKED', blocker=context['blocker'])
@@ -513,7 +517,12 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 from .skill_proposals import question_text
                 question = question_text(question, language)
             if runtime._handle_ask_user(task_id, session_id, emit_update, language, question, host_elicitor):
-                if resume_answered(runtime._store, task_id):
+                resumed = resume_answered(runtime._store, task_id)
+                if isinstance(resumed, tuple) and resumed[0] == 'force_finish':
+                    runtime.stop_task(task_id, session_id, emit_update, emit_tool_call=emit_tool_call,
+                                      stop_source='user_answer_force_finish', question_id=resumed[1])
+                    return StopReason.CANCELLED
+                if resumed:
                     prompted.pop((question['resume_state'], context['revision']),None)
                     continue
             runtime._set_state(task_id, 'waiting_for_user', wait_reason=question.get('blocker') or 'user_question')

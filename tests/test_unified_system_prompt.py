@@ -20,6 +20,9 @@ def test_prompt_is_role_specific_engine_neutral_and_carries_the_environment(tmp_
         assert f"- Working directory: {tmp_path}" in text and "- Git repository: yes" in text
         assert "- Date (UTC): 2026-09-28" in text
         assert "`read_skill`" in text and "code index" in text
+        assert "Tools have three sources" in text
+        assert "`cortex` MCP server" in text and "`codebase-memory-mcp`" in text
+        assert "native shell, file and search tools" in text
         # Project rule file names are named; engines and products are not.
         lowered = text.lower().replace("claude.md", "")
         assert "codex" not in lowered and "claude" not in lowered
@@ -85,4 +88,15 @@ def test_only_workers_are_told_to_work_without_narration():
     worker = cortex_system_prompt("worker", None, environ={})
     coordinator = cortex_system_prompt("coordinator", None, environ={})
     assert "Work without narration" in worker and "write one final message" in worker
+    assert "including before the first tool and after a tool result" in worker
+    assert "native shell output alone is not a verified check receipt" in worker
     assert "Work without narration" not in coordinator and "@@" not in worker + coordinator
+
+
+@pytest.mark.parametrize("role", ["coordinator", "worker"])
+def test_conditional_skill_instruction_is_imperative_but_not_eager(role):
+    prompt = cortex_system_prompt(role, None, environ={})
+    assert "call the `read_skill` tool from the `cortex` MCP server with that exact skill id" in prompt
+    assert "before assessing documentation impact for a plan or updating affected docs" in prompt
+    assert "Do not read a conditional skill when its trigger has not arisen" in prompt
+    assert "do not re-read them" in prompt

@@ -74,6 +74,9 @@ def dispatch(store, channel, operation, args):
                 from .gateway import _authority
                 return TaskMachine(store).submit_plan(
                     channel, candidate, args['request_key'], authorization=lambda db: _authority(db, channel))
+    if operation == 'result_submit' and isinstance(args, dict) and args.get('verdict') in {
+            'approve', 'request_changes', 'block'}:
+        args = dict(args, verdict=args['verdict'].upper())
     validate(schema, args)
     machine = TaskMachine(store)
     from .gateway import _authority
@@ -105,14 +108,32 @@ def dispatch(store, channel, operation, args):
         with store.connection() as db:
             provision = db.execute('SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
                                    (channel.task_id, channel.attempt_id)).fetchone()
-            node = db.execute('SELECT stage FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
+            node = db.execute('SELECT stage, role FROM runtime_nodes WHERE task_id=? AND assignment_ref=?',
                               (channel.task_id, provision['idempotency_key'] if provision else None)).fetchone()
+            role_id = db.execute('SELECT role_id FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
+                                 (channel.task_id, channel.attempt_id)).fetchone()
+            recorded = db.execute('SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
+                                  (channel.task_id, channel.channel_id, args['request_key'])).fetchone()
         if not node:
             raise StoreError('runtime_assignment_missing')
         if (node['stage'] == 'review') != ('verdict' in args):
-            raise StoreError('review_verdict_required' if node['stage'] == 'review' else 'reviewer_only_verdict')
+            raise StoreError('review_verdict_required' if node['stage'] == 'review' else 'reviewer_only_verdict',
+                             'arguments.verdict', 'missing' if node['stage'] == 'review' else 'present',
+                             'one review verdict (APPROVE, REQUEST_CHANGES or BLOCK)' if node['stage'] == 'review'
+                             else 'verdict omitted outside the review stage',
+                             'Send verdict=APPROVE, REQUEST_CHANGES or BLOCK on review; omit it otherwise.')
         if 'findings' in args and node['stage'] != 'review':
-            raise StoreError('reviewer_only_findings')
+            raise StoreError('reviewer_only_findings', 'arguments.findings', 'present',
+                             'findings omitted outside the review stage',
+                             'Only a review-stage worker may send findings; omit them here.')
+        if recorded is None:
+            # Observed changes that match an unread situational skill refuse
+            # the result before anything is recorded, so a retry after
+            # read_skill (even with this request_key) goes through. A request
+            # already recorded is a replay and is never re-gated.
+            from .skill_gate import enforce as enforce_situational_skills
+            enforce_situational_skills(store, channel, stage=node['stage'],
+                                       role_ids=(node['role'], role_id['role_id'] if role_id else None))
         # An inline report's body lives in its published file; the request
         # retains and digests its SHA-256 (a changed body still conflicts).
         request = inline_report_form(args)
@@ -122,7 +143,10 @@ def dispatch(store, channel, operation, args):
             previous = db.execute('SELECT * FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
                                   (channel.task_id, channel.channel_id, args['request_key'])).fetchone()
             if previous and (previous['operation'] != operation or previous['digest'] != digest):
-                raise StoreError('request_key_conflict')
+                raise StoreError('request_key_conflict', 'arguments.request_key',
+                                 'key already bound to a different operation or payload on this channel',
+                                 'a fresh key for a new result or the identical original payload for a retry',
+                                 'Retry with the exact original arguments, or use a new key for a new result and publish a new report when its content changed.')
             if previous and json.loads(previous['result_json']).get('complete'):
                 return json.loads(previous['result_json'])['receipt']
             if previous is None:
@@ -137,15 +161,17 @@ def dispatch(store, channel, operation, args):
                     if not gap and 'blocker' in check:
                         raise StoreError('check_blocker_unexpected', f'arguments.checks[{index}].blocker', check['outcome'],
                                          'no blocker on a passed or failed check', 'Remove blocker from checks that passed or failed.')
-                    if not gap and 'command' in check:
-                        raise StoreError('check_command_unexpected', f'arguments.checks[{index}].command', check['outcome'],
-                                         'command only on a not_run or unverified check',
-                                         'Remove command from checks that passed or failed; their command comes from tool_call_ref.')
                 # A pass the runtime cannot verify is kept unverified (or
                 # failed, when its cited command exited nonzero) with the
                 # structured gap; a failure an exact later rerun closed keeps
                 # closed_by. The original claim stays in the digest.
-                accepted = dict(request, checks=accept_checks(db, channel.task_id, channel.attempt_id, args['checks']))
+                accepted_checks = accept_checks(db, channel.task_id, channel.attempt_id, args['checks'])
+                # A supplied argv on a completed check is descriptive, never
+                # evidence. Do not echo it in the retained result as if trusted.
+                for check in accepted_checks:
+                    if check['outcome'] in {'passed', 'failed'}:
+                        check.pop('command', None)
+                accepted = dict(request, checks=accepted_checks)
                 db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
                            (channel.task_id, args['request_key'], channel.channel_id, operation, digest,
                             encoded(dict(complete=False, assignment_ref=provision['idempotency_key'], result=request,

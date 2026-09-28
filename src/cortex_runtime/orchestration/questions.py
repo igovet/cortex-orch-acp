@@ -7,6 +7,29 @@ from ..portable.identity import new_id
 from .state import encoded, event, now, transition
 
 
+# Only an unambiguous, complete owner answer closes unfinished work. In
+# particular, requests to *do* a final check or release are not closure.
+FORCE_FINISH_ANSWERS = frozenset({
+    '/cortex-finish',
+    'закрыть как есть', 'завершить задачу', 'заверши задачу',
+    'закрыть задачу', 'закрой задачу',
+    'finish the task', 'close the task', 'close as is', 'finish now',
+})
+
+
+def is_force_finish_answer(value, question=None):
+    if not isinstance(value, str):
+        return False
+    answer = value.strip().casefold().rstrip('.!')
+    if answer in FORCE_FINISH_ANSWERS:
+        return True
+    prompt = question.casefold() if isinstance(question, str) else ''
+    return answer in {'завершить', 'закрыть', 'finish', 'close'} and (
+        ('задач' in prompt and any(word in prompt for word in ('заверш', 'закры'))) or
+        ('task' in prompt and any(word in prompt for word in ('finish', 'close')))
+    )
+
+
 def request(store, channel, args):
     if args.get('skill_proposal') is not None and channel.role != 'coordinator':
         raise StoreError('skill_proposal_not_allowed', 'skill_proposal', channel.role, 'the coordinator')
@@ -76,9 +99,23 @@ def resume_answered(store, task_id):
         if not row:
             raise StoreError('runtime_question_missing')
         saved = json.loads(row['payload_json'])
-        answer = db.execute('SELECT status,answer_text FROM pending_questions WHERE task_id=? AND id=?', (task_id, saved['question_id'])).fetchone()
+        answer = db.execute('SELECT status,answer_text,answer_source FROM pending_questions WHERE task_id=? AND id=?', (task_id, saved['question_id'])).fetchone()
         if not answer or answer['status'] != 'answered':
             return False
+        if answer['answer_source'] in {'text', 'elicitation'} and is_force_finish_answer(answer['answer_text'], saved['question']):
+            # Leave WAITING_USER in place until stop_task atomically records
+            # the stop marker and fences workers. A crash here is retryable.
+            received = db.execute(
+                "SELECT 1 FROM runtime_events WHERE task_id=? AND type='USER_ANSWER_RECEIVED' "
+                "AND json_extract(payload_json,'$.question_id')=? LIMIT 1",
+                (task_id, saved['question_id']),
+            ).fetchone()
+            if received is None:
+                event(db, task_id, 'USER_ANSWER_RECEIVED', dict(
+                    question_id=saved['question_id'], answer=answer['answer_text'],
+                ))
+            db.commit()
+            return ('force_finish', saved['question_id'])
         event(db, task_id, 'USER_ANSWER_RECEIVED', dict(question_id=saved['question_id'], answer=answer['answer_text']))
         from .skill_proposals import record_decision
         record_decision(db, task_id, saved, answer['answer_text'])

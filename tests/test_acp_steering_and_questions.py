@@ -320,16 +320,8 @@ def test_follow_up_question_on_a_completed_task_is_answered_without_a_plan(tmp_p
 
 
 def test_a_finish_answer_survives_a_process_restart_without_repeating_the_question(tmp_path):
-    """d8d66aa2: the coordinator's user_question_request stopped the task on
-    WAITING_USER; the user answered with a Russian 'Завершить' ("Finish"),
-    but the same question was asked again. Reproduce the persisted cycle
-    (question -> answer -> a fresh runtime against the same store, standing
-    in for the process restart/session recovery that read the persisted
-    state) and assert the question closes exactly once, the answer is
-    processed exactly once, the same question is never re-asked, no
-    structured_proposal_missing occurs, and completion still requires the
-    coordinator's own planned/verified work -- the answer alone never marks
-    the task COMPLETED."""
+    """An exact owner choice to finish closes after restart without claiming
+    that a plan, review, verification, or synthesis succeeded."""
     from cortex_runtime.orchestration.state import TaskMachine
     from runtime_scenarios import propose_inspection, publish_result
 
@@ -373,14 +365,14 @@ def test_a_finish_answer_survives_a_process_restart_without_repeating_the_questi
     output = []
     try:
         assert runtime2.start_prompt(task_id, "s1", "Завершить", output.append,
-                                     threading.Event()) == StopReason.END_TURN
+                                     threading.Event()) == StopReason.CANCELLED
     finally:
         runtime2.shutdown()
 
     context = TaskMachine(store).context(task_id)
-    assert context["state"] == "COMPLETED" and context["blocker"] is None
+    assert context["state"] == "CANCELLED"
     assert len(asked) == 1  # the same question was never asked again
-    assert len(resumed_planning) == 1  # exactly one resumed planning turn
+    assert not resumed_planning  # no coordinator may turn closure into more work
 
     with store.connection() as db:
         questions = db.execute(
@@ -391,18 +383,48 @@ def test_a_finish_answer_survives_a_process_restart_without_repeating_the_questi
         answered_events = db.execute(
             "SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='USER_ANSWER_RECEIVED'",
             (task_id,)).fetchone()[0]
+        force_events = db.execute(
+            "SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='USER_FORCE_FINISHED'",
+            (task_id,)).fetchone()[0]
         blocked = db.execute(
             "SELECT 1 FROM runtime_events WHERE task_id=? AND payload_json LIKE ?",
             (task_id, "%structured_proposal_missing%")).fetchone()
     assert [(q["status"], q["answer_text"]) for q in questions] == [("answered", "Завершить")]
     assert asked_events == 1  # closed exactly once, never re-asked
     assert answered_events == 1  # exactly one answer was processed
+    assert force_events == 1
     assert blocked is None
-    # The answer alone did not complete the task: it only resumed planning
-    # (never straight to COMPLETED), which then went through a real plan,
-    # worker result and verification -- and the user was never shown the
-    # question text again.
+    # Force closure is terminal but never equivalent to verified COMPLETED.
     assert not any("Завершить задачу?" in text for text in output)
+
+
+def test_question_card_close_as_is_stops_same_turn_without_another_coordinator_call(tmp_path):
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    store, task_id = _task(tmp_path, "Prepare release")
+    coordinator_calls = []
+
+    def router(store, channel, *_):
+        def behavior(store, channel, _ref, _message, _index):
+            coordinator_calls.append(channel.role)
+            mcp_tools.dispatch(store, channel, "user_question_request", dict(
+                question="Как завершить релиз?", options=["Проверить ещё раз", "Закрыть как есть"],
+                request_key="close-release",
+            ))
+            return PromptOutcome(StopReason.END_TURN, "Question asked")
+        return behavior
+
+    runtime, _engine = _make_runtime(store, router)
+    try:
+        outcome = runtime.start_prompt(
+            task_id, "s1", "Prepare release", lambda _text: True, threading.Event(),
+            host_elicitor=FakeElicitor("Закрыть как есть"),
+        )
+    finally:
+        runtime.shutdown()
+    assert outcome == StopReason.CANCELLED
+    assert coordinator_calls == ["coordinator"]
+    assert TaskMachine(store).context(task_id)["state"] == "CANCELLED"
 
 
 def test_explicit_cancel_during_worker_does_not_record_route_fallback(tmp_path):
@@ -591,6 +613,147 @@ def test_stop_retains_first_observed_transport_source(tmp_path, client_cancel):
     detail = json.loads(state["wait_detail_json"])
     assert detail["source"] == source
     assert ("/cortex-stop" in detail["explanation"]) is (not client_cancel)
+
+
+def test_owner_close_as_is_answer_force_finishes_without_certifying_work(tmp_path):
+    from types import SimpleNamespace
+    from cortex_runtime.orchestration.state import TaskMachine
+    from cortex_runtime.orchestration.questions import request, resume_answered
+
+    store, task_id = _task(tmp_path)
+    machine = TaskMachine(store)
+    machine.create(task_id, "Make release")
+    channel = SimpleNamespace(task_id=task_id, channel_id="coordinator", role="coordinator")
+    decision = request(store, channel, dict(
+        question="Как завершить релиз?", options=["Проверить ещё раз", "Закрыть как есть"],
+        request_key="close-decision",
+    ))
+    assert questions_store.answer(store, decision["question_id"], "Закрыть как есть", "elicitation")
+    assert resume_answered(store, task_id) == ("force_finish", decision["question_id"])
+    assert machine.context(task_id)["state"] == "WAITING_USER"
+
+    runtime, _engine = _make_runtime(store, lambda *_args: None)
+    assert runtime.stop_task(task_id, "s1", lambda _text: True,
+                             stop_source="user_answer_force_finish",
+                             question_id=decision["question_id"])
+    assert machine.context(task_id)["state"] == "CANCELLED"
+    with store.connection() as db:
+        force = json.loads(db.execute(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_FORCE_FINISHED'",
+            (task_id,),
+        ).fetchone()[0])
+        assert db.execute(
+            "SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='VERIFICATION_PASSED'",
+            (task_id,),
+        ).fetchone()[0] == 0
+    assert force["question_id"] == decision["question_id"]
+    assert force["review_verification_synthesis"] == "not_certified_by_force_finish"
+    assert runtime.stop_task(task_id, "s1", lambda _text: True,
+                             stop_source="user_answer_force_finish",
+                             question_id=decision["question_id"]) is False
+
+
+def test_force_finish_answer_matching_is_narrow():
+    from cortex_runtime.orchestration.questions import is_force_finish_answer
+
+    assert is_force_finish_answer("Закрыть как есть", "Как завершить релиз?")
+    assert is_force_finish_answer("Завершить", "Завершить задачу?")
+    assert is_force_finish_answer("Finish", "Finish this task?")
+    assert is_force_finish_answer("/cortex-finish", "Any question")
+    assert not is_force_finish_answer("Finish", "Anything else?")
+    assert not is_force_finish_answer("Сделать ещё один прогон проверки", "Как завершить релиз?")
+    assert not is_force_finish_answer("Finish the release build", "Finish this task?")
+
+
+def test_force_finish_refuses_forged_answer_or_missing_user_source(tmp_path):
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    store, task_id = _task(tmp_path)
+    TaskMachine(store).create(task_id, "Build")
+    runtime, _engine = _make_runtime(store, lambda *_args: None)
+    with pytest.raises(ValueError, match="captured owner answer"):
+        runtime.stop_task(task_id, "s1", lambda _text: True,
+                          stop_source="user_answer_force_finish", question_id="pq_forged")
+    question = questions_store.create_if_absent(store, task_id, "ask_user:more", "Finish this task?",
+                                                options=["Do one more check", "Finish"])
+    assert questions_store.answer(store, question.id, "Do one more check", "elicitation")
+    with pytest.raises(ValueError, match="captured owner answer"):
+        runtime.stop_task(task_id, "s1", lambda _text: True,
+                          stop_source="user_answer_force_finish", question_id=question.id)
+    with pytest.raises(ValueError, match="captured owner command"):
+        runtime.stop_task(task_id, "s1", lambda _text: True,
+                          stop_source="cortex_finish_command", source_origin="acp-command:s1",
+                          source_event_id="forged")
+    assert TaskMachine(store).context(task_id)["state"] == "PLANNING"
+    assert not acp_steering.is_stopped(store, task_id)
+
+
+def test_captured_finish_command_reaches_terminal_runtime_state(tmp_path):
+    from cortex_runtime.bootstrap import append_source_event
+    from cortex_runtime.orchestration.state import TaskMachine
+    from types import SimpleNamespace
+
+    store, task_id = _task(tmp_path)
+    TaskMachine(store).create(task_id, "Build")
+    source = SimpleNamespace(origin="acp-command:s1", event_id="owner-finish-1")
+    append_source_event(store, source, "/cortex-finish", task_id)
+    runtime, _engine = _make_runtime(store, lambda *_args: None)
+    assert runtime.stop_task(
+        task_id, "s1", lambda _text: True, stop_source="cortex_finish_command",
+        source_origin=source.origin, source_event_id=source.event_id,
+    )
+    assert TaskMachine(store).context(task_id)["state"] == "CANCELLED"
+    with store.connection() as db:
+        force = json.loads(db.execute(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_FORCE_FINISHED'",
+            (task_id,),
+        ).fetchone()[0])
+    assert (force["source_origin"], force["source_event_id"]) == (source.origin, source.event_id)
+
+
+def test_finish_before_first_coordinator_provisioning_still_has_terminal_state(tmp_path):
+    from cortex_runtime.bootstrap import append_source_event
+    from cortex_runtime.orchestration.state import TaskMachine
+    from types import SimpleNamespace
+
+    store, task_id = _task(tmp_path, "Original task goal")
+    source = SimpleNamespace(origin="acp-command:s1", event_id="finish-before-open")
+    append_source_event(store, source, "/cortex-finish", task_id)
+    runtime, engine = _make_runtime(store, lambda *_args: None)
+    assert runtime.stop_task(task_id, "s1", lambda _text: True,
+                             stop_source="cortex_finish_command",
+                             source_origin=source.origin, source_event_id=source.event_id)
+    context = TaskMachine(store).context(task_id)
+    assert context["state"] == "CANCELLED"
+    assert context["goal"] == "Original task goal"
+    assert not engine.open_calls
+    assert runtime.stop_task(task_id, "s1", lambda _text: True,
+                             stop_source="cortex_finish_command",
+                             source_origin=source.origin, source_event_id=source.event_id) is False
+
+
+def test_force_finish_reconciles_marker_committed_before_terminal_transition(tmp_path):
+    from cortex_runtime.bootstrap import append_source_event
+    from cortex_runtime.orchestration.state import TaskMachine
+    from types import SimpleNamespace
+
+    store, task_id = _task(tmp_path)
+    TaskMachine(store).create(task_id, "Build")
+    source = SimpleNamespace(origin="acp-command:s1", event_id="owner-finish-crash")
+    append_source_event(store, source, "/cortex-finish", task_id)
+    assert acp_steering.mark_stopped(
+        store, task_id, source="cortex_finish_command", session_id="s1",
+        source_origin=source.origin, source_event_id=source.event_id,
+    )
+    assert TaskMachine(store).context(task_id)["state"] == "PLANNING"
+    runtime, _engine = _make_runtime(store, lambda *_args: None)
+    assert runtime.stop_task(task_id, "s1", lambda _text: True,
+                             stop_source="cortex_finish_command",
+                             source_origin=source.origin, source_event_id=source.event_id)
+    assert TaskMachine(store).context(task_id)["state"] == "CANCELLED"
+    with store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='USER_FORCE_FINISHED'",
+                          (task_id,)).fetchone()[0] == 1
 
 
 def test_stop_marker_and_source_commit_atomically(tmp_path, monkeypatch):
@@ -960,6 +1123,57 @@ def _agent_for_language_tests(tmp_path, monkeypatch):
     return agent, transport, environ
 
 
+def test_agent_finish_command_with_real_runtime_replies_after_closing_host_session(tmp_path, monkeypatch):
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    agent, transport, _environ = _agent_for_language_tests(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(project))
+    source = SourceEvent(origin=f"acp:{session_id}", event_id=str(uuid.uuid4()))
+    task = bootstrap_task(store, source, "Original goal", source.origin)
+    agent.sessions[session_id]["task_id"] = task.task_id
+    agent.sessions[session_id]["owner_epoch"] = task.owner_epoch
+    acp_sessions.bind_task(store, session_id, task.task_id)
+    runtime, _engine = _make_runtime(store, lambda *_args: None)
+    agent.runtime = runtime
+
+    agent._run_command_body(61, session_id, agent.sessions[session_id],
+                            (acp_commands.CORTEX_FINISH, ""), threading.Event())
+    response = next(r for r in transport.responses if r.get("id") == 61)
+    assert response["result"]["stopReason"] == "end_turn"
+    assert TaskMachine(store).context(task.task_id)["state"] == "CANCELLED"
+    with store.connection() as db:
+        assert db.execute("SELECT closed_at FROM acp_host_sessions WHERE session_id=?",
+                          (session_id,)).fetchone()[0] is not None
+
+
+def test_agent_queued_finish_with_real_runtime_acks_after_terminal_state(tmp_path, monkeypatch):
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    agent, transport, _environ = _agent_for_language_tests(tmp_path, monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(project))
+    source = SourceEvent(origin=f"acp:{session_id}", event_id=str(uuid.uuid4()))
+    task = bootstrap_task(store, source, "Original goal", source.origin)
+    agent.sessions[session_id]["task_id"] = task.task_id
+    agent.sessions[session_id]["owner_epoch"] = task.owner_epoch
+    acp_sessions.bind_task(store, session_id, task.task_id)
+    runtime, _engine = _make_runtime(store, lambda *_args: None)
+    agent.runtime = runtime
+
+    agent._queue_paseo_message(62, session_id, agent.sessions[session_id], json.dumps(dict(
+        clientMessageId="queued-finish", content=[dict(type="text", text="/cortex-finish")],
+    )))
+    response = next(r for r in transport.responses if r.get("id") == 62)
+    assert "result" in response
+    assert TaskMachine(store).context(task.task_id)["state"] == "CANCELLED"
+    assert not agent.sessions[session_id].get("queued_messages")
+
+
 def test_paseo_steer_config_is_durable_and_idempotent(tmp_path, monkeypatch):
     from cortex_runtime.orchestration.state import TaskMachine
 
@@ -1023,6 +1237,83 @@ def test_paseo_steer_config_is_durable_and_idempotent(tmp_path, monkeypatch):
             value=json.dumps(dict(clientMessageId="msg-2",
                                   content=[dict(type="text", text="Stale steer")])),
         ))
+
+
+def test_paseo_queued_message_after_loaded_turn_recovers_owner_epoch(tmp_path, monkeypatch):
+    from cortex_runtime.acp.agent import Agent
+    from cortex_runtime.acp.protocol import RpcError
+    from cortex_runtime.ownership import acquire_task_owner
+    from cortex_runtime.orchestration.state import TaskMachine
+    from test_acp_config_options import _NoopRuntime, _RecordingTransport
+
+    agent, _, environ = _agent_for_language_tests(tmp_path, monkeypatch)
+    environ["CORTEX_PASEO_QUESTION_UI"] = "1"
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(project))
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id=str(uuid.uuid4())), "Inspect", "owner-1")
+    acp_sessions.bind_task(store, session_id, task.task_id)
+    TaskMachine(store).create(task.task_id, "Inspect")
+    with store.connection() as db:
+        db.execute("INSERT INTO task_orchestration (task_id,state,updated_at,requirement_revision) VALUES (?,?,?,0)",
+                   (task.task_id, "running", "now"))
+        db.commit()
+
+    restored = Agent(_NoopRuntime(), environ=environ)
+    transport = _RecordingTransport()
+    restored.bind_transport(transport)
+    restored.initialized = True
+    restored._session_load(1, dict(sessionId=session_id, cwd=str(project), mcpServers=[]))
+    session = restored.sessions[session_id]
+    assert session["owner_epoch"] == task.owner_epoch
+    recovered = acquire_task_owner(store, task.task_id, "recovery:test", task.owner_epoch.epoch)
+    assert recovered.epoch != task.owner_epoch.epoch
+    turn = threading.Event()
+    session["active"] = turn
+    restored.runtime.active_session_owner_epoch = lambda project_root, task_id, host_session: (
+        recovered.epoch if (project_root, task_id, host_session) == (str(project), task.task_id, session_id) else None
+    )
+    params = dict(
+        sessionId=session_id, configId="cortex_queued_message",
+        value=json.dumps(dict(clientMessageId="restored-1", content=[dict(type="text", text="Follow up")])),
+    )
+    restored._session_set_config_option(2, params)
+    assert any(response.get("id") == 2 and "result" in response for response in transport.responses)
+    assert session["owner_epoch"].epoch == recovered.epoch
+    with store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM source_events WHERE task_id=? AND origin=?",
+                          (task.task_id, f"paseo-steer:{session_id}")).fetchone()[0] == 1
+
+    # A different owner or a completed turn must not refresh a stale session.
+    next_owner = acquire_task_owner(store, task.task_id, "other-process", recovered.epoch)
+    with pytest.raises(RpcError, match="no longer owns"):
+        restored._session_set_config_option(3, {**params, "value": json.dumps(dict(
+            clientMessageId="restored-2", content=[dict(type="text", text="Must refuse")]))})
+    restored.runtime.active_session_owner_epoch = lambda *_: next_owner.epoch
+    session["active"] = None
+    with pytest.raises(RpcError, match="no longer owns"):
+        restored._session_set_config_option(4, {**params, "value": json.dumps(dict(
+            clientMessageId="restored-3", content=[dict(type="text", text="Must refuse")]))})
+
+
+def test_active_session_owner_epoch_requires_matching_live_turn(tmp_path):
+    from types import SimpleNamespace
+    from cortex_runtime.acp.production_runtime import ProductionOrchestratingRuntime
+
+    store, task_id = _task(tmp_path)
+    runtime, _ = _make_runtime(store, lambda *_: None)
+    runtime._active_tasks.add(task_id)
+    runtime._task_requester_sessions[task_id] = "restored-session"
+    runtime._coordinator_channels[task_id] = SimpleNamespace(owner_epoch=2)
+    assert runtime.active_session_owner_epoch(task_id, "restored-session") == 2
+    assert runtime.active_session_owner_epoch(task_id, "other-session") is None
+    production = ProductionOrchestratingRuntime()
+    production._runtimes[str(tmp_path)] = runtime
+    assert production.active_session_owner_epoch(str(tmp_path), task_id, "restored-session") == 2
+    assert production.active_session_owner_epoch("/different-project", task_id, "restored-session") is None
+    runtime._active_tasks.remove(task_id)
+    assert runtime.active_session_owner_epoch(task_id, "restored-session") is None
 
 
 def test_paseo_queued_message_with_image_is_captured_not_refused(tmp_path, monkeypatch):

@@ -298,6 +298,9 @@ def _run_cli(args) -> int:
         return 2
 
     env = isolated_environment(home)
+    # A wrapper invoked from an active Paseo agent must not target that agent.
+    env.pop("PASEO_AGENT_ID", None)
+    env.pop("PASEO_AGENT_CWD", None)
     # Paseo bundles server plugins as CJS and does not expose their source path.
     # Pass this worktree root explicitly to the isolated daemon for directory plugins.
     env["CORTEX_PASEO_SOURCE_ROOT"] = str(Path(__file__).resolve().parent.parent)

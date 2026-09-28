@@ -3,8 +3,8 @@
 Read this reference only for structural repository discovery or when saved report
 detail is needed.
 
-When a code index (such as Codebase Memory) is available in the current host, use
-it first for every code discovery question: definitions, callers, dependencies,
+When an external code-index MCP server (such as `codebase-memory-mcp`) is attached,
+use its own tools first for every code discovery question: definitions, callers, dependencies,
 impact and implementation reads. Use repository-native search or file reads only
 for literal text, configuration and non-code files, for paths the index does not
 cover, or when no matching healthy index exists. Discover the needed operation
@@ -52,7 +52,8 @@ or the concrete limitation that required source fallback. Merely listing availab
 tools is not evidence that graph discovery was performed.
 
 Treat report references as opaque values supplied by the coordinator or a live
-catalogue result. Read only reports relevant to the assignment. Begin each document
+catalogue result. Read them through Cortex MCP `read_report`, not the code-index
+server or a native file tool. Read only reports relevant to the assignment. Begin each document
 at no more than 4,000 characters and continue with its cursor until the needed fact
 is found. Reuse unchanged pages. Record the source revision, artifact revision and
 remaining coverage gaps in the published evidence.

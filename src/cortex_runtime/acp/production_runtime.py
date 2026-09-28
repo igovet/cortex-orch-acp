@@ -255,6 +255,12 @@ class ProductionOrchestratingRuntime:
         for runtime in list(self._runtimes.values()):
             runtime.cancel(session_id)
 
+    def active_session_owner_epoch(self, project_root, task_id, session_id):
+        """Return only an already-open, session-bound coordinator's epoch."""
+        with self._lock:
+            runtime = self._runtimes.get(project_root)
+        return runtime.active_session_owner_epoch(task_id, session_id) if runtime is not None else None
+
     def cancel_task(self, task_id, session_id, *, project_root, emit_tool_call=None):
         """Forward Paseo's task-wide ``session/cancel`` to the owning project."""
         runtime = self._runtime_for_project(project_root)
@@ -290,9 +296,14 @@ class ProductionOrchestratingRuntime:
 
     # -- T020 /cortex-stop / /cortex-answer entrypoints ------------------
 
-    def stop_task(self, task_id, session_id, emit_update, *, project_root, emit_tool_call=None):
+    def stop_task(self, task_id, session_id, emit_update, *, project_root, emit_tool_call=None,
+                  stop_source="cortex_stop_command", question_id=None, source_origin=None, source_event_id=None):
         runtime = self._runtime_for_project(project_root)
-        return runtime.stop_task(task_id, session_id, emit_update, emit_tool_call=emit_tool_call)
+        return runtime.stop_task(
+            task_id, session_id, emit_update, emit_tool_call=emit_tool_call,
+            stop_source=stop_source, question_id=question_id,
+            source_origin=source_origin, source_event_id=source_event_id,
+        )
 
     def answer_question(self, task_id, session_id, question, text, emit_update, cancel_event, *, project_root, emit_tool_call=None):
         runtime = self._runtime_for_project(project_root)

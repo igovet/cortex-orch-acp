@@ -23,6 +23,16 @@ Additional states are BLOCKED, FAILED, CANCELLED, WAITING_USER and RECOVERING.
 A direct EXECUTING → COMPLETED transition is rejected. Model-facing APIs do not
 accept state transitions or task acceptance decisions.
 
+An explicit owner force-finish is **not** verified completion. `/cortex-finish`
+or an unambiguous answer to a task-closure question stops task-owned work and
+leaves the task terminal `CANCELLED`, with a `USER_FORCE_FINISHED` event recording
+the captured owner source, prior state, current revision, unfinished nodes, and
+the fact that review, verification, and synthesis were not certified by this
+decision. The runtime never inserts a passing review or verification event for
+force-finish. Unlike ordinary coordinator planning, it does not require another
+worker or a model acceptance decision; unlike `COMPLETED`, it makes no quality
+claim about the deliverable.
+
 Only an immutable, attempt-owned report and its structured result close a node.
 A reviewer, required whenever the project changed, submits APPROVE, REQUEST_CHANGES or BLOCK. Changes produce
 fix nodes and another review, with a three-cycle ceiling. Structured review findings confine fixes to the

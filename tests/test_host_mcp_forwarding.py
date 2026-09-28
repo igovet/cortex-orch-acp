@@ -432,14 +432,28 @@ def test_attached_server_section_states_the_code_index_first_step():
     from cortex_runtime.engine.unified_system_prompt import attached_servers_section, with_attached_servers
 
     assert attached_servers_section([]) is None
-    note = attached_servers_section(["playwright", "codebase-memory-mcp"], "/work/project")
+    full = {"name": "codebase-memory-mcp", "allowed_tools": [
+        "list_projects", "search_graph", "trace_path", "get_code_snippet", "get_architecture", "index_repository"]}
+    note = attached_servers_section(["playwright", full], "/work/project")
     assert "attached to this session: `codebase-memory-mcp`, `playwright`." in note
     assert "Call `list_projects` once and take the project whose root path is `/work/project`" in note
     assert "`search_graph`, `trace_path` and `get_code_snippet`" in note
+    assert "`index_repository` attempt" in note
+    limited = attached_servers_section([{**full, "coordinator_tools": ["search_graph"],
+                                         "read_only_tools": full["allowed_tools"]}], "/work/project",
+                                       role="coordinator")
+    assert "only these granted tools: `search_graph`" in limited
+    assert "Call `list_projects`" not in limited
+    coordinator_tools = [tool for tool in full["allowed_tools"] if tool != "index_repository"]
+    coordinator = attached_servers_section([{**full, "coordinator_tools": coordinator_tools,
+                                             "read_only_tools": coordinator_tools}],
+                                           "/work/project", role="coordinator")
+    assert "ask an authorized worker" in coordinator
+    assert "index_repository` attempt" not in coordinator
     other = attached_servers_section(["playwright"], "/work/project")
     assert "`playwright`" in other and "list_projects" not in other
     meta = {"systemPrompt": "Base.\n\nRole text.\n", "claudeCode": {"options": {}}}
-    merged = with_attached_servers(meta, ["codebase-memory-mcp"], "/work/project")
+    merged = with_attached_servers(meta, [full], "/work/project")
     assert merged["systemPrompt"].startswith("Base.\n\nRole text.\n\n# Attached MCP servers\n")
     assert meta["systemPrompt"] == "Base.\n\nRole text.\n" and merged["claudeCode"] == meta["claudeCode"]
     appended = with_attached_servers({"systemPrompt": {"append": "Role text."}}, ["playwright"])
@@ -479,7 +493,8 @@ def test_every_engine_session_new_carries_the_attached_server_note(tmp_path, eng
     prompt = wire["_meta"]["systemPrompt"]["append"]
     assert prompt.startswith("Role text.\n\n# Attached MCP servers\n\nExternal MCP servers attached to this "
                              "session: `codebase-memory-mcp`.")
-    assert f"root path is `{tmp_path}`" in prompt
+    assert "only these granted tools: `inspect`" in prompt
+    assert "Call `list_projects`" not in prompt
 
 
 def test_registry_always_load_tools_must_be_granted(tmp_path):

@@ -123,9 +123,9 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
         report = db.execute("SELECT task_id FROM reports WHERE id=?", (report_ref,)).fetchone()
     if report is None or report["task_id"] != channel.task_id:
         raise StoreError(
-            "unknown_report_ref", "report_ref", report_ref,
-            "an existing published report id for this task",
-            "Publish via write_report first and pass the exact receipt's report_ref.",
+            "unknown_report_ref", "arguments.report_ref", "well-formed id not published in this task",
+            "the report_id returned by this worker's write_report in this task",
+            "Publish this worker's filled draft with write_report, then copy its exact report_id into result_submit.report_ref.",
         )
     # T019: report_ref must be a report this worker itself published from its
     # own draft (drafts.owner_thread_id == channel.principal_thread_id) --
@@ -137,10 +137,10 @@ def _worker_publish_result(store, channel: ChannelContext, args: Mapping[str, An
         ).fetchone()
     if draft is None or draft["owner_thread_id"] != channel.principal_thread_id:
         raise StoreError(
-            "report_not_own", "report_ref", report_ref,
+            "report_not_own", "arguments.report_ref", "published report owned by another thread or attempt",
             "a report published from this worker's own draft in this attempt",
             "Publish the result via write_report using this worker's own draft, "
-            "then pass that exact receipt's report_ref.",
+            "then copy that call's exact report_id into result_submit.report_ref.",
         )
     assignment_ref = channel.attempt_id
     dedup_key = f"result_submit:{report_ref}"
@@ -294,7 +294,18 @@ def _own_role_id(store, channel: ChannelContext | None) -> str | None:
 
 
 def _shared_read_skill(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
-    """Read a shared skill or a declared reference for this channel's role."""
+    """Read a shared skill or a declared reference for this channel's role.
+
+    A worker's successful read is retained for its attempt: the runtime's
+    situational-skill gate at result_submit (orchestration.skill_gate)
+    checks it."""
+    result = _read_skill_body(store, channel, args)
+    from ..orchestration.skill_gate import record_skill_read
+    record_skill_read(store, channel, result["skill"])
+    return result
+
+
+def _read_skill_body(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
     from ..portable.roles import (
         COORDINATOR_ONLY_SHARED_ROLE_IDS, COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS,
         SHARED_ROLE_IDS, WORKER_REFERENCE_IDS, load_role, read_reference,
@@ -447,13 +458,19 @@ _OPERATION_DESCRIPTIONS = dict(
     verification_submit="After the runtime verification failed and the work itself is fine: replace only the verification commands and verify again, without redoing the reviewed work.",
     synthesis_submit="Submit a final synthesis grounded in the retained reports and verification. Accepted only after every task, the review and the verification finished. Every retained not_run or unverified worker check must be verified first or listed in not_verified with its concrete blocker. The runtime then completes the task, so use it only when nothing is left for the user to decide; otherwise ask with user_question_request.",
     user_question_request="Request user input while planning or reconciling. Write the details in your message first; the question itself is one short line with short answer options. The runtime persists the question before elicitation and resumes only after a real answer. A question asked while reconciling (approve a proposed plan, choose how to continue) keeps the task open, and the answer returns it to planning: submit a plan for the chosen work, or answer_submit a short close when the user chose to finish. With skill_proposal it proposes one reusable project skill backed by retained report evidence. Use exactly one accepted action-matched pair, approval first: create: [Create the skill, Not now], [Создать навык, Не сейчас], [Approve creating the skill, Decline creating the skill], [Одобрить создание навыка, Отклонить создание навыка]; update: [Update the skill, Not now], [Обновить навык, Не сейчас], [Approve updating the skill, Decline updating the skill], [Одобрить обновление навыка, Отклонить обновление навыка]. Only an exact pair is accepted; 1 selects its approval label, 2 its decline label, and any other answer is unclear. An arbitrary first option never approves.",
-    result_submit="Submit this worker attempt's report, summary and observed checks in one call: pass the report itself (title and Markdown) and the runtime publishes it as your immutable report, or pass report_ref from your own earlier write_report. Exactly one of the two. An exact retry with the same request_key returns the same report and result. Every not_run or unverified check names its concrete blocker. Reviewers must include a verdict. This cannot accept the task.",
+    result_submit="Submit this worker attempt's report, summary and observed checks. Exactly one report path: (1) send report={title,markdown} inline and omit report_ref; or (2) create_draft, draft_write, write_report, then copy write_report.report_id into report_ref and omit report. Use checks=[] only if no automated command ran. For a verified passed check, run command_run first, inspect its complete exit-0 result, and copy its tool_call_ref into one check. Engine-native shell calls and report ids are not command evidence. A checks[].command supplied with passed or failed is descriptive only and cannot verify the check; do not send closed_by, which the runtime derives. Every not_run or unverified check needs a concrete blocker. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. Reviewers must include verdict=APPROVE, REQUEST_CHANGES or BLOCK (lowercase forms normalize); other workers omit verdict. This cannot accept the task. "
+                  "The runtime compares the project with how it was when this attempt started: when the changes match a "
+                  "situational skill's trigger ({gates}) and this attempt has not read that skill with read_skill, the "
+                  "result is refused with situational_skill_required and nothing is recorded; read the skill, re-check "
+                  "the edits against it, then submit again.",
     ask_question="Ask the user for information this assignment cannot finish without. It stops every running worker and returns the task to planning; after the answer the coordinator re-plans with it.",
     read_skill=(
         "Read one shared skill or role-scoped reference. The input object has exactly one "
         "accepted field, `skill`; pass the exact skill/reference id there (for example "
         "skill='documentation-sync' or skill='knowledge-harvest'). Do not send `topic`, "
-        "`name`, or `id`; those fields are invalid."
+        "`name`, or `id`; those fields are invalid. A worker's successful read is retained for its attempt; "
+        "result_submit refuses a result whose observed changes match an unread situational skill's trigger "
+        "({gates})."
     ),
     list_sources="List durable source references (user text and resolved attachments) for this task, cursor-paginated. "
                  "Every page also carries answered_questions: each question a real user answer resolved, with its "
@@ -549,7 +566,7 @@ def _enumerate_skills(schema: dict, role_kind: str, role_id: str | None) -> dict
     from ..acp.orchestrating_runtime import COORDINATOR_ROLE_ID
     from ..portable.roles import (
         COORDINATOR_ONLY_SHARED_ROLE_IDS, COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS,
-        SHARED_ROLE_IDS, WORKER_REFERENCE_IDS,
+        SHARED_ROLE_IDS, WORKER_REFERENCE_IDS, situational_skill_triggers,
     )
 
     ids = set(SHARED_ROLE_IDS) | EXAMPLE_REFERENCE_IDS
@@ -560,7 +577,13 @@ def _enumerate_skills(schema: dict, role_kind: str, role_id: str | None) -> dict
     if own:
         ids.add(own)
     properties = dict(schema["properties"])
-    properties["skill"] = dict(properties["skill"], enum=sorted(ids))
+    triggers = situational_skill_triggers(role_kind, role_id)
+    properties["skill"] = dict(
+        properties["skill"], enum=sorted(ids),
+        description=properties["skill"].get("description", "Exact skill id.") + " Situational ids and when to read them: "
+        + "; ".join(f"{skill_id}: {trigger}" for skill_id, trigger in triggers)
+        + ". Read only a matching skill; the always-needed skills are already included in the role instructions.",
+    )
     return dict(schema, properties=properties)
 
 
@@ -584,11 +607,23 @@ def tool_definitions(role_kind: str, *, role_id: str | None = None, stage: str |
             schema = _narrow_result_submit(schema, stage)
         if name == "read_skill":
             schema = _enumerate_skills(schema, role_kind, role_id)
+        description = _OPERATION_DESCRIPTIONS.get(name, f"Delegation operation '{name}'.")
+        if "{gates}" in description:
+            from ..orchestration.skill_gate import gate_summary
+            description = description.replace("{gates}", gate_summary())
+        if name == "read_skill":
+            from ..portable.roles import situational_skill_triggers
+            description += (
+                " When one of these conditions arises during work, call read_skill with that exact id before "
+                "the action and follow the returned body; do not read unrelated or already-included skills. "
+                "Situational skills: "
+                + "; ".join(f"{skill_id}: {trigger}" for skill_id, trigger in
+                            situational_skill_triggers(role_kind, role_id)) + "."
+            )
         tools.append(dict(
             name=name, title=name.replace("_", " ").capitalize(),
-            description=_OPERATION_DESCRIPTIONS.get(name, f"Delegation operation '{name}'."),
-            inputSchema=dict(type="object", properties=schema["properties"],
-                              required=schema["required"], additionalProperties=False),
+            description=description,
+            inputSchema=dict(schema),
             annotations=dict(readOnlyHint=name in ("project_read", "project_git", "task_get_context", "list_sources", "read_source", "read_capsule", "read_large_output", "read_diagnostics", "read_skill", "list_route_options"), destructiveHint=name=="project_delete",
                               idempotentHint=name != "ask_question", openWorldHint=False),
         ))
@@ -610,7 +645,25 @@ def dispatch(store, channel: ChannelContext, operation: str, args: Mapping[str, 
         return gateway.dispatch(store, channel, operation, dict(args))
     from ..orchestration import mcp as runtime_mcp
     if operation in runtime_mcp.schemas(channel.role):
-        return runtime_mcp.dispatch(store, channel, operation, dict(args))
+        try:
+            return runtime_mcp.dispatch(store, channel, operation, dict(args))
+        except StoreError as error:
+            if operation == "result_submit":
+                # Retain only a code and safe field path, never rejected
+                # arguments, report bodies, receipts or raw error messages.
+                try:
+                    from ..observability.events import append_event as _append_observability_event
+
+                    field = error.field if isinstance(error.field, str) and (
+                        error.field.startswith("arguments.") or error.field in {"report_ref", "request_key"}
+                    ) else "arguments"
+                    _append_observability_event(
+                        store, channel.task_id, "submission_rejection", str(error), "observed",
+                        attempt_id=channel.attempt_id, detail=dict(operation=operation, field=field),
+                    )
+                except Exception:
+                    pass
+            raise
     if operation not in delegation_contracts.schemas_for(channel.role):
         raise StoreError("unknown_operation")
     role_kind = channel.role

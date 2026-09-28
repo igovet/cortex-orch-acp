@@ -106,6 +106,25 @@ def test_roles_advertise_only_the_new_protocol(tmp_path):
         assert ('plan_submit' in names)==(role=='coordinator')
         assert ('result_submit' in names)==(role=='worker')
         assert all(t['_meta']['anthropic/alwaysLoad'] is True for t in tools)
+        read_skill = next(t for t in tools if t['name'] == 'read_skill')
+        assert 'documentation-sync: before assessing documentation impact' in read_skill['description']
+        assert 'documentation-sync: before assessing documentation impact' in (
+            read_skill['inputSchema']['properties']['skill']['description'])
+        assert 'documentation-sync' in read_skill['inputSchema']['properties']['skill']['enum']
+
+
+def test_result_submit_wire_advertises_and_rejects_missing_report(tmp_path):
+    project, store, task, coordinator, secret = _bootstrap(tmp_path)
+    worker, worker_secret, _ = _worker_channel(store, task, coordinator)
+    tools = _call(project, worker, worker_secret, _init_and('tools/list', {}), tmp_path)[-1]['result']['tools']
+    schema = next(tool['inputSchema'] for tool in tools if tool['name'] == 'result_submit')
+    assert len(schema['oneOf']) == 2
+    assert schema['properties']['report_ref']['pattern'] == r'^r_[0-9a-f]{12}$'
+    args = dict(summary='Observed', checks=[], request_key='missing-report')
+    refused = _call(project, worker, worker_secret, _init_and('tools/call',
+                    dict(name='result_submit', arguments=args)), tmp_path)[-1]
+    assert 'result_report_required' in json.dumps(refused) or 'invalid_arguments' in json.dumps(refused)
+    assert 'report_ref' in json.dumps(refused) and 'report' in json.dumps(refused)
 
 
 def test_plan_wire_is_idempotent_and_does_not_start_a_worker(tmp_path):
@@ -168,3 +187,34 @@ def test_worker_gateway_publication_and_result_cross_real_mcp_process(tmp_path):
     assert context['state']=='EXECUTING'
     assert context['nodes'][0]['status']=='completed'
     assert context['nodes'][0]['result']['report_ref']==report['report_id']
+
+
+def test_result_submit_accepts_descriptive_command_without_trusting_fake_receipt(tmp_path):
+    from cortex_runtime.trusted_channel import resolve_channel
+    from runtime_scenarios import reserve_assignment
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    project, store, task, coordinator_id, coordinator_secret = _bootstrap(tmp_path)
+    coordinator = resolve_channel(store, coordinator_id, coordinator_secret)
+    reserved = reserve_assignment(store, coordinator, dict(
+        title='Implement', brief='Implement', role='backend-dev', acceptance='Report', request_key='one'))
+    worker, worker_secret, attempt = _worker_channel(store, task, coordinator_id)
+    with store.connection() as db:
+        stamp = store._now()
+        db.execute('INSERT INTO delegation_provisioning VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                   (reserved['assignment_ref'], task, 'a_wire1', attempt, 'worker-backend-dev',
+                    'ready', 'ready', 'shared_project_root', worker, None, None, None,
+                    'qualified', None, coordinator.owner_epoch, stamp, stamp))
+        db.commit()
+    args = dict(report=dict(title='Report', markdown='# Report\n\nObserved.'),
+                summary='Observed', request_key='result-with-command', checks=[dict(
+                    name='unit tests', outcome='passed', command=['python3', '-m', 'pytest'],
+                    tool_call_ref='gateway:' + 'a' * 32)])
+    result = _data(_call(project, worker, worker_secret, _init_and('tools/call',
+                   dict(name='result_submit', arguments=args)), tmp_path))
+    assert result['recorded']
+    assert result['checks'][0]['outcome'] == 'unverified'
+    assert result['checks'][0]['claimed_outcome'] == 'passed'
+    retained = TaskMachine(store).context(task)['nodes'][0]['result']['checks'][0]
+    assert 'command' not in retained
+    assert retained['evidence_gap']

@@ -391,15 +391,15 @@ _SKILL_TRIGGERS = {
                        "or you will edit the runtime's draft",
     "content-safety": "private data, a secret, a raw host log or someone else's content "
                       "may enter an artifact",
-    "context-compaction": "your context is running out mid-work",
+    "context-compaction": "before continuing after context is compacted or runs out mid-work",
     "coordinator-communication": "you write to the user and the wording matters",
-    "documentation-sync": "your change makes existing documentation wrong",
-    "knowledge-harvest": "you were asked to collect what a codebase already knows",
+    "documentation-sync": "before assessing documentation impact for a plan or updating docs affected by a behavior or contract change",
+    "knowledge-harvest": "before collecting what a codebase already knows into project knowledge",
     "skill-management": "the user invoked /skill-management or approved a skill proposal, or retained reports repeat a procedure",
     "cortex-control": "the user asked for the `clear N days` retention command",
     "report-publication": "you draft and publish your report and result",
     "code-and-evidence": "you locate code (code index first) or need saved report detail",
-    "interactive-resources": "you need a browser, device, port or server session",
+    "interactive-resources": "before starting or using a browser, device, port or server session",
     "index": "you want a full-report example",
 }
 
@@ -417,6 +417,21 @@ INLINED_SKILLS: dict[str, tuple[str, ...]] = {
     "worker": ("tool-discipline", "content-safety", "report-publication", "code-and-evidence"),
     "shared": (),
 }
+
+
+def situational_skill_triggers(role_kind: str, role_id: str | None = None) -> tuple[tuple[str, str], ...]:
+    """Role-visible conditional skills and their action-bound triggers.
+
+    Keep the prompt list and the read_skill tool catalogue identical. Inlined
+    procedures are intentionally absent: they do not require another read.
+    """
+    loadable = NAMED_SKILLS.get(role_kind, ())
+    if role_id == CONSULTANT_ROLE_ID:
+        loadable = tuple(skill_id for skill_id in loadable
+                         if skill_id not in CONSULTANT_EXCLUDED_NAMED_SKILLS)
+    inlined = set(INLINED_SKILLS.get(role_kind, ()))
+    return tuple((skill_id, _SKILL_TRIGGERS[skill_id]) for skill_id in loadable
+                 if skill_id not in inlined and skill_id in _SKILL_TRIGGERS)
 
 
 def _inlined_skill_text(skill_id: str, role_kind: str) -> str | None:
@@ -446,10 +461,7 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
     worker that cannot start at all is worse still, and the omission is
     visible in what was delivered.
     """
-    loadable = NAMED_SKILLS.get(role_set.kind, ())
-    if role_set.role_id == CONSULTANT_ROLE_ID:
-        loadable = tuple(skill_id for skill_id in loadable
-                          if skill_id not in CONSULTANT_EXCLUDED_NAMED_SKILLS)
+    loadable = situational_skill_triggers(role_set.kind, role_set.role_id)
     parts = [role_set.body_portable]
     inlined = []
     for skill_id in INLINED_SKILLS.get(role_set.kind, ()):
@@ -463,8 +475,6 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
             "full. Follow them from your first action; do not read them again with `read_skill`.\n\n"
             + "\n\n".join(f"### Skill `{skill_id}`\n\n{text}" for skill_id, text in inlined)
         )
-    included = {skill_id for skill_id, _ in inlined}
-    loadable = tuple(skill_id for skill_id in loadable if skill_id not in included)
     if loadable:
         # Named, not pasted. Handing every shared skill over with the role
         # made the delivered text half again as long before the work even
@@ -474,10 +484,10 @@ def composed_instructions(role_set: RoleInstructionSet) -> str:
         parts.append(
             "## Skills, and when to read one\n\n"
             "The `read_skill` tool on the `cortex` MCP server returns one skill by its exact "
-            "name from the list below; use it, not an engine-native skill loader. Read one only when its case "
-            "arises -- text you do not need costs room for the work:\n"
-            + "\n".join(f"- `{skill_id}` -- {_SKILL_TRIGGERS[skill_id]}"
-                        for skill_id in loadable if skill_id in _SKILL_TRIGGERS)
+            "name from the list below; use it, not an engine-native skill loader. When an action below "
+            "becomes necessary, call Cortex MCP `read_skill` with that id before the action, then follow its body. "
+            "Do not read skills whose trigger has not arisen or re-read skills already included above:\n"
+            + "\n".join(f"- `{skill_id}` -- {trigger}" for skill_id, trigger in loadable)
         )
     return "\n\n".join(part.strip() for part in parts if part and part.strip()) + "\n"
 

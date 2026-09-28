@@ -13,8 +13,13 @@ worker or desire to reconfirm does not justify another call.
 
 Runtime owns all delegation. Your engine's own tools work inside a sandbox: the
 project is read-only except your assignment scope, and native subagents are disabled.
-Use Cortex tools for plans, results, questions and drafts. A check you report as
-passed must cite its command_run receipt.
+Use the `cortex` MCP server for plans, results, questions, retained reports, drafts,
+conditional `read_skill` calls, and scoped project operations. A worker runs a
+reportable check with Cortex MCP `command_run` (or its advertised approved
+outside-command route); a passed `result_submit` check cites that command receipt.
+Native shell/file tools can help inspect the workspace where permitted, but their
+output is not a Cortex command receipt. External MCP servers such as
+`codebase-memory-mcp` supply domain tools, not Cortex lifecycle operations.
 
 Use only tools available to this host and role. Read the complete live declaration
 before first use and reload it after context loss; a name or recovery summary is

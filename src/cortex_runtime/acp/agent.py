@@ -333,9 +333,10 @@ class _PaseoQuestionElicitor:
     def elicit(self, session_id: str, question: str, options: list[str] | None) -> str | None:
         del session_id
         choices = list(options or [])
-        if not choices:
-            return None
-        option_ids = {f"cortex-question-{index}": value for index, value in enumerate(choices, 1)}
+        # Paseo's permission bridge needs at least one action to render a
+        # question card. The fallback action is instructional, not an answer.
+        display_choices = choices or ["Reply in chat or type an answer under Other…"]
+        option_ids = {f"cortex-question-{index}": value for index, value in enumerate(display_choices, 1)}
         params = dict(
             sessionId=self._session_id,
             toolCall=dict(
@@ -386,7 +387,7 @@ class _PaseoQuestionElicitor:
         outcome = result.get("outcome")
         if not isinstance(outcome, dict) or outcome.get("outcome") != "selected":
             return None
-        return option_ids.get(outcome.get("optionId"))
+        return option_ids.get(outcome.get("optionId")) if choices else None
 
     def _close_card(self, tool_call_id):
         """Best effort: mark the card's tool call finished so the host can
@@ -1919,8 +1920,12 @@ class Agent:
             _reply(acp_commands.build_setup_text(
                 connection_states=self._connection_state_counts(connections)))
             return
-        if command_id == acp_commands.CORTEX_STOP:
-            self._run_cortex_stop(request_id, session_id, session, cancel_event, _reply)
+        if command_id in (acp_commands.CORTEX_STOP, acp_commands.CORTEX_FINISH):
+            if command_id == acp_commands.CORTEX_FINISH and argument:
+                _reply("Usage: /cortex-finish (no arguments)")
+                return
+            self._run_cortex_stop(request_id, session_id, session, cancel_event, _reply,
+                                  finish=command_id == acp_commands.CORTEX_FINISH)
             return
         if command_id == acp_commands.CORTEX_ANSWER:
             self._run_cortex_answer(request_id, session_id, session, argument, cancel_event, _reply)
@@ -2022,26 +2027,40 @@ class Agent:
             accepted = set()
         return method, {key: value for key, value in candidate_kwargs.items() if key in accepted}
 
-    def _run_cortex_stop(self, request_id, session_id, session, cancel_event, reply):
+    def _run_cortex_stop(self, request_id, session_id, session, cancel_event, reply, *, finish=False):
         task_id = session["task_id"]
         if task_id is None:
-            reply("There is no active task on this session to stop.")
+            reply("There is no active task on this session to close." if finish else
+                  "There is no active task on this session to stop.")
             return
+        source_identity = {}
+        if finish:
+            source_event = SimpleNamespace(origin=f"acp-command:{session_id}", event_id=str(uuid.uuid4()))
+            try:
+                append_source_event(self._store_for(session["project"]), source_event,
+                                    "/cortex-finish", task_id)
+            except StoreError:
+                self._reply_error(request_id, -32603, "Durable capture failed; the task was not closed.")
+                return
+            source_identity = dict(stop_source="cortex_finish_command",
+                                   source_origin=source_event.origin, source_event_id=source_event.event_id)
         method, kwargs = self._runtime_call_kwargs(
             "stop_task", project_root=session["project"],
             emit_tool_call=self._make_emit_tool_call(session_id, cancel_event),
         )
         if method is None:
-            reply("This runtime does not support /cortex-stop.")
+            reply("This runtime does not support /cortex-finish." if finish else
+                  "This runtime does not support /cortex-stop.")
             return
         try:
-            method(task_id, session_id, lambda text: True, **kwargs)
+            method(task_id, session_id, lambda text: True, **kwargs, **source_identity)
         except Exception:
-            self._reply_error(request_id, -32603, "Failed to stop the task.")
+            self._reply_error(request_id, -32603,
+                              "Failed to close the task." if finish else "Failed to stop the task.")
             observe(self.environ, "session/prompt", "cortex_stop_failed")
             return
         language = acp_messages.select_language(None, [])
-        reply(acp_messages.render("stop_confirmed", language))
+        reply(acp_messages.render("force_finish_confirmed" if finish else "stop_confirmed", language))
 
     def _run_cortex_answer(self, request_id, session_id, session, argument, cancel_event, reply):
         task_id = session["task_id"]
@@ -2536,6 +2555,19 @@ class Agent:
         store = self._store_for(session["project"])
         with store.connection() as db:
             owner_epoch = _current_owner_epoch_obj(db, task_id)
+        # A loaded session captures the epoch before its next prompt. That
+        # prompt may replace a lost coordinator and acquire a new epoch while
+        # it is still running. Trust only this process's active, session-bound
+        # coordinator channel for that exact epoch; never refresh from the
+        # database alone (a different connection may now own the task).
+        if owner_epoch is not None and session.get("owner_epoch") != owner_epoch:
+            with session["lock"]:
+                active = session["active"]
+            owned_epoch = getattr(self.runtime, "active_session_owner_epoch", lambda *_: None)(
+                session["project"], task_id, session_id,
+            )
+            if active is not None and not active.is_set() and owned_epoch == owner_epoch.epoch:
+                session["owner_epoch"] = owner_epoch
         if owner_epoch is None or session.get("owner_epoch") != owner_epoch:
             raise RpcError(-32602, "This session no longer owns the task.")
         if acp_steering.is_stopped(store, task_id):
@@ -2568,6 +2600,21 @@ class Agent:
         except StoreError:
             acp_replay_store.cleanup_staged(staged_blocks)
             raise RpcError(-32603, "Durable capture failed; nothing was forwarded to orchestration.") from None
+        if acp_commands.recognize(content) == (acp_commands.CORTEX_FINISH, ""):
+            method, kwargs = self._runtime_call_kwargs("stop_task", project_root=session["project"])
+            if method is None:
+                raise RpcError(-32603, "This runtime does not support /cortex-finish.")
+            options = self._config_options_for_session(session, store)
+            try:
+                method(task_id, session_id, lambda _text: True, **kwargs,
+                       stop_source="cortex_finish_command", source_origin=origin,
+                       source_event_id=message_id)
+            except Exception:
+                raise RpcError(-32603, "Failed to close the task after durable capture.") from None
+            self.transport.send_response(protocol.result_response(
+                request_id, protocol.set_config_option_response(options),
+            ))
+            return
         attachment_descriptors = [
             dict(source_ref=f"{result.report_id}:{b.capture.block_index}", name=b.capture.name, uri=b.capture.uri,
                  kind=b.capture.kind, availability=b.capture.availability, reason=b.capture.reason)

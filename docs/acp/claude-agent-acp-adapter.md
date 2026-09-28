@@ -44,10 +44,17 @@ above was exercised live.
 
 ## Current runtime gateway policy
 
-All roles receive `tools: []`, `strictMcpConfig: true`, empty settings sources and
-plugins, disabled hooks, and explicit native Agent/Task denial through the installed
-SDK options. Only runtime-brokered MCP tools are supplied. The coordinator has no
-external MCP tools; read-only specialists receive only explicit read-only grants.
+All roles receive `strictMcpConfig: true`, empty plugins, disabled hooks,
+and explicit native subagent plus gateway-alternative denial through installed
+SDK options. Only runtime-brokered MCP tools are supplied for Cortex-governed
+code/file/command work. A coordinator receives only an owner-registry
+`coordinator_tools` subset of external MCP tools; specialists receive their
+explicit grants. A code-index coordinator grant must include `list_projects`,
+`trace_path`, `get_code_snippet` and `check_index_coverage` as well as search
+tools before its documented index procedure is actually available. The
+session prompt now derives that procedure from the effective role grants,
+not merely the attached server name; an incomplete grant yields a limited
+capability note instead. Index creation remains worker-authorized.
 
 External MCP catalogues are filtered by exact administrator grants, role and engine.
 Each permitted call rechecks the current channel, runs in its contained server and
@@ -169,14 +176,20 @@ token bytes were not retained, so that individual case cannot be proved
 byte-for-byte after the fact.
 
 Every Cortex-created session at this pinned version, coordinator or worker,
-keeps Claude's native tools and sends `strictMcpConfig: true`, empty `plugins`,
-`managedSettings.disableAllHooks`, and disallows `Agent`, `Task`, `Workflow`,
-`TeamCreate`, `TeamDelete` and `SendMessage`. A session with role instructions
+sends `strictMcpConfig: true`, empty `plugins`,
+`managedSettings.disableAllHooks`, and disallows native subagents plus `Bash`,
+`Read`, `Edit`, `Write`, `Grep`, `Glob`, `Skill` and `NotebookEdit` through the
+Claude-specific SDK `disallowedTools` option. MCP tools are not disallowed.
+The installed 0.78.0 and 0.81.2 option-forwarding paths are statically checked,
+and fake-wire tests check the emitted payload. The isolated CLI diagnosis
+observed a 0.81.2 session *before* this restriction with full MCP schemas and
+native Bash/Read/Edit still available. A new owner-requested live canary is
+needed to establish effective 0.81.2 enforcement. A session with role instructions
 sends the [unified system prompt](unified-system-prompt.md) and the role text as
 one plain-string `systemPrompt`, replacing the `claude_code` preset, with
 `skills: []` and a `settings` layer that empties commit/PR attribution and turns
-off git instructions; a session without role instructions keeps the preset and
-`skills: "all"`. `settingSources` is not sent, so the adapter default (`user`,
+off git instructions; a session without role instructions keeps the preset but
+still has native skills disabled. `settingSources` is not sent, so the adapter default (`user`,
 `project`, `local`) applies and Claude Code loads `CLAUDE.md`/`AGENTS.md`. The process runs in Cortex's engine jail, which bounds
 native tools to the assignment scope (see
 [containment](permissions-and-containment.md)). A 2026-09-22 no-paid check started

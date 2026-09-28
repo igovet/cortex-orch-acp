@@ -69,6 +69,17 @@ def test_all_t001_specializations_load():
         assert role.source_path
 
 
+def test_conditional_skill_catalogue_is_engine_neutral_and_has_action_triggers():
+    for kind in ("coordinator", "worker"):
+        role_id = "orchestrator" if kind == "coordinator" else "worker-backend-dev"
+        delivered = roles.composed_instructions(roles.load_role(role_id))
+        assert "call Cortex MCP `read_skill` with that id before the action" in delivered
+        for skill_id, trigger in roles.situational_skill_triggers(kind, role_id):
+            assert trigger.startswith(("before ", "you ", "the "))
+            assert f"`{skill_id}` -- {trigger}" in delivered
+        assert "apply_patch" not in delivered
+
+
 def test_worker_role_bodies_are_free_of_denylisted_tokens():
     """Every worker/coordinator role's *portable* body (after stripping native
     marker spans) is free of the same denylist, even though the required

@@ -70,18 +70,20 @@ def test_build_first_prompt_blocks_never_writes_a_file_or_returns_env_vars(tmp_p
     assert blocks == [{"type": "text", "text": "instructions"}]
 
 
-def test_claude_keeps_native_tools_but_never_subagents_for_every_role():
+def test_claude_disallows_native_gateway_alternatives_for_every_role():
     for role in ['coordinator','worker']:
         meta=build_claude_session_new_meta('Cortex instructions',role=role)
         assert meta['systemPrompt']=={'append':'Cortex instructions'}
         options=meta['claudeCode']['options']
         assert 'tools' not in options
-        assert options['skills']=='all'
+        assert options['skills']==[]
         assert 'settingSources' not in options
         assert options['plugins']==[]
         assert options['strictMcpConfig'] is True
         assert options['managedSettings']['disableAllHooks'] is True
-        assert {'Agent','Task','Workflow','TeamCreate'}<=set(options['disallowedTools'])
+        assert {'Agent','Task','Workflow','TeamCreate','Bash','Read','Edit','Write',
+                'Grep','Glob','Skill','NotebookEdit'}<=set(options['disallowedTools'])
+        assert not any(name.startswith('mcp__') for name in options['disallowedTools'])
 
 
 def test_installed_claude_acp_0_78_accepts_tool_allowlist_and_forwards_it():
@@ -100,6 +102,20 @@ def test_installed_claude_acp_0_78_accepts_tool_allowlist_and_forwards_it():
     assert "tools?: string[] | {" in sdk_source
     assert "disallowedTools?: string[];" in sdk_source
     assert "passing 'Skill' here is deprecated" in sdk_source
+
+
+def test_installed_claude_acp_0_81_forwards_disallowed_tools_without_a_model_call():
+    root = Path.home() / ".local/share/cortex/engines/claude-agent-acp/0.81.2/node_modules"
+    adapter = root / "@agentclientprotocol/claude-agent-acp"
+    sdk_types = root / "@anthropic-ai/claude-agent-sdk/sdk.d.ts"
+    if not (adapter / "package.json").exists() or not sdk_types.exists():
+        pytest.skip("Installed Claude ACP 0.81.2/SDK copy is unavailable")
+    package = json.loads((adapter / "package.json").read_text(encoding="utf-8"))
+    assert package["version"] == "0.81.2"
+    source = (adapter / "dist/acp-agent.js").read_text(encoding="utf-8")
+    assert "...userProvidedOptions" in source
+    assert "disallowedTools: [...(userProvidedOptions?.disallowedTools || []), ...disallowedTools]" in source
+    assert "disallowedTools?: string[];" in sdk_types.read_text(encoding="utf-8")
 
 
 def test_installed_claude_acp_0_78_initialize_is_no_paid_and_reports_pinned_version(tmp_path):

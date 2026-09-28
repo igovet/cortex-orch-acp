@@ -55,6 +55,36 @@ def test_paseo_question_bridge_uses_core_permission_choice_schema():
     _schema_validator("RequestPermissionRequest").validate(seen["params"])
 
 
+def test_paseo_free_text_question_exposes_a_card_without_inventing_an_answer():
+    seen = {}
+
+    class Requester:
+        def request(self, method, params, timeout, cancelled=None, id_suffix=None):
+            seen.update(method=method, params=params)
+            return {"outcome": {"outcome": "selected", "optionId": "cortex-question-1"}}
+
+    elicitor = _PaseoQuestionElicitor(Requester(), session_id="sess-1")
+    elicitor.set_question_id("pq-free-text")
+    assert elicitor.elicit("ignored", "What should I do?", None) is None
+    assert seen["method"] == "session/request_permission"
+    assert len(seen["params"]["options"]) == 1
+    assert seen["params"]["options"][0]["optionId"] == "cortex-question-1"
+    assert seen["params"]["toolCall"]["rawInput"]["questionId"] == "pq-free-text"
+    _schema_validator("RequestPermissionRequest").validate(seen["params"])
+
+    registered = {}
+
+    class TypedRequester:
+        def request(self, method, params, timeout, cancelled=None, id_suffix=None):
+            registered["deliver"][1]("A real free-text answer")
+            return {"outcome": {"outcome": "cancelled"}}
+
+    typed = _PaseoQuestionElicitor(TypedRequester(), session_id="sess-1",
+                                   register=lambda callback: registered.__setitem__("deliver", callback))
+    typed.set_question_id("pq-free-text")
+    assert typed.elicit("ignored", "What should I do?", []) == "A real free-text answer"
+
+
 def test_paseo_question_card_waits_for_the_user_and_a_typed_message_answers_it():
     """A 30 s timeout ended the turn while Paseo kept the card; a later Submit was lost."""
     import threading, time

@@ -426,6 +426,23 @@ def test_cli_uses_private_cortex_xdg_paths_and_current_source_root(tmp_path):
     assert f"XDG_STATE_HOME={dev_home}/cortex-xdg/state" in result.stdout
 
 
+def test_cli_drops_inherited_paseo_agent_target(tmp_path):
+    fake_paseo = tmp_path / "paseo"
+    fake_paseo.write_text(
+        "#!/bin/sh\n"
+        'printf "agent=%s cwd=%s\\n" "${PASEO_AGENT_ID-unset}" "${PASEO_AGENT_CWD-unset}"\n'
+    )
+    fake_paseo.chmod(0o755)
+    env = dict(os.environ, PASEO_AGENT_ID="caller-agent", PASEO_AGENT_CWD="/caller/project")
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--paseo", str(fake_paseo),
+         "--home", str(tmp_path / "dev-home"), "--", "status"],
+        capture_output=True, text=True, cwd=str(ROOT), env=env,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "agent=unset cwd=unset"
+
+
 def test_gui_uses_private_cortex_xdg_paths_and_current_source_root(tmp_path):
     fake_paseo = tmp_path / "Paseo"
     fake_paseo.write_text(

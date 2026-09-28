@@ -103,3 +103,12 @@ def test_load_role_source_unavailable_for_missing_file(tmp_path, monkeypatch):
     with pytest.raises(PortableError) as excinfo:
         roles.load_role("orchestrator")
     assert excinfo.value.code == "role_source_unavailable"
+
+
+def test_situational_catalogue_excludes_inlined_and_consultant_mutation_skills():
+    worker = dict(roles.situational_skill_triggers("worker", "worker-backend-dev"))
+    consultant = dict(roles.situational_skill_triggers("worker", "worker-senior-consultant"))
+    assert "documentation-sync" in worker and "knowledge-harvest" in worker
+    assert "report-publication" not in worker and "code-and-evidence" not in worker
+    assert set(consultant) == {"index", "context-compaction"}
+    assert "skill-management" in dict(roles.situational_skill_triggers("coordinator"))

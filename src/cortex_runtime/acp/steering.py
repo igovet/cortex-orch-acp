@@ -218,7 +218,9 @@ def _undelivered_steering_ids_tx(db, task_id: str) -> list[int]:
     return ids
 
 
-def mark_stopped(store, task_id: str, *, source: str = "cortex_stop_command", session_id: str | None = None) -> bool:
+def mark_stopped(store, task_id: str, *, source: str = "cortex_stop_command", session_id: str | None = None,
+                 question_id: str | None = None, source_origin: str | None = None,
+                 source_event_id: str | None = None) -> bool:
     """Insert into ``task_stopped`` iff not already stopped (and iff
     ``task_id`` actually exists -- see below), and -- in that exact same
     transaction -- supersede every still-undelivered steering/user_message
@@ -247,7 +249,7 @@ def mark_stopped(store, task_id: str, *, source: str = "cortex_stop_command", se
     real -- see ``OrchestratingRuntime.stop_task``, which surfaces this as
     an explicit, non-silent error to the caller).
     """
-    if source not in {"cortex_stop_command", "paseo_session_cancel"}:
+    if source not in {"cortex_stop_command", "paseo_session_cancel", "cortex_finish_command", "user_answer_force_finish"}:
         raise ValueError("unknown task stop source")
     with store.connection() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -258,14 +260,69 @@ def mark_stopped(store, task_id: str, *, source: str = "cortex_stop_command", se
             if row is not None:
                 db.commit()
                 return False
+            if source == "user_answer_force_finish":
+                from ..orchestration.questions import is_force_finish_answer
+                answer = db.execute(
+                    "SELECT status,answer_text,answer_source,text FROM pending_questions WHERE task_id=? AND id=?",
+                    (task_id, question_id),
+                ).fetchone()
+                if (
+                    not answer or answer["status"] != "answered"
+                    or answer["answer_source"] not in {"text", "elicitation"}
+                    or not is_force_finish_answer(answer["answer_text"], answer["text"])
+                ):
+                    raise ValueError("force finish requires an exact captured owner answer")
+            elif source == "cortex_finish_command":
+                source_row = db.execute(
+                    "SELECT 1 FROM source_events WHERE task_id=? AND origin=? AND event_id=?",
+                    (task_id, source_origin, source_event_id),
+                ).fetchone()
+                if source_row is None or not source_origin or not source_event_id:
+                    raise ValueError("force finish requires a captured owner command")
+            task = db.execute("SELECT state,revision FROM runtime_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if (source in {"cortex_finish_command", "user_answer_force_finish"}
+                    and task and task["state"] in {"COMPLETED", "FAILED", "CANCELLED"}):
+                db.commit()
+                return False
+            if source in {"cortex_finish_command", "user_answer_force_finish"} and task is None:
+                from ..orchestration.state import event, now, transition
+                first = db.execute(
+                    "SELECT report_id FROM source_revisions WHERE task_id=? ORDER BY revision LIMIT 1",
+                    (task_id,),
+                ).fetchone()
+                if first is None:
+                    raise ValueError("force finish requires the original captured goal")
+                goal = store._location(db, first["report_id"]).read_text(encoding="utf-8")
+                stamp = now()
+                db.execute(
+                    "INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES(?,?,?,?,?)",
+                    (task_id, "CREATED", goal, stamp, stamp),
+                )
+                event(db, task_id, "TASK_CREATED", dict(goal=goal))
+                transition(db, task_id, "PLANNING")
+                task = db.execute("SELECT state,revision FROM runtime_tasks WHERE task_id=?", (task_id,)).fetchone()
             db.execute("INSERT INTO task_stopped (task_id, stopped_at) VALUES (?,?)", (task_id, _now()))
             # Commit provenance with the stop marker, before process teardown.
             # ACP identifies the client transport, not the human/UI action.
             delegation_events.append_event_tx(
                 db, task_id, "progress", "task_stop_observed",
-                dict(kind="task_stop_observed", source=source, session_id=session_id),
+                dict(kind="task_stop_observed", source=source, session_id=session_id,
+                     **({"question_id": question_id} if question_id else {})),
                 origin="runtime",
             )
+            if source in {"cortex_finish_command", "user_answer_force_finish"}:
+                from ..orchestration.state import event
+                pending = db.execute(
+                    "SELECT node_id,status FROM runtime_nodes WHERE task_id=? AND revision=? AND status!='completed' ORDER BY node_id",
+                    (task_id, task["revision"]),
+                ).fetchall()
+                event(db, task_id, "USER_FORCE_FINISHED", dict(
+                    source=source, session_id=session_id, question_id=question_id,
+                    source_origin=source_origin, source_event_id=source_event_id,
+                    previous_state=task["state"], revision=task["revision"],
+                    unfinished_nodes=[dict(node_id=r["node_id"], status=r["status"]) for r in pending],
+                    review_verification_synthesis="not_certified_by_force_finish",
+                ))
             ids = _undelivered_steering_ids_tx(db, task_id)
             if ids:
                 db.executemany("UPDATE task_events SET superseded=1 WHERE id=?", [(event_id,) for event_id in ids])

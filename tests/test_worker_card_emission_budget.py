@@ -55,6 +55,7 @@ def _worker_router(*, tools: int, words_per_block: int, write_every: int, write_
             ).fetchone()[0]
         if role == "worker-code-reviewer" or call_index:
             return publish_result(store, channel)
+        on_delta("Interim narration before first tool. ")
         for index in range(tools):
             ref = f"read-{index}"
             on_tool_call(ref, "read", "Read", "in_progress", None, None,
@@ -167,6 +168,24 @@ def test_paseo_worker_card_has_no_transcript_body_but_panel_history_is_full(tmp_
     assert len(writes[0]["raw_input"]["arguments"]["content"]) >= 19_000
     tools = {p["activity_ref"] for p in payloads if str(p.get("activity_ref", "")).startswith("tool:read-")}
     assert len(tools) == 30
+
+
+def test_worker_interim_prose_is_not_published_to_card_or_history(tmp_path):
+    updates, _session, harness = run_worker_session(
+        tmp_path, client_name="zed", tools=10, words_per_block=3,
+    )
+    with harness.store.connection() as db:
+        payloads = [json.loads(row[0]) for row in db.execute(
+            "SELECT payload_json FROM task_events WHERE event_type='progress' "
+            "AND payload_json LIKE '%worker_activity%'"
+        )]
+    assert not any("[worker message]" in str(item.get("text", "")) for item in payloads)
+    assert not any("Interim narration before first tool" in str(item.get("text", "")) for item in payloads)
+    assert not any("word0 word1 word2" in str(item.get("text", "")) for item in payloads)
+    assert any("[final response] Worker finished:" in str(item.get("text", "")) for item in payloads)
+    assert not any("[worker message]" in json.dumps(item) for item in _worker_updates(updates))
+    assert not any("Interim narration before first tool" in json.dumps(item) for item in _worker_updates(updates))
+    assert not any("word0 word1 word2" in json.dumps(item) for item in _worker_updates(updates))
 
 
 def test_generic_worker_card_body_is_a_bounded_rolling_tail(tmp_path):

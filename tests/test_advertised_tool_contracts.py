@@ -24,6 +24,19 @@ from cortex_runtime.trusted_channel import issue_channel_tx, resolve_channel
 
 GENERIC = {"Structured fields; use the exact advertised properties.",
            "Bounded list of items described by the item schema."}
+
+
+def test_result_submit_describes_receipt_sources_and_exclusive_report_forms():
+    entry = next(t for t in mcp_tools.tool_definitions("worker", role_id="worker-backend-dev", stage="execution")
+                 if t["name"] == "result_submit")
+    schema = entry["inputSchema"]
+    assert len(schema["oneOf"]) == 2
+    assert "write_report.report_id" in entry["description"]
+    assert "command_run" in entry["description"] and "tool_call_ref" in entry["description"]
+    assert "write_report" in schema["properties"]["report_ref"]["description"]
+    assert "same attempt" in schema["properties"]["checks"]["items"]["properties"]["tool_call_ref"]["description"]
+    assert "closed_by" in schema["properties"]["checks"]["items"]["properties"]["tool_call_ref"]["description"]
+    assert "identical" in schema["properties"]["request_key"]["description"]
 PROFILES = [
     ("coordinator", None, None),
     ("worker", "worker-debugger", "execution"),
@@ -154,3 +167,27 @@ def test_every_offered_skill_id_is_actually_readable(tmp_path):
         for skill in tool["inputSchema"]["properties"]["skill"]["enum"]:
             result = mcp_tools.dispatch(store, channel, "read_skill", dict(skill=skill))
             assert result["body"].strip(), (kind, skill)
+
+
+@pytest.mark.parametrize("kind,role_id", [
+    ("coordinator", None), ("worker", "worker-backend-dev"),
+    ("worker", "worker-senior-consultant"),
+])
+def test_read_skill_advertises_only_matching_situational_triggers(kind, role_id):
+    from cortex_runtime.portable.roles import situational_skill_triggers
+
+    (entry,) = [t for t in mcp_tools.tool_definitions(kind, role_id=role_id)
+                if t["name"] == "read_skill"]
+    selector = entry["inputSchema"]["properties"]["skill"]
+    assert entry["inputSchema"]["required"] == ["skill"]
+    assert set(selector["enum"]) >= {skill for skill, _ in situational_skill_triggers(kind, role_id)}
+    for skill, trigger in situational_skill_triggers(kind, role_id):
+        assert f"{skill}: {trigger}" in entry["description"]
+        assert f"{skill}: {trigger}" in selector["description"]
+    assert "already-included skills" in entry["description"]
+    assert "tool-discipline:" not in entry["description"]
+    if role_id == "worker-senior-consultant":
+        assert "documentation-sync:" not in entry["description"]
+        assert "interactive-resources:" not in entry["description"]
+    if kind == "worker":
+        assert "cortex-control:" not in entry["description"]

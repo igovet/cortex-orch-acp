@@ -257,10 +257,10 @@ def test_result_recovery_records_the_accepted_checks(tmp_path):
 def test_blocker_rules_still_refuse_malformed_checks(tmp_path):
     store,task,_,worker,assignment=_fixture(tmp_path,'blockers')
     report=publish_fixture_report(store,worker)
-    with pytest.raises(StoreError,match='check_blocker_required'):
+    with pytest.raises(StoreError,match='invalid_arguments'):
         mcp_tools.dispatch(store,worker,'result_submit',dict(report_ref=report,summary='Observed',request_key='r1',
             checks=[dict(name='unit tests',outcome='unverified')]))
-    with pytest.raises(StoreError,match='check_blocker_unexpected'):
+    with pytest.raises(StoreError,match='invalid_arguments'):
         mcp_tools.dispatch(store,worker,'result_submit',dict(report_ref=report,summary='Observed',request_key='r2',
             checks=[dict(name='unit tests',outcome='passed',blocker='none')]))
 
@@ -291,7 +291,7 @@ def test_result_submit_schema_states_the_evidence_contract():
     check=RESULT['properties']['checks']
     ref=check['items']['properties']['tool_call_ref']['description']
     outcome=check['items']['properties']['outcome']['description']
-    assert 'Required for passed' in ref and 'same attempt' in ref and 'exited 0' in ref and 'untruncated' in ref
-    assert 'pwd' in ref and 'engine shell calls' in ref and 'one check only' in ref
+    assert 'verified passed' in ref and 'same attempt' in ref and 'exit_code=0' in ref and 'untruncated' in ref
+    assert 'gateway:' in ref and 'engine shell call' in ref and 'one check only' in ref
     assert 'recorded as unverified with evidence_gap' in outcome and 'always kept as failed' in outcome
     assert 'qualitative review remarks' in check['description'] and 'report body' in check['description']

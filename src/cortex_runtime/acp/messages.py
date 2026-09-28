@@ -282,6 +282,10 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Stopped this task: every assignment, queued open, and pending question was cancelled.",
         "ru": "Задача остановлена: все назначения, ожидающие запуски и открытые вопросы отменены.",
     },
+    "force_finish_confirmed": {
+        "en": "Closed this task at your request. Active work was cancelled; unfinished review, verification, and synthesis are not certified as passed.",
+        "ru": "Задача закрыта по вашему решению. Активная работа отменена; незавершённые ревью, проверки и итог не считаются пройденными.",
+    },
     "coordinator_recovery_new_session": {
         "en": "Reconnected this task with a new coordinator session, rebuilt from recorded task state (this is a new session, not a resumed one).",
         "ru": "Задача переподключена с новой сессией координатора, восстановленной из сохранённого состояния задачи (это новая сессия, а не возобновлённая).",

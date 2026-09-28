@@ -51,7 +51,7 @@ _BODY = """\
 
 # Tools
 
-- You have the engine's own tools (shell, file read, search, edit) and MCP tools. The `cortex` MCP server is the runtime's channel: reports, drafts, skills, questions, proposals and results go through it.
+- Tools have three sources. The `cortex` MCP server is the runtime's channel: use its `read_report` for retained reports, `read_skill` for conditional Cortex skills, draft/publication tools for reports, `command_run` for worker checks whose receipts support passed results, and role-appropriate question, proposal and result tools. Use its scoped project tools when supplied for project reads and edits. External MCP servers (for example `codebase-memory-mcp`) provide their own domain tools, not Cortex lifecycle operations. The engine's native shell, file and search tools are local workspace aids where permitted; they do not publish Cortex reports, submit results or produce a `command_run` receipt.
 - Before the first call to any tool, read its full advertised description and argument schema. Never fill arguments from another tool's or engine's conventions, and never guess a value the schema does not explain.
 - If a tool you need is not in your list, look it up with the engine's tool search when one exists before concluding it is unavailable.
 - Run independent reads and searches together; keep dependent steps, edits, approvals and other mutations sequential.
@@ -61,7 +61,7 @@ _BODY = """\
 # Cortex skills
 
 - Cortex skills are procedures the runtime keeps for you, read with `read_skill` on the `cortex` server. The engine's own skill loaders, if any, are not part of this session; project and user skills, when there are any, are listed under Project and user skills below.
-- The skills that apply to almost every session are already included in full in your role instructions; follow them from your first action. The other skills are listed there with their triggers: when a trigger matches what you are about to do, read that skill with `read_skill` before doing it and follow it. Reading a matching skill is part of the work, not an optional extra.
+- The skills that apply to almost every session are already included in full in your role instructions; follow them from your first action and do not re-read them. The other skills are conditional. Before an action that matches a listed trigger, call the `read_skill` tool from the `cortex` MCP server with that exact skill id and follow its returned body. For example, read `documentation-sync` before assessing documentation impact for a plan or updating affected docs; read `interactive-resources` before using a browser or server session. Do not read a conditional skill when its trigger has not arisen. Reading a matching skill is part of the work, not an optional extra.
 
 # Finding code
 
@@ -79,7 +79,7 @@ _BODY = """\
 
 # Evidence and honesty
 
-- Verify what you change with the checks that exercise it, and report their real outcomes with the exact command, working directory and exit code.
+- Verify what you change with the checks that exercise it, and report their real outcomes with the exact command, working directory and exit code. Workers run reportable checks through Cortex MCP `command_run` (or its advertised approved outside-command route) and cite its receipt for a passed `result_submit` check; native shell output alone is not a verified check receipt.
 - Keep unrun, failed, truncated and unverifiable checks explicit, with their concrete blocker. A successful tool response or model turn is not proof that the project works.
 - Distinguish what you observed from what you infer. If information you need is missing, ask through the runtime's question tool instead of inventing it.
 
@@ -196,7 +196,7 @@ def project_skills_section(workspace_root: str | None, environ=None) -> str:
 CODE_INDEX_SERVER = "codebase-memory-mcp"
 
 
-def attached_servers_section(server_names, workspace_root: str | None = None) -> str | None:
+def attached_servers_section(servers, workspace_root: str | None = None, *, role: str = "worker") -> str | None:
     """What the runtime knows only when a session starts: which external MCP
     servers were really attached to it. Added after the role instructions for
     every engine, or ``None`` when none were attached.
@@ -208,12 +208,25 @@ def attached_servers_section(server_names, workspace_root: str | None = None) ->
     made. So the section states the fact and the first step. Only tool names
     appear here; arguments stay in each tool's advertised schema.
     """
-    names = sorted({name for name in server_names or () if isinstance(name, str) and name})
+    from .mcp_bridge import coordinator_tools
+
+    grants = {}
+    for server in servers or ():
+        if isinstance(server, dict):
+            name = server.get("name")
+            tools = coordinator_tools(server) if role == "coordinator" else server.get("allowed_tools", ())
+            if isinstance(name, str) and name and isinstance(tools, (list, tuple)):
+                grants[name] = {tool for tool in tools if isinstance(tool, str)}
+        elif isinstance(server, str) and server:
+            # A bare name establishes attachment, not authority to use tools.
+            grants.setdefault(server, set())
+    names = sorted(grants)
     if not names:
         return None
     lines = ["# Attached MCP servers", "",
              "External MCP servers attached to this session: " + ", ".join(f"`{name}`" for name in names) + "."]
-    if CODE_INDEX_SERVER in names:
+    index_tools = grants.get(CODE_INDEX_SERVER, set())
+    if {"list_projects", "search_graph", "trace_path", "get_code_snippet"} <= index_tools:
         where = f"`{workspace_root}`" if workspace_root else "the working directory"
         lines += [
             "",
@@ -222,21 +235,30 @@ def attached_servers_section(server_names, workspace_root: str | None = None) ->
             "before shell search:",
             f"1. Call `list_projects` once and take the project whose root path is {where}, or the closest "
             "root that contains it.",
-            "2. Use `search_graph`, `trace_path` and `get_code_snippet` (and `get_architecture` for orientation) "
-            "with that project.",
+            "2. Use `search_graph`, `trace_path` and `get_code_snippet`"
+            + (" (and `get_architecture` for orientation)" if "get_architecture" in index_tools else "")
+            + " with that project.",
             "3. Use shell or file search on source code only for literal text, configuration and documentation, "
             "or when no indexed project covers the working directory; then state that limitation in your report.",
         ]
+        if "index_repository" in index_tools:
+            lines.append("If no matching index exists, make one authorized `index_repository` attempt for the exact working directory before falling back.")
+        elif role == "coordinator":
+            lines.append("If no matching index exists, ask an authorized worker to bootstrap it; the coordinator has no index mutation grant.")
+    elif CODE_INDEX_SERVER in names:
+        lines += ["", f"`{CODE_INDEX_SERVER}` is attached, but this role has only these granted tools: "
+                  + (", ".join(f"`{tool}`" for tool in sorted(index_tools)) or "none") + ". "
+                  "Do not assume the full code-index procedure is available; use only the granted tools."]
     lines += ["", "If a tool of an attached server is not in your tool list, load it with the engine's tool "
                   "search before concluding it is unavailable."]
     return "\n".join(lines)
 
 
-def with_attached_servers(meta: dict, server_names, workspace_root: str | None = None) -> dict:
+def with_attached_servers(meta: dict, servers, workspace_root: str | None = None, *, role: str = "worker") -> dict:
     """``meta`` with :func:`attached_servers_section` appended to the text the
     model reads as its instructions: the plain-string ``systemPrompt`` both
     adapters send, or an ``append`` object. Never mutates ``meta``."""
-    note = attached_servers_section(server_names, workspace_root)
+    note = attached_servers_section(servers, workspace_root, role=role)
     result = dict(meta)
     if note is None:
         return result
@@ -260,9 +282,9 @@ def with_attached_servers(meta: dict, server_names, workspace_root: str | None =
 _ROLE_COMMUNICATION = {
     "coordinator": "",
     "worker": (
-        "- Work without narration. Call tools one after another and write no text between tool calls: no plans, "
-        "status updates, announcements of the next step or summaries of what a tool returned. Think as much as you "
-        "need; only visible text is left out.\n"
+        "- Work without narration, including before the first tool and after a tool result. Call tools one after "
+        "another and write no text between tool calls: no plans, status updates, announcements of the next step "
+        "or summaries of what a tool returned. Think as much as you need; only visible text is left out.\n"
         "- After your last tool call, write one final message: what you did, what you found, which checks ran with "
         "their outcome, and what remains. Your report and structured result still go through the runtime's tools; "
         "the final message does not replace them."

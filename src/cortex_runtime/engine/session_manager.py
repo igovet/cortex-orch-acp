@@ -706,7 +706,7 @@ class EngineSessionManager:
             # code index's first step bound to this session's working directory.
             from .unified_system_prompt import with_attached_servers
             params["_meta"] = with_attached_servers(
-                session_new_meta, [server["name"] for server in external_servers], self._workspace_root)
+                session_new_meta, external_servers, self._workspace_root, role=self._mcp_role)
         with self._lock:
             result = self._client.call("session/new", params, timeout=self._call_timeout)
             wire_session_id = result.get("sessionId")

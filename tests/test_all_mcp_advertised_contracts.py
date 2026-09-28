@@ -81,6 +81,8 @@ def test_every_advertised_tool_uses_its_current_validator_and_read_classificatio
         assert schema["additionalProperties"] is False
         assert entry["annotations"]["readOnlyHint"] == (name in READ_NAMES)
         args = {key: _sample(schema["properties"][key]) for key in schema["required"]}
+        if name == "result_submit":
+            args["report"] = {"title": "Result", "markdown": "# Result\n\nObserved.\n"}
         assert not list(Draft202012Validator(schema).iter_errors(args)), name
         validator = (lambda a: validate_base(name, a)) if name in BY_NAME else (lambda a: delegation_contracts.validate(role, name, a))
         validator(args)
@@ -98,6 +100,36 @@ def test_every_delegation_read_bypasses_mutation_epoch_gate():
     assert DELEGATION_READ_OPERATIONS == READ_NAMES - {"read_draft", "list_reports", "read_report", "project_git"}
 
 
+@pytest.mark.parametrize("args, valid", [
+    ({"report": {"title": "Report", "markdown": "# Report"}, "summary": "Done", "checks": [], "request_key": "once"}, True),
+    ({"report_ref": "r_" + "a" * 12, "summary": "Done", "checks": [], "request_key": "once"}, True),
+    ({"summary": "Done", "checks": [], "request_key": "once"}, False),
+    ({"report_ref": "r_" + "a" * 12, "report": {"title": "Report", "markdown": "# Report"}, "summary": "Done", "checks": [], "request_key": "once"}, False),
+    ({"report_ref": "r_" + "a" * 12, "summary": "Done", "checks": [{"name": "GUI", "outcome": "not_run"}], "request_key": "once"}, False),
+    ({"report_ref": "r_" + "a" * 12, "summary": "Done", "checks": [{"name": "GUI", "outcome": "unverified", "blocker": "   "}], "request_key": "once"}, False),
+    ({"report_ref": "r_" + "a" * 12, "summary": "Done", "checks": [{"name": "pytest", "outcome": "passed", "command": ["pytest"]}], "request_key": "once"}, True),
+])
+def test_result_report_and_check_combinations_match_validator(args, valid):
+    schema = next(t["inputSchema"] for t in mcp_tools.tool_definitions("worker") if t["name"] == "result_submit")
+    assert (not list(Draft202012Validator(schema).iter_errors(args))) is valid
+    if valid:
+        delegation_contracts.validate("worker", "result_submit", args)
+    else:
+        with pytest.raises(StoreError, match="invalid_arguments"):
+            delegation_contracts.validate("worker", "result_submit", args)
+
+
+@pytest.mark.parametrize("role", ["coordinator", "worker"])
+def test_read_skill_selector_keeps_the_validated_single_field_contract(role):
+    (entry,) = [tool for tool in mcp_tools.tool_definitions(role) if tool["name"] == "read_skill"]
+    schema = entry["inputSchema"]
+    assert schema["required"] == ["skill"]
+    assert set(schema["properties"]) == {"skill"}
+    assert "documentation-sync: before assessing documentation impact" in schema["properties"]["skill"]["description"]
+    assert not list(Draft202012Validator(schema).iter_errors({"skill": "documentation-sync"}))
+    delegation_contracts.validate(role, "read_skill", {"skill": "documentation-sync"})
+
+
 def test_review_findings_contract_agrees_with_its_validator():
     """The optional review findings (with a boolean) are checked the same way
     by the advertised JSON Schema and the runtime validator."""
@@ -106,7 +138,8 @@ def test_review_findings_contract_agrees_with_its_validator():
     schema = entry["inputSchema"]
     finding_schema = schema["properties"]["findings"]["items"]
     finding = {name: _sample(finding_schema["properties"][name]) for name in finding_schema["required"]}
-    args = dict({key: _sample(schema["properties"][key]) for key in schema["required"]}, findings=[finding])
+    args = dict({key: _sample(schema["properties"][key]) for key in schema["required"]},
+                report_ref="r_" + "a" * 12, findings=[finding])
     assert not list(Draft202012Validator(schema).iter_errors(args))
     delegation_contracts.validate("worker", "result_submit", args)
     for bad in (dict(finding, cross_cutting="false"), dict(finding, files=[]), dict(finding, node="_fix_1_x")):

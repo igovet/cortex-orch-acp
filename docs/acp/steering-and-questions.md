@@ -25,8 +25,10 @@ the plan still waited for approval. The question keeps the task open in
 `WAITING_USER`. The answer resumes planning rather than reconciling: the
 coordinator submits a plan for the chosen work, which becomes a new revision
 with its own review and verification. If the user chose to finish, it closes
-the task with a short `answer_submit`. The coordinator uses `synthesis_submit`
-only when nothing is left for the user to decide.
+the task with a short `answer_submit` only when the answer is an ordinary
+planning choice. An explicit owner choice to close the task as-is takes the
+runtime-owned force-finish path below instead. The coordinator uses
+`synthesis_submit` only when nothing is left for the user to decide.
 
 A question can carry a `skill_proposal` for a reusable project skill. The
 runtime validates action-matched approval and decline labels before persistence,
@@ -45,6 +47,10 @@ The text answers the question exactly as a message typed into the chat would,
 and is kept in the chat history. Once Cortex has accepted it, the provider
 retires the card as declined; Cortex ignores that late decline. If Cortex
 refuses the text, the card stays open.
+For a free-text question with no supplied options, Cortex sends one instructional
+card action so Paseo still renders the question and its "Other..." field. That
+action is not an answer: selecting it leaves the durable question open. The user
+must type an answer under "Other..." or reply in chat.
 
 An ordinary prompt answers the single open question. Multiple open questions
 require the existing explicit `/cortex-answer` selection. A cancelled or
@@ -55,6 +61,26 @@ included in the structured task context for the next coordinator turn.
 idempotent, fences late runtime results and prevents completion. Engine process
 termination and ownership checks remain necessary; a cancellation event by itself
 does not prove that an external process is gone.
+
+`/cortex-finish` (with no argument) is the explicit owner command to close the
+current task **without** claiming unfinished checks passed. It captures the
+command as a real user source before the runtime's stop marker, uses the same
+task-owned worker/coordinator termination and question/steering fencing as
+`/cortex-stop`, and records `USER_FORCE_FINISHED`. The terminal state is
+`CANCELLED`, not verified `COMPLETED`. Paseo's queued-message channel handles an
+exact `/cortex-finish` during an active turn immediately after durable capture,
+instead of waiting for the current worker and review to finish. A replay of
+the same queued message identity cannot create a second closure event.
+
+When a saved question about closing the **task** receives an exact owner answer
+such as `Закрыть как есть`, `Завершить задачу`, `close as is`, or a bare
+`Завершить`/`Finish` to a question that explicitly asks to finish the task,
+the runtime force-finishes from that recorded answer. This includes a Paseo
+question-card choice or typed answer and works after process recovery. Similar
+but non-closure requests (for example, asking for one more check or a release
+build) continue through ordinary planning. The match is deliberately narrow;
+use `/cortex-finish` if wording is uncertain. Model text alone cannot trigger
+this transition.
 
 User steering is durably queued by message identity and requirement revision. It
 does not cancel the coordinator turn, change an executing plan, revoke worker
@@ -85,9 +111,14 @@ terminology for the item). If capture races with the end of that turn, the
 provider still acknowledges it for that turn, and the agent starts a
 background continuation using the same source identity so the queued message
 is still processed once, in order, after the turn (and any worker it started)
-finishes. An image or uploaded file is resolved and staged exactly as it
-would be for an ordinary new-turn `session/prompt` (capped at 1 MiB per
-block, 4 MiB per message); an oversized or unreadable image is refused before
+finishes. A session loaded before coordinator recovery retains its old ownership
+epoch until the replacement opens; a queued message may use the replacement
+epoch only while this process has an active turn for that exact host session
+and a matching coordinator channel. A different owner or an ended turn is
+refused rather than adopting the database's newer epoch. An image or uploaded
+file is resolved and staged exactly as it would be for an ordinary new-turn
+`session/prompt` (capped at 1 MiB per block, 4 MiB per message); an oversized
+or unreadable image is refused before
 capture, same as a first prompt. Paseo accepts this only as a `steer` result
 for the turn it expects. Any other result makes it cancel that turn
 (`session/cancel`) and resend the message as a new prompt. Cortex cannot tell
@@ -95,10 +126,15 @@ that cancel from a Stop, so the task pauses and its running workers are
 cancelled. So when the provider cannot queue a message, it fails the send
 instead of returning a result. An attachment kind this queue path does not
 carry (a forge/review/GitHub attachment, for instance) and a failed config
-acknowledgment both do this. The chat shows a "Message was not queued"
-warning with the reason, Paseo reports the send as failed, and nothing reaches
-Cortex. The current turn and its workers keep running, and the user can send
-the message again. An explicit Stop
+acknowledgment both do this. Paseo 0.9.2 displays a rejected send as a host
+error. It cannot suppress that host error while preserving the running turn,
+and a provider notice would display the same error a second time. The provider
+therefore emits no notice on refusal; the single host error says that nothing
+was sent and, when available, includes Cortex's reason and retry guidance.
+Nothing reaches Cortex. The current turn and its workers keep running, and the
+user can send the message again. This failure is not displayed in the styled
+plugin notice block because Paseo does not expose a safe single-channel outcome
+for it. An explicit Stop
 (`session/cancel`) or `/cortex-stop` remains an interruption: the former
 moves the task to RECOVERING and fences unfinished work; the latter
 permanently cancels it. Worker questions enter the persisted question protocol;

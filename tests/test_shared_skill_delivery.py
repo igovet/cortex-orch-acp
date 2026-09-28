@@ -24,7 +24,7 @@ from cortex_runtime.contracts import StoreError  # noqa: E402
 from cortex_runtime.delegation.mcp_tools import _enumerate_skills, _shared_read_skill  # noqa: E402
 from cortex_runtime.portable.roles import (  # noqa: E402
     COORDINATOR_ONLY_SHARED_ROLE_IDS, INLINED_SKILLS, NAMED_SKILLS, SHARED_ROLE_IDS, composed_instructions,
-    load_role, read_reference,
+    load_role, read_reference, situational_skill_triggers,
 )
 from cortex_runtime.portable.errors import PortableError  # noqa: E402
 
@@ -71,7 +71,25 @@ def test_a_worker_gets_its_everyday_skills_and_is_told_when_to_read_the_rest():
     # to the user.
     assert "coordinator-communication" not in NAMED_SKILLS["worker"]
     assert "coordinator-communication" not in INLINED_SKILLS["worker"]
-    assert "you need a browser, device, port or server session" in composed
+    assert "before starting or using a browser, device, port or server session" in composed
+    assert "call Cortex MCP `read_skill` with that id before the action" in composed
+
+
+@pytest.mark.parametrize("role_id,kind", [("orchestrator", "coordinator"),
+                                            ("worker-backend-dev", "worker"),
+                                            ("worker-senior-consultant", "worker")])
+def test_prompt_and_tool_share_one_situational_catalogue(role_id, kind):
+    role = load_role(role_id)
+    composed = composed_instructions(role)
+    schema = _enumerate_skills({"properties": {"skill": {"type": "string", "description": "Select a skill."}}},
+                               kind, role_id)
+    advertised = schema["properties"]["skill"]
+    for skill_id, trigger in situational_skill_triggers(kind, role_id):
+        assert f"`{skill_id}` -- {trigger}" in composed
+        assert f"{skill_id}: {trigger}" in advertised["description"]
+        assert skill_id in advertised["enum"]
+    if role_id == "worker-senior-consultant":
+        assert "`documentation-sync` --" not in composed
 
 
 def test_the_delivered_text_is_the_role_plus_its_everyday_skills():
