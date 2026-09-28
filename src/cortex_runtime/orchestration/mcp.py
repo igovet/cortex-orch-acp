@@ -74,9 +74,15 @@ def dispatch(store, channel, operation, args):
                 from .gateway import _authority
                 return TaskMachine(store).submit_plan(
                     channel, candidate, args['request_key'], authorization=lambda db: _authority(db, channel))
-    if operation == 'result_submit' and isinstance(args, dict) and args.get('verdict') in {
-            'approve', 'request_changes', 'block'}:
-        args = dict(args, verdict=args['verdict'].upper())
+    if operation == 'result_submit' and isinstance(args, dict):
+        # Ignore only write_report fields that are not part of result_submit;
+        # preserve all result fields and keep strict validation for everything else.
+        write_report_only = {'artifacts', 'author', 'draft_id', 'title', 'redact_values', 'source_revision'}
+        ignored = write_report_only.difference(schema.get('properties', {}))
+        if ignored.intersection(args):
+            args = {key: value for key, value in args.items() if key not in ignored}
+        if args.get('verdict') in {'approve', 'request_changes', 'block'}:
+            args = dict(args, verdict=args['verdict'].upper())
     validate(schema, args)
     machine = TaskMachine(store)
     from .gateway import _authority
