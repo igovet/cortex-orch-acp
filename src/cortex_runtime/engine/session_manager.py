@@ -29,6 +29,14 @@ from .resource_policy import ResourcePolicy
 from .terminal_bridge import TerminalBridge, TerminalBridgeError
 
 DEFAULT_INITIALIZE_TIMEOUT = 15.0
+# OpenCode 2.0.19 connects a session's MCP servers as session/new returns and
+# fixes the session's Code Mode tool catalog at its first prompt: a prompt
+# sent sooner than about 0.1 s after the servers' tools/list never sees them,
+# in that turn or any later one (no-paid probe, docs/acp/opencode-adapter.md).
+# No ACP signal marks the registration, so after the engine's own tools/list
+# is observed through the broker, this margin (ten times the observed gap)
+# passes before create_session returns.
+OPENCODE_MCP_SETTLE_SECONDS = 1.0
 DEFAULT_CALL_TIMEOUT = 30.0
 # A person needs time to inspect a destructive-command card. This applies
 # only to downstream approval requests, not the short control RPCs above.
@@ -178,6 +186,19 @@ _DISPLAY_ONLY_UPDATES = frozenset({
 })
 
 
+def _is_refusal(result, params) -> bool:
+    """Whether a permission answer refuses: ``cancelled``, or one of the
+    request's own reject options."""
+    outcome = result.get("outcome") if isinstance(result, dict) else None
+    if not isinstance(outcome, dict):
+        return False
+    if outcome.get("outcome") == "cancelled":
+        return True
+    kinds = {option.get("optionId"): option.get("kind")
+             for option in (params or {}).get("options") or () if isinstance(option, dict)}
+    return str(kinds.get(outcome.get("optionId")) or "").startswith("reject")
+
+
 def context_usage_update(update) -> dict | None:
     """The ACP ``usage_update`` context fill, or None unless both counts are
     real non-negative integers (a missing size is not a zero-sized window)."""
@@ -219,6 +240,7 @@ class EngineSessionManager:
         mcp_role: str | None = None,
         broker_mcp=False,
         jail=None,
+        engine_instructions: str | None = None,
     ):
         """``install`` -- a
         :class:`~.codex_install.CodexAcpInstall`, or ``None`` -- is passed
@@ -261,6 +283,13 @@ class EngineSessionManager:
         # ``jail`` -- ``{"scopes": [...], "alive": callable}`` or ``None`` --
         # runs the engine process in engine_jail (see EngineProcess).
         self._jail = jail
+        # OpenCode only: the role prompt its process starts with (2.0.19 has
+        # no per-session instruction channel; see engine.opencode_adapter_acp).
+        self._engine_instructions = engine_instructions
+        self._sent_engine_instructions: str | None = None
+        # OpenCode only: wire sessions whose current turn had a permission
+        # request refused (see take_permission_refusal).
+        self._permission_refusals: set[str] = set()
         # The client's own MCP servers, to be offered to this engine
         # alongside Cortex's own. Held in memory only: a client's env and
         # header values are its secrets (see engine.mcp_bridge
@@ -416,11 +445,14 @@ class EngineSessionManager:
             if self._process is not None:
                 return
             project_root = self._channel_credentials[2] if self._channel_credentials is not None else None
+            engine_instructions = self._opencode_prompt() if self._record.engine == "opencode" else None
             self._process = EngineProcess(
                 self._record, self._workspace_root, environ=self._environ, install=self._install,
                 broker_mcp=self._broker_mcp, project_root=project_root,
                 channel_credentials=self._channel_credentials, jail=self._jail,
+                engine_instructions=engine_instructions,
             )
+            self._sent_engine_instructions = engine_instructions
             self._permission_bridge = PermissionBridge(
                 correlation=self.correlation, bindings=self.bindings, logs=self._process.logs,
                 host_permission_requester=self._host_permission_requester,
@@ -437,6 +469,29 @@ class EngineSessionManager:
                 on_unknown_notification=self._on_unknown_notification,
                 logs=self._process.logs,
             ).start()
+
+    def _opencode_prompt(self) -> str:
+        """The whole prompt an OpenCode process starts with: the caller's
+        role prompt plus the note naming the external MCP servers this
+        session will attach -- the note Claude and Codex receive in
+        ``session/new`` ``_meta``, which OpenCode 2.0.19 ignores."""
+        if not isinstance(self._engine_instructions, str) or not self._engine_instructions.strip():
+            raise _fail("opencode_instructions_required",
+                        "An OpenCode session needs its role prompt at launch (engine_instructions).")
+        from .unified_system_prompt import CODE_INDEX_SERVER, attached_servers_section, code_index_project_name
+
+        servers = host_mcp_servers(self._host_mcp_servers, role=self._mcp_role, engine=self._record.engine)
+        note = attached_servers_section(
+            servers, self._workspace_root, role=self._mcp_role or "worker",
+            code_index_project=(code_index_project_name(self._workspace_root)
+                                if any(server.get("name") == CODE_INDEX_SERVER for server in servers) else None),
+        )
+        return self._engine_instructions.rstrip() + ("\n\n" + note + "\n" if note else "\n")
+
+    def sent_engine_instructions(self) -> str | None:
+        """The prompt this manager's OpenCode process was started with, or
+        ``None`` (any other engine, or not started yet)."""
+        return self._sent_engine_instructions
 
     def _handle_client_request(self, method, params, request_id) -> None:
         # T014: never service an agent-to-client request on the transport's
@@ -512,7 +567,18 @@ class EngineSessionManager:
         except DuplicateEnginePermissionRequestId:
             self._client.reply_error(request_id, -32600, "duplicate_request_id")
             return
+        if self._record.engine == "opencode" and _is_refusal(result, params):
+            self._permission_refusals.add(wire_session_id)
         self._client.reply_result(request_id, result)
+
+    def take_permission_refusal(self, engine_session_id: str) -> bool:
+        """Whether the current turn of ``engine_session_id`` had a permission
+        request refused (OpenCode then ends the turn "cancelled"); clears it."""
+        wire_session_id = self.correlation.wire_session_id(engine_session_id)
+        if wire_session_id is None or wire_session_id not in self._permission_refusals:
+            return False
+        self._permission_refusals.discard(wire_session_id)
+        return True
 
     def _dispatch_fs(self, method, request_id, engine_session_id, params) -> None:
         if not self._policy.fs_local:
@@ -628,6 +694,8 @@ class EngineSessionManager:
                 )
                 self._agent_capabilities = result.get("agentCapabilities") or {}
                 self._process.logs.observe("initialized", agent_capabilities=self._agent_capabilities)
+                if self._record.engine == "opencode":
+                    self._require_qualified_opencode(result)
             always_granted = {
                 EngineCapability.PROTOCOL_VERSION,
                 EngineCapability.SESSION_CREATION,
@@ -650,6 +718,23 @@ class EngineSessionManager:
                     granted.add(capability)
             self._negotiated = tuple(cap for cap in requested_capabilities if cap in granted)
             return self._negotiated
+
+    def _require_qualified_opencode(self, initialize_result) -> None:
+        """Refuse an OpenCode whose own ``agentInfo`` is not a qualified
+        version -- the binary may have changed since its install was checked.
+        Nothing is created on an unqualified engine; the caller releases it."""
+        from .opencode_install import qualified_versions
+
+        info = initialize_result.get("agentInfo") if isinstance(initialize_result, dict) else None
+        version = info.get("version") if isinstance(info, dict) else None
+        self._process.logs.observe("engine_agent_version", version=version if isinstance(version, str) else None)
+        if version not in qualified_versions():
+            self._agent_capabilities = {}
+            raise _fail(
+                "opencode_version_unqualified",
+                f"OpenCode reported version {version!r} at initialize; Cortex runs only "
+                f"{', '.join(qualified_versions())}.",
+            )
 
     def sent_session_new_meta(self, session_id: str) -> dict | None:
         """The ``_meta`` this manager actually sent on ``session_id``'s
@@ -734,12 +819,32 @@ class EngineSessionManager:
             }
             self._session_locks[portable_session_id] = threading.Lock()
         self._process.logs.observe("session_created", portable_session_id=portable_session_id)
+        if self._record.engine == "opencode":
+            self._await_opencode_mcp(portable_session_id)
         self._process.logs.observe("external_mcp_inventory", **self.external_mcp_inventory(portable_session_id))
         # The broker owns the actual child ``tools/list`` observation.  Record
         # only its bounded receipt here, never the response body or schemas.
         receipt = self.mcp_tools_receipt(portable_session_id)
         self._process.logs.observe("mcp_tools_receipt", **receipt)
         return portable_session_id
+
+    def _await_opencode_mcp(self, portable_session_id: str) -> None:
+        """Hold the session back until OpenCode can have registered its MCP
+        servers (see :data:`OPENCODE_MCP_SETTLE_SECONDS`). Without its Cortex
+        gateway the session could never report or submit, so a gateway whose
+        tools/list is never observed fails the session instead of letting it
+        run without one."""
+        import time
+
+        broker = self._process.mcp_broker if self._process is not None else None
+        readiness = broker.readiness(self._call_timeout) if broker is not None else "no_broker"
+        self._process.logs.observe("opencode_mcp_readiness", portable_session_id=portable_session_id,
+                                   readiness=readiness)
+        if broker is not None and readiness != "ready":
+            raise _fail("opencode_mcp_not_ready",
+                        f"OpenCode's Cortex MCP gateway did not become ready ({readiness}); the session is not used.")
+        if self._channel_credentials is not None or self._host_mcp_servers:
+            time.sleep(OPENCODE_MCP_SETTLE_SECONDS)
 
     def observed_config_options(self, engine_session_id: str) -> list | None:
         """T035: the raw ``configOptions`` array this engine session's own
@@ -951,6 +1056,7 @@ class EngineSessionManager:
             pass
 
     def _prompt_turn_locked(self, wire_session_id: str, prompt: str, prompt_blocks=None):
+        self._permission_refusals.discard(wire_session_id)
         update_queue: "queue.Queue" = queue.Queue(maxsize=self._update_queue_maxsize)
         overflowed = threading.Event()
         token = object()

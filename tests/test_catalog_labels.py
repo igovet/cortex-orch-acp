@@ -227,9 +227,12 @@ def test_engine_short_name_maps_known_adapter_ids_to_their_short_name():
     assert engine_short_name("codex-acp") == "codex"
     # An unmapped engine id falls back to itself, never a fabricated guess.
     assert engine_short_name("future-engine-acp") == "future-engine-acp"
-    # SUPPORTED_ENGINES connections.model has exactly these two engines --
-    # a new engine must only need one entry here (T035 review requirement).
-    assert set(ENGINE_SHORT_NAMES) == {"claude-agent-acp", "codex-acp"}
+    # Every engine in connections.model.SUPPORTED_ENGINES has exactly one
+    # entry here -- a new engine only needs that (T035 review requirement).
+    from cortex_runtime.connections.model import SUPPORTED_ENGINES
+
+    assert set(ENGINE_SHORT_NAMES) == set(SUPPORTED_ENGINES) == {"claude-agent-acp", "codex-acp", "opencode"}
+    assert engine_short_name("opencode") == "opencode"
 
 
 def test_build_connection_label_uses_the_short_engine_name_not_the_adapter_package_id():

@@ -130,6 +130,14 @@ python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
   and is verified for the selected engine before the registry is mutated;
   it must contain the exact JSON fields for that engine and never contains
   credentials.
+- **`add-opencode-connection [--binary PATH]`** onboards the optional
+  OpenCode v2 engine, which is never discovered at startup. It finds a
+  trusted `opencode` binary and reads its version in a network-less sandbox,
+  refusing any version but `2.0.19`. It then registers a connection that
+  references the owner's own `~/.local/share/opencode` login (never copied)
+  and prints the next step: `opencode auth login`, `chmod 700` of that
+  directory, or `refresh-catalog`. See the
+  [OpenCode adapter](opencode-adapter.md#onboarding).
 - **`validate-connection`** recomputes one connection's current state and
   prints only its id, engine, state, and qualification flag. It never prints
   credential paths or values.
@@ -254,6 +262,8 @@ Run one explicit setup command:
 ```bash
 python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
 ```
+
+The plugin registers a Cortex Settings screen for supported owner/project configuration. Its values are stored by the Cortex runtime (JSON files or the existing project SQLite configuration row), not in Paseo's settings document. A live Paseo 0.10.0 check did not find the screen in the rendered Settings navigation or command palette, so do not assume it is reachable in that host version. See [configuration management](../configuration.md#manage-settings-in-paseo) for scope, revision conflicts, redaction and the OpenCode opt-in.
 
 #### Install from GitHub
 

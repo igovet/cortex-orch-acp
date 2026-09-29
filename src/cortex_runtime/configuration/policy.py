@@ -74,6 +74,9 @@ class FailureClass(str):
 COORDINATOR_MODE_FLOOR: Mapping[str, str] = {
     "codex-acp": "agent",
     "claude-agent-acp": "default",
+    # OpenCode's "mode" is its agent; Cortex offers one, ``cortex``, whose
+    # permission rules ask for every native tool call (see WORKER_MODE_FLOOR).
+    "opencode": "cortex",
 }
 
 # T035 gap closure ("a worker's engine mode is never chosen or confirmed by
@@ -141,6 +144,11 @@ COORDINATOR_MODE_FLOOR: Mapping[str, str] = {
 WORKER_MODE_FLOOR: Mapping[str, str] = {
     "codex-acp": "agent",
     "claude-agent-acp": "default",
+    # opencode 2.0.19: the ``cortex`` agent Cortex configures
+    # (engine.opencode_adapter_acp) with ``"*": "ask"`` -- observed to turn
+    # every native tool call into session/request_permission -- and the
+    # only mode such a session offers.
+    "opencode": "cortex",
 }
 
 # T035 FINDING-02 / EXT-01 #2: the one error_code that means "this engine

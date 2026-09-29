@@ -27,7 +27,7 @@ from pathlib import Path
 from ..connections.environment import build_process_env
 from ..connections import registry
 from ..portable.errors import PortableError, PortableErrorCategory
-from . import claude_install, codex_install
+from . import claude_install, codex_install, opencode_install
 from .logs import EngineLogs
 from .broker import McpBroker
 
@@ -38,7 +38,43 @@ from .broker import McpBroker
 _INSTALL_MODULE_BY_ENGINE = {
     "codex-acp": codex_install,
     "claude-agent-acp": claude_install,
+    "opencode": opencode_install,
 }
+
+
+def _require_opencode_isolation(jail, install) -> None:
+    """OpenCode runs only verified, only in the engine jail, and only where
+    that jail isolates its processes (see ``engine_jail(isolate_processes=)``).
+
+    Each ``opencode acp`` starts a private control server whose password is
+    in its environment. The kernel keeps a sibling jail from reading that
+    environment only because every bubblewrap sandbox gets its own user
+    namespace -- which a setuid bwrap does not create, so a setuid bwrap is
+    refused rather than trusted.
+    """
+    import stat as stat_module
+
+    if jail is None:
+        raise _validation_error(
+            "opencode_requires_engine_jail",
+            "OpenCode is only launched inside Cortex's engine jail.", field="jail",
+        )
+    if install is None:
+        raise _validation_error(
+            "opencode_install_unverified",
+            "OpenCode is only launched from a verified install (engine.install_resolution).", field="install",
+        )
+    bwrap = shutil.which("bwrap")
+    try:
+        setuid = bwrap is None or bool(os.stat(bwrap).st_mode & stat_module.S_ISUID)
+    except OSError:
+        setuid = True
+    if setuid:
+        raise _validation_error(
+            "opencode_process_isolation_unavailable",
+            "OpenCode needs an unprivileged (non-setuid) bubblewrap, whose per-sandbox user namespace keeps "
+            "other jails from reading its control-server credential.",
+        )
 
 TERMINATE_GRACE_SECONDS = 5.0
 
@@ -668,7 +704,7 @@ class EngineProcess:
     """
 
     def __init__(self, record, cwd, *, environ=None, install=None, broker_mcp=False,
-                 project_root=None, channel_credentials=None, jail=None):
+                 project_root=None, channel_credentials=None, jail=None, engine_instructions=None):
         """``install`` -- a :class:`~.codex_install.CodexAcpInstall` for a
         ``codex-acp`` record, a :class:`~.claude_install.ClaudeAcpInstall`
         for a ``claude-agent-acp`` record, or ``None`` -- is re-verified
@@ -692,6 +728,12 @@ class EngineProcess:
         read-only except ``scopes``, and every native tool the engine offers
         acts inside that box. ``alive`` is polled; once it returns false the
         process is terminated, so a revoked channel stops native effects.
+
+        ``engine_instructions`` -- OpenCode only: the whole prompt its
+        ``cortex`` agent runs with (``engine.opencode_adapter_acp``), mounted
+        read-only into the jail from memory. OpenCode additionally requires a
+        jail, a verified install and process isolation
+        (:func:`_require_opencode_isolation`).
         """
         if record.launch_command is None:
             raise _validation_error(
@@ -713,6 +755,9 @@ class EngineProcess:
                 "An explicit absolute workspace directory is required to launch an engine process.",
                 field="cwd",
             )
+        opencode = record.engine == opencode_install.ENGINE
+        if opencode:
+            _require_opencode_isolation(jail, install)
         self.mcp_broker = None
         self.external_mcp_brokers = []
         self.engine_instance_id = "eirt_" + uuid.uuid4().hex[:12]
@@ -754,6 +799,12 @@ class EngineProcess:
                     "verified install; a launch command is never silently substituted.",
                     field="launch_command",
                 )
+            if opencode:
+                from .opencode_adapter_acp import CATALOG_PROBE_PROMPT, PROMPT_FILE_NAME, process_environment
+
+                opencode_prompt_path = str(self._jail_dir / "tmp" / PROMPT_FILE_NAME)
+                opencode_prompt = engine_instructions or CATALOG_PROBE_PROMPT
+                pinned_engine_vars = process_environment(opencode_prompt_path)
             if record.engine == "codex-acp":
                 adapter_entry_override = _prepare_codex_manual_review_adapter(
                     verified_install, record.id, environ,
@@ -787,6 +838,15 @@ class EngineProcess:
         # harmless for the Node-based Claude adapter and keeps the launch
         # contract independent of the caller's ambient environment.
         process_env["PYTHONDONTWRITEBYTECODE"] = "1"
+        if opencode:
+            # OpenCode writes $XDG_STATE_HOME/opencode (recent models, prompt
+            # history) and fails to start when it cannot. The owner's HOME is
+            # read-only in the jail, so this process gets a private,
+            # disposable one in its own scratch directory; its credentials
+            # and sessions stay in XDG_DATA_HOME.
+            state_home = self._jail_dir / "tmp" / "xdg-state"
+            state_home.mkdir(mode=0o700, exist_ok=True)
+            process_env["XDG_STATE_HOME"] = str(state_home)
         # ssh in the engine's shell uses the owner's own ssh-agent, like
         # their terminal (see orchestration.ssh_askpass.host_agent_env).
         from ..orchestration.ssh_askpass import host_agent_env
@@ -810,8 +870,18 @@ class EngineProcess:
             if jail is not None:
                 from ..orchestration import ssh_askpass
                 from ..orchestration.sandbox import engine_jail
-                from ..connections.environment import _ISOLATION_ENV_VAR
-                state = process_env[_ISOLATION_ENV_VAR[record.engine]]
+                from ..connections.environment import engine_state_dir
+                state = engine_state_dir(record.engine, process_env)
+                isolation = {}
+                if opencode:
+                    from .opencode_adapter_acp import USER_CONFIG_RELATIVE
+
+                    home = process_env.get("HOME")
+                    isolation = dict(
+                        isolate_processes=True,
+                        masked=[str(Path(home).joinpath(*USER_CONFIG_RELATIVE))] if home else [],
+                        data_files={opencode_prompt_path: opencode_prompt.encode("utf-8")},
+                    )
                 # Opt-in: ssh in the native shell asks for a password in a
                 # desktop dialog (see orchestration.ssh_askpass).
                 askpass_dir = self._jail_dir / "askpass"
@@ -822,6 +892,7 @@ class EngineProcess:
                     cwd, self._jail_dir / "tmp", launch_command, jail["scopes"], env=process_env,
                     state_dirs={state: record.engine}, writable=[self._socket_dir],
                     readonly=jail.get("readonly") or (), sealed=[askpass_dir] if askpass_env else (),
+                    **isolation,
                 ))
                 process_env = {"PATH": "/usr/bin:/bin"}
             # Spawned from one process-lifetime thread: the jail's

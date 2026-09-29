@@ -96,7 +96,10 @@ def _read_catalog_from_engine(record, workspace_root, *, environ=None, timeout: 
     from ..engine.correlation import CorrelationTables
     from ..engine.process import EngineProcess
 
-    process = EngineProcess(record, workspace_root, environ=environ, install=install)
+    # OpenCode is only ever launched jailed (engine.process); a catalog read
+    # needs no project write, so its jail grants none.
+    jail = {"scopes": [], "readonly": []} if record.engine == "opencode" else None
+    process = EngineProcess(record, workspace_root, environ=environ, install=install, jail=jail)
     correlation = CorrelationTables()
     client = EngineClient(
         process,
@@ -106,10 +109,16 @@ def _read_catalog_from_engine(record, workspace_root, *, environ=None, timeout: 
         logs=process.logs,
     ).start()
     try:
-        client.call("initialize", dict(protocolVersion=1, clientCapabilities={}), timeout=timeout)
+        initialized = client.call("initialize", dict(protocolVersion=1, clientCapabilities={}), timeout=timeout)
+        if record.engine == "opencode":
+            from ..engine.opencode_install import qualified_versions
+
+            info = initialized.get("agentInfo") if isinstance(initialized, dict) else None
+            if not isinstance(info, dict) or info.get("version") not in qualified_versions():
+                raise RuntimeError("opencode_version_unqualified")
         result = client.call("session/new", dict(cwd=workspace_root, mcpServers=[]), timeout=timeout)
         options = result.get("configOptions") if isinstance(result, dict) else None
-        if record.engine == 'claude-agent-acp' and options:
+        if record.engine in ('claude-agent-acp', 'opencode') and options:
             from .model_efforts import observe_model_efforts
             levels = observe_model_efforts(client.call, result['sessionId'], options, timeout=timeout)
             return parse_observation(options).with_model_thought_levels(levels)

@@ -18,7 +18,8 @@ def record_session_skills(store, *, task_id: str, attempt_id: str, session_ref: 
     """
     entries = project_skill_entries(project_root, environ)
     section = project_skills_section(project_root, environ, entries=entries)
-    prompt = (sent_meta or {}).get("cortexBaseInstructions") or (sent_meta or {}).get("systemPrompt")
+    prompt = ((sent_meta or {}).get("cortexBaseInstructions") or (sent_meta or {}).get("systemPrompt")
+              or (sent_meta or {}).get("opencodeAgentPrompt"))
     if (not isinstance(prompt, str) or not prompt.startswith("# Cortex session\n\n")
             or not section or section not in prompt):
         entries = []

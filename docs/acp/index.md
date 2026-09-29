@@ -1,11 +1,11 @@
 # ACP documentation
 
-Cortex is an incoming ACP v1 stdio agent at `src/cortex_acp.py`. It runs its own project-local runtime and starts Codex or Claude ACP engines as outgoing sessions. Models propose work and interpret evidence; the runtime owns lifecycle, dependency scheduling, rights, routing, independent review, verification and completion. The current security contract is [SECURITY.md](../../SECURITY.md).
+Cortex is an incoming ACP v1 stdio agent at `src/cortex_acp.py`. It runs its own project-local runtime and starts Codex or Claude ACP engines, or the optional OpenCode v2 engine, as outgoing sessions. Models propose work and interpret evidence; the runtime owns lifecycle, dependency scheduling, rights, routing, independent review, verification and completion. The current security contract is [SECURITY.md](../../SECURITY.md).
 
 ## Start and configure
 
 - [Paseo installation, onboarding and diagnostics](packaging-and-onboarding.md)
-- [Complete JSON configuration reference](../configuration.md): connections, defaults and policy ceilings, routing, MCP servers, file locations and precedence
+- [Configuration reference and Paseo settings UI](../configuration.md): supported management surfaces, JSON/SQLite storage, connections, defaults and policy ceilings, routing, MCP servers, file locations and precedence
 - [Zed Custom Agent setup](zed-custom-agent.md)
 - [codeg recipe and current limits](codeg-custom-agent.md)
 - [Isolated dev Paseo environment and plugin safety](dev-paseo-environment.md)
@@ -40,6 +40,7 @@ The no-paid startup smoke in `scripts/cortex_acp_smoke.py` launches the producti
 
 - [Codex ACP adapter](codex-acp-adapter.md)
 - [Claude ACP adapter](claude-agent-acp-adapter.md)
+- [OpenCode v2 adapter (optional)](opencode-adapter.md)
 - [Unified system prompt](unified-system-prompt.md)
 - [Permissions and containment](permissions-and-containment.md)
 - [Security boundary audit](security-boundaries.md)

@@ -51,6 +51,27 @@ checkout: `git clone --no-hardlinks`, overlay the working diff, stamp there
 (`python3 -B scripts/cortex_package.py stamp`), then run the command above.
 The stamp must reproduce byte-identically in the real checkout.
 
+## Opt-in installed-binary checks (no paid call)
+
+Two tests exercise a real installed engine binary against a loopback fake
+model provider. They skip unless their variable names the binary:
+
+- **Codex.** `CORTEX_PINNED_CODEX_BINARY=<codex binary>` enables
+  `tests/test_engine_native_gateway.py`.
+- **OpenCode.** `CORTEX_PINNED_OPENCODE_BINARY=<opencode 2.0.19 binary>`
+  enables `tests/test_engine_opencode_qualification.py`. It runs the binary
+  through `EngineSessionManager`, the engine jail with process isolation, the
+  brokered Cortex MCP server and the permission bridge, in a disposable HOME
+  and project:
+
+```
+CORTEX_PINNED_OPENCODE_BINARY=$HOME/.opencode/bin/opencode PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_engine_opencode_qualification.py
+```
+
+`tests/test_engine_opencode.py` needs no OpenCode binary and is part of the
+default suite. Its jail, version-probe and onboarding cases skip without
+`bwrap`.
+
 ## Why a default run cannot start a paid campaign
 
 Nothing in the default suite can reach a paid engine, and this is enforced in

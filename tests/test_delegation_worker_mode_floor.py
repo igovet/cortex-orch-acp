@@ -90,7 +90,9 @@ def _propose_and_apply(store, task_id, epoch, connection, model="shared-model"):
 def test_worker_mode_floor_matches_pinned_engine_values():
     """The exact values this task closes the gap around -- see
     ``WORKER_MODE_FLOOR``'s own docstring for the pinned-build evidence."""
-    assert WORKER_MODE_FLOOR == {"codex-acp": "agent", "claude-agent-acp": "default"}
+    # opencode 2.0.19: the one Cortex agent, whose rules ask for every native
+    # tool call (tests/test_engine_opencode_qualification.py).
+    assert WORKER_MODE_FLOOR == {"codex-acp": "agent", "claude-agent-acp": "default", "opencode": "cortex"}
 
 
 def test_coordinator_floor_matches_the_worker_floor_after_finding_12():
@@ -101,7 +103,7 @@ def test_coordinator_floor_matches_the_worker_floor_after_finding_12():
     so it removed Cortex's only interception point. The floor now matches
     ``WORKER_MODE_FLOOR`` -- the narrowest mode still known to always ask --
     and enforcement moved to ``engine.permissions.PermissionBridge``."""
-    assert COORDINATOR_MODE_FLOOR == {"codex-acp": "agent", "claude-agent-acp": "default"}
+    assert COORDINATOR_MODE_FLOOR == {"codex-acp": "agent", "claude-agent-acp": "default", "opencode": "cortex"}
 
 
 def test_worker_session_confirms_its_own_mode_over_the_wire(tmp_path):

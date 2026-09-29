@@ -225,6 +225,9 @@ def secret_path(connection_id: str, environ: dict[str, str] | None = None) -> Pa
 _ENGINE_STATE_SUBDIR = {
     "codex-acp": "codex-home",
     "claude-agent-acp": "claude-config",
+    # Named like the directory OpenCode itself uses under $XDG_DATA_HOME, so
+    # the parent can serve as that XDG_DATA_HOME (connections.environment).
+    "opencode": "opencode",
 }
 
 
@@ -242,6 +245,8 @@ def connection_state_dir(connection_id: str, engine: str, environ: dict[str, str
 _ENGINE_CLIENT_NATIVE_DIR = {
     "codex-acp": ".codex",
     "claude-agent-acp": ".claude",
+    # OpenCode's own data directory: auth.json and its session database.
+    "opencode": ".local/share/opencode",
 }
 
 

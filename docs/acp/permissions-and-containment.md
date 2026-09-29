@@ -55,6 +55,23 @@ in place of Claude Code's preset, with `skills: []` and attribution and git
 instructions switched off. Every role receives the same options; roles differ
 only in their jail scopes.
 
+The optional OpenCode 2.0.19 engine runs in the same jail with three additions
+(`engine_jail(isolate_processes=, masked=, data_files=)`):
+
+- its own user, PID and IPC namespaces, so no sibling jail can read its
+  control server's credential from `/proc`;
+- the owner's `~/.config/opencode` hidden behind an empty private tmpfs;
+- its role prompt mounted read-only from memory.
+
+Cortex supplies its whole configuration: one `cortex` agent with
+`"*": "ask"` and subagents, questions and skills denied. Project configuration
+and auto-update are off, and the data directory's `bin` is read-only. MCP tools,
+including the Cortex gateway, are reached through its `execute` (Code Mode)
+tool: one permission request per `execute` call, with each Cortex MCP call still
+checked by the gateway. A refused permission ends OpenCode's turn as
+`cancelled`; the runtime continues the session after its own refusal. See the
+[OpenCode adapter](opencode-adapter.md).
+
 ACP permission requests for native tools are allowed, since the jail bounds them,
 except a deletion, which the user confirms in Guarded mode (see
 [Access mode](#access-mode-guarded-and-auto)); a native subagent request is

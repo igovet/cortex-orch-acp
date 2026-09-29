@@ -19,7 +19,9 @@ type IdentityInput = { workspaceId?: string; agentId?: string };
 /** Wrap one RPC handler with duration diagnostics: the exact registered
  * method name, hashed (never raw) workspace/agent identity, and elapsed
  * time. Never logs message bodies or other input/output content. */
-export function instrumentHandler<Input extends IdentityInput, Output>(
+// Any object input: an RPC without a workspace/agent identity (for example
+// owner configuration) is logged with "-" for both.
+export function instrumentHandler<Input extends object, Output>(
   methodName: string,
   handler: (input: Input, context: PluginHandlerContext) => Output | Promise<Output>,
   options: { thresholdMs?: number; log?: (line: string) => void } = {},
@@ -33,8 +35,9 @@ export function instrumentHandler<Input extends IdentityInput, Output>(
     } finally {
       const durationMs = Date.now() - startedAt;
       if (durationMs >= thresholdMs) {
-        const workspace = input.workspaceId ? safeId(input.workspaceId) : "-";
-        const agent = input.agentId ? safeId(input.agentId) : "-";
+        const identity = input as IdentityInput;
+        const workspace = typeof identity.workspaceId === "string" && identity.workspaceId ? safeId(identity.workspaceId) : "-";
+        const agent = typeof identity.agentId === "string" && identity.agentId ? safeId(identity.agentId) : "-";
         log(`[cortex-acp] slow invoke method=${methodName} workspace=${workspace} agent=${agent} durationMs=${durationMs}`);
       }
     }

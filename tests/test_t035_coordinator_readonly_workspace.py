@@ -225,8 +225,10 @@ def test_mode_floors_are_unchanged():
     assert configuration_policy.COORDINATOR_MODE_FLOOR == {
         "codex-acp": "agent",
         "claude-agent-acp": "default",
+        "opencode": "cortex",
     }
     assert configuration_policy.WORKER_MODE_FLOOR == {
         "codex-acp": "agent",
         "claude-agent-acp": "default",
+        "opencode": "cortex",
     }

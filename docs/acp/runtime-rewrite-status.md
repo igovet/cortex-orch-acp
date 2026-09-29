@@ -59,6 +59,33 @@ installed Claude adapter was started in the jail and created a session without
 a model turn. This is executable installed-CLI evidence, not a paid-model or ACP
 GUI qualification.
 
+## 2026-09-29 optional OpenCode v2 engine
+
+OpenCode 2.0.19 (`opencode acp`) is registered as an optional third engine,
+fail-closed. It is onboarded only by `add-opencode-connection`, never discovered
+at startup, and excluded from automatic worker routing unless opted in. Launches
+are refused without a verified install, the engine jail, unprivileged bubblewrap
+process isolation, or a qualified `agentInfo.version`.
+
+`tests/test_engine_opencode.py` runs in the default suite.
+`tests/test_engine_opencode_qualification.py`, enabled with
+`CORTEX_PINNED_OPENCODE_BINARY`, runs the installed binary through
+`EngineSessionManager`, the engine jail, the brokered Cortex MCP server and the
+permission bridge, with a loopback fake provider. It observed:
+
+- the Cortex agent as the only mode;
+- confirm-or-fail model, effort and mode;
+- role and `AGENTS.md` delivery;
+- the Cortex gateway reached through Code Mode;
+- the in-scope write and the refused out-of-scope write;
+- the deletion confirmation card;
+- cancellation and usage;
+- a sibling jail denied the control server's environment.
+
+No paid model, real provider, Zed or Paseo run was made. Live qualification was
+not run because the owner did not request a paid live check. See the
+[OpenCode adapter](opencode-adapter.md) for the parity table and limits.
+
 ## Verification boundary
 
 The no-paid suite covers real storage, authenticated MCP subprocesses, both engine

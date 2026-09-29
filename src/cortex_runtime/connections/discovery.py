@@ -61,6 +61,10 @@ SUPPORTED_ENGINES: tuple[str, ...] = tuple(_PACKAGE_NAME)
 QUALIFIED_ADAPTER_VERSIONS: dict[str, tuple[str, ...] | None] = {
     "codex-acp": ("1.12.0", "1.13.0"),
     "claude-agent-acp": None,
+    # OpenCode's configuration keys, tool names, permission requests and
+    # Code Mode catalog were observed on exactly this release (no-paid
+    # probes, docs/acp/opencode-adapter.md); any other version is refused.
+    "opencode": ("2.0.19",),
 }
 
 
@@ -236,6 +240,57 @@ def _discover_in(entries: list[Path], engine: str, package_name: str, node: str,
             version=version,
             launch_command=(node, str(bin_path)),
             native_credential_dir=str(native_dir),
+        )
+    return None
+
+
+# Where OpenCode's installer puts its binary, relative to HOME.
+_OPENCODE_INSTALL_RELATIVE = (".opencode", "bin", "opencode")
+_OPENCODE_DATA_RELATIVE = (".local", "share", "opencode")
+
+
+def discover_opencode(*, binary: str | None = None, environ: dict[str, str] | None = None) -> EngineDiscovery | None:
+    """The OpenCode binary to onboard, iff one is installed, trusted and
+    reports a version (``None`` otherwise -- never raises).
+
+    Unlike the npm engines this is *not* part of :func:`discover_all`:
+    OpenCode is optional, so startup never creates a connection for it; the
+    explicit ``add-opencode-connection`` setup step calls this. Candidates, in
+    order: ``binary``, ``$CORTEX_OPENCODE_BINARY``, ``~/.opencode/bin/opencode``
+    and ``opencode`` on PATH, each resolved to its real file. Reading the
+    version runs ``opencode --version`` in a network-less sandbox with a
+    throwaway HOME (``engine.opencode_install.probe_version``); nothing else
+    is executed or written. A version Cortex has not qualified is still
+    reported, so onboarding can name it before refusing it.
+    """
+    from ..engine import opencode_install
+    from ..portable.errors import PortableError
+
+    env = os.environ if environ is None else environ
+    candidates = [binary, env.get("CORTEX_OPENCODE_BINARY"),
+                  str(_home(environ).joinpath(*_OPENCODE_INSTALL_RELATIVE)),
+                  shutil.which("opencode", path=env.get("PATH"))]
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            real = str(Path(candidate).resolve(strict=True))
+        except (OSError, RuntimeError):
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            opencode_install.trusted_binary(real, environ)
+        except PortableError:
+            continue
+        version = opencode_install.probe_version(real)
+        if version is None:
+            continue
+        return EngineDiscovery(
+            engine="opencode", version=version, launch_command=(real, opencode_install.ACP_SUBCOMMAND),
+            native_credential_dir=str(_home(environ).joinpath(*_OPENCODE_DATA_RELATIVE)),
         )
     return None
 

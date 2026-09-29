@@ -160,6 +160,9 @@ npm --prefix integrations/paseo run test:worker-history-concurrency # server/wor
 npm --prefix integrations/paseo run test:worker-results # server/worker-results.test.ts
 npm --prefix integrations/paseo run test:pipeline # server/pipeline.test.ts
 npm --prefix integrations/paseo run test:error-boundary # client/plugin-error-boundary.test.ts
+npm --prefix integrations/paseo run test:config         # server/config.test.ts
+npm --prefix integrations/paseo run test:settings      # client/settings-model.test.ts + client/settings-panel.test.ts
+npm --prefix integrations/paseo run test:client-bundle  # includes settings screen render-walk
 ```
 
 A local sibling import must use its real `.ts` extension (e.g. `./pipeline.ts`),
@@ -170,11 +173,7 @@ imports it.
 
 **GUI testing** (verifies rendered user-facing behavior):
 
-The installed Paseo CLI was read-only checked at version 0.9.2. Its help lists CLI/daemon/plugin commands and `--home`; no browser client or local HTTP UI command is documented. The daemon uses WebSocket, and Electron Desktop remains the GUI method. Its local daemon
-uses WebSocket, and the installed CLI provides daemon and plugin commands rather
-than a web-client launcher. The Electron Desktop application is the standard
-GUI method. Use the isolated dev home/profile and a disposable project as
-described in [the dev Paseo environment guide](../acp/dev-paseo-environment.md).
+Paseo 0.10.0 desktop evidence (2026-09-29) is inconsistent about availability, so the screen must be treated as unverified rather than reliably reachable. One earlier report described the implemented settings screen and component tests; two isolated live desktop checks found the plugin enabled/running at this worktree but no Cortex entry in Settings or matching command-palette result. The later recheck also inspected the rendered screenshots directly. These negative findings apply to the tested host/session, not every host version or feature flag. Because those desktop runs could not reach the screen, they did not exercise GUI settings reads/updates, saving, revision-conflict/error display, secret redaction, or the OpenCode section; component/render tests are not substitutes. See desktop reports `r_24d9b22e87f5` and `r_a7f0d6da5ec2` for retained evidence and limitations. The settings UI code now uses typed controls rather than JSON text editors; this implementation fact does not establish live reachability. Use the existing documented CLI fallback for supported setup operations, including OpenCode onboarding, where the UI is unavailable. Use the isolated dev home/profile and a disposable project as described in [the dev Paseo environment guide](../acp/dev-paseo-environment.md).
 
 Always pass the plugin directory explicitly as a full absolute path. The plugin
 is edited in isolated git worktrees and the path changes between sessions.
@@ -188,10 +187,7 @@ python3 -B scripts/cortex_paseo_dev.py -- plugin install "$PWD/integrations/pase
 python3 -B scripts/cortex_paseo_dev.py gui
 ```
 
-In Paseo Desktop, open or create a Cortex agent and inspect the rendered behavior
-under test: worker cards and results, tool output and shell commands, and the
-timeline. CLI output, logs and CDP inspection alone do not establish rendered
-behavior. For Xvfb use `python3 -B scripts/cortex_paseo_dev.py gui --xvfb`.
+In Paseo Desktop, inspect the rendered behavior under test. If the Cortex Settings screen is available, check workspace selection, supported setting sections, validation/conflict behavior, redacted values, and explicit OpenCode onboarding; if it is absent, record that outcome and do not report those interactions as tested. The 2026-09-29 Paseo 0.10.0 checks found the plugin screen and command absent, with the later check also inspecting screenshot pixels; see `r_24d9b22e87f5` and `r_a7f0d6da5ec2`. GUI form behavior remains unverified because those runs could not reach the screen. For Xvfb use `python3 -B scripts/cortex_paseo_dev.py gui --xvfb`.
 After testing, stop only the isolated dev daemon:
 
 ```
@@ -209,10 +205,9 @@ python3 -B scripts/cortex_paseo_dev.py -- logs <agent-id> --json
 
 For retained-history checks, omit `--tail` and retain the exit status, output
 byte count, structural event count, safe first/last event identities and any
-explicit error. Paseo 0.9.2 documents `--tail`, `--filter` and `--since` for logs, but no pagination or full-history flag; if completeness cannot be independently
-established, mark that check unverified. Do not store message bodies or raw logs
+explicit error. The 0.9.2 observation that `--tail`, `--filter` and `--since` existed without pagination must not be assumed to apply to 0.10.0. Check the installed `logs --help`; if completeness cannot be independently established, mark that check unverified. Do not store message bodies or raw logs
 in repository documents or reports.
 
 ## What automated evidence cannot close
 
-The no-paid automated suite cannot reach a paid engine and does not establish rendered GUI behavior. Use isolated dev Paseo for applicable live checks. Each probe or GUI observation supports only the exact surface exercised.
+The no-paid automated suite cannot reach a paid engine and does not establish rendered GUI behavior. The settings screen's client-bundle render-walk uses compiled UI plus host shims; it is not a visual Paseo Desktop result. The UI test coverage also includes `client/settings-model.test.ts` (run with `node --experimental-strip-types integrations/paseo/client/settings-model.test.ts`) and the config RPC end-to-end test. Use isolated dev Paseo for applicable live checks. A rendered desktop check must inspect the actual Settings screen and relevant behaviors (workspace selection, read/update, conflicts/redaction, and OpenCode opt-in) in the Electron app; CLI, logs, simulated render-walk, or CDP alone are not GUI evidence. Each probe or GUI observation supports only the exact surface exercised.

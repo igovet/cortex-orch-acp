@@ -38,6 +38,17 @@ function releaseSlot(): void {
 
 export type PythonRunResult = { status: number; stdout: string };
 
+export type ProcessRunOptions = {
+  timeoutMs: number;
+  maxBuffer?: number;
+  /** Written to the child's stdin, which is then closed. Keeps request
+   * bodies (which may hold a new secret value) out of the argv. */
+  input?: string;
+  /** The child's whole environment; inherited when omitted. */
+  env?: NodeJS.ProcessEnv;
+  cwd?: string;
+};
+
 /** Run `python3 -B -c <script> ...args` asynchronously, bounded by the
  * shared concurrency limit above. Mirrors the `spawnSync` result shape
  * (`status`/`stdout`) the store readers already check, so callers are
@@ -45,13 +56,22 @@ export type PythonRunResult = { status: number; stdout: string };
  * a nonzero `status`, matching `spawnSync`'s own timeout behavior (`status`
  * is `null`, which the existing `!== 0` checks already treat as failure). */
 export async function runPython(args: readonly string[], options: { timeoutMs: number; maxBuffer?: number }): Promise<PythonRunResult> {
+  return runProcess("python3", args, options);
+}
+
+/** `runPython` for an explicit interpreter, with optional stdin, environment
+ * and working directory; shares the same concurrency bound. A nonzero exit
+ * still returns whatever the child wrote to stdout. */
+export async function runProcess(command: string, args: readonly string[], options: ProcessRunOptions): Promise<PythonRunResult> {
   await acquireSlot();
   try {
-    const { stdout } = await execFileAsync("python3", args, {
+    const { stdout } = await execFileAsync(command, args, {
       encoding: "utf8",
       timeout: options.timeoutMs,
       maxBuffer: options.maxBuffer ?? 16 * 1024 * 1024,
-    });
+      ...(options.env === undefined ? {} : { env: options.env }),
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+    }, options.input);
     return { status: 0, stdout };
   } catch (error) {
     const stdout = isExecFileError(error) && typeof error.stdout === "string" ? error.stdout : "";
@@ -61,12 +81,19 @@ export async function runPython(args: readonly string[], options: { timeoutMs: n
   }
 }
 
-function execFileAsync(command: string, args: readonly string[], options: { encoding: "utf8"; timeout: number; maxBuffer: number }): Promise<{ stdout: string }> {
+type ExecOptions = { encoding: "utf8"; timeout: number; maxBuffer: number; env?: NodeJS.ProcessEnv; cwd?: string };
+
+function execFileAsync(command: string, args: readonly string[], options: ExecOptions, input?: string): Promise<{ stdout: string }> {
   return new Promise((resolve, reject) => {
-    execFile(command, args as string[], options, (error, stdout) => {
+    const child = execFile(command, args as string[], options, (error, stdout) => {
       if (error) reject(Object.assign(error, { stdout }));
       else resolve({ stdout });
     });
+    if (input !== undefined && child.stdin) {
+      // A child that exits before reading surfaces through the callback.
+      child.stdin.on("error", () => {});
+      child.stdin.end(input);
+    }
   });
 }
 

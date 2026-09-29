@@ -148,6 +148,10 @@ _TIER_REGISTRY: dict[tuple[str, str], CompactionTier] = {
     ("claude-agent-acp", "0.78.0"): CompactionTier("claude-agent-acp", "0.78.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("claude-agent-acp", "0.77.0"): CompactionTier("claude-agent-acp", "0.77.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("claude-agent-acp", "*"): CompactionTier("claude-agent-acp", "*", AUTOMATIC, _AUTOMATIC_LIMITATION),
+    # OpenCode 2.0.19 documents a /compact command and advertises only the
+    # init/review commands over ACP; no compaction signal was observed in
+    # the no-paid probes, so Cortex claims no more than its own boundaries.
+    ("opencode", "2.0.19"): CompactionTier("opencode", "2.0.19", CONTROLLED_BOUNDARY, _CONTROLLED_BOUNDARY_LIMITATION),
 }
 
 

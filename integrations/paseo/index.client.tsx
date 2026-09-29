@@ -6,6 +6,7 @@ import { Animated, Platform, Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { WorkerPanel } from "./client/worker-panel.js";
 import { PipelinePanel } from "./client/pipeline-panel.js";
+import { SettingsScreen } from "./client/settings-panel.js";
 import { selectWorker } from "./client/worker-selection.js";
 import { isWorkerTimelineRunning } from "./client/worker-timeline-status.js";
 import { resolveDurableWorkerCardStatus, workerCardMetadata, workerTerminalState, type WorkerStatusTone } from "./client/worker-display.ts";
@@ -220,6 +221,20 @@ export default function contribute(client: PluginClientContext) {
       }} />
     </PluginErrorBoundary>,
   });
+  // A dedicated settings screen (not a workspace/agent panel: the owner
+  // configuration it edits -- user defaults, MCP servers, connections -- is
+  // not scoped to one project). Reads and writes the Cortex configuration
+  // API from `r_072f338e9c81`/`r_1e6ed08710fe` directly; Paseo's own
+  // settings document is never used, so hand-edited Cortex JSON files stay
+  // the single source of truth.
+  client.addSettingsScreen({
+    id: "cortex-settings",
+    title: "Cortex",
+    icon: "Settings",
+    Component: (props) => <PluginErrorBoundary theme={props.theme} label="Cortex settings">
+      <SettingsScreen {...props} />
+    </PluginErrorBoundary>,
+  });
   client.addCommandCenterItem({
     id: "open-pipeline",
     title: "Open pipeline",
@@ -238,6 +253,19 @@ export default function contribute(client: PluginClientContext) {
     context: "agent",
     onSelect({ openPanel }) {
       openPanel("workers", { location: "workspace" });
+    },
+  });
+  // Discoverable from anywhere (the command palette), not only from a
+  // Cortex chat: the settings it edits are owner- and project-scoped, not
+  // agent-scoped, so this entry never gates on the active agent's provider.
+  client.addCommandCenterItem({
+    id: "open-cortex-settings",
+    title: "Open Cortex settings",
+    icon: "Settings",
+    keywords: ["config", "configuration", "defaults", "routing", "mcp", "connections", "opencode", "cortex"],
+    context: "global",
+    onSelect({ openSettings }) {
+      openSettings("cortex-settings");
     },
   });
   let active = true;

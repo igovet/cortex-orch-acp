@@ -58,7 +58,12 @@ KEY_KIND_ENV_VAR: dict[str, str] = {
     "claude_oauth_token": "CLAUDE_CODE_OAUTH_TOKEN",
 }
 
-SUPPORTED_ENGINES: tuple[str, ...] = ("codex-acp", "claude-agent-acp")
+# "opencode" is OpenCode v2's own ``opencode acp`` (a standalone binary, not
+# an npm package). It is optional: never discovered at startup, onboarded
+# only by the explicit ``add-opencode-connection`` setup step, and excluded
+# from automatic worker routing unless routing.json opts in (see
+# ``engine.opencode_adapter_acp`` and docs/acp/opencode-adapter.md).
+SUPPORTED_ENGINES: tuple[str, ...] = ("codex-acp", "claude-agent-acp", "opencode")
 
 
 @dataclass(frozen=True)
@@ -117,6 +122,20 @@ SUPPORT_MATRIX: dict[str, dict[AuthMode, _AuthSupport]] = {
             qualification="static_unqualified",
             key_kinds=None,
             basis="STATIC: gateway, gateway-bedrock (T002 claude-agent-acp auth line, acp-agent.js:950); no launch implemented",
+        ),
+    },
+    # OpenCode keeps the owner's provider logins in its own data directory
+    # ($XDG_DATA_HOME/opencode/auth.json, written by `opencode auth login`).
+    # Only that native login is registered: an API key would have to be
+    # delivered through provider configuration Cortex deliberately does not
+    # write, and no gateway launch exists.
+    "opencode": {
+        AuthMode.NATIVE_ACCOUNT: _AuthSupport(
+            qualified=True,
+            qualification="observed_no_paid",
+            key_kinds=None,
+            basis=("OBSERVED: opencode 2.0.19 initialize authMethods [opencode-login] "
+                   "(`opencode auth login` in a terminal); no-paid ACP probes only"),
         ),
     },
 }

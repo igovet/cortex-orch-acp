@@ -661,13 +661,20 @@ ENGINE_CONFIG = {
     'claude-agent-acp': {'settings.json': '{}\n', 'settings.local.json': '{}\n', 'CLAUDE.md': '',
                          'AGENTS.md': '', 'skills': None, 'agents': None, 'commands': None,
                          'hooks': None, 'output-styles': None, 'rules': None},
+    # OpenCode's data directory ($XDG_DATA_HOME/opencode) holds its
+    # credentials and session database, which it must write, and ``bin``:
+    # helper executables it downloads and later runs in the owner's own
+    # interactive sessions, outside any jail. Its configuration lives in
+    # ~/.config/opencode, which the OpenCode jail hides (``masked``).
+    'opencode': {'bin': None},
 }
 # Installed plugins are not loaded in Cortex sessions.
 ENGINE_HIDDEN = ('plugins',)
 
 
 @contextmanager
-def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(), readonly=(), sealed=()):
+def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(), readonly=(), sealed=(),
+                isolate_processes=False, masked=(), data_files=None):
     """Run a whole engine process the way a worker's shell runs.
 
     The project is read-only except the granted scopes, `.cortex` is hidden
@@ -680,6 +687,18 @@ def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(
     writable directories (the MCP broker sockets); `sealed` host paths are
     mounted read-only over themselves (the ssh askpass script, which lives
     under the otherwise writable /tmp). `env` is the engine's own.
+
+    ``isolate_processes`` gives the engine its own user, PID and IPC
+    namespaces. Another jail runs in a sibling user namespace, so the kernel
+    refuses it ``/proc/<pid>/environ`` of this engine's processes (the
+    ptrace access check needs CAP_SYS_PTRACE in the target's user
+    namespace), and this engine sees none of the host's processes. OpenCode
+    needs it: its private control server keeps its password in its
+    environment. ``masked`` host directories are hidden behind an empty,
+    jail-private tmpfs (OpenCode's own user configuration). ``data_files``
+    (path -> bytes) appear read-only at those paths, copied by bwrap from a
+    memory file: no other process can change them on the host, although the
+    empty mount point itself is created there.
     """
     from .gateway import PRIVATE
     with gateway_command(root, scratch, argv, scopes, reveal=frozenset(PRIVATE) - {'.cortex'},
@@ -730,11 +749,38 @@ def engine_jail(root, scratch, argv, scopes, *, env, state_dirs=None, writable=(
                     extra += ['--tmpfs', str(path), '--remount-ro', str(path)]
         for path in sealed:
             extra += ['--ro-bind', str(path), str(path)]
-        at = command.index('--chdir')
-        command[at:at] = extra
-        if not scopes:
-            readonly_test_cache(command, scratch, env)
-        launch, launch_fds = compact_argv(command, fds)
+        for directory in masked:
+            path = Path(directory)
+            if path.is_symlink():
+                # A dotfile manager links it elsewhere: hide what it points to.
+                try:
+                    path = path.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    continue
+            if path.is_dir():
+                extra += ['--tmpfs', str(path)]
+        data_fds = []
+        try:
+            for destination, content in (data_files or {}).items():
+                fd = os.memfd_create('cortex-engine-data')
+                data_fds.append(fd)
+                view = memoryview(bytes(content))
+                while view:
+                    view = view[os.write(fd, view):]
+                os.lseek(fd, 0, os.SEEK_SET)
+                extra += ['--perms', '0400', '--ro-bind-data', str(fd), str(destination)]
+            if isolate_processes:
+                at = command.index('--die-with-parent') + 1
+                command[at:at] = ['--unshare-user', '--unshare-pid', '--unshare-ipc']
+            at = command.index('--chdir')
+            command[at:at] = extra
+            if not scopes:
+                readonly_test_cache(command, scratch, env)
+            launch, launch_fds = compact_argv(command, (*fds, *data_fds))
+        except BaseException:
+            for fd in data_fds:
+                os.close(fd)
+            raise
         try:
             yield launch, launch_fds
         finally:

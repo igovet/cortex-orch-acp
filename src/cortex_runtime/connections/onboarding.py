@@ -56,6 +56,8 @@ from .model import (
 _NATIVE_LOGIN_MARKER = {
     "codex-acp": "auth.json",
     "claude-agent-acp": ".credentials.json",
+    # `opencode auth login` writes $XDG_DATA_HOME/opencode/auth.json.
+    "opencode": "auth.json",
 }
 
 _ISOLATION_ENV_VAR = {
@@ -524,6 +526,8 @@ _STATE_ERROR_CODE = {
 _DISCOVERY_PROVIDER = {
     "codex-acp": "openai",
     "claude-agent-acp": "anthropic",
+    # OpenCode routes to whichever providers the owner logged in to.
+    "opencode": "opencode",
 }
 
 

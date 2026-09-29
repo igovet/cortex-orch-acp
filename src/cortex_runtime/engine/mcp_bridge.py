@@ -25,7 +25,7 @@ _CHANNEL_ID_PATTERN = re.compile(r"^ch_[0-9a-f]{12}$")
 _CHANNEL_SECRET_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
 
 _ROLES = ("coordinator", "worker")
-_ENGINES = ("codex-acp", "claude-agent-acp")
+_ENGINES = ("codex-acp", "claude-agent-acp", "opencode")
 
 
 def allowed_mcp_servers(role: str) -> tuple[str, ...]:

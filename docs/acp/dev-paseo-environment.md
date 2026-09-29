@@ -1,15 +1,16 @@
 # Persistent isolated dev Paseo environment
 
-## Verified Paseo 0.9.2 boundary
+## Installed Paseo 0.10.0 boundary
 
-The installed Linux CLI is `/opt/Paseo/resources/bin/paseo`; a read-only `--version` check on 2026-09-26 returned 0.9.2. Its help exposes global `--home <path>` and `--host <host>` options. The guarded wrapper passes the explicit dev home and rejects per-command home or endpoint overrides.
+The installed Linux CLI is `/opt/Paseo/resources/bin/paseo`; a read-only `--version` check on 2026-09-29 returned 0.10.0. Do not assume older 0.9.2 command or isolation observations still apply without checking the installed CLI and bridge. The guarded wrapper's current `--check` was run on 2026-09-29: it selected `/home/igovet/.paseo-dev` and reported `/home/igovet/.paseo` as the protected production home (exit 0). This validates wrapper selection only, not daemon endpoint or GUI isolation.
 
-Production is `~/.paseo` on `127.0.0.1:6767`. The permanent development home is
-`~/.paseo-dev`; its daemon is configured for `127.0.0.1:16767`. Use the separate
-Electron profile directory `~/.config/Paseo-dev` for desktop validation. Do not use
-the normal Paseo desktop profile for development testing.
+The permanent development home is `~/.paseo-dev`; use the separate Electron
+profile directory `~/.config/Paseo-dev` for desktop validation. The host version
+change means historical endpoint values must not be assumed current: check the
+active dev daemon configuration and endpoint before any live run. Do not use the
+normal Paseo desktop profile for development testing.
 
-Paseo 0.9.2 provides no supported browser client or local HTTP UI. Its CLI help lists daemon and plugin commands, with no web-client launcher; the daemon endpoint is WebSocket. Use the Electron Desktop application as the standard GUI method.
+Paseo 0.10.0's CLI help (checked 2026-09-29) lists CLI commands and options but no web-client launch command. That alone does not prove whether a daemon-served UI exists; use the Electron app for rendered GUI evidence unless a supported alternative is independently verified.
 
 ## Mandatory safety rule
 
@@ -19,11 +20,11 @@ Paseo home, daemon, or cortex-acp plugin. All Paseo and plugin work must use
 `scripts/update-paseo-plugin.sh`: it does not establish a dev-only daemon boundary.
 
 Run Paseo through [scripts/cortex_paseo_dev.py](../../scripts/cortex_paseo_dev.py).
-A read-only `--check` run on 2026-09-26 selected `/home/igovet/.paseo-dev`, reported `/home/igovet/.paseo` as the protected production home, and exited 0. The wrapper defaults to `~/.paseo-dev`, rejects the resolved production home, and rejects per-command `--home` and `--host` overrides. It sets Cortex XDG config/state below the dev home and passes the checkout root for the local plugin. CLI calls also discard inherited `PASEO_AGENT_ID` and `PASEO_AGENT_CWD`, so a command launched from another Paseo agent cannot accidentally target that agent. The check validates selection and does not launch or inspect a daemon.
+A read-only `--check` on 2026-09-29 selected `/home/igovet/.paseo-dev`, reported `/home/igovet/.paseo` as the protected production home, and exited 0. The wrapper source defaults to `~/.paseo-dev`, refuses the resolved production home, and blocks forwarded `--home` and `--host` overrides. It sets Cortex XDG config/state below the selected dev home and passes the checkout root for the local plugin; CLI calls also discard inherited `PASEO_AGENT_ID` and `PASEO_AGENT_CWD`. The check validates home selection only; it does not launch Paseo or verify the daemon endpoint, daemon state, Electron profile, or GUI isolation.
 
 Until plugin-reload recovery is qualified for the deployed version, apply plugin updates between active tasks. Recovery uses persisted Cortex state and does not automatically repeat actions with an unknown outcome. A host SIGKILL without SIGTERM leaves no disconnect record (a later reader identifies the interrupted worker from its provably gone owning process), and native engine actions have no retained command receipt.
 
-To reproduce a reload with an active worker, run `plugin reload cortex-acp` through the guarded wrapper while a worker runs. Paseo 0.9.2 closes the provider connection, the shim forwards SIGTERM, and Cortex records `host_disconnected` with `trigger: sigterm`; Paseo does not reload the session until the next prompt. Start the daemon and the `gui` helper outside the Cortex command sandbox (a Cortex worker uses `outside_command`), because the sandboxed runner cannot write the dev home. The `gui` helper blocks until Electron exits, so run it detached; SIGTERM to the helper stops its Electron and Xvfb.
+Historical 0.9.2 observation only: a plugin reload with an active worker closed the provider connection, the shim forwarded SIGTERM, Cortex recorded `host_disconnected` with `trigger: sigterm`, and Paseo did not reload the session until the next prompt. This recovery behavior has not been requalified for 0.10.0; do not reproduce it against active work without a separately authorized, isolated check. Start the daemon and the `gui` helper outside the Cortex command sandbox (a Cortex worker uses `outside_command`), because the sandboxed runner cannot write the dev home. The `gui` helper blocks until Electron exits, so run it detached; SIGTERM to the helper stops its Electron and Xvfb.
 
 ## Paid live testing only on request
 
@@ -58,8 +59,7 @@ exact surface being checked.
 ## Requested `cli` mode
 
 `cli` mode drives a Cortex agent headlessly through the guarded wrapper, without
-Electron. The Paseo 0.9.2 help lists the commands and flags used here, and the
-dev daemon reports the `cortex` provider with `gpt-5.6-luna` among its models.
+Electron. Verify that the installed Paseo CLI help supports the commands and flags used here, and check the dev daemon's actual provider/model configuration before use.
 Start the daemon and check the plugin as in the setup section, then, from a
 disposable project directory outside this checkout:
 
@@ -156,7 +156,7 @@ that Xvfb when the GUI exits. It never inherits a desktop `DISPLAY` in this mode
 The command fails before launching Paseo when Xvfb is absent or cannot provide a
 private display.
 
-Paseo 0.9.2 calls Electron's `requestSingleInstanceLock()` per `userData`
+The installed Paseo calls Electron's `requestSingleInstanceLock()` per `userData`
 directory; a second launch on a profile already held by a live instance quits
 with status 0 after briefly opening its DevTools port, and Paseo forwards the
 launch to the holder as an extra window. The helper therefore reads the
@@ -192,7 +192,5 @@ python3 -B scripts/cortex_paseo_dev.py -- logs <agent-id> --json
 
 For retained-history checks, omit `--tail` and retain exit status, output byte
 count, structural event count, safe first/last event identities and any explicit
-error. Paseo 0.9.2 documents `--tail`, `--filter` and `--since` for logs, but
-no pagination or full-history flag. If completeness cannot be independently
-established, mark the check unverified. Do not store message bodies or raw logs
+error. The 0.9.2 observation that `--tail`, `--filter` and `--since` existed without pagination must not be carried forward to 0.10.0 without checking its logs command help. If completeness cannot be independently established, mark the check unverified. Do not store message bodies or raw logs
 in repository documents or reports.

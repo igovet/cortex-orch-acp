@@ -226,6 +226,29 @@ const pipelineFixture = {
   workers: [],
 };
 
+// A minimal, schema-shaped `cortex.config.read` fixture for `surface:
+// "user_defaults"` only: enough for the Settings screen's default section to
+// reach its "ready" state during the render walk below. Every other surface
+// is left unresolved (the section shows "Loading…", which is still a
+// defined element tree) -- this walk checks for undefined element types, not
+// full section coverage, which is exercised by `settings-model.test.ts`.
+const configBinding = { apiVersion: 1, configHome: "~", project: null as string | null };
+const userDefaultsFixture = {
+  surface: "user_defaults", path: "~/.config/cortex/defaults.json", revision: "absent", exists: false,
+  defaults: {}, editable_keys: ["route_id", "route_connection_id", "route_model", "parameters", "language"],
+  preserved_keys: [], languages: ["en", "ru"],
+  ceiling: {
+    allowed_routes: null, allowed_connections: null, allowed_data_recipients: null, permission_level: null,
+    limits: {}, spend_limit: null, spend_limit_enforceable: false,
+    fallback_policy: { allowed_target_routes: null, allowed_failure_classes: null, budget: null, data_recipient_consent: false },
+  },
+  ceiling_set: false,
+};
+async function configReadFixture(input: { surface: string }): Promise<unknown> {
+  if (input.surface === "user_defaults") return { ok: true, binding: configBinding, result: userDefaultsFixture };
+  return new Promise<never>(() => {});
+}
+
 async function loadClient(platformOs: "android" | "ios" | "web") {
   const runtime = createRuntime();
   const component = (name: string) => name;
@@ -247,13 +270,26 @@ async function loadClient(platformOs: "android" | "ios" | "web") {
     },
   });
   const rpcs = new Map<string, (input: unknown) => Promise<unknown>>();
+  // Shared between the `@getpaseo/plugin/client` module shim's `usePaseo()`
+  // and the top-level `client.paseo` the harness passes to `contribute()`,
+  // exactly like the real host: one workspace/agent catalogue either way.
+  const paseoApi = {
+    workspaces: { list: async () => ({ entries: [{ id: "ws1", title: null, name: "ws1" }] }), subscribe: () => () => {} },
+    agents: {
+      list: async () => ({ entries: [{ agent: { id: "a1", workspaceId: "ws1", status: "running", provider: "cortex" } }], pageInfo: { hasMore: false } }),
+      subscribe: () => () => {},
+    },
+  };
   const pluginClient = {
     useAgent: (_agentId: string, select: (agent: { workspaceId: string }) => unknown) => select({ workspaceId: "ws1" }),
+    usePaseo: () => paseoApi,
     useRpc(definition: { name: string }) {
       let call = rpcs.get(definition.name);
       if (!call) {
         call = definition.name === "cortex.pipeline.read"
           ? async () => pipelineFixture
+          : definition.name === "cortex.config.read"
+          ? (input: unknown) => configReadFixture(input as { surface: string })
           : () => new Promise<never>(() => {});
         rpcs.set(definition.name, call);
       }
@@ -279,27 +315,45 @@ async function loadClient(platformOs: "android" | "ios" | "web") {
     return modules[name];
   });
   const captured: Record<string, { Component: (props: Record<string, unknown>) => unknown }> = {};
+  const commands: Record<string, { title: string; context: string; onSelect: (capabilities: { openSettings: (id: string) => void }) => void }> = {};
   let pill: { button: { behavior: { kind: string; Content?: (props: Record<string, unknown>) => unknown } } } | undefined;
   const registration = { remove() {} };
   const client = {
     addTimelineTransformer: () => registration,
     addTimelineRenderer: (renderer: { kind: string; Component: (props: Record<string, unknown>) => unknown }) => { captured[renderer.kind] = renderer; return registration; },
     addWorkspacePanel: (panel: { id: string; Component: (props: Record<string, unknown>) => unknown }) => { captured[panel.id] = panel; return registration; },
-    addCommandCenterItem: () => registration,
+    addSettingsScreen: (screen: { id: string; Component: (props: Record<string, unknown>) => unknown }) => { captured[screen.id] = screen; return registration; },
+    addCommandCenterItem: (item: { id: string; title: string; context: string; onSelect: (capabilities: { openSettings: (id: string) => void }) => void }) => {
+      commands[item.id] = item;
+      return registration;
+    },
     addComposerPill: (contribution: typeof pill) => { pill = contribution; return registration; },
     openPanel() {},
-    paseo: {
-      workspaces: { list: async () => ({ entries: [{ id: "ws1" }] }), subscribe: () => () => {} },
-      agents: {
-        list: async () => ({ entries: [{ agent: { id: "a1", workspaceId: "ws1", status: "running", provider: "cortex" } }], pageInfo: { hasMore: false } }),
-        subscribe: () => () => {},
-      },
-    },
+    paseo: paseoApi,
   };
   const cleanup = exports.default(client);
   for (let tick = 0; tick < 5 && !pill; tick += 1) await new Promise((done) => setTimeout(done, 0));
-  return { runtime, captured, pill: () => pill, cleanup };
+  return { runtime, captured, commands, pill: () => pill, cleanup };
 }
+
+test("Cortex settings registers a native screen and a global command that opens it", async () => {
+  const { captured, commands, cleanup } = await loadClient("web");
+  try {
+    assert.ok(captured["cortex-settings"], "native settings screen registered");
+    const command = commands["open-cortex-settings"];
+    assert.ok(command, "settings command registered");
+    assert.equal(command.title, "Open Cortex settings");
+    assert.equal(command.context, "global");
+    const opened: string[] = [];
+    command.onSelect({ openSettings: (id) => {
+      assert.ok(captured[id], `native settings screen ${id} is registered`);
+      opened.push(id);
+    } });
+    assert.deepEqual(opened, ["cortex-settings"]);
+  } finally {
+    cleanup();
+  }
+});
 
 for (const platformOs of ["android", "web"] as const) {
   test(`every rendered surface has defined element types (${platformOs})`, async () => {
@@ -321,6 +375,10 @@ for (const platformOs of ["android", "web"] as const) {
       const panelProps = { ...host, workspaceId: "ws1", agentId: "a1", context: "agent" };
       assert.ok((await runtime.mount(() => ({ type: captured.pipeline.Component, props: panelProps }))) > 20, "pipeline panel rendered its steps");
       assert.ok((await runtime.mount(() => ({ type: captured.workers.Component, props: panelProps }))) > 1, "workers panel rendered");
+
+      const settings = captured["cortex-settings"];
+      assert.ok(settings, "Cortex settings screen registered");
+      assert.ok((await runtime.mount(() => ({ type: settings.Component, props: host }))) > 15, "settings screen rendered its default section");
 
       const registered = pill();
       assert.ok(registered, "Pipeline composer pill registered");

@@ -141,7 +141,7 @@ that dev home only with python3 -B scripts/cortex_paseo_clone.py while its dev d
 is stopped; the production home is read-only to that utility. Before using an
 isolation flag or environment variable, verify it against the installed Paseo version
 and ACP bridge. Follow [the dev Paseo environment guide](docs/acp/dev-paseo-environment.md).
-For verified Linux 0.9.2 commands, invoke python3 -B scripts/cortex_paseo_dev.py --
+For the current installed Linux Paseo 0.10.0, invoke python3 -B scripts/cortex_paseo_dev.py --
 ...; it defaults to ~/.paseo-dev, rejects ~/.paseo, and blocks command-level endpoint
 overrides. If the installed build cannot be shown to isolate every required state and
 the daemon endpoint, do not launch Paseo or install the plugin; report the missing
@@ -159,12 +159,10 @@ described below. See the dev Paseo environment guide for the `cli` commands.
 ### Dev Paseo GUI verification
 
 For a requested `desktop` check, use the persistent isolated dev home with the
-Paseo Electron Desktop application. Paseo 0.9.2 does not provide a browser-based web
-client or local HTTP UI; its daemon exposes a WebSocket endpoint, which is not a
-browser UI. The installed `paseo --help` lists CLI commands and the plugin
-reference lists directory, Git and npm plugin sources. No supported web-client
-launch command or daemon-served UI was found. Use the Electron app connected to
-the isolated dev daemon for rendered behavior. Until recovery is qualified for the deployed version, apply plugin updates between active tasks. A host SIGKILL without SIGTERM cannot be recorded; native engine actions have no retained command receipt. Outside a
+Paseo Electron Desktop application. The installed Paseo 0.10.0 CLI help lists CLI commands but no web-client launch
+command. This does not establish whether a daemon-served UI exists. Use the
+Electron app connected to the isolated dev daemon for rendered behavior unless
+a supported alternative is independently verified. Until recovery is qualified for the deployed version, apply plugin updates between active tasks. A host SIGKILL without SIGTERM cannot be recorded; native engine actions have no retained command receipt. Outside a
 requested `cli` check, CLI use is secondary and covers daemon health, plugin
 registration and logs only.
 
@@ -221,7 +219,7 @@ python3 -B scripts/cortex_paseo_dev.py -- logs <agent-id> --json
 
 For retained-history checks, omit `--tail` and retain the exit status, output
 byte count, structural event count, safe first/last event identities and any
-explicit error. Paseo 0.9.2 documents `--tail`, `--filter` and `--since` for
-logs, but no pagination or full-history flag; if completeness cannot be independently
+explicit error. Paseo 0.10.0's `logs --help` and retained-history behavior must be checked before
+relying on historical 0.9.2 observations; if completeness cannot be independently
 established, mark that check unverified. Do not store message bodies or raw logs in
 repository documents or reports.

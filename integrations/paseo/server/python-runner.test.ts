@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { runPython } from "./python-runner.ts";
+import { runProcess, runPython } from "./python-runner.ts";
 
 // Basic correctness: argv passthrough, stdout capture, exit-code mapping.
 {
@@ -15,6 +15,19 @@ import { runPython } from "./python-runner.ts";
   // A slow script exceeding the timeout is reported as a failure, not hung.
   const result = await runPython(["-B", "-c", "import time; time.sleep(2)"], { timeoutMs: 100 });
   assert.notEqual(result.status, 0);
+}
+
+// runProcess: stdin (kept out of argv), an explicit environment and working
+// directory; a nonzero exit still returns what the child wrote to stdout.
+{
+  const result = await runProcess("python3", ["-B", "-c", "import os, sys; print(sys.stdin.read() + os.environ['CORTEX_RUNNER_TEST'] + os.getcwd())"], {
+    timeoutMs: 5000, input: "in:", env: { ...process.env, CORTEX_RUNNER_TEST: "env:" }, cwd: "/",
+  });
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, "in:env:/\n");
+  const refused = await runProcess("python3", ["-B", "-c", "import sys; print('body'); sys.exit(1)"], { timeoutMs: 5000 });
+  assert.equal(refused.status, 1);
+  assert.equal(refused.stdout, "body\n");
 }
 
 // Reproducible load test: N "concurrent" calls (root cause r_6df0ca1ceeb1's

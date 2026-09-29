@@ -70,7 +70,14 @@ an unrelated one:
    denied models from a leftover ``route-policy.json`` (see
    ``cortex_runtime.routing.defaults``). ``init-storage`` and
    ``install-paseo-plugin`` run it too.
-9. ``print-client-recipes`` -- delegates entirely to the existing T011
+9. ``add-opencode-connection`` -- the one way to onboard the optional
+   OpenCode v2 engine (never discovered at startup): finds a trusted
+   ``opencode`` binary, reads its version in a network-less sandbox, refuses
+   any version Cortex has not qualified, and registers a connection that
+   references the owner's own ``~/.local/share/opencode`` login (created by
+   ``opencode auth login``; never copied, never written). See
+   docs/acp/opencode-adapter.md.
+10. ``print-client-recipes`` -- delegates entirely to the existing T011
    ``cortex_acp_client_config.py`` (Zed dry-run-by-default entry +
    ``--print-codeg-recipe``); this script never re-implements or
    duplicates that write path.
@@ -639,6 +646,41 @@ def _verified_install_launch_command(*, engine, install_record, environ=None):
         raise SystemExit(f"error: invalid --install-record: {error}") from None
 
 
+def add_opencode_connection(*, binary=None, name="OpenCode", environ=None):
+    """Register (or reuse) the connection for a verified OpenCode binary
+    (module docstring, step 9); return a JSON-safe summary with next steps."""
+    from cortex_runtime.engine import opencode_install
+
+    found = connection_discovery.discover_opencode(binary=binary, environ=environ)
+    if found is None:
+        raise SystemExit(
+            "error: no trusted OpenCode binary reporting a version was found (looked at --binary, "
+            "$CORTEX_OPENCODE_BINARY, ~/.opencode/bin/opencode and PATH)."
+        )
+    try:
+        install = opencode_install.verify_install(
+            opencode_install.OpenCodeInstall(binary=found.launch_command[0], version=found.version), environ)
+        record = onboarding.create_referenced_connection(
+            name=name, engine="opencode", provider="opencode",
+            launch_command=opencode_install.launch_command_for(install), reuse=True, environ=environ,
+        )
+        # A reused connection keeps its stored state; recompute it from the
+        # login directory as it is now.
+        record = onboarding.validate(record.id, environ=environ)
+    except PortableError as error:
+        raise SystemExit(f"error: {error.code}: {error.remediation}") from None
+    next_steps = {
+        "configured": [f"python3 -B scripts/cortex_acp_setup.py refresh-catalog --connection {record.id}"],
+        "authorization_required": ["opencode auth login",
+                                   f"python3 -B scripts/cortex_acp_setup.py validate-connection --connection {record.id}"],
+        "invalid": [f"chmod 700 {found.native_credential_dir}  (Cortex requires a private credential directory)",
+                    f"python3 -B scripts/cortex_acp_setup.py validate-connection --connection {record.id}"],
+    }.get(record.state.value, [])
+    return dict(connection_id=record.id, name=record.name, engine=record.engine, version=install.version,
+                launch_command=list(record.launch_command), credential_dir=found.native_credential_dir,
+                credential_dir_kind="referenced", state=record.state.value, next_steps=next_steps)
+
+
 def pin_route(*, connection_id, model, environ=None):
     """Declare one qualified model for ``connection_id`` and pin it as the
     persisted user-default route (see module docstring, step 3)."""
@@ -775,6 +817,13 @@ def status(environ=None):
         }
         for engine in connection_discovery.SUPPORTED_ENGINES:
             result["discovered_engines"].setdefault(engine, None)
+        # Optional engine: reported, never auto-registered (add-opencode-connection).
+        opencode = connection_discovery.discover_opencode(environ=environ)
+        result["discovered_engines"]["opencode"] = None if opencode is None else dict(
+            version=opencode.version, launch_command=list(opencode.launch_command),
+            native_credential_dir=opencode.native_credential_dir, credential_dir_kind="referenced",
+            qualified=connection_discovery.is_qualified("opencode", opencode.version), optional=True,
+        )
     except Exception as error:  # noqa: BLE001 - status is always safe to run
         result["discovery_error"] = str(error)
     try:
@@ -868,6 +917,14 @@ def main(argv=None):
     )
     p_conn.add_argument("--no-reuse", dest="reuse", action="store_false", default=True)
 
+    p_opencode = sub.add_parser(
+        "add-opencode-connection",
+        help="Register the optional OpenCode v2 engine from a verified, qualified binary (explicit opt-in).",
+    )
+    p_opencode.add_argument("--binary", default=None,
+                            help="Absolute path of the opencode binary (default: search the usual locations).")
+    p_opencode.add_argument("--name", default="OpenCode")
+
     p_route = sub.add_parser("pin-route", help="Pin one declared model as the default route.")
     p_route.add_argument("--connection", required=True, dest="connection_id")
     p_route.add_argument("--model", required=True)
@@ -931,6 +988,9 @@ def main(argv=None):
             launch_command=launch_command, reuse=args.reuse,
         )
         print(_json(result))
+        return 0
+    if step == "add-opencode-connection":
+        print(_json(add_opencode_connection(binary=args.binary, name=args.name)))
         return 0
     if step == "pin-route":
         result = pin_route(connection_id=args.connection_id, model=args.model)

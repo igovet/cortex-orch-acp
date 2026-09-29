@@ -126,10 +126,10 @@ def _normalize_entries(raw: object, path: Path) -> list[dict[str, object]]:
         engines = spec.get("engines")
         if engines is not None and (
             not isinstance(engines, list) or not engines
-            or any(engine not in ("codex-acp", "claude-agent-acp") for engine in engines)
+            or any(engine not in ("codex-acp", "claude-agent-acp", "opencode") for engine in engines)
             or len(set(engines)) != len(engines)
         ):
-            raise _error("invalid_mcp_registry", f"{path}: {name}.engines must be a non-empty array of unique codex-acp/claude-agent-acp engines.")
+            raise _error("invalid_mcp_registry", f"{path}: {name}.engines must be a non-empty array of unique codex-acp/claude-agent-acp/opencode engines.")
         entry = dict(
             name=name,
             command=command,

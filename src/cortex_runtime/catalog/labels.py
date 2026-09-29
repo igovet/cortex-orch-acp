@@ -77,6 +77,7 @@ _ALLOWED_PUNCTUATION = frozenset("-_()#+&,'")
 ENGINE_SHORT_NAMES: dict[str, str] = {
     "claude-agent-acp": "claude",
     "codex-acp": "codex",
+    "opencode": "opencode",
 }
 
 

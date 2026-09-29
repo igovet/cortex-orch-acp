@@ -2,8 +2,8 @@
 
 ## Current ACP boundary (1.0.0)
 
-Cortex is an incoming ACP stdio agent. It launches Codex and Claude ACP engines
-as separate processes and stores task metadata and published Markdown under the
+Cortex is an incoming ACP stdio agent. It launches Codex and Claude ACP engines,
+and the optional OpenCode v2 engine once the owner onboards it, as separate processes and stores task metadata and published Markdown under the
 single project-local `.cortex` directory. The current working tree is undergoing
 a runtime-owned orchestration rewrite and is **not release qualified**. See
 [implementation status](docs/acp/runtime-rewrite-status.md).
@@ -126,6 +126,51 @@ servers (strict MCP config; native Codex MCP entries disabled), hooks and plugin
 The host network is shared, which also exposes abstract Unix sockets of the host
 network namespace. The engine binary itself is trusted, runs as the owner and can
 read what the owner can read.
+
+### OpenCode (optional engine)
+
+OpenCode 2.0.19 is launched only after the owner's explicit
+`add-opencode-connection` step, only from a trusted binary whose sandboxed
+`--version` and `initialize` `agentInfo.version` are both exactly `2.0.19`, and
+only inside the engine jail. Anything else fails before a session. Its additional
+boundaries, all checked by no-paid tests against the installed binary
+([OpenCode adapter](docs/acp/opencode-adapter.md)):
+
+- **Process isolation.** Each `opencode acp` starts a loopback control server
+  whose password is in its environment. The OpenCode jail has its own user,
+  PID and IPC namespaces. Any other bubblewrap sandbox is in a sibling user
+  namespace, which the kernel denies `/proc/<pid>/environ` of the OpenCode
+  processes. A setuid `bwrap` would not create those namespaces and is refused.
+  Processes in the parent user namespace (the Cortex runtime, the owner's own
+  shell) can still read it. Cortex never reads or uses the password.
+- **Configuration is Cortex's.** The owner's `~/.config/opencode` is hidden
+  behind an empty private tmpfs, project `opencode.json`/`.opencode/` is
+  disabled (`OPENCODE_DISABLE_PROJECT_CONFIG=1`), and auto-update is off.
+  Cortex supplies one `cortex` agent whose rules ask for every native tool
+  call and deny subagents, questions and skills. It names no provider, so a
+  session runs only on a model Cortex confirmed; OpenCode's own default is a
+  free third-party model.
+- **Role prompt.** The prompt is mounted read-only into the jail from memory;
+  the host holds only an empty mount point.
+- **State.** The owner's `~/.local/share/opencode` (login and session
+  database, shared with the owner's own OpenCode sessions) is referenced in
+  place, never copied, and must be owner-private. Its `bin` directory of
+  downloaded helpers is read-only in the jail. Each process gets a private
+  disposable `XDG_STATE_HOME`.
+- **Code Mode.** Session MCP servers, the Cortex gateway included, are reached
+  only through OpenCode's `execute` (Code Mode) tool. One `execute` call is one
+  permission request, and the calls inside it are not asked individually. Every
+  Cortex MCP call is still checked by the channel-bound gateway. Code Mode can
+  call no shell or file tool, but it has `fetch` over the shared host network,
+  like the engine's shell.
+- **Refusals.** A declared shell `rm` asks the owner in Guarded mode, as for
+  Codex. A refused permission ends OpenCode's whole turn as `cancelled`; Cortex
+  treats its own refusal as a refusal and continues that session (at most three
+  times per prompt), never a user cancellation.
+
+`~/.cache` stays writable to every jailed process, as it is for other tools.
+Whether OpenCode later loads executable content from its cache there was not
+examined. No paid or live OpenCode run has been made.
 
 Outside the jail, entirely unjailed, `connections.quota` lazily runs the
 installed Claude Code CLI's own local `/usage` command (`claude -p /usage
@@ -334,6 +379,16 @@ directory, both already scoped to the running command. A whole engine process
 (`engine_jail`) is not covered by this and keeps the runtime's stricter
 default, since its own state directory can hold real credentials (a native
 account's session tokens) that should stay owner-only.
+
+## Configuration management UI and RPC boundary
+
+The Paseo plugin's Cortex Settings screen edits only the closed surfaces exposed by the Cortex management API: user defaults, project policy ceiling, routing, MCP servers, and connection metadata. It does not edit Paseo's own plugin settings document or expose arbitrary paths, commands, or executable selection. Project scope is resolved from Paseo's workspace; the owner configuration root comes from the Cortex launch environment.
+
+The plugin RPC handlers rely on Paseo daemon authorization (the installed 0.10.0 implementation requires `daemon.manage` for RPC invocation); the handler itself receives no caller identity for an additional per-call check. Writes use revision preconditions and refuse stale revisions. File and project-configuration writes use the existing lock/SQLite transaction path; lockless external writers may still race the final instant. A timeout does not prove that a write failed; re-read state before retrying.
+
+MCP environment values and credential values/paths are not returned. MCP secret values may be retained with an explicit keep marker without being read back. Treat settings JSON fields as sensitive input: only enter trusted configuration, and never paste secrets into support logs or reports. OpenCode onboarding is explicit opt-in, references the owner's existing login rather than copying it, and does not enable automatic routing.
+
+See [configuration management](docs/configuration.md#manage-settings-in-paseo) for the supported scope and persistence map.
 
 ## Store and identity
 

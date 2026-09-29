@@ -184,6 +184,39 @@ class ClaudeAgentAcpUnrecognizedVersionDelivery:
         )
 
 
+@dataclass(frozen=True)
+class OpenCodeAgentPromptDelivery:
+    """OpenCode 2.0.19: the role text is the prompt of the ``cortex`` agent
+    the process is started with -- QUALIFIED on observed evidence.
+
+    2.0.19 ignores ``session/new`` ``_meta.systemPrompt`` (a marker sent there
+    never reached the model), and has no other per-session instruction
+    channel. An agent ``prompt`` given in ``OPENCODE_CONFIG_CONTENT`` as
+    ``{file:<path>}`` was observed, through a loopback fake provider, as the
+    first system message of every model request, replacing OpenCode's own
+    base prompt; OpenCode appends its environment block and Code Mode tool
+    catalog after it. ``engine.opencode_adapter_acp`` builds that prompt and
+    ``engine.process`` mounts it read-only into the jail, one process per
+    session, so ``session_new_meta`` is ``None`` and no prompt block carries
+    the role (``blocks`` stays empty, as for the other engines). Checked by
+    ``tests/test_engine_opencode_qualification.py`` against the installed
+    binary when it is present.
+    """
+
+    engine: str = "opencode"
+    version: str = "2.0.19"
+
+    def plan(self, role: RoleInstructionSet, user_blocks: list) -> DeliveryPlan:
+        return DeliveryPlan(
+            qualification=DeliveryQualification.QUALIFIED,
+            engine=self.engine,
+            version=self.version,
+            channel="OPENCODE_CONFIG_CONTENT agent prompt {file:} at process launch",
+            blocks=(),
+            session_new_meta=None,
+        )
+
+
 # Registry keyed by (engine, version). An unknown engine or an unknown
 # version of a known engine resolves to UnsupportedDelivery -- never a
 # guessed/interpolated qualification.
@@ -192,6 +225,7 @@ _REGISTRY: dict[tuple[str, str], InstructionDelivery] = {
     ("codex-acp", "1.13.0"): CodexAcpDelivery(version="1.13.0"),
     ("claude-agent-acp", "0.78.0"): ClaudeAgentAcp0_78Delivery(),
     ("claude-agent-acp", "*"): ClaudeAgentAcpUnrecognizedVersionDelivery(),
+    ("opencode", "2.0.19"): OpenCodeAgentPromptDelivery(),
 }
 
 

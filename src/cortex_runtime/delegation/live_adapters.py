@@ -60,6 +60,9 @@ from typing import Callable, Mapping
 _PINNED_ENGINE_VERSION: dict[str, str] = {
     "codex-acp": "1.12.0",
     "claude-agent-acp": "0.78.0",
+    # The one qualified OpenCode release; initialize re-checks the running
+    # binary's own agentInfo.version against it (engine.session_manager).
+    "opencode": "2.0.19",
 }
 
 
@@ -138,6 +141,10 @@ def _option_mapping_for(engine: str):
         from ..engine.claude_adapter_acp import claude_option_mapping
 
         return claude_option_mapping
+    if engine == "opencode":
+        from ..engine.opencode_adapter_acp import opencode_option_mapping
+
+        return opencode_option_mapping
     return None
 
 
@@ -349,6 +356,10 @@ def base_prompt_mode(meta) -> str:
     """Return the safely observable base-prompt mode from sent session metadata."""
     if not isinstance(meta, Mapping):
         return "unknown"
+    if isinstance(meta.get("opencodeAgentPrompt"), str):
+        # Recorded by _open_generation for OpenCode, whose prompt is the
+        # launch-time agent prompt, not session metadata.
+        return "unified" if meta["opencodeAgentPrompt"].startswith("# Cortex session\n\n") else "native"
     if "cortexBaseInstructions" in meta:
         return "unified"
     # Codex metadata always carries one of these markers.  Check them before
@@ -988,6 +999,14 @@ class EngineSessionManagerAdapter:
             recipient = "worker" if launch.get("assignment_id") else "coordinator"
             if "mcp_role" not in manager_kwargs:
                 manager_kwargs["mcp_role"] = recipient
+            if record.engine == "opencode" and "engine_instructions" not in manager_kwargs:
+                # OpenCode 2.0.19 takes its role prompt at process launch
+                # only (engine.instruction_delivery_registry
+                # .OpenCodeAgentPromptDelivery); session/new gets no _meta.
+                from ..engine.opencode_adapter_acp import build_agent_prompt
+
+                manager_kwargs["engine_instructions"] = build_agent_prompt(
+                    instructions, role=recipient, project_root=workspace_root, environ=self._environ)
             if "jail" not in manager_kwargs and self._store is not None and channel_credentials is not None:
                 manager_kwargs["jail"] = _jail_for(self._store, channel_credentials)
             manager = EngineSessionManager(
@@ -1164,7 +1183,9 @@ class EngineSessionManagerAdapter:
                 )
                 if ceilings:
                     observation = observation.with_model_thought_levels(ceilings)
-            if record.engine == 'claude-agent-acp':
+            if record.engine in ('claude-agent-acp', 'opencode'):
+                # Both offer an effort selector only for some models, and a
+                # different one per model (observed on opencode 2.0.19 too).
                 from ..catalog.model_efforts import observe_model_efforts
                 levels = observe_model_efforts(
                     manager._client.call, manager.correlation.wire_session_id(session_id), raw, timeout=20.0,
@@ -1956,6 +1977,12 @@ class EngineSessionManagerAdapter:
         # (the Claude note naming attached external MCP servers).
         sent = getattr(manager, "sent_session_new_meta", None)
         meta = sent(session_id) if sent is not None else None
+        launched = getattr(manager, "sent_engine_instructions", None)
+        launched_prompt = launched() if launched is not None else None
+        if meta is None and isinstance(launched_prompt, str):
+            # OpenCode: what the model receives is the agent prompt its
+            # process started with (no session/new _meta at all).
+            meta = {"opencodeAgentPrompt": launched_prompt}
         if meta is None:
             meta = _session_new_meta_for(record.engine, version, instructions, role=recipient,
                                          project_root=getattr(manager, "_workspace_root", None),
@@ -2723,6 +2750,17 @@ class EngineSessionManagerAdapter:
         "previous step was interrupted. Continue the same work from where you stopped; "
         "do not restart or repeat completed steps."
     )
+    # OpenCode 2.0.19 ends the whole turn with stopReason "cancelled" when a
+    # permission request is answered with a reject option (observed), where
+    # the other engines only fail that one tool call. A refusal is a runtime
+    # decision, not a cancellation: the same session is told so and
+    # continues, at most this many times per prompt() call.
+    _MAX_REFUSAL_CONTINUATIONS = 3
+    _REFUSAL_CONTINUE_PROMPT = (
+        "Runtime notice: your last tool call was refused by a permission decision; it is not an error. "
+        "Do not retry it or reach the same effect another way. Continue your work without it, or report "
+        "it as a blocker."
+    )
 
     def prompt(
         self, session_ref: str, message: str, cancel_event: threading.Event, *,
@@ -2814,6 +2852,7 @@ class EngineSessionManagerAdapter:
         watcher.start()
         try:
             instruction_delivery_observed = False
+            refusal_continuations = 0
             turn_message, turn_blocks = message, prompt_blocks
             while True:
                 _last_event[0] = time.monotonic()
@@ -2961,6 +3000,14 @@ class EngineSessionManagerAdapter:
                     _nudged.clear()
                     stop_reason = StopReason.END_TURN
                     turn_message, turn_blocks = self._STALL_NUDGE_PROMPT, None
+                    continue
+                take_refusal = getattr(manager, "take_permission_refusal", None)
+                if (not cancel_event.is_set() and stop_reason == StopReason.CANCELLED
+                        and refusal_continuations < self._MAX_REFUSAL_CONTINUATIONS
+                        and take_refusal is not None and take_refusal(session_ref) is True):
+                    refusal_continuations += 1
+                    stop_reason = StopReason.END_TURN
+                    turn_message, turn_blocks = self._REFUSAL_CONTINUE_PROMPT, None
                     continue
                 break
             call_failed = False

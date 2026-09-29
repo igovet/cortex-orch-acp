@@ -39,7 +39,7 @@ import platform
 from pathlib import Path
 
 from ..portable.errors import PortableError, PortableErrorCategory
-from . import claude_install, codex_install
+from . import claude_install, codex_install, opencode_install
 
 _MAX_PACKAGE_JSON_SEARCH_DEPTH = 6
 
@@ -231,6 +231,8 @@ def resolve_verified_install(record, environ: dict[str, str] | None = None):
     fatal to a caller launching a real engine; a refresh caller still
     treats this as optional-enrichment-skipped, never as its own failure.
     """
+    if record.engine == opencode_install.ENGINE:
+        return _resolve_opencode_install(record, environ)
     if record.launch_command is None or len(record.launch_command) != 2:
         raise InstallUnresolvable(
             "record.launch_command is not the exact (node_binary, adapter_entry) shape a real "
@@ -245,3 +247,16 @@ def resolve_verified_install(record, environ: dict[str, str] | None = None):
         raise InstallUnresolvable("record.launch_command elements must be strings.")
     install = builder(Path(node_binary_text), Path(adapter_entry_text))
     return verifier(install, environ)
+
+
+def _resolve_opencode_install(record, environ):
+    """OpenCode's launch command is ``(binary, "acp")`` -- a standalone
+    binary, no package. Any other shape is not an OpenCode install at all;
+    a binary that fails its trust, version probe or qualification check
+    raises (fatal on launch, like every other engine)."""
+    command = record.launch_command
+    if (command is None or len(command) != 2 or not isinstance(command[0], str)
+            or command[1] != opencode_install.ACP_SUBCOMMAND):
+        raise InstallUnresolvable("record.launch_command is not the exact (binary, 'acp') OpenCode shape.")
+    install = opencode_install.build_install(command[0], environ)
+    return opencode_install.verify_install(install, environ)

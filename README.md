@@ -56,6 +56,16 @@ ACP timeline updates use bounded display projections to avoid repeatedly sending
 
 Worker routes and effort are selected from observed models by the task (role tier, complexity, work-kind engine affinity configurable with `engine_affinity` in `routing.json`, and the coordinator's hint) and each engine's subscription plan usage; how often an engine was used before is not a factor. Light work stays on light models and hard work gets stronger ones. Codex Luna runs at high to max effort; beyond light work it competes only for ordinary standard-tier testing, never for other standard-tier work. A normal standard-tier testing retry or review fix keeps the standard candidate pool and targets Luna at max; other standard-tier retries, explicit high-complexity work and deep roles still escalate and exclude Luna. Plan model hints are constrained recommendations; explicit routing rules remain authoritative. Flagship models (Astra, Fable) run only on escalation or on a node whose exact flagship route the user explicitly asked for in the task; the runtime confirms that request from the user's own recorded messages and answers, never from the coordinator's hint (see [routing and fallback](docs/acp/routing-and-fallback.md#user-requested-flagship-route)).
 
+OpenCode v2 (`opencode acp`, exactly version 2.0.19) is an optional third engine.
+It is never discovered at startup and runs only after the explicit
+`python3 -B scripts/cortex_acp_setup.py add-opencode-connection` step. Automatic
+worker routing skips it unless `routing.json` opts in. It runs only inside the
+engine jail, in its own user/PID/IPC namespaces, with Cortex's own configuration
+(one `cortex` agent that asks permission for every native tool) and the Cortex
+gateway reached through its `execute` tool. The
+[OpenCode adapter page](docs/acp/opencode-adapter.md) lists what works, what
+does not, and the no-paid evidence; no paid or live OpenCode run was made.
+
 Claude Cortex sessions disallow native shell, file/search/edit, notebook edit and
 Skill alternatives through adapter options, leaving the scoped Cortex MCP tools
 and granted code-index MCP tools for that work. This does not change Codex's
@@ -126,7 +136,7 @@ Use the client’s ACP agent registration settings. See [the ACP documentation i
 
 ## Configuration
 
-See the [configuration guide](docs/configuration.md) for JSON configuration files and their locations, MCP server setup, engine connections, routing rules, and the default Haiku exclusion with conditional Luna routing. ssh from workers uses your own ssh-agent and `~/.ssh/config`; see [ssh from workers](docs/configuration.md#ssh-from-workers).
+See the [configuration guide](docs/configuration.md) for JSON configuration files and their locations, MCP server setup, engine connections, routing rules, and the default Haiku exclusion with conditional Luna routing. The plugin implements a Cortex Settings screen for supported owner and project configuration, but a live Paseo 0.10.0 check did not find it in the rendered Settings navigation or command palette; do not assume it is reachable there. Cortex files and the project SQLite configuration row remain authoritative, and fields the typed form cannot safely represent are read-only rather than rewritten. See [the configuration guide](docs/configuration.md#manage-settings-in-paseo) for details and limitations. SSH from workers uses your own ssh-agent and `~/.ssh/config`; see [ssh from workers](docs/configuration.md#ssh-from-workers).
 
 ### Project skills
 
@@ -136,7 +146,7 @@ Codex can discover repository skills under `.agents/skills`; Claude Code discove
 
 - [Packaging and onboarding](docs/acp/packaging-and-onboarding.md): install, first-run setup, diagnostics
 - [Configuration guide](docs/configuration.md): connections, routing, MCP servers, ssh
-- [Codex adapter](docs/acp/codex-acp-adapter.md) and [Claude adapter](docs/acp/claude-agent-acp-adapter.md): how Cortex runs each engine
+- [Codex adapter](docs/acp/codex-acp-adapter.md), [Claude adapter](docs/acp/claude-agent-acp-adapter.md) and the optional [OpenCode adapter](docs/acp/opencode-adapter.md): how Cortex runs each engine
 - [Routing and fallback](docs/acp/routing-and-fallback.md): worker routing and multi-provider fallback
 - [Project storage and recovery](docs/project/storage.md): task storage, format upgrades, recovery
 - [Security](SECURITY.md): the sandbox and permission boundary

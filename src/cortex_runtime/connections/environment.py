@@ -43,6 +43,15 @@
    engine may use this parameter; nothing here ever sets
    ``OPENAI_API_KEY``, ``CODEX_CONFIG``, ``MODEL_PROVIDER``,
    ``DEFAULT_AUTH_REQUEST``, ``INITIAL_AGENT_MODE``, or ``APP_SERVER_LOGS``.
+   The one other engine that may use it is ``opencode``, and only with
+   exactly ``{"OPENCODE_CONFIG_CONTENT", "OPENCODE_DISABLE_PROJECT_CONFIG",
+   "OPENCODE_DISABLE_AUTOUPDATE"}``: the Cortex-built process configuration
+   (a JSON object, see ``engine.opencode_adapter_acp.build_opencode_config``)
+   and the two switches, each exactly ``"1"``.
+7. For ``opencode`` the isolation variable is ``XDG_DATA_HOME``, set to the
+   *parent* of the connection's credential directory (OpenCode keeps its
+   state in ``$XDG_DATA_HOME/opencode``); a credential directory not named
+   ``opencode`` is refused rather than guessed at.
 """
 from __future__ import annotations
 
@@ -89,7 +98,11 @@ DENYLIST_PATTERN = re.compile(
 _ISOLATION_ENV_VAR = {
     "codex-acp": "CODEX_HOME",
     "claude-agent-acp": "CLAUDE_CONFIG_DIR",
+    "opencode": "XDG_DATA_HOME",
 }
+
+# OpenCode names its state directory itself: ``$XDG_DATA_HOME/opencode``.
+_OPENCODE_DATA_SUBDIR = "opencode"
 
 _CHANNEL_ID_PATTERN = re.compile(r"^ch_[0-9a-f]{12}$")
 _CHANNEL_SECRET_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,256}$")
@@ -147,15 +160,46 @@ def _validate_channel_credentials(channel_credentials: tuple[str, str, str]) -> 
 
 _PINNED_ENGINE_VAR_NAMES = {"CODEX_PATH", "NO_BROWSER"}
 _PINNED_ENGINE_VAR_ENGINE = "codex-acp"
+_OPENCODE_PINNED_VAR_NAMES = {"OPENCODE_CONFIG_CONTENT", "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_DISABLE_AUTOUPDATE"}
+
+
+def _apply_opencode_pinned_vars(result: dict[str, str], pinned_engine_vars) -> None:
+    if not isinstance(pinned_engine_vars, dict) or set(pinned_engine_vars) != _OPENCODE_PINNED_VAR_NAMES:
+        raise _validation_error(
+            "invalid_field",
+            f"pinned_engine_vars for 'opencode' must be exactly the keys {sorted(_OPENCODE_PINNED_VAR_NAMES)}.",
+            field="pinned_engine_vars",
+        )
+    import json
+
+    content = pinned_engine_vars["OPENCODE_CONFIG_CONTENT"]
+    try:
+        parsed = json.loads(content) if isinstance(content, str) else None
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        raise _validation_error(
+            "invalid_field", "pinned_engine_vars['OPENCODE_CONFIG_CONTENT'] must be a JSON object.",
+            field="pinned_engine_vars",
+        )
+    for name in ("OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_DISABLE_AUTOUPDATE"):
+        if pinned_engine_vars[name] != "1":
+            raise _validation_error(
+                "invalid_field", f"pinned_engine_vars[{name!r}] must be exactly '1'.", field="pinned_engine_vars",
+            )
+    result.update({name: pinned_engine_vars[name] for name in sorted(_OPENCODE_PINNED_VAR_NAMES)})
 
 
 def _apply_pinned_engine_vars(record, result: dict[str, str], pinned_engine_vars: dict[str, str] | None) -> None:
     if pinned_engine_vars is None:
         return
+    if record.engine == "opencode":
+        _apply_opencode_pinned_vars(result, pinned_engine_vars)
+        return
     if record.engine != _PINNED_ENGINE_VAR_ENGINE:
         raise _validation_error(
             "invalid_field",
-            f"pinned_engine_vars is only accepted for engine {_PINNED_ENGINE_VAR_ENGINE!r}, not {record.engine!r}.",
+            f"pinned_engine_vars is only accepted for engine {_PINNED_ENGINE_VAR_ENGINE!r} or 'opencode', not {record.engine!r}.",
             field="pinned_engine_vars",
         )
     if not isinstance(pinned_engine_vars, dict) or set(pinned_engine_vars) != _PINNED_ENGINE_VAR_NAMES:
@@ -245,7 +289,7 @@ def build_process_env(
     # is injected regardless of the denylist; both originate solely from
     # this connection's own freshly re-verified record, never from
     # base_env/channel_credentials.
-    result[env_var_name] = _isolation_dir(current, environ)
+    result[env_var_name] = _isolation_value(current, environ)
     if current.auth_mode == AuthMode.API_KEY:
         if current.key_kind not in KEY_KIND_ENV_VAR:
             raise _validation_error("unsupported_auth_mode", f"Unknown key_kind {current.key_kind!r}.")
@@ -275,6 +319,30 @@ def credential_directory(record, environ: dict[str, str] | None = None) -> str:
 
 def _isolation_dir(record, environ: dict[str, str] | None = None) -> str:
     return credential_directory(record, environ)
+
+
+def _isolation_value(record, environ: dict[str, str] | None = None) -> str:
+    """The isolation variable's value: the credential directory itself, or
+    for OpenCode its parent (``XDG_DATA_HOME``; see guarantee 7)."""
+    directory = _isolation_dir(record, environ)
+    if record.engine != "opencode":
+        return directory
+    path = Path(directory)
+    if path.name != _OPENCODE_DATA_SUBDIR:
+        raise _validation_error(
+            "connection_invalid",
+            "An OpenCode connection's credential directory must be named 'opencode' "
+            "($XDG_DATA_HOME/opencode); this one cannot be expressed as XDG_DATA_HOME.",
+            field="credential_ref",
+        )
+    return str(path.parent)
+
+
+def engine_state_dir(engine: str, process_env: dict[str, str]) -> str:
+    """The engine state directory ``process_env`` (from :func:`build_process_env`)
+    points the engine at -- the directory its jail keeps writable."""
+    value = process_env[_ISOLATION_ENV_VAR[engine]]
+    return str(Path(value) / _OPENCODE_DATA_SUBDIR) if engine == "opencode" else value
 
 
 def describe_process_env(env: dict[str, str]) -> tuple[str, ...]:

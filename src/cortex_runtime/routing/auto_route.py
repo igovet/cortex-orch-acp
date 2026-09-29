@@ -110,6 +110,9 @@ bare family name that covers every version and alias of that family
 global file (:mod:`routing.defaults`).
 The built-in Haiku exclusion applies only to automatic worker selection;
 a matching ``pin`` or ``auto_allow`` can opt into Haiku, while ``deny`` still wins.
+Every ``opencode`` route is excluded from automatic selection the same way
+(OpenCode is an optional engine): an exact ``auto_allow`` entry such as
+``"opencode/anthropic/claude-sonnet-4-5"`` or a ``pin`` opts one in.
 
 ``engine_affinity`` maps a work kind (a key of :data:`WORK_KIND_ENGINES`)
 or ``"*"`` to an engine id, or ``null`` for no lean; a named kind wins,
@@ -1017,13 +1020,21 @@ def _listed(values: Sequence[str], engine: str, model: str) -> bool:
     return False
 
 
+#: Engines whose routes automatic selection never picks on its own: OpenCode
+#: is optional, so its routes run only when chosen explicitly (the model
+#: selector, a ``pin``) or opted in through ``auto_allow``.
+DEFAULT_AUTO_DENY_ENGINES = frozenset({"opencode"})
+
+
 def _default_auto_denied(overrides: Mapping, entry) -> bool:
-    """The built-in Haiku exclusion from automatic selection (``auto_allow``
-    lifts it; ``deny`` still wins)."""
+    """The built-in Haiku and OpenCode exclusions from automatic selection
+    (``auto_allow`` lifts them; ``deny`` still wins)."""
     engine, model = entry.route.engine, entry.route.model
-    return (engine == "claude-agent-acp"
-            and any(family in model.casefold() for family in DEFAULT_AUTO_DENY_FAMILIES)
-            and not _listed(overrides.get("auto_allow") or (), engine, model))
+    if _listed(overrides.get("auto_allow") or (), engine, model):
+        return False
+    return (engine in DEFAULT_AUTO_DENY_ENGINES
+            or (engine == "claude-agent-acp"
+                and any(family in model.casefold() for family in DEFAULT_AUTO_DENY_FAMILIES)))
 
 
 # --- model versions ----------------------------------------------------------

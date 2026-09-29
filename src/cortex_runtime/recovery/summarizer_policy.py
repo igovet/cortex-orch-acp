@@ -77,6 +77,7 @@ _ENGINE_OWNED_REASON = (
 ADAPTER_SUMMARIZER_SUPPORT: dict[str, AdapterSummarizerSupport] = {
     "codex-acp": AdapterSummarizerSupport("codex-acp", False, _ENGINE_OWNED_REASON),
     "claude-agent-acp": AdapterSummarizerSupport("claude-agent-acp", False, _ENGINE_OWNED_REASON),
+    "opencode": AdapterSummarizerSupport("opencode", False, _ENGINE_OWNED_REASON),
 }
 
 _UNKNOWN_ENGINE_REASON = (

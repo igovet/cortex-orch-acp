@@ -577,7 +577,7 @@ except (Conflict, OSError, RuntimeError, ValueError):
 `;
 
 /** The runtime's logical project root for one workspace directory, or null. */
-async function resolveProjectRoot(directory: string): Promise<string | null> {
+export async function resolveProjectRoot(directory: string): Promise<string | null> {
   const result = await runPython(["-B", "-c", PROJECT_ROOT_PYTHON, directory], { timeoutMs: 5000 });
   const root = result.status === 0 && result.stdout.endsWith("\n") ? result.stdout.slice(0, -1) : "";
   return root.startsWith("/") && !root.includes("\0") && !root.includes("\n") ? root : null;

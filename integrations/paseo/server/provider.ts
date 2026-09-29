@@ -720,6 +720,16 @@ function queuedContentEcho(blocks: readonly QueuedContentBlock[]): string {
 }
 
 
+/** The Cortex process this plugin launches (its argv and env overrides), as
+ * the provider selects it; undefined when no usable launch is configured. */
+export function cortexLaunchTarget(): LaunchConfig | undefined {
+  try {
+    return launchTarget(cortexCommand());
+  } catch {
+    return undefined;
+  }
+}
+
 /** The Cortex process a shimmed launch command starts (see shimmedCommand). */
 function launchTarget(command: readonly string[]): LaunchConfig | undefined {
   const prefix = "CORTEX_ACP_TARGET=";

@@ -190,6 +190,21 @@ Claude's `managedSettings` layer drops `attribution`; it works only through the
 `settings` layer. See the [Codex adapter](codex-acp-adapter.md) for the private
 adapter fields.
 
+The optional OpenCode 2.0.19 engine ignores `session/new` `_meta.systemPrompt`.
+Its whole prompt is the prompt of the `cortex` agent Cortex configures at process
+launch, a read-only file mounted into the jail. In order, it holds:
+
+1. the unified base prompt;
+2. a note that MCP tools, `cortex` included, are called inside its `execute` tool;
+3. the role instructions;
+4. the project's `AGENTS.md`/`CLAUDE.md`, which OpenCode stops loading once
+   project configuration is off;
+5. the attached-MCP-servers note.
+
+Observed through a loopback fake provider, OpenCode appends an environment block
+and its Code Mode tool catalog after that prompt. See the
+[OpenCode adapter](opencode-adapter.md#role-instructions).
+
 ## What each engine still adds
 
 Observed on 2026-09-28 by pointing each installed engine (claude-agent-acp
