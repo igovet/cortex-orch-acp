@@ -28,8 +28,28 @@ import {
   buildProjectCeilingUpdate,
   buildRoutingUpdate,
   buildUserDefaultsUpdate,
+  canAutoAllow,
+  automaticText,
   composePin,
   connectionAction,
+  engineAutomaticIn,
+  engineDisabledIn,
+  engineLabel,
+  engineModelsTarget,
+  engineNowText,
+  engineToken,
+  modelAutoAllowState,
+  modelDenyState,
+  modelGroups,
+  removeRoutingToken,
+  sameJson,
+  selectorText,
+  setEngineAutomatic,
+  setEngineEnabled,
+  setModelAutoAllowed,
+  setModelEnabled,
+  shadowingSource,
+  unmatchedTokens,
   describeConfigError,
   errorAt,
   errorFor,
@@ -46,6 +66,7 @@ import {
   routingVocabulary,
   userDefaultsToForm,
   type AffinityRow,
+  type CatalogEngine,
   type CeilingForm,
   type CeilingView,
   type ConnectionView,
@@ -56,7 +77,9 @@ import {
   type McpServerForm,
   type McpServersView,
   type PinRow,
+  type ModelGroup,
   type ProjectCeilingView,
+  type RouteCatalogView,
   type RoutingForm,
   type RoutingView,
   type RoutingVocabulary,
@@ -456,8 +479,10 @@ function CeilingEditor({ form, onChange, theme, errors, owner }: {
       </>}
     </Optional>;
   return <View style={{ gap: 10 }}>
-    {restricted("allowed_routes", "allowed routes", "ceiling.allowed_routes", "exact route id")}
-    {restricted("allowed_connections", "allowed connections", "ceiling.allowed_connections", "cn_…")}
+    {restricted("allowed_routes", "allowed routes", "ceiling.allowed_routes", "exact route id",
+      "Exact route ids (xr_…), listed per model under Engines & models. A dispatch to any other route is refused.")}
+    {restricted("allowed_connections", "allowed connections", "ceiling.allowed_connections", "cn_…",
+      "Recorded and checked for narrowing only: this Cortex version does not use it to block a connection. To switch an engine or model off, use Engines & models.")}
     {restricted("allowed_data_recipients", "allowed data recipients", "ceiling.allowed_data_recipients", "recipient")}
     <ChoiceField label={`${owner} permission level`} value={form.permission_level ?? ""} theme={theme}
       options={[{ value: "", label: "Unrestricted" }, ...PERMISSION_LEVELS.map((level) => ({ value: level, label: level }))]}
@@ -669,9 +694,12 @@ function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
         </View>} />}
     </Optional>
     <Optional label="Deny list" value={form.deny} emptyValue={() => [] as string[]} onChange={(deny) => set({ deny })} theme={theme}
-      unsetText="Not set: the built-in deny list applies.">
-      {(values) => <StringListField label="Denied route or engine" values={values} onChange={(deny) => set({ deny })} theme={theme}
-        errors={errors} errorKey="rules.deny" placeholder="engine, engine/model or model" />}
+      unsetText="Not set: this file denies nothing.">
+      {(values) => <>
+        <Hint theme={theme} text="Each entry is an exact model id, engine/model, a family (haiku) or versioned id that covers its variants, or engine/* for a whole engine. Denied routes are hidden from the model selector and refused. Engines & models switches write the same entries." />
+        <StringListField label="Denied route or engine" values={values} onChange={(deny) => set({ deny })} theme={theme}
+          errors={errors} errorKey="rules.deny" placeholder="model, engine/model, family or engine/*" />
+      </>}
     </Optional>
     <Optional label="Auto-allow list" value={form.auto_allow} emptyValue={() => [] as string[]} onChange={(auto_allow) => set({ auto_allow })} theme={theme}
       unsetText="Not set: nothing is lifted from the automatic-routing exclusions.">
@@ -691,10 +719,13 @@ function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
             options={vocabulary.tiers.map((tier) => ({ value: tier, label: tier }))} />
         </View>} />}
     </Optional>
-    <Optional label="Engine preference order" value={form.providers} emptyValue={() => [] as string[]} onChange={(providers) => set({ providers })}
-      theme={theme} unsetText="Not set: the built-in engine order applies.">
-      {(values) => <OrderedChoiceList label="Engine preference" values={values} options={vocabulary.engines} theme={theme} errors={errors}
-        errorKey="rules.providers" onChange={(providers) => set({ providers })} />}
+    <Optional label="Restrict automatic routing to engines" value={form.providers} emptyValue={() => [] as string[]} onChange={(providers) => set({ providers })}
+      theme={theme} unsetText="Not set: automatic routing may use every engine.">
+      {(values) => <>
+        <Hint theme={theme} text="Automatic worker routing, failover and pins use only these engines; every engine stays selectable by hand. The order is kept but does not rank engines." />
+        <OrderedChoiceList label="Automatic-routing engines" values={values} options={vocabulary.engines} theme={theme} errors={errors}
+          errorKey="rules.providers" onChange={(providers) => set({ providers })} />
+      </>}
     </Optional>
     <Optional label="Engine affinity per work kind" value={form.engine_affinity} emptyValue={() => [] as AffinityRow[]}
       onChange={(engine_affinity) => set({ engine_affinity })} theme={theme} unsetText="Not set: built-in affinities apply."
@@ -771,6 +802,187 @@ function RoutingSection({ theme, workspaceId }: { theme: Theme; workspaceId: str
               {Object.keys(clientErrors).length > 0 && <Banner text="Fix the highlighted fields before saving." theme={theme} tone="danger" />}
               <Button title={surface.saving ? "Saving…" : `Save ${target} routing`} icon="Check" onPress={onSave} theme={theme} disabled={surface.saving} />
             </>}
+        </View>;
+      }}
+    </SurfaceFrame>
+  </Card>;
+}
+
+// --- Engines & models ---------------------------------------------------------------
+
+function SwitchLegend({ theme }: { theme: Theme }) {
+  return <Group title="What these switches change" theme={theme}>
+    <Hint theme={theme} text={"Use … in Cortex (engine or model): off hides it from the model selector, refuses it when chosen or pinned, and "
+      + "removes it from automatic routing. Saved as a deny entry (engine/* for a whole engine). Connections and logins are never touched."} />
+    <Hint theme={theme} text={"Automatic routing may use …: off only keeps automatic worker routing, failover and pins away from the engine; "
+      + "its models stay selectable by hand. Saved as the engine list of automatic routing."} />
+    <Hint theme={theme} text={"Allow … in automatic routing: only for models Cortex leaves out of automatic routing by default (OpenCode v2 "
+      + "routes, the Claude Haiku family). Saved as an exact auto-allow entry."} />
+    <Hint theme={theme} text={"Now: the state under the rules Cortex uses at the moment. Recorded unavailability and plan quota are decided per "
+      + "dispatch and are not shown. The ceilings' allowed connections are not enforced by this Cortex version and cannot switch anything off."} />
+  </Group>;
+}
+
+function ModelRow({ group, form, onChange, target, theme }: {
+  group: ModelGroup; form: RoutingForm; onChange: (form: RoutingForm) => void; target: "user" | "project"; theme: Theme;
+}) {
+  const route = group.routes[0];
+  const title = group.key;
+  const deny = modelDenyState(route, form, target);
+  const auto = modelAutoAllowState(route, form, target);
+  const engineOff = deny.blocking.includes(engineToken(route.engine));
+  const broader = deny.blocking.filter((token) => token !== engineToken(route.engine));
+  const denyHint = engineOff ? "Off because the whole engine is switched off above."
+    : broader.length > 0 ? `Off because of ${broader.map((token) => `"${token}"`).join(", ")}, which can cover other models too; remove it to switch this back on.`
+      : deny.on ? `Off: hidden from the model selector and refused (entry "${deny.exact}").` : undefined;
+  return <View style={{ borderTopWidth: 1, borderColor: theme.colors.border, paddingTop: 8, gap: 4 }}>
+    <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>{route.model_name}</Text>
+    <ReadOnlyRow label="Model" value={title} theme={theme} />
+    {group.routes.map((item) => <ReadOnlyRow key={item.route_id} label={`Now via ${item.connection_name}`} theme={theme}
+      value={`${selectorText(item)} · ${automaticText(item)}${item.tier ? ` · tier ${item.tier}` : ""}${item.observed ? "" : " · not yet confirmed by the engine"} · route ${item.route_id}`} />)}
+    <ToggleField label={`Use ${title} in Cortex`} value={!deny.on} disabled={deny.blocking.length > 0} theme={theme} hint={denyHint}
+      onValueChange={(on) => onChange(setModelEnabled(form, route, on))} />
+    {broader.map((token) => <Button key={token} title={`Remove rule "${token}"`} tone="danger" theme={theme}
+      accessibilityLabel={`Remove deny rule ${token} (covers ${title})`} onPress={() => onChange(removeRoutingToken(form, "deny", token))} />)}
+    {route.default_auto_excluded !== null && (canAutoAllow(route)
+      ? <>
+        <ToggleField label={`Allow ${title} in automatic routing`} value={auto.on} disabled={auto.blocking.length > 0 || deny.on} theme={theme}
+          onValueChange={(on) => onChange(setModelAutoAllowed(form, route, on))}
+          hint={deny.on ? "A model that is switched off is never routed automatically."
+            : auto.blocking.length > 0 ? `Allowed by ${auto.blocking.map((token) => `"${token}"`).join(", ")}, which can cover other models too.`
+              : route.default_auto_excluded === "optional_engine" ? "OpenCode v2 routes are left out of automatic routing until you opt each one in."
+                : "Left out of automatic routing by default; still selectable by hand."} />
+        {auto.blocking.map((token) => <Button key={token} title={`Remove auto-allow rule "${token}"`} tone="danger" theme={theme}
+          accessibilityLabel={`Remove auto-allow rule ${token} (covers ${title})`} onPress={() => onChange(removeRoutingToken(form, "auto_allow", token))} />)}
+      </>
+      : <ReadOnlyNotice theme={theme} text="This OpenCode model id has no provider/model form, so it cannot be opted into automatic routing; it stays selectable by hand." />)}
+  </View>;
+}
+
+function EngineBlock({ engine, catalog, form, onChange, target, engines, theme }: {
+  engine: CatalogEngine; catalog: RouteCatalogView; form: RoutingForm; onChange: (form: RoutingForm) => void; target: "user" | "project";
+  engines: readonly string[]; theme: Theme;
+}) {
+  const name = engineLabel(engine.engine);
+  const disabled = engineDisabledIn(form, engine.engine);
+  const automatic = engineAutomaticIn(form, engine.engine);
+  const lastAutomatic = automatic && engines.filter((item) => engineAutomaticIn(form, item)).length <= 1;
+  const groups = modelGroups(catalog.routes, engine.engine);
+  return <View style={{ borderWidth: 1, borderColor: theme.colors.border, borderRadius: 6, padding: 8, gap: 8 }}>
+    <Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "700" }}>
+      {name}{engine.optional ? " — optional engine" : ""}
+    </Text>
+    <ReadOnlyRow label="Now" value={engineNowText(engine)} theme={theme} />
+    <ReadOnlyRow label="Connections" theme={theme} value={engine.connections.length === 0 ? "none registered"
+      : engine.connections.map((item) => `${item.name} (${item.state}${item.qualified ? "" : ", unqualified"})`).join(", ")} />
+    {engine.optional && engine.connections.length === 0 && <ReadOnlyNotice theme={theme}
+      text="Not registered. OpenCode v2 is only added by an explicit opt-in under Connections; nothing here registers or activates it." />}
+    <ToggleField label={`Use ${name} in Cortex`} value={!disabled} theme={theme}
+      onValueChange={(on) => onChange(setEngineEnabled(form, engine.engine, on))}
+      hint={disabled ? `Off: every ${engine.engine} model is hidden from the model selector, refused when chosen or pinned, and never routed automatically (entry "${engineToken(engine.engine)}"). Connections and logins are kept.`
+        : undefined} />
+    <ToggleField label={`Automatic routing may use ${name}`} value={automatic} disabled={lastAutomatic} theme={theme}
+      onValueChange={(on) => onChange(setEngineAutomatic(form, engine.engine, on, engines))}
+      hint={lastAutomatic ? "At least one engine must stay available to automatic routing; switch another one on first."
+        : !automatic ? "Off: its models stay selectable by hand, but automatic worker routing, failover and pins skip this engine."
+          : engine.default_auto_excluded ? "Its routes still need their own opt-in below." : undefined} />
+    {groups.length === 0
+      ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+        {engine.connections.length === 0 ? "No models: no connection for this engine." : "No models known yet for this engine."}
+      </Text>
+      : groups.map((group) => <ModelRow key={group.key} group={group} form={form} onChange={onChange} target={target} theme={theme} />)}
+  </View>;
+}
+
+function OtherRules({ catalog, form, onChange, target, theme }: {
+  catalog: RouteCatalogView; form: RoutingForm; onChange: (form: RoutingForm) => void; target: "user" | "project"; theme: Theme;
+}) {
+  const deny = unmatchedTokens(form, "deny", catalog, target);
+  const allow = unmatchedTokens(form, "auto_allow", catalog, target);
+  if (deny.length === 0 && allow.length === 0) return null;
+  return <Group title="Other entries in this file" theme={theme}
+    hint="They match none of the models listed above (for example models not observed yet). Edit them under Routing, or remove them here.">
+    {[...deny.map((token) => ["deny", token] as const), ...allow.map((token) => ["auto_allow", token] as const)].map(([key, token]) =>
+      <View key={`${key}:${token}`} style={{ flexDirection: "row", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+        <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>{key === "deny" ? `Denied: ${token}` : `Auto-allowed: ${token}`}</Text>
+        <Button title="Remove" icon="Trash2" tone="danger" theme={theme}
+          accessibilityLabel={`Remove ${key === "deny" ? "deny" : "auto-allow"} rule ${token}`} onPress={() => onChange(removeRoutingToken(form, key, token))} />
+      </View>)}
+  </Group>;
+}
+
+function EnginesModelsSection({ theme, workspaceId }: { theme: Theme; workspaceId: string | null }) {
+  const routing = useConfigSurface<RoutingView>("routing", workspaceId, false);
+  const catalog = useConfigSurface<RouteCatalogView>("route_catalog", workspaceId, false);
+  const [target, setTarget] = useState<"user" | "project">("user");
+  const [picked, setPicked] = useState(false);
+  const [form, setForm] = useState<RoutingForm | null>(null);
+  const [clientErrors, setClientErrors] = useState<FieldErrors>({});
+  const [notice, setNotice] = useState<string | null>(null);
+  const { state } = routing;
+
+  useEffect(() => {
+    if (!workspaceId && target === "project") setTarget("user");
+    else if (!picked && workspaceId && state.status === "ready" && state.result.effective_source === "project") setTarget("project");
+  }, [workspaceId, target, picked, state]);
+  useEffect(() => {
+    if (state.status !== "ready") return;
+    setForm(engineModelsTarget(state.result, target).form);
+    setClientErrors({});
+  }, [state, target]);
+
+  const reloadAll = () => { routing.reload(); catalog.reload(); };
+  const errors = mergeErrors(clientErrors, routing.saveError?.fields);
+  const onSave = async () => {
+    if (state.status !== "ready" || !form) return;
+    setNotice(null);
+    const built = buildRoutingUpdate(state.result, target, workspaceId, form);
+    if (!built.ok) { setClientErrors(built.errors); routing.setSaveError(null); return; }
+    setClientErrors({});
+    if (await routing.save(built.value)) {
+      setNotice("Saved. The states below were read again from the files Cortex now uses.");
+      await catalog.reload();
+    }
+  };
+
+  return <Card title="Engines & models" theme={theme}>
+    <SurfaceFrame state={state} reload={reloadAll} theme={theme}>
+      {(view) => {
+        const current = engineModelsTarget(view, target);
+        const shadow = shadowingSource(view, target);
+        const engines = routingVocabulary(view).engines;
+        const dirty = form !== null && current.form !== null && !sameJson(form, current.form);
+        return <View style={{ gap: 10 }}>
+          <SwitchLegend theme={theme} />
+          <ReadOnlyRow label="Rules Cortex uses now" theme={theme}
+            value={`${view.effective_source === "builtin" ? "built-in (no routing file)" : `${view.effective_source} file`}${view.effective_valid ? "" : " (invalid)"}`} />
+          <ChoiceField label="Save switches to" value={target} theme={theme} onChange={(value) => { setPicked(true); setTarget(value); }}
+            options={[{ value: "user", label: "User routing file" }, { value: "project", label: "Project routing file", disabled: !workspaceId }]}
+            hint={workspaceId ? undefined : "Select a project workspace above to switch engines or models for one project only."} />
+          {shadow && <Banner theme={theme} tone="warning"
+            text={`The ${shadow === "env" ? "$CORTEX_ROUTING" : shadow} routing file takes precedence (files are never merged): switches saved to the ${target} file do not apply ${shadow === "project" ? "in this project" : "while it is set"}.`} />}
+          {!workspaceId && <Hint theme={theme} text="A project with its own routing file uses that file instead of this one." />}
+          {current.seededFrom && <Banner theme={theme} tone="muted"
+            text={`This project has no routing file yet. Saving creates one, and it replaces the ${current.seededFrom} rules for this project, so the switches start from those rules.`} />}
+          {!current.editable || !form
+            ? <ReadOnlyNotice theme={theme} text={current.reason ?? "This routing file is read-only."} />
+            : <SurfaceFrame state={catalog.state} reload={catalog.reload} theme={theme}>
+              {(cat) => <View style={{ gap: 10 }}>
+                {!cat.effective_valid && <Banner theme={theme} tone="danger"
+                  text="The routing file Cortex uses is invalid: every dispatch is refused until it is repaired (see Routing)." />}
+                {cat.catalog_problems.map((problem) => <Banner key={problem.connection_id} theme={theme} tone="warning"
+                  text={`The model list of connection ${problem.connection_id} could not be read: ${problem.message}`} />)}
+                {cat.engines.map((engine) => <EngineBlock key={engine.engine} engine={engine} catalog={cat} form={form} onChange={setForm}
+                  target={target} engines={engines} theme={theme} />)}
+                <OtherRules catalog={cat} form={form} onChange={setForm} target={target} theme={theme} />
+              </View>}
+            </SurfaceFrame>}
+          {dirty && <Banner theme={theme} tone="muted" text={`Unsaved changes to the ${target} routing file.`} />}
+          <ErrorText message={errorAt(errors, "rules")} theme={theme} />
+          <SaveStatus saveError={routing.saveError} notice={notice} reload={reloadAll} theme={theme} />
+          {Object.keys(clientErrors).length > 0 && <Banner text="Fix the problems shown before saving." theme={theme} tone="danger" />}
+          {current.editable && form && <Button title={routing.saving ? "Saving…" : `Save ${target} routing`} icon="Check" onPress={onSave} theme={theme}
+            disabled={routing.saving} accessibilityLabel={`Save engine and model switches to the ${target} routing file`} />}
         </View>;
       }}
     </SurfaceFrame>
@@ -1135,6 +1347,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
     <ChoiceField label="Section" value={section} theme={theme} onChange={setSection}
       options={SETTINGS_SECTIONS.map((entry) => ({ value: entry.id, label: entry.title }))} />
     {section === "user_defaults" && <UserDefaultsSection theme={theme} />}
+    {section === "engines_models" && <EnginesModelsSection theme={theme} workspaceId={workspaceId} />}
     {section === "project_ceiling" && <ProjectCeilingSection theme={theme} workspaceId={workspaceId} />}
     {section === "routing" && <RoutingSection theme={theme} workspaceId={workspaceId} />}
     {section === "mcp_servers" && <McpServersSection theme={theme} />}

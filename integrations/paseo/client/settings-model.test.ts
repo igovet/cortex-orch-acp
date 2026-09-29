@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  automaticText,
+  canAutoAllow,
+  emptyRoutingForm,
+  engineAutomaticIn,
+  engineDisabledIn,
+  engineModelsTarget,
+  modelAutoAllowState,
+  modelDenyState,
+  modelGroups,
+  removeRoutingToken,
+  setEngineAutomatic,
+  setEngineEnabled,
+  setModelAutoAllowed,
+  setModelEnabled,
+  shadowingSource,
+  unmatchedTokens,
+  type CatalogRoute,
+  type RouteCatalogView,
   buildCeiling,
   buildConnectionMaxSessions,
   buildConnectionRename,
@@ -79,6 +97,26 @@ function routing(rules: Record<string, unknown> | undefined, extra: Partial<Rout
       default_auto_deny_families: [], tiers: ["light", "standard", "heavy"], efforts: ["low", "medium", "high"],
       work_kinds: ["code", "review"], default_user_deny: [],
     },
+  };
+}
+
+function catalogRoute(engine: string, model: string, extra: Partial<CatalogRoute> = {}): CatalogRoute {
+  return {
+    route_id: "xr_aaaaaaaaaaaa", engine, model, model_name: model, connection_id: "cn_0123456789ab", connection_name: "Main",
+    connection_state: "configured", qualified: true, observed: true, tier: "standard", selectable: true, in_selector: true,
+    disabled: false, deny_tokens: [], engine_disabled: false, default_auto_excluded: null, auto_allow_tokens: [], automatic: "eligible",
+    superseded_by: null, matches: { user: { deny: [], auto_allow: [] } }, ...extra,
+  };
+}
+
+function catalog(routes: CatalogRoute[]): RouteCatalogView {
+  return {
+    surface: "route_catalog", project_root: null, precedence: ["user"], effective_source: "user", effective_valid: true, providers: null,
+    engines: ["codex-acp", "claude-agent-acp", "opencode"].map((engine) => ({
+      engine, optional: engine === "opencode", connections: [], disabled: false, automatic: true,
+      default_auto_excluded: engine === "opencode", route_count: 0, matches: {},
+    })),
+    routes, catalog_problems: [], not_shown: ["recorded_unavailability", "quota"],
   };
 }
 
@@ -436,4 +474,111 @@ test("OpenCode v2 registration is sent only with an explicit opt-in", () => {
   assert.equal(buildOnboard(CONNECTIONS, false, "").ok, false);
   assert.deepEqual(buildOnboard(CONNECTIONS, true, ""), { ok: true, value: { expected_revision: REV("c"), explicit_opt_in: true } });
   assert.deepEqual(buildOnboard(CONNECTIONS, true, " OpenCode "), { ok: true, value: { expected_revision: REV("c"), explicit_opt_in: true, name: "OpenCode" } });
+});
+
+// --- engines & models -----------------------------------------------------------
+
+test("engines & models: engine switches write <engine>/* and the automatic-routing list, keeping every other rule", () => {
+  const view = routing({ deny: ["gpt-5.5"], pin: { "*": "codex-acp/gpt-6-luna" }, tiers: { "gpt-6-luna": "light" } });
+  const state = engineModelsTarget(view, "user");
+  assert.equal(state.seededFrom, null);
+  const engines = routingVocabulary(view).engines;
+  let form = setEngineEnabled(state.form!, "claude-agent-acp", false);
+  assert.equal(engineDisabledIn(form, "claude-agent-acp"), true);
+  assert.equal(setEngineEnabled(form, "claude-agent-acp", false), form, "switching off twice writes nothing more");
+  form = setEngineAutomatic(form, "codex-acp", false, engines);
+  assert.deepEqual(form.providers, ["claude-agent-acp", "opencode"], "an unset list becomes every other engine");
+  assert.equal(engineAutomaticIn(form, "codex-acp"), false);
+  assert.equal(engineDisabledIn(form, "codex-acp"), false, "automatic routing is not disabling");
+  const built = buildRoutingUpdate(view, "user", null, form);
+  assert.ok(built.ok);
+  if (built.ok) {
+    assert.equal(built.value.expected_revision, REV("b"));
+    assert.deepEqual(built.value.rules, {
+      pin: { "*": "codex-acp/gpt-6-luna" }, deny: ["gpt-5.5", "claude-agent-acp/*"], tiers: { "gpt-6-luna": "light" },
+      providers: ["claude-agent-acp", "opencode"],
+    });
+  }
+  form = setEngineEnabled(setEngineAutomatic(form, "codex-acp", true, engines), "claude-agent-acp", true);
+  assert.deepEqual(form.deny, ["gpt-5.5"]);
+  assert.deepEqual(form.providers, ["claude-agent-acp", "opencode", "codex-acp"]);
+  let none = form;
+  for (const engine of engines) none = setEngineAutomatic(none, engine, false, engines);
+  const refused = buildRoutingUpdate(view, "user", null, none);
+  assert.equal(refused.ok, false, "automatic routing always keeps at least one engine");
+});
+
+test("engines & models: a model switch writes its exact entry; broader entries are named, never removed by it", () => {
+  const view = routing({ deny: ["haiku", "codex-acp/gpt-6-sol"] });
+  const form = engineModelsTarget(view, "user").form!;
+  const haiku = catalogRoute("claude-agent-acp", "claude-haiku-4-5", {
+    default_auto_excluded: "family", matches: { user: { deny: ["haiku"], auto_allow: [] } },
+  });
+  const sol = catalogRoute("codex-acp", "gpt-6-sol", { matches: { user: { deny: ["codex-acp/gpt-6-sol"], auto_allow: [] } } });
+  const sonnet = catalogRoute("claude-agent-acp", "claude-sonnet-5");
+  assert.deepEqual(modelDenyState(haiku, form, "user"), { on: true, exact: "claude-agent-acp/claude-haiku-4-5", blocking: ["haiku"] });
+  assert.deepEqual(modelDenyState(sol, form, "user"), { on: true, exact: "codex-acp/gpt-6-sol", blocking: [] });
+  let next = setModelEnabled(form, sol, true);
+  assert.deepEqual(next.deny, ["haiku"]);
+  next = setModelEnabled(next, sonnet, false);
+  assert.deepEqual(next.deny, ["haiku", "claude-agent-acp/claude-sonnet-5"]);
+  assert.equal(modelDenyState(sonnet, next, "user").on, true);
+  assert.deepEqual(modelDenyState(sol, setEngineEnabled(next, "codex-acp", false), "user").blocking, ["codex-acp/*"]);
+  assert.deepEqual(modelDenyState(sol, { ...next, deny: ["gpt-6-sol"] }, "user").blocking, ["gpt-6-sol"], "a bare id applies on every engine");
+  assert.deepEqual(removeRoutingToken(next, "deny", "haiku").deny, ["claude-agent-acp/claude-sonnet-5"]);
+  assert.equal(removeRoutingToken(next, "auto_allow", "haiku"), next);
+  const cat = catalog([haiku, sol, sonnet]);
+  assert.deepEqual(unmatchedTokens({ ...next, deny: [...next.deny!, "gpt-4o", "opencode/*"] }, "deny", cat, "user"), ["gpt-4o"]);
+  const groups = modelGroups([sol, { ...sol, route_id: "xr_bbbbbbbbbbbb", connection_id: "cn_bbbbbbbbbbbb" }, sonnet], "codex-acp");
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].routes.length, 2, "one switch covers every connection offering the model");
+});
+
+test("engines & models: OpenCode v2 routes are opted into automatic routing only by their exact route", () => {
+  const view = routing({});
+  const form = engineModelsTarget(view, "user").form!;
+  const sonnet = catalogRoute("opencode", "anthropic/claude-sonnet-4-5", { default_auto_excluded: "optional_engine", automatic: "excluded_by_default" });
+  assert.equal(canAutoAllow(sonnet), true);
+  assert.equal(canAutoAllow(catalogRoute("opencode", "big-pickle", { default_auto_excluded: "optional_engine" })), false);
+  assert.equal(canAutoAllow(catalogRoute("codex-acp", "gpt-6-luna")), false, "only a model excluded by default has an opt-in");
+  assert.match(automaticText(sonnet), /OpenCode v2 routes need an opt-in/);
+  const allowed = setModelAutoAllowed(form, sonnet, true);
+  assert.deepEqual(allowed.auto_allow, ["opencode/anthropic/claude-sonnet-4-5"]);
+  assert.equal(modelAutoAllowState(sonnet, allowed, "user").on, true);
+  const built = buildRoutingUpdate(view, "user", null, allowed);
+  assert.ok(built.ok);
+  if (built.ok) assert.deepEqual(built.value.rules, { auto_allow: ["opencode/anthropic/claude-sonnet-4-5"] }, "nothing else is written");
+  assert.deepEqual(setModelAutoAllowed(allowed, sonnet, false).auto_allow, []);
+});
+
+test("engines & models: a new project file starts from the rules in use; a shadowing file is named", () => {
+  const view = routing({ deny: ["gpt-5.5"], providers: ["codex-acp"] });
+  const project = engineModelsTarget(view, "project");
+  assert.equal(project.seededFrom, "user");
+  assert.deepEqual(project.form?.deny, ["gpt-5.5"]);
+  assert.equal(project.revision, "absent");
+  assert.equal(routingTarget(view, "project").form?.deny, null, "the Routing section still shows the file as it is");
+  assert.equal(shadowingSource(view, "user"), null);
+  const built = buildRoutingUpdate(view, "project", "ws1", project.form!);
+  assert.ok(built.ok);
+  if (built.ok) {
+    assert.deepEqual(built.value, {
+      surface: "routing", target: "project", workspaceId: "ws1", expected_revision: "absent", rules: { deny: ["gpt-5.5"], providers: ["codex-acp"] },
+    });
+  }
+  const withProject: RoutingView = {
+    ...view, effective_source: "project", effective_rules: {},
+    sources: view.sources.map((source) => (source.source === "project" ? { ...source, exists: true, revision: REV("p"), valid: true, rules: {} } : source)),
+  };
+  assert.equal(shadowingSource(withProject, "user"), "project");
+  assert.equal(engineModelsTarget(withProject, "project").seededFrom, null);
+  assert.equal(engineModelsTarget({ ...view, effective_valid: false }, "project").seededFrom, null, "an invalid file is never copied");
+});
+
+test("routing validation: the only wildcard is <engine>/* in the deny list", () => {
+  const vocabulary = routingVocabulary(routing({}));
+  assert.ok(buildRoutingRules({ ...emptyRoutingForm(), deny: ["codex-acp/*", "opencode/*"] }, vocabulary).ok);
+  const bad = buildRoutingRules({ ...emptyRoutingForm(), deny: ["*", "gemini/*", "gpt-*"], auto_allow: ["opencode/*"] }, vocabulary);
+  assert.equal(bad.ok, false);
+  if (!bad.ok) assert.deepEqual(Object.keys(bad.errors).sort(), ["rules.auto_allow[0]", "rules.deny[0]", "rules.deny[1]", "rules.deny[2]"]);
 });

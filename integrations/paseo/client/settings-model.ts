@@ -6,6 +6,7 @@ import type {
   connectionsResult,
   mcpServersResult,
   projectCeilingResult,
+  routeCatalogResult,
   routingResult,
   userDefaultsResult,
 } from "../shared/config.ts";
@@ -26,6 +27,7 @@ import type {
 
 export const SETTINGS_SECTIONS = [
   { id: "user_defaults", title: "User defaults" },
+  { id: "engines_models", title: "Engines & models" },
   { id: "project_ceiling", title: "Project ceiling" },
   { id: "routing", title: "Routing" },
   { id: "mcp_servers", title: "MCP servers" },
@@ -44,6 +46,9 @@ export type McpServerView = McpServersView["servers"][number];
 export type ConnectionsView = z.infer<typeof connectionsResult>;
 export type ConnectionView = ConnectionsView["connections"][number];
 export type CeilingView = UserDefaultsView["ceiling"];
+export type RouteCatalogView = z.infer<typeof routeCatalogResult>;
+export type CatalogRoute = RouteCatalogView["routes"][number];
+export type CatalogEngine = RouteCatalogView["engines"][number];
 
 type UpdateFor<S extends ConfigUpdateInput["surface"]> = Extract<ConfigUpdateInput, { surface: S }>;
 export type UserDefaultsInput = UpdateFor<"user_defaults">;
@@ -580,9 +585,15 @@ function isOpenCodeExact(model: string): boolean {
 
 function checkRouteToken(token: string, key: "deny" | "auto_allow", engines: readonly string[]): string | null {
   const slash = token.indexOf("/");
+  const prefix = slash === -1 ? "" : token.slice(0, slash);
+  const rest = slash === -1 ? token : token.slice(slash + 1);
+  if (token.includes("*")) {
+    if (key === "deny" && slash > 0 && engines.includes(prefix) && rest === ENGINE_WILDCARD) return null;
+    return key === "deny"
+      ? "The only wildcard is <engine>/*, which switches off that whole engine."
+      : "Auto-allow names an exact model or family, never a wildcard.";
+  }
   if (slash === -1) return null;
-  const prefix = token.slice(0, slash);
-  const rest = token.slice(slash + 1);
   if (!engines.includes(prefix) || !rest) return `The part before "/" must be an engine (${engines.join(", ")}); write an OpenCode model with its engine, e.g. opencode/${token}.`;
   if (prefix === "opencode" && key === "auto_allow" && !isOpenCodeExact(rest)) {
     return "Auto-allow lifts the OpenCode exclusion only for an exact opencode/<provider>/<model> route.";
@@ -661,6 +672,190 @@ export function buildRoutingUpdate(
     ok: true,
     value: { surface: "routing", target, ...(workspaceId ? { workspaceId } : {}), expected_revision: state.revision, rules: rules.value },
   };
+}
+
+// --- engines & models ---------------------------------------------------------
+//
+// The Engines & models switches are routing rules of one routing file, never a
+// separate store:
+// - an engine switched off is the deny token `<engine>/*` (hidden from the
+//   model selector, refused when chosen or pinned, never routed automatically);
+// - a model switched off is the exact deny token `<engine>/<model>`;
+// - "automatic routing may use" an engine is its membership in `providers`
+//   (still selectable by hand);
+// - a model excluded from automatic routing by default (OpenCode v2 routes,
+//   Claude Haiku) is opted in by the exact auto_allow token `<engine>/<model>`.
+// A broader token that also covers a model (a family, a bare model id, the
+// engine switch) is never removed by a model switch; it is named instead.
+
+export const ENGINE_WILDCARD = "*";
+export const ENGINE_LABELS: Readonly<Record<string, string>> = {
+  "codex-acp": "Codex", "claude-agent-acp": "Claude", opencode: "OpenCode v2",
+};
+
+export function engineToken(engine: string): string {
+  return `${engine}/${ENGINE_WILDCARD}`;
+}
+
+/** The exact token naming one engine's model (OpenCode: `opencode/<provider>/<model>`). */
+export function routeToken(engine: string, model: string): string {
+  return `${engine}/${model}`;
+}
+
+/** Full engine identity for display, e.g. "Codex (codex-acp)". */
+export function engineLabel(engine: string): string {
+  return ENGINE_LABELS[engine] ? `${ENGINE_LABELS[engine]} (${engine})` : engine;
+}
+
+export function engineDisabledIn(form: RoutingForm, engine: string): boolean {
+  return (form.deny ?? []).includes(engineToken(engine));
+}
+
+export function setEngineEnabled(form: RoutingForm, engine: string, enabled: boolean): RoutingForm {
+  const token = engineToken(engine);
+  const deny = form.deny ?? [];
+  if (enabled) return deny.includes(token) ? { ...form, deny: deny.filter((item) => item !== token) } : form;
+  return deny.includes(token) ? form : { ...form, deny: [...deny, token] };
+}
+
+/** Automatic routing may use `engine`: every engine while `providers` is unset. */
+export function engineAutomaticIn(form: RoutingForm, engine: string): boolean {
+  return form.providers === null || form.providers.includes(engine);
+}
+
+/** Turning one engine off while `providers` is unset lists every other
+ * engine explicitly; turning it back on appends it. */
+export function setEngineAutomatic(form: RoutingForm, engine: string, on: boolean, engines: readonly string[]): RoutingForm {
+  const current = form.providers ?? [...engines];
+  if (on) return current.includes(engine) ? form : { ...form, providers: [...current, engine] };
+  return { ...form, providers: current.filter((item) => item !== engine) };
+}
+
+/** One model switch as a routing file currently holds it: `on` when any
+ * token covers the model, `exact` the token the switch writes, `blocking`
+ * every other covering token (the switch cannot clear those). */
+export type TokenState = { on: boolean; exact: string; blocking: string[] };
+
+type RouteRef = Pick<CatalogRoute, "engine" | "model">;
+
+function tokenState(values: readonly string[] | null, exact: string, alsoCovering: readonly string[]): TokenState {
+  const covering = (values ?? []).filter((token) => token === exact || alsoCovering.includes(token));
+  return { on: covering.length > 0, exact, blocking: covering.filter((token) => token !== exact) };
+}
+
+/** Whether `form` switches `route` off. Covering tokens are the exact one,
+ * the engine switch, the bare model id and whatever the server matched in
+ * the stored `target` file (family and versioned ids). */
+export function modelDenyState(route: CatalogRoute, form: RoutingForm, target: "user" | "project"): TokenState {
+  return tokenState(form.deny, routeToken(route.engine, route.model),
+    [engineToken(route.engine), route.model, ...(route.matches[target]?.deny ?? [])]);
+}
+
+export function modelAutoAllowState(route: CatalogRoute, form: RoutingForm, target: "user" | "project"): TokenState {
+  return tokenState(form.auto_allow, routeToken(route.engine, route.model), [route.model, ...(route.matches[target]?.auto_allow ?? [])]);
+}
+
+export function setModelEnabled(form: RoutingForm, route: RouteRef, enabled: boolean): RoutingForm {
+  const exact = routeToken(route.engine, route.model);
+  const deny = form.deny ?? [];
+  if (enabled) return deny.includes(exact) ? { ...form, deny: deny.filter((token) => token !== exact) } : form;
+  return deny.includes(exact) ? form : { ...form, deny: [...deny, exact] };
+}
+
+export function setModelAutoAllowed(form: RoutingForm, route: RouteRef, allowed: boolean): RoutingForm {
+  const exact = routeToken(route.engine, route.model);
+  const list = form.auto_allow ?? [];
+  if (!allowed) return list.includes(exact) ? { ...form, auto_allow: list.filter((token) => token !== exact) } : form;
+  return list.includes(exact) ? form : { ...form, auto_allow: [...list, exact] };
+}
+
+/** An exact auto_allow entry can opt this route in: it is excluded by default,
+ * and an OpenCode model id has the `provider/model` form the API requires. */
+export function canAutoAllow(route: Pick<CatalogRoute, "engine" | "model" | "default_auto_excluded">): boolean {
+  return route.default_auto_excluded !== null && (route.engine !== "opencode" || isOpenCodeExact(route.model));
+}
+
+export function removeRoutingToken(form: RoutingForm, key: "deny" | "auto_allow", token: string): RoutingForm {
+  const values = form[key];
+  return values === null || !values.includes(token) ? form : { ...form, [key]: values.filter((item) => item !== token) };
+}
+
+/** The tokens of `key` in `form` that name none of the listed engines or models. */
+export function unmatchedTokens(form: RoutingForm, key: "deny" | "auto_allow", catalog: RouteCatalogView, target: "user" | "project"): string[] {
+  const known = new Set<string>();
+  for (const route of catalog.routes) {
+    known.add(routeToken(route.engine, route.model));
+    known.add(route.model);
+    for (const token of route.matches[target]?.[key] ?? []) known.add(token);
+  }
+  if (key === "deny") for (const engine of catalog.engines) known.add(engineToken(engine.engine));
+  return (form[key] ?? []).filter((token) => !known.has(token));
+}
+
+export type ModelGroup = { key: string; engine: string; model: string; routes: CatalogRoute[] };
+
+/** Routes grouped per engine and model: a model switch covers every
+ * connection that offers it. */
+export function modelGroups(routes: readonly CatalogRoute[], engine: string): ModelGroup[] {
+  const groups = new Map<string, ModelGroup>();
+  for (const route of routes) {
+    if (route.engine !== engine) continue;
+    const key = routeToken(route.engine, route.model);
+    const group = groups.get(key) ?? { key, engine: route.engine, model: route.model, routes: [] };
+    group.routes.push(route);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
+/** The existing routing file that wins over `target` (files never merge). */
+export function shadowingSource(view: RoutingView, target: "user" | "project"): string | null {
+  for (const source of view.precedence) {
+    if (source === target) return null;
+    if (view.sources.find((item) => item.source === source)?.exists) return source;
+  }
+  return null;
+}
+
+export type EngineModelsTargetState = RoutingTargetState & { seededFrom: string | null };
+
+/** `routingTarget`, except that an absent project file starts from the
+ * rules Cortex uses now: a project file replaces them wholesale, so an empty
+ * start would silently drop every other rule for this project. */
+export function engineModelsTarget(view: RoutingView, target: "user" | "project"): EngineModelsTargetState {
+  const state = routingTarget(view, target);
+  if (target !== "project" || !state.editable || state.source?.exists || view.effective_source === "builtin"
+    || view.effective_source === "project" || !view.effective_valid) return { ...state, seededFrom: null };
+  const parsed = routingRulesToForm(view.effective_rules ?? undefined);
+  if (!parsed.ok) return { ...state, editable: false, reason: parsed.reason, form: null, seededFrom: null };
+  return { ...state, form: parsed.form, seededFrom: view.effective_source };
+}
+
+export function selectorText(route: CatalogRoute): string {
+  if (route.in_selector) return "model selector: shown";
+  if (!route.selectable) return `model selector: hidden (connection ${route.connection_state})`;
+  return `model selector: hidden (disabled by ${route.deny_tokens.join(", ")})`;
+}
+
+export function automaticText(route: CatalogRoute): string {
+  switch (route.automatic) {
+    case "eligible": return route.auto_allow_tokens.length > 0 ? "automatic routing: yes (opted in)" : "automatic routing: yes";
+    case "disabled": return "automatic routing: no (disabled)";
+    case "not_observed": return "automatic routing: no (model list not confirmed by the engine yet; selectable by hand)";
+    case "engine_excluded_from_automatic_routing": return "automatic routing: no (engine switched off for automatic routing)";
+    case "excluded_by_default": return route.default_auto_excluded === "optional_engine"
+      ? "automatic routing: no (OpenCode v2 routes need an opt-in)" : "automatic routing: no (excluded by default until opted in)";
+    case "superseded": return `automatic routing: no (superseded by ${route.superseded_by ?? "a newer version"})`;
+    case "connection_not_ready": return `automatic routing: no (connection ${route.connection_state})`;
+    case "no_launch_command": return "automatic routing: no (connection has no launch command)";
+    case "routing_invalid": return "automatic routing: no (the routing file in use is invalid)";
+    default: return `automatic routing: no (${route.automatic})`;
+  }
+}
+
+export function engineNowText(engine: CatalogEngine): string {
+  const automatic = !engine.automatic ? "no" : engine.default_auto_excluded ? "only routes opted in below" : "yes";
+  return `${engine.disabled ? "switched off" : "on"} · automatic routing: ${automatic} · ${engine.route_count} known route(s)`;
 }
 
 // --- MCP servers --------------------------------------------------------------

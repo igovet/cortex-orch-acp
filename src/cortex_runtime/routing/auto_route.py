@@ -106,7 +106,11 @@ selector. A ``deny``/``auto_allow`` token is an exact model id, a versioned
 id that also covers its variants (``gpt-5.5`` covers ``gpt-5.5[1m]``), or a
 bare family name that covers every version and alias of that family
 (``haiku`` covers ``haiku`` and ``claude-haiku-4-5-20251001``); an
-``engine/`` prefix restricts it to that engine. Setup writes the default
+``engine/`` prefix restricts it to that engine. In ``deny`` only,
+``<engine>/*`` (:data:`ENGINE_WILDCARD`) names every route of that engine:
+the engine is disabled for Cortex as a whole -- hidden from the selector,
+refused when chosen or pinned, and never routed automatically -- while its
+connections and credentials stay untouched. Setup writes the default
 global file (:mod:`routing.defaults`).
 The built-in Haiku exclusion applies only to automatic worker selection;
 a matching ``pin`` or ``auto_allow`` can opt into Haiku, while ``deny`` still wins.
@@ -123,8 +127,10 @@ Unknown kinds or engines are refused.
 ``providers`` restricts automatic routing and failover to connections whose
 engine is in the list (each id must be one of
 :data:`connections.model.SUPPORTED_ENGINES`); when absent, every configured
-engine is still considered. A route ``deny``'d or excluded by ``providers``
-is treated the same way by the editor's selector. A ``pin`` naming an engine
+engine is still considered. A ``deny``'d route is also hidden from the
+editor's selector; ``providers`` is not -- an engine outside it stays
+selectable by hand (a restriction of automatic routing, failover and pins
+only, not a way to disable the engine). A ``pin`` naming an engine
 outside ``providers`` is refused (``pinned_route_unavailable``) rather than
 silently ignored, and if no allowed provider has a usable route the existing
 ``no_available_route`` refusal applies, naming the excluded providers too.
@@ -1097,8 +1103,19 @@ def superseded_routes(entries: Sequence) -> dict[str, str]:
     return result
 
 
+#: The ``deny`` token suffix that names every model of one engine
+#: (``codex-acp/*``). Deny-only: ``auto_allow`` never takes a wildcard.
+ENGINE_WILDCARD = "*"
+
+
+def engine_wildcard(engine: str) -> str:
+    """The ``deny`` token that disables every route of ``engine``."""
+    return f"{engine}/{ENGINE_WILDCARD}"
+
+
 def _denied(overrides: Mapping, engine: str, model: str) -> bool:
-    return _listed(overrides.get("deny") or (), engine, model)
+    deny = overrides.get("deny") or ()
+    return engine_wildcard(engine) in deny or _listed(deny, engine, model)
 
 
 def _pin_for(overrides: Mapping, role: str):

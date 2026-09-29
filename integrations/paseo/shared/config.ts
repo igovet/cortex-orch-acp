@@ -19,6 +19,11 @@ export const CONFIG_API_VERSION = 1;
 
 export const configSurfaces = ["user_defaults", "project_ceiling", "routing", "mcp_servers", "connections"] as const;
 export type ConfigSurface = typeof configSurfaces[number];
+/** Every surface a client may read. ``route_catalog`` is read-only: the
+ * derived state of every engine and model; enabling or disabling one is a
+ * ``routing`` update. */
+export const configReadSurfaces = [...configSurfaces, "route_catalog"] as const;
+export type ConfigReadSurface = typeof configReadSurfaces[number];
 
 /** The marker a redacted credential part reads as in a response. */
 export const REDACTED = "[redacted]";
@@ -269,6 +274,60 @@ export const connectionsResult = z.object({
   ...writeMeta,
 });
 
+// The deny/auto_allow tokens of one routing file that cover a route.
+const tokenMatches = z.object({ deny: z.array(z.string()), auto_allow: z.array(z.string()) });
+
+const catalogRoute = z.object({
+  route_id: z.string(),
+  engine: z.string(),
+  model: z.string(),
+  model_name: z.string(),
+  connection_id: z.string(),
+  connection_name: z.string(),
+  connection_state: z.string(),
+  qualified: z.boolean(),
+  // False for a seed catalog nothing has confirmed yet (never routed automatically).
+  observed: z.boolean(),
+  tier: z.string().nullable(),
+  selectable: z.boolean(),
+  in_selector: z.boolean(),
+  disabled: z.boolean(),
+  deny_tokens: z.array(z.string()),
+  engine_disabled: z.boolean(),
+  default_auto_excluded: z.enum(["optional_engine", "family"]).nullable(),
+  auto_allow_tokens: z.array(z.string()),
+  // "eligible" or the first reason automatic routing skips the route.
+  automatic: z.string(),
+  superseded_by: z.string().nullable(),
+  // Per routing file (project/env/user) that is valid.
+  matches: z.record(z.string(), tokenMatches),
+});
+
+const catalogEngine = z.object({
+  engine: z.string(),
+  optional: z.boolean(),
+  connections: z.array(z.object({ id: z.string(), name: z.string(), state: z.string(), qualified: z.boolean() })),
+  disabled: z.boolean(),
+  automatic: z.boolean(),
+  default_auto_excluded: z.boolean(),
+  route_count: z.number(),
+  matches: z.record(z.string(), z.object({ disabled: z.boolean(), automatic: z.boolean() })),
+});
+
+export const routeCatalogResult = z.object({
+  surface: z.literal("route_catalog"),
+  project_root: z.string().nullable(),
+  precedence: z.array(z.string()),
+  effective_source: z.enum(["project", "env", "user", "builtin"]),
+  effective_valid: z.boolean(),
+  providers: z.array(z.string()).nullable(),
+  engines: z.array(catalogEngine),
+  routes: z.array(catalogRoute),
+  catalog_problems: z.array(z.object({ connection_id: z.string(), code: z.string(), message: z.string() })),
+  // Per-dispatch states this view does not decide (recorded unavailability, quota).
+  not_shown: z.array(z.string()),
+});
+
 export const openCodeDiscoveryResult = z.object({
   found: z.boolean(),
   binary: z.string().optional(),
@@ -301,6 +360,8 @@ export const surfaceResults = {
   connections: connectionsResult,
 } as const;
 
+export const readSurfaceResults = { ...surfaceResults, route_catalog: routeCatalogResult } as const;
+
 /** Where a response was bound, in display form only (``~`` for the owner's
  * home, ``<project>`` for the workspace's project), never raw paths. */
 export const configBinding = z.object({
@@ -321,6 +382,7 @@ export const configReadOutput = envelope(z.union([
   routingResult,
   mcpServersResult,
   connectionsResult,
+  routeCatalogResult,
 ]));
 export const configUpdateOutput = envelope(z.union([
   userDefaultsResult,
@@ -340,7 +402,7 @@ export const readConfig = defineRpc({
     // Binds the project surfaces (project ceiling, project routing file) to
     // this workspace's Cortex project. Without it only owner surfaces read.
     workspaceId: workspaceId.optional(),
-    surface: z.enum(["all", ...configSurfaces]),
+    surface: z.enum(["all", ...configReadSurfaces]),
   }),
   output: configReadOutput,
 });

@@ -292,6 +292,44 @@ try {
     assert.ok(family.error.errors.some((item: any) => item.code === "opencode_model_not_exact"));
   }
 
+  // Engines & models: the read-only route catalog is bound to the workspace,
+  // lists every engine (OpenCode v2 optional, never registered by a read) and
+  // cannot be written; a whole engine is switched off by a routing update.
+  {
+    await rejects(updateConfig, { surface: "route_catalog", expected_revision: "absent" });
+    const connectionsBefore = await call(readConfig, { surface: "connections" }, ctx);
+    const catalog = await call(readConfig, { workspaceId: WORKSPACE, surface: "route_catalog" }, ctx);
+    assert.equal(catalog.ok, true, JSON.stringify(catalog));
+    assert.equal(catalog.result.effective_source, "project");
+    assert.equal(catalog.result.project_root, "<project>");
+    assert.deepEqual(catalog.result.engines.map((engine: any) => engine.engine).sort(), ["claude-agent-acp", "codex-acp", "opencode"]);
+    const openCode = catalog.result.engines.find((engine: any) => engine.engine === "opencode");
+    assert.equal(openCode.optional, true);
+    assert.deepEqual(openCode.connections, []);
+    assert.deepEqual(catalog.result.routes, []);
+    noLeak(catalog);
+    const connectionsAfter = await call(readConfig, { surface: "connections" }, ctx);
+    assert.equal(connectionsAfter.result.revision, connectionsBefore.result.revision);
+
+    const routing = await call(readConfig, { workspaceId: WORKSPACE, surface: "routing" }, ctx);
+    const projectSource = routing.result.sources.find((source: any) => source.source === "project");
+    const switched = await call(updateConfig, {
+      surface: "routing", target: "project", workspaceId: WORKSPACE, expected_revision: projectSource.revision,
+      rules: { ...projectSource.rules, deny: [...projectSource.rules.deny, "claude-agent-acp/*"] },
+    }, ctx);
+    assert.equal(switched.ok, true, JSON.stringify(switched));
+    const after = await call(readConfig, { workspaceId: WORKSPACE, surface: "route_catalog" }, ctx);
+    const claude = after.result.engines.find((engine: any) => engine.engine === "claude-agent-acp");
+    assert.equal(claude.disabled, true);
+    assert.deepEqual(claude.matches.project, { disabled: true, automatic: true });
+    const wildcard = await call(updateConfig, {
+      surface: "routing", target: "project", workspaceId: WORKSPACE, expected_revision: switched.result.written_revision,
+      rules: { deny: ["gemini/*"] },
+    }, ctx);
+    assert.equal(wildcard.ok, false);
+    assert.ok(wildcard.error.errors.some((item: any) => item.code === "unsupported_wildcard"));
+  }
+
   // Project ceiling: bound to the workspace's project store and narrowing
   // the user ceiling.
   {

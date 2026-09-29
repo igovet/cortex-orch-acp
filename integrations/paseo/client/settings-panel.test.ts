@@ -140,6 +140,27 @@ const OPEN_CEILING = {
   fallback_policy: { allowed_target_routes: null, allowed_failure_classes: null, budget: null, data_recipient_consent: false },
 };
 
+const CONN = {
+  codex: ["cn_0123456789ab", "Codex"], claude: ["cn_1123456789ab", "Claude"], opencode: ["cn_2123456789ab", "OpenCode"],
+} as const;
+
+function catalogRoute(id: string, engine: string, model: string, name: string, connection: readonly [string, string], extra: Record<string, unknown> = {}) {
+  return {
+    route_id: `xr_${id.repeat(12)}`, engine, model, model_name: name, connection_id: connection[0], connection_name: connection[1],
+    connection_state: "configured", qualified: true, observed: true, tier: "standard", selectable: true, in_selector: true,
+    disabled: false, deny_tokens: [], engine_disabled: false, default_auto_excluded: null, auto_allow_tokens: [], automatic: "eligible",
+    superseded_by: null, matches: { user: { deny: [], auto_allow: [] } }, ...extra,
+  };
+}
+
+function catalogEngine(engine: string, connection: readonly [string, string] | null, extra: Record<string, unknown> = {}) {
+  return {
+    engine, optional: engine === "opencode", disabled: false, automatic: true, default_auto_excluded: engine === "opencode", route_count: 1,
+    connections: connection ? [{ id: connection[0], name: connection[1], state: "configured", qualified: true }] : [],
+    matches: { user: { disabled: false, automatic: true } }, ...extra,
+  };
+}
+
 function fixtures() {
   return {
     user_defaults: {
@@ -181,6 +202,27 @@ function fixtures() {
         { name: "legacy", enabled: false, valid: true, problem: null, redacted: false, unsupported_keys: ["cwd"], config: { command: "legacy-mcp" } },
       ],
       editable_keys: [], engines: ["codex-acp", "claude-agent-acp", "opencode"],
+    },
+    route_catalog: {
+      surface: "route_catalog", project_root: null, precedence: ["env", "user"], effective_source: "user", effective_valid: true,
+      providers: ["codex-acp", "opencode"],
+      engines: [
+        catalogEngine("codex-acp", CONN.codex),
+        catalogEngine("claude-agent-acp", CONN.claude, { automatic: false, route_count: 2, matches: { user: { disabled: false, automatic: false } } }),
+        catalogEngine("opencode", CONN.opencode),
+      ],
+      routes: [
+        catalogRoute("a", "codex-acp", "gpt-6-luna", "GPT-6 Luna", CONN.codex, { tier: "light" }),
+        catalogRoute("b", "claude-agent-acp", "opus[1m]", "Opus 5.5", CONN.claude, {
+          in_selector: false, disabled: true, deny_tokens: ["claude-agent-acp/opus"], automatic: "disabled", tier: null,
+          matches: { user: { deny: ["claude-agent-acp/opus"], auto_allow: [] } },
+        }),
+        catalogRoute("c", "claude-agent-acp", "claude-sonnet-5", "Sonnet 5", CONN.claude, { automatic: "engine_excluded_from_automatic_routing", tier: null }),
+        catalogRoute("d", "opencode", "anthropic/claude-sonnet-4-5", "Claude Sonnet 4.5", CONN.opencode, {
+          default_auto_excluded: "optional_engine", automatic: "excluded_by_default", tier: null,
+        }),
+      ],
+      catalog_problems: [], not_shown: ["recorded_unavailability", "quota"],
     },
     connections: {
       surface: "connections", revision: REV("c"), exists: true,
@@ -469,4 +511,133 @@ test("project ceiling: typed ceiling fields save with the workspace and revision
     surface: "project_ceiling", workspaceId: "ws1", expected_revision: REV("p"),
     ceiling: { ...OPEN_CEILING, allowed_routes: ["codex-acp/gpt-5"], permission_level: "READ_ONLY", limits: { tokens: 1000 } },
   }]);
+});
+
+test("engines & models: every engine and model is a labelled switch with full identity and its current state", async () => {
+  const screen = await openScreen();
+  await screen.section("Engines & models");
+  const elements = screen.runtime.elements();
+  const switches = elements.filter((element) => element.type === "Switch");
+  assert.deepEqual(switches.map((element) => element.props.accessibilityLabel), [
+    "Use Codex (codex-acp) in Cortex", "Automatic routing may use Codex (codex-acp)", "Use codex-acp/gpt-6-luna in Cortex",
+    "Use Claude (claude-agent-acp) in Cortex", "Automatic routing may use Claude (claude-agent-acp)",
+    "Use claude-agent-acp/opus[1m] in Cortex", "Use claude-agent-acp/claude-sonnet-5 in Cortex",
+    "Use OpenCode v2 (opencode) in Cortex", "Automatic routing may use OpenCode v2 (opencode)",
+    "Use opencode/anthropic/claude-sonnet-4-5 in Cortex", "Allow opencode/anthropic/claude-sonnet-4-5 in automatic routing",
+  ]);
+  for (const element of switches) {
+    assert.equal(element.props.accessibilityRole, "switch");
+    assert.equal(typeof (element.props.accessibilityState as { checked?: unknown }).checked, "boolean");
+  }
+  for (const element of elements.filter((item) => item.type === "Pressable")) {
+    assert.ok(typeof element.props.accessibilityLabel === "string" && element.props.accessibilityLabel.length > 0, "unlabelled button");
+    assert.ok(["button", "radio", "checkbox"].includes(String(element.props.accessibilityRole)));
+  }
+  assert.ok(!elements.some((element) => element.type === "TextInput" && element.props.multiline === true));
+  const opus = screen.find("Use claude-agent-acp/opus[1m] in Cortex", "Switch");
+  assert.equal(opus.props.value, false);
+  assert.equal(opus.props.disabled, true, "a family entry is never cleared by one model's switch");
+  assert.ok(screen.has("Remove deny rule claude-agent-acp/opus (covers claude-agent-acp/opus[1m])"));
+  assert.equal(screen.find("Automatic routing may use Claude (claude-agent-acp)", "Switch").props.value, false);
+  assert.equal(screen.find("Use Claude (claude-agent-acp) in Cortex", "Switch").props.value, true, "automatic routing is not disabling");
+  const texts = screen.texts().join("\n");
+  assert.match(texts, /route xr_bbbbbbbbbbbb/);
+  assert.match(texts, /model selector: hidden \(disabled by claude-agent-acp\/opus\)/);
+  assert.match(texts, /model selector: shown · automatic routing: no \(engine switched off for automatic routing\)/);
+  assert.match(texts, /automatic routing: no \(OpenCode v2 routes need an opt-in\)/);
+  assert.match(texts, /not enforced by this Cortex version/);
+  assert.ok(!screen.texts().some((text) => /\bJSON\b/.test(text)));
+});
+
+test("engines & models: switches save exact routing entries to the chosen file, then re-read the effective state", async () => {
+  const screen = await openScreen();
+  await screen.section("Engines & models");
+  const catalogReads = () => screen.reads.filter((read) => read.surface === "route_catalog").length;
+  const before = catalogReads();
+  await screen.toggle("Use Codex (codex-acp) in Cortex", false);
+  assert.equal(screen.find("Use codex-acp/gpt-6-luna in Cortex", "Switch").props.disabled, true, "the engine switch covers its models");
+  await screen.toggle("Automatic routing may use Claude (claude-agent-acp)", true);
+  await screen.toggle("Use claude-agent-acp/claude-sonnet-5 in Cortex", false);
+  await screen.toggle("Allow opencode/anthropic/claude-sonnet-4-5 in automatic routing", true);
+  assert.ok(screen.texts().includes("Unsaved changes to the user routing file."));
+  assert.equal(screen.updates.length, 0, "nothing is written before Save");
+  await screen.press("Save engine and model switches to the user routing file");
+  assert.deepEqual(screen.updates, [{
+    surface: "routing", target: "user", expected_revision: REV("b"),
+    rules: {
+      pin: { "*": "opencode/anthropic/claude-sonnet-4-5:high" },
+      deny: ["claude-agent-acp/opus", "codex-acp/*", "claude-agent-acp/claude-sonnet-5"],
+      auto_allow: ["opencode/anthropic/claude-sonnet-4-5"],
+      providers: ["codex-acp", "opencode", "claude-agent-acp"],
+    },
+  }]);
+  assert.ok(catalogReads() > before, "the effective state is read again after saving");
+  assert.ok(screen.texts().some((text) => text.startsWith("Saved.")));
+  assert.deepEqual(screen.onboards, [], "no switch registers OpenCode");
+});
+
+test("engines & models: removing a broader entry is explicit; a conflict writes nothing and reload re-reads both views", async () => {
+  const screen = await openScreen();
+  await screen.section("Engines & models");
+  await screen.press("Remove deny rule claude-agent-acp/opus (covers claude-agent-acp/opus[1m])");
+  assert.equal(screen.find("Use claude-agent-acp/opus[1m] in Cortex", "Switch").props.value, true);
+  screen.replies.push({
+    ok: false, binding,
+    error: { code: "revision_conflict", message: "routing (user) changed after it was read.", field: "expected_revision", currentRevision: REV("f") },
+  });
+  await screen.press("Save engine and model switches to the user routing file");
+  assert.deepEqual((screen.updates[0].rules as { deny?: string[] }).deny, []);
+  assert.ok(screen.texts().some((text) => text.startsWith("Changed elsewhere since this was loaded")));
+  const reads = (surface: string) => screen.reads.filter((read) => read.surface === surface).length;
+  const [routingBefore, catalogBefore] = [reads("routing"), reads("route_catalog")];
+  await screen.press("Reload latest (discards edits here)");
+  assert.equal(reads("routing"), routingBefore + 1);
+  assert.equal(reads("route_catalog"), catalogBefore + 1);
+  assert.equal(screen.updates.length, 1, "a conflict is never retried automatically");
+  assert.equal(screen.find("Use claude-agent-acp/opus[1m] in Cortex", "Switch").props.value, false, "edits here were discarded");
+});
+
+test("engines & models: a shadowing project file is named; an unregistered OpenCode v2 is never activated from here", async () => {
+  const screen = await openScreen();
+  const routing = screen.data.routing;
+  screen.data.routing = {
+    ...routing, project_root: "<project>", precedence: ["project", "env", "user"], effective_source: "project",
+    sources: [
+      { source: "project", path: "<project>/.cortex/routing.json", writable: true, exists: true, revision: REV("p"), valid: true, rules: { deny: [] }, ignored_keys: [] },
+      ...(routing.sources as unknown[]),
+    ],
+  };
+  const catalog = screen.data.route_catalog;
+  screen.data.route_catalog = {
+    ...catalog,
+    engines: (catalog.engines as Array<Record<string, unknown>>).map((engine) => (engine.engine === "opencode" ? { ...engine, connections: [], route_count: 0 } : engine)),
+    routes: (catalog.routes as Array<Record<string, unknown>>).filter((route) => route.engine !== "opencode"),
+  };
+  await screen.press("Project (for project ceiling and project routing): ws1");
+  await screen.section("Engines & models");
+  const checked = (label: string) => (screen.find(label, "Pressable").props.accessibilityState as { checked: boolean }).checked;
+  assert.equal(checked("Save switches to: Project routing file"), true, "the file in use is edited by default");
+  await screen.press("Save switches to: User routing file");
+  assert.equal(checked("Save switches to: User routing file"), true);
+  assert.ok(screen.texts().some((text) => text.startsWith("The project routing file takes precedence")));
+  assert.ok(screen.texts().some((text) => text.startsWith("Not registered. OpenCode v2 is only added by an explicit opt-in")));
+  assert.ok(!screen.has("Allow opencode/anthropic/claude-sonnet-4-5 in automatic routing"));
+  await screen.toggle("Use Claude (claude-agent-acp) in Cortex", false);
+  await screen.press("Save engine and model switches to the user routing file");
+  assert.deepEqual(screen.onboards, []);
+  assert.equal(screen.updates.length, 1);
+  assert.deepEqual([screen.updates[0].surface, screen.updates[0].target, screen.updates[0].workspaceId], ["routing", "user", "ws1"]);
+  assert.deepEqual((screen.updates[0].rules as { deny?: string[] }).deny, ["claude-agent-acp/opus", "claude-agent-acp/*"]);
+});
+
+test("routing and ceilings say what each setting actually does", async () => {
+  const screen = await openScreen();
+  await screen.section("Routing");
+  const texts = screen.texts();
+  assert.ok(texts.some((text) => text.startsWith("Automatic worker routing, failover and pins use only these engines")));
+  assert.ok(!texts.some((text) => /built-in deny list|engine preference/i.test(text)));
+  await screen.press("Project (for project ceiling and project routing): ws1");
+  await screen.section("Project ceiling");
+  await screen.toggle("Restrict allowed connections", true);
+  assert.ok(screen.texts().some((text) => text.startsWith("Recorded and checked for narrowing only")));
 });

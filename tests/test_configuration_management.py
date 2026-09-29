@@ -474,6 +474,154 @@ def test_opencode_unqualified_version_is_refused_without_registering(home, monke
     assert management.read_connections()["connections"] == []
 
 
+# --- route catalog: enabling and disabling engines and models ------------------------
+
+def _observe(record, models):
+    """Cache a genuine, engine-confirmed catalog snapshot for ``record``."""
+    from cortex_runtime.catalog import discovery as catalog_discovery
+    from cortex_runtime.catalog import store as catalog_store
+
+    raw = [dict(id="model", name="Model", type="select", category="model", currentValue=models[0][0],
+                options=[dict(value=value, name=name) for value, name in models])]
+    catalog_store.save_snapshot(catalog_discovery.build_catalog(
+        {record.id: record}, {record.id: catalog_discovery.parse_observation(raw)}))
+
+
+def _claude_connection():
+    record = onboarding.create_connection(
+        name="Claude key", engine="claude-agent-acp", provider="anthropic", auth_mode=AuthMode.API_KEY,
+        key_kind="anthropic_api_key", launch_command=("/usr/bin/node", "/opt/claude-agent-acp/dist/index.js"),
+    )
+    return onboarding.set_api_key(record.id, lambda: b"sk-ant-TEST-SECRET")
+
+
+def _catalog_fixture(home, monkeypatch):
+    """Codex and Claude API-key connections and a logged-in OpenCode v2
+    connection, each with an observed catalog."""
+    from dataclasses import replace as replace_record
+    from cortex_runtime.connections.model import ConnectionState
+
+    codex, claude = _api_key_connection(), _claude_connection()
+    _observe(codex, [("gpt-6-luna", "GPT-6 Luna"), ("gpt-5.6-luna", "GPT-5.6 Luna"), ("gpt-6-sol", "GPT-6 Sol")])
+    _observe(claude, [("claude-sonnet-5", "Sonnet 5"), ("claude-haiku-4-5-20251001", "Haiku 4.5")])
+    binary, _ = _fake_opencode(monkeypatch, home)
+    onboarded = management.onboard_opencode(management.read_connections()["revision"], explicit_opt_in=True,
+                                            binary=str(binary))["connection"]
+    with registry.transaction(None) as state:
+        state.connections[onboarded["id"]] = replace_record(state.connections[onboarded["id"]],
+                                                            state=ConnectionState.CONFIGURED)
+    opencode = registry.read_registry(None).connections[onboarded["id"]]
+    _observe(opencode, [("anthropic/claude-sonnet-4-5", "Claude Sonnet 4.5"), ("openai/gpt-5.1", "GPT-5.1")])
+    return codex, claude, opencode
+
+
+def _routes(view):
+    return {f"{item['engine']}/{item['model']}": item for item in view["routes"]}
+
+
+def _engines(view):
+    return {item["engine"]: item for item in view["engines"]}
+
+
+def test_route_catalog_reports_every_route_with_its_effective_state_and_writes_nothing(home, monkeypatch):
+    codex, _claude, opencode = _catalog_fixture(home, monkeypatch)
+    registry_before = registry.registry_path(None).read_bytes()
+    catalog_dir = registry.state_root(None) / "catalog"
+    catalog_before = sorted(str(path) for path in catalog_dir.rglob("*"))
+    view = management.read_route_catalog()
+    assert view["effective_source"] == "builtin" and view["effective_valid"] is True and view["catalog_problems"] == []
+    routes = _routes(view)
+    luna = routes["codex-acp/gpt-6-luna"]
+    assert (luna["in_selector"], luna["disabled"], luna["automatic"], luna["observed"]) == (True, False, "eligible", True)
+    assert luna["route_id"].startswith("xr_") and luna["connection_id"] == codex.id and luna["model_name"] == "GPT-6 Luna"
+    older = routes["codex-acp/gpt-5.6-luna"]
+    assert (older["automatic"], older["superseded_by"], older["in_selector"]) == ("superseded", "codex-acp/gpt-6-luna", True)
+    haiku = routes["claude-agent-acp/claude-haiku-4-5-20251001"]
+    assert (haiku["in_selector"], haiku["default_auto_excluded"], haiku["automatic"]) == (True, "family", "excluded_by_default")
+    optional = routes[OPENCODE_ROUTE]
+    assert (optional["in_selector"], optional["default_auto_excluded"], optional["automatic"]) \
+        == (True, "optional_engine", "excluded_by_default")
+    engines = _engines(view)
+    assert set(engines) == {"codex-acp", "claude-agent-acp", "opencode"}
+    assert engines["opencode"]["optional"] is True and [item["id"] for item in engines["opencode"]["connections"]] == [opencode.id]
+    assert all(item["disabled"] is False and item["automatic"] is True for item in engines.values())
+    assert registry.registry_path(None).read_bytes() == registry_before
+    assert sorted(str(path) for path in catalog_dir.rglob("*")) == catalog_before
+    assert "sk-" not in json.dumps(view)
+
+
+def test_engine_and_model_toggles_are_routing_rules_the_runtime_honours(home, monkeypatch):
+    codex, _claude, _opencode = _catalog_fixture(home, monkeypatch)
+    with pytest.raises(management.ConfigValidationError) as caught:
+        management.update_routing("user", "absent", {"deny": ["*", "gpt-*", "gemini/*"],
+                                                   "auto_allow": ["opencode/*", "claude-agent-acp/*"]})
+    assert sum(1 for item in caught.value.errors if item["code"] == "unsupported_wildcard") == 5
+    assert not (home.config / "routing.json").exists()
+    rules = {"deny": ["codex-acp/*", "claude-agent-acp/claude-sonnet-5"], "auto_allow": [OPENCODE_ROUTE],
+             "providers": ["claude-agent-acp", "opencode"]}
+    written = management.update_routing("user", "absent", rules)
+    assert auto_route.load_overrides() == rules
+    # The runtime honours what the settings wrote: selector, dispatch, automatic routing.
+    assert auto_route.is_denied("codex-acp", "gpt-6-luna") and auto_route.is_denied("codex-acp", "a-future-model")
+    assert not auto_route.is_denied("claude-agent-acp", "claude-haiku-4-5-20251001")
+    with pytest.raises(PortableError) as refused:
+        auto_route.refuse_if_denied("claude-agent-acp", "claude-sonnet-5")
+    assert refused.value.code == "route_denied"
+    view = management.read_route_catalog()
+    routes, engines = _routes(view), _engines(view)
+    luna = routes["codex-acp/gpt-6-luna"]
+    assert (luna["disabled"], luna["engine_disabled"], luna["in_selector"], luna["automatic"]) == (True, True, False, "disabled")
+    assert luna["deny_tokens"] == ["codex-acp/*"] and luna["matches"]["user"]["deny"] == ["codex-acp/*"]
+    assert (engines["codex-acp"]["disabled"], engines["codex-acp"]["automatic"]) == (True, False)
+    sonnet = routes["claude-agent-acp/claude-sonnet-5"]
+    assert (sonnet["disabled"], sonnet["engine_disabled"], sonnet["deny_tokens"]) \
+        == (True, False, ["claude-agent-acp/claude-sonnet-5"])
+    assert routes["claude-agent-acp/claude-haiku-4-5-20251001"]["automatic"] == "excluded_by_default"
+    allowed = routes[OPENCODE_ROUTE]
+    assert (allowed["automatic"], allowed["auto_allow_tokens"], allowed["in_selector"]) == ("eligible", [OPENCODE_ROUTE], True)
+    assert routes["opencode/openai/gpt-5.1"]["automatic"] == "excluded_by_default"
+
+    # Automatic routing is not disabling: an engine outside providers stays selectable.
+    management.update_routing("user", written["sources"][-1]["revision"],
+                              {"providers": ["opencode"], "auto_allow": [OPENCODE_ROUTE]})
+    view = management.read_route_catalog()
+    luna = _routes(view)["codex-acp/gpt-6-luna"]
+    assert (luna["disabled"], luna["in_selector"], luna["automatic"]) == (False, True, "engine_excluded_from_automatic_routing")
+    assert not auto_route.is_denied("codex-acp", "gpt-6-luna")
+    assert (_engines(view)["codex-acp"]["disabled"], _engines(view)["codex-acp"]["automatic"]) == (False, False)
+    assert luna["connection_id"] == codex.id
+
+
+def test_route_catalog_follows_routing_precedence_and_fails_closed(home, monkeypatch, tmp_path):
+    _catalog_fixture(home, monkeypatch)
+    project = tmp_path / "project"
+    (project / ".cortex").mkdir(parents=True)
+    management.update_routing("user", "absent", {"deny": ["claude-agent-acp/*"]})
+    management.update_routing("project", "absent", {"providers": ["claude-agent-acp"]}, project_root=str(project))
+    view = management.read_route_catalog(str(project))
+    assert view["effective_source"] == "project" and view["precedence"] == ["project", "user"]
+    routes = _routes(view)
+    sonnet = routes["claude-agent-acp/claude-sonnet-5"]
+    assert (sonnet["disabled"], sonnet["automatic"]) == (False, "eligible")
+    assert sonnet["matches"] == {"project": {"deny": [], "auto_allow": []},
+                                 "user": {"deny": ["claude-agent-acp/*"], "auto_allow": []}}
+    assert routes["codex-acp/gpt-6-luna"]["automatic"] == "engine_excluded_from_automatic_routing"
+    assert _engines(view)["claude-agent-acp"]["matches"] == {"project": {"disabled": False, "automatic": True},
+                                                               "user": {"disabled": True, "automatic": True}}
+    owner_only = management.read_route_catalog()
+    assert owner_only["effective_source"] == "user"
+    assert _routes(owner_only)["claude-agent-acp/claude-sonnet-5"]["automatic"] == "disabled"
+    (project / ".cortex" / "routing.json").write_text("{broken")
+    broken = management.read_route_catalog(str(project))
+    assert broken["effective_valid"] is False
+    assert {item["automatic"] for item in broken["routes"]} == {"routing_invalid"}
+    response = management.execute({"action": "read", "surface": "route_catalog", "project": str(project)})
+    assert response["ok"] and response["result"]["surface"] == "route_catalog"
+    assert management.execute({"action": "update", "surface": "route_catalog"})["error"]["code"] == "unsupported_action"
+    assert management.execute({"action": "read", "surface": "route_catalog", "path": "/etc"})["error"]["code"] \
+        == "unsupported_request_field"
+
+
 # --- JSON request/response -------------------------------------------------------------
 
 def test_execute_returns_structured_errors_and_main_answers_json(home):

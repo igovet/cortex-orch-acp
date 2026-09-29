@@ -7,9 +7,10 @@ import {
   REDACTED,
   allSurfacesResult,
   openCodeDiscoveryResult,
-  surfaceResults,
+  readSurfaceResults,
   type ConfigBinding,
   type ConfigError,
+  type ConfigReadSurface,
   type ConfigReadInput,
   type ConfigReadOutput,
   type ConfigSurface,
@@ -228,7 +229,7 @@ function sanitizeConnection(raw: unknown, scope: Scope): Record<string, unknown>
 /** A surface result as the settings UI may receive it. Editable values
  * (defaults, ceilings, rules, MCP tool/path grants) stay verbatim so they
  * round-trip; only metadata is put in display form. */
-export function sanitizeSurface(surface: ConfigSurface, raw: unknown, scope: Scope): Record<string, unknown> {
+export function sanitizeSurface(surface: ConfigReadSurface, raw: unknown, scope: Scope): Record<string, unknown> {
   const result = { ...record(raw) };
   displayField(result, "path", scope);
   displayField(result, "project_root", scope);
@@ -246,6 +247,13 @@ export function sanitizeSurface(surface: ConfigSurface, raw: unknown, scope: Sco
   }
   if (surface === "mcp_servers" && Array.isArray(result.servers)) {
     result.servers = result.servers.map((server) => sanitizeMcpServer(server, scope));
+  }
+  if (surface === "route_catalog" && Array.isArray(result.catalog_problems)) {
+    result.catalog_problems = result.catalog_problems.map((item) => {
+      const problem = { ...record(item) };
+      if (typeof problem.message === "string") problem.message = scrubText(problem.message, scope);
+      return problem;
+    });
   }
   if (surface === "connections") {
     if (Array.isArray(result.connections)) result.connections = result.connections.map((item) => sanitizeConnection(item, scope));
@@ -337,8 +345,8 @@ function refused(bound: ConfigBinding | null, error: ConfigError) {
 }
 
 /** Parse one sanitized surface result against its contract, or explain. */
-function typedSurface(surface: ConfigSurface, raw: unknown, scope: Scope): { result: unknown } | Failure {
-  const parsed = surfaceResults[surface].safeParse(sanitizeSurface(surface, raw, scope));
+function typedSurface(surface: ConfigReadSurface, raw: unknown, scope: Scope): { result: unknown } | Failure {
+  const parsed = readSurfaceResults[surface].safeParse(sanitizeSurface(surface, raw, scope));
   return parsed.success ? { result: parsed.data } : failure("invalid_response", `The Cortex configuration API returned an unexpected ${surface} result.`);
 }
 
@@ -364,7 +372,8 @@ export const readConfigHandler = guarded(async (input: ConfigReadInput, context:
   const prepared = await prepare(input.workspaceId, context);
   if ("refusal" in prepared) return refused(prepared.bound, prepared.refusal);
   const { runtime, scope, bound } = prepared;
-  const projectScoped = input.surface === "all" || input.surface === "project_ceiling" || input.surface === "routing";
+  const projectScoped = input.surface === "all" || input.surface === "project_ceiling" || input.surface === "routing"
+    || input.surface === "route_catalog";
   const outcome = await callApi(runtime, {
     action: "read",
     surface: input.surface,
@@ -378,7 +387,7 @@ export const readConfigHandler = guarded(async (input: ConfigReadInput, context:
   }
   const all: Record<string, unknown> = {};
   for (const [surface, entry] of Object.entries(record(outcome.result))) {
-    if (!(surface in surfaceResults)) continue;
+    if (!(surface in readSurfaceResults) || surface === "route_catalog") continue;
     const item = record(entry);
     if (item.ok === true) {
       const typed = typedSurface(surface as ConfigSurface, item.result, scope);
