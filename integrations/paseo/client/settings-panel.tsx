@@ -1218,6 +1218,22 @@ function ConnectionCard({ connection, view, busy, save, errors, theme }: {
 
 type Discovery = { status: "idle" | "loading" | "error"; message?: string; found?: boolean; version?: string; qualified?: boolean; qualifiedVersions?: string };
 
+const OPENCODE_NEXT_ACTION_TEXT: Record<string, string> = {
+  make_credential_dir_private:
+    "OpenCode’s login directory is not private. Make it readable only by you (see docs/acp/opencode-adapter.md, Onboarding step 2), then press Validate above.",
+  opencode_auth_login: "Log in to OpenCode once in a terminal (opencode auth login), then press Validate above.",
+  refresh_catalog:
+    "Registered and ready. Its models reach the selector only after a catalog refresh: open a new Cortex session, or run refresh-catalog from the setup CLI.",
+};
+
+/** Renders the onboard response’s own `next_action`, since the reloaded connections view never carries it. */
+function opencodeOnboardedText(onboarded: { version: string; nextAction: string | null; automaticRouting: string }): string {
+  const next = onboarded.nextAction
+    ? OPENCODE_NEXT_ACTION_TEXT[onboarded.nextAction] ?? `next: ${onboarded.nextAction}`
+    : "Registered.";
+  return `Onboarded OpenCode ${onboarded.version} — ${next} Automatic routing: ${onboarded.automaticRouting}.`;
+}
+
 function ConnectionsSection({ theme }: { theme: Theme }) {
   const surface = useConfigSurface<ConnectionsView>("connections", null, false);
   const discover = useRpc(discoverOpenCode);
@@ -1227,6 +1243,7 @@ function ConnectionsSection({ theme }: { theme: Theme }) {
   const [openCodeName, setOpenCodeName] = useState("");
   const [onboarding, setOnboarding] = useState<{ busy: boolean; error: string | null; conflict: boolean; fields: FieldErrors }>({ busy: false, error: null, conflict: false, fields: {} });
   const [activeConnection, setActiveConnection] = useState<string | null>(null);
+  const [onboarded, setOnboarded] = useState<{ version: string; nextAction: string | null; automaticRouting: string } | null>(null);
   const { state } = surface;
 
   const runDiscover = async () => {
@@ -1253,6 +1270,12 @@ function ConnectionsSection({ theme }: { theme: Theme }) {
       if (out.ok) {
         setOnboarding({ busy: false, error: null, conflict: false, fields: {} });
         setOptIn(false);
+        // The reloaded "connections" read view never carries `opencode`
+        // (only this one onboard response does), so capture it here or the
+        // next-step guidance is silently lost once `reload()` replaces `state.result`.
+        setOnboarded(out.result.opencode
+          ? { version: out.result.opencode.version, nextAction: out.result.opencode.next_action, automaticRouting: out.result.opencode.automatic_routing }
+          : null);
         await surface.reload();
         return;
       }
@@ -1297,8 +1320,7 @@ function ConnectionsSection({ theme }: { theme: Theme }) {
               theme={theme} tone="danger" />
             {onboarding.conflict && <Button title="Reload latest" onPress={() => { setOnboarding({ busy: false, error: null, conflict: false, fields: {} }); surface.reload(); }} theme={theme} />}
           </View>}
-          {result.opencode && <Banner theme={theme} tone="success"
-            text={`Onboarded OpenCode ${result.opencode.version} — next: ${result.opencode.next_action ?? "none"} — automatic routing: ${result.opencode.automatic_routing}`} />}
+          {onboarded && <Banner theme={theme} tone="success" text={opencodeOnboardedText(onboarded)} />}
         </Group>
       </View>}
     </SurfaceFrame>

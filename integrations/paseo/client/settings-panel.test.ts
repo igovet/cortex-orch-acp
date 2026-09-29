@@ -250,6 +250,7 @@ async function openScreen() {
   const reads: Array<Record<string, unknown>> = [];
   const updates: Array<Record<string, unknown>> = [];
   const onboards: Array<Record<string, unknown>> = [];
+  const onboardReplies: unknown[] = [];
   const replies: unknown[] = [];
   const rpcs: Record<string, (input: Record<string, unknown>) => Promise<unknown>> = {
     "cortex.config.read": async (input) => {
@@ -264,7 +265,11 @@ async function openScreen() {
     "cortex.config.opencode.discover": async () => ({
       ok: true, binding, result: { found: true, version: "2.0.19", qualified: true, qualified_versions: ["2.0.19"], onboarded_connection_ids: [] },
     }),
-    "cortex.config.opencode.onboard": async (input) => { onboards.push(input); return { ok: true, binding, result: data.connections }; },
+    "cortex.config.opencode.onboard": async (input) => {
+      onboards.push(input);
+      const reply = onboardReplies.shift();
+      return reply ?? { ok: true, binding, result: data.connections };
+    },
   };
   const paseo = { workspaces: { list: async () => ({ entries: [{ id: "ws1", title: null, name: "ws1" }] }) } };
   const modules: Record<string, unknown> = {
@@ -298,7 +303,7 @@ async function openScreen() {
   const toggle = async (label: string, value: boolean) => { (find(label, "Switch").props.onValueChange as (v: boolean) => void)(value); await runtime.settle(); };
   const texts = () => runtime.elements().filter((element) => element.type === "Text").map((element) => textOf(element.props.children));
   const section = async (title: string) => press(`Section: ${title}`);
-  return { runtime, data, reads, updates, onboards, replies, find, has, press, type, toggle, texts, section };
+  return { runtime, data, reads, updates, onboards, onboardReplies, replies, find, has, press, type, toggle, texts, section };
 }
 
 // --- tests ------------------------------------------------------------------------
@@ -495,6 +500,26 @@ test("connections: numeric session limits are validated; OpenCode v2 needs an ex
   await screen.toggle("I want to enable OpenCode v2 for this owner", true);
   await screen.press("Enable OpenCode v2");
   assert.deepEqual(screen.onboards, [{ expected_revision: REV("c"), explicit_opt_in: true }]);
+});
+
+test("connections: a successful OpenCode onboard shows its own next-step guidance, not the reloaded connections view", async () => {
+  // Regression test: `read_connections` (what `surface.reload()` re-fetches after onboarding)
+  // never carries an `opencode` key -- only the one-shot onboard response does. The panel used
+  // to read `result.opencode` off the reloaded view, so the next_action banner never rendered.
+  const screen = await openScreen();
+  screen.onboardReplies.push({
+    ok: true, binding, result: {
+      ...screen.data.connections,
+      opencode: { version: "2.0.19", next_action: "make_credential_dir_private", automatic_routing: "excluded_until_routing_opts_in" },
+    },
+  });
+  await screen.section("Connections");
+  await screen.press("Check for OpenCode");
+  await screen.toggle("I want to enable OpenCode v2 for this owner", true);
+  await screen.press("Enable OpenCode v2");
+  assert.deepEqual(screen.onboards, [{ expected_revision: REV("c"), explicit_opt_in: true }]);
+  assert.ok(screen.texts().some((text) => text.includes("Onboarded OpenCode 2.0.19") && text.includes("login directory is not private")),
+    "expected the banner to show the onboard responses own next_action, not the reloaded connections view");
 });
 
 test("project ceiling: typed ceiling fields save with the workspace and revision", async () => {

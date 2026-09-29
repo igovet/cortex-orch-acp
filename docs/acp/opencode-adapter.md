@@ -13,7 +13,7 @@ Source: `engine/opencode_install.py` (binary trust and version), `engine/opencod
 
 1. Install OpenCode with its own installer (the binary normally lands in `~/.opencode/bin/opencode`) and log in once in a terminal: `opencode auth login`. The login is stored in `~/.local/share/opencode/auth.json`.
 2. Cortex requires that directory to be private. If `status` or the step below reports the connection `invalid`, run `chmod 700 ~/.local/share/opencode`. Cortex never changes it for you.
-3. Register the connection only after explicitly choosing to enable this optional engine. The plugin implements a [Paseo Cortex Settings screen](../configuration.md#manage-settings-in-paseo) for discovery and onboarding, but a live Paseo 0.10.0 check did not find that screen in Settings or the command palette. If it is not available in your host, use the setup CLI below. Onboarding requires an explicit opt-in, never copies the existing owner login, and does not change routing.
+3. Register the connection only after explicitly choosing to enable this optional engine. The plugin implements a [Paseo Cortex Settings screen](../configuration.md#manage-settings-in-paseo) for discovery and onboarding, but a live Paseo 0.10.0 check did not find that screen in Settings or the command palette. If it is not available in your host, use the setup CLI below. Onboarding requires an explicit opt-in, never copies the existing owner login, and does not change routing. When the Settings panel is reachable, a successful “Enable OpenCode v2” shows a banner naming the connection’s exact next step (for example, making the login directory private) directly from the onboard response; it never shows the credential directory’s path, since Cortex never surfaces credential paths to the plugin layer.
 
 ```bash
 python3 -B scripts/cortex_acp_setup.py add-opencode-connection
@@ -41,6 +41,8 @@ The catalog fills the way it does for the other engines:
 - on demand, with `refresh-catalog`, which opens a prompt-free session inside a read-only jail.
 
 Efforts are read per model, because OpenCode offers different effort values per model and none at all for some.
+
+Registering the connection is not enough by itself: OpenCode contributes no models to the selector until its catalog holds at least one successful refresh (there is no seed for it, unlike the built-in engines). A `configured` connection with no catalog snapshot yet is exactly as invisible in the model selector as an `invalid` one. After a `configured` state, run `refresh-catalog` (above) or open a new Cortex session, which also triggers a background refresh; only then does a new session’s model list include OpenCode.
 
 ## What Cortex configures
 
