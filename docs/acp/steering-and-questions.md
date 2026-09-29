@@ -125,7 +125,7 @@ epoch only while this process has an active turn for that exact host session
 and a matching coordinator channel. A different owner or an ended turn is
 refused rather than adopting the database's newer epoch. An image or uploaded
 file is resolved and staged exactly as it would be for an ordinary new-turn
-`session/prompt` (capped at 1 MiB per block, 4 MiB per message); an oversized
+`session/prompt` (capped at 10 MiB per block, 10 MiB per message); an oversized
 or unreadable image is refused before
 capture, same as a first prompt. Paseo accepts this only as a `steer` result
 for the turn it expects. Any other result makes it cancel that turn

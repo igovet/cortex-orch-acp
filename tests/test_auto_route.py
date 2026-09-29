@@ -1185,3 +1185,85 @@ def test_standard_retry_preserves_non_luna_pin_effort(tmp_path, monkeypatch, suf
         "pin": {"worker-qa-engineer": "claude-agent-acp/claude-sonnet-5" + suffix}})
     choice = auto_route.choose("worker-qa-engineer", project, environ, escalate=True)
     assert (choice.model, choice.effort, choice.basis) == ("claude-sonnet-5", effort, "auto:pin")
+
+
+# --- a flagship route the user explicitly asked for ----------------------------
+
+ASTRA = "codex-acp/gpt-6-astra"
+FABLE = "claude-agent-acp/claude-fable-5-1[1m]"
+USER_ASKED = dict(source_ref="r_0123456789ab:-1", family="astra", matched="Astra")
+
+
+def test_a_user_requested_flagship_hint_runs_on_that_route_and_is_audited(tmp_path, monkeypatch):
+    project, environ = _live_all(monkeypatch, tmp_path)
+    choice = auto_route.choose("worker-backend-dev", project, environ, model_hint=ASTRA,
+                               model_reason="The user asked for Astra.", user_request=USER_ASKED)
+    assert (choice.model, choice.effort, choice.basis) == ("gpt-6-astra", "high", "auto:user_request")
+    decision = choice.decision
+    assert (decision["base_role_tier"], decision["role_tier"], decision["tier"]) == ("standard", "flagship", "flagship")
+    assert (decision["basis"], decision["decided_by"]) == ("user_request", "user_request")
+    assert decision["model_hint_status"] == "honoured"
+    assert decision["user_model_request"] == dict(USER_ASKED, status="honoured")
+    assert [c["route"] for c in decision["candidates"]] == [ASTRA]
+    fable = auto_route.choose("worker-code-reviewer", project, environ, model_hint=FABLE,
+                              user_request=dict(USER_ASKED, family="fable", matched="Fable"))
+    assert (fable.model, fable.effort, fable.basis) == ("claude-fable-5-1[1m]", "high", "auto:user_request")
+
+
+def test_a_flagship_hint_without_a_user_request_stays_escalation_only(tmp_path, monkeypatch):
+    project, environ = _live_all(monkeypatch, tmp_path)
+    choice = auto_route.choose("worker-backend-dev", project, environ, model_hint=ASTRA,
+                               model_reason="The user asked for Astra.")
+    assert choice.model != "gpt-6-astra" and choice.basis == "auto"
+    assert (choice.decision["role_tier"], choice.decision["tier"]) == ("standard", "standard")
+    assert choice.decision["model_hint_status"] == "ignored:tier_mismatch"
+    assert choice.decision["user_model_request"] == dict(status="not_requested_by_user")
+
+
+@pytest.mark.parametrize("routing,codex,unavailable,status", [
+    ({"deny": ["gpt-6-astra"]}, None, (), "refused:denied"),
+    ({"deny": ["astra"]}, None, (), "refused:denied"),
+    ({"providers": ["claude-agent-acp"]}, None, (), "refused:provider_not_allowed"),
+    (None, 100.0, (), "refused:quota_exhausted"),
+    (None, None, ({"connection_id": "codex", "model": "gpt-6-astra", "engine": "codex-acp",
+                   "reason": "quota_exhausted", "expires_at": "later"},), "refused:unavailable"),
+])
+def test_policy_still_wins_over_a_user_requested_flagship(tmp_path, monkeypatch, routing, codex, unavailable, status):
+    project, environ = _live_all(monkeypatch, tmp_path, routing, codex=codex)
+    choice = auto_route.choose("worker-backend-dev", project, environ, model_hint=ASTRA,
+                               user_request=USER_ASKED, unavailable=unavailable)
+    assert choice.model != "gpt-6-astra" and choice.basis == "auto"
+    assert choice.decision["role_tier"] == "standard"
+    assert choice.decision["user_model_request"] == dict(USER_ASKED, status=status)
+
+
+def test_a_pin_still_wins_over_a_user_requested_flagship(tmp_path, monkeypatch):
+    project, environ = _live_all(monkeypatch, tmp_path, {"pin": {"backend-dev": "codex-acp/gpt-6-sol"}})
+    choice = auto_route.choose("worker-backend-dev", project, environ, model_hint=ASTRA, user_request=USER_ASKED)
+    assert (choice.model, choice.basis) == ("gpt-6-sol", "auto:pin")
+    assert choice.decision["user_model_request"] == dict(USER_ASKED, status="ignored:pinned")
+
+
+def test_a_user_request_never_raises_a_non_flagship_hint_or_an_unhinted_node(tmp_path, monkeypatch):
+    project, environ = _live_all(monkeypatch, tmp_path)
+    sonnet = auto_route.choose("worker-backend-dev", project, environ, model_hint="claude-agent-acp/claude-sonnet-5",
+                               user_request=dict(USER_ASKED, family="sonnet"))
+    assert (sonnet.model, sonnet.basis, sonnet.decision["tier"]) == ("claude-sonnet-5", "auto", "standard")
+    assert sonnet.decision["user_model_request"]["status"] == "not_flagship"
+    plain = auto_route.choose("worker-backend-dev", project, environ)
+    assert plain.decision["tier"] == "standard" and "user_model_request" not in plain.decision
+
+
+def test_a_user_requested_flagship_survives_a_retry(tmp_path, monkeypatch):
+    project, environ = _live_all(monkeypatch, tmp_path)
+    choice = auto_route.choose("worker-backend-dev", project, environ, model_hint=ASTRA, user_request=USER_ASKED,
+                               escalate=True, previous_engine="codex-acp")
+    assert (choice.model, choice.basis) == ("gpt-6-astra", "auto:user_request")
+    assert choice.decision["escalated"] is True
+
+
+def test_route_menu_names_the_user_request_exception(tmp_path, monkeypatch):
+    project, environ = _live_all(monkeypatch, tmp_path)
+    menu = auto_route.route_menu(project, environ)
+    assert menu["flagship_note"] == "escalation, or an exact route the user explicitly requested in this task"
+    assert {item["route"] for item in menu["tiers"]["flagship"]} >= {ASTRA, FABLE}

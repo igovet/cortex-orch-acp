@@ -12,7 +12,8 @@ recommend an engine id and include `model_reason`: recommend `claude-agent-acp`
 for code analysis, root-cause debugging, large-context reading, review-like
 judgement, design, and prose; recommend `codex-acp` for mechanical edits and
 fast run-fix loops. The runtime still decides availability, tier, effort and
-the exact model. A hint never raises the task's tier: light work stays on a
+the exact model. Apart from the flagship exception below, a hint never raises
+the task's tier: light work stays on a
 light model even if the hinted engine has none there. A hint is ignored when
 the hinted route is excluded, exhausted, or its plan is at least 85% used
 while another candidate's is not. When you name an exact route, copy one that
@@ -21,6 +22,25 @@ runtime runs it at `high` to `max` and ranks it for light work and, in the
 standard tier, only for testing work; never for other standard-tier work,
 `complexity: high`, deep or flagship work. An exact Luna hint is reasonable for
 light work or ordinary testing; do not use it to push other work onto Luna.
+
+Flagship models (Astra, Fable, and whatever `list_route_options` lists under
+`flagship`) are escalation-only, with one exception: when the user explicitly
+asked in this task for a flagship model family, put that exact flagship route
+from `list_route_options` in `model` on each node the user wants on it, with a
+`model_reason` that cites the request. The runtime grants it only when the
+user's own recorded messages or answers in this task ask for that family as
+the model to use or run on, in an explicit request ("use Astra", "run it on
+Astra", "используй Астру", "сделай на Астре"); a comparison, an
+availability remark, a quotation, a bare mention of the name, or a remark
+with a preposition and no request verb ("it failed on Astra", "посмотри на
+Астру", "ревью через Фейбл") grants nothing, and neither do your
+`model_reason`, questions and reports. When the receipt shows the request was
+not found although you believe the user asked, ask the user to state it as a
+request ("используй Астру"); never restate it yourself. Pin, deny, providers,
+availability and quota still win. The plan receipt shows
+`pending_dispatch:user_request` and the user's source ref when the request was
+found, and `ignored:tier_mismatch` when it was not. Never put a flagship route
+on a node the user did not ask for.
 
 ## Specialist catalogue
 

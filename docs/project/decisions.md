@@ -1,3 +1,48 @@
+## 2026-09-29 a flagship route runs when the user asked for it
+
+Flagship models (Astra, Fable) were escalation-only, and a plan hint never
+raised the tier, so an owner's explicit "use Astra" relayed by the coordinator
+was recorded as `ignored:tier_mismatch`. Now an exact flagship route hint runs
+its node at the flagship tier when the user named that model family in the
+task. The grant is read by the runtime (`routing.auto_route.user_model_request`) from the
+task's `source_revisions` bodies and real users' answers -- the same records
+`list_sources` labels `user_direct` and addresses by `source_ref` -- never from
+the hint, `model_reason`, question text, reports or worker output, so the
+coordinator cannot grant itself a flagship model. The `USER_STEERING` runtime
+events were considered and rejected as the source: they only cover later
+steers applied at a planning boundary, while every steer is already a source
+revision. No per-task structured model choice exists to use instead.
+
+The match is deterministic, not an interpretation: the route's family (Latin
+name or a known Russian spelling, whole word) must follow, within four words
+in the same sentence, either an explicit request word (`REQUEST_WORDS`: "use
+Astra", "run it on Astra", "используй астру", "требование использования
+астры") or a work verb governing a preposition of means right before it
+(`WORK_VERBS` + `MEANS_WORDS`: "implement it on Astra", "сделай на Астре"),
+with no negation, comparison or substitution word in the five words before
+it (`NEGATION_WORDS`: "don't use Astra", "compare Astra with Fable",
+"instead of Astra"). Review of the first cut found that a bare mention
+granted the route ("Astra is unavailable; use the default route" raised the
+node to Astra), so the request word became mandatory. Review of that fix
+found that the prepositions it also accepted as request words (`on`, `via`,
+`through`, `на`, `через`) still granted remarks such as "it failed on
+Astra" and "посмотри на Астру", so a preposition now counts only when a work
+verb governs it, and a request or work word counts only in a request form:
+an English verb opening its clause or following a request-mood word
+("please", "to", "could you"), not an article, noun or auxiliary ("the last
+run on Astra", "the tests run on Astra", "we tried to run it on Astra"), and
+a Russian verb only in its listed imperative, infinitive or first-person
+plural forms, never a past tense, participle or verbal noun ("запустили на
+Астре", "использование Астры"). A request phrased otherwise ("I want Astra",
+"ревью через Фейбл", "let Astra do it") is deliberately not recognised and
+leaves the node on its ordinary tier with `not_requested_by_user` in the
+receipt: a false negative costs a rephrase, a false positive a flagship run
+the user did not ask for. The coordinator's
+exact hint is the required second step, and it applies only to the nodes
+carrying it. Pin, deny, providers, availability and quota still win; a
+refused request routes the node normally with its reason in
+`route_decision.user_model_request`.
+
 ## 2026-09-29 the runtime withholds coordinator text after its own question
 
 In Paseo session bb142018 the coordinator wrote the full details, asked with

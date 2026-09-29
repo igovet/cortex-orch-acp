@@ -942,14 +942,14 @@ def test_only_retries_and_review_fixes_escalate_the_route(machine):
     with state.store.connection() as db:
         db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                    (node['assignment_ref'], channel.task_id, 'xa_first', 'worker-debugger', 'ready', 'ready', 0, 'now', 'now')); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (False, 'high', 'auto', None, None)
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (False, 'high', 'auto', None, None, None)
     with state.store.connection() as db:
         event(db, channel.task_id, 'ASSIGNMENT_RETRIED', dict(node=node['node_id'], revision=1, retry=1)); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None)
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None, None)
     with state.store.connection() as db:
         db.execute("UPDATE runtime_nodes SET node_id='_fix_0_N0' WHERE task_id=?", (channel.task_id,))
         db.execute("DELETE FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'"); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None)  # a fix keeps its node's complexity
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'high', 'auto', None, None, None)  # a fix keeps its node's complexity
 
 
 def test_a_planned_provider_preference_reaches_routing(machine):
@@ -962,7 +962,7 @@ def test_a_planned_provider_preference_reaches_routing(machine):
         db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
                    (node['assignment_ref'], channel.task_id, 'xa_first', 'worker-debugger', 'ready', 'ready', 0, 'now', 'now')); db.commit()
         db.execute("UPDATE runtime_nodes SET node_id='_fix_0_N0' WHERE task_id=?", (channel.task_id,)); db.commit()
-    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'normal', 'codex-acp', None, None)  # a fix keeps it too
+    assert attempt_routing(state.store, channel.task_id, 'xa_first') == (True, 'normal', 'codex-acp', None, None, None)  # a fix keeps it too
 
 
 def test_plan_provider_is_optional_and_bounded(machine):
@@ -1121,6 +1121,67 @@ def test_exact_model_hint_requires_live_menu_and_reports_tier_mismatch(machine, 
     assert receipt['model_hints'] == [{
         'node': 'N0', 'model': 'codex-acp/gpt-6-astra',
         'tier_now': 'standard', 'preview_status': 'ignored:tier_mismatch'}]
+
+
+def _provision(state, channel, node_id, attempt_id):
+    with state.store.connection() as db:
+        ref = db.execute('SELECT assignment_ref FROM runtime_nodes WHERE task_id=? AND node_id=?',
+                         (channel.task_id, node_id)).fetchone()['assignment_ref']
+        db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                   (ref, channel.task_id, attempt_id, 'worker-backend-dev', 'ready', 'ready', 0, 'now', 'now'))
+        db.commit()
+
+
+def test_a_flagship_hint_is_granted_only_by_the_users_own_words(machine, monkeypatch):
+    from cortex_runtime.acp import questions_store
+    from cortex_runtime.bootstrap import append_source_event
+    from cortex_runtime.orchestration.state import attempt_routing
+    from cortex_runtime.routing import auto_route
+    state, channel = machine
+    monkeypatch.setattr(auto_route, 'route_menu', lambda *_: {
+        'tiers': {'flagship': [{'route': 'codex-acp/gpt-6-astra'}],
+                  'deep': [], 'standard': [], 'light': []}})
+    # Model-authored text never grants: the coordinator's model_reason and
+    # the question it asked both name Astra; the user's answer does not.
+    question = questions_store.create_if_absent(state.store, channel.task_id, 'q-astra',
+                                                'Run the implementation on Astra?', options=['Continue'])
+    assert questions_store.answer(state.store, question.id, 'Continue', 'text')
+    proposal = plan(2)
+    proposal['tasks'][0].update(model='codex-acp/gpt-6-astra', model_reason='The user wants Astra.')
+    receipt = state.submit_plan(channel, proposal, 'astra-plan')
+    assert receipt['model_hints'][0]['preview_status'] == 'ignored:tier_mismatch'
+    state.move(channel.task_id, 'EXECUTING')
+    state.claim_ready(channel.task_id, channel.channel_id)
+    _provision(state, channel, 'N0', 'xa_astra')
+    _provision(state, channel, 'N1', 'xa_other')
+    assert attempt_routing(state.store, channel.task_id, 'xa_astra').user_request is None
+    # The user's own later message names the family: only the hinted node gets it.
+    added = append_source_event(state.store, SourceEvent(origin='test', event_id='astra'),
+                                'Please run the implementation on Astra.', channel.task_id)
+    routed = attempt_routing(state.store, channel.task_id, 'xa_astra')
+    assert routed.model_hint == 'codex-acp/gpt-6-astra'
+    assert routed.user_request == dict(source_ref=f'{added.report_id}:-1', family='astra', matched='Astra')
+    assert attempt_routing(state.store, channel.task_id, 'xa_other').user_request is None
+
+
+def test_plan_preview_names_the_user_request_for_a_flagship_hint(tmp_path, monkeypatch):
+    from cortex_runtime.routing import auto_route
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin='test', event_id='fable'), 'Ревью сделай на фейбле', 'owner')
+    state = TaskMachine(store)
+    state.create(task.task_id, 'Review')
+    channel = SimpleNamespace(task_id=task.task_id, channel_id='coordinator', role='coordinator')
+    monkeypatch.setattr(auto_route, 'route_menu', lambda *_: {
+        'tiers': {'flagship': [{'route': 'claude-agent-acp/claude-fable-5-1[1m]'},
+                               {'route': 'codex-acp/gpt-6-astra'}],
+                  'deep': [], 'standard': [], 'light': []}})
+    proposal = plan(2)
+    proposal['tasks'][0].update(model='claude-agent-acp/claude-fable-5-1[1m]', model_reason='The user asked for Fable.')
+    proposal['tasks'][1].update(model='codex-acp/gpt-6-astra', model_reason='Astra is stronger.')
+    hints = state.submit_plan(channel, proposal, 'fable-plan')['model_hints']
+    assert hints[0] == dict(node='N0', model='claude-agent-acp/claude-fable-5-1[1m]', tier_now='standard',
+                            preview_status='pending_dispatch:user_request', user_request=f'{task.report_id}:-1')
+    assert hints[1]['preview_status'] == 'ignored:tier_mismatch' and 'user_request' not in hints[1]
 
 
 def test_a_luna_hint_serves_only_standard_testing_work(machine, monkeypatch):

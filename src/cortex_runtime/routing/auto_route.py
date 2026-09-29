@@ -74,6 +74,12 @@ available -- replaces the hand-maintained per-role ``route-policy.json``.
    one step. Other standard work, explicit high complexity and deep roles
    still move up. If a
    tier cannot rise (explorer), effort rises one supported step.
+6. Flagship is otherwise reached only by escalation. The one exception is
+   the user's explicit request in the task: an exact flagship
+   ``model_hint`` whose family the user explicitly asked for, not merely
+   mentioned (:func:`user_model_request`, :func:`requests_family`)
+   runs on that route at the flagship tier, still subject to pin, deny,
+   providers, availability and quota (basis ``auto:user_request``).
 
 Only engine-confirmed catalogs are used -- a connection whose models were
 never observed (seed catalog) is not routed to automatically; the worker
@@ -127,7 +133,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Iterator, Mapping, Sequence
 
 from ..catalog.evidence import ProvenanceSource
 from ..portable.errors import PortableError, PortableErrorCategory
@@ -245,7 +251,7 @@ class Choice:
     connection_id: str
     model: str
     effort: str | None
-    basis: str  # "auto" | "auto:pin"
+    basis: str  # "auto" | "auto:pin" | "auto:user_request"
     # What decided it (tier, ranked candidates, the provider preference and
     # whether it was honoured) -- recorded in the attempt's route audit.
     decision: Mapping | None = None
@@ -364,7 +370,7 @@ def route_menu(project_root=None, environ=None, unavailable=()):
     return dict(tiers=result, roles={role: {complexity: tier_for(role, complexity=complexity)
                                           for complexity in ("low", "normal", "high")}
                                      for role in roles},
-                flagship_note="escalation-only",
+                flagship_note="escalation, or an exact route the user explicitly requested in this task",
                 luna=dict(effort_floor=LUNA_EFFORT_FLOOR,
                           efforts=dict(light=luna_effort("light"), standard=luna_effort("standard"),
                                        standard_escalated=luna_effort("standard", True)),
@@ -376,7 +382,8 @@ def route_menu(project_root=None, environ=None, unavailable=()):
 def choose(role: str, project_root=None, environ: Mapping[str, str] | None = None, *,
            escalate: bool = False, complexity: str = "normal", unavailable: Sequence[Mapping] = (),
            preference: str | None = None, model_hint: str = "auto",
-           model_reason: str | None = None, previous_engine: str | None = None) -> Choice | None:
+           model_reason: str | None = None, previous_engine: str | None = None,
+           user_request: Mapping | None = None) -> Choice | None:
     """The route this worker role should open on, or ``None`` when nothing
     engine-confirmed is configured (keep the coordinator's route).
     See :func:`tier_for` for ``escalate`` and ``complexity``, and
@@ -387,7 +394,16 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     ``unavailable`` are the unexpired ``routing.availability`` records;
     a route they name is skipped. When routes are configured but none is
     usable, the delegation is refused (``no_available_route``) with every
-    unavailable route named -- never the coordinator's route instead."""
+    unavailable route named -- never the coordinator's route instead.
+
+    ``user_request`` (:func:`user_model_request`) is the
+    user's own request, in this task, for the family of an exact
+    ``model_hint``. When that hinted route is a flagship model it runs at
+    the flagship tier even without escalation (basis ``auto:user_request``);
+    a pin still wins, and a denied, excluded, superseded, unavailable or
+    exhausted requested route is refused with its reason in
+    ``decision["user_model_request"]`` while the node is routed as usual.
+    Without a user request a flagship hint stays escalation-only."""
     from ..connections import quota
     from ..connections import registry as connection_registry
     from . import availability
@@ -466,6 +482,8 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             "auto" if model_hint == "auto" else "ignored:escalated" if escalate else "ignored:pinned"),
             model_hint_reason=model_reason, diversify_from=previous_engine if escalate else None,
             luna=dict(status="pinned" if best.route.id in luna_ids else luna, chosen=best.route.id in luna_ids))
+        if user_request is not None:
+            decision["user_model_request"] = dict(user_request, status="ignored:pinned")
         default_effort = (luna_effort(role_tier, escalate) if best.route.id in luna_ids
                           else EFFORT_BY_TIER[tier_for(role, escalate, complexity)])
         return Choice(best.connection_id, model,
@@ -475,6 +493,21 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     luna_denied = luna_ids if luna.startswith("excluded:") else frozenset()
     superseded = superseded_routes(allowed)
     providers = overrides.get("providers")
+    # A flagship route the user asked for in this task (see user_model_request).
+    requested, request_status = _user_flagship(model_hint, user_request, overrides, allowed, tiers,
+                                               frozenset(blocked), superseded, usage)
+    if requested:
+        picked, decision = rank("flagship", requested, usage, overrides.get("tiers") or {},
+                                role=role, model_hint=model_hint, model_reason=model_reason,
+                                all_entries=entries, providers=providers, affinity=affinity)
+        decision.update(
+            base_role_tier=base_role_tier, role_tier="flagship", basis="user_request",
+            decided_by="user_request", escalated=escalate, preference=preference,
+            preference_status="ignored:user_request" if preference else "none",
+            effort_basis="user_request:flagship",
+            user_model_request=dict(user_request, status=request_status))
+        effort = nearest(EFFORT_BY_TIER["flagship"], permitted_efforts(picked, tiers[picked.route.id]))
+        return Choice(picked.connection_id, picked.route.model, effort, "auto:user_request", decision)
     status = None
     if preference is not None and providers is not None and preference not in providers:
         status = "ignored:provider_not_allowed"
@@ -492,6 +525,8 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                             all_entries=entries, providers=providers, affinity=affinity)
     if decision is not None and status:
         decision.update(preference=preference, preference_status=status)
+    if decision is not None and request_status is not None:
+        decision["user_model_request"] = dict(user_request or {}, status=request_status)
     if picked is None:
         if not entries:
             # Nothing engine-confirmed at all -- unrelated to 'providers'.
@@ -546,7 +581,9 @@ def tier_for(role: str, escalate: bool = False, complexity: str = "normal") -> s
 
     Complexity moves ordinary work only between light, standard and deep.
     ``flagship`` is reserved for an explicit escalation after an earlier
-    attempt falls short; explorer stays light even then.
+    attempt falls short; explorer stays light even then. :func:`choose`
+    also runs an exact flagship hint the user explicitly asked for in the
+    task at the flagship tier (:func:`user_model_request`).
     """
     if role == "worker-explorer":
         return "light"
@@ -754,6 +791,40 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
         )
         return best, decision
     return None, None
+
+
+def _user_flagship(model_hint: str, user_request: Mapping | None, overrides: Mapping, allowed: Sequence,
+                   tiers: Mapping[str, str], blocked: frozenset, superseded: Mapping[str, str], usage):
+    """``(entries, status)`` for an exact flagship ``model_hint``: the usable
+    entries of the route the user asked for (status ``honoured``), or none
+    and why not. ``status`` is ``None`` when the hint is not an exact route,
+    or names a route of another tier the user did not ask for."""
+    engine, slash, model = model_hint.partition("/")
+    if not slash:
+        return (), None
+    offered = [e for e in allowed if e.route.engine == engine and e.route.model == model]
+    flagship = bool(offered) and all(tiers[e.route.id] == "flagship" for e in offered)
+    if user_request is None:
+        return (), "not_requested_by_user" if flagship else None
+    if _denied(overrides, engine, model):
+        return (), "refused:denied"
+    providers = overrides.get("providers")
+    if providers is not None and engine not in providers:
+        return (), "refused:provider_not_allowed"
+    if not offered:
+        return (), "refused:not_offered"
+    if not flagship:
+        return (), "not_flagship"
+    current = [e for e in offered if e.route.id not in superseded]
+    if not current:
+        return (), "refused:superseded"
+    open_routes = [e for e in current if e.route.id not in blocked]
+    if not open_routes:
+        return (), "refused:unavailable"
+    usable = [e for e in open_routes if (usage(e) or 0.0) < 100.0]
+    if not usable:
+        return (), "refused:quota_exhausted"
+    return usable, "honoured"
 
 
 def _hot(used: float | None) -> bool:
@@ -1094,3 +1165,272 @@ def _candidate_paths(project_root, environ) -> list[Path]:
     xdg = environ.get("XDG_CONFIG_HOME") or ""
     paths.append((Path(xdg) if xdg.startswith("/") else home / ".config") / "cortex" / "routing.json")
     return paths
+
+
+# --- a model family the user asked for ---------------------------------------
+#
+# A flagship model is otherwise reserved for escalation. The coordinator may
+# still route one node to an exact flagship route when the *user* explicitly
+# asked for that family in the same task. The plan hint only names the route;
+# the grant (``user_model_request``) comes from user-authored text the runtime
+# recorded, never from coordinator prose, ``model_reason``, a question the
+# model wrote, a report or worker output:
+#
+# * every ``source_revisions`` body of the task (the initial request and each
+#   later user message or steer the host delivered), and
+# * the verbatim ``answer_text`` of every question a real user answer resolved
+#   (``acp.questions_store.answered_questions``) -- never the question text,
+#   which the asking model wrote.
+#
+# A source *requests* the family (not merely mentions it) when it names the
+# hinted model's family (:func:`model_line`: ``astra`` for ``gpt-6-astra``,
+# ``fable`` for ``claude-fable-5-1[1m]``) as a word, case-insensitively, or
+# by one of its Russian spellings (:data:`CYRILLIC_FAMILY_NAMES`), and in the
+# same sentence, within :data:`REQUEST_WINDOW` words before it, either
+#
+# * an explicit request word stands (:data:`REQUEST_WORDS`: "use Astra",
+#   "switch the review to Fable", "используй астру", "требование
+#   использования астры"), or
+# * a work verb (:data:`WORK_VERBS`) governs a preposition of means
+#   (:data:`MEANS_WORDS`) that stands directly before the family, at most one
+#   article or "model" word between (:data:`MEANS_FILLERS`): "implement it on
+#   Astra", "сделай на Астре", "проверь через Фейбл".
+#
+# A preposition alone never requests: "it failed on Astra", "посмотри на
+# Астру", "sent via Fable", "ревью через Фейбл" grant nothing. A request or
+# work word counts only in a request form (:func:`_request_form`): an English
+# verb must open its clause or follow a request-mood word (:data:`_REQUEST_LEAD`:
+# "please", "to", "could you", "let's", ...), so a noun or a report ("the last
+# run on Astra", "the tests run on Astra", "we tried to run it on Astra") is
+# not a request; Russian verbs are listed only in their imperative, infinitive
+# and first-person-plural forms, so past tenses, participles and verbal nouns
+# ("запустили на Астре", "сделано на Астре", "использование Астры") are not
+# requests either, nor is a verb right after a past tense ("пытались
+# запустить на Астре"). A negation, comparison or substitution word
+# (:data:`NEGATION_WORDS`) within the wider :data:`NEGATION_WINDOW` refuses the
+# mention ("не используй астру", "don't use Astra", "compare Astra with
+# Fable", "instead of Astra"). A bare mention -- a comparison, an availability
+# remark ("Astra is unavailable; use the default route"), a quotation or
+# report ("the last report said Astra ...") or a preference for the default
+# route -- grants nothing. This is a deterministic word match, not an
+# interpretation, and it errs towards refusing: a missed request only leaves
+# the node on its ordinary tier, with the reason in the receipt. The
+# coordinator must still choose to hint the exact route, and pin, deny,
+# providers, availability and quota still apply (see :func:`choose`).
+
+# Russian spellings of family names the engines list in Latin. A family not
+# listed here is still recognised by its Latin name.
+CYRILLIC_FAMILY_NAMES = {
+    "astra": ("астр",),
+    "fable": ("фейбл", "фэйбл"),
+    "mythos": ("мифос", "майтос", "митос"),
+}
+_RU_ENDING = r"(?:а|ы|е|у|ой|ою|и|ом|ам|ами|ах|ов)?"
+# Words that request the family by themselves: verbs whose object is the model
+# and nouns of requirement. Deliberately narrow: prepositions ("on", "via",
+# "through", "на", "через"; see WORK_VERBS), "with"/"с", "by", "about", "let"
+# and wishing or modal verbs ("want", "should", "хочу", "нужно") also
+# introduce remarks, comparisons, authorship and questions, so a request
+# phrased with them alone ("I want Astra") is not recognised -- the node then
+# stays on its ordinary tier and the receipt says ``not_requested_by_user``.
+# Russian verbs are listed only in the forms that ask (imperative, infinitive,
+# first person plural), never a past tense, participle or verbal noun.
+REQUEST_WORDS = re.compile(
+    r"use|run|execute|launch|route|delegate|assign|switch|prefer|pick|choose|select"
+    r"|requires?|requirement|request"
+    r"|использ(?:уй|уйте|овать|уем)|задейств(?:уй|уйте|овать|уем)"
+    r"|запуст(?:и|ите|ить|им)|запуска(?:й|йте|ть|ем)|прогон(?:и|ите|яй|яйте)|прогнать"
+    r"|выбер(?:и|ите|ем)|выбрать|выбира(?:й|йте|ть)|назнач(?:ь|ьте|ить|им|ай|айте)"
+    r"|отда(?:й|йте|ть|дим|вай|вайте)|переключ(?:и|ите|ись|итесь|ить|иться|им|имся|ай|айся)"
+    r"|постав(?:ь|ьте|ить|им)|возьм(?:и|ите|ём|ем)|взять|бери|берите|берём|берем|пусть"
+    r"|треб(?:ование|ования|ованию|ованием|овании|ую|уем|ует|уется|уются|уй|уйте|овать)",
+    re.IGNORECASE,
+)
+# Verbs of the work itself. They request the family only through a
+# preposition of means (MEANS_WORDS) directly before it ("implement it on
+# Astra", "сделай на Астре"): with the family as their object they name what
+# the work is about ("review Astra's output", "проверь Астру"), and a
+# preposition with no such verb is a remark ("it failed on Astra", "посмотри
+# на Астру"). Russian forms as in REQUEST_WORDS.
+WORK_VERBS = re.compile(
+    r"implement|build|fix|write|test|review|perform|handle|redo|rerun|retry|debug|refactor"
+    r"|investigate|analy[sz]e|do"
+    r"|реализ(?:уй|уйте|овать|уем)|(?:с|пере|до)?дела(?:й|йте|ть)|(?:с|пере|до)делаем"
+    r"|выполн(?:и|ите|ить|им|яй|яйте|ять)|напиш(?:и|ите|ем)|написать"
+    r"|провер(?:ь|ьте|ить|им|яй|яйте|ять)|исправ(?:ь|ьте|ить|им|ляй|ляйте|лять)"
+    r"|почин(?:и|ите|ить|им)|(?:про)?тестир(?:уй|уйте|овать|уем)"
+    r"|собер(?:и|ите|ём|ем)|собрать|провед(?:и|ите|ём|ем)|провести|отревью(?:й|йте|ить)",
+    re.IGNORECASE,
+)
+MEANS_WORDS = re.compile(r"on|via|through|using|на|через|посредством|силами|помощью", re.IGNORECASE)
+# At most one of these may stand between the preposition and the family
+# ("on the Astra route", "на модели Астра").
+MEANS_FILLERS = frozenset({"the", "a", "an", "model", "модели", "моделью"})
+# An English request or work verb is in a request form when it opens its
+# clause or directly follows one of these words (or an "'ll"/"'d"
+# contraction). Anything else before it -- an article, a possessive, a noun,
+# an auxiliary -- makes it a noun or a report: "the last run on Astra", "the
+# tests run on Astra", "was run on Astra", "I use Astra daily".
+_REQUEST_LEAD = frozenset({
+    "please", "pls", "plz", "kindly", "just", "simply", "only", "always", "also", "then",
+    "and", "now", "so", "ok", "okay", "yes", "no", "to", "can", "could", "would", "will",
+    "should", "must", "may", "let's", "lets", "better",
+})
+# "could you run it on Astra": "you" leads only after one of these.
+_ASKING_MODALS = frozenset({"can", "could", "would", "will", "please"})
+# "I prefer Astra": a first-person subject leads only a verb of choice.
+_CHOOSERS = frozenset({"i", "we"})
+_CHOICE_WORDS = frozenset({"prefer", "pick", "choose", "select", "request", "require"})
+# "to" after one of these reports an attempt or a habit, not a request
+# ("we tried to run it on Astra").
+_REPORTED_BEFORE_TO = frozenset({
+    "tried", "wanted", "used", "failed", "managed", "attempted", "meant", "supposed",
+    "was", "were", "had", "did", "went", "planned", "started", "began", "continued", "seemed",
+})
+# Nouns and statements of requirement need no lead ("the task requires Astra").
+_UNGUARDED = frozenset({"requirement", "requires"})
+_CYRILLIC = re.compile(r"[а-яё]")
+# A Russian past tense ("пытались", "хотел") right before a verb makes it a report.
+_RU_PAST = re.compile(r"[а-яё]+(?:л|ла|ло|ли|лся|лась|лось|лись)")
+# One of these within NEGATION_WINDOW words before the family (same sentence)
+# makes the mention a refusal, a comparison, a substitution or a report rather
+# than a request. Deliberately broad, and read from a wider window than
+# REQUEST_WORDS: a missed refusal would run a flagship model, a missed request
+# only leaves the node on its ordinary tier. "no"/"нет" are not here: "No,
+# use Astra" is a request, and a bare "нет Астры" has no request word anyway.
+NEGATION_WORDS = re.compile(
+    r"not|never|without|avoid|except|cannot|unable"
+    r"|(?:do|does|did|is|are|was|were|has|have|had|ca|could|would|should|must|wo|shall|need)n'?t"
+    r"|instead|rather|than|versus|vs|over|compar\w*|based|depend\w*"
+    r"|не|без|никогда|кроме|нельзя|запрещ\w*|вместо|чем|сравн\w*|против|основан\w*|исходя",
+    re.IGNORECASE,
+)
+_WORD = re.compile(r"[\w']+", re.UNICODE)
+_SENTENCE_END = re.compile(r"[.!?;\n]")
+# A request verb's lead is read within its own clause ("No, use Astra").
+_CLAUSE_BREAK = re.compile(r"[,:()\"«»“”„—–]")
+# The token the family name is attached to ("codex-acp/gpt-6-" before "astra"
+# in an exact route id, an opening quote) is not a word before it.
+_ATTACHED = re.compile(r"\S*\Z")
+REQUEST_WINDOW = 4
+NEGATION_WINDOW = 5
+
+
+def family_of(model_hint: str) -> str | None:
+    """The model family an exact ``engine/model`` hint names, or ``None``."""
+    _engine, slash, model = model_hint.partition("/")
+    if not slash or not model:
+        return None
+    family = model_line(model)[0]
+    return family or None
+
+
+def family_pattern(family: str) -> re.Pattern:
+    """A case-insensitive whole-word pattern for ``family``'s Latin name and
+    its Russian spellings."""
+    latin = r"[-\s]?".join(re.escape(part) for part in family.split("-"))
+    names = [rf"(?<![a-z0-9]){latin}s?(?![a-z0-9])"]
+    names += [rf"(?<![а-яё]){re.escape(stem)}{_RU_ENDING}(?![а-яё])"
+              for stem in CYRILLIC_FAMILY_NAMES.get(family, ())]
+    return re.compile("|".join(names), re.IGNORECASE)
+
+
+def _clause_words(sentence: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Each casefolded word of ``sentence`` with the words before it in its
+    own clause."""
+    result = []
+    for clause in _CLAUSE_BREAK.split(sentence):
+        words = [w for w in (token.casefold().strip("'") for token in _WORD.findall(clause)) if w]
+        result.extend((word, tuple(words[:index])) for index, word in enumerate(words))
+    return result
+
+
+def _request_form(pattern: re.Pattern, word: str, lead: tuple[str, ...]) -> bool:
+    """Whether ``word``, after ``lead`` in its clause, is a ``pattern`` word
+    used as a request -- not a noun ("the last run"), a statement ("the tests
+    run", "I use") or a report ("tried to run", "пытались запустить")."""
+    if not pattern.fullmatch(word):
+        return False
+    previous = lead[-1] if lead else None
+    if _CYRILLIC.search(word):
+        return previous is None or not _RU_PAST.fullmatch(previous)
+    if word in _UNGUARDED or previous is None:
+        return True
+    if previous == "to":
+        return len(lead) < 2 or lead[-2] not in _REPORTED_BEFORE_TO
+    if previous in _REQUEST_LEAD or previous.endswith(("'ll", "'d")):
+        return True
+    if previous in _CHOOSERS:
+        return word in _CHOICE_WORDS
+    if previous == "you":
+        return len(lead) >= 2 and lead[-2] in _ASKING_MODALS
+    return False
+
+
+def _governed_means(window: list[tuple[str, tuple[str, ...]]]) -> bool:
+    """A :data:`MEANS_WORDS` preposition directly before the family (at most
+    one :data:`MEANS_FILLERS` word between) governed by a :data:`WORK_VERBS`
+    verb in request form earlier in ``window``."""
+    position = len(window) - 1
+    if position >= 0 and window[position][0] in MEANS_FILLERS:
+        position -= 1
+    if position < 0 or not MEANS_WORDS.fullmatch(window[position][0]):
+        return False
+    return any(_request_form(WORK_VERBS, word, lead) for word, lead in window[:position])
+
+
+def requests_family(text: str, family: str) -> str | None:
+    """The first mention of ``family`` in ``text`` that is a request -- within
+    :data:`REQUEST_WINDOW` words before it, in the same sentence, a
+    :data:`REQUEST_WORDS` word in request form or a :data:`WORK_VERBS` verb
+    governing a :data:`MEANS_WORDS` preposition right before it, and no
+    :data:`NEGATION_WORDS` word within :data:`NEGATION_WINDOW` -- or ``None``
+    when every mention is bare, a remark or refused."""
+    for match in family_pattern(family).finditer(text):
+        before = _ATTACHED.sub("", text[: match.start()]).replace("’", "'")
+        words = _clause_words(_SENTENCE_END.split(before)[-1])
+        if any(NEGATION_WORDS.fullmatch(word) for word, _lead in words[-NEGATION_WINDOW:]):
+            continue
+        window = words[-REQUEST_WINDOW:]
+        if (any(_request_form(REQUEST_WORDS, word, lead) for word, lead in window)
+                or _governed_means(window)):
+            return match.group(0)
+    return None
+
+
+def _user_texts(store, db, task_id: str) -> Iterator[tuple[str, str]]:
+    """``(source_ref, text)`` of every user-authored source of the task,
+    newest first: source revisions, then answered questions' answers."""
+    from ..acp import questions_store
+
+    rows = db.execute(
+        "SELECT sr.report_id, r.filename FROM source_revisions sr JOIN reports r ON r.id=sr.report_id "
+        "WHERE sr.task_id=? ORDER BY sr.revision DESC", (task_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            text = (store._task_directory(db, task_id) / row["filename"]).read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        yield f"{row['report_id']}:-1", text
+    for answer in reversed(questions_store.answered_questions(db, task_id)):
+        if isinstance(answer.get("answer_text"), str):
+            yield answer["source_ref"], answer["answer_text"]
+
+
+def user_model_request(store, task_id: str, model_hint: str) -> dict | None:
+    """The user's request for ``model_hint``'s family in ``task_id``:
+    ``{"source_ref", "family", "matched"}`` for the newest user source that
+    requests it (``source_ref`` is readable with ``read_source``), or ``None``
+    when no source does, including when the family is only mentioned.
+    Only an exact ``engine/model`` hint can be requested. A missing or
+    unreadable source grants nothing."""
+    family = family_of(model_hint or "")
+    if family is None:
+        return None
+    with store.connection() as db:
+        for source_ref, text in _user_texts(store, db, task_id):
+            matched = requests_family(text, family)
+            if matched is not None:
+                return dict(source_ref=source_ref, family=family, matched=matched)
+    return None

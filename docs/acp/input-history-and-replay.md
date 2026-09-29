@@ -106,9 +106,9 @@ claiming retention that did not happen:
 
 | Block | Condition | `availability` |
 | --- | --- | --- |
-| `resource` (embedded `text`/`blob`) | ≤ 1 MiB, prompt total ≤ 4 MiB | `stored` |
+| `resource` (embedded `text`/`blob`) | ≤ 10 MiB, prompt total ≤ 10 MiB | `stored` |
 | `resource` | over either cap | `too_large` (metadata only, body discarded) |
-| `resource_link` (`file://`, inside project root, owned regular file, no symlink, single hardlink) | ≤ 1 MiB, prompt total ≤ 4 MiB | `stored` (a snapshot copy, sha256-verified) |
+| `resource_link` (`file://`, inside project root, owned regular file, no symlink, single hardlink) | ≤ 10 MiB, prompt total ≤ 10 MiB | `stored` (a snapshot copy, sha256-verified) |
 | `resource_link` (`file://`, outside project root) | -- | `reference_only` (uri kept, never read) |
 | `resource_link` (any other scheme, e.g. `https://`) | -- | `reference_only` (never fetched) |
 | `resource_link` (symlink / non-owned / multiple hardlinks / unreadable) | -- | `inaccessible` (with a concrete `reason`) |
@@ -137,8 +137,8 @@ the engine's ACP `session/prompt` content array. `audio` remains rejected
 with `-32602` because it is unadvertised.
 
 Images travel inline as base64, so the whole `session/prompt` line must fit
-the transport's 8 MiB inbound frame limit (`acp.transport.MAX_FRAME_BYTES`):
-room for the full 4 MiB attachment budget once encoded, plus the prompt text,
+the transport's 15 MiB inbound frame limit (`acp.transport.MAX_FRAME_BYTES`):
+room for the full 10 MiB attachment budget once encoded, plus the prompt text,
 and below the Paseo relay's 16 MiB per-frame ceiling. A larger line is drained
 without being buffered or echoed and answered with `-32700` ("attach fewer or
 smaller images"). The reply carries the request's own `id` when the frame's

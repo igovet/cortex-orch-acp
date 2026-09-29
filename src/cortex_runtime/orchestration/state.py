@@ -307,10 +307,14 @@ class AttemptRouting(NamedTuple):
     model_hint: str
     model_reason: str | None
     previous_engine: str | None
+    # The user's own request for the exact hint's model family in this
+    # task (routing.auto_route.user_model_request); only a flagship hint uses it.
+    user_request: dict | None = None
 
 
 def attempt_routing(store, task_id, attempt_id):
-    """Read a node's plan hint and prior audited engine for runtime routing."""
+    """Read a node's plan hint, prior audited engine and, for an exact route
+    hint, whether the user asked for its model family in this task."""
     with store.connection() as db:
         provision = db.execute('SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
                                (task_id, attempt_id)).fetchone()
@@ -341,9 +345,11 @@ def attempt_routing(store, task_id, attempt_id):
     task = next((t for t in tasks if t['id'] == planned), {})
     retried = any(p.get('node') == node['node_id'] and p.get('revision') == node['revision'] and not p.get('route_failure')
                   for p in (json.loads(r[0]) for r in retries))
-    return AttemptRouting(bool(fix) or retried, task.get('complexity', 'normal'),
-                          task.get('model') or task.get('provider') or 'auto',
-                          task.get('model_reason'), prior['engine'] if prior else None)
+    hint = task.get('model') or task.get('provider') or 'auto'
+    from ..routing.auto_route import user_model_request
+    return AttemptRouting(bool(fix) or retried, task.get('complexity', 'normal'), hint,
+                          task.get('model_reason'), prior['engine'] if prior else None,
+                          user_model_request(store, task_id, hint) if '/' in hint else None)
 
 
 def review_provider_preference(store, task_id, attempt_id):
@@ -664,19 +670,29 @@ class TaskMachine:
                 raise StoreError('unknown_model_hint', 'model', ', '.join(exact_hints),
                                  'an exact route from list_route_options',
                                  'Call list_route_options and copy an offered route.')
-        previews = [dict(node=n['id'], model=n.get('model', 'auto'),
-                         tier_now=tier_for(resolve_role(n['role']), complexity=n.get('complexity', 'normal')),
-                         preview_status=('auto' if n.get('model', 'auto') == 'auto' else
-                                         'ignored:tier_mismatch' if '/' in n.get('model', '')
-                                         and not hint_serves_tier(
-                                             n['model'].partition('/')[2],
-                                             next((tier for tier, group in menu['tiers'].items()
-                                                   if any(item['route'] == n['model'] for item in group)), None),
-                                             resolve_role(n['role']),
-                                             tier_for(resolve_role(n['role']), complexity=n.get('complexity', 'normal')),
-                                             n.get('complexity', 'normal'))
-                                         else 'pending_dispatch'))
-                    for n in plan['tasks']]
+        from ..routing.auto_route import user_model_request
+
+        def preview(n):
+            model, role = n.get('model', 'auto'), resolve_role(n['role'])
+            complexity = n.get('complexity', 'normal')
+            item = dict(node=n['id'], model=model, tier_now=tier_for(role, complexity=complexity))
+            if '/' not in model:
+                item['preview_status'] = 'auto' if model == 'auto' else 'pending_dispatch'
+                return item
+            hinted_tier = next((tier for tier, group in menu['tiers'].items()
+                                if any(entry['route'] == model for entry in group)), None)
+            # A flagship route runs only on escalation or when the user asked
+            # for its family in this task (auto_route.user_model_request).
+            request = user_model_request(self.store, channel.task_id, model) if hinted_tier == 'flagship' else None
+            if request is not None:
+                item.update(preview_status='pending_dispatch:user_request', user_request=request['source_ref'])
+            elif not hint_serves_tier(model.partition('/')[2], hinted_tier, role, item['tier_now'], complexity):
+                item['preview_status'] = 'ignored:tier_mismatch'
+            else:
+                item['preview_status'] = 'pending_dispatch'
+            return item
+
+        previews = [preview(n) for n in plan['tasks']]
         with self.store.connection() as db:
             db.execute('BEGIN IMMEDIATE')
             if authorization: authorization(db)

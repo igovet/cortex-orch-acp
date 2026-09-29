@@ -119,8 +119,8 @@ REPLAY_TABLES = frozenset({"source_blocks", "source_block_reads", "host_transcri
 
 TRUST_LABELS = frozenset({"user_direct", "file_content", "worker_report", "derived_summary"})
 
-MAX_BLOCK_BYTES = 1 * 1024 * 1024
-MAX_PROMPT_ATTACHMENT_BYTES = 4 * 1024 * 1024
+MAX_BLOCK_BYTES = 10 * 1024 * 1024
+MAX_PROMPT_ATTACHMENT_BYTES = 10 * 1024 * 1024
 READ_CHUNK_LIMIT = 64 * 1024
 MAX_META_BYTES = 16 * 1024
 
@@ -282,12 +282,12 @@ def _resolve_resource_link_block(index: int, block: Mapping[str, Any], project_r
             # Bounded read caught the file growing past the cap during (or
             # after fstat but before/while) reading -- never store a
             # partial/truncated body silently as if it were complete.
-            return BlockCapture(index, "resource_link", mime, name, uri, "too_large", "block_exceeds_1mib_cap", None), total
+            return BlockCapture(index, "resource_link", mime, name, uri, "too_large", "block_exceeds_10mib_cap", None), total
         body = b"".join(chunks)
     finally:
         os.close(fd)
     if total + len(body) > MAX_PROMPT_ATTACHMENT_BYTES:
-        return BlockCapture(index, "resource_link", mime, name, uri, "too_large", "prompt_attachment_total_exceeds_4mib_cap", None), total
+        return BlockCapture(index, "resource_link", mime, name, uri, "too_large", "prompt_attachment_total_exceeds_10mib_cap", None), total
     is_text = True
     try:
         body.decode("utf-8")
@@ -315,9 +315,9 @@ def _resolve_resource_block(index: int, block: Mapping[str, Any], total: int) ->
     else:
         return BlockCapture(index, "resource", mime, None, uri, "inaccessible", "no_embedded_content", None), total
     if len(body) > MAX_BLOCK_BYTES:
-        return BlockCapture(index, "resource", mime, None, uri, "too_large", "block_exceeds_1mib_cap", None), total
+        return BlockCapture(index, "resource", mime, None, uri, "too_large", "block_exceeds_10mib_cap", None), total
     if total + len(body) > MAX_PROMPT_ATTACHMENT_BYTES:
-        return BlockCapture(index, "resource", mime, None, uri, "too_large", "prompt_attachment_total_exceeds_4mib_cap", None), total
+        return BlockCapture(index, "resource", mime, None, uri, "too_large", "prompt_attachment_total_exceeds_10mib_cap", None), total
     return BlockCapture(index, "resource", mime, None, uri, "stored", None, body, is_text), total + len(body)
 
 
@@ -325,7 +325,7 @@ def resolve_prompt_blocks(blocks: Sequence[Mapping[str, Any]], project_root: str
     """Resolve every non-text content block of one accepted prompt into a
     :class:`BlockCapture`, truthfully classifying availability -- never
     claiming a body is retained when it was not. Enforces the per-block
-    (1 MiB) and per-prompt total (4 MiB) attachment caps; content over
+    (10 MiB) and per-prompt total (10 MiB) attachment caps; content over
     either cap is recorded with metadata only (``availability='too_large'``),
     never partially stored. Pure read/decode work over already-received
     prompt data -- no database access, so this always runs *before* any
@@ -358,7 +358,7 @@ def resolve_prompt_blocks(blocks: Sequence[Mapping[str, Any]], project_root: str
                 else:
                     encoded_block_cap = ((MAX_BLOCK_BYTES + 2) // 3) * 4
                     if len(data) > encoded_block_cap:
-                        capture = BlockCapture(index, "image", mime, None, None, "too_large", "block_exceeds_1mib_cap", None)
+                        capture = BlockCapture(index, "image", mime, None, None, "too_large", "block_exceeds_10mib_cap", None)
                     else:
                         try:
                             body = base64.b64decode(data, validate=True)
@@ -366,7 +366,7 @@ def resolve_prompt_blocks(blocks: Sequence[Mapping[str, Any]], project_root: str
                             capture = BlockCapture(index, "image", mime, None, None, "inaccessible", "invalid_blob_encoding", None)
                         else:
                             if len(body) > MAX_BLOCK_BYTES or total + len(body) > MAX_PROMPT_ATTACHMENT_BYTES:
-                                reason = "block_exceeds_1mib_cap" if len(body) > MAX_BLOCK_BYTES else "prompt_attachment_total_exceeds_4mib_cap"
+                                reason = "block_exceeds_10mib_cap" if len(body) > MAX_BLOCK_BYTES else "prompt_attachment_total_exceeds_10mib_cap"
                                 capture = BlockCapture(index, "image", mime, None, None, "too_large", reason, None)
                             else:
                                 capture = BlockCapture(index, "image", mime, None, None, "stored", None, body, False)

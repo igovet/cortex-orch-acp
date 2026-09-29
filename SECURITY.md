@@ -18,6 +18,12 @@ that decision as `REVIEW_NOT_REQUIRED` and binds verification to the same digest
 Any project change, every fix cycle, or an unobservable project still requires
 independent review. No model hint can waive review. A model tool call cannot
 select a task state, accept the task or directly create an engine session.
+A model hint also cannot raise a worker to a flagship model on its own: the
+runtime grants a flagship route only for a node whose exact hint names a model
+family the user asked for in the task's own recorded messages or answers, never
+from model-authored text, and `pin`, `deny`, `providers`, availability and
+quota still apply (see
+[user-requested flagship route](docs/acp/routing-and-fallback.md#user-requested-flagship-route)).
 
 After a coordinator question commits `WAITING_USER`, further coordinator text
 received in that turn is suppressed, not released by delayed tool callbacks.

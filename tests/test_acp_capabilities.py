@@ -91,13 +91,13 @@ def test_oversized_image_is_rejected_before_capture_or_forwarding(tmp_path):
                           params=dict(cwd=str(tmp_path), mcpServers=[])))
         session_id = _recv(proc)["result"]["sessionId"]
         _recv(proc)
-        oversized = base64.b64encode(b"x" * (1024 * 1024 + 1)).decode("ascii")
+        oversized = base64.b64encode(b"x" * (11 * 1024 * 1024)).decode("ascii")
         _send(proc, dict(jsonrpc="2.0", id=3, method="session/prompt",
                           params=dict(sessionId=session_id,
                                       prompt=[dict(type="image", data=oversized, mimeType="image/png")])))
         reply = _recv(proc)
         assert reply["error"]["code"] == -32602
-        assert "large" in reply["error"]["message"].lower() or "cap" in reply["error"]["message"].lower()
+        assert "10 MiB" in reply["error"]["message"]
     finally:
         proc.stdin.close()
         proc.wait(timeout=15)

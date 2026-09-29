@@ -671,6 +671,33 @@ def test_exact_model_hint_and_reason_are_audited(tmp_path, monkeypatch):
     adapter.terminate_owned(result.attempt_id)
 
 
+@pytest.mark.parametrize("requested", [True, False])
+def test_a_user_requested_flagship_is_dispatched_and_audited(tmp_path, monkeypatch, requested):
+    """Standard implementation work runs on the flagship route only when the
+    user asked for its family; the audit names the user's source."""
+    from cortex_runtime.orchestration import state
+
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
+        tmp_path, model_a="gpt-6-astra", model_b="claude-sonnet-5")
+    user_request = dict(source_ref="r_0123456789ab:-1", family="astra", matched="Astra") if requested else None
+    monkeypatch.setattr(state, "attempt_routing", lambda store, task_id, attempt_id: state.AttemptRouting(
+        False, "normal", "codex-acp/gpt-6-astra", "The user asked for Astra.", None, user_request))
+    result = provisioning.delegate(channel, "Build", "Build it.", "backend-dev", "Done.", "req-user-flagship")
+    assert result.status == "ready"
+    audit = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]
+    detail = audit["decision_detail"]
+    decision = detail["route_decision"]
+    if requested:
+        assert (audit["engine"], audit["model"], detail["route_basis"]) == ("codex-acp", "gpt-6-astra", "auto:user_request")
+        assert (decision["tier"], decision["decided_by"]) == ("flagship", "user_request")
+        assert decision["user_model_request"] == dict(user_request, status="honoured")
+    else:
+        assert (audit["engine"], audit["model"], detail["route_basis"]) == ("claude-agent-acp", "claude-sonnet-5", "auto")
+        assert decision["model_hint_status"] == "ignored:tier_mismatch"
+        assert decision["user_model_request"] == dict(status="not_requested_by_user")
+    adapter.terminate_owned(result.attempt_id)
+
+
 @pytest.mark.parametrize("trigger", ["retry", "review_fix"])
 def test_normal_testing_retry_and_review_fix_dispatch_luna_max(tmp_path, trigger):
     from cortex_runtime.orchestration.state import TaskMachine, event

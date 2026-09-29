@@ -183,7 +183,7 @@ def test_a_route_failure_retry_uses_no_ordinary_retry_and_does_not_escalate(exec
     # The next attempt's routing: no model fell short, so no escalation.
     _fail(store, channel.task_id, node, "xa_next", error="dispatch_failed:WorkerModeNotConfirmed",
           route=dict(connection_id="cn_next", reason="configuration_not_confirmed"))
-    assert attempt_routing(store, channel.task_id, "xa_next") == (False, "normal", "auto", None, None)
+    assert attempt_routing(store, channel.task_id, "xa_next") == (False, "normal", "auto", None, None, None)
     # Route retries are bounded too.
     with pytest.raises(StoreError, match="worker_retry_limit:dispatch_failed:WorkerModeNotConfirmed"):
         retry_lost(runtime, channel.task_id, node)
@@ -197,7 +197,7 @@ def test_an_ordinary_failure_still_escalates_and_stays_bounded(executing):
         retry_lost(runtime, channel.task_id, node)
     node = _running_node(machine, channel)
     _fail(store, channel.task_id, node, "xa_last", error="worker_ended_without_result")
-    assert attempt_routing(store, channel.task_id, "xa_last") == (True, "normal", "auto", None, None)
+    assert attempt_routing(store, channel.task_id, "xa_last") == (True, "normal", "auto", None, None, None)
     with pytest.raises(StoreError, match="worker_retry_limit:worker_ended_without_result"):
         retry_lost(runtime, channel.task_id, node)
 

@@ -251,8 +251,9 @@ Automatic routing uses four tiers: `light`, `standard`, `deep`, and
 never selected for a role's default tier or because a plan merely says
 `complexity: high`; high complexity tops out at `deep` (Sol/Opus class).
 The flagship tier requires an explicit runtime escalation after a prior
-attempt fell short. A user `routing.json` pin is also an explicit route
-choice and remains strict.
+attempt fell short, or the user's own explicit request for that model family
+in the task (see [User-requested flagship route](#user-requested-flagship-route)).
+A user `routing.json` pin is also an explicit route choice and remains strict.
 
 The role tier starts from `ROLE_TIERS` and is shifted by complexity (low moves
 cheaper; high moves stronger). On escalation, the runtime normally advances the tier;
@@ -266,7 +267,7 @@ Luna, high to xhigh).
 
 Models are grouped into light, standard, deep, and flagship. An unavailable
 role tier searches the nearest tier permitted by policy; flagship is never a
-starting tier. Haiku is excluded from automatic selection by default, but
+starting tier except for a node the user explicitly asked to run on it. Haiku is excluded from automatic selection by default, but
 `auto_allow` can opt in a model or `engine/model`; `deny` and `providers` still
 apply. Setup writes the default user `routing.json`, `{"deny": ["gpt-5.5",
 "haiku"]}`, whose bare `haiku` token denies every Haiku id and alias
@@ -285,6 +286,93 @@ another tier only when **no** engine has a usable model in the task's tier
 other engine as a `cross_tier` candidate; that was removed in rank version 4,
 and older audit rows that carry `cross_tier`/`chosen_cross_tier` stay
 readable.
+
+### User-requested flagship route
+
+A user may ask for a flagship model family in the task (for example "use
+Astra for the implementation" or "сделай ревью на Фейбле"). The coordinator
+then puts that exact flagship `engine/model` route from `list_route_options`
+in the node's `model` hint. The hint alone never grants flagship: the grant
+comes only from user-authored text the runtime itself recorded for the same
+task (`routing.auto_route.user_model_request`):
+
+- every `source_revisions` body of the task -- the initial request and each
+  later user message or steer the host delivered (`list_sources` entries,
+  `trust_label: user_direct`); and
+- the verbatim answer of every question a real user answer resolved
+  (`<question_id>:answer`), never the question text, which the asking model
+  wrote.
+
+Coordinator prose, `model_reason`, questions, reports and worker output are
+never read for it. A source requests the family when it names the hinted
+model's family (`model_line`: `astra` for `gpt-6-astra`, `fable` for
+`claude-fable-5-1[1m]`) as a whole word, case-insensitively, or by one of its
+Russian spellings (`CYRILLIC_FAMILY_NAMES`: `астр...`, `фейбл`/`фэйбл`,
+`мифос`/`майтос`/`митос`), and, in the same sentence (`requests_family`):
+
+- within the four words before it, either an explicit request word stands
+  (`REQUEST_WORDS`: `use`, `run`, `switch`, `prefer`, `choose`, `request`,
+  `requirement`, `используй`, `запусти`, `переключи`, `пусть`,
+  `требование`, ... -- "use Astra", "run it on Astra", "switch the review to
+  Fable", "используй астру", "требование использования астры"), or a work
+  verb (`WORK_VERBS`: `implement`, `review`, `fix`, `сделай`, `реализуй`,
+  `проверь`, ...) governs a preposition of means (`MEANS_WORDS`: `on`, `via`,
+  `through`, `using`, `на`, `через`, `с помощью`, ...) that stands directly
+  before the family, with at most an article or "model" between
+  ("implement it on Astra", "Реализуй на Астре", "сделай на модели
+  Астра"); and
+- that word is in a request form: an English verb opens its clause or
+  follows a request-mood word (`please`, `to`, `could you`, `let's`, `then`,
+  ...; a verb of choice may also follow `I`/`we`: "I prefer Astra"), and a
+  Russian verb is one of its listed imperative, infinitive or first-person
+  plural forms and does not follow a past tense; and
+- no negation, comparison or substitution word stands within the five words
+  before it (`NEGATION_WORDS`: `not`, `never`, `without`, `don't`, `can't`,
+  `instead`, `rather`, `than`, `over`, `compare`, `based`, `не`, `без`,
+  `никогда`, `вместо`, `чем`, `сравни`, ... -- "don't use Astra", "prefer
+  the default route over Astra").
+
+A bare mention grants nothing: a comparison ("compare Astra with Fable"),
+an availability remark ("Astra is unavailable; use the default route"), a
+quotation or report ("the last report said Astra found nothing") or a
+preference for the default route. Neither does a preposition that no request
+or work verb governs ("it failed on Astra", "посмотри на Астру", "sent via
+Fable", "ревью через Фейбл"), nor a request word used as a noun, a
+statement or a report ("the last run on Astra failed", "the tests run on
+Astra", "we tried to run it on Astra", "I use Astra daily", "запустили на
+Астре", "сделано на Астре", "пытались запустить на Астре",
+"использование Астры"). This is a deterministic word match, not an
+interpretation, and it errs towards refusing: a request phrased without an
+explicit request word or a governing verb ("I want Astra", "Модель: Астра",
+"ревью через Фейбл", "let Astra do it", "если запустить на Астре") is
+not recognised, the node stays on its ordinary tier, and the receipt shows
+`user_model_request.status: not_requested_by_user`, so the user rephrases
+("use Astra", "используй Астру"). Conversely, a statement the rule cannot
+tell from a request still grants (for example "the plan requires Astra"),
+which is why the coordinator's exact hint remains a required second step.
+The family comes from the route, not from a fixed list, so a future flagship
+family works by its Latin name once the engine offers it and
+`routing.auto_route` (or a `tiers` override) classifies it as flagship.
+
+At dispatch, `choose` runs such a node on the requested route at the
+flagship tier (effort `high`, the flagship ceiling), even on a retry or a
+review fix, and records `basis: auto:user_request` with
+`route_decision.decided_by: user_request` and
+`route_decision.user_model_request = {source_ref, family, matched, status}` in
+the attempt's `attempt_route_audit` detail, distinct from escalation. Only that
+node is affected: other nodes, and a hint for a non-flagship route
+(`status: not_flagship`), route as usual. Policy still wins, and a refused
+request routes the node at its ordinary tier with the reason recorded:
+a matching pin (`ignored:pinned`), `deny` (`refused:denied`), `providers`
+(`refused:provider_not_allowed`), a route no connection offers
+(`refused:not_offered`), a superseded version (`refused:superseded`), an
+availability record (`refused:unavailable`), or a 100% plan
+(`refused:quota_exhausted`). A flagship hint without the user's request keeps
+the old behaviour: `model_hint_status: ignored:tier_mismatch` and
+`user_model_request.status: not_requested_by_user`. At plan submission the
+receipt's `model_hints` preview shows `pending_dispatch:user_request` with the
+user's `user_request` source ref, or `ignored:tier_mismatch` when no request
+was found.
 
 ### Codex Luna
 
@@ -353,12 +441,15 @@ hand its place to an older one.
 `plan_submit` requires every node to provide `model`: `auto`, an engine id, or
 an exact `engine/model` route label from `list_route_options`. A non-`auto`
 recommendation requires a short `model_reason`; it is optional for `auto`. This is a recommendation only. A model hint is
-considered only within the runtime-computed tier and cannot override pin, deny,
-providers, availability, or the 100% quota exclusion. A hint from another tier is recorded as `ignored:tier_mismatch`;
+considered only within the runtime-computed tier (except a
+[user-requested flagship route](#user-requested-flagship-route)) and cannot
+override pin, deny, providers, availability, or the 100% quota exclusion. A hint from another tier is recorded as `ignored:tier_mismatch`;
 using `auto` delegates all selection to ranking. Legacy stored plans without
 `model` retain their old `provider` preference behavior; new plans use `model`.
 
-On escalation, the previous hint is not inherited. The runtime ranks the new
+On escalation, the previous hint is not inherited (a
+[user-requested flagship route](#user-requested-flagship-route) is the
+exception). The runtime ranks the new
 tier and prefers a different engine from the failed attempt when candidates
 otherwise tie. A hint is honoured unless the hinted route is excluded,
 unavailable or exhausted, or its usage is both at or above 85%

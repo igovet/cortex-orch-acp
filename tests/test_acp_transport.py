@@ -124,6 +124,22 @@ def test_frame_limit_fits_a_prompt_with_its_full_attachment_budget():
     assert MAX_FRAME_BYTES < 16 * 1024 * 1024
 
 
+def test_frame_carrying_a_near_cap_image_is_accepted():
+    """A session/prompt frame carrying a single image at the raised 10 MiB
+    per-block cap still fits within the transport frame limit and parses."""
+    import base64
+
+    from cortex_runtime.acp.replay_store import MAX_BLOCK_BYTES
+
+    image_b64 = base64.b64encode(b"x" * MAX_BLOCK_BYTES).decode("ascii")
+    raw = json.dumps(dict(jsonrpc="2.0", id=1, method="session/prompt",
+                           params=dict(sessionId="s1",
+                                       prompt=[dict(type="image", data=image_b64, mimeType="image/png")]))).encode()
+    assert len(raw) <= MAX_FRAME_BYTES
+    message = parse_frame(raw)
+    assert message["id"] == 1
+
+
 @pytest.mark.parametrize("head, expected", [
     (b'{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"prompt":[{"data":"AAAA', 7),
     (b'{ "jsonrpc" : "2.0" , "id" : "req-\\u00e9" , "params":{"x', "req-\u00e9"),

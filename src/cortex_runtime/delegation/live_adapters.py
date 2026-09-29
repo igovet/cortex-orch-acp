@@ -1700,6 +1700,7 @@ class EngineSessionManagerAdapter:
         model_hint = route.model_hint if route else 'auto'
         model_reason = route.model_reason if route else None
         previous_engine = route.previous_engine if route else None
+        user_request = route.user_request if route else None
         provider = None
         review_reason = None
         if role == "worker-code-reviewer" and launch.get('task_id') and launch.get('attempt_id'):
@@ -1711,7 +1712,7 @@ class EngineSessionManagerAdapter:
         choice = auto_route.choose(
             role, project_root, self._environ, escalate=escalate, complexity=complexity,
             unavailable=unavailable, preference=provider, model_hint=model_hint,
-            model_reason=model_reason, previous_engine=previous_engine,
+            model_reason=model_reason, previous_engine=previous_engine, user_request=user_request,
         )
         if choice is None:
             return

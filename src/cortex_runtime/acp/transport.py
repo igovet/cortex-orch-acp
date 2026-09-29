@@ -25,13 +25,13 @@ import threading
 import time
 
 # One inbound line. A session/prompt carries its images inline as base64, and
-# Cortex accepts up to 4 MiB of decoded attachments per prompt (see
-# acp.replay_store.MAX_PROMPT_ATTACHMENT_BYTES), about 5.6 MB once encoded,
+# Cortex accepts up to 10 MiB of decoded attachments per prompt (see
+# acp.replay_store.MAX_PROMPT_ATTACHMENT_BYTES), about 13.3 MB once encoded,
 # plus the prompt text. The Paseo relay drops the whole stream above 16 MiB,
 # so this stays below that and answers an oversized request itself.
-MAX_FRAME_BYTES = 8 * 1024 * 1024
+MAX_FRAME_BYTES = 15 * 1024 * 1024
 OVERSIZED_FRAME_MESSAGE = (
-    "Request exceeds Cortex's 8 MiB message limit; attach fewer or smaller images.")
+    "Request exceeds Cortex's 15 MiB message limit; attach fewer or smaller images.")
 # How much of an oversized frame's head is scanned for its top-level "id".
 ID_RECOVERY_PREFIX_BYTES = 64 * 1024
 MAX_JSON_DEPTH = 64

@@ -28,7 +28,7 @@ reaches the same choice through the ``access_mode`` config option.
 from __future__ import annotations
 
 PROTOCOL_VERSION = 1
-MAX_IMAGE_BYTES = 1 * 1024 * 1024
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_ENCODED_BYTES = ((MAX_IMAGE_BYTES + 2) // 3) * 4
 
 # Methods this agent recognizes as valid ACP method names but does not
@@ -236,7 +236,7 @@ def content_blocks_to_text(blocks):
             if not isinstance(block.get("mimeType"), str) or not block["mimeType"].startswith("image/"):
                 raise RpcError(-32602, "An image content block needs an image/* mimeType.")
             if len(block["data"]) > MAX_IMAGE_ENCODED_BYTES:
-                raise RpcError(-32602, "An image content block exceeds Cortex's 1 MiB limit.")
+                raise RpcError(-32602, "An image content block exceeds Cortex's 10 MiB limit.")
             try:
                 base64.b64decode(block["data"], validate=True)
             except Exception:

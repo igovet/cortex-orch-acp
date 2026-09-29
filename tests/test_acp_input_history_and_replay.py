@@ -29,6 +29,7 @@ from cortex_runtime.delegation import mcp_tools
 from cortex_runtime.portable.engine_contract import StopReason
 from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.acp.protocol import RpcError
+from cortex_runtime.acp import protocol as acp_protocol
 from cortex_runtime.store import Store
 from cortex_runtime.trusted_channel import issue_channel, resolve_channel
 
@@ -110,6 +111,43 @@ def test_image_exact_bytes_and_mime_are_persisted_and_read_back(tmp_path):
     assert source["total_size"] == len(image_bytes)
     assert source["encoding"] == "base64"
     assert base64.b64decode(source["chunk"]) == image_bytes
+
+
+def test_image_just_under_10mib_cap_is_stored_and_durably_captured(tmp_path):
+    """An image just under the raised 10 MiB per-block cap is accepted and
+    durably captured end to end, not merely classified as stored in memory."""
+    import base64
+    import hashlib
+
+    image_bytes = b"x" * (replay_store.MAX_BLOCK_BYTES - 1)
+    blocks = [dict(type="image", data=base64.b64encode(image_bytes).decode("ascii"), mimeType="image/png")]
+    resolved = replay_store.resolve_prompt_blocks(blocks, str(tmp_path))
+    assert resolved[0].availability == "stored"
+    assert resolved[0].body == image_bytes
+    store, result = _task(tmp_path)
+    staged = replay_store.stage_blocks(str(tmp_path), resolved)
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        replay_store.record_blocks_tx(store, db, result.task_id, result.report_id, staged, [], [])
+        db.commit()
+    source = replay_store.read_source(store, result.task_id, f"{result.report_id}:0")
+    assert source["total_size"] == len(image_bytes)
+    assert source["sha256"] == hashlib.sha256(image_bytes).hexdigest()
+
+
+def test_content_blocks_to_text_accepts_just_under_and_rejects_just_over_10mib_cap():
+    """``protocol.content_blocks_to_text`` enforces the same raised 10 MiB
+    cap on the encoded image size and reports it accurately on rejection."""
+    import base64
+
+    under = base64.b64encode(b"x" * (acp_protocol.MAX_IMAGE_BYTES - 1)).decode("ascii")
+    text = acp_protocol.content_blocks_to_text([dict(type="image", data=under, mimeType="image/png")])
+    assert text == "[image: image/png]"
+
+    over = base64.b64encode(b"x" * (acp_protocol.MAX_IMAGE_BYTES + 4)).decode("ascii")
+    with pytest.raises(RpcError) as excinfo:
+        acp_protocol.content_blocks_to_text([dict(type="image", data=over, mimeType="image/png")])
+    assert "10 MiB" in excinfo.value.message
 
 
 def test_invalid_or_oversized_images_never_produce_a_stored_body(tmp_path):
@@ -251,7 +289,7 @@ def test_resource_link_oversize_growth_during_read_never_stores_partial(tmp_path
         resolved = replay_store.resolve_prompt_blocks(
             [dict(type="resource_link", name="growing.txt", uri=f"file://{path}")], str(tmp_path))
         assert resolved[0].availability == "too_large"
-        assert resolved[0].reason == "block_exceeds_1mib_cap"
+        assert resolved[0].reason == "block_exceeds_10mib_cap"
         assert resolved[0].body is None  # bounded read never stored a partial/truncated body
     finally:
         pass
