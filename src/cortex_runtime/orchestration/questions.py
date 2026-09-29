@@ -17,6 +17,16 @@ FORCE_FINISH_ANSWERS = frozenset({
 })
 
 
+# The model sees this with the receipt. A bare receipt was followed by a full
+# rewrite of the message written before the call (r_5c2679466a0e); the
+# coordinator's later text in that turn is also withheld by the controller.
+QUESTION_RECEIPT_NEXT = (
+    'The question is shown to the user together with the message you wrote before this call. '
+    'End this turn now without writing any further text: do not restate, rewrite or summarize anything. '
+    'The runtime continues the task after the user answers.'
+)
+
+
 def is_force_finish_answer(value, question=None):
     if not isinstance(value, str):
         return False
@@ -74,6 +84,9 @@ def request(store, channel, args):
               dict(question_id=question_id, question=args['question'], options=args.get('options'), resume_state=resume_state, **details), channel.channel_id)
         transition(db, channel.task_id, 'WAITING_USER')
         receipt = dict(question_id=question_id, state='WAITING_USER')
+        if channel.role == 'coordinator':
+            # Only the coordinator's text before the call reaches the user.
+            receipt['next'] = QUESTION_RECEIPT_NEXT
         db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
                    (channel.task_id, args['request_key'], channel.channel_id, 'user_question_request', digest, encoded(receipt)))
         db.commit()

@@ -24,6 +24,11 @@
   </tr>
 </table>
 
+After a coordinator question commits, Cortex suppresses further text received
+in that turn, including when tool lifecycle callbacks arrive late. Details
+delivered only after the commit can also be omitted; see the
+[question display boundary](docs/acp/orchestration.md#plan-submission-and-coordinator-polling).
+
 
 ## What Cortex is
 

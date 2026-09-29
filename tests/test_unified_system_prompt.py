@@ -221,6 +221,13 @@ def test_only_workers_are_told_to_work_without_narration():
     assert "Work without narration" not in coordinator and "@@" not in worker + coordinator
 
 
+def test_only_the_coordinator_is_told_to_write_nothing_after_its_question():
+    worker = cortex_system_prompt("worker", None, environ={})
+    coordinator = cortex_system_prompt("coordinator", None, environ={})
+    rule = "end the turn right after it: write nothing more"
+    assert rule in coordinator and rule not in worker
+
+
 @pytest.mark.parametrize("role", ["coordinator", "worker"])
 def test_conditional_skill_instruction_is_imperative_but_not_eager(role):
     prompt = cortex_system_prompt(role, None, environ={})

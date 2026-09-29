@@ -463,28 +463,6 @@ def test_composed_prompt_forwards_mixed_image_blocks_without_text_duplication(tm
         assert blocks[3]["text"] == right
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_second_coordinator_is_refused_while_one_is_active(tmp_path):
     store, task_id = _task(tmp_path)
     release = threading.Event()
@@ -599,10 +577,6 @@ def test_turn_proceeds_on_a_fresh_unapplied_selected_revision(tmp_path):
 
 
 
-
-
-
-
 def test_stale_recovery_marker_with_absent_attempt_is_orphaned(tmp_path):
     """A restart cannot prompt an ACP session whose owned attempt is gone."""
     store, task_id = _task(tmp_path)
@@ -627,8 +601,6 @@ def _resolve_owner_channel(store, task_id):
         epoch = current_owner_epoch(db, task_id)
     channel_id, secret = issue_channel(store, task_id, "coordinator", epoch)
     return resolve_channel(store, channel_id, secret)
-
-
 
 
 
@@ -663,7 +635,18 @@ def test_claimed_events_survive_a_prompt_exception_and_are_delivered_once(tmp_pa
     updates = []
     result = runtime.start_prompt(task_id, "s1", "Second try.", updates.append, threading.Event())
     assert result == StopReason.END_TURN
-    assert any("Accepted" in u for u in updates)
+    # The coordinator's own "Accepted." text is emitted (as a delta) only
+    # after its own question already committed this turn to WAITING_USER;
+    # controller.run intentionally suppresses that text for the rest of the
+    # turn (docs/project/decisions.md "the runtime withholds coordinator
+    # text after its own question") -- it must never reach the user as a
+    # false confirmation of a question nobody answered yet.
+    assert not any("Accepted" in u for u in updates)
+    # What the user does see is the question text itself. That is the real
+    # proof this second turn actually replayed the events released by the
+    # first turn's exception and let the coordinator run a genuine
+    # continuation (rather than, say, silently doing nothing).
+    assert any("Next?" in u for u in updates)
 
     with store.connection() as db:
         first_message = db.execute(
@@ -894,8 +877,6 @@ def test_clamp_attempt_context_size_never_regresses_within_an_attempt():
     assert runtime._clamp_attempt_context_size("xa_1", -5) is None
     assert runtime._clamp_attempt_context_size("xa_1", True) is None
     assert runtime._clamp_attempt_context_size(None, 200000) is None
-
-
 
 
 

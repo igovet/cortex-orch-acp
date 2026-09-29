@@ -61,8 +61,11 @@ def test_a_coordinator_gets_its_everyday_skills_and_is_told_when_to_read_the_res
     # A commentary-then-final-answer host otherwise treats a detailed
     # pre-call message and the final answer as two separate, never-collapsed
     # turns and repeats the content in both (investigation r_af50d7468665,
-    # session c2016029): tell the model explicitly not to.
-    assert "never follow it with a shorter recap or summary in the same turn" in " ".join(role.body_portable.split())
+    # session c2016029): tell the model explicitly not to. The rule was later
+    # strengthened from banning only a *shorter* recap to banning any
+    # restatement, of any length (r_5c2679466a0e; docs/project/decisions.md
+    # "the runtime withholds coordinator text after its own question").
+    assert "never follow it with a recap, summary or rewritten version of any length in the same turn" in " ".join(role.body_portable.split())
 
 
 def test_a_worker_gets_its_everyday_skills_and_is_told_when_to_read_the_rest():

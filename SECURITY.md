@@ -19,6 +19,12 @@ Any project change, every fix cycle, or an unobservable project still requires
 independent review. No model hint can waive review. A model tool call cannot
 select a task state, accept the task or directly create an engine session.
 
+After a coordinator question commits `WAITING_USER`, further coordinator text
+received in that turn is suppressed, not released by delayed tool callbacks.
+This is a display boundary only: it does not cancel engine actions, rewrite
+history, or grant authority. Ambiguous late pre-question text may also be omitted;
+see [question display ordering](docs/acp/orchestration.md#plan-submission-and-coordinator-polling).
+
 The worker result schema requires exactly one owned report form: an explicit
 `report_ref` for an already published report, or inline `report: {title, markdown}`.
 When a draft was published through `write_report`, its returned `report_id` is

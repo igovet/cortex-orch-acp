@@ -112,6 +112,19 @@ def test_user_question_request_forbids_a_recap_after_the_call(kind, role_id, sta
     description = tool["inputSchema"]["properties"]["question"]["description"]
     assert "exactly once" in description
     assert "without restating" in description or "not restating" in description
+    # A same-length rewrite is banned too, not only a shorter recap
+    # (r_5c2679466a0e); the tool description closes the turn as well.
+    assert "write nothing more" in description and "rewriting" in description
+    assert "After the call end the turn without writing anything more" in tool["description"]
+
+
+def test_orchestrator_skill_bans_any_rewrite_after_a_question():
+    from pathlib import Path
+
+    skill = (Path(__file__).resolve().parents[1] / "skills/orchestrator/SKILL.md").read_text(encoding="utf-8")
+    text = " ".join(skill.split())
+    assert "recap, summary or rewritten version of any length" in text
+    assert "end the turn right after it without writing anything more" in text
 
 
 def test_skill_proposal_guidance_matches_the_enforced_action_pairs():

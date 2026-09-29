@@ -16,8 +16,16 @@ phase. Exact retries preserve the original question identity; changed deliveries
 with the same key fail.
 
 The coordinator writes the details (the proposed plan, the evidence, what each
-choice leads to) as its chat message. The question itself is one short line
-with short answer options. A question asked while reconciling is how the
+choice leads to) once, as its chat message before the question call. The
+question itself is one short line with short answer options. The receipt tells
+the model to end the turn without writing anything more, and the runtime
+withholds coordinator text received after the committed question in that turn,
+even if the question's first lifecycle callback is delayed. This conservative
+boundary can omit pre-question text delivered late by the adapter
+(see [orchestration](orchestration.md#plan-submission-and-coordinator-polling)).
+A prompt-only rule against a recap did not hold: in one observed session the
+model rewrote the full details after the question, and both copies reached
+the chat. A question asked while reconciling is how the
 coordinator hands the user a decision after verified work, such as approving a
 proposed fix plan. Before this, the coordinator wrote such a plan into its
 synthesis, and the runtime reported the task as finished (`Завершено`) while

@@ -469,7 +469,9 @@ def with_attached_servers(meta: dict, servers, workspace_root: str | None = None
 #: 2026-09-28: workers of one engine wrote exactly one final message per
 #: session over 7-62 tool calls, while workers of the other wrote 3-39
 #: interim messages. The coordinator's text is the user's view of the task,
-#: so its role instructions govern it.
+#: so its role instructions govern it; its one rule here closes the turn after
+#: a user question, where a full rewrite of the details was observed
+#: (r_5c2679466a0e) and the runtime now withholds such text.
 _ROLE_CORTEX_TOOLS = {
     "coordinator": (
         "Tools have three sources. The `cortex` MCP server is the runtime's channel: use its `read_report` for retained reports, "
@@ -492,7 +494,10 @@ _ROLE_CORTEX_TOOLS = {
 }
 
 _ROLE_COMMUNICATION = {
-    "coordinator": "",
+    "coordinator": (
+        "- When you ask the user a question through the runtime, write the details once before the question "
+        "call and end the turn right after it: write nothing more, not even a shorter or reworded version."
+    ),
     "worker": (
         "- Work without narration, including before the first tool and after a tool result. Call tools one after "
         "another and write no text between tool calls: no plans, status updates, announcements of the next step "

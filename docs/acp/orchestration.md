@@ -64,6 +64,21 @@ state; it does not rebuild the full context for each delta. A full
 `TaskMachine.context()` read uses one SQLite read transaction, and assignment
 attempt lookups for result checks are batched.
 
+The same state read withholds the coordinator's text after its own question.
+Once `user_question_request` has committed `WAITING_USER`, the controller drops
+further coordinator deltas observed in that engine turn. No tool lifecycle
+callback releases them: even the question's first callback can arrive after a
+post-question rewrite, so a new id is not evidence of pre-question ordering.
+Text received before the commit (including its buffered redactor tail) and text
+in later turns after the answer are still shown. The runtime renders the question
+itself. The conservative boundary can also omit genuine pre-question details
+that the adapter delivers only after the commit; the callbacks cannot distinguish
+them from a rewrite. Final-only turn text is likewise withheld when the question
+was observed or the task is still `WAITING_USER`, rather than replayed unsplit.
+This is display filtering, not engine cancellation or a history rewrite. The coordinator's
+question receipt also carries a `next` hint telling the model to end the turn without
+further text; like the plan and context hints, that hint is advisory.
+
 While workers run, an unchanged database change fingerprint skips the expensive
 scheduler pass. Worker completion and runtime notifications can wake it sooner;
 a periodic full reconciliation still runs at least every 2 seconds. Permission

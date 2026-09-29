@@ -103,7 +103,12 @@ can use it directly instead of repeating `list_projects`. If resolution fails or
 the named project is unavailable, workers use the normal project-list fallback;
 no project identity is guessed.
 
-Workers are told to work without narration, including before the first tool and after tool results. The runtime also discards worker prose at tool boundaries from the public worker card and its replay history, retaining only the post-tool terminal response; underlying engine events remain available for evidence. Coordinator text still streams because it is the user's task view. This is a presentation boundary, not a claim that either model stops generating interim text. A direct 2026-09-28 re-check counted ten between-tool Claude assistant text blocks and one Codex block; an earlier count of 83 Codex blocks conflated reasoning records with visible messages.
+Workers are told to work without narration, including before the first tool and after tool results. The runtime also discards worker prose at tool boundaries from the public worker card and its replay history, retaining only the post-tool terminal response; underlying engine events remain available for evidence. Coordinator text still streams because it is the user's task view, except
+that the runtime withholds the coordinator's text after its own accepted user
+question in the same turn (see
+[orchestration](orchestration.md#plan-submission-and-coordinator-polling)).
+The coordinator's one role-specific communication rule is to write the details
+once before that question and write nothing after it. This is a presentation boundary, not a claim that either model stops generating interim text. A direct 2026-09-28 re-check counted ten between-tool Claude assistant text blocks and one Codex block; an earlier count of 83 Codex blocks conflated reasoning records with visible messages.
 
 The attached-server section renders the exact available tools under each MCP
 server name. Cortex MCP owns lifecycle, report reads/publication, conditional

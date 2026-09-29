@@ -1,3 +1,31 @@
+## 2026-09-29 the runtime withholds coordinator text after its own question
+
+In Paseo session bb142018 the coordinator wrote the full details, asked with
+`user_question_request`, and then, in the same turn, wrote a second full
+version of the same details (similarity 0.69). The runtime forwarded both
+(`r_5c2679466a0e`, re-checked at the then-current HEAD in `r_58fc7e6e5219`).
+The 2026-09-27 fix below was prompt-only: it banned a *shorter* recap and
+lowered the frequency, but a same-length rewrite still happened
+intermittently.
+
+After the question commits `WAITING_USER`, `controller.run` suppresses newly
+received coordinator text for the rest of that engine turn, using the state
+read that already suppressed the `ANSWER_READY` echo. Review found that releasing
+held text on an unseen tool-call id leaked the rewrite when the question's first
+lifecycle callback was delayed. That release heuristic was removed; final-only
+text is also withheld when the question was observed or remains pending. Text
+already accepted before the commit still flushes, and later turns stream normally.
+The trade-off is explicit: genuinely pre-question text delivered after the commit
+is indistinguishable from a rewrite and is omitted too. No engine history is
+rewritten. The prompts changed to match:
+
+- The coordinator's question receipt now carries a `next` end-turn hint.
+- The RECONCILING prompt says to write the details once before the call and
+  nothing after it; it no longer says "your final message".
+- The orchestrator skill and the tool contract ban any restatement or rewrite
+  after the question, of any length.
+- The unified base prompt gives the coordinator its one communication rule.
+
 ## 2026-09-28 queued, cancelled and re-reviewed workers recover instead of failing
 
 Paseo session 7bda9342 (task t_e1ff07ff2819) lost workers in three ways. All
@@ -247,7 +275,8 @@ in the contract. Required array descriptions now reject empty lists up front,
 require verification for every plan, and define a project-local literal-argv
 fallback when no verification is documented. Validation corrections repeat
 the field guidance. The coordinator communication rule remains one complete
-user-facing message without a shorter recap.
+user-facing message without a shorter recap (runtime-enforced after a user
+question since 2026-09-29, see above).
 
 Timeline emission now sends only changed tool-card fields, drops exact
 MCP-text mirrors of structured results, suppresses no-op updates, and uses

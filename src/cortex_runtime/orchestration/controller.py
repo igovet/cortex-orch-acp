@@ -244,10 +244,11 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                        'If a retained not_run or unverified check, or a changed surface nobody verified, can still be verified '
                        'with the available environment and the user\'s authorizations, submit replan_request to verify it before synthesis. '
                        'List in synthesis not_verified only what a real blocker makes impossible, each with that blocker; '
-                       'your final message\'s not-verified list must be exactly those items with their blockers, and omit that list when everything was verified. '
+                       'the synthesis text\'s not-verified list must be exactly those items with their blockers, and omit that list when everything was verified. '
                        'Runtime decides completion. '
                        'If the user must still decide something (approve a proposed plan, choose between fixes, confirm manual steps), '
-                       'write the full details as your message and ask with user_question_request instead of submitting synthesis. ')
+                       'do not submit synthesis: write the full details once as message text before the call, then ask with '
+                       'user_question_request and end the turn without writing anything after it. ')
             delivery_marker=f'runtime-coordinator:{time.monotonic_ns()}'
             pending_events=events.claim_unconsumed(runtime._store,task_id,delivery_marker)
             from ..acp import messages as localized_messages
@@ -279,6 +280,12 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 return StopReason.END_TURN
             streamed = []
             answer_pending = False
+            # Once the coordinator's question is committed (WAITING_USER), its
+            # text for the rest of this turn is suppressed. A delayed lifecycle
+            # callback (even a new id) cannot prove that preceding deltas were
+            # written before the question. Do not release text on that signal.
+            # Already accepted redactor tails still flush; later turns reset.
+            question_asked = False
             redactor = StreamingRedactor(max_chars=4000, preserve_paths=True)
             tool_emitter = runtime._engine_tool_call_emitter(emit_tool_call, id_scope=f'coordinator:{session_ref}',
                                                            task_id=task_id, cancel_event=cancel_event)
@@ -287,19 +294,27 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 if tail:
                     emit_update(tail)
             def on_delta(text):
-                nonlocal answer_pending
+                nonlocal answer_pending, question_asked
                 # Some adapters deliver text before the tool lifecycle callback.
                 # The committed proposal is the authority for suppressing its echo.
-                answer_pending = answer_pending or machine.get_state(task_id) == 'ANSWER_READY'
                 if answer_pending: return True
+                if not question_asked:
+                    current = machine.get_state(task_id)
+                    answer_pending = current == 'ANSWER_READY'
+                    if answer_pending: return True
+                    question_asked = current == 'WAITING_USER'
                 streamed.append(text)
+                if question_asked:
+                    return True
                 safe = redactor.push(text)
                 return emit_update(safe) if safe else True
             tool_seen = []
             def on_tool(*args):
-                nonlocal answer_pending
+                nonlocal answer_pending, question_asked
                 tool_seen.append(True)
-                answer_pending = machine.get_state(task_id) == 'ANSWER_READY'
+                current = machine.get_state(task_id)
+                answer_pending = current == 'ANSWER_READY'
+                question_asked = question_asked or current == 'WAITING_USER'
                 flush()
                 if tool_emitter:
                     tool_emitter(*args)
@@ -359,7 +374,8 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 # Turn end: the aggregate tool-call card gets its final count.
                 tool_emitter.close_group()
             prompt_blocks = None
-            if outcome.text and not streamed and machine.get_state(task_id) != 'ANSWER_READY':
+            if (outcome.text and not streamed and not question_asked
+                    and machine.get_state(task_id) not in {'ANSWER_READY', 'WAITING_USER'}):
                 emit_update(outcome.text)
             if outcome.stop_reason == StopReason.CANCELLED:
                 return _stop_turn(runtime, task_id, machine, emit_tool_call)

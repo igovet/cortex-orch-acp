@@ -130,6 +130,17 @@ refused and the review is re-bound to the new digest, at most
 `MAX_REVIEW_REBINDS` times. Avoid editing a checkout while its task is in
 review.
 
+A prompt rule is not a guarantee. The coordinator was told not to recap after
+`user_question_request`, and it still rewrote its full details after the
+question in some turns. The runtime now withholds coordinator text after the
+committed question (`WAITING_USER`) for the rest of that turn. A delayed first
+lifecycle callback is not proof that preceding text was written before the
+question; neither new nor repeated tool calls release suppressed text. This
+conservative boundary can hide pre-question details delivered after the commit.
+Final-only text is withheld too when the question was observed or is pending.
+Text received before the commit and text after the answer in a later turn remain
+visible.
+
 A Paseo "cancel" (`session/cancel`) pauses the whole task and cancels every
 running and queued worker (`turn_interrupted`). That is by design, not a
 worker failure. A cancelled queued worker is reported only as cancelled.
