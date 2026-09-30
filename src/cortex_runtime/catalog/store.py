@@ -223,7 +223,15 @@ def load_connection_snapshot(
 def latest_connection_entries(
     connection_id: str, environ: dict[str, str] | None = None
 ) -> tuple[CatalogEntry, ...] | None:
-    """This connection's most recently cached *genuine* snapshot entries, or
+    """:func:`latest_connection_snapshot`'s entries, or ``None``."""
+    view = latest_connection_snapshot(connection_id, environ)
+    return None if view is None else view.entries
+
+
+def latest_connection_snapshot(
+    connection_id: str, environ: dict[str, str] | None = None
+) -> ConnectionSnapshotView | None:
+    """This connection's most recently cached *genuine* snapshot, or
     ``None`` when it has never been observed. Skips a placeholder file (no
     entries, an ``unavailable_reason``) written into this connection's own
     directory by an unrelated ``build_catalog`` call for a sibling
@@ -248,7 +256,7 @@ def latest_connection_entries(
             continue
         if not view.entries and view.unavailable_reason is not None:
             continue
-        return view.entries
+        return view
     return None
 
 

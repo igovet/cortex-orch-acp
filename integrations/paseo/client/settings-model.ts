@@ -28,6 +28,7 @@ import type {
 
 export const SETTINGS_SECTIONS = [
   { id: "user_defaults", title: "User defaults" },
+  { id: "models", title: "Models" },
   { id: "engines_models", title: "Engines & models" },
   { id: "project_ceiling", title: "Project ceiling" },
   { id: "routing", title: "Routing" },
@@ -470,7 +471,7 @@ export function projectCeilingRemoval(view: ProjectCeilingView, workspaceId: str
 
 // --- routing ------------------------------------------------------------------
 
-export const ROUTING_KEYS = ["pin", "deny", "auto_allow", "tiers", "providers", "engine_affinity", "models"] as const;
+export const ROUTING_KEYS = ["pin", "deny", "enabled", "auto_allow", "tiers", "providers", "engine_affinity", "models"] as const;
 export type RoutingKey = typeof ROUTING_KEYS[number];
 
 /** One `pin` entry: a role (or `*`) pinned to `engine/model[:effort]`. The
@@ -491,6 +492,8 @@ export type RoutingForm = {
   providers: string[] | null;
   engine_affinity: AffinityRow[] | null;
   models?: ModelRulesForm | null;
+  /** Per engine, the only models it may use in Cortex (Settings > Models). */
+  enabled?: Record<string, string[]> | null;
 };
 
 export function emptyRoutingForm(): RoutingForm {
@@ -524,7 +527,7 @@ export function routingVocabulary(view: RoutingView): RoutingVocabulary {
 
 export type RoutingFormResult = { ok: true; form: RoutingForm } | { ok: false; reason: string };
 
-/** The six supported keys as form rows, or why the stored rules cannot be
+/** The eight supported keys as form rows, or why the stored rules cannot be
  * shown as typed fields without losing something. */
 export function routingRulesToForm(rules: Record<string, unknown> | undefined): RoutingFormResult {
   const form = emptyRoutingForm();
@@ -561,6 +564,10 @@ export function routingRulesToForm(rules: Record<string, unknown> | undefined): 
       models[engine] = { auto: raw.auto === undefined ? null : [...raw.auto as string[]], tiers: raw.tiers === undefined ? {} : { ...raw.tiers as Record<string, string> }, policy };
     }
     form.models = models;
+  }
+  if (rules.enabled !== undefined) {
+    if (!isPlainObject(rules.enabled) || !Object.values(rules.enabled).every(isStringArray)) return unrepresentable("enabled");
+    form.enabled = Object.fromEntries(Object.entries(rules.enabled).map(([engine, models]) => [engine, [...models as string[]]]));
   }
   if (rules.engine_affinity !== undefined) {
     if (!isStringRecord(rules.engine_affinity, true)) return unrepresentable("engine_affinity");
@@ -692,6 +699,17 @@ export function buildRoutingRules(form: RoutingForm, vocabulary: RoutingVocabula
         ...(Object.keys(value.policy).length ? { policy: value.policy } : {}) };
     }
     rules.models = models;
+  }
+  if (form.enabled != null) {
+    const enabled: Record<string, string[]> = {};
+    for (const [engine, models] of Object.entries(form.enabled)) {
+      if (!engines.includes(engine)) { addError(errors, `rules.enabled.${engine}`, `Engine must be one of ${engines.join(", ")}.`); continue; }
+      enabled[engine] = checkList(models, `rules.enabled.${engine}`, errors, {
+        noSpaces: true, maxItems: 1000,
+        check: (model) => engine === "opencode" && !isOpenCodeExact(model) ? "An OpenCode model is its exact provider/model id." : null,
+      }) ?? [];
+    }
+    rules.enabled = enabled;
   }
   if (form.engine_affinity !== null) {
     const affinity: Record<string, string | null> = {};
@@ -908,7 +926,74 @@ export function engineModelsTarget(view: RoutingView, target: "user" | "project"
 export function selectorText(route: CatalogRoute): string {
   if (route.in_selector) return "model selector: shown";
   if (!route.selectable) return `model selector: hidden (connection ${route.connection_state})`;
+  if (route.deny_tokens.length === 0) return "model selector: hidden (not switched on under Models)";
   return `model selector: hidden (disabled by ${route.deny_tokens.join(", ")})`;
+}
+
+// --- models -------------------------------------------------------------------
+//
+// Settings > Models decides which models exist for Cortex at all. A model is
+// in Cortex when no deny token covers it and routing `enabled` lists it --
+// or, for an engine `enabled` does not list, when that engine is on by
+// default (every engine except OpenCode v2, whose hundreds of provider models
+// stay off until switched on one by one). Switching a default-on model off
+// writes its exact deny token; a model of a listed engine (or of OpenCode) is
+// added to or removed from its `enabled` list.
+
+export function modelListed(form: RoutingForm, engine: string, model: string, engineDefault: boolean): boolean {
+  const list = form.enabled?.[engine];
+  return list === undefined ? engineDefault : list.includes(model);
+}
+
+export function modelInCortex(route: CatalogRoute, form: RoutingForm, target: "user" | "project", engineDefault: boolean): boolean {
+  return modelListed(form, route.engine, route.model, engineDefault) && !modelDenyState(route, form, target).on;
+}
+
+export function setModelInCortex(form: RoutingForm, route: RouteRef, on: boolean, engineDefault: boolean): RoutingForm {
+  const list = form.enabled?.[route.engine];
+  if (on) {
+    const next = setModelEnabled(form, route, true);
+    if (list === undefined ? engineDefault : list.includes(route.model)) return next;
+    return { ...next, enabled: { ...(next.enabled ?? {}), [route.engine]: [...(list ?? []), route.model] } };
+  }
+  if (list !== undefined) return { ...form, enabled: { ...form.enabled, [route.engine]: list.filter((model) => model !== route.model) } };
+  return engineDefault ? setModelEnabled(form, route, false) : form;
+}
+
+export function removeEnabledModel(form: RoutingForm, engine: string, model: string): RoutingForm {
+  const list = form.enabled?.[engine];
+  return list === undefined ? form : { ...form, enabled: { ...form.enabled, [engine]: list.filter((item) => item !== model) } };
+}
+
+/** `groups` whose model id or name contains every word of `query`, case-insensitively. */
+export function filterModelGroups(groups: readonly ModelGroup[], query: string): ModelGroup[] {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [...groups];
+  return groups.filter((group) => {
+    const haystack = `${group.model} ${group.routes[0]?.model_name ?? ""}`.toLowerCase();
+    return words.every((word) => haystack.includes(word));
+  });
+}
+
+/** When an engine's model list was last read from the engine, for display. */
+export function catalogObservedText(observedAt: string | null): string {
+  if (!observedAt) return "never read from the engine (built-in list, or none)";
+  const date = new Date(observedAt);
+  return Number.isNaN(date.getTime()) ? observedAt : `read ${date.toLocaleString()}`;
+}
+
+const REFRESH_REASON_TEXT: Record<string, string> = {
+  authorization_required: "not signed in to this engine",
+  no_config_options_advertised: "the engine reported no settings",
+  no_model_options_advertised: "the engine reported no models",
+  opencode_cortex_mode_not_advertised: "OpenCode did not offer the Cortex agent",
+};
+
+export function refreshOutcomeText(outcome: { success: boolean; reason: string | null }): string {
+  if (outcome.success) return "model list updated";
+  const reason = outcome.reason ?? "unknown";
+  const known = REFRESH_REASON_TEXT[reason] ?? (reason.startsWith("engine_unreachable:") ? "the engine could not be started or did not answer in time" : reason);
+  return `not updated (${known}); the previous list is kept`;
 }
 
 export function automaticText(route: CatalogRoute): string {

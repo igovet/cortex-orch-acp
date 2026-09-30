@@ -541,11 +541,17 @@ def test_route_catalog_reports_every_route_with_its_effective_state_and_writes_n
     assert (older["automatic"], older["superseded_by"], older["in_selector"]) == ("superseded", "codex-acp/gpt-6-luna", True)
     haiku = routes["claude-agent-acp/claude-haiku-4-5-20251001"]
     assert (haiku["in_selector"], haiku["default_auto_excluded"], haiku["automatic"]) == (True, "family", "excluded_by_default")
+    # OpenCode models stay off until the owner enables them (Settings > Models).
     optional = routes[OPENCODE_ROUTE]
-    assert (optional["in_selector"], optional["default_auto_excluded"], optional["automatic"]) \
-        == (True, "optional_engine", "excluded_by_default")
+    assert (optional["in_selector"], optional["enabled"], optional["disabled"], optional["deny_tokens"],
+            optional["default_auto_excluded"], optional["automatic"]) \
+        == (False, False, True, [], "optional_engine", "disabled")
+    assert (luna["enabled"], haiku["enabled"]) == (True, True)
     engines = _engines(view)
     assert set(engines) == {"codex-acp", "claude-agent-acp", "opencode"}
+    assert (engines["opencode"]["enabled_models"], engines["opencode"]["enabled_default"]) == (None, False)
+    assert (engines["codex-acp"]["enabled_models"], engines["codex-acp"]["enabled_default"]) == (None, True)
+    assert all(item["catalog_observed_at"] for engine in engines.values() for item in engine["connections"])
     assert engines["opencode"]["optional"] is True and [item["id"] for item in engines["opencode"]["connections"]] == [opencode.id]
     assert all(item["disabled"] is False and item["automatic"] is True for item in engines.values())
     assert registry.registry_path(None).read_bytes() == registry_before
@@ -561,6 +567,7 @@ def test_engine_and_model_toggles_are_routing_rules_the_runtime_honours(home, mo
     assert sum(1 for item in caught.value.errors if item["code"] == "unsupported_wildcard") == 5
     assert not (home.config / "routing.json").exists()
     rules = {"deny": ["codex-acp/*", "claude-agent-acp/claude-sonnet-5"], "auto_allow": [OPENCODE_ROUTE],
+             "enabled": {"opencode": [OPENCODE_ROUTE.removeprefix("opencode/"), "openai/gpt-5.1"]},
              "providers": ["claude-agent-acp", "opencode"]}
     written = management.update_routing("user", "absent", rules)
     assert auto_route.load_overrides() == rules
@@ -586,13 +593,71 @@ def test_engine_and_model_toggles_are_routing_rules_the_runtime_honours(home, mo
 
     # Automatic routing is not disabling: an engine outside providers stays selectable.
     management.update_routing("user", written["sources"][-1]["revision"],
-                              {"providers": ["opencode"], "auto_allow": [OPENCODE_ROUTE]})
+                              {"providers": ["opencode"], "auto_allow": [OPENCODE_ROUTE],
+                               "enabled": {"opencode": [OPENCODE_ROUTE.removeprefix("opencode/")]}})
     view = management.read_route_catalog()
     luna = _routes(view)["codex-acp/gpt-6-luna"]
     assert (luna["disabled"], luna["in_selector"], luna["automatic"]) == (False, True, "engine_excluded_from_automatic_routing")
     assert not auto_route.is_denied("codex-acp", "gpt-6-luna")
     assert (_engines(view)["codex-acp"]["disabled"], _engines(view)["codex-acp"]["automatic"]) == (False, False)
     assert luna["connection_id"] == codex.id
+    # An OpenCode model left out of 'enabled' is off like a denied one.
+    unlisted = _routes(view)["opencode/openai/gpt-5.1"]
+    assert (unlisted["enabled"], unlisted["disabled"], unlisted["in_selector"], unlisted["automatic"]) == (
+        False, True, False, "disabled")
+    assert auto_route.is_denied("opencode", "openai/gpt-5.1")
+    with pytest.raises(PortableError) as refused:
+        auto_route.refuse_if_denied("opencode", "openai/gpt-5.1")
+    assert refused.value.code == "route_denied" and "not enabled" in refused.value.remediation
+
+
+def test_enabled_lists_only_the_models_an_engine_may_use(home, monkeypatch):
+    _catalog_fixture(home, monkeypatch)
+    with pytest.raises(management.ConfigValidationError) as caught:
+        management.update_routing("user", "absent", {"enabled": {
+            "codex-acp": ["gpt-6-luna", "gpt-6-luna"], "opencode": ["claude-sonnet-4-5"], "gemini-acp": []}})
+    assert {("rules.enabled.codex-acp", "invalid_type"), ("rules.enabled.opencode", "opencode_model_not_exact"),
+            ("rules.enabled.gemini-acp", "invalid_value")} <= _codes(caught.value)
+    written = management.update_routing("user", "absent", {"enabled": {"codex-acp": ["gpt-6-sol", "gpt-9-missing"]}})
+    assert written["effective_rules"] == {"enabled": {"codex-acp": ["gpt-6-sol", "gpt-9-missing"]}}
+    view = management.read_route_catalog()
+    routes, engines = _routes(view), _engines(view)
+    assert (routes["codex-acp/gpt-6-sol"]["enabled"], routes["codex-acp/gpt-6-sol"]["in_selector"]) == (True, True)
+    assert (routes["codex-acp/gpt-6-luna"]["enabled"], routes["codex-acp/gpt-6-luna"]["automatic"]) == (False, "disabled")
+    assert (engines["codex-acp"]["enabled_models"], engines["codex-acp"]["unmatched_enabled"]) == (
+        ["gpt-6-sol", "gpt-9-missing"], ["gpt-9-missing"])
+    # An engine the list does not name keeps its default.
+    assert routes["claude-agent-acp/claude-sonnet-5"]["enabled"] is True
+    assert auto_route.is_denied("codex-acp", "gpt-6-luna") and not auto_route.is_denied("codex-acp", "gpt-6-sol")
+    # An empty list switches every model of the engine off.
+    management.update_routing("user", written["written_revision"], {"enabled": {"codex-acp": []}})
+    assert auto_route.is_denied("codex-acp", "gpt-6-sol")
+
+
+def test_route_catalog_refresh_rereads_every_connection(home, monkeypatch):
+    from cortex_runtime.catalog import refresh as catalog_refresh
+
+    codex, claude, opencode = _catalog_fixture(home, monkeypatch)
+    seen = []
+
+    def fake_refresh(record, workspace_root, *, environ=None, timeout=None):
+        seen.append((record.id, workspace_root, timeout))
+        return catalog_refresh.RefreshOutcome(record.id, True, record.id != claude.id,
+                                              None if record.id != claude.id else "authorization_required",
+                                              None, "now")
+
+    monkeypatch.setattr(catalog_refresh, "perform_refresh", fake_refresh)
+    response = management.execute({"action": "refresh", "surface": "route_catalog"})
+    assert response["ok"], response
+    result = response["result"]
+    assert result["surface"] == "route_catalog" and result["routes"]
+    assert {item["connection_id"]: (item["success"], item["reason"]) for item in result["refresh"]} == {
+        codex.id: (True, None), claude.id: (False, "authorization_required"), opencode.id: (True, None)}
+    assert {item[0] for item in seen} == {codex.id, claude.id, opencode.id}
+    # The engines never start in a project directory.
+    assert all("cortex-catalog-refresh-" in item[1] and not Path(item[1]).exists() for item in seen)
+    assert management.execute({"action": "refresh", "surface": "route_catalog", "path": "/etc"})["error"]["code"] \
+        == "unsupported_request_field"
 
 
 def test_route_catalog_follows_routing_precedence_and_fails_closed(home, monkeypatch, tmp_path):
@@ -689,12 +754,12 @@ def test_routing_models_are_validated_with_field_paths_and_round_trip(home):
         ("rules.models.gemini-acp", "unknown_engine"),
     } <= _codes(caught.value)
     assert not (home.config / "routing.json").exists()
-    rules = {"deny": ["haiku"], "models": {
+    rules = {"deny": ["haiku"], "enabled": {"opencode": [OPENCODE_MODEL]}, "models": {
         "opencode": {"auto": [OPENCODE_MODEL], "tiers": {OPENCODE_MODEL: "standard"}},
         "codex-acp": {"policy": {"gpt-6-sol": {"preferred_for": ["review"], "max_effort": None}}}}}
     written = management.update_routing("user", "absent", rules)
     assert written["effective_rules"] == rules and auto_route.load_overrides() == rules
-    assert "models" in management.ROUTING_KEYS and len(management.ROUTING_KEYS) == 7
+    assert "models" in management.ROUTING_KEYS and len(management.ROUTING_KEYS) == 8
     builtin = written["builtin"]
     assert builtin["policy_attributes"] == ["effort_floor", "max_effort", "effort_ladder", "also_standard_for",
                                             "preferred_for", "request_names"]
@@ -710,7 +775,7 @@ def test_routing_models_are_validated_with_field_paths_and_round_trip(home):
 
 def test_route_catalog_reports_selection_tier_source_and_policy(home, monkeypatch):
     _catalog_fixture(home, monkeypatch)
-    management.update_routing("user", "absent", {"models": {
+    management.update_routing("user", "absent", {"enabled": {"opencode": ["anthropic/claude-sonnet-4-5", "openai/gpt-5.1"]}, "models": {
         "codex-acp": {"auto": ["gpt-5.6-luna", "gpt-9-missing"], "tiers": {"gpt-6-sol": "flagship"}},
         "opencode": {"auto": ["anthropic/claude-sonnet-4-5"], "tiers": {"anthropic/claude-sonnet-4-5": "standard"},
                      "policy": {"anthropic/claude-sonnet-4-5": {"preferred_for": ["writing"]}}}}})
@@ -742,7 +807,7 @@ def test_route_catalog_reports_selection_tier_source_and_policy(home, monkeypatc
 def test_opencode_acp_observation_exposes_byteplus_only_when_offered(home, monkeypatch):
     _codex, _claude, opencode = _catalog_fixture(home, monkeypatch)
     target = "byteplus-plan/glm-5.3-flash"
-    management.update_routing("user", "absent", {"models": {"opencode": {"auto": [target]}}})
+    management.update_routing("user", "absent", {"enabled": {"opencode": [target]}, "models": {"opencode": {"auto": [target]}}})
     before = management.read_route_catalog()
     assert "opencode/" + target not in _routes(before)
     assert _engines(before)["opencode"]["unmatched_selected"] == [target]

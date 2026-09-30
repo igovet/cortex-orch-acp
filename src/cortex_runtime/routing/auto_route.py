@@ -140,6 +140,13 @@ outside ``providers`` is refused (``pinned_route_unavailable``) rather than
 silently ignored, and if no allowed provider has a usable route the existing
 ``no_available_route`` refusal applies, naming the excluded providers too.
 
+``enabled`` maps an engine id to the exact model ids that engine may use in
+Cortex at all (Settings > Models). An engine it lists offers only those
+models -- every other one is treated exactly like a ``deny``'d route; an
+engine it does not list keeps the built-in default: every model on, except
+the optional OpenCode engine (:data:`DEFAULT_DISABLED_ENGINES`), whose models
+stay off until enabled. ``deny`` still wins over ``enabled``.
+
 ``models`` (:mod:`routing.model_policy`) configures each engine's models by
 exact id: ``auto`` lists the only models automatic routing may use on that
 engine (LISTED mode: the built-in Haiku and optional-engine exclusions,
@@ -1113,7 +1120,10 @@ def refuse_if_denied(engine: str, model: str | None, project_root=None, environ=
     if model and _denied(load_overrides(project_root, environ), engine, model):
         raise PortableError(
             category=PortableErrorCategory.AUTHORIZATION, code="route_denied",
-            remediation=f"{engine}/{model} is listed under 'deny' in routing.json.",
+            remediation=(f"{engine}/{model} is listed under 'deny' in routing.json."
+                         if model_enabled(load_overrides(project_root, environ), engine, model) else
+                         f"{engine}/{model} is not enabled: switch it on under Settings > Models "
+                         f"(routing.json 'enabled')."),
             retry_eligible=False, field="model",
         )
 
@@ -1228,9 +1238,32 @@ def engine_wildcard(engine: str) -> str:
     return f"{engine}/{ENGINE_WILDCARD}"
 
 
+#: Engines whose models are all off until routing.json ``enabled`` lists
+#: them: an optional engine (OpenCode) offers hundreds of provider models,
+#: and none of them should reach the selector without the owner's choice.
+DEFAULT_DISABLED_ENGINES = model_policy.BUILTIN_AUTO_DENY_ENGINES
+
+
+def enabled_models(overrides: Mapping, engine: str) -> tuple[str, ...] | None:
+    """``engine``'s exact enabled model ids from routing.json ``enabled``, or
+    ``None`` when the file does not list the engine (the built-in default
+    then applies: every model on, except :data:`DEFAULT_DISABLED_ENGINES`)."""
+    enabled = overrides.get("enabled")
+    listed = enabled.get(engine) if isinstance(enabled, Mapping) else None
+    return None if listed is None else tuple(listed)
+
+
+def model_enabled(overrides: Mapping, engine: str, model: str) -> bool:
+    """Whether ``enabled`` (or its built-in default) lets ``engine``/``model``
+    into Cortex at all; ``deny`` is checked separately and still wins."""
+    listed = enabled_models(overrides, engine)
+    return engine not in DEFAULT_DISABLED_ENGINES if listed is None else model in listed
+
+
 def _denied(overrides: Mapping, engine: str, model: str) -> bool:
     deny = overrides.get("deny") or ()
-    return engine_wildcard(engine) in deny or _listed(deny, engine, model)
+    return (engine_wildcard(engine) in deny or _listed(deny, engine, model)
+            or not model_enabled(overrides, engine, model))
 
 
 def _pin_for(overrides: Mapping, role: str):
@@ -1297,6 +1330,12 @@ def _validate(data) -> None:
             if engine is not None and engine not in SUPPORTED_ENGINES:
                 raise ValueError(f"'engine_affinity' maps {kind!r} to unknown engine {engine!r}; "
                                  f"use one of {', '.join(SUPPORTED_ENGINES)} or null")
+    if "enabled" in data:
+        enabled = data["enabled"]
+        if not isinstance(enabled, dict) or not all(
+                engine in SUPPORTED_ENGINES and isinstance(models, list)
+                and all(isinstance(v, str) and v for v in models) for engine, models in enabled.items()):
+            raise ValueError("'enabled' must map an engine id to a list of exact model ids")
     if "models" in data:
         problems = model_policy.validate_models(
             data["models"], engines=SUPPORTED_ENGINES, work_kinds=tuple(WORK_KIND_ENGINES),

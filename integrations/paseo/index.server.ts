@@ -7,8 +7,8 @@ import { readPipeline } from "./shared/pipeline.js";
 import { getWorkerResults } from "./server/worker-results.js";
 import { readWorkerResults } from "./shared/worker-results.js";
 import { instrumentHandler } from "./server/invoke-diagnostics.js";
-import { discoverOpenCode, onboardOpenCode, readConfig, updateConfig } from "./shared/config.js";
-import { discoverOpenCodeHandler, onboardOpenCodeHandler, readConfigHandler, updateConfigHandler } from "./server/config.js";
+import { discoverOpenCode, onboardOpenCode, readConfig, refreshModelCatalog, updateConfig } from "./shared/config.js";
+import { discoverOpenCodeHandler, onboardOpenCodeHandler, readConfigHandler, refreshModelCatalogHandler, updateConfigHandler } from "./server/config.js";
 
 export default function contribute(server: PluginServerContext) {
   server.registerProvider(createCortexProvider());
@@ -21,5 +21,6 @@ export default function contribute(server: PluginServerContext) {
   server.handle(updateConfig, instrumentHandler(updateConfig.name, updateConfigHandler));
   server.handle(discoverOpenCode, instrumentHandler(discoverOpenCode.name, discoverOpenCodeHandler));
   server.handle(onboardOpenCode, instrumentHandler(onboardOpenCode.name, onboardOpenCodeHandler));
+  server.handle(refreshModelCatalog, instrumentHandler(refreshModelCatalog.name, refreshModelCatalogHandler));
   return () => {};
 }

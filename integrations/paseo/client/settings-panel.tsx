@@ -6,6 +6,7 @@ import {
   discoverOpenCode,
   onboardOpenCode,
   readConfig,
+  refreshModelCatalog,
   updateConfig,
   type ConfigBinding,
   type ConfigError,
@@ -31,6 +32,12 @@ import {
   buildUserDefaultsUpdate,
   canAutoAllow,
   automaticText,
+  catalogObservedText,
+  filterModelGroups,
+  modelInCortex,
+  refreshOutcomeText,
+  removeEnabledModel,
+  setModelInCortex,
   composePin,
   connectionAction,
   engineAutomaticIn,
@@ -52,7 +59,6 @@ import {
   setEngineAutomatic,
   setEngineEnabled,
   setModelAutoAllowed,
-  setModelEnabled,
   shadowingSource,
   unmatchedTokens,
   describeConfigError,
@@ -444,7 +450,12 @@ function useConfigSurface<Result>(surface: string, workspaceId: string | null, r
     }
   }, [write]);
 
-  return { state, reload, save, saving, saveError, setSaveError };
+  // A result obtained another way (a catalog refresh) replaces the one read.
+  const replace = useCallback((result: Result) => {
+    setState((current) => current.status === "ready" ? { ...current, result } : current);
+  }, []);
+
+  return { state, reload, save, saving, saveError, setSaveError, replace };
 }
 
 function SurfaceFrame<Result>({ state, reload, theme, children }: {
@@ -901,8 +912,9 @@ function RoutingProfilesSection({ theme, workspaceId }: { theme: Theme; workspac
 
 function SwitchLegend({ theme }: { theme: Theme }) {
   return <Group title="What these switches change" theme={theme}>
-    <Hint theme={theme} text={"Use … in Cortex (engine or model): off hides it from the model selector, refuses it when chosen or pinned, and "
-      + "removes it from automatic routing. Saved as a deny entry (engine/* for a whole engine). Connections and logins are never touched."} />
+    <Hint theme={theme} text={"Only models switched on under Models are listed here. Use … in Cortex (engine): off hides every model of it from the "
+      + "model selector, refuses it when chosen or pinned, and removes it from automatic routing. Saved as the deny entry engine/*. "
+      + "Connections and logins are never touched."} />
     <Hint theme={theme} text={"Automatic routing may use …: off only keeps automatic worker routing, failover and pins away from the engine; "
       + "its models stay selectable by hand. Saved as the engine list of automatic routing."} />
     <Hint theme={theme} text={"Allow … in automatic routing: only for models Cortex leaves out of automatic routing by default (OpenCode v2 "
@@ -920,20 +932,11 @@ function ModelRow({ group, form, onChange, target, tiers, availableModels, workK
   const title = group.key;
   const deny = modelDenyState(route, form, target);
   const auto = modelAutoAllowState(route, form, target);
-  const engineOff = deny.blocking.includes(engineToken(route.engine));
-  const broader = deny.blocking.filter((token) => token !== engineToken(route.engine));
-  const denyHint = engineOff ? "Off because the whole engine is switched off above."
-    : broader.length > 0 ? `Off because of ${broader.map((token) => `"${token}"`).join(", ")}, which can cover other models too; remove it to switch this back on.`
-      : deny.on ? `Off: hidden from the model selector and refused (entry "${deny.exact}").` : undefined;
   return <View style={{ borderTopWidth: 1, borderColor: theme.colors.border, paddingTop: 8, gap: 4 }}>
     <Text style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "600" }}>{route.model_name}</Text>
     <ReadOnlyRow label="Model" value={title} theme={theme} />
     {group.routes.map((item) => <ReadOnlyRow key={item.route_id} label={`Now via ${item.connection_name}`} theme={theme}
       value={`${selectorText(item)} · ${automaticText(item)}${item.tier ? ` · tier ${item.tier}` : ""}${item.observed ? "" : " · not yet confirmed by the engine"} · route ${item.route_id}`} />)}
-    <ToggleField label={`Use ${title} in Cortex`} value={!deny.on} disabled={deny.blocking.length > 0} theme={theme} hint={denyHint}
-      onValueChange={(on) => onChange(setModelEnabled(form, route, on))} />
-    {broader.map((token) => <Button key={token} title={`Remove rule "${token}"`} tone="danger" theme={theme}
-      accessibilityLabel={`Remove deny rule ${token} (covers ${title})`} onPress={() => onChange(removeRoutingToken(form, "deny", token))} />)}
     <ToggleField label={`Use ${title} for automatic ranking`}
       value={modelAutoSelected(form, route.engine, route.model, route.auto_selected ?? route.automatic === "eligible")} disabled={deny.on} theme={theme}
       hint="Controls the configured automatic-routing candidate list; it does not affect manual selection."
@@ -973,7 +976,8 @@ function EngineBlock({ engine, catalog, form, onChange, target, engines, workKin
   const disabled = engineDisabledIn(form, engine.engine);
   const automatic = engineAutomaticIn(form, engine.engine);
   const lastAutomatic = automatic && engines.filter((item) => engineAutomaticIn(form, item)).length <= 1;
-  const groups = modelGroups(catalog.routes, engine.engine);
+  const all = modelGroups(catalog.routes, engine.engine);
+  const groups = all.filter((group) => modelInCortex(group.routes[0], form, target, engine.enabled_default));
   return <View style={{ borderWidth: 1, borderColor: theme.colors.border, borderRadius: 6, padding: 8, gap: 8 }}>
     <Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "700" }}>
       {name}{engine.optional ? " — optional engine" : ""}
@@ -994,7 +998,9 @@ function EngineBlock({ engine, catalog, form, onChange, target, engines, workKin
           : engine.default_auto_excluded ? "Its routes still need their own opt-in below." : undefined} />
     {groups.length === 0
       ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
-        {engine.connections.length === 0 ? "No models: no connection for this engine." : "No models known yet for this engine."}
+        {engine.connections.length === 0 ? "No models: no connection for this engine."
+          : all.length === 0 ? "No models known yet for this engine (refresh the model lists under Models)."
+            : "No model of this engine is switched on (see Models)."}
       </Text>
       : groups.map((group) => <ModelRow key={group.key} group={group} form={form} onChange={onChange} target={target} tiers={["light", "standard", "deep", "flagship"]}
         availableModels={groups.filter((item) => item.routes.some((route) => route.auto_selected ?? route.automatic === "eligible")).map((item) => item.model)}
@@ -1019,7 +1025,16 @@ function OtherRules({ catalog, form, onChange, target, theme }: {
   </Group>;
 }
 
-function EnginesModelsSection({ theme, workspaceId }: { theme: Theme; workspaceId: string | null }) {
+type RoutingSwitchesProps = { cat: RouteCatalogView; form: RoutingForm; setForm: (form: RoutingForm) => void; target: "user" | "project"; view: RoutingView };
+
+/** One routing file's switches over the route catalog: the save target, the
+ * shadowing warnings and the save button are shared by Models and Engines &
+ * models; `tools` renders above the switches even when the file is read-only. */
+function RoutingSwitchesCard({ title, saveLabel, theme, workspaceId, legend, tools, children }: {
+  title: string; saveLabel: string; theme: Theme; workspaceId: string | null; legend: React.ReactNode;
+  tools?: (cat: RouteCatalogView, replace: (next: RouteCatalogView) => void) => React.ReactNode;
+  children: (props: RoutingSwitchesProps) => React.ReactNode;
+}) {
   const routing = useConfigSurface<RoutingView>("routing", workspaceId, false);
   const catalog = useConfigSurface<RouteCatalogView>("route_catalog", workspaceId, false);
   const [target, setTarget] = useState<"user" | "project">("user");
@@ -1053,15 +1068,14 @@ function EnginesModelsSection({ theme, workspaceId }: { theme: Theme; workspaceI
     }
   };
 
-  return <Card title="Engines & models" theme={theme}>
+  return <Card title={title} theme={theme}>
     <SurfaceFrame state={state} reload={reloadAll} theme={theme}>
       {(view) => {
         const current = engineModelsTarget(view, target);
         const shadow = shadowingSource(view, target);
-        const engines = routingVocabulary(view).engines;
         const dirty = form !== null && current.form !== null && !sameJson(form, current.form);
         return <View style={{ gap: 10 }}>
-          <SwitchLegend theme={theme} />
+          {legend}
           <ReadOnlyRow label="Rules Cortex uses now" theme={theme}
             value={`${view.effective_source === "builtin" ? "built-in (no routing file)" : `${view.effective_source} file`}${view.effective_valid ? "" : " (invalid)"}`} />
           <ChoiceField label="Save switches to" value={target} theme={theme} onChange={(value) => { setPicked(true); setTarget(value); }}
@@ -1072,29 +1086,154 @@ function EnginesModelsSection({ theme, workspaceId }: { theme: Theme; workspaceI
           {!workspaceId && <Hint theme={theme} text="A project with its own routing file uses that file instead of this one." />}
           {current.seededFrom && <Banner theme={theme} tone="muted"
             text={`This project has no routing file yet. Saving creates one, and it replaces the ${current.seededFrom} rules for this project, so the switches start from those rules.`} />}
-          {!current.editable || !form
-            ? <ReadOnlyNotice theme={theme} text={current.reason ?? "This routing file is read-only."} />
-            : <SurfaceFrame state={catalog.state} reload={catalog.reload} theme={theme}>
-              {(cat) => <View style={{ gap: 10 }}>
-                {!cat.effective_valid && <Banner theme={theme} tone="danger"
-                  text="The routing file Cortex uses is invalid: every dispatch is refused until it is repaired (see Routing)." />}
-                {cat.catalog_problems.map((problem) => <Banner key={problem.connection_id} theme={theme} tone="warning"
-                  text={`The model list of connection ${problem.connection_id} could not be read: ${problem.message}`} />)}
-                {cat.engines.map((engine) => <EngineBlock key={engine.engine} engine={engine} catalog={cat} form={form} onChange={setForm}
-                  target={target} engines={engines} workKinds={view.builtin.work_kinds} workKindLabels={view.builtin.work_kind_labels} theme={theme} />)}
-                <OtherRules catalog={cat} form={form} onChange={setForm} target={target} theme={theme} />
-              </View>}
-            </SurfaceFrame>}
+          <SurfaceFrame state={catalog.state} reload={catalog.reload} theme={theme}>
+            {(cat) => <View style={{ gap: 10 }}>
+              {tools?.(cat, catalog.replace)}
+              {!current.editable || !form
+                ? <ReadOnlyNotice theme={theme} text={current.reason ?? "This routing file is read-only."} />
+                : <View style={{ gap: 10 }}>
+                  {!cat.effective_valid && <Banner theme={theme} tone="danger"
+                    text="The routing file Cortex uses is invalid: every dispatch is refused until it is repaired (see Routing)." />}
+                  {cat.catalog_problems.map((problem) => <Banner key={problem.connection_id} theme={theme} tone="warning"
+                    text={`The model list of connection ${problem.connection_id} could not be read: ${problem.message}`} />)}
+                  {children({ cat, form, setForm, target, view })}
+                </View>}
+            </View>}
+          </SurfaceFrame>
           {dirty && <Banner theme={theme} tone="muted" text={`Unsaved changes to the ${target} routing file.`} />}
           <ErrorText message={errorAt(errors, "rules")} theme={theme} />
           <SaveStatus saveError={routing.saveError} notice={notice} reload={reloadAll} theme={theme} />
           {Object.keys(clientErrors).length > 0 && <Banner text="Fix the problems shown before saving." theme={theme} tone="danger" />}
           {current.editable && form && <Button title={routing.saving ? "Saving…" : `Save ${target} routing`} icon="Check" onPress={onSave} theme={theme}
-            disabled={routing.saving} accessibilityLabel={`Save engine and model switches to the ${target} routing file`} />}
+            disabled={routing.saving} accessibilityLabel={`Save ${saveLabel} to the ${target} routing file`} />}
         </View>;
       }}
     </SurfaceFrame>
   </Card>;
+}
+
+function EnginesModelsSection({ theme, workspaceId }: { theme: Theme; workspaceId: string | null }) {
+  return <RoutingSwitchesCard title="Engines & models" saveLabel="engine and model switches" theme={theme} workspaceId={workspaceId} legend={<SwitchLegend theme={theme} />}>
+    {({ cat, form, setForm, target, view }) => <>
+      {cat.engines.map((engine) => <EngineBlock key={engine.engine} engine={engine} catalog={cat} form={form} onChange={setForm}
+        target={target} engines={routingVocabulary(view).engines} workKinds={view.builtin.work_kinds} workKindLabels={view.builtin.work_kind_labels} theme={theme} />)}
+      <OtherRules catalog={cat} form={form} onChange={setForm} target={target} theme={theme} />
+    </>}
+  </RoutingSwitchesCard>;
+}
+
+// --- Models --------------------------------------------------------------------------
+
+function CatalogRefresh({ cat, replace, workspaceId, theme }: {
+  cat: RouteCatalogView; replace: (next: RouteCatalogView) => void; workspaceId: string | null; theme: Theme;
+}) {
+  const refresh = useRpc(refreshModelCatalog);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [outcomes, setOutcomes] = useState<RouteCatalogView["refresh"]>(undefined);
+  const connections = cat.engines.flatMap((engine) => engine.connections.map((connection) => ({ ...connection, engine: engine.engine })));
+  const run = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const out = await refresh(workspaceId ? { workspaceId } : {});
+      if (out.ok) { replace(out.result); setOutcomes(out.result.refresh); }
+      else setError(describeConfigError(out.error));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Refresh failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <Group title="Model lists" theme={theme}
+    hint="Cortex learns each engine's models from the engine itself. After an engine update, refresh to see its new models: each engine is started without a prompt, so no model is called.">
+    {connections.length === 0 && <Hint theme={theme} text="No connection is registered (see Connections)." />}
+    {connections.map((connection) => {
+      const outcome = outcomes?.find((item) => item.connection_id === connection.id);
+      return <ReadOnlyRow key={connection.id} label={`${engineLabel(connection.engine)} · ${connection.name}`} theme={theme}
+        value={`${catalogObservedText(connection.catalog_observed_at)}${outcome ? ` · ${refreshOutcomeText(outcome)}` : ""}`} />;
+    })}
+    <Button title={busy ? "Refreshing…" : "Refresh model lists"} theme={theme} onPress={run} disabled={busy || connections.length === 0}
+      accessibilityLabel="Read every engine's model list again" />
+    {error && <Banner theme={theme} tone="danger" text={error} />}
+  </Group>;
+}
+
+function ModelSwitch({ group, form, onChange, target, engine, theme }: {
+  group: ModelGroup; form: RoutingForm; onChange: (form: RoutingForm) => void; target: "user" | "project"; engine: CatalogEngine; theme: Theme;
+}) {
+  const route = group.routes[0];
+  const deny = modelDenyState(route, form, target);
+  const engineOff = deny.blocking.includes(engineToken(route.engine));
+  const broader = deny.blocking.filter((token) => token !== engineToken(route.engine));
+  const on = modelInCortex(route, form, target, engine.enabled_default);
+  const label = route.model_name && route.model_name !== route.model ? `${route.model_name} (${group.key})` : group.key;
+  const hint = engineOff ? "Off because the whole engine is switched off under Engines & models."
+    : broader.length > 0 ? `Off because of ${broader.map((token) => `"${token}"`).join(", ")}, which can cover other models too; remove it to switch this back on.`
+      : group.routes.every((item) => item.observed) ? undefined : "Not yet confirmed by the engine: refresh the model lists.";
+  return <View style={{ gap: 2 }}>
+    <ToggleField label={label} value={on} disabled={deny.blocking.length > 0} theme={theme} hint={hint}
+      onValueChange={(next) => onChange(setModelInCortex(form, route, next, engine.enabled_default))} />
+    {broader.map((token) => <Button key={token} title={`Remove rule "${token}"`} tone="danger" theme={theme}
+      accessibilityLabel={`Remove deny rule ${token} (covers ${group.key})`} onPress={() => onChange(removeRoutingToken(form, "deny", token))} />)}
+  </View>;
+}
+
+function EngineModels({ engine, catalog, form, onChange, target, query, theme }: {
+  engine: CatalogEngine; catalog: RouteCatalogView; form: RoutingForm; onChange: (form: RoutingForm) => void;
+  target: "user" | "project"; query: string; theme: Theme;
+}) {
+  const groups = modelGroups(catalog.routes, engine.engine);
+  const shown = filterModelGroups(groups, query);
+  const onCount = groups.filter((group) => modelInCortex(group.routes[0], form, target, engine.enabled_default)).length;
+  const unmatched = (form.enabled?.[engine.engine] ?? []).filter((model) => !groups.some((group) => group.model === model));
+  const setAll = (on: boolean) => onChange(shown.reduce((next, group) => modelDenyState(group.routes[0], next, target).blocking.length > 0
+    ? next : setModelInCortex(next, group.routes[0], on, engine.enabled_default), form));
+  return <View style={{ borderWidth: 1, borderColor: theme.colors.border, borderRadius: 6, padding: 8, gap: 6 }}>
+    <Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: 13, fontWeight: "700" }}>
+      {engineLabel(engine.engine)} — {onCount} of {groups.length} on
+    </Text>
+    {!engine.enabled_default && <Hint theme={theme} text="Its models are off until you switch them on here." />}
+    {engineDisabledIn(form, engine.engine) && <ReadOnlyNotice theme={theme} text="This engine is switched off under Engines & models; its models stay off." />}
+    {groups.length === 0
+      ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
+        {engine.connections.length === 0 ? "No connection for this engine." : "No models known yet: refresh the model lists."}
+      </Text>
+      : <>
+        {shown.length > 1 && <View style={{ flexDirection: "row", gap: 6, flexWrap: "wrap" }}>
+          <Button title={`Switch on ${shown.length === groups.length ? "all" : `all ${shown.length} shown`}`} theme={theme} onPress={() => setAll(true)}
+            accessibilityLabel={`Switch on every shown ${engine.engine} model`} />
+          <Button title={`Switch off ${shown.length === groups.length ? "all" : `all ${shown.length} shown`}`} tone="danger" theme={theme} onPress={() => setAll(false)}
+            accessibilityLabel={`Switch off every shown ${engine.engine} model`} />
+        </View>}
+        {shown.length === 0 && <Hint theme={theme} text="No model of this engine matches the filter." />}
+        {shown.map((group) => <ModelSwitch key={group.key} group={group} form={form} onChange={onChange} target={target} engine={engine} theme={theme} />)}
+      </>}
+    {unmatched.length > 0 && <Group title="Switched on but not offered now" theme={theme}
+      hint="The engine's current model list does not include these; they return when the engine offers them again.">
+      {unmatched.map((model) => <View key={model} style={{ flexDirection: "row", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+        <Text style={{ color: theme.colors.foreground, fontSize: 12 }}>{model}</Text>
+        <Button title="Remove" icon="Trash2" tone="danger" theme={theme} accessibilityLabel={`Remove ${model} from the enabled ${engine.engine} models`}
+          onPress={() => onChange(removeEnabledModel(form, engine.engine, model))} />
+      </View>)}
+    </Group>}
+  </View>;
+}
+
+function ModelsSection({ theme, workspaceId }: { theme: Theme; workspaceId: string | null }) {
+  const [query, setQuery] = useState("");
+  return <RoutingSwitchesCard title="Models" saveLabel="model switches" theme={theme} workspaceId={workspaceId}
+    legend={<Hint theme={theme} text={"Switch on the models Cortex may use. Only these appear in the model selector, under Engines & models and in "
+      + "automatic routing; a model switched off is refused when chosen or pinned. Codex and Claude models are on until switched off; "
+      + "OpenCode v2 models are off until switched on. Connections and logins are never touched."} />}
+    tools={(cat, replace) => <CatalogRefresh cat={cat} replace={replace} workspaceId={workspaceId} theme={theme} />}>
+    {({ cat, form, setForm, target }) => <>
+      <TextField label="Filter models" value={query} onChangeText={setQuery} theme={theme} placeholder="e.g. sol, sonnet, nvidia"
+        hint="Words in the model name or id; the switch-all buttons apply to the models shown." />
+      {cat.engines.map((engine) => <EngineModels key={engine.engine} engine={engine} catalog={cat} form={form} onChange={setForm}
+        target={target} query={query} theme={theme} />)}
+    </>}
+  </RoutingSwitchesCard>;
 }
 
 // --- MCP servers -------------------------------------------------------------------
@@ -1477,6 +1616,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
     <ChoiceField label="Section" value={section} theme={theme} onChange={setSection}
       options={SETTINGS_SECTIONS.map((entry) => ({ value: entry.id, label: entry.title }))} />
     {section === "user_defaults" && <UserDefaultsSection theme={theme} />}
+    {section === "models" && <ModelsSection theme={theme} workspaceId={workspaceId} />}
     {section === "engines_models" && <EnginesModelsSection theme={theme} workspaceId={workspaceId} />}
     {section === "project_ceiling" && <ProjectCeilingSection theme={theme} workspaceId={workspaceId} />}
     {section === "routing" && <RoutingSection theme={theme} workspaceId={workspaceId} />}

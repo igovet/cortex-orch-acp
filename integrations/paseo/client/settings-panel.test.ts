@@ -148,7 +148,7 @@ function catalogRoute(id: string, engine: string, model: string, name: string, c
   return {
     route_id: `xr_${id.repeat(12)}`, engine, model, model_name: name, connection_id: connection[0], connection_name: connection[1],
     connection_state: "configured", qualified: true, observed: true, tier: "standard", selectable: true, in_selector: true,
-    disabled: false, deny_tokens: [], engine_disabled: false, default_auto_excluded: null, auto_allow_tokens: [], automatic: "eligible", auto_selected: engine !== "opencode",
+    disabled: false, deny_tokens: [], enabled: true, engine_disabled: false, default_auto_excluded: null, auto_allow_tokens: [], automatic: "eligible", auto_selected: engine !== "opencode",
     superseded_by: null, preferred_for: [], preferred_inactive: false, matches: { user: { deny: [], auto_allow: [] } }, ...extra,
   };
 }
@@ -156,7 +156,8 @@ function catalogRoute(id: string, engine: string, model: string, name: string, c
 function catalogEngine(engine: string, connection: readonly [string, string] | null, extra: Record<string, unknown> = {}) {
   return {
     engine, optional: engine === "opencode", disabled: false, automatic: true, default_auto_excluded: engine === "opencode", route_count: 1,
-    connections: connection ? [{ id: connection[0], name: connection[1], state: "configured", qualified: true }] : [],
+    connections: connection ? [{ id: connection[0], name: connection[1], state: "configured", qualified: true, catalog_observed_at: "2026-09-30T08:00:00+00:00" }] : [],
+    enabled_models: engine === "opencode" ? ["anthropic/claude-sonnet-4-5"] : null, enabled_default: engine !== "opencode", unmatched_enabled: [],
     matches: { user: { disabled: false, automatic: true } }, ...extra,
   };
 }
@@ -181,7 +182,8 @@ function fixtures() {
         { source: "env", path: "(unset)", writable: false, exists: false, revision: null },
         {
           source: "user", path: "~/.config/cortex/routing.json", writable: true, exists: true, revision: REV("b"), valid: true,
-          rules: { pin: { "*": "opencode/anthropic/claude-sonnet-4-5:high" }, deny: ["claude-agent-acp/opus"], providers: ["codex-acp", "opencode"] },
+          rules: { pin: { "*": "opencode/anthropic/claude-sonnet-4-5:high" }, deny: ["claude-agent-acp/opus"], providers: ["codex-acp", "opencode"],
+            enabled: { opencode: ["anthropic/claude-sonnet-4-5"] } },
           ignored_keys: ["comment"],
         },
       ],
@@ -263,6 +265,7 @@ async function openScreen() {
   const onboards: Array<Record<string, unknown>> = [];
   const onboardReplies: unknown[] = [];
   const replies: unknown[] = [];
+  const refreshes: Array<Record<string, unknown>> = [];
   const rpcs: Record<string, (input: Record<string, unknown>) => Promise<unknown>> = {
     "cortex.config.read": async (input) => {
       reads.push(input);
@@ -272,6 +275,10 @@ async function openScreen() {
       updates.push(input);
       const reply = replies.shift();
       return reply ?? { ok: true, binding, result: data[input.surface as string] };
+    },
+    "cortex.config.catalog.refresh": async (input) => {
+      refreshes.push(input);
+      return { ok: true, binding, result: data.route_catalog };
     },
     "cortex.config.opencode.discover": async () => ({
       ok: true, binding, result: { found: true, version: "2.0.20", qualified: true, qualified_versions: ["2.x.x"], onboarded_connection_ids: [] },
@@ -314,7 +321,7 @@ async function openScreen() {
   const toggle = async (label: string, value: boolean) => { (find(label, "Switch").props.onValueChange as (v: boolean) => void)(value); await runtime.settle(); };
   const texts = () => runtime.elements().filter((element) => element.type === "Text").map((element) => textOf(element.props.children));
   const section = async (title: string) => press(`Section: ${title}`);
-  return { runtime, data, reads, updates, onboards, onboardReplies, replies, find, has, press, type, toggle, texts, section };
+  return { runtime, data, reads, updates, onboards, onboardReplies, replies, refreshes, find, has, press, type, toggle, texts, section };
 }
 
 // --- tests ------------------------------------------------------------------------
@@ -324,6 +331,7 @@ test("no section offers a raw JSON entry field, and every control is labelled", 
   await screen.press("Project (for project ceiling and project routing): ws1");
   const visits: Array<[string, () => Promise<void>]> = [
     ["User defaults", async () => {}],
+    ["Models", async () => {}],
     ["Project ceiling", async () => {}],
     ["Routing", async () => {}],
     ["User routing profiles", async () => {}],
@@ -423,7 +431,8 @@ test("routing: a per-model effort is edited as a typed pin and saved to its own 
   await screen.press("Save user routing");
   assert.deepEqual(screen.updates, [{
     surface: "routing", target: "user", expected_revision: REV("b"),
-    rules: { pin: { "*": "opencode/anthropic/claude-sonnet-4-5:medium" }, deny: ["claude-agent-acp/opus"], providers: ["codex-acp", "opencode"] },
+    rules: { pin: { "*": "opencode/anthropic/claude-sonnet-4-5:medium" }, deny: ["claude-agent-acp/opus"], providers: ["codex-acp", "opencode"],
+      enabled: { opencode: ["anthropic/claude-sonnet-4-5"] } },
   }]);
 });
 
@@ -557,12 +566,12 @@ test("engines & models: every engine and model is a labelled switch with full id
   const elements = screen.runtime.elements();
   const switches = elements.filter((element) => element.type === "Switch");
   assert.deepEqual(switches.map((element) => element.props.accessibilityLabel).filter((label) => !String(label).includes(" — ")), [
-    "Use Codex (codex-acp) in Cortex", "Automatic routing may use Codex (codex-acp)", "Use codex-acp/gpt-6-luna in Cortex", "Use codex-acp/gpt-6-luna for automatic ranking",
+    "Use Codex (codex-acp) in Cortex", "Automatic routing may use Codex (codex-acp)", "Use codex-acp/gpt-6-luna for automatic ranking",
     "Use Claude (claude-agent-acp) in Cortex", "Automatic routing may use Claude (claude-agent-acp)",
-    "Use claude-agent-acp/opus[1m] in Cortex", "Use claude-agent-acp/opus[1m] for automatic ranking", "Use claude-agent-acp/claude-sonnet-5 in Cortex", "Use claude-agent-acp/claude-sonnet-5 for automatic ranking",
+    "Use claude-agent-acp/claude-sonnet-5 for automatic ranking",
     "Use OpenCode v2 (opencode) in Cortex", "Automatic routing may use OpenCode v2 (opencode)",
-    "Use opencode/anthropic/claude-sonnet-4-5 in Cortex", "Use opencode/anthropic/claude-sonnet-4-5 for automatic ranking", "Allow opencode/anthropic/claude-sonnet-4-5 in automatic routing",
-  ]);
+    "Use opencode/anthropic/claude-sonnet-4-5 for automatic ranking", "Allow opencode/anthropic/claude-sonnet-4-5 in automatic routing",
+  ], "only models switched on under Models are listed; opus[1m] is switched off");
   assert.ok(switches.some((element) => element.props.accessibilityLabel === "Review — opencode/anthropic/claude-sonnet-4-5"));
   for (const element of switches) {
     assert.equal(element.props.accessibilityRole, "switch");
@@ -573,15 +582,12 @@ test("engines & models: every engine and model is a labelled switch with full id
     assert.ok(["button", "radio", "checkbox"].includes(String(element.props.accessibilityRole)));
   }
   assert.ok(!elements.some((element) => element.type === "TextInput" && element.props.multiline === true));
-  const opus = screen.find("Use claude-agent-acp/opus[1m] in Cortex", "Switch");
-  assert.equal(opus.props.value, false);
-  assert.equal(opus.props.disabled, true, "a family entry is never cleared by one model's switch");
-  assert.ok(screen.has("Remove deny rule claude-agent-acp/opus (covers claude-agent-acp/opus[1m])"));
+  assert.ok(!screen.has("Use claude-agent-acp/opus[1m] for automatic ranking"));
   assert.equal(screen.find("Automatic routing may use Claude (claude-agent-acp)", "Switch").props.value, false);
   assert.equal(screen.find("Use Claude (claude-agent-acp) in Cortex", "Switch").props.value, true, "automatic routing is not disabling");
   const texts = screen.texts().join("\n");
-  assert.match(texts, /route xr_bbbbbbbbbbbb/);
-  assert.match(texts, /model selector: hidden \(disabled by claude-agent-acp\/opus\)/);
+  assert.match(texts, /route xr_aaaaaaaaaaaa/);
+  assert.doesNotMatch(texts, /route xr_bbbbbbbbbbbb/);
   assert.match(texts, /model selector: shown · automatic routing: no \(engine switched off for automatic routing\)/);
   assert.match(texts, /automatic routing: no \(OpenCode v2 routes need an opt-in\)/);
   assert.match(texts, /not enforced by this Cortex version/);
@@ -594,9 +600,8 @@ test("engines & models: switches save exact routing entries to the chosen file, 
   const catalogReads = () => screen.reads.filter((read) => read.surface === "route_catalog").length;
   const before = catalogReads();
   await screen.toggle("Use Codex (codex-acp) in Cortex", false);
-  assert.equal(screen.find("Use codex-acp/gpt-6-luna in Cortex", "Switch").props.disabled, true, "the engine switch covers its models");
+  assert.ok(!screen.has("Use codex-acp/gpt-6-luna for automatic ranking"), "the engine switch covers its models");
   await screen.toggle("Automatic routing may use Claude (claude-agent-acp)", true);
-  await screen.toggle("Use claude-agent-acp/claude-sonnet-5 in Cortex", false);
   await screen.toggle("Allow opencode/anthropic/claude-sonnet-4-5 in automatic routing", true);
   assert.ok(screen.texts().includes("Unsaved changes to the user routing file."));
   assert.equal(screen.updates.length, 0, "nothing is written before Save");
@@ -605,7 +610,8 @@ test("engines & models: switches save exact routing entries to the chosen file, 
     surface: "routing", target: "user", expected_revision: REV("b"),
     rules: {
       pin: { "*": "opencode/anthropic/claude-sonnet-4-5:high" },
-      deny: ["claude-agent-acp/opus", "codex-acp/*", "claude-agent-acp/claude-sonnet-5"],
+      deny: ["claude-agent-acp/opus", "codex-acp/*"],
+      enabled: { opencode: ["anthropic/claude-sonnet-4-5"] },
       auto_allow: ["opencode/anthropic/claude-sonnet-4-5"],
       providers: ["codex-acp", "opencode", "claude-agent-acp"],
     },
@@ -615,16 +621,19 @@ test("engines & models: switches save exact routing entries to the chosen file, 
   assert.deepEqual(screen.onboards, [], "no switch registers OpenCode");
 });
 
-test("engines & models: removing a broader entry is explicit; a conflict writes nothing and reload re-reads both views", async () => {
+test("models: removing a broader entry is explicit; a conflict writes nothing and reload re-reads both views", async () => {
   const screen = await openScreen();
-  await screen.section("Engines & models");
+  await screen.section("Models");
+  const opus = "Opus 5.5 (claude-agent-acp/opus[1m])";
+  assert.equal(screen.find(opus, "Switch").props.value, false);
+  assert.equal(screen.find(opus, "Switch").props.disabled, true, "a family entry is never cleared by one model's switch");
   await screen.press("Remove deny rule claude-agent-acp/opus (covers claude-agent-acp/opus[1m])");
-  assert.equal(screen.find("Use claude-agent-acp/opus[1m] in Cortex", "Switch").props.value, true);
+  assert.equal(screen.find(opus, "Switch").props.value, true);
   screen.replies.push({
     ok: false, binding,
     error: { code: "revision_conflict", message: "routing (user) changed after it was read.", field: "expected_revision", currentRevision: REV("f") },
   });
-  await screen.press("Save engine and model switches to the user routing file");
+  await screen.press("Save model switches to the user routing file");
   assert.deepEqual((screen.updates[0].rules as { deny?: string[] }).deny, []);
   assert.ok(screen.texts().some((text) => text.startsWith("Changed elsewhere since this was loaded")));
   const reads = (surface: string) => screen.reads.filter((read) => read.surface === surface).length;
@@ -633,7 +642,45 @@ test("engines & models: removing a broader entry is explicit; a conflict writes 
   assert.equal(reads("routing"), routingBefore + 1);
   assert.equal(reads("route_catalog"), catalogBefore + 1);
   assert.equal(screen.updates.length, 1, "a conflict is never retried automatically");
-  assert.equal(screen.find("Use claude-agent-acp/opus[1m] in Cortex", "Switch").props.value, false, "edits here were discarded");
+  assert.equal(screen.find(opus, "Switch").props.value, false, "edits here were discarded");
+});
+
+test("models: default-on engines write deny entries, OpenCode writes its enabled list, and the lists refresh without a prompt", async () => {
+  const screen = await openScreen();
+  const catalog = screen.data.route_catalog;
+  screen.data.route_catalog = {
+    ...catalog,
+    routes: [...(catalog.routes as unknown[]), catalogRoute("e", "opencode", "nvidia/nemotron-ultra", "Nemotron Ultra", CONN.opencode, {
+      enabled: false, disabled: true, in_selector: false, default_auto_excluded: "optional_engine", automatic: "disabled", tier: null,
+    })],
+  };
+  await screen.section("Models");
+  const texts = screen.texts().join("\n");
+  assert.match(texts, /Codex \(codex-acp\) — 1 of 1 on/);
+  assert.match(texts, /OpenCode v2 \(opencode\) — 1 of 2 on/);
+  assert.match(texts, /off until you switch them on here/);
+  assert.equal(screen.find("Nemotron Ultra (opencode/nvidia/nemotron-ultra)", "Switch").props.value, false);
+  await screen.type("Filter models", "nemotron");
+  assert.ok(!screen.has("GPT-6 Luna (codex-acp/gpt-6-luna)"), "the filter hides other models");
+  await screen.type("Filter models", "");
+  await screen.toggle("Nemotron Ultra (opencode/nvidia/nemotron-ultra)", true);
+  await screen.toggle("GPT-6 Luna (codex-acp/gpt-6-luna)", false);
+  await screen.toggle("Claude Sonnet 4.5 (opencode/anthropic/claude-sonnet-4-5)", false);
+  await screen.press("Save model switches to the user routing file");
+  const rules = screen.updates[0].rules as { deny: string[]; enabled: Record<string, string[]> };
+  assert.deepEqual(rules.deny, ["claude-agent-acp/opus", "codex-acp/gpt-6-luna"]);
+  assert.deepEqual(rules.enabled, { opencode: ["nvidia/nemotron-ultra"] });
+
+  screen.data.route_catalog = { ...screen.data.route_catalog, refresh: [
+    { connection_id: CONN.codex[0], success: true, reason: null },
+    { connection_id: CONN.claude[0], success: false, reason: "authorization_required" },
+  ] };
+  await screen.press("Read every engine's model list again");
+  assert.deepEqual(screen.refreshes, [{}]);
+  const after = screen.texts().join("\n");
+  assert.match(after, /model list updated/);
+  assert.match(after, /not updated \(not signed in to this engine\); the previous list is kept/);
+  assert.equal(screen.updates.length, 1, "a refresh never writes routing");
 });
 
 test("engines & models: a shadowing project file is named; an unregistered OpenCode v2 is never activated from here", async () => {

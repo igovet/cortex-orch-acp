@@ -16,7 +16,7 @@ assignments that use them.
 
 User **routing profiles** are distinct from the per-revision `RouteProfile`
 below. A profile in `$XDG_CONFIG_HOME/cortex/routing-profiles.json` saves the
-seven managed routing keys; activation materializes them into the user
+eight managed routing keys; activation materializes them into the user
 `routing.json` under the connection lock. The loader's first-existing-file
 precedence remains project, `$CORTEX_ROUTING`, user, so a project or
 environment file shadows an active user profile. The profile management API
@@ -285,6 +285,14 @@ apply. Setup writes the default user `routing.json`, `{"deny": ["gpt-5.5",
 "haiku"]}`, whose bare `haiku` token denies every Haiku id and alias
 everywhere (see [configuration](../configuration.md#routing-rules)). A pin is
 strict and has priority over automatic selection.
+
+`enabled` is the per-engine list of models Cortex may use at all (Settings >
+Models). A model its engine's list leaves out is handled exactly like a
+denied one by the selector, dispatch, pins and automatic routing
+(`auto_route._denied`); an engine the key does not name keeps its default:
+every model on, except OpenCode, whose models stay off until listed. A
+refused model reports `route_denied` with a remediation naming Settings >
+Models.
 
 Weaker models do light work and stronger models do hard work: a task never
 runs on a stronger tier than its own because another engine lacks a model in

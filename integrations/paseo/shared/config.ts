@@ -62,7 +62,7 @@ const defaultsPatch = z.strictObject({
   language: z.enum(["en", "ru"]).nullable().optional(),
 });
 
-// The six keys the routing loader supports; an omitted key is removed.
+// The eight keys the routing loader supports; an omitted key is removed.
 const modelRules = z.strictObject({
   auto: z.array(text()).max(1000).optional(),
   tiers: z.record(text(), text(64)).optional(),
@@ -72,6 +72,9 @@ const modelRules = z.strictObject({
 const routingRules = z.strictObject({
   pin: z.record(text(128), text()).optional(),
   deny: z.array(text()).max(1000).optional(),
+  // Per engine, the only exact model ids it may use in Cortex (Settings >
+  // Models); an engine not listed keeps its default (OpenCode: none).
+  enabled: z.record(text(64), z.array(text()).max(1000)).optional(),
   auto_allow: z.array(text()).max(1000).optional(),
   tiers: z.record(text(), text(64)).optional(),
   providers: z.array(text(64)).max(16).optional(),
@@ -328,6 +331,8 @@ const catalogRoute = z.object({
   in_selector: z.boolean(),
   disabled: z.boolean(),
   deny_tokens: z.array(z.string()),
+  // Whether routing "enabled" (or its per-engine default) lets the model in.
+  enabled: z.boolean(),
   engine_disabled: z.boolean(),
   default_auto_excluded: z.enum(["optional_engine", "family"]).nullable(),
   auto_allow_tokens: z.array(z.string()),
@@ -344,7 +349,13 @@ const catalogRoute = z.object({
 const catalogEngine = z.object({
   engine: z.string(),
   optional: z.boolean(),
-  connections: z.array(z.object({ id: z.string(), name: z.string(), state: z.string(), qualified: z.boolean() })),
+  // catalog_observed_at: when the engine last reported its model list (null: never).
+  connections: z.array(z.object({ id: z.string(), name: z.string(), state: z.string(), qualified: z.boolean(),
+    catalog_observed_at: z.string().nullable() })),
+  // Exact ids listed under routing "enabled" (null: not listed, the default applies).
+  enabled_models: z.array(z.string()).nullable(),
+  enabled_default: z.boolean(),
+  unmatched_enabled: z.array(z.string()),
   disabled: z.boolean(),
   automatic: z.boolean(),
   default_auto_excluded: z.boolean(),
@@ -364,6 +375,8 @@ export const routeCatalogResult = z.object({
   catalog_problems: z.array(z.object({ connection_id: z.string(), code: z.string(), message: z.string() })),
   // Per-dispatch states this view does not decide (recorded unavailability, quota).
   not_shown: z.array(z.string()),
+  // Only after a refresh: one outcome per connection (a failure keeps the old list).
+  refresh: z.array(z.object({ connection_id: z.string(), success: z.boolean(), reason: z.string().nullable() })).optional(),
 });
 
 export const openCodeDiscoveryResult = z.object({
@@ -434,6 +447,7 @@ export const configUpdateOutput = envelope(z.union([
   connectionsResult,
 ]));
 export const openCodeDiscoverOutput = envelope(openCodeDiscoveryResult);
+export const catalogRefreshOutput = envelope(routeCatalogResult);
 export const openCodeOnboardOutput = envelope(connectionsResult);
 
 // --- contracts --------------------------------------------------------------
@@ -523,6 +537,15 @@ export const onboardOpenCode = defineRpc({
   output: openCodeOnboardOutput,
 });
 
+/** Re-reads every connection's model list from its engine (initialize and
+ * session/new only: no prompt, no model call) and returns the fresh route
+ * catalog. Nothing in routing changes. */
+export const refreshModelCatalog = defineRpc({
+  name: "cortex.config.catalog.refresh",
+  input: z.strictObject({ workspaceId: workspaceId.optional() }),
+  output: catalogRefreshOutput,
+});
+
 export type ConfigError = z.infer<typeof configError>;
 export type ConfigBinding = z.infer<typeof configBinding>;
 export type ConfigReadInput = z.infer<typeof readConfig["input"]>;
@@ -531,3 +554,4 @@ export type ConfigReadOutput = z.infer<typeof configReadOutput>;
 export type ConfigUpdateOutput = z.infer<typeof configUpdateOutput>;
 export type OpenCodeDiscoverOutput = z.infer<typeof openCodeDiscoverOutput>;
 export type OpenCodeOnboardOutput = z.infer<typeof openCodeOnboardOutput>;
+export type CatalogRefreshOutput = z.infer<typeof catalogRefreshOutput>;

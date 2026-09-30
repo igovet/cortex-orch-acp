@@ -1311,8 +1311,17 @@ def _menu_items(menu):
     return {item["route"]: dict(item, tier=tier) for tier, group in menu["tiers"].items() for item in group}
 
 
-def test_without_models_an_optional_engine_stays_out_of_automatic_routing(tmp_path, monkeypatch):
+def test_optional_engine_models_stay_off_until_enabled(tmp_path, monkeypatch):
     project, environ = _configured(monkeypatch, tmp_path, None, [_opencode(OPENCODE_PLAIN), _opencode(OPENCODE_VARIANT)])
+    items = _menu_items(auto_route.route_menu(project, environ))
+    assert not any(route.startswith("opencode/") for route in items)
+    assert auto_route.is_denied("opencode", OPENCODE_VARIANT, project, environ)
+    assert not auto_route.is_denied("codex-acp", "gpt-6-luna", project, environ)
+
+
+def test_without_models_an_optional_engine_stays_out_of_automatic_routing(tmp_path, monkeypatch):
+    routing = {"enabled": {"opencode": [OPENCODE_PLAIN, OPENCODE_VARIANT]}}
+    project, environ = _configured(monkeypatch, tmp_path, routing, [_opencode(OPENCODE_PLAIN), _opencode(OPENCODE_VARIANT)])
     items = _menu_items(auto_route.route_menu(project, environ))
     opencode = items[f"opencode/{OPENCODE_VARIANT}"]
     assert (opencode["auto_eligible"], opencode["auto_reason"], opencode["selection"]) == (False, "excluded_by_default", "builtin")
@@ -1322,7 +1331,7 @@ def test_without_models_an_optional_engine_stays_out_of_automatic_routing(tmp_pa
 
 
 def test_a_selection_list_makes_exactly_the_listed_models_automatic(tmp_path, monkeypatch):
-    routing = {"models": {
+    routing = {"enabled": {"opencode": [OPENCODE_PLAIN, OPENCODE_VARIANT]}, "models": {
         "opencode": {"auto": [OPENCODE_VARIANT], "tiers": {OPENCODE_VARIANT: "standard"}},
         "codex-acp": {"auto": ["gpt-5.6-terra"]}}}
     project, environ = _configured(monkeypatch, tmp_path, routing, [_opencode(OPENCODE_PLAIN), _opencode(OPENCODE_VARIANT)])

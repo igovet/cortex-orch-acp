@@ -18,7 +18,7 @@ def _entry(connection, engine, model):
 
 # The tiers the name tables gave before routing.json ``models`` existed.
 PREVIOUS_TIERS = {
-    "gpt-6-astra": "flagship", "gpt-6-sol": "deep", "gpt-6-luna": "light", "gpt-5.6-sol": "standard",
+    "gpt-6-astra": "flagship", "gpt-6-sol": "deep", "gpt-6.1-sol": "deep", "gpt-6-luna": "light", "gpt-5.6-sol": "standard",
     "gpt-5.6-terra": "standard", "gpt-5.6-luna": "light", "gpt-5.5": "light", "gpt-7-luna": "light",
     "gpt-7-terra": "standard", "sonnet": "standard", "opus": "deep", "opus[1m]": "deep",
     "claude-opus-4-8": "deep", "claude-fable-5-1[1m]": "flagship", "claude-sonnet-5": "standard",

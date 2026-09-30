@@ -17,6 +17,7 @@ import {
   type ConfigUpdateInput,
   type ConfigUpdateOutput,
   type McpOperation,
+  type CatalogRefreshOutput,
   type OpenCodeDiscoverOutput,
   type OpenCodeOnboardOutput,
 } from "../shared/config.js";
@@ -68,6 +69,8 @@ const READ_TIMEOUT_MS = 15000;
 // Below Paseo's 30 s plugin request timeout, so a slow write still returns a
 // structured error instead of a host timeout.
 const WRITE_TIMEOUT_MS = 25000;
+// Every connection's engine is started in parallel, each bounded at 20 s.
+const REFRESH_TIMEOUT_MS = 60000;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 const BOOT = [
@@ -527,6 +530,23 @@ export const discoverOpenCodeHandler = guarded(async (_input: Record<string, nev
   return parsed.success
     ? { ok: true, binding: bound, result: parsed.data }
     : refused(bound, failure("invalid_response", "The Cortex configuration API returned an unexpected discovery result.").failure);
+}, internalError);
+
+export const refreshModelCatalogHandler = guarded(async (
+  input: { workspaceId?: string }, context: PluginHandlerContext,
+): Promise<CatalogRefreshOutput> => {
+  const prepared = await prepare(input.workspaceId, context);
+  if ("refusal" in prepared) return refused(prepared.bound, prepared.refusal);
+  const { runtime, scope, bound } = prepared;
+  return serializeWrite(async () => {
+    const outcome = await callApi(runtime, {
+      action: "refresh", surface: "route_catalog", ...(scope.projectRoot ? { project: scope.projectRoot } : {}),
+    }, REFRESH_TIMEOUT_MS);
+    if (isFailure(outcome)) return refused(bound, outcome.failure);
+    if (!outcome.ok) return refused(bound, convertError(outcome.error, scope));
+    const typed = typedSurface("route_catalog", outcome.result, scope);
+    return isFailure(typed) ? refused(bound, typed.failure) : { ok: true, binding: bound, result: typed.result as never };
+  });
 }, internalError);
 
 export const onboardOpenCodeHandler = guarded(async (

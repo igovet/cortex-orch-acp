@@ -2,7 +2,7 @@
 
 User routing profiles are saved owner-level snapshots in
 `$XDG_CONFIG_HOME/cortex/routing-profiles.json` (format 1), not another
-runtime routing source. Activation validates a profile and writes its seven
+runtime routing source. Activation validates a profile and writes its eight
 managed routing keys into the user `routing.json` under `connections.lock`,
 preserving unrelated keys. This keeps the loader and precedence unchanged:
 project and `$CORTEX_ROUTING` files still win wholesale. The file retains

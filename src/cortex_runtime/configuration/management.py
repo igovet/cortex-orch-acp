@@ -22,7 +22,7 @@ Surfaces (:data:`SURFACES`):
 - ``routing`` -- the precedence of ``routing.auto_route.load_overrides``
   (project ``.cortex/routing.json``, then ``$CORTEX_ROUTING``, then the user
   ``routing.json``). Reads report every source, the effective one and its
-  rules; writes replace the seven supported keys of the user or project
+  rules; writes replace the eight supported keys of the user or project
   file, validated by ``auto_route._validate``. ``$CORTEX_ROUTING`` is
   read-only. ``models`` holds the owner's per-engine automatic-routing
   selection, model tiers and model policy (``routing.model_policy``).
@@ -47,8 +47,11 @@ Surfaces (:data:`SURFACES`):
   state) -- plus its tier and where it comes from, its effective policy,
   and which ``deny``/``auto_allow`` tokens of each routing file cover it.
   Reading never refreshes a catalog or revalidates a connection, so it writes
-  nothing; enabling or disabling an
-  engine or model is a ``routing`` update.
+  nothing; the separate ``refresh`` action re-reads every connection's model
+  list from its engine without a prompt (``catalog.refresh``) and adds a new
+  catalog snapshot. Each route reports ``enabled`` (routing ``enabled`` or
+  its built-in default: OpenCode models stay off until listed). Enabling or
+  disabling an engine or model is a ``routing`` update.
 
 Versioning: every read returns a ``revision`` -- ``"absent"`` or
 ``"sha256:<hex>"`` of the authoritative bytes (for the project row, of its
@@ -117,7 +120,7 @@ CEILING_KEYS = (
 )
 FALLBACK_KEYS = ("allowed_target_routes", "allowed_failure_classes", "budget", "data_recipient_consent")
 LIMIT_KEYS = ("attempts", "calls", "tokens", "concurrency")
-ROUTING_KEYS = ("pin", "deny", "auto_allow", "tiers", "providers", "engine_affinity", "models")
+ROUTING_KEYS = ("pin", "deny", "enabled", "auto_allow", "tiers", "providers", "engine_affinity", "models")
 ROUTING_TARGETS = ("project", "user")
 MCP_SERVER_KEYS = (
     "command", "args", "env", "enabled", "allowed_tools", "read_only_tools", "coordinator_tools",
@@ -719,7 +722,7 @@ def _opencode_model(model: str) -> bool:
 
 
 def validate_routing_rules(rules) -> dict[str, object]:
-    """The seven supported keys, checked strictly (every problem at once) and
+    """The eight supported keys, checked strictly (every problem at once) and
     then by the loader itself (``auto_route._validate``).
 
     Beyond the loader: a pin names a supported engine and an effort from
@@ -818,6 +821,21 @@ def validate_routing_rules(rules) -> dict[str, object]:
                 elif engine is not None and engine not in engines:
                     errors.add(f"rules.engine_affinity.{kind}", "invalid_value",
                                f"must be null or one of {', '.join(engines)}")
+    if "enabled" in rules:
+        enabled = rules["enabled"]
+        if not isinstance(enabled, Mapping):
+            errors.add("rules.enabled", "invalid_type", "must map an engine id to an array of exact model ids")
+        else:
+            for engine, models in enabled.items():
+                field = f"rules.enabled.{engine}"
+                if engine not in engines:
+                    errors.add(field, "invalid_value", f"engine must be one of {', '.join(engines)}")
+                elif (not isinstance(models, list) or len(set(map(str, models))) != len(models)
+                      or not all(isinstance(m, str) and _TOKEN.fullmatch(m) for m in models)):
+                    errors.add(field, "invalid_type", "must be an array of unique exact model ids without spaces")
+                elif engine == OPENCODE and not all(_opencode_model(m) for m in models):
+                    errors.add(field, "opencode_model_not_exact",
+                               "an OpenCode model is its exact provider/model id, e.g. anthropic/claude-sonnet-4-5")
     if "models" in rules:
         for where, code, message in model_policy.validate_models(
                 rules["models"], engines=engines, work_kinds=tuple(auto_route.WORK_KIND_ENGINES),
@@ -852,7 +870,7 @@ def _project_routing_path(project_root) -> Path:
 
 def update_routing(target: str, expected_revision, rules, *, project_root: str | None = None,
                    environ: Mapping[str, str] | None = None) -> dict[str, object]:
-    """Replace the seven supported keys of the ``user`` or ``project`` routing
+    """Replace the eight supported keys of the ``user`` or ``project`` routing
     file with ``rules`` (an omitted key is removed); other keys in the file
     are kept. The result's ``shadowed_by`` names the source that still wins
     when the written file is not the effective one."""
@@ -894,22 +912,55 @@ def update_routing(target: str, expected_revision, rules, *, project_root: str |
 
 # --- route catalog (read-only) -------------------------------------------------
 
-def _catalog_entries(record, environ) -> tuple:
+def _catalog_entries(record, environ) -> tuple[tuple, str | None]:
     """``record``'s routes as the model selector presents them -- its newest
-    genuine catalog snapshot, else its engine's seed catalog -- without the
-    selector's live connection revalidation, which may rewrite the registry."""
+    genuine catalog snapshot, else its engine's seed catalog -- and when that
+    snapshot was observed (``None`` for the seed), without the selector's
+    live connection revalidation, which may rewrite the registry."""
     from ..acp.config_options import presented_entries
     from ..catalog import discovery as catalog_discovery
     from ..catalog import store as catalog_store
 
-    entries = catalog_store.latest_connection_entries(record.id, environ)
-    if entries is None:
-        observation = catalog_discovery.seed_observation(record.engine)
-        if observation is None:
-            return ()
-        entries = catalog_discovery.build_catalog(
-            {record.id: record}, {record.id: observation}, seeded_connection_ids=frozenset({record.id})).entries
-    return presented_entries(entries)
+    view = catalog_store.latest_connection_snapshot(record.id, environ)
+    if view is not None:
+        return presented_entries(view.entries), view.created_at
+    observation = catalog_discovery.seed_observation(record.engine)
+    if observation is None:
+        return (), None
+    entries = catalog_discovery.build_catalog(
+        {record.id: record}, {record.id: observation}, seeded_connection_ids=frozenset({record.id})).entries
+    return presented_entries(entries), None
+
+
+#: Per-connection bound of one prompt-free catalog refresh; connections are
+#: refreshed in parallel so the whole action stays inside the plugin's
+#: write timeout.
+REFRESH_CATALOG_TIMEOUT_SECONDS = 20.0
+
+
+def refresh_route_catalog(project_root: str | None = None, environ: Mapping[str, str] | None = None) -> dict[str, object]:
+    """Re-read every registered connection's model list from its engine
+    (``catalog.refresh.perform_refresh``: ``initialize`` + ``session/new``,
+    never a prompt, so no model is called) and return the fresh
+    :func:`read_route_catalog` with one ``refresh`` outcome per connection.
+    A failed refresh keeps that connection's previous snapshot. The engines
+    start in a private empty directory, never in the project."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from ..catalog import refresh as catalog_refresh
+
+    env = _env(environ)
+    records = sorted(registry._parse_registry_bytes(_registry_bytes(env) or b"").connections.values(),
+                     key=lambda record: (record.engine, record.name, record.id))
+    with tempfile.TemporaryDirectory(prefix="cortex-catalog-refresh-") as workspace:
+        def run(record):
+            return catalog_refresh.perform_refresh(record, workspace, environ=env, timeout=REFRESH_CATALOG_TIMEOUT_SECONDS)
+        with ThreadPoolExecutor(max_workers=max(1, len(records))) as pool:
+            outcomes = list(pool.map(run, records))
+    view = read_route_catalog(project_root, env)
+    view["refresh"] = [dict(connection_id=outcome.connection_id, success=outcome.success, reason=outcome.reason)
+                       for outcome in outcomes]
+    return view
 
 
 def _token_matches(tokens, engine: str, model: str, *, wildcard: bool) -> list[str]:
@@ -945,10 +996,10 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
     source_rules = {view["source"]: view.get("rules") or {} for view in routing["sources"] if view.get("valid")}
     records = sorted(registry._parse_registry_bytes(_registry_bytes(env) or b"").connections.values(),
                      key=lambda record: (record.engine, record.name, record.id))
-    pairs, problems = [], []
+    pairs, problems, observed_at = [], [], {}
     for record in records:
         try:
-            entries = _catalog_entries(record, env)
+            entries, observed_at[record.id] = _catalog_entries(record, env)
         except PortableError as error:
             problems.append(dict(connection_id=record.id, code=error.code, message=error.remediation))
             continue
@@ -970,6 +1021,7 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
         engine, model = entry.route.engine, entry.route.model
         selectable = entry.is_selectable(record.state, record.auth_mode.value)
         deny_tokens = _token_matches(deny, engine, model, wildcard=True)
+        enabled = auto_route.model_enabled(rules, engine, model)
         allow_tokens = _token_matches(rules.get("auto_allow"), engine, model, wildcard=False)
         builtin_excluded = auto_route._default_auto_denied({}, entry)
         exclusion = auto_route._auto_exclusion(rules, entry)
@@ -981,7 +1033,7 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
             automatic = "connection_not_ready"
         elif record.launch_command is None:
             automatic = "no_launch_command"
-        elif deny_tokens:
+        elif deny_tokens or not enabled:
             automatic = "disabled"
         elif auto_route._is_seed(entry):
             automatic = "not_observed"
@@ -1003,8 +1055,8 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
             selection=policy.selection, auto_selected=policy.selected, policy=policy.attributes(),
             preferred_for=sorted(policy.preferred_for),
             preferred_inactive=bool(policy.preferred_for) and automatic != "eligible",
-            selectable=selectable, in_selector=selectable and not deny_tokens,
-            disabled=bool(deny_tokens), deny_tokens=deny_tokens,
+            selectable=selectable, in_selector=selectable and not deny_tokens and enabled,
+            disabled=bool(deny_tokens) or not enabled, deny_tokens=deny_tokens, enabled=enabled,
             engine_disabled=auto_route.engine_wildcard(engine) in deny,
             default_auto_excluded=(None if not builtin_excluded else
                                    "optional_engine" if engine in auto_route.DEFAULT_AUTO_DENY_ENGINES else "family"),
@@ -1019,11 +1071,16 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
         config = model_policy.engine_config(rules, engine)
         selected = list(config.get("auto") or ()) if "auto" in config else None
         offered_models = {entry.route.model for entry, record in pairs if record.engine == engine}
+        enabled_models = auto_route.enabled_models(rules, engine)
         engines.append(dict(
             engine=engine, optional=engine in OPTIONAL_ENGINES,
             selection="builtin" if selected is None else "listed", selected_models=selected,
             unmatched_selected=[model for model in selected or () if model not in offered_models],
-            connections=[dict(id=record.id, name=record.name, state=record.state.value, qualified=record.qualified)
+            enabled_models=None if enabled_models is None else list(enabled_models),
+            enabled_default=engine not in auto_route.DEFAULT_DISABLED_ENGINES,
+            unmatched_enabled=[model for model in enabled_models or () if model not in offered_models],
+            connections=[dict(id=record.id, name=record.name, state=record.state.value, qualified=record.qualified,
+                              catalog_observed_at=observed_at.get(record.id))
                          for record in records if record.engine == engine],
             disabled=token in deny, automatic=providers is None or engine in providers,
             default_auto_excluded=engine in auto_route.DEFAULT_AUTO_DENY_ENGINES,
@@ -1458,10 +1515,13 @@ def _dispatch(request, environ) -> dict[str, object]:
         _fields(request, ("project",))
         return read_all(request.get("project"), environ)
     if surface == ROUTE_CATALOG:
-        if action != "read":
-            raise _error("unsupported_action", f"{ROUTE_CATALOG} is read-only; enable or disable an engine or model "
-                                               "with a routing update.", field="action")
+        if action not in ("read", "refresh"):
+            raise _error("unsupported_action", f"{ROUTE_CATALOG} is read-only (or 'refresh' to re-read the engines' "
+                                               "model lists); enable or disable an engine or model with a routing "
+                                               "update.", field="action")
         _fields(request, ("project",))
+        if action == "refresh":
+            return refresh_route_catalog(request.get("project"), environ)
         return read_route_catalog(request.get("project"), environ)
     if surface not in SURFACES:
         raise _error("unknown_surface", f"surface must be one of {', '.join(SURFACES)} (or 'all' or "
