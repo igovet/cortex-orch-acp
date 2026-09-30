@@ -292,6 +292,57 @@ try {
     assert.ok(family.error.errors.some((item: any) => item.code === "opencode_model_not_exact"));
   }
 
+  // User profiles are revision-checked snapshots and activation writes user routing.
+  {
+    const initial = await call(readConfig, { surface: "routing_profiles", workspaceId: WORKSPACE }, ctx);
+    assert.equal(initial.ok, true, JSON.stringify(initial));
+    assert.equal(initial.result.state, "none");
+    const created = await call(updateConfig, { surface: "routing_profiles", action: "create", workspaceId: WORKSPACE,
+      expected_revision: initial.result.revision, name: "mix", description: "All configured engines", from_current: true }, ctx);
+    assert.equal(created.ok, true, JSON.stringify(created));
+    assert.equal(created.result.profiles.length, 1);
+    const stale = await call(updateConfig, { surface: "routing_profiles", action: "create",
+      expected_revision: initial.result.revision, name: "stale", from_current: true }, ctx);
+    assert.equal(stale.ok, false);
+    assert.equal(stale.error.code, "revision_conflict");
+    const renamed = await call(updateConfig, { surface: "routing_profiles", action: "update",
+      expected_revision: created.result.revision, name: "mix", rename_to: "claude-only",
+      description: "Claude alone", rules: { providers: ["claude-agent-acp"] } }, ctx);
+    assert.equal(renamed.ok, true, JSON.stringify(renamed));
+    assert.deepEqual(renamed.result.profiles.map((item: any) => item.name), ["claude-only"]);
+    const activated = await call(updateConfig, { surface: "routing_profiles", action: "activate", workspaceId: WORKSPACE,
+      expected_revision: renamed.result.revision, expected_routing_revision: renamed.result.user_routing_revision, name: "claude-only" }, ctx);
+    assert.equal(activated.ok, true, JSON.stringify(activated));
+    assert.equal(activated.result.state, "in_sync");
+    assert.equal(activated.result.active, "claude-only");
+    assert.equal(activated.result.shadowed_by, "project");
+    noLeak(activated);
+    const detached = await call(updateConfig, { surface: "routing_profiles", action: "deactivate",
+      expected_revision: activated.result.revision }, ctx);
+    assert.equal(detached.ok, true, JSON.stringify(detached));
+    assert.equal(detached.result.state, "none");
+    const deleted = await call(updateConfig, { surface: "routing_profiles", action: "delete",
+      expected_revision: detached.result.revision, name: "claude-only" }, ctx);
+    assert.equal(deleted.ok, true, JSON.stringify(deleted));
+    assert.equal(deleted.result.profiles.length, 0);
+  }
+
+  // The plugin contract preserves the exact OpenCode model selection, tier and purpose policy.
+  {
+    const before = await call(readConfig, { surface: "routing" }, ctx);
+    const user = before.result.sources.find((source: any) => source.source === "user");
+    const updated = await call(updateConfig, {
+      surface: "routing", target: "user", expected_revision: user.revision,
+      rules: { models: { opencode: {
+        auto: ["zai-coding-plan/glm-5"], tiers: { "zai-coding-plan/glm-5": "standard" },
+        policy: { "zai-coding-plan/glm-5": { preferred_for: ["review"] } },
+      } } },
+    }, ctx);
+    assert.equal(updated.ok, true, JSON.stringify(updated));
+    const source = updated.result.sources.find((item: any) => item.source === "user");
+    assert.deepEqual(source.rules.models.opencode.policy["zai-coding-plan/glm-5"].preferred_for, ["review"]);
+  }
+
   // Engines & models: the read-only route catalog is bound to the workspace,
   // lists every engine (OpenCode v2 optional, never registered by a read) and
   // cannot be written; a whole engine is switched off by a routing update.

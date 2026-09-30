@@ -17,7 +17,7 @@ import { z } from "zod";
 
 export const CONFIG_API_VERSION = 1;
 
-export const configSurfaces = ["user_defaults", "project_ceiling", "routing", "mcp_servers", "connections"] as const;
+export const configSurfaces = ["user_defaults", "project_ceiling", "routing", "routing_profiles", "mcp_servers", "connections"] as const;
 export type ConfigSurface = typeof configSurfaces[number];
 /** Every surface a client may read. ``route_catalog`` is read-only: the
  * derived state of every engine and model; enabling or disabling one is a
@@ -63,6 +63,12 @@ const defaultsPatch = z.strictObject({
 });
 
 // The six keys the routing loader supports; an omitted key is removed.
+const modelRules = z.strictObject({
+  auto: z.array(text()).max(1000).optional(),
+  tiers: z.record(text(), text(64)).optional(),
+  policy: z.record(text(), z.record(text(), z.unknown())).optional(),
+});
+
 const routingRules = z.strictObject({
   pin: z.record(text(128), text()).optional(),
   deny: z.array(text()).max(1000).optional(),
@@ -70,6 +76,7 @@ const routingRules = z.strictObject({
   tiers: z.record(text(), text(64)).optional(),
   providers: z.array(text(64)).max(16).optional(),
   engine_affinity: z.record(text(64), text(64).nullable()).optional(),
+  models: z.record(text(64), modelRules).optional(),
 });
 
 // An ``env`` value is a new string or ``{"keep": true}`` for the value
@@ -196,12 +203,40 @@ export const routingResult = z.object({
     tiers: z.array(z.string()),
     efforts: z.array(z.string()),
     work_kinds: z.array(z.string()),
+    work_kind_labels: z.record(z.string(), z.string()),
+    work_kind_roles: z.record(z.string(), z.array(z.string())),
+    builtin_affinity: z.record(z.string(), z.string().nullable()),
     default_user_deny: z.array(z.string()),
   }),
   target: z.enum(["user", "project"]).optional(),
   written_revision: revision.optional(),
   // The source that still wins when the written file is not effective.
   shadowed_by: z.string().nullable().optional(),
+  profile: z.object({ name: z.string().optional(), state: z.string(), written_through: z.boolean().optional(), code: z.string().optional() }).nullable().optional(),
+  ...writeMeta,
+});
+
+export const routingProfilesResult = z.object({
+  surface: z.literal("routing_profiles"),
+  path: z.string(),
+  revision,
+  active: z.string().nullable(),
+  state: z.enum(["none", "in_sync", "diverged"]),
+  applied: z.record(z.string(), z.unknown()).nullable(),
+  profiles: z.array(z.object({
+    name: z.string(), description: z.string(), revision,
+    rules: z.record(z.string(), z.unknown()),
+    created_at: z.string().nullable(), updated_at: z.string().nullable(),
+    summary: z.object({
+      providers: z.array(z.string()).nullable().optional(),
+      denied_engines: z.array(z.string()),
+      selected_models: z.record(z.string(), z.number()),
+    }),
+  })),
+  user_routing_revision: revision,
+  shadowed_by: z.string().nullable(),
+  matches_profile: z.array(z.string()),
+  routing: routingResult.optional(),
   ...writeMeta,
 });
 
@@ -298,6 +333,9 @@ const catalogRoute = z.object({
   auto_allow_tokens: z.array(z.string()),
   // "eligible" or the first reason automatic routing skips the route.
   automatic: z.string(),
+  auto_selected: z.boolean().nullable(),
+  preferred_for: z.array(z.string()),
+  preferred_inactive: z.boolean(),
   superseded_by: z.string().nullable(),
   // Per routing file (project/env/user) that is valid.
   matches: z.record(z.string(), tokenMatches),
@@ -347,6 +385,7 @@ const surfaceOutcome = <Result extends z.ZodType>(result: Result) => z.union([
 export const allSurfacesResult = z.object({
   user_defaults: surfaceOutcome(userDefaultsResult),
   routing: surfaceOutcome(routingResult),
+  routing_profiles: surfaceOutcome(routingProfilesResult),
   mcp_servers: surfaceOutcome(mcpServersResult),
   connections: surfaceOutcome(connectionsResult),
   project_ceiling: surfaceOutcome(projectCeilingResult).optional(),
@@ -356,6 +395,7 @@ export const surfaceResults = {
   user_defaults: userDefaultsResult,
   project_ceiling: projectCeilingResult,
   routing: routingResult,
+  routing_profiles: routingProfilesResult,
   mcp_servers: mcpServersResult,
   connections: connectionsResult,
 } as const;
@@ -380,6 +420,7 @@ export const configReadOutput = envelope(z.union([
   userDefaultsResult,
   projectCeilingResult,
   routingResult,
+  routingProfilesResult,
   mcpServersResult,
   connectionsResult,
   routeCatalogResult,
@@ -388,6 +429,7 @@ export const configUpdateOutput = envelope(z.union([
   userDefaultsResult,
   projectCeilingResult,
   routingResult,
+  routingProfilesResult,
   mcpServersResult,
   connectionsResult,
 ]));
@@ -433,6 +475,16 @@ export const updateConfig = defineRpc({
       expected_revision: revision,
       rules: routingRules,
     }),
+    z.discriminatedUnion("action", [
+      z.strictObject({ surface: z.literal("routing_profiles"), action: z.literal("create"), workspaceId: workspaceId.optional(), expected_revision: revision,
+        name: text(40).min(1), description: text(256).optional(), rules: routingRules.optional(), from_current: z.literal(true).optional() }),
+      z.strictObject({ surface: z.literal("routing_profiles"), action: z.literal("update"), workspaceId: workspaceId.optional(), expected_revision: revision,
+        name: text(40).min(1), rename_to: text(40).min(1).optional(), description: text(256).optional(), rules: routingRules.optional(), expected_routing_revision: revision.optional() }),
+      z.strictObject({ surface: z.literal("routing_profiles"), action: z.literal("delete"), workspaceId: workspaceId.optional(), expected_revision: revision, name: text(40).min(1) }),
+      z.strictObject({ surface: z.literal("routing_profiles"), action: z.literal("activate"), workspaceId: workspaceId.optional(), expected_revision: revision,
+        expected_routing_revision: revision, name: text(40).min(1) }),
+      z.strictObject({ surface: z.literal("routing_profiles"), action: z.literal("deactivate"), workspaceId: workspaceId.optional(), expected_revision: revision }),
+    ]),
     z.strictObject({
       surface: z.literal("mcp_servers"),
       expected_revision: revision,

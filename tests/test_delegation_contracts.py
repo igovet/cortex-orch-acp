@@ -106,3 +106,12 @@ def test_overlong_result_summary_names_the_limit():
     with pytest.raises(StoreError) as error: dc.validate('worker','result_submit',args)
     assert (error.value.field,error.value.received,error.value.expected)==('arguments.summary','4053 Unicode characters','between 1 and 4000 characters')
     assert '4000' in error.value.correction
+
+
+def test_plan_accepts_exact_routes_whose_model_ids_hold_slashes_and_commas():
+    for route in ('opencode/anthropic/claude-sonnet-4-5', 'opencode/anthropic/claude-sonnet-4-5,thinking'):
+        args=deepcopy(PLAN); args['plan']['tasks'][0].update(model=route, model_reason='The owner selected this route.')
+        dc.validate('coordinator','plan_submit',args)
+    for route in ('opencode/a b', 'opencode/', 'unknown-acp/model'):
+        args=deepcopy(PLAN); args['plan']['tasks'][0].update(model=route, model_reason='x')
+        with pytest.raises(StoreError,match='invalid_arguments'): dc.validate('coordinator','plan_submit',args)

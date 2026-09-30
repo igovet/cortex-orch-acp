@@ -10,6 +10,7 @@ This reference describes configuration the current ACP runtime actually reads. T
 | Connection secrets | `$XDG_CONFIG_HOME/cortex/secrets/<connection-id>` | User-wide private files, written by setup. Native-account credentials can instead be referenced from the existing user engine directory. |
 | User defaults and policy ceiling | `$XDG_CONFIG_HOME/cortex/defaults.json` | User-wide base configuration. |
 | Routing rules | `<project>/.cortex/routing.json`, then `$CORTEX_ROUTING`, then `$XDG_CONFIG_HOME/cortex/routing.json` (or `~/.config/cortex/routing.json`) | First existing file wins; files are not merged. Setup writes the user file's default `{"deny": ["gpt-5.5", "haiku"]}`. |
+| User routing profiles | `$XDG_CONFIG_HOME/cortex/routing-profiles.json` | User-only saved routing snapshots. Activation writes a snapshot into user `routing.json`; project routing files never use profiles. |
 | Cortex-owned external MCP servers | `$XDG_CONFIG_HOME/cortex/mcp-servers.json` | User-wide only. Project-local MCP registries are intentionally ignored. |
 | Engine-native state and catalog snapshots | `$XDG_STATE_HOME/cortex/connections/<id>/...` or `~/.local/state/cortex/...` | User-wide mutable state, separate from configuration. |
 | Paseo launch record | `~/.config/cortex/paseo-plugin-launch.json` | Owner-private non-secret command, environment and shim metadata written by the setup helper. |
@@ -18,9 +19,13 @@ This reference describes configuration the current ACP runtime actually reads. T
 
 ### Manage settings in Paseo
 
-The plugin implements a **Cortex Settings** screen for supported Cortex configuration; this is not Paseo's plugin-settings document. However, independent desktop checks on installed Paseo 0.10.0 found the plugin enabled and running but did not find its screen in Settings or its command in the command palette. Earlier implementation/test evidence describes the screen, while live access in the tested host is inconsistent and remains unverified; do not assume an owner can reliably reach it. The screen has six sections: user defaults, Engines & models, project ceiling, routing, MCP servers, and connections. Editable fields use typed controls (such as text, number, selectors, switches, and lists), not JSON text editors; values the form cannot safely represent are read-only rather than rewritten. Select a workspace for project-scoped settings. This is a bounded management interface, not a control for every runtime or task setting. Use the documented setup CLI as a fallback where a supported command exists; for OpenCode onboarding, see [the OpenCode adapter](acp/opencode-adapter.md#onboarding). See [verification guidance](project/verification.md) for the desktop findings and untested flows.
+The plugin implements a **Cortex Settings** screen for supported Cortex configuration; this is not Paseo's plugin-settings document. However, independent desktop checks on installed Paseo 0.10.0 found the plugin enabled and running but did not find its screen in Settings or its command in the command palette. Earlier implementation/test evidence describes the screen, while live access in the tested host is inconsistent and remains unverified; do not assume an owner can reliably reach it. The screen has seven sections: user defaults, Engines & models, project ceiling, routing, user routing profiles, MCP servers, and connections. Editable fields use typed controls (such as text, number, selectors, switches, and lists), not JSON text editors; values the form cannot safely represent are read-only rather than rewritten. Select a workspace for project-scoped settings. This is a bounded management interface, not a control for every runtime or task setting. Use the documented setup CLI as a fallback where a supported command exists; for OpenCode onboarding, see [the OpenCode adapter](acp/opencode-adapter.md#onboarding). See [verification guidance](project/verification.md) for the desktop findings and untested flows.
 
 In **Engines & models**, the engine switch adds/removes a `<engine>/*` token in `deny`: it disables model selection and dispatch for that engine but does not remove its connection or credentials. This is a routing rule, not a connection-registration toggle: use the Connections section or setup command to register a connection; removing one is a separate operation. The separate automatic-routing switch edits `providers`, which restricts automatic routing, failover, and pins but does not hide models from manual selection. Per-model switches edit `deny` (including selector visibility and dispatch) or `auto_allow` (lifting only a built-in automatic exclusion for that exact model). `deny` takes precedence; provider policy, catalog and connection readiness, and other runtime eligibility checks still apply. The screen shows effective status and matching rules. Project routing takes precedence over `$CORTEX_ROUTING`, then user routing; the first existing file wins and files do not merge. Review shadowing warnings before saving. A newly created project file is seeded from effective rules, not created empty.
+
+The `routing` surface carries the `models` key (per-engine automatic-routing selection, tiers and per-model policy). In **Engines & models**, each discovered model has an automatic-ranking switch, a light, standard, deep, or flagship tier selector, and work-kind preference switches using the runtime's work-kind labels. A preference can be selected only for a currently auto-eligible model or one explicitly selected in `models.<engine>.auto`; excluded models require that explicit selection first. Saving writes the selected engine/model values and `preferred_for` lists through the revision-checked routing API, preserving other per-model policy attributes. The read-only `route_catalog` reports each route's `tier_source`, engine `selection` mode, `auto_selected` membership, `configured_tier`, effective `policy`, and `not_selected` reason, plus every engine's `selected_models` and `unmatched_selected` ids.
+
+In **User routing profiles**, create a named snapshot from current user routing, choose a saved profile, edit and save its typed routing rules and description or name, activate it, detach it, or delete an inactive profile. The screen shows `in_sync`/`diverged` state, matching current user routing, and project/environment shadowing. Every mutation uses the read revision; activation and active rules changes also use the user-routing revision. A conflict offers reload rather than overwriting. Re-activate a diverged profile with fresh revisions to restore it, or deactivate to keep the current user routing. A profile never applies directly to a project file.
 
 The owner API is version 1: `cortex_runtime.configuration.management`. The typed plugin RPCs are `cortex.config.read`, `cortex.config.update`, `cortex.config.opencode.discover`, and `cortex.config.opencode.onboard`. The plugin runs this API through its selected Cortex launch, using that launch's HOME/XDG configuration. Projects are resolved from the selected Paseo workspace; requests do not supply paths, commands, or binaries. Paseo RPC invocation is gated by its daemon authorization, and writes require the read's current revision. A stale revision returns a conflict; reload the latest value before retrying rather than overwriting it. A timed-out write can have an unknown outcome: re-read before retry.
 
@@ -119,7 +124,7 @@ Access mode is a separate task-scoped user choice, not a JSON option: new tasks 
 
 ## Routing rules
 
-The routing loader reads six keys: `pin`, `deny`, `auto_allow`, `tiers`, `providers`, and `engine_affinity`; additional JSON keys are currently ignored. Its validation and selection logic are in `routing.auto_route`. These are the six supported routing keys (unknown keys are ignored):
+The routing loader reads seven keys: `pin`, `deny`, `auto_allow`, `tiers`, `providers`, `engine_affinity` and `models`; additional JSON keys are currently ignored. Its validation and selection logic are in `routing.auto_route` and `routing.model_policy`. These are the seven supported routing keys (unknown keys are ignored):
 
 ```json
 {
@@ -138,22 +143,83 @@ The routing loader reads six keys: `pin`, `deny`, `auto_allow`, `tiers`, `provid
     "implementation": "claude-agent-acp",
     "testing": null,
     "*": "codex-acp"
+  },
+  "models": {
+    "opencode": {
+      "auto": ["anthropic/claude-sonnet-4-5"],
+      "tiers": {"anthropic/claude-sonnet-4-5": "standard"},
+      "policy": {"anthropic/claude-sonnet-4-5": {"preferred_for": ["review"]}}
+    },
+    "codex-acp": {
+      "policy": {"gpt-6-sol": {"preferred_for": ["design"], "max_effort": "xhigh"}}
+    }
   }
 }
 ```
 
 - `pin`: object mapping worker role names or `*` to `engine/model` or `engine/model:effort`. A pin is strict: unavailable or disallowed pins fail instead of silently switching routes.
 - `deny`: array of model tokens, each optionally prefixed `engine/`. A token is an exact model id; a versioned id, which also covers that version's variants (`gpt-5.5` covers `gpt-5.5[1m]`, not `gpt-5.6-luna`); or a bare family name, which covers every version and alias of that family (`haiku` covers `haiku`, `claude-haiku-4-5` and `claude-haiku-4-5-20251001`). A token with a `[...]` variant is exact only. The special `<supported-engine>/*` token disables every model for that engine, including future models. Explicit deny applies to automatic routing, pins, dispatch, and the model selector, and always wins; it does not unregister the connection.
-- `auto_allow`: tokens of the same form that may enter automatic selection despite the built-in Haiku and OpenCode exclusions. OpenCode model IDs name their provider, so an OpenCode entry is the exact route, for example `"opencode/anthropic/claude-sonnet-4-5"`. It does not override `deny`, `providers`, catalog availability, connection readiness or quota limits.
-- `tiers`: object mapping model names to `flagship`, `deep`, `standard`, or `light`. Built-in known families/models are classified automatically; this key overrides that classification. A Luna model moved out of `light` routes like any model of its new tier; only the Luna effort floor (`high`) and `max` still apply.
+- `auto_allow`: tokens of the same form that may enter automatic selection despite the built-in Haiku and OpenCode exclusions (on an engine without a `models` selection list; a list replaces these exclusions). OpenCode model IDs name their provider, so an OpenCode entry is the exact route, for example `"opencode/anthropic/claude-sonnet-4-5"`. It does not override `deny`, `providers`, catalog availability, connection readiness or quota limits.
+- `tiers`: object mapping model names to `flagship`, `deep`, `standard`, or `light`, for every engine. Built-in known families/models are classified automatically; this key overrides that classification, and a per-engine `models` tier overrides this key. A Luna model moved out of `light` routes like any model of its new tier; only the Luna effort floor (`high`) and `max` still apply.
 - `providers`: array restricted to `codex-acp`, `claude-agent-acp` and/or `opencode`. When absent, every configured provider is considered. It restricts automatic routing, failover and pins; it does not hide models from the selector or disable manual selection. A disallowed pin is refused.
 - `engine_affinity`: object mapping a work kind or `*` to `codex-acp`, `claude-agent-acp`, `opencode`, or `null` (no lean). Work kinds are `implementation`, `operations`, `debugging`, `testing`, `investigation`, `review`, `design`, `writing`, `planning`, and `analysis` (each worker role's kind is `routing.auto_route.ROLE_WORK_KINDS`; an unlisted role is `implementation`). A kind named here wins, then `*`, then the built-in default: `implementation` and `operations` lean to `codex-acp`; `investigation`, `review`, `design`, `writing`, `planning` and `analysis` lean to `claude-agent-acp`; `debugging` and `testing` are neutral. Affinity breaks ties only after plan usage and retry diversification (a plan at least 10 points less used wins first), and it is itself broken by the 85% quota band only as a late tie breaker; it never overrides a pin, `deny`, `providers`, availability or the 100% quota exclusion. An unknown kind or engine makes the file invalid.
+- `models`: object mapping a supported engine id to an object with any of `auto`, `tiers` and `policy`, each keyed by the exact model id the engine reports (OpenCode ids are `<provider>/<model>`). Validation (`routing.model_policy.validate_models`) reports every problem with its field path.
+  - `auto`: array of unique model ids. Present, it is the complete list of that engine's models automatic routing may use (`[]`: none), replacing the built-in Haiku/optional-engine exclusions, `auto_allow` and newest-version-only routing for that engine; absent, the built-in rules apply. `deny` and `providers` still win; a `pin` or the model selector can still use any offered model.
+  - `tiers`: model id to `flagship`, `deep`, `standard` or `light`; it wins over the legacy top-level `tiers`, which wins over the built-in classification.
+  - `policy`: model id to an object of optional attributes, each overriding the model's built-in value (`null` removes it): `effort_floor` and `max_effort` (efforts `low`..`max`; without `max_effort` a flagship-tier model stops at `high`), `effort_ladder` (1-3 strictly ascending efforts a light model runs at for light work, standard work, and standard work that fell short once), `also_standard_for` (work kinds for which a light model is also a standard-tier candidate, as the built-in Luna rule does for `testing`), `preferred_for` (work kinds this model is preferred for: it ranks first among its tier's candidates for that work, after plan usage and retry diversification and before engine affinity) and `request_names` (1-16 lowercase extra spellings, Cyrillic stems taking Russian endings, that count as the user naming this model's family in an explicit flagship request; ordinary request, work or negation words are refused).
+
+  `preferred_for` uses the same ten work kinds as `engine_affinity`. The API's
+  `routing.builtin` includes English `work_kind_labels`, the worker-role list
+  `work_kind_roles`, and `builtin_affinity` for each kind. A model with a
+  non-empty `preferred_for` must appear in its engine's explicit `models.auto`
+  list when that list exists (`preferred_not_selected` otherwise). Without a
+  list, built-in eligibility is dynamic: the route catalog marks a preference
+  `preferred_inactive` when its route is not auto-eligible, and
+  `list_route_options.preferred` includes only auto-eligible routes. The latter
+  also returns `affinity_source` (`routing.json` or `builtin`) per kind.
+
+  The coordinator sees the effective selection, tiers and policy only through `list_route_options`; no prompt or tool schema names a model. See [routing](acp/routing-and-fallback.md#owner-configured-models-selection-tiers-and-policy).
 
 Precedence is first existing routing file: project `<project>/.cortex/routing.json`, then `CORTEX_ROUTING`, then user `routing.json`. The files do not merge, so a project file that should keep the defaults must list them itself. An existing malformed file fails closed. If no file exists, built-in automatic routing applies.
 
+### User routing profiles
+
+The owner management API has a `routing_profiles` surface with `read`,
+`create`, `update`, `delete`, `activate`, and `deactivate` actions. The file is
+owner-only JSON format 1: `format`, `profiles` (named entries with description,
+seven-key `rules`, and timestamps), `active`, and `applied` (the profile and
+user-routing revisions last materialized). Names are lowercase letters,
+digits or hyphens, 1–40 characters; at most 32 entries exist. Every mutation
+requires the latest profile-file `expected_revision`; activation and an active
+profile's rules update also require the user routing file's
+`expected_routing_revision`. A mismatch returns `revision_conflict` without
+writing. An unknown format is refused, not migrated implicitly.
+
+Create accepts either `rules` or `from_current: true` to snapshot only the
+seven managed keys of the **user** routing file. Activation validates those
+rules again, preserves unmanaged keys in user `routing.json`, and writes it
+under `connections.lock`. It does not change an in-flight worker, a project
+routing file, or the policy ceiling. A project file or `$CORTEX_ROUTING` still
+wins; `shadowed_by` reports that. `read` reports `none` (no active profile),
+`in_sync` (user routing bytes and profile revision match the last application),
+or `diverged` (a hand edit or interrupted two-file write). Re-activate using
+fresh revisions to repair divergence, or deactivate to leave the current
+user routing in place and detach it. Deleting the active profile is refused.
+An ordinary user `routing` save writes through to its active profile only
+while `in_sync`; a diverged save changes routing but never silently overwrites
+the saved profile. A project save never writes a profile.
+
+For a Claude-only profile, use `providers: ["claude-agent-acp"]` and deny
+other connected engines with their `<engine>/*` tokens if they must also be
+hidden from manual selection. For a mixed profile, remove the provider
+restriction and other-engine deny tokens, then choose exact model IDs under
+`models.<engine>.auto`, including OpenCode IDs such as
+`zai-coding-plan/<observed-model-id>` only when the local catalog actually
+offers them. These are examples, not built-in presets.
+
 Default user file: `scripts/cortex_acp_setup.py init-storage`, `apply-routing-defaults`, `install-paseo-plugin` and the Paseo plugin's Git install hook (`bootstrap-paseo-git-install`) create `$XDG_CONFIG_HOME/cortex/routing.json` as exactly `{"deny": ["gpt-5.5", "haiku"]}` when it is absent. When the file already exists, setup keeps every setting and only appends the default `deny` tokens it lacks. It reports an invalid file and leaves it untouched. The same step removes every route whose model the global `deny` names from a leftover `$XDG_CONFIG_HOME/cortex/route-policy.json`, the per-role policy file that automatic routing replaced and the runtime no longer reads. It keeps a private `route-policy.json.cortex-backup-<ns>` copy first, preserves all other content, and removes a role left with no route. Neither the plugin nor the package ships a `route-policy.json`. Project files and `$CORTEX_ROUTING` are never modified. See `routing.defaults`.
 
-Latest version only: automatic routing uses only the newest engine-confirmed version of each model family on an engine. Codex `gpt-6-luna` supersedes `gpt-5.6-luna`; Claude `opus[1m]` ("Opus 5.5") supersedes `claude-opus-5[1m]` and `claude-opus-4-8`, and `claude-sonnet-5` supersedes `claude-sonnet-4-6`. Family and version are parsed from the model id, or for a versionless alias from the engine's own display name for the same family, so a new release takes over without configuration. `deny` is applied first, so if it removes the newest version, the newest non-denied version is routed. A model whose version cannot be parsed, such as a bare `sonnet` alias, is never treated as older. A superseded version stays in the model selector. It is reported with `auto_eligible: false` and `superseded_by` in `list_route_options`, and under `superseded` in the route decision. A plan hint naming it is recorded as `ignored:superseded`. An explicit `pin` of an older version is still honoured. Supersession does not depend on availability: an older version does not take over while the newest is exhausted or recorded unavailable.
+Latest version only: automatic routing uses only the newest engine-confirmed version of each model family on an engine. Codex `gpt-6-luna` supersedes `gpt-5.6-luna`; Claude `opus[1m]` ("Opus 5.5") supersedes `claude-opus-5[1m]` and `claude-opus-4-8`, and `claude-sonnet-5` supersedes `claude-sonnet-4-6`. Family and version are parsed from the model id, or for a versionless alias from the engine's own display name for the same family, so a new release takes over without configuration. `deny` is applied first, so if it removes the newest version, the newest non-denied version is routed. A model whose version cannot be parsed, such as a bare `sonnet` alias, is never treated as older. An engine with a `models` selection list is exempt: the owner's list decides, and an older selected version is still routed (its `superseded_by` stays informational). A superseded version stays in the model selector. It is reported with `auto_eligible: false` and `superseded_by` in `list_route_options`, and under `superseded` in the route decision. A plan hint naming it is recorded as `ignored:superseded`. An explicit `pin` of an older version is still honoured. Supersession does not depend on availability: an older version does not take over while the newest is exhausted or recorded unavailable.
 
 Legacy `route-policy.json`: `~/.config/cortex/route-policy.json` (`$XDG_CONFIG_HOME/cortex/route-policy.json`) is a legacy file. The runtime no longer reads it: `routing.json` plus automatic routing replaced it. Its model lists, whether or not they name Luna, have no effect. Setup only prunes denied routes from it and never deletes it. Configure routing in `routing.json`; the available models and their tiers are in `list_route_options`.
 

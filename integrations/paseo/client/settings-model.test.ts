@@ -15,6 +15,8 @@ import {
   setEngineEnabled,
   setModelAutoAllowed,
   setModelEnabled,
+  setModelAutoSelected,
+  setModelPreferredFor,
   shadowingSource,
   unmatchedTokens,
   type CatalogRoute,
@@ -104,7 +106,7 @@ function catalogRoute(engine: string, model: string, extra: Partial<CatalogRoute
   return {
     route_id: "xr_aaaaaaaaaaaa", engine, model, model_name: model, connection_id: "cn_0123456789ab", connection_name: "Main",
     connection_state: "configured", qualified: true, observed: true, tier: "standard", selectable: true, in_selector: true,
-    disabled: false, deny_tokens: [], engine_disabled: false, default_auto_excluded: null, auto_allow_tokens: [], automatic: "eligible",
+    disabled: false, deny_tokens: [], engine_disabled: false, default_auto_excluded: null, auto_allow_tokens: [], automatic: "eligible", auto_selected: engine !== "opencode",
     superseded_by: null, matches: { user: { deny: [], auto_allow: [] } }, ...extra,
   };
 }
@@ -581,4 +583,26 @@ test("routing validation: the only wildcard is <engine>/* in the deny list", () 
   const bad = buildRoutingRules({ ...emptyRoutingForm(), deny: ["*", "gemini/*", "gpt-*"], auto_allow: ["opencode/*"] }, vocabulary);
   assert.equal(bad.ok, false);
   if (!bad.ok) assert.deepEqual(Object.keys(bad.errors).sort(), ["rules.auto_allow[0]", "rules.deny[0]", "rules.deny[1]", "rules.deny[2]"]);
+});
+
+test("purpose preferences round-trip other policy attributes and require an auto-selected model", () => {
+  const parsed = routingRulesToForm({ models: { opencode: {
+    auto: ["zai-coding-plan/glm-5"], tiers: { "zai-coding-plan/glm-5": "standard" },
+    policy: { "zai-coding-plan/glm-5": { preferred_for: ["review"], effort_floor: "medium" } },
+  } } });
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const view = routing();
+  let form = setModelPreferredFor(parsed.form, "opencode", "zai-coding-plan/glm-5", "code", true);
+  const built = buildRoutingRules(form, routingVocabulary(view));
+  assert.equal(built.ok, true);
+  if (built.ok) assert.deepEqual(built.value.models?.opencode?.policy?.["zai-coding-plan/glm-5"], {
+    preferred_for: ["review", "code"], effort_floor: "medium",
+  });
+  form = setModelAutoSelected(form, "opencode", "zai-coding-plan/glm-5", false, ["zai-coding-plan/glm-5"]);
+  const removed = buildRoutingRules(form, routingVocabulary(view));
+  assert.equal(removed.ok, true);
+  if (removed.ok) assert.deepEqual(removed.value.models?.opencode?.policy?.["zai-coding-plan/glm-5"], {
+    preferred_for: [], effort_floor: "medium",
+  });
 });

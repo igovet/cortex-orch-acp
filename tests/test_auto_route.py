@@ -213,7 +213,7 @@ def test_default_route_skips_haiku_and_an_explicit_pin_can_restore_it(tmp_path, 
     with pytest.raises(PortableError) as unavailable:
         auto_route.choose("worker-technical-writer", project, environ)
     assert unavailable.value.code == "no_available_route"
-    assert "Haiku" in unavailable.value.remediation
+    assert "claude-agent-acp/claude-haiku-4-5-20251001 excluded from automatic routing" in unavailable.value.remediation
 
 
 def test_codex_usage_is_read_from_its_newest_rollout(tmp_path):
@@ -358,7 +358,7 @@ def test_plan_usage_decides_between_suitable_engines_before_affinity():
     assert auto_route.USAGE_MARGIN == 10.0
     picked, decision = _rank("standard", "worker-backend-dev", codex=30, claude=10)
     assert picked.route.model == "sonnet" and decision["decided_by"] == "usage"
-    assert decision["rank_version"] == 7
+    assert decision["rank_version"] == 8
     assert decision["usage"] == dict(compared=True, margin=10.0, least_used_percent=10)
     assert {c["route"]: c["usage_band"] for c in decision["candidates"]} == {
         "claude-agent-acp/sonnet": 0, "codex-acp/gpt-5.6-sol": 2, "codex-acp/gpt-5.6-terra": 2}
@@ -1106,7 +1106,7 @@ def test_hard_deep_and_flagship_work_never_goes_to_luna(tmp_path, monkeypatch, r
     with pytest.raises(PortableError) as refused:
         auto_route.choose(role, project, environ, **kwargs)
     assert refused.value.code == "no_available_route"
-    assert "Luna is not used for this work" in refused.value.remediation
+    assert "(codex-acp/gpt-6-luna) are not used for this work" in refused.value.remediation
 
 
 @pytest.mark.parametrize("role,kwargs", [
@@ -1145,8 +1145,17 @@ def test_route_menu_and_hint_preview_describe_the_luna_rule(tmp_path, monkeypatc
     menu = auto_route.route_menu(project, environ)
     luna = next(item for item in menu["tiers"]["light"] if item["model"] == "gpt-6-luna")
     assert luna["efforts"] == ["high", "xhigh", "max"]
-    assert menu["luna"]["efforts"] == dict(light="high", standard="xhigh", standard_escalated="max")
-    assert menu["luna"]["standard_candidate_roles"] == ["worker-qa-engineer"]
+    stretch = {item["route"]: item for item in menu["stretch"]}
+    assert set(stretch) == {"codex-acp/gpt-6-luna", "codex-acp/gpt-5.6-luna"}
+    rule = stretch["codex-acp/gpt-6-luna"]
+    assert rule["efforts"] == dict(light="high", standard="xhigh", standard_escalated="max")
+    assert rule["standard_candidate_roles"] == ["worker-qa-engineer"]
+    assert (rule["effort_floor"], rule["standard_work_kinds"], rule["auto_eligible"]) == ("high", ["testing"], True)
+    assert stretch["codex-acp/gpt-5.6-luna"]["auto_eligible"] is False
+    assert luna["policy"]["attribute_sources"] == dict(effort_floor="builtin", effort_ladder="builtin",
+                                                       also_standard_for="builtin")
+    assert (luna["tier_source"], luna["selection"], luna["auto_reason"]) == ("builtin", "builtin", "eligible")
+    assert "luna" not in menu and "flagship_note" not in menu
     assert auto_route.hint_serves_tier("gpt-6-luna", "light", "worker-qa-engineer", "standard")
     assert not auto_route.hint_serves_tier("gpt-6-luna", "light", "worker-backend-dev", "standard")
     assert not auto_route.hint_serves_tier("gpt-6-luna", "light", "worker-debugger", "standard")
@@ -1265,5 +1274,228 @@ def test_a_user_requested_flagship_survives_a_retry(tmp_path, monkeypatch):
 def test_route_menu_names_the_user_request_exception(tmp_path, monkeypatch):
     project, environ = _live_all(monkeypatch, tmp_path)
     menu = auto_route.route_menu(project, environ)
-    assert menu["flagship_note"] == "escalation, or an exact route the user explicitly requested in this task"
+    assert menu["flagship"]["rule"] == "escalation, or an exact route the user explicitly asked for in this task"
     assert {item["route"] for item in menu["tiers"]["flagship"]} >= {ASTRA, FABLE}
+    assert set(menu["flagship"]["routes"]) >= {ASTRA, FABLE}
+    assert menu["flagship"]["request_names"][ASTRA] == ["астр"]
+    assert menu["affinity"]["implementation"] == "codex-acp" and menu["affinity"]["testing"] is None
+    assert menu["role_work_kinds"]["worker-qa-engineer"] == "testing"
+    assert menu["preferred"] == {}
+
+
+# --- routing.json models: selection, tiers and per-model policy ---------------
+
+OPENCODE_PLAIN = "vendor/nebula"
+OPENCODE_VARIANT = "vendor/nebula,thinking"
+
+
+def _opencode(model):
+    route = SimpleNamespace(id=f"opencode:{model}", engine="opencode", model=model, supported_parameters=())
+    return SimpleNamespace(connection_id="opencode", route=route, model_name=model)
+
+
+def _configured(monkeypatch, tmp_path, routing=None, extra=(), codex=None, claude=None):
+    from cortex_runtime.connections import registry
+
+    entries = _all_efforts([_named("codex", e.route.model) for e in LIVE_CODEX]
+                           + [_named("claude", e.route.model, e.model_name) for e in LIVE_CLAUDE]) + list(extra)
+    project, environ = _live_choose(monkeypatch, tmp_path, entries, routing)
+    connections = {name: SimpleNamespace(launch_command=(name,)) for name in ("claude", "codex", "opencode")}
+    monkeypatch.setattr(registry, "read_registry", lambda _: SimpleNamespace(connections=connections))
+    monkeypatch.setattr(quota, "used_percent", lambda record, *_: (
+        codex if record.launch_command == ("codex",) else claude if record.launch_command == ("claude",) else None))
+    return project, environ
+
+
+def _menu_items(menu):
+    return {item["route"]: dict(item, tier=tier) for tier, group in menu["tiers"].items() for item in group}
+
+
+def test_without_models_an_optional_engine_stays_out_of_automatic_routing(tmp_path, monkeypatch):
+    project, environ = _configured(monkeypatch, tmp_path, None, [_opencode(OPENCODE_PLAIN), _opencode(OPENCODE_VARIANT)])
+    items = _menu_items(auto_route.route_menu(project, environ))
+    opencode = items[f"opencode/{OPENCODE_VARIANT}"]
+    assert (opencode["auto_eligible"], opencode["auto_reason"], opencode["selection"]) == (False, "excluded_by_default", "builtin")
+    assert opencode["tier_source"] == "position" and opencode["efforts"] == []
+    choice = auto_route.choose("worker-backend-dev", project, environ)
+    assert all(not c["route"].startswith("opencode/") for c in choice.decision["candidates"])
+
+
+def test_a_selection_list_makes_exactly_the_listed_models_automatic(tmp_path, monkeypatch):
+    routing = {"models": {
+        "opencode": {"auto": [OPENCODE_VARIANT], "tiers": {OPENCODE_VARIANT: "standard"}},
+        "codex-acp": {"auto": ["gpt-5.6-terra"]}}}
+    project, environ = _configured(monkeypatch, tmp_path, routing, [_opencode(OPENCODE_PLAIN), _opencode(OPENCODE_VARIANT)])
+    items = _menu_items(auto_route.route_menu(project, environ))
+    thinking = items[f"opencode/{OPENCODE_VARIANT}"]
+    assert (thinking["tier"], thinking["tier_source"], thinking["selection"]) == ("standard", "configured", "listed")
+    assert thinking["auto_eligible"] is True
+    assert items[f"opencode/{OPENCODE_PLAIN}"]["auto_reason"] == "not_selected"
+    assert items["codex-acp/gpt-6-luna"]["auto_reason"] == "not_selected"
+    assert items["codex-acp/gpt-5.6-terra"]["auto_eligible"] is True
+    # Claude has no list: its built-in rules are unchanged.
+    assert items["claude-agent-acp/claude-sonnet-5"]["auto_eligible"] is True
+    assert items["claude-agent-acp/claude-sonnet-4-6"]["auto_reason"] == "superseded"
+    choice = auto_route.choose("worker-backend-dev", project, environ)
+    assert {c["route"] for c in choice.decision["candidates"]} == {
+        "codex-acp/gpt-5.6-terra", "claude-agent-acp/claude-sonnet-5", f"opencode/{OPENCODE_VARIANT}"}
+    assert choice.model == "gpt-5.6-terra" and choice.decision["decided_by"] == "affinity"
+    assert choice.decision["rank_version"] == 8
+    # An exact hint may now name a route whose id holds '/' and ','.
+    hinted = auto_route.choose("worker-backend-dev", project, environ, model_hint=f"opencode/{OPENCODE_VARIANT}",
+                               model_reason="The owner selected it.")
+    assert (hinted.model, hinted.effort, hinted.decision["model_hint_status"]) == (OPENCODE_VARIANT, None, "honoured")
+    # A pin still reaches a model the list leaves out.
+    project, environ = _configured(monkeypatch, tmp_path, dict(routing, pin={"*": f"opencode/{OPENCODE_PLAIN}"}),
+                                   [_opencode(OPENCODE_PLAIN), _opencode(OPENCODE_VARIANT)])
+    pinned = auto_route.choose("worker-backend-dev", project, environ)
+    assert (pinned.model, pinned.basis) == (OPENCODE_PLAIN, "auto:pin")
+
+
+def test_an_empty_selection_routes_no_model_of_that_engine(tmp_path, monkeypatch):
+    project, environ = _configured(monkeypatch, tmp_path, {"models": {"codex-acp": {"auto": []}}})
+    choice = auto_route.choose("worker-technical-writer", project, environ)
+    assert choice.model == "claude-sonnet-5" and choice.decision["tier"] == "standard"
+    assert all(c["route"].startswith("claude-agent-acp/") for c in choice.decision["candidates"])
+
+
+def test_a_listed_engine_routes_a_selected_older_version(tmp_path, monkeypatch):
+    project, environ = _configured(monkeypatch, tmp_path, {"models": {"codex-acp": {"auto": ["gpt-5.6-luna"]}}})
+    choice = auto_route.choose("worker-backend-dev", project, environ, complexity="low")
+    assert choice.model == "gpt-5.6-luna"
+    assert not any(route.startswith("codex-acp/") for route in choice.decision["superseded"])
+    old = _menu_items(auto_route.route_menu(project, environ))["codex-acp/gpt-5.6-luna"]
+    assert (old["auto_eligible"], old["superseded_by"]) == (True, "codex-acp/gpt-6-luna")
+
+
+def test_a_selection_list_overrides_the_haiku_default_but_deny_still_wins(tmp_path, monkeypatch):
+    haiku = _all_efforts([_named("claude", "claude-haiku-4-5-20251001", "Haiku 4.5")])
+    selection = {"claude-agent-acp": {"auto": ["claude-haiku-4-5-20251001", "claude-sonnet-5"]}}
+    project, environ = _configured(monkeypatch, tmp_path, {"models": selection}, haiku)
+    assert auto_route.choose("worker-technical-writer", project, environ).model == "claude-haiku-4-5-20251001"
+    project, environ = _configured(monkeypatch, tmp_path, {"models": selection, "deny": ["haiku"]}, haiku)
+    assert auto_route.choose("worker-technical-writer", project, environ).model == "gpt-6-luna"
+
+
+def test_a_configured_stretch_policy_moves_the_luna_rule_to_another_light_model(tmp_path, monkeypatch):
+    stretch = {"effort_floor": "high", "effort_ladder": ["high", "xhigh", "max"], "also_standard_for": ["testing"]}
+    cleared = {"effort_floor": None, "effort_ladder": None, "also_standard_for": None}
+    routing = {"models": {"codex-acp": {"policy": {"gpt-5.5": stretch, "gpt-6-luna": cleared}}}}
+    project, environ = _configured(monkeypatch, tmp_path, routing, _all_efforts([_named("codex", "gpt-5.5")]))
+    menu = auto_route.route_menu(project, environ)
+    # The superseded older Luna keeps its built-in rule but is not eligible.
+    stretch = {item["route"]: item for item in menu["stretch"]}
+    assert {route: item["auto_eligible"] for route, item in stretch.items()} == {
+        "codex-acp/gpt-5.6-luna": False, "codex-acp/gpt-5.5": True}
+    assert stretch["codex-acp/gpt-5.5"]["efforts"] == dict(light="high", standard="xhigh", standard_escalated="max")
+    items = _menu_items(menu)
+    assert items["codex-acp/gpt-6-luna"]["efforts"] == ["low", "medium", "high", "xhigh", "max"]
+    assert items["codex-acp/gpt-6-luna"]["policy"]["attribute_sources"] == {}
+    assert items["codex-acp/gpt-5.5"]["policy"]["attribute_sources"]["effort_ladder"] == "configured"
+    # The cleared Luna runs light work like any light model ...
+    writer = auto_route.choose("worker-technical-writer", project, environ)
+    assert (writer.model, writer.effort, writer.decision["effort_basis"]) == ("gpt-6-luna", "low", "role_tier:light")
+    # ... and only the configured stretch model joins standard testing work.
+    tester = auto_route.choose("worker-qa-engineer", project, environ)
+    routes = {c["route"] for c in tester.decision["candidates"]}
+    assert "codex-acp/gpt-5.5" in routes and "codex-acp/gpt-6-luna" not in routes
+    assert tester.decision["luna"]["status"] == "standard_candidate"
+    hinted = auto_route.choose("worker-qa-engineer", project, environ, model_hint="codex-acp/gpt-5.5",
+                               model_reason="Cheap and strong enough.")
+    assert (hinted.model, hinted.effort, hinted.decision["effort_basis"]) == ("gpt-5.5", "xhigh", "luna:standard")
+    assert auto_route.hint_serves_tier("gpt-5.5", "light", "worker-qa-engineer", "standard",
+                                       also_standard_for=["testing"])
+    assert not auto_route.hint_serves_tier("gpt-6-luna", "light", "worker-qa-engineer", "standard",
+                                           also_standard_for=[])
+
+
+def test_the_flagship_effort_ceiling_follows_the_tier_and_the_policy(tmp_path, monkeypatch):
+    routing = {"models": {
+        "claude-agent-acp": {"tiers": {"claude-sonnet-5": "flagship"}},
+        "codex-acp": {"tiers": {"gpt-6-astra": "deep"}, "policy": {"gpt-6-astra": {"max_effort": None}}}}}
+    project, environ = _configured(monkeypatch, tmp_path, routing)
+    items = _menu_items(auto_route.route_menu(project, environ))
+    sonnet, astra = items["claude-agent-acp/claude-sonnet-5"], items["codex-acp/gpt-6-astra"]
+    assert (sonnet["tier"], sonnet["tier_source"], sonnet["efforts"]) == ("flagship", "configured",
+                                                                          ["low", "medium", "high"])
+    assert (astra["tier"], astra["efforts"]) == ("deep", ["low", "medium", "high", "xhigh"])
+    project, environ = _configured(monkeypatch, tmp_path, {"models": {
+        "claude-agent-acp": {"tiers": {"claude-sonnet-5": "flagship"},
+                             "policy": {"claude-sonnet-5": {"max_effort": "xhigh"}}}}})
+    items = _menu_items(auto_route.route_menu(project, environ))
+    assert items["claude-agent-acp/claude-sonnet-5"]["efforts"] == ["low", "medium", "high", "xhigh"]
+
+
+def test_the_owners_preferred_model_for_a_kind_of_work_ranks_first(tmp_path, monkeypatch):
+    project, environ = _configured(monkeypatch, tmp_path)
+    assert auto_route.choose("worker-security-auditor", project, environ).model == "opus[1m]"
+    routing = {"models": {"codex-acp": {"policy": {"gpt-6-sol": {"preferred_for": ["review", "design"]}}}}}
+    project, environ = _configured(monkeypatch, tmp_path, routing)
+    choice = auto_route.choose("worker-security-auditor", project, environ)
+    assert (choice.model, choice.decision["decided_by"]) == ("gpt-6-sol", "purpose")
+    assert choice.decision["purpose"] == dict(work_kind="review", preferred=["codex-acp/gpt-6-sol"])
+    assert auto_route.route_menu(project, environ)["preferred"] == {
+        "design": ["codex-acp/gpt-6-sol"], "review": ["codex-acp/gpt-6-sol"]}
+    # It never moves a tier, and a meaningful plan-usage gap still wins.
+    light = auto_route.choose("worker-explorer", project, environ)
+    assert light.decision["tier"] == "light"
+    project, environ = _configured(monkeypatch, tmp_path, routing, codex=90.0, claude=10.0)
+    busy = auto_route.choose("worker-security-auditor", project, environ)
+    assert (busy.model, busy.decision["decided_by"]) == ("opus[1m]", "usage")
+
+
+def test_route_menu_only_advertises_eligible_preferences_and_affinity_source(tmp_path, monkeypatch):
+    routing = {"engine_affinity": {"review": "codex-acp"},
+               "models": {"claude-agent-acp": {"policy": {"haiku": {"preferred_for": ["review"]}}},
+                          "codex-acp": {"policy": {"gpt-6-sol": {"preferred_for": ["review"]}}}}}
+    project, environ = _configured(monkeypatch, tmp_path, routing)
+    menu = auto_route.route_menu(project, environ)
+    assert menu["preferred"] == {"review": ["codex-acp/gpt-6-sol"]}
+    assert menu["affinity_source"]["review"] == "routing.json"
+    assert menu["affinity_source"]["design"] == "builtin"
+
+
+@pytest.mark.parametrize("models,needle", [
+    ([], "must map an engine id"),
+    ({"gemini-acp": {}}, "engine must be one of"),
+    ({"codex-acp": {"auto": "gpt-6-luna"}}, "exact model ids"),
+    ({"codex-acp": {"auto": ["a b"]}}, "without whitespace"),
+    ({"codex-acp": {"auto": ["x", "x"]}}, "listed twice"),
+    ({"codex-acp": {"select": []}}, "use one of auto, tiers, policy"),
+    ({"codex-acp": {"tiers": {"x": "huge"}}}, "tier must be one of"),
+    ({"codex-acp": {"policy": {"x": {"effort_floor": "ultra"}}}}, "must be null or one of"),
+    ({"codex-acp": {"policy": {"x": {"effort_floor": "max", "max_effort": "high"}}}}, "not be above max_effort"),
+    ({"codex-acp": {"policy": {"x": {"effort_ladder": ["xhigh", "high"]}}}}, "strictly ascending"),
+    ({"codex-acp": {"policy": {"x": {"also_standard_for": ["coding"]}}}}, "unique work kinds"),
+    ({"codex-acp": {"policy": {"x": {"preferred_for": ["review", "review"]}}}}, "unique work kinds"),
+    ({"codex-acp": {"policy": {"x": {"speed": 1}}}}, "use one of effort_floor"),
+    ({"codex-acp": {"policy": {"x": {"request_names": ["Astra"]}}}}, "lowercase word"),
+    ({"codex-acp": {"policy": {"x": {"request_names": ["use"]}}}}, "ordinary request"),
+    ({"codex-acp": {"policy": {"x": {"request_names": ["используй"]}}}}, "ordinary request"),
+    ({"codex-acp": {"policy": {"x": {"request_names": ["instead"]}}}}, "ordinary request"),
+])
+def test_models_are_validated(tmp_path, models, needle):
+    project = tmp_path / "project"
+    (project / ".cortex").mkdir(parents=True)
+    (project / ".cortex" / "routing.json").write_text(json.dumps({"models": models}))
+    with pytest.raises(PortableError) as refused:
+        auto_route.load_overrides(project, {"HOME": str(tmp_path)})
+    assert refused.value.code == "invalid_routing_overrides" and needle in refused.value.remediation
+
+
+def test_configured_request_names_replace_the_builtin_spellings(tmp_path):
+    astra = "codex-acp/gpt-6-astra"
+    assert auto_route.requests_family("используй астру", "astra")
+    assert auto_route.requests_family("используй астру", "astra", []) is None
+    assert auto_route.requests_family("используй звезду", "astra", ["звезд"])
+    assert auto_route.requests_family("please use the star", "astra", ["star"]) == "star"
+    assert auto_route.requests_family("use Astra", "astra", []) == "Astra"
+    project = tmp_path / "project"
+    (project / ".cortex").mkdir(parents=True)
+    environ = {"HOME": str(tmp_path)}
+    assert auto_route.request_names(astra, project, environ) == ("астр",)
+    (project / ".cortex" / "routing.json").write_text(json.dumps({"models": {"codex-acp": {"policy": {
+        "gpt-6-astra": {"request_names": ["звезд"]}}}}}))
+    assert auto_route.request_names(astra, project, environ) == ("звезд",)
+    (project / ".cortex" / "routing.json").write_text("{broken")
+    assert auto_route.request_names(astra, project, environ) == ("астр",)

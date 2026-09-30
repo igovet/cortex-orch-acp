@@ -1,3 +1,68 @@
+## 2026-09-30 user routing profiles materialize into routing.json
+
+User routing profiles are saved owner-level snapshots in
+`$XDG_CONFIG_HOME/cortex/routing-profiles.json` (format 1), not another
+runtime routing source. Activation validates a profile and writes its seven
+managed routing keys into the user `routing.json` under `connections.lock`,
+preserving unrelated keys. This keeps the loader and precedence unchanged:
+project and `$CORTEX_ROUTING` files still win wholesale. The file retains
+`active` and `applied` revisions so external edits or an interrupted two-file
+write show as `diverged`; writes cannot be transactional across these files,
+and no silent reapplication occurs. User routing saves write through only
+while the profile is `in_sync`; a diverged profile requires explicit
+re-activation or detachment. Project saves never change user profiles.
+
+The management API requires the profile file's expected revision for every
+mutation and the user routing revision for activation or active rules edits.
+An older runtime ignores the profiles file but continues to read the
+materialized routing file. This design was chosen over adding a new loader
+precedence layer, which would make project overrides and old installations
+behave differently.
+
+The ten existing work kinds are the purpose vocabulary for
+`models.<engine>.policy.<model>.preferred_for`; a preferred model in an
+explicit `models.auto` list must also be selected there. The route menu
+publishes only auto-eligible preferences and the source of each work-kind
+affinity. These are ranking preferences, never authorization grants.
+
+## 2026-09-30 model selection, tiers and policy come from configuration
+
+Automatic worker routing knew models only by name: tier tables (families,
+Codex ids and lines), the Haiku and optional-engine exclusions, the flagship
+effort ceiling, the Luna rule and the Russian request spellings were
+constants in `routing/auto_route.py`, and the `plan_submit` node schema and
+the orchestrator's `worker-routing` reference named models and engine
+preferences. The owner could not choose which models (including OpenCode
+models) take part in automatic routing, how they are classified, or
+which model to prefer for a kind of work.
+
+`routing.json` gained a `models` key, per engine and keyed by exact model id
+(OpenCode ids contain `/`, so a flat `engine/model` key would be
+ambiguous): `auto` (the complete automatic-routing selection; absent keeps
+the built-in rules), `tiers` and `policy` (`effort_floor`, `max_effort`,
+`effort_ladder`, `also_standard_for`, `preferred_for`, `request_names`). The
+name-keyed rules moved to `routing/model_policy.py` as built-in defaults that
+apply only where the file is silent, so an existing installation routes
+exactly as before (rank version 8; the golden tests are unchanged apart from
+the version). `preferred_for` answers the owner's request to say which models
+suit which purposes: it is a rank key between retry diversification and
+engine affinity, never a tier change, so plan usage, hints and pins keep
+their precedence. A selection list disables supersede for its engine,
+because silently dropping an explicitly selected older version would
+contradict the owner's list.
+
+Prompts carry no model names: `list_route_options` is the single live source
+(tiers, tier sources, policy, `flagship`, `stretch`, `preferred`,
+`affinity`), the node schema and `worker-routing.md` refer to it, and
+`tests/test_no_hardcoded_model_names.py` fails when a built-in model or
+family name reappears in skills, profile sources, tool schemas or the unified
+system prompt. The live-qualification references keep the AGENTS.md owner
+rule's model, which is not a routing input. Rejected: a per-session templated
+schema (engines cache schemas per session and the reference files are
+hashed into the package), a separate config file (a second precedence
+chain), and extending the legacy `tiers`/`auto_allow` keys (engine-agnostic
+and family-matched, so they cannot express "only these models").
+
 ## 2026-09-29 a flagship route runs when the user asked for it
 
 Flagship models (Astra, Fable) were escalation-only, and a plan hint never

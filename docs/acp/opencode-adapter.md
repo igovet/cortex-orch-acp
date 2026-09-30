@@ -4,7 +4,7 @@ Cortex can run [OpenCode v2](https://opencode.ai/v2/docs/cli/acp/) (`opencode ac
 
 - startup never discovers it or creates a connection for it;
 - you onboard it with one explicit setup step;
-- automatic worker routing never picks it unless `routing.json` opts in;
+- automatic worker routing never picks it unless `routing.json` opts in (a `models` selection list or an exact `auto_allow` entry);
 - only OpenCode **2.0.19** is accepted, and it runs only inside the engine jail with process isolation.
 
 Source: `engine/opencode_install.py` (binary trust and version), `engine/opencode_adapter_acp.py` (configuration, prompt, option mapping), plus OpenCode branches in `engine/process.py`, `engine/session_manager.py`, `orchestration/sandbox.py`, `delegation/live_adapters.py`, `catalog/refresh.py`, `routing/auto_route.py` and `scripts/cortex_acp_setup.py`.
@@ -111,7 +111,7 @@ Native tool requests reach the same permission bridge as the other engines:
 ## Options, routing and access mode
 
 - **Options.** `model` is always set, since OpenCode's own default is a free OpenCode Zen model. `effort` is set when the route carries one; it is pre-checked only when the route's model is already current, otherwise `configure()` re-checks it after the model switch. `mode` is always `cortex`.
-- **Routing.** Every `opencode` route is excluded from automatic selection (`routing.auto_route.DEFAULT_AUTO_DENY_ENGINES`). The model selector, a `pin` or an exact `auto_allow` entry opts one in; model IDs contain the provider, so the entry names both (for example `"opencode/anthropic/claude-sonnet-4-5"`). Plan node hints cannot name an exact OpenCode route, because the hint pattern allows no `/` inside a model ID; an engine-level `opencode` hint does not lift the exclusion and is ignored.
+- **Routing.** By default every `opencode` route is excluded from automatic selection (`routing.model_policy.BUILTIN_AUTO_DENY_ENGINES`). A `routing.json` `models.opencode.auto` list makes exactly the listed models eligible (with `models.opencode.tiers` and `policy` placing them; unlisted OpenCode models get a tier by list position), and an exact `auto_allow` entry lifts the exclusion for one route; the model selector or a `pin` runs any offered route. Model IDs contain the provider, so an entry names both (`models.opencode.auto: ["anthropic/claude-sonnet-4-5"]`, or `"opencode/anthropic/claude-sonnet-4-5"` in `auto_allow`). A plan node hint may name an exact OpenCode route (`opencode/anthropic/claude-sonnet-4-5`) copied from `list_route_options`; it is honoured only when that route is eligible for automatic routing, and an engine-level `opencode` hint does not lift the exclusion. See [owner-configured models](routing-and-fallback.md#owner-configured-models-selection-tiers-and-policy).
 - **Access modes.** Guarded and Auto both work at the bridge. OpenCode has no more permissive mode to switch to, so Auto only answers the permission cards.
 
 ## Recovery, compaction and usage

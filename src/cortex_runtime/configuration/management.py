@@ -22,8 +22,13 @@ Surfaces (:data:`SURFACES`):
 - ``routing`` -- the precedence of ``routing.auto_route.load_overrides``
   (project ``.cortex/routing.json``, then ``$CORTEX_ROUTING``, then the user
   ``routing.json``). Reads report every source, the effective one and its
-  rules; writes replace the six supported keys of the user or project file,
-  validated by ``auto_route._validate``. ``$CORTEX_ROUTING`` is read-only.
+  rules; writes replace the seven supported keys of the user or project
+  file, validated by ``auto_route._validate``. ``$CORTEX_ROUTING`` is
+  read-only. ``models`` holds the owner's per-engine automatic-routing
+  selection, model tiers and model policy (``routing.model_policy``).
+- ``routing_profiles`` -- owner-only user routing snapshots. Activation
+  materializes one snapshot into user ``routing.json``; it does not add a
+  routing source or create a project profile.
 - ``mcp_servers`` -- ``$XDG_CONFIG_HOME/cortex/mcp-servers.json``. Every
   result redacts ``env`` values; a write may keep an existing value without
   ever reading it back. The whole written registry must pass
@@ -36,11 +41,13 @@ Surfaces (:data:`SURFACES`):
   route Cortex knows of, with its effective state under the effective
   routing rules and the reason: disabled (a ``deny`` token, ``<engine>/*``
   for a whole engine), shown in the model selector, and eligible for
-  automatic routing or not (``providers``, the built-in Haiku/OpenCode
-  exclusions lifted by ``auto_allow``, superseded versions, unobserved seed
-  catalogs, connection state) -- plus which ``deny``/``auto_allow`` tokens of
-  each routing file cover it. Reading never refreshes a catalog or
-  revalidates a connection, so it writes nothing; enabling or disabling an
+  automatic routing or not (``providers``, a ``models`` selection list that
+  leaves it out, the built-in Haiku/OpenCode exclusions lifted by
+  ``auto_allow``, superseded versions, unobserved seed catalogs, connection
+  state) -- plus its tier and where it comes from, its effective policy,
+  and which ``deny``/``auto_allow`` tokens of each routing file cover it.
+  Reading never refreshes a catalog or revalidates a connection, so it writes
+  nothing; enabling or disabling an
   engine or model is a ``routing`` update.
 
 Versioning: every read returns a ``revision`` -- ``"absent"`` or
@@ -81,6 +88,7 @@ from typing import Iterator, Mapping
 from ..connections import registry
 from ..connections.model import (
     MAX_CONCURRENT_SESSIONS_LIMIT,
+    OPTIONAL_ENGINES,
     SUPPORT_MATRIX,
     SUPPORTED_ENGINES,
     EngineNativeDir,
@@ -88,13 +96,13 @@ from ..connections.model import (
     SecretFile,
 )
 from ..portable.errors import PortableError, PortableErrorCategory
-from ..routing import auto_route
+from ..routing import auto_route, model_policy
 from . import mcp_servers as mcp_registry
 from . import store as configuration_store
 from .policy import FALLBACK_HARD_DENYLIST, FallbackPolicy, PermissionLevel, PolicyCeiling, require_narrowing
 
 API_VERSION = 1
-SURFACES = ("user_defaults", "project_ceiling", "routing", "mcp_servers", "connections")
+SURFACES = ("user_defaults", "project_ceiling", "routing", "routing_profiles", "mcp_servers", "connections")
 ROUTE_CATALOG = "route_catalog"
 READ_ONLY_SURFACES = (ROUTE_CATALOG,)
 ABSENT = "absent"
@@ -109,7 +117,7 @@ CEILING_KEYS = (
 )
 FALLBACK_KEYS = ("allowed_target_routes", "allowed_failure_classes", "budget", "data_recipient_consent")
 LIMIT_KEYS = ("attempts", "calls", "tokens", "concurrency")
-ROUTING_KEYS = ("pin", "deny", "auto_allow", "tiers", "providers", "engine_affinity")
+ROUTING_KEYS = ("pin", "deny", "auto_allow", "tiers", "providers", "engine_affinity", "models")
 ROUTING_TARGETS = ("project", "user")
 MCP_SERVER_KEYS = (
     "command", "args", "env", "enabled", "allowed_tools", "read_only_tools", "coordinator_tools",
@@ -675,11 +683,17 @@ def _routing_builtin() -> dict[str, object]:
 
     return dict(
         supported_engines=list(SUPPORTED_ENGINES),
-        optional_engines=[OPENCODE],
+        optional_engines=list(OPTIONAL_ENGINES),
         default_auto_deny_engines=sorted(getattr(auto_route, "DEFAULT_AUTO_DENY_ENGINES", ())),
         default_auto_deny_families=sorted(auto_route.DEFAULT_AUTO_DENY_FAMILIES),
         tiers=list(auto_route.TIERS), efforts=list(auto_route.EFFORT_ORDER),
-        work_kinds=list(auto_route.WORK_KIND_ENGINES), default_user_deny=list(DEFAULT_DENY),
+        work_kinds=list(model_policy.WORK_KINDS), work_kind_labels=dict(model_policy.WORK_KIND_LABELS),
+        work_kind_roles={kind: sorted(role for role, role_kind in auto_route.ROLE_WORK_KINDS.items()
+                                      if role_kind == kind) for kind in model_policy.WORK_KINDS},
+        builtin_affinity=dict(auto_route.WORK_KIND_ENGINES), default_user_deny=list(DEFAULT_DENY),
+        selection_modes=list(model_policy.SELECTION_MODES), tier_sources=list(model_policy.TIER_SOURCES),
+        policy_attributes=list(model_policy.POLICY_ATTRIBUTES), policy_efforts=list(model_policy.POLICY_EFFORTS),
+        max_request_names=model_policy.MAX_REQUEST_NAMES,
     )
 
 
@@ -705,7 +719,7 @@ def _opencode_model(model: str) -> bool:
 
 
 def validate_routing_rules(rules) -> dict[str, object]:
-    """The six supported keys, checked strictly (every problem at once) and
+    """The seven supported keys, checked strictly (every problem at once) and
     then by the loader itself (``auto_route._validate``).
 
     Beyond the loader: a pin names a supported engine and an effort from
@@ -715,6 +729,12 @@ def validate_routing_rules(rules) -> dict[str, object]:
     ids contain a ``/``, so a bare id would be read as a foreign engine
     prefix, and a family token would lift OpenCode's automatic-routing
     exclusion for more than the route the owner chose.
+
+    ``models`` (``routing.model_policy.validate_models``) maps a supported
+    engine to ``auto`` (its automatic-routing selection), ``tiers`` and
+    ``policy``, each keyed by an exact model id; an OpenCode id is the exact
+    ``<provider>/<model>``, and a ``request_names`` entry is never an
+    ordinary request, work or negation word.
     """
     errors = _Errors()
     if not isinstance(rules, Mapping):
@@ -798,6 +818,13 @@ def validate_routing_rules(rules) -> dict[str, object]:
                 elif engine is not None and engine not in engines:
                     errors.add(f"rules.engine_affinity.{kind}", "invalid_value",
                                f"must be null or one of {', '.join(engines)}")
+    if "models" in rules:
+        for where, code, message in model_policy.validate_models(
+                rules["models"], engines=engines, work_kinds=tuple(auto_route.WORK_KIND_ENGINES),
+                reserved_word=auto_route._reserved_request_word,
+                exact_model=lambda engine, model: engine != OPENCODE or _opencode_model(model),
+                prefix="rules.models"):
+            errors.add(where, code, message)
     errors.raise_if_any()
     document = {key: rules[key] for key in ROUTING_KEYS if key in rules}
     try:
@@ -825,7 +852,7 @@ def _project_routing_path(project_root) -> Path:
 
 def update_routing(target: str, expected_revision, rules, *, project_root: str | None = None,
                    environ: Mapping[str, str] | None = None) -> dict[str, object]:
-    """Replace the six supported keys of the ``user`` or ``project`` routing
+    """Replace the seven supported keys of the ``user`` or ``project`` routing
     file with ``rules`` (an omitted key is removed); other keys in the file
     are kept. The result's ``shadowed_by`` names the source that still wins
     when the written file is not the effective one."""
@@ -838,7 +865,17 @@ def update_routing(target: str, expected_revision, rules, *, project_root: str |
     document = validate_routing_rules(rules)
     env = _env(environ)
     path = _project_routing_path(project_root) if target == "project" else registry.config_root(env) / "routing.json"
+    profile_result = None
     with _owner_config_lock(env):
+        if target == "user":
+            from . import routing_profiles
+            try:
+                profiles_path, _, profiles_data, profiles_doc, _ = routing_profiles._load(env)
+            except PortableError as error:
+                # Profiles are not a routing source: a damaged or newer
+                # profile file must not prevent an ordinary routing save.
+                profiles_data = None
+                profile_result = dict(state="unavailable", code=error.code)
         data = _read_plain(path)
         _check(f"routing ({target})", expected, _revision(data))
         preserved = {}
@@ -847,9 +884,12 @@ def update_routing(target: str, expected_revision, rules, *, project_root: str |
             preserved = {key: value for key, value in existing.items() if key not in ROUTING_KEYS}
         body = _pretty({**document, **preserved})
         _replace_file(path, body)
+        if target == "user" and profiles_data is not None:
+            profile_result = routing_profiles.write_through(profiles_doc, data, document, body, profiles_path)
     view = read_routing(project_root, env)
     return dict(view, changed=body != data, target=target, written_revision=_revision(body),
-                shadowed_by=None if view["effective_source"] == target else view["effective_source"])
+                shadowed_by=None if view["effective_source"] == target else view["effective_source"],
+                profile=profile_result)
 
 
 # --- route catalog (read-only) -------------------------------------------------
@@ -887,10 +927,16 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
     ``automatic`` is the first reason automatic worker routing would skip the
     route (``routing_invalid``, ``connection_not_ready``, ``no_launch_command``,
     ``disabled``, ``not_observed``, ``engine_excluded_from_automatic_routing``,
-    ``excluded_by_default``, ``superseded``) or ``eligible``; what the
-    runtime decides per dispatch (recorded unavailability, quota) is not
-    shown. Connection state is the stored one: nothing is revalidated,
-    refreshed or written.
+    ``not_selected``, ``excluded_by_default``, ``superseded``) or
+    ``eligible``; what the runtime decides per dispatch (recorded
+    unavailability, quota) is not shown. Each route also carries its tier
+    and ``tier_source`` (``configured``, ``legacy_tiers``, ``builtin``,
+    ``position``; ``null`` when it is not an automatic-routing candidate),
+    its engine's ``selection`` mode and ``auto_selected`` membership, the
+    ``configured_tier`` and the effective ``policy`` with each attribute's
+    source; each engine its ``selection``, ``selected_models`` and the
+    ``unmatched_selected`` ids no catalog of it offers. Connection state is
+    the stored one: nothing is revalidated, refreshed or written.
     """
     env = _env(environ)
     routing = read_routing(project_root, env)
@@ -916,8 +962,9 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
     offered = [entry for entry, record in pairs if usable(entry, record) and not auto_route._is_seed(entry)
                and not auto_route._denied(rules, entry.route.engine, entry.route.model)]
     candidates = auto_route._allowed(rules, offered)
-    tiers = auto_route.model_tiers(candidates, rules.get("tiers") or {})
+    policies = model_policy.resolve_policies(candidates, rules)
     superseded = auto_route.superseded_routes(candidates)
+    applied = auto_route._applied_superseded(rules, candidates, superseded)
     routes = []
     for entry, record in pairs:
         engine, model = entry.route.engine, entry.route.model
@@ -925,6 +972,9 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
         deny_tokens = _token_matches(deny, engine, model, wildcard=True)
         allow_tokens = _token_matches(rules.get("auto_allow"), engine, model, wildcard=False)
         builtin_excluded = auto_route._default_auto_denied({}, entry)
+        exclusion = auto_route._auto_exclusion(rules, entry)
+        candidate_policy = policies.get(entry.route.id)
+        policy = candidate_policy or model_policy.policy_for(engine, model, rules)
         if not valid:
             automatic = "routing_invalid"
         elif not selectable:
@@ -937,16 +987,22 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
             automatic = "not_observed"
         elif providers is not None and engine not in providers:
             automatic = "engine_excluded_from_automatic_routing"
-        elif builtin_excluded and not allow_tokens:
-            automatic = "excluded_by_default"
-        elif entry.route.id in superseded:
+        elif exclusion is not None:
+            automatic = exclusion
+        elif entry.route.id in applied:
             automatic = "superseded"
         else:
             automatic = "eligible"
         routes.append(dict(
             route_id=entry.route.id, engine=engine, model=model, model_name=entry.model_name or model,
             connection_id=record.id, connection_name=record.name, connection_state=record.state.value,
-            qualified=record.qualified, observed=not auto_route._is_seed(entry), tier=tiers.get(entry.route.id),
+            qualified=record.qualified, observed=not auto_route._is_seed(entry),
+            tier=candidate_policy.tier if candidate_policy else None,
+            tier_source=candidate_policy.tier_source if candidate_policy else None,
+            configured_tier=(model_policy.engine_config(rules, engine).get("tiers") or {}).get(model),
+            selection=policy.selection, auto_selected=policy.selected, policy=policy.attributes(),
+            preferred_for=sorted(policy.preferred_for),
+            preferred_inactive=bool(policy.preferred_for) and automatic != "eligible",
             selectable=selectable, in_selector=selectable and not deny_tokens,
             disabled=bool(deny_tokens), deny_tokens=deny_tokens,
             engine_disabled=auto_route.engine_wildcard(engine) in deny,
@@ -960,8 +1016,13 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
     engines = []
     for engine in SUPPORTED_ENGINES:
         token = auto_route.engine_wildcard(engine)
+        config = model_policy.engine_config(rules, engine)
+        selected = list(config.get("auto") or ()) if "auto" in config else None
+        offered_models = {entry.route.model for entry, record in pairs if record.engine == engine}
         engines.append(dict(
-            engine=engine, optional=engine == OPENCODE,
+            engine=engine, optional=engine in OPTIONAL_ENGINES,
+            selection="builtin" if selected is None else "listed", selected_models=selected,
+            unmatched_selected=[model for model in selected or () if model not in offered_models],
             connections=[dict(id=record.id, name=record.name, state=record.state.value, qualified=record.qualified)
                          for record in records if record.engine == engine],
             disabled=token in deny, automatic=providers is None or engine in providers,
@@ -1179,7 +1240,7 @@ def _connection_view(record) -> dict[str, object]:
         launch_command=list(record.launch_command) if record.launch_command is not None else None,
         credential=_credential_summary(record.credential_ref), state=record.state.value,
         qualified=record.qualified, max_concurrent_sessions=record.max_concurrent_sessions,
-        optional_engine=record.engine == OPENCODE, created_at=record.created_at, updated_at=record.updated_at,
+        optional_engine=record.engine in OPTIONAL_ENGINES, created_at=record.created_at, updated_at=record.updated_at,
     )
 
 
@@ -1200,8 +1261,8 @@ def _connections_view(data: bytes | None) -> dict[str, object]:
     engines = []
     for engine in SUPPORTED_ENGINES:
         engines.append(dict(
-            engine=engine, optional=engine == OPENCODE,
-            onboarding="explicit_opt_in" if engine == OPENCODE else "discovery_or_setup",
+            engine=engine, optional=engine in OPTIONAL_ENGINES,
+            onboarding="explicit_opt_in" if engine in OPTIONAL_ENGINES else "discovery_or_setup",
             auth_modes={mode.value: support.qualified for mode, support in SUPPORT_MATRIX.get(engine, {}).items()},
             qualified_versions=_qualified_versions(engine),
             connection_ids=[record.id for record in records if record.engine == engine],
@@ -1356,6 +1417,11 @@ def _open_project_store(project, *, write: bool):
     return root, Store(directory, initialize=write, project_root=root)
 
 
+def read_routing_profiles(project_root=None, environ=None):
+    from . import routing_profiles
+    return routing_profiles.read_profiles(project_root, environ)
+
+
 def read_all(project: str | None = None, environ: Mapping[str, str] | None = None) -> dict[str, object]:
     """Every surface at once; a surface that cannot be read reports its
     error instead of hiding the others."""
@@ -1363,6 +1429,7 @@ def read_all(project: str | None = None, environ: Mapping[str, str] | None = Non
     readers = dict(
         user_defaults=lambda: read_user_defaults(env),
         routing=lambda: read_routing(project, env),
+        routing_profiles=lambda: read_routing_profiles(project, env),
         mcp_servers=lambda: read_mcp_servers(env),
         connections=lambda: read_connections(env),
     )
@@ -1421,6 +1488,27 @@ def _dispatch(request, environ) -> dict[str, object]:
         _fields(request, ("target", "expected_revision", "rules", "project"))
         return update_routing(request.get("target"), request.get("expected_revision"), request.get("rules"),
                               project_root=request.get("project"), environ=environ)
+    if surface == "routing_profiles":
+        from . import routing_profiles
+        if action == "read":
+            _fields(request, ("project",))
+            return routing_profiles.read_profiles(request.get("project"), environ)
+        if action in ("create", "update", "delete", "activate", "deactivate"):
+            fields = {
+                "create": ("expected_revision", "name", "description", "rules", "from_current", "project"),
+                "update": ("expected_revision", "name", "description", "rules", "rename_to",
+                           "expected_routing_revision", "project"),
+                "delete": ("expected_revision", "name", "project"),
+                "activate": ("expected_revision", "expected_routing_revision", "name", "project"),
+                "deactivate": ("expected_revision", "project"),
+            }[action]
+            _fields(request, fields)
+            return routing_profiles.mutate(
+                action, request.get("expected_revision"), name=request.get("name"),
+                description=request.get("description"), rules=request.get("rules"),
+                from_current=request.get("from_current", False), rename_to=request.get("rename_to"),
+                expected_routing_revision=request.get("expected_routing_revision"),
+                project_root=request.get("project"), environ=environ)
     if surface == "mcp_servers" and action == "read":
         _fields(request, ())
         return read_mcp_servers(environ)

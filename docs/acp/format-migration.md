@@ -7,6 +7,11 @@ already-completed legacy-root move (`<project>/.codex/cortex` ->
 `<project>/.cortex`, T001/T004/T019 — see
 `project_storage.migrate_legacy_project_storage()`), and it is not a rollback to the retired Codex plugin harness.
 
+User `routing-profiles.json` is separate from this SQLite format. Its JSON
+`format` is 1; an unknown format fails closed in the owner management API.
+An older runtime ignores that file but continues to read the last profile
+materialized into user `routing.json`. No project profile migration exists.
+
 ## Compatibility and current format
 
 Current stores use `PRAGMA user_version=12`. Format 12 is the ACP-only

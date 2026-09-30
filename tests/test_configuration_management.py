@@ -206,6 +206,7 @@ def test_routing_read_reports_precedence_and_the_effective_source(home, tmp_path
     assert view["effective_source"] == "user" and view["effective_rules"] == {"deny": ["haiku"]}
     assert view["sources"][1]["ignored_keys"] == ["future_key"] and view["sources"][0]["exists"] is False
     assert view["builtin"]["default_auto_deny_engines"] == ["opencode"]
+    assert view["builtin"]["optional_engines"] == ["opencode"]
     env_file = tmp_path / "env-routing.json"
     _write_json(env_file, {"providers": ["codex-acp"]})
     monkeypatch.setenv("CORTEX_ROUTING", str(env_file))
@@ -638,7 +639,8 @@ def test_execute_returns_structured_errors_and_main_answers_json(home):
     out = io.StringIO()
     assert management.main(io.StringIO(json.dumps({"action": "read", "surface": "all"})), out) == 0
     answer = json.loads(out.getvalue())
-    assert answer["ok"] and set(answer["result"]) == {"user_defaults", "routing", "mcp_servers", "connections"}
+    assert answer["ok"] and set(answer["result"]) == {"user_defaults", "routing", "routing_profiles",
+                                                   "mcp_servers", "connections"}
     assert all(item["ok"] for item in answer["result"].values())
     out = io.StringIO()
     assert management.main(io.StringIO("not json"), out) == 1
@@ -662,3 +664,74 @@ def test_execute_project_ceiling_uses_the_project_store(home, tmp_path):
     empty.mkdir()
     missing = management.execute({"action": "read", "surface": "project_ceiling", "project": str(empty)})
     assert missing["error"]["code"] == "project_store_missing"
+
+
+# --- routing.json models: automatic-routing selection, tiers and policy ---------
+
+OPENCODE_MODEL = "anthropic/claude-sonnet-4-5"
+
+
+def test_routing_models_are_validated_with_field_paths_and_round_trip(home):
+    with pytest.raises(management.ConfigValidationError) as caught:
+        management.update_routing("user", "absent", {"models": {
+            "codex-acp": {"auto": ["gpt-6-luna", "gpt-6-luna"], "tiers": {"gpt-6-luna": "huge"},
+                          "policy": {"gpt-6-luna": {"effort_ladder": ["max", "high"], "request_names": ["use"]}}},
+            "opencode": {"auto": ["claude-sonnet-4-5"]},
+            "gemini-acp": {}}})
+    assert {
+        ("rules.models.codex-acp.auto[1]", "duplicate_model"),
+        ("rules.models.codex-acp.tiers.gpt-6-luna", "invalid_value"),
+        ("rules.models.codex-acp.policy.gpt-6-luna.effort_ladder", "invalid_value"),
+        ("rules.models.codex-acp.policy.gpt-6-luna.request_names[0]", "reserved_word"),
+        ("rules.models.opencode.auto[0]", "model_not_exact"),
+        ("rules.models.gemini-acp", "unknown_engine"),
+    } <= _codes(caught.value)
+    assert not (home.config / "routing.json").exists()
+    rules = {"deny": ["haiku"], "models": {
+        "opencode": {"auto": [OPENCODE_MODEL], "tiers": {OPENCODE_MODEL: "standard"}},
+        "codex-acp": {"policy": {"gpt-6-sol": {"preferred_for": ["review"], "max_effort": None}}}}}
+    written = management.update_routing("user", "absent", rules)
+    assert written["effective_rules"] == rules and auto_route.load_overrides() == rules
+    assert "models" in management.ROUTING_KEYS and len(management.ROUTING_KEYS) == 7
+    builtin = written["builtin"]
+    assert builtin["policy_attributes"] == ["effort_floor", "max_effort", "effort_ladder", "also_standard_for",
+                                            "preferred_for", "request_names"]
+    assert builtin["selection_modes"] == ["builtin", "listed"] and "ultra" not in builtin["policy_efforts"]
+    assert builtin["tier_sources"] == ["configured", "legacy_tiers", "builtin", "position"]
+    assert builtin["work_kind_labels"]["design"] == "Design and architecture"
+    assert "worker-architect" in builtin["work_kind_roles"]["design"]
+    assert builtin["builtin_affinity"]["design"] == "claude-agent-acp"
+    # The whole managed rule set is replaced: omitting models removes it.
+    management.update_routing("user", written["written_revision"], {"deny": ["haiku"]})
+    assert json.loads((home.config / "routing.json").read_text()) == {"deny": ["haiku"]}
+
+
+def test_route_catalog_reports_selection_tier_source_and_policy(home, monkeypatch):
+    _catalog_fixture(home, monkeypatch)
+    management.update_routing("user", "absent", {"models": {
+        "codex-acp": {"auto": ["gpt-5.6-luna", "gpt-9-missing"], "tiers": {"gpt-6-sol": "flagship"}},
+        "opencode": {"auto": ["anthropic/claude-sonnet-4-5"], "tiers": {"anthropic/claude-sonnet-4-5": "standard"},
+                     "policy": {"anthropic/claude-sonnet-4-5": {"preferred_for": ["writing"]}}}}})
+    view = management.read_route_catalog()
+    routes, engines = _routes(view), _engines(view)
+    older = routes["codex-acp/gpt-5.6-luna"]
+    assert (older["automatic"], older["auto_selected"], older["selection"], older["superseded_by"]) == (
+        "eligible", True, "listed", "codex-acp/gpt-6-luna")
+    assert routes["codex-acp/gpt-6-luna"]["automatic"] == "not_selected"
+    luna_policy = routes["codex-acp/gpt-6-luna"]["policy"]
+    assert luna_policy["effort_floor"] == "high" and luna_policy["attribute_sources"]["effort_floor"] == "builtin"
+    sol = routes["codex-acp/gpt-6-sol"]
+    assert (sol["tier"], sol["tier_source"], sol["configured_tier"], sol["automatic"]) == (
+        "flagship", "configured", "flagship", "not_selected")
+    optional = routes[OPENCODE_ROUTE]
+    assert (optional["automatic"], optional["tier"], optional["tier_source"]) == ("eligible", "standard", "configured")
+    assert optional["policy"]["preferred_for"] == ["writing"]
+    assert optional["preferred_for"] == ["writing"] and optional["preferred_inactive"] is False
+    assert optional["policy"]["attribute_sources"] == {"preferred_for": "configured"}
+    assert routes["opencode/openai/gpt-5.1"]["automatic"] == "not_selected"
+    haiku = routes["claude-agent-acp/claude-haiku-4-5-20251001"]
+    assert (haiku["selection"], haiku["auto_selected"], haiku["automatic"]) == ("builtin", None, "excluded_by_default")
+    assert (engines["codex-acp"]["selection"], engines["codex-acp"]["selected_models"],
+            engines["codex-acp"]["unmatched_selected"]) == ("listed", ["gpt-5.6-luna", "gpt-9-missing"], ["gpt-9-missing"])
+    assert (engines["claude-agent-acp"]["selection"], engines["claude-agent-acp"]["selected_models"],
+            engines["claude-agent-acp"]["unmatched_selected"]) == ("builtin", None, [])

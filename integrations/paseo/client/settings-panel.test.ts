@@ -148,8 +148,8 @@ function catalogRoute(id: string, engine: string, model: string, name: string, c
   return {
     route_id: `xr_${id.repeat(12)}`, engine, model, model_name: name, connection_id: connection[0], connection_name: connection[1],
     connection_state: "configured", qualified: true, observed: true, tier: "standard", selectable: true, in_selector: true,
-    disabled: false, deny_tokens: [], engine_disabled: false, default_auto_excluded: null, auto_allow_tokens: [], automatic: "eligible",
-    superseded_by: null, matches: { user: { deny: [], auto_allow: [] } }, ...extra,
+    disabled: false, deny_tokens: [], engine_disabled: false, default_auto_excluded: null, auto_allow_tokens: [], automatic: "eligible", auto_selected: engine !== "opencode",
+    superseded_by: null, preferred_for: [], preferred_inactive: false, matches: { user: { deny: [], auto_allow: [] } }, ...extra,
   };
 }
 
@@ -189,8 +189,19 @@ function fixtures() {
       builtin: {
         supported_engines: ["codex-acp", "claude-agent-acp"], optional_engines: ["opencode"], default_auto_deny_engines: ["opencode"],
         default_auto_deny_families: [], tiers: ["light", "standard", "heavy"], efforts: ["low", "medium", "high"], work_kinds: ["code", "review"],
+        work_kind_labels: { code: "Code", review: "Review" }, work_kind_roles: { code: [], review: [] },
+        builtin_affinity: { code: "codex-acp", review: "claude-agent-acp" },
         default_user_deny: [],
       },
+    },
+    routing_profiles: {
+      surface: "routing_profiles", path: "~/.config/cortex/routing-profiles.json", revision: REV("q"),
+      active: "mix", state: "diverged", applied: null, user_routing_revision: REV("b"), shadowed_by: null,
+      matches_profile: [], profiles: [{
+        name: "mix", description: "All engines", revision: REV("r"),
+        rules: { providers: ["codex-acp", "opencode"] }, created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z",
+        summary: { providers: ["codex-acp", "opencode"], denied_engines: [], selected_models: {} },
+      }],
     },
     mcp_servers: {
       surface: "mcp_servers", path: "~/.config/cortex/mcp-servers.json", revision: REV("m"), exists: true, root_key: "servers", version: 1,
@@ -315,6 +326,7 @@ test("no section offers a raw JSON entry field, and every control is labelled", 
     ["User defaults", async () => {}],
     ["Project ceiling", async () => {}],
     ["Routing", async () => {}],
+    ["User routing profiles", async () => {}],
     ["MCP servers", async () => { await screen.press("Edit search"); await screen.press("Add MCP server"); }],
     ["Connections", async () => { await screen.press("Check for OpenCode"); }],
   ];
@@ -543,13 +555,14 @@ test("engines & models: every engine and model is a labelled switch with full id
   await screen.section("Engines & models");
   const elements = screen.runtime.elements();
   const switches = elements.filter((element) => element.type === "Switch");
-  assert.deepEqual(switches.map((element) => element.props.accessibilityLabel), [
-    "Use Codex (codex-acp) in Cortex", "Automatic routing may use Codex (codex-acp)", "Use codex-acp/gpt-6-luna in Cortex",
+  assert.deepEqual(switches.map((element) => element.props.accessibilityLabel).filter((label) => !String(label).includes(" — ")), [
+    "Use Codex (codex-acp) in Cortex", "Automatic routing may use Codex (codex-acp)", "Use codex-acp/gpt-6-luna in Cortex", "Use codex-acp/gpt-6-luna for automatic ranking",
     "Use Claude (claude-agent-acp) in Cortex", "Automatic routing may use Claude (claude-agent-acp)",
-    "Use claude-agent-acp/opus[1m] in Cortex", "Use claude-agent-acp/claude-sonnet-5 in Cortex",
+    "Use claude-agent-acp/opus[1m] in Cortex", "Use claude-agent-acp/opus[1m] for automatic ranking", "Use claude-agent-acp/claude-sonnet-5 in Cortex", "Use claude-agent-acp/claude-sonnet-5 for automatic ranking",
     "Use OpenCode v2 (opencode) in Cortex", "Automatic routing may use OpenCode v2 (opencode)",
-    "Use opencode/anthropic/claude-sonnet-4-5 in Cortex", "Allow opencode/anthropic/claude-sonnet-4-5 in automatic routing",
+    "Use opencode/anthropic/claude-sonnet-4-5 in Cortex", "Use opencode/anthropic/claude-sonnet-4-5 for automatic ranking", "Allow opencode/anthropic/claude-sonnet-4-5 in automatic routing",
   ]);
+  assert.ok(switches.some((element) => element.props.accessibilityLabel === "Review — opencode/anthropic/claude-sonnet-4-5"));
   for (const element of switches) {
     assert.equal(element.props.accessibilityRole, "switch");
     assert.equal(typeof (element.props.accessibilityState as { checked?: unknown }).checked, "boolean");
@@ -653,6 +666,37 @@ test("engines & models: a shadowing project file is named; an unregistered OpenC
   assert.equal(screen.updates.length, 1);
   assert.deepEqual([screen.updates[0].surface, screen.updates[0].target, screen.updates[0].workspaceId], ["routing", "user", "ws1"]);
   assert.deepEqual((screen.updates[0].rules as { deny?: string[] }).deny, ["claude-agent-acp/opus", "claude-agent-acp/*"]);
+});
+
+test("purpose choices require explicit auto selection and save OpenCode preferences", async () => {
+  const screen = await openScreen();
+  await screen.section("Engines & models");
+  const purpose = "Review — opencode/anthropic/claude-sonnet-4-5";
+  assert.equal(screen.find(purpose, "Switch").props.disabled, true);
+  await screen.toggle("Use opencode/anthropic/claude-sonnet-4-5 for automatic ranking", true);
+  assert.equal(screen.find(purpose, "Switch").props.disabled, false);
+  await screen.toggle(purpose, true);
+  await screen.press("Save engine and model switches to the user routing file");
+  const rules = screen.updates[0].rules as any;
+  assert.deepEqual(rules.models.opencode.auto, ["anthropic/claude-sonnet-4-5"]);
+  assert.deepEqual(rules.models.opencode.policy["anthropic/claude-sonnet-4-5"].preferred_for, ["review"]);
+});
+
+test("user profiles show divergence and send revision-checked activation; conflicts offer reload", async () => {
+  const screen = await openScreen();
+  await screen.section("User routing profiles");
+  assert.ok(screen.texts().some((text) => text.includes("active profile and user routing differ")));
+  await screen.press("Saved profile: mix");
+  await screen.type("New profile name", "renamed");
+  screen.replies.push({ ok: false, binding, error: { code: "revision_conflict", message: "Profile changed", field: "expected_revision", currentRevision: REV("s") } });
+  await screen.press("Activate profile");
+  assert.deepEqual(screen.updates[0], {
+    surface: "routing_profiles", action: "activate", workspaceId: undefined,
+    expected_revision: REV("q"), expected_routing_revision: REV("b"), name: "mix",
+  });
+  assert.ok(screen.has("Reload latest (discards edits here)"));
+  await screen.press("Reload latest (discards edits here)");
+  assert.equal(screen.find("New profile name", "TextInput").props.value, "mix");
 });
 
 test("routing and ceilings say what each setting actually does", async () => {

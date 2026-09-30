@@ -14,6 +14,16 @@ and from the explicitly authorized fallback path described below. Legacy
 mixed-team route profiles and fallback checks remain documented here for
 assignments that use them.
 
+User **routing profiles** are distinct from the per-revision `RouteProfile`
+below. A profile in `$XDG_CONFIG_HOME/cortex/routing-profiles.json` saves the
+seven managed routing keys; activation materializes them into the user
+`routing.json` under the connection lock. The loader's first-existing-file
+precedence remains project, `$CORTEX_ROUTING`, user, so a project or
+environment file shadows an active user profile. The profile management API
+reports `none`, `in_sync`, or `diverged`. Only an in-sync user routing save
+writes through to the active profile; project saves never do. Profiles cannot
+broaden a policy ceiling. See [configuration](../configuration.md#user-routing-profiles).
+
 ## Route profile: the authorized route set
 
 `configuration.policy.RouteProfile` (persisted per configuration revision
@@ -247,8 +257,10 @@ nearest other tier when none is usable), then an effort.
 ### Economy policy
 
 Automatic routing uses four tiers: `light`, `standard`, `deep`, and
-`flagship`. Astra and Fable are the only named flagship families. They are
-never selected for a role's default tier or because a plan merely says
+`flagship`. The built-in defaults name Astra and Fable as the flagship
+families; routing.json `models` can place any model in any tier (see
+[Owner-configured models](#owner-configured-models-selection-tiers-and-policy)).
+Flagship models are never selected for a role's default tier or because a plan merely says
 `complexity: high`; high complexity tops out at `deep` (Sol/Opus class).
 The flagship tier requires an explicit runtime escalation after a prior
 attempt fell short, or the user's own explicit request for that model family
@@ -287,6 +299,57 @@ other engine as a `cross_tier` candidate; that was removed in rank version 4,
 and older audit rows that carry `cross_tier`/`chosen_cross_tier` stay
 readable.
 
+### Owner-configured models: selection, tiers and policy
+
+Every name-keyed rule in this section -- the family and line tier tables, the
+Haiku and optional-engine exclusions, the flagship effort ceiling, the Luna
+rule and the Russian request spellings -- is only a built-in default
+(`routing.model_policy`). The owner overrides it per engine and per exact
+model id with the `models` key of `routing.json` (reference:
+[configuration](../configuration.md#routing-rules)); with no `models` key
+every routing decision is the same as before rank version 8.
+
+- **Selection.** `models.<engine>.auto` present puts that engine in LISTED
+  mode: exactly the listed models are eligible for automatic routing (`[]`:
+  none of that engine's models), the built-in Haiku and optional-engine
+  exclusions and `auto_allow` no longer apply to it, and supersede is not
+  applied there (an older selected version still runs; `superseded_by`
+  stays informational). A model left out is `not_selected`
+  (`auto_reason`, route-catalog `automatic`, hint status
+  `ignored:auto_excluded`). `deny` and `providers` still win, and a `pin`
+  or the model selector still reaches every offered model. Without `auto`
+  the engine stays in BUILTIN mode. This is how an optional engine such as
+  OpenCode joins automatic routing.
+- **Tiers.** A route's tier is, first that applies: `models.<engine>.tiers`
+  (`tier_source: configured`), the legacy engine-agnostic `tiers`
+  (`legacy_tiers`), the built-in tables (`builtin`), else list position
+  (`position`).
+- **Policy.** `models.<engine>.policy.<model>` overlays the built-in
+  attributes key by key; `null` removes a built-in value:
+  `effort_floor`, `max_effort` (without one, a model of the effective
+  `flagship` tier stops at `high`), `effort_ladder` (1-3 ascending efforts
+  for light work, standard work and standard work that fell short once; a
+  ladder holding `max` permits `max` outside the light tier),
+  `also_standard_for` (work kinds for which a light model is also a
+  standard-tier candidate: the stretch rule below), `preferred_for` (work
+  kinds the owner prefers this model for: rank key `purpose` below) and
+  `request_names` (extra spellings for the
+  [user-requested flagship route](#user-requested-flagship-route); a request,
+  work, means or negation word is refused).
+
+`list_route_options` is the coordinator's only source of model names: every
+route carries `tier_source`, `selection`, `auto_reason` and its effective
+`policy` with each attribute's source; the result adds `affinity` (the
+effective engine per work kind), `affinity_source` (`routing.json` or `builtin`
+per kind), `role_work_kinds`, `preferred` (only auto-eligible routes per
+`preferred_for` work kind), `flagship` (`routes`, `request_names`, `rule`) and
+`stretch` (each light model with a stretch rule: `effort_floor`, `efforts` by
+work, `standard_work_kinds`, `standard_candidate_roles`). The `plan_submit`
+node schema and the orchestrator's `worker-routing` reference name no model
+or engine preference; `tests/test_no_hardcoded_model_names.py` guards that.
+An exact hint may name a route whose model id holds `/` or `,`
+(`opencode/<provider>/<model>`; a model id can also contain `,`).
+
 ### User-requested flagship route
 
 A user may ask for a flagship model family in the task (for example "use
@@ -307,8 +370,10 @@ Coordinator prose, `model_reason`, questions, reports and worker output are
 never read for it. A source requests the family when it names the hinted
 model's family (`model_line`: `astra` for `gpt-6-astra`, `fable` for
 `claude-fable-5-1[1m]`) as a whole word, case-insensitively, or by one of its
-Russian spellings (`CYRILLIC_FAMILY_NAMES`: `астр...`, `фейбл`/`фэйбл`,
-`мифос`/`майтос`/`митос`), and, in the same sentence (`requests_family`):
+extra spellings -- the hinted model's `request_names` policy, by default the
+built-in Russian spellings (`CYRILLIC_FAMILY_NAMES`: `астр...`,
+`фейбл`/`фэйбл`, `мифос`/`майтос`/`митос`) -- and, in the same sentence
+(`requests_family`):
 
 - within the four words before it, either an explicit request word stands
   (`REQUEST_WORDS`: `use`, `run`, `switch`, `prefer`, `choose`, `request`,
@@ -379,8 +444,12 @@ was found.
 The Codex Luna line (`gpt-6-luna`, `gpt-5.6-luna`, and any later
 `gpt-<n>-luna`; the newest non-denied version is routed) is very cheap and
 very effective, so it has its own rule in `routing.auto_route` (rank version
-7). The rule is hard-coded: `routing.json` classifies models by tier, and has
-no per-work-kind or per-complexity setting that would fit it.
+7). Since rank version 8 this is the built-in default of the *stretch* rule
+(`routing.model_policy.BUILTIN_STRETCH_POLICY`): a `routing.json` `models`
+policy with `effort_floor`, `effort_ladder` and `also_standard_for` gives any
+light model the same rule, and setting them to `null` takes it away from
+Luna. Everything below describes the built-in values; the audit keeps the
+historic names (`luna`, `luna:<tier>`) for every stretch model.
 
 - **Effort floor.** Luna never runs below `high` (`LUNA_EFFORT_FLOOR`). The
   floor also applies to a pin (`codex-acp/gpt-6-luna:low` runs at `high`) and
@@ -404,8 +473,8 @@ no per-work-kind or per-complexity setting that would fit it.
   only for testing work (`LUNA_WORK_KINDS`: testing, that is `qa-engineer` and
   `build-verification`), where it ranks next to the tier's own models, such as
   `gpt-5.6-terra` and Claude Sonnet (`standard_candidate`). The ordinary rank then decides: preference,
-  hint, plan usage, diversify, affinity, quota band, used percent, engine
-  order. Luna is not always chosen. A Claude plan at least 10 points less
+  hint, plan usage, diversify, purpose, affinity, quota band, used percent,
+  engine order. Luna is not always chosen. A Claude plan at least 10 points less
   used, a much hotter Codex plan than the alternative, or a hint for another
   model all move the work away from it. On one
   Codex plan with equal affinity, Codex's own list order (newest generation
@@ -490,15 +559,19 @@ eligible candidates the rank criteria are, first difference wins:
 4. On escalation, an engine other than the one whose attempt fell short --
    unless step 3 already sent the work to a meaningfully less-used plan,
    diversification does not retry onto a plan with meaningfully less room.
-5. Engine affinity (role suitability). Built-in defaults
+5. Purpose (rank version 8): a model whose `routing.json` `models` policy
+   lists the role's work kind under `preferred_for` -- the owner's choice of
+   model for that kind of work -- ranks ahead of the tier's other
+   candidates. It never moves a tier and never overrides steps 1-4.
+6. Engine affinity (role suitability). Built-in defaults
    (`WORK_KIND_ENGINES`): implementation and operations lean to `codex-acp`;
    investigation, review, design, writing, planning and analysis lean to
    `claude-agent-acp`; debugging and testing are neutral. `routing.json`
    `engine_affinity` overrides it per work kind (see
    [configuration](../configuration.md#routing-rules)).
-6. Quota band, as a late tie breaker only (rank version 6): known usage at
+7. Quota band, as a late tie breaker only (rank version 6): known usage at
    or above 85% (`HOT_PERCENT`) ranks behind candidates below 85%, but only
-   once steps 1-5 have not already separated the candidates. Unknown quota
+   once steps 1-6 have not already separated the candidates. Unknown quota
    is not hot. Crossing 85% alone no longer overrides plan usage, retry
    diversification or engine affinity, and no longer causes a cliff right at
    the boundary -- a candidate at 86% used is barely behind one at 84% used,
@@ -509,32 +582,36 @@ eligible candidates the rank criteria are, first difference wins:
    could otherwise push cheap work into a plan about to run out -- rank
    version 6 keeps that protection through the usage-gap signal in step 3
    instead, and only demotes the raw 85% crossing itself.
-7. Exact used percentage, only when every candidate has a known value.
-8. Stable engine order.
+8. Exact used percentage, only when every candidate has a known value.
+9. Stable engine order.
 
 `decided_by` names the first of these keys (`preference`, `hint`, `usage`,
-`diversify`, `affinity`, `quota`, `used_percent`, `engine_order`) that
+`diversify`, `purpose`, `affinity`, `quota`, `used_percent`, `engine_order`) that
 separated the chosen candidate from the runner-up, or `only_candidate`; a pin
 records `pin`. It is never `balance`. The runner-up can be another model on
 the same engine, in which case `engine_order` is the usual answer.
 
 Unknown quota remains neutral and is never coerced to zero for percentage
-comparison: when any candidate's usage is unknown, steps 3 and 7 compare
+comparison: when any candidate's usage is unknown, steps 3 and 8 compare
 nothing and the order falls through to diversify, affinity or the quota tie
 breaker (`quota` is `false`/not-hot for unknown usage, so it still separates
 a known-hot candidate from an unknown one).
 
 Effort is derived from the runtime-selected tier, task complexity/escalation,
 and each model's supported effort list. `effort_basis` records whether it came
-from the role tier, escalation step, the Luna rule (`luna:<tier>` or
-`luna:<tier>:escalated`), or a pin. A pin may explicitly name an
+from the role tier, escalation step, a stretch model's effort ladder (the
+Luna rule; recorded as `luna:<tier>` or `luna:<tier>:escalated`), or a pin. A pin may explicitly name an
 effort; otherwise the runtime chooses a supported effort. A model hint cannot
 raise tier or effort.
 
 The read-only `list_route_options` tool reports currently engine-confirmed
-routes, tier, supported effort, availability and quota band, plus role tiers
-for low/normal/high complexity and the Luna rule (`luna`: effort floor, efforts
-by work, and the roles for which Luna is a standard-tier candidate). It is advisory and may become stale; the
+routes, tier and tier source, supported effort, policy, automatic eligibility,
+availability and quota band, plus role tiers for low/normal/high complexity
+and the `affinity`, `role_work_kinds`, `preferred`, `flagship` and `stretch`
+summaries (see
+[Owner-configured models](#owner-configured-models-selection-tiers-and-policy));
+the former `luna` and `flagship_note` fields are replaced by `stretch` and
+`flagship`. It is advisory and may become stale; the
 runtime validates the choice at plan submission and dispatch. The server
 advertises `listChanged: false`, so clients must call the menu again when they
 need a fresh snapshot; there is no push refresh contract.
@@ -545,7 +622,8 @@ including `rank_version`, `role_tier`, tier and effort basis, `model_hint`,
 (`compared`, `margin`, `least_used_percent`), `affinity` (work kind, engine,
 `default` or `routing.json` source), candidates with `used_percent`, `hot`,
 `quota_state`, `usage_band`, `suitability` and `preferred`, `decided_by`,
-`excluded_by_policy`, `unavailable`, `superseded`, `luna` (`status`,
+`excluded_by_policy`, `unavailable`, `superseded`, `purpose` (`work_kind`
+and the `preferred` candidates), `luna` (`status`,
 `candidate`, `chosen`, and `outranked_by`, the rank key that put the best Luna
 candidate behind the chosen route), and whether usage percentages were
 comparable. `rank_version` history: 2 ranked by quota band,
@@ -559,7 +637,11 @@ preference/hint quota exclusion require the excluded route's usage to be
 both hot and meaningfully worse (`USAGE_MARGIN`) than an available
 alternative's, not merely at or above `HOT_PERCENT`; 7 narrowed Luna's
 standard-tier candidacy to testing work only, so other standard-tier retries
-and review fixes escalate as before version 5. Older rows keep their own fields
+and review fixes escalate as before version 5; 8 takes tiers, automatic
+selection and per-model policy from `routing.json` `models` before the
+built-in defaults, skips supersede on LISTED engines and adds the `purpose`
+key between `diversify` and `affinity` (no decision changes without
+`models`). Older rows keep their own fields
 (`balance`, `balance_excess`, `cross_tier`, `chosen_cross_tier`) and still
 render. These fields are evidence of runtime decisions, not proof of
 the exact observed live surface.

@@ -8,6 +8,7 @@ import type {
   projectCeilingResult,
   routeCatalogResult,
   routingResult,
+  routingProfilesResult,
   userDefaultsResult,
 } from "../shared/config.ts";
 
@@ -30,6 +31,7 @@ export const SETTINGS_SECTIONS = [
   { id: "engines_models", title: "Engines & models" },
   { id: "project_ceiling", title: "Project ceiling" },
   { id: "routing", title: "Routing" },
+  { id: "routing_profiles", title: "User routing profiles" },
   { id: "mcp_servers", title: "MCP servers" },
   { id: "connections", title: "Connections" },
 ] as const;
@@ -40,6 +42,7 @@ export type SettingsSectionId = typeof SETTINGS_SECTIONS[number]["id"];
 export type UserDefaultsView = z.infer<typeof userDefaultsResult>;
 export type ProjectCeilingView = z.infer<typeof projectCeilingResult>;
 export type RoutingView = z.infer<typeof routingResult>;
+export type RoutingProfilesView = z.infer<typeof routingProfilesResult>;
 export type RoutingSourceView = RoutingView["sources"][number];
 export type McpServersView = z.infer<typeof mcpServersResult>;
 export type McpServerView = McpServersView["servers"][number];
@@ -467,7 +470,7 @@ export function projectCeilingRemoval(view: ProjectCeilingView, workspaceId: str
 
 // --- routing ------------------------------------------------------------------
 
-export const ROUTING_KEYS = ["pin", "deny", "auto_allow", "tiers", "providers", "engine_affinity"] as const;
+export const ROUTING_KEYS = ["pin", "deny", "auto_allow", "tiers", "providers", "engine_affinity", "models"] as const;
 export type RoutingKey = typeof ROUTING_KEYS[number];
 
 /** One `pin` entry: a role (or `*`) pinned to `engine/model[:effort]`. The
@@ -476,6 +479,7 @@ export type PinRow = { role: string; engine: string; model: string; effort: stri
 export type TierRow = { model: string; tier: string };
 /** `engine: ""` means `null` (no affinity for that work kind). */
 export type AffinityRow = { kind: string; engine: string };
+export type ModelRulesForm = Record<string, { auto: string[] | null; tiers: Record<string, string>; policy: Record<string, Record<string, unknown>> }>;
 
 /** Each key is `null` while it is absent from the file (the built-in policy
  * applies); a present key keeps its exact order. */
@@ -486,6 +490,7 @@ export type RoutingForm = {
   tiers: TierRow[] | null;
   providers: string[] | null;
   engine_affinity: AffinityRow[] | null;
+  models?: ModelRulesForm | null;
 };
 
 export function emptyRoutingForm(): RoutingForm {
@@ -540,6 +545,22 @@ export function routingRulesToForm(rules: Record<string, unknown> | undefined): 
   if (rules.tiers !== undefined) {
     if (!isStringRecord(rules.tiers)) return unrepresentable("tiers");
     form.tiers = Object.entries(rules.tiers).map(([model, tier]) => ({ model, tier: tier as string }));
+  }
+  if (rules.models !== undefined) {
+    if (!isPlainObject(rules.models)) return unrepresentable("models");
+    const models: ModelRulesForm = {};
+    for (const [engine, raw] of Object.entries(rules.models)) {
+      if (!isPlainObject(raw) || Object.keys(raw).some((key) => !["auto", "tiers", "policy"].includes(key))
+        || (raw.auto !== undefined && !isStringArray(raw.auto)) || (raw.tiers !== undefined && !isStringRecord(raw.tiers))
+        || (raw.policy !== undefined && !isPlainObject(raw.policy))) return unrepresentable("models");
+      const policy: Record<string, Record<string, unknown>> = {};
+      for (const [model, value] of Object.entries(raw.policy ?? {})) {
+        if (!isPlainObject(value) || (value.preferred_for !== undefined && !isStringArray(value.preferred_for))) return unrepresentable("models.policy");
+        policy[model] = { ...value };
+      }
+      models[engine] = { auto: raw.auto === undefined ? null : [...raw.auto as string[]], tiers: raw.tiers === undefined ? {} : { ...raw.tiers as Record<string, string> }, policy };
+    }
+    form.models = models;
   }
   if (rules.engine_affinity !== undefined) {
     if (!isStringRecord(rules.engine_affinity, true)) return unrepresentable("engine_affinity");
@@ -646,6 +667,31 @@ export function buildRoutingRules(form: RoutingForm, vocabulary: RoutingVocabula
     const providers = checkList(form.providers, "rules.providers", errors, { oneOf: engines, maxItems: 16 });
     if (form.providers.length === 0) addError(errors, "rules.providers", "Add at least one engine, or unset this setting.");
     rules.providers = providers ?? [];
+  }
+  if (form.models != null) {
+    const models: Record<string, { auto?: string[]; tiers?: Record<string, string>; policy?: Record<string, Record<string, unknown>> }> = {};
+    for (const [engine, value] of Object.entries(form.models)) {
+      if (!engines.includes(engine)) { addError(errors, `rules.models.${engine}`, `Engine must be one of ${engines.join(", ")}.`); continue; }
+      const auto = checkList(value.auto, `rules.models.${engine}.auto`, errors, { noSpaces: true, maxItems: 1000 });
+      const tiers: Record<string, string> = {};
+      for (const [model, tier] of Object.entries(value.tiers)) {
+        if (!model || SPACE_OR_CONTROL.test(model)) addError(errors, `rules.models.${engine}.tiers.${model}`, "Model id must not contain spaces.");
+        if (!vocabulary.tiers.includes(tier)) addError(errors, `rules.models.${engine}.tiers.${model}`, `Tier must be one of ${vocabulary.tiers.join(", ")}.`);
+        tiers[model] = tier;
+      }
+      for (const [model, policy] of Object.entries(value.policy)) {
+        const preferred = policy.preferred_for;
+        if (preferred !== undefined) {
+          if (!isStringArray(preferred) || preferred.some((kind) => !vocabulary.workKinds.includes(kind)))
+            addError(errors, `rules.models.${engine}.policy.${model}.preferred_for`, "Choose known work kinds.");
+          if (Array.isArray(preferred) && preferred.length > 0 && auto !== null && !auto.includes(model))
+            addError(errors, `rules.models.${engine}.policy.${model}.preferred_for`, "Select this model for automatic ranking first.");
+        }
+      }
+      models[engine] = { ...(auto === null ? {} : { auto }), ...(Object.keys(tiers).length ? { tiers } : {}),
+        ...(Object.keys(value.policy).length ? { policy: value.policy } : {}) };
+    }
+    rules.models = models;
   }
   if (form.engine_affinity !== null) {
     const affinity: Record<string, string | null> = {};
@@ -792,6 +838,34 @@ export function unmatchedTokens(form: RoutingForm, key: "deny" | "auto_allow", c
   return (form[key] ?? []).filter((token) => !known.has(token));
 }
 
+export function modelAutoSelected(form: RoutingForm, engine: string, model: string, builtinSelected: boolean): boolean {
+  const auto = form.models?.[engine]?.auto;
+  return auto === null || auto === undefined ? builtinSelected : auto.includes(model);
+}
+export function setModelAutoSelected(form: RoutingForm, engine: string, model: string, selected: boolean, defaultSelected: readonly string[]): RoutingForm {
+  const models = { ...(form.models ?? {}) }; const current = models[engine] ?? { auto: null, tiers: {}, policy: {} }; const auto = current.auto ?? [...defaultSelected];
+  const policy = { ...current.policy };
+  if (!selected && policy[model]) policy[model] = { ...policy[model], preferred_for: [] };
+  models[engine] = { ...current, policy, auto: selected ? (auto.includes(model) ? auto : [...auto, model]) : auto.filter((item) => item !== model) };
+  return { ...form, models };
+}
+export function setModelTier(form: RoutingForm, engine: string, model: string, tier: string): RoutingForm {
+  const models = { ...(form.models ?? {}) }; const current = models[engine] ?? { auto: null, tiers: {}, policy: {} };
+  models[engine] = { ...current, tiers: { ...current.tiers, [model]: tier } }; return { ...form, models };
+}
+export function setModelPreferredFor(form: RoutingForm, engine: string, model: string, kind: string, enabled: boolean, builtinEligible = false): RoutingForm {
+  const currentAuto = form.models?.[engine]?.auto;
+  if (currentAuto === null || currentAuto === undefined ? !builtinEligible : !currentAuto.includes(model)) return form;
+  const models = { ...(form.models ?? {}) };
+  const current = models[engine] ?? { auto: null, tiers: {}, policy: {} };
+  const policy = { ...current.policy };
+  const entry = { ...(policy[model] ?? {}) };
+  const previous = Array.isArray(entry.preferred_for) ? entry.preferred_for as string[] : [];
+  entry.preferred_for = enabled ? [...new Set([...previous, kind])] : previous.filter((item) => item !== kind);
+  policy[model] = entry;
+  models[engine] = { ...current, policy };
+  return { ...form, models };
+}
 export type ModelGroup = { key: string; engine: string; model: string; routes: CatalogRoute[] };
 
 /** Routes grouped per engine and model: a model switch covers every

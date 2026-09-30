@@ -245,6 +245,9 @@ export function sanitizeSurface(surface: ConfigReadSurface, raw: unknown, scope:
       return source;
     });
   }
+  if (surface === "routing_profiles" && result.routing !== undefined) {
+    result.routing = sanitizeSurface("routing", result.routing, scope);
+  }
   if (surface === "mcp_servers" && Array.isArray(result.servers)) {
     result.servers = result.servers.map((server) => sanitizeMcpServer(server, scope));
   }
@@ -372,7 +375,7 @@ export const readConfigHandler = guarded(async (input: ConfigReadInput, context:
   const prepared = await prepare(input.workspaceId, context);
   if ("refusal" in prepared) return refused(prepared.bound, prepared.refusal);
   const { runtime, scope, bound } = prepared;
-  const projectScoped = input.surface === "all" || input.surface === "project_ceiling" || input.surface === "routing"
+  const projectScoped = input.surface === "all" || input.surface === "project_ceiling" || input.surface === "routing" || input.surface === "routing_profiles"
     || input.surface === "route_catalog";
   const outcome = await callApi(runtime, {
     action: "read",
@@ -477,6 +480,18 @@ export const updateConfigHandler = guarded(async (input: ConfigUpdateInput, cont
       case "routing":
         request = { target: input.target, expected_revision: input.expected_revision, rules: input.rules, ...(scope.projectRoot ? { project: scope.projectRoot } : {}) };
         break;
+      case "routing_profiles":
+        request = {
+          action: input.action, expected_revision: input.expected_revision,
+          ...("name" in input ? { name: input.name } : {}),
+          ...("description" in input && input.description !== undefined ? { description: input.description } : {}),
+          ...("rename_to" in input && input.rename_to !== undefined ? { rename_to: input.rename_to } : {}),
+          ...("rules" in input && input.rules !== undefined ? { rules: input.rules } : {}),
+          ...("from_current" in input && input.from_current === true ? { from_current: true } : {}),
+          ...("expected_routing_revision" in input ? { expected_routing_revision: input.expected_routing_revision } : {}),
+          ...(scope.projectRoot ? { project: scope.projectRoot } : {}),
+        };
+        break;
       case "mcp_servers": {
         const operations = await restoreRedacted(runtime, scope, input.expected_revision, input.operations);
         if (isFailure(operations)) return refused(bound, operations.failure);
@@ -491,7 +506,7 @@ export const updateConfigHandler = guarded(async (input: ConfigUpdateInput, cont
         };
         break;
     }
-    const outcome = await callApi(runtime, { action: "update", surface: input.surface, ...request }, WRITE_TIMEOUT_MS);
+    const outcome = await callApi(runtime, { action: input.surface === "routing_profiles" ? input.action : "update", surface: input.surface, ...request }, WRITE_TIMEOUT_MS);
     if (isFailure(outcome)) return refused(bound, outcome.failure);
     if (!outcome.ok) return refused(bound, convertError(outcome.error, scope));
     const typed = typedSurface(input.surface, outcome.result, scope);

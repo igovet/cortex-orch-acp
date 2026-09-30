@@ -9,6 +9,14 @@ see the [retained observations](evidence/paseo-2026-09-21/runtime-rewrite.md).
 The standalone paid probe scripts were not used in this campaign. See [current results](runtime-rewrite-status.md).
 The broker suite forces a random token whose first byte is `-`, then checks that the stdio relay still connects and advertises tools. It also checks an MCP child that exits before `tools/list` and prompt-level error classification. These tests cover the runtime broker behavior exercised by the fixtures.
 
+Focused no-paid routing checks are `tests/test_routing_profiles.py`
+(revisioned user profile operations, write-through, divergence, shadowing and
+storage refusals), `tests/test_model_policy.py` (purpose-selection validation),
+`tests/test_auto_route.py` (eligible preferences and affinity source),
+`tests/test_configuration_management.py` (management API/catalog contract),
+and `tests/test_no_hardcoded_model_names.py` (prompt/schema guards). They do
+not establish rendered settings UI behavior or a live paid engine result.
+
 ## The non-paid default command
 
 ```

@@ -679,14 +679,15 @@ class TaskMachine:
             if '/' not in model:
                 item['preview_status'] = 'auto' if model == 'auto' else 'pending_dispatch'
                 return item
-            hinted_tier = next((tier for tier, group in menu['tiers'].items()
-                                if any(entry['route'] == model for entry in group)), None)
+            hinted_tier, hinted = next(((tier, entry) for tier, group in menu['tiers'].items()
+                                        for entry in group if entry['route'] == model), (None, {}))
             # A flagship route runs only on escalation or when the user asked
             # for its family in this task (auto_route.user_model_request).
             request = user_model_request(self.store, channel.task_id, model) if hinted_tier == 'flagship' else None
             if request is not None:
                 item.update(preview_status='pending_dispatch:user_request', user_request=request['source_ref'])
-            elif not hint_serves_tier(model.partition('/')[2], hinted_tier, role, item['tier_now'], complexity):
+            elif not hint_serves_tier(model.partition('/')[2], hinted_tier, role, item['tier_now'], complexity,
+                                      also_standard_for=(hinted.get('policy') or {}).get('also_standard_for')):
                 item['preview_status'] = 'ignored:tier_mismatch'
             else:
                 item['preview_status'] = 'pending_dispatch'

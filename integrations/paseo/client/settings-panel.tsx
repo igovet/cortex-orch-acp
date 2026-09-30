@@ -27,6 +27,7 @@ import {
   buildOnboard,
   buildProjectCeilingUpdate,
   buildRoutingUpdate,
+  buildRoutingRules,
   buildUserDefaultsUpdate,
   canAutoAllow,
   automaticText,
@@ -41,6 +42,10 @@ import {
   modelAutoAllowState,
   modelDenyState,
   modelGroups,
+  modelAutoSelected,
+  setModelAutoSelected,
+  setModelTier,
+  setModelPreferredFor,
   removeRoutingToken,
   sameJson,
   selectorText,
@@ -63,6 +68,7 @@ import {
   projectCeilingRemoval,
   projectCeilingToForm,
   routingTarget,
+  routingRulesToForm,
   routingVocabulary,
   userDefaultsToForm,
   type AffinityRow,
@@ -82,6 +88,7 @@ import {
   type RouteCatalogView,
   type RoutingForm,
   type RoutingView,
+  type RoutingProfilesView,
   type RoutingVocabulary,
   type SettingsSectionId,
   type TierRow,
@@ -808,6 +815,88 @@ function RoutingSection({ theme, workspaceId }: { theme: Theme; workspaceId: str
   </Card>;
 }
 
+function RoutingProfilesSection({ theme, workspaceId }: { theme: Theme; workspaceId: string | null }) {
+  const surface = useConfigSurface<RoutingProfilesView>("routing_profiles", workspaceId, false);
+  const routing = useConfigSurface<RoutingView>("routing", workspaceId, false);
+  const [selected, setSelected] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [form, setForm] = useState<RoutingForm | null>(null);
+  const [clientErrors, setClientErrors] = useState<FieldErrors>({});
+  const [notice, setNotice] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const profile = surface.state.status === "ready" ? surface.state.result.profiles.find((item) => item.name === selected) : undefined;
+  useEffect(() => {
+    if (!profile) { setForm(null); return; }
+    setName(profile.name); setDescription(profile.description);
+    const parsed = routingRulesToForm(profile.rules);
+    setForm(parsed.ok ? parsed.form : null);
+    setClientErrors({});
+    setConfirmDelete(false);
+  }, [surface.state, selected]);
+  const mutate = async (input: ConfigUpdateInput): Promise<boolean> => {
+    setNotice(null);
+    if (await surface.save(input)) {
+      setNotice("Saved. Re-read the routing file before further profile changes.");
+      await routing.reload();
+      return true;
+    }
+    return false;
+  };
+  return <Card title="User routing profiles" theme={theme}>
+    <SurfaceFrame state={surface.state} reload={surface.reload} theme={theme}>
+      {(view) => <View style={{ gap: 10 }}>
+        <Hint theme={theme} text="Profiles are owner-only snapshots of user routing. A project routing file or environment override still wins. Activating a profile writes its rules into the user routing file; projects have no profiles." />
+        <ReadOnlyRow label="Active" value={view.active ?? "none"} theme={theme} />
+        <ReadOnlyRow label="State" value={view.state} theme={theme} />
+        {view.state === "diverged" && <Banner text="The active profile and user routing differ. Reload, then re-activate to apply it or detach to keep the current user routing." theme={theme} tone="warning" />}
+        {view.shadowed_by && <Banner text={`The ${view.shadowed_by} routing file currently overrides user profiles here.`} theme={theme} tone="warning" />}
+        <TextField label="New profile name" value={name} onChangeText={setName} theme={theme} placeholder="my-profile" />
+        <TextField label="Description" value={description} onChangeText={setDescription} theme={theme} />
+        <Button title="Create from current user routing" theme={theme} disabled={surface.saving || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(name)}
+          onPress={() => mutate({ surface: "routing_profiles", action: "create", workspaceId: workspaceId ?? undefined,
+            expected_revision: view.revision, name, description, from_current: true })} />
+        <ChoiceField label="Saved profile" value={selected} theme={theme}
+          options={[{ value: "", label: "Choose a profile" }, ...view.profiles.map((item) => ({ value: item.name, label: item.name }))]}
+          onChange={(value) => { setSelected(value); setName(value); }} />
+        {profile && <>
+          <ReadOnlyRow label="Saved route selections" value={Object.entries(profile.summary.selected_models).map(([engine, count]) => `${engine}: ${count}`).join(", ") || "built-in defaults"} theme={theme} />
+          <ReadOnlyRow label="Matching current user routing" value={view.matches_profile.includes(profile.name) ? "yes" : "no"} theme={theme} />
+          {!form ? <ReadOnlyNotice text="This profile has rules these fields cannot represent; edit the source file, then reload." theme={theme} />
+            : <SurfaceFrame state={routing.state} reload={routing.reload} theme={theme}>{(routes) => <>
+              <RoutingEditor form={form} onChange={setForm} vocabulary={routingVocabulary(routes)} theme={theme}
+                errors={mergeErrors(clientErrors, surface.saveError?.fields)} />
+              <Button title="Save profile rules and name" theme={theme} disabled={surface.saving}
+                onPress={() => {
+                  const built = buildRoutingRules(form, routingVocabulary(routes));
+                  if (!built.ok) { setClientErrors(built.errors); return; }
+                  setClientErrors({});
+                  const changedRules = !sameJson(built.value, profile.rules);
+                  mutate({ surface: "routing_profiles", action: "update", workspaceId: workspaceId ?? undefined,
+                    expected_revision: view.revision, expected_routing_revision: view.user_routing_revision,
+                    name: profile.name, rename_to: name, description, ...(changedRules ? { rules: built.value } : {}) })
+                    .then((ok) => { if (ok) setSelected(name); });
+                }} />
+            </>}</SurfaceFrame>}
+          <Button title="Activate profile" theme={theme} disabled={surface.saving}
+                onPress={() => mutate({ surface: "routing_profiles", action: "activate", workspaceId: workspaceId ?? undefined,
+                  expected_revision: view.revision, expected_routing_revision: view.user_routing_revision, name: profile.name })} />
+              {view.active === profile.name && <Button title="Deactivate profile (keep current user routing)" theme={theme} disabled={surface.saving}
+                onPress={() => mutate({ surface: "routing_profiles", action: "deactivate", workspaceId: workspaceId ?? undefined,
+                  expected_revision: view.revision })} />}
+              {view.active !== profile.name && (confirmDelete
+                ? <><Button title="Confirm delete profile" theme={theme} tone="danger" disabled={surface.saving}
+                    onPress={() => { mutate({ surface: "routing_profiles", action: "delete", workspaceId: workspaceId ?? undefined,
+                      expected_revision: view.revision, name: profile.name }).then((ok) => { if (ok) setSelected(""); }); }} />
+                  <Button title="Cancel delete" theme={theme} onPress={() => setConfirmDelete(false)} /></>
+                : <Button title="Delete profile" theme={theme} tone="danger" onPress={() => setConfirmDelete(true)} />)}
+        </>}
+        <SaveStatus saveError={surface.saveError} notice={notice} reload={surface.reload} theme={theme} />
+      </View>}
+    </SurfaceFrame>
+  </Card>;
+}
+
 // --- Engines & models ---------------------------------------------------------------
 
 function SwitchLegend({ theme }: { theme: Theme }) {
@@ -823,8 +912,9 @@ function SwitchLegend({ theme }: { theme: Theme }) {
   </Group>;
 }
 
-function ModelRow({ group, form, onChange, target, theme }: {
-  group: ModelGroup; form: RoutingForm; onChange: (form: RoutingForm) => void; target: "user" | "project"; theme: Theme;
+function ModelRow({ group, form, onChange, target, tiers, availableModels, workKinds, workKindLabels, theme }: {
+  group: ModelGroup; form: RoutingForm; onChange: (form: RoutingForm) => void; target: "user" | "project"; tiers: readonly string[]; availableModels: readonly string[];
+  workKinds: readonly string[]; workKindLabels: Record<string, string>; theme: Theme;
 }) {
   const route = group.routes[0];
   const title = group.key;
@@ -844,6 +934,22 @@ function ModelRow({ group, form, onChange, target, theme }: {
       onValueChange={(on) => onChange(setModelEnabled(form, route, on))} />
     {broader.map((token) => <Button key={token} title={`Remove rule "${token}"`} tone="danger" theme={theme}
       accessibilityLabel={`Remove deny rule ${token} (covers ${title})`} onPress={() => onChange(removeRoutingToken(form, "deny", token))} />)}
+    <ToggleField label={`Use ${title} for automatic ranking`}
+      value={modelAutoSelected(form, route.engine, route.model, route.auto_selected ?? route.automatic === "eligible")} disabled={deny.on} theme={theme}
+      hint="Controls the configured automatic-routing candidate list; it does not affect manual selection."
+      onValueChange={(on) => onChange(setModelAutoSelected(form, route.engine, route.model, on, availableModels))} />
+    <ChoiceField label={`Automatic tier for ${title}`} value={form.models?.[route.engine]?.tiers[route.model] ?? route.tier ?? tiers[0] ?? "standard"}
+      options={tiers.map((tier) => ({ value: tier, label: tier }))} onChange={(tier) => onChange(setModelTier(form, route.engine, route.model, tier))}
+      theme={theme} hint="The configured tier is used by runtime model ranking." disabled={deny.on} />
+    <Group title={`Preferred work for ${title}`} theme={theme}
+      hint="Preferences rank this model within its tier; they do not override availability, policy or plan usage. If built-in eligibility excludes it, select it for automatic ranking first.">
+      {workKinds.map((kind) => <ToggleField key={kind} label={`${workKindLabels[kind] ?? kind} — ${title}`}
+        value={(form.models?.[route.engine]?.policy?.[route.model]?.preferred_for as string[] | undefined)?.includes(kind) ?? false}
+        disabled={deny.on || (form.models?.[route.engine]?.auto == null
+          ? route.automatic !== "eligible" : !form.models[route.engine].auto?.includes(route.model))}
+        theme={theme} onValueChange={(on) => onChange(setModelPreferredFor(form, route.engine, route.model, kind, on,
+          route.automatic === "eligible"))} />)}
+    </Group>
     {route.default_auto_excluded !== null && (canAutoAllow(route)
       ? <>
         <ToggleField label={`Allow ${title} in automatic routing`} value={auto.on} disabled={auto.blocking.length > 0 || deny.on} theme={theme}
@@ -859,9 +965,9 @@ function ModelRow({ group, form, onChange, target, theme }: {
   </View>;
 }
 
-function EngineBlock({ engine, catalog, form, onChange, target, engines, theme }: {
+function EngineBlock({ engine, catalog, form, onChange, target, engines, workKinds, workKindLabels, theme }: {
   engine: CatalogEngine; catalog: RouteCatalogView; form: RoutingForm; onChange: (form: RoutingForm) => void; target: "user" | "project";
-  engines: readonly string[]; theme: Theme;
+  engines: readonly string[]; workKinds: readonly string[]; workKindLabels: Record<string, string>; theme: Theme;
 }) {
   const name = engineLabel(engine.engine);
   const disabled = engineDisabledIn(form, engine.engine);
@@ -890,7 +996,9 @@ function EngineBlock({ engine, catalog, form, onChange, target, engines, theme }
       ? <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
         {engine.connections.length === 0 ? "No models: no connection for this engine." : "No models known yet for this engine."}
       </Text>
-      : groups.map((group) => <ModelRow key={group.key} group={group} form={form} onChange={onChange} target={target} theme={theme} />)}
+      : groups.map((group) => <ModelRow key={group.key} group={group} form={form} onChange={onChange} target={target} tiers={["light", "standard", "deep", "flagship"]}
+        availableModels={groups.filter((item) => item.routes.some((route) => route.auto_selected ?? route.automatic === "eligible")).map((item) => item.model)}
+        workKinds={workKinds} workKindLabels={workKindLabels} theme={theme} />)}
   </View>;
 }
 
@@ -973,7 +1081,7 @@ function EnginesModelsSection({ theme, workspaceId }: { theme: Theme; workspaceI
                 {cat.catalog_problems.map((problem) => <Banner key={problem.connection_id} theme={theme} tone="warning"
                   text={`The model list of connection ${problem.connection_id} could not be read: ${problem.message}`} />)}
                 {cat.engines.map((engine) => <EngineBlock key={engine.engine} engine={engine} catalog={cat} form={form} onChange={setForm}
-                  target={target} engines={engines} theme={theme} />)}
+                  target={target} engines={engines} workKinds={view.builtin.work_kinds} workKindLabels={view.builtin.work_kind_labels} theme={theme} />)}
                 <OtherRules catalog={cat} form={form} onChange={setForm} target={target} theme={theme} />
               </View>}
             </SurfaceFrame>}
@@ -1372,6 +1480,7 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
     {section === "engines_models" && <EnginesModelsSection theme={theme} workspaceId={workspaceId} />}
     {section === "project_ceiling" && <ProjectCeilingSection theme={theme} workspaceId={workspaceId} />}
     {section === "routing" && <RoutingSection theme={theme} workspaceId={workspaceId} />}
+    {section === "routing_profiles" && <RoutingProfilesSection theme={theme} workspaceId={workspaceId} />}
     {section === "mcp_servers" && <McpServersSection theme={theme} />}
     {section === "connections" && <ConnectionsSection theme={theme} />}
   </ScrollView>;

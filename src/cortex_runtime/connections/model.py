@@ -65,6 +65,9 @@ KEY_KIND_ENV_VAR: dict[str, str] = {
 # ``engine.opencode_adapter_acp`` and docs/acp/opencode-adapter.md).
 SUPPORTED_ENGINES: tuple[str, ...] = ("codex-acp", "claude-agent-acp", "opencode")
 
+# Optional engines are onboarded explicitly and excluded from automatic routing by default.
+OPTIONAL_ENGINES: tuple[str, ...] = ("opencode",)
+
 
 @dataclass(frozen=True)
 class _AuthSupport:
