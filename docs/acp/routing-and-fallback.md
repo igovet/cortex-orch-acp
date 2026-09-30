@@ -277,7 +277,10 @@ remains light at every complexity and escalation; because its tier cannot rise,
 escalation raises its effort one supported step (normally low to medium; on
 Luna, high to xhigh).
 
-Models are grouped into light, standard, deep, and flagship. An unavailable
+Models are grouped into light, standard, deep, and flagship; the owner may
+place one model in several tiers (`models.<engine>.tiers` as a list), which
+makes it a candidate of each and runs it at the effort of the tier it was
+chosen for. An unavailable
 role tier searches the nearest tier permitted by policy; flagship is never a
 starting tier except for a node the user explicitly asked to run on it. Haiku is excluded from automatic selection by default, but
 `auto_allow` can opt in a model or `engine/model`; `deny` and `providers` still

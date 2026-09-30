@@ -8,7 +8,7 @@ the engine reports (OpenCode ids may contain ``/`` and ``,``)::
     "models": {
       "<engine id>": {
         "auto":   ["<model id>", ...],
-        "tiers":  {"<model id>": "light|standard|deep|flagship"},
+        "tiers":  {"<model id>": "light|standard|deep|flagship" or ["standard", "deep"]},
         "policy": {"<model id>": {"effort_floor": "high", "max_effort": null,
                                   "effort_ladder": ["high", "xhigh", "max"],
                                   "also_standard_for": ["testing"],
@@ -25,7 +25,11 @@ the engine reports (OpenCode ids may contain ``/`` and ``,``)::
 - A model's tier is, first that applies: ``models[engine].tiers`` (source
   ``configured``), the legacy engine-agnostic top-level ``tiers``
   (``legacy_tiers``), the built-in tables (``builtin``), else its position
-  in its own connection's list (``position``).
+  in its own connection's list (``position``). Only ``models[engine].tiers``
+  may give a model several tiers (a list): it is then a candidate of each of
+  them, and its efforts follow the tier it was chosen for.
+  :attr:`RoutePolicy.tier` is the strongest of them, :attr:`RoutePolicy.tiers`
+  all of them.
 - A model's policy is the built-in attributes (:func:`builtin_attributes`)
   overlaid key by key with ``models[engine].policy[model]``; a configured
   ``null`` removes the built-in value.
@@ -160,7 +164,7 @@ def model_line(model: str, name: str | None = None) -> tuple[str, tuple[int, ...
 class RoutePolicy:
     """One route's effective tier, selection and policy attributes."""
 
-    tier: str | None
+    tier: str | None  # the strongest of ``tiers``
     tier_source: str | None  # configured | legacy_tiers | builtin | position | None (unplaced)
     selection: str  # builtin | listed
     selected: bool | None  # listed-mode membership; None in builtin mode
@@ -171,12 +175,19 @@ class RoutePolicy:
     preferred_for: frozenset = frozenset()
     request_names: tuple[str, ...] = ()
     attribute_sources: Mapping[str, str] = field(default_factory=dict)
+    #: Every tier the model is a candidate of, strongest first (``(tier,)``
+    #: unless ``models[engine].tiers`` lists several).
+    tiers: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if not self.tiers and self.tier is not None:
+            object.__setattr__(self, "tiers", (self.tier,))
 
     @property
     def stretch(self) -> bool:
         """A light-tier model with its own effort ladder or standard work
         kinds (the rule built in for the Codex Luna line)."""
-        return self.tier == "light" and bool(self.effort_ladder or self.also_standard_for)
+        return "light" in self.tiers and bool(self.effort_ladder or self.also_standard_for)
 
     def attributes(self) -> dict[str, object]:
         """The effective attributes as JSON, with each one's source."""
@@ -227,18 +238,25 @@ def builtin_attributes(model: str) -> dict[str, object]:
     return attributes
 
 
-def _configured_tier(overrides: Mapping, engine: str, model: str) -> tuple[str | None, str | None]:
+def tier_list(value) -> tuple[str, ...]:
+    """A configured tier value (one tier or a list of tiers) as the known
+    tiers it names, strongest first."""
+    named = {value} if isinstance(value, str) else set(value or ())
+    return tuple(tier for tier in TIERS if tier in named)
+
+
+def _configured_tier(overrides: Mapping, engine: str, model: str) -> tuple[tuple[str, ...], str | None]:
     configured = engine_config(overrides, engine).get("tiers") or {}
-    if configured.get(model):
-        return configured[model], "configured"
+    if tier_list(configured.get(model)):
+        return tier_list(configured[model]), "configured"
     legacy = overrides.get("tiers") or {}
     if legacy.get(model):
-        return legacy[model], "legacy_tiers"
+        return (legacy[model],), "legacy_tiers"
     tier = builtin_tier(model)
-    return (tier, "builtin") if tier else (None, None)
+    return ((tier,), "builtin") if tier else ((), None)
 
 
-def _policy(engine: str, model: str, overrides: Mapping, tier: str | None, tier_source: str | None) -> RoutePolicy:
+def _policy(engine: str, model: str, overrides: Mapping, tiers: tuple[str, ...], tier_source: str | None) -> RoutePolicy:
     attributes = builtin_attributes(model)
     sources = {name: "builtin" for name in attributes}
     configured = (engine_config(overrides, engine).get("policy") or {}).get(model) or {}
@@ -252,7 +270,8 @@ def _policy(engine: str, model: str, overrides: Mapping, tier: str | None, tier_
             sources.pop(name, None)
     selected = is_selected(overrides, engine, model)
     return RoutePolicy(
-        tier=tier, tier_source=tier_source, selection="builtin" if selected is None else "listed", selected=selected,
+        tier=tiers[0] if tiers else None, tiers=tuple(tiers), tier_source=tier_source,
+        selection="builtin" if selected is None else "listed", selected=selected,
         effort_floor=attributes.get("effort_floor"), max_effort=attributes.get("max_effort"),
         effort_ladder=tuple(attributes.get("effort_ladder") or ()),
         also_standard_for=frozenset(attributes.get("also_standard_for") or ()),
@@ -266,8 +285,8 @@ def policy_for(engine: str, model: str, overrides: Mapping | None = None) -> Rou
     """One model's policy without its connection's list: the tier is
     ``None`` when only its list position would place it."""
     overrides = overrides or {}
-    tier, source = _configured_tier(overrides, engine, model)
-    return _policy(engine, model, overrides, tier, source)
+    tiers, source = _configured_tier(overrides, engine, model)
+    return _policy(engine, model, overrides, tiers, source)
 
 
 def resolve_policies(entries: Sequence, overrides: Mapping | None = None) -> dict[str, RoutePolicy]:
@@ -279,15 +298,15 @@ def resolve_policies(entries: Sequence, overrides: Mapping | None = None) -> dic
     unplaced: dict[str, list] = {}
     for entry in entries:
         engine, model = entry.route.engine, entry.route.model
-        tier, source = _configured_tier(overrides, engine, model)
-        if tier is None:
+        tiers, source = _configured_tier(overrides, engine, model)
+        if not tiers:
             unplaced.setdefault(entry.connection_id, []).append(entry)
             continue
-        result[entry.route.id] = _policy(engine, model, overrides, tier, source)
+        result[entry.route.id] = _policy(engine, model, overrides, tiers, source)
     for group in unplaced.values():
         for index, entry in enumerate(group):
             tier = ("deep", "standard", "light")[min(2, index * 3 // len(group))]
-            result[entry.route.id] = _policy(entry.route.engine, entry.route.model, overrides, tier, "position")
+            result[entry.route.id] = _policy(entry.route.engine, entry.route.model, overrides, (tier,), "position")
     return result
 
 
@@ -368,12 +387,19 @@ def validate_models(value, *, engines: Sequence[str], work_kinds: Sequence[str],
         if "tiers" in config:
             tiers = config["tiers"]
             if not isinstance(tiers, Mapping):
-                add(f"{base}.tiers", "invalid_type", "must map an exact model id to a tier")
+                add(f"{base}.tiers", "invalid_type", "must map an exact model id to a tier or a list of tiers")
             else:
                 for model, tier in tiers.items():
                     where = f"{base}.tiers.{model}"
-                    if check_model(where, model) and tier not in TIERS:
-                        add(where, "invalid_value", f"tier must be one of {', '.join(TIERS)}")
+                    if not check_model(where, model):
+                        continue
+                    if isinstance(tier, list):
+                        if (not tier or len(set(map(str, tier))) != len(tier)
+                                or not all(isinstance(item, str) and item in TIERS for item in tier)):
+                            add(where, "invalid_value",
+                                f"a list of tiers must be non-empty and unique, drawn from {', '.join(TIERS)}")
+                    elif tier not in TIERS:
+                        add(where, "invalid_value", f"tier must be one of {', '.join(TIERS)} or a list of them")
         if "policy" in config:
             policies = config["policy"]
             if not isinstance(policies, Mapping):

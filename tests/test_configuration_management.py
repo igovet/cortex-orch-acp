@@ -817,3 +817,16 @@ def test_opencode_acp_observation_exposes_byteplus_only_when_offered(home, monke
     assert offered["observed"] and offered["in_selector"] and offered["automatic"] == "eligible"
     assert offered["auto_selected"] is True
     assert _engines(after)["opencode"]["unmatched_selected"] == []
+
+
+def test_a_model_may_be_placed_in_several_tiers(home, monkeypatch):
+    _catalog_fixture(home, monkeypatch)
+    with pytest.raises(management.ConfigValidationError) as caught:
+        management.update_routing("user", "absent", {"models": {"codex-acp": {"tiers": {"gpt-6-sol": ["deep", "deep"]}}}})
+    assert ("rules.models.codex-acp.tiers.gpt-6-sol", "invalid_value") in _codes(caught.value)
+    rules = {"models": {"codex-acp": {"tiers": {"gpt-6-sol": ["standard", "deep"]}}}}
+    written = management.update_routing("user", "absent", rules)
+    assert written["effective_rules"] == rules and auto_route.load_overrides() == rules
+    sol = _routes(management.read_route_catalog())["codex-acp/gpt-6-sol"]
+    assert (sol["tier"], sol["tiers"], sol["tier_source"], sol["configured_tier"]) == (
+        "deep", ["deep", "standard"], "configured", ["standard", "deep"])

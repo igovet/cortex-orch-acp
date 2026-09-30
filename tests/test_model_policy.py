@@ -149,3 +149,15 @@ def test_preferred_model_must_be_selected_when_auto_list_is_explicit():
     rules["models"]["opencode"].pop("auto")
     assert model_policy.validate_models(rules["models"], engines=SUPPORTED_ENGINES,
                                         work_kinds=model_policy.WORK_KINDS) == []
+
+
+def test_a_configured_tier_list_places_a_model_in_each_tier():
+    overrides = {"models": {"codex-acp": {"tiers": {"gpt-6-sol": ["standard", "flagship"]}}}}
+    policy = model_policy.policy_for("codex-acp", "gpt-6-sol", overrides)
+    assert (policy.tier, policy.tiers, policy.tier_source) == ("flagship", ("flagship", "standard"), "configured")
+    assert model_policy.policy_for("codex-acp", "gpt-6-sol").tiers == ("deep",)
+    problems = model_policy.validate_models(
+        {"codex-acp": {"tiers": {"a": [], "b": ["deep", "deep"], "c": ["huge"], "d": ["light", "deep"]}}},
+        engines=("codex-acp",), work_kinds=(), reserved_word=lambda word: False)
+    assert {where for where, _code, _message in problems} == {
+        "models.codex-acp.tiers.a", "models.codex-acp.tiers.b", "models.codex-acp.tiers.c"}

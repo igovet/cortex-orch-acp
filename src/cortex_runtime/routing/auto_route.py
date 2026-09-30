@@ -410,18 +410,21 @@ def route_menu(project_root=None, environ=None, unavailable=()):
         used = quota.used_percent(connections[entry.connection_id], model, environ)
         blocked = availability.blocking(unavailable, entry.connection_id, model)
         reason = _auto_exclusion(overrides, entry) or ("superseded" if entry.route.id in applied else None)
-        result[policy.tier].append(dict(
-            route=label, engine=engine, model=model,
-            connection_id=entry.connection_id,
-            efforts=list(permitted_efforts(entry, policy.tier, policy)),
-            state=(f"unavailable_until:{blocked['expires_at']}" if blocked else
-                   "exhausted" if used is not None and used >= 100 else "available"),
-            auto_eligible=reason is None, auto_reason=reason or "eligible",
-            superseded_by=superseded.get(entry.route.id),
-            tier_source=policy.tier_source, selection=policy.selection, policy=policy.attributes(),
-            quota=dict(band="unknown" if used is None else "hot" if used >= HOT_PERCENT else "cool",
-                       used_percent=used)))
-        if policy.tier == "flagship":
+        # A model the owner placed in several tiers is listed under each.
+        for tier in policy.tiers:
+            result[tier].append(dict(
+                route=label, engine=engine, model=model,
+                connection_id=entry.connection_id,
+                efforts=list(permitted_efforts(entry, tier, policy)),
+                state=(f"unavailable_until:{blocked['expires_at']}" if blocked else
+                       "exhausted" if used is not None and used >= 100 else "available"),
+                auto_eligible=reason is None, auto_reason=reason or "eligible",
+                superseded_by=superseded.get(entry.route.id),
+                tier_source=policy.tier_source, tiers=list(policy.tiers), selection=policy.selection,
+                policy=policy.attributes(),
+                quota=dict(band="unknown" if used is None else "hot" if used >= HOT_PERCENT else "cool",
+                           used_percent=used)))
+        if "flagship" in policy.tiers:
             flagship.append((label, policy))
         if policy.stretch:
             ladder = policy.effort_ladder
@@ -504,6 +507,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     allowed = _allowed(overrides, entries)
     policies = model_policy.resolve_policies(allowed, overrides)
     tiers = {route_id: policy.tier for route_id, policy in policies.items()}
+    tier_sets = {route_id: policy.tiers for route_id, policy in policies.items()}
     models = overrides.get("models") or {}
     usage_cache: dict = {}
 
@@ -588,7 +592,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                           if best.route.id in luna_ids and best_policy.effort_ladder
                           else EFFORT_BY_TIER[tier_for(role, escalate, complexity)])
         return Choice(best.connection_id, model,
-                      nearest(effort or default_effort, permitted_efforts(best, best_policy.tier, best_policy)),
+                      nearest(effort or default_effort, efforts_in_any_tier(best, best_policy)),
                       "auto:pin", decision)
     default_denied = {entry.route.id for entry in allowed if _default_auto_denied(overrides, entry)}
     luna_denied = frozenset(route_id for route_id, status in stretch_status.items() if status.startswith("excluded:"))
@@ -597,7 +601,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     superseded = _applied_superseded(overrides, allowed, superseded_routes(allowed))
     providers = overrides.get("providers")
     # A flagship route the user asked for in this task (see user_model_request).
-    requested, request_status = _user_flagship(model_hint, user_request, overrides, allowed, tiers,
+    requested, request_status = _user_flagship(model_hint, user_request, overrides, allowed, tier_sets,
                                                frozenset(blocked), superseded, usage)
     if requested:
         picked, decision = rank("flagship", requested, usage, overrides.get("tiers") or {},
@@ -612,7 +616,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         if profile_label is not None:
             decision["routing_profile"] = profile_label
         effort = nearest(EFFORT_BY_TIER["flagship"],
-                         permitted_efforts(picked, tiers[picked.route.id], policies[picked.route.id]))
+                         permitted_efforts(picked, "flagship", policies[picked.route.id]))
         return Choice(picked.connection_id, picked.route.model, effort, "auto:user_request", decision)
     status = None
     if preference is not None and providers is not None and preference not in providers:
@@ -682,7 +686,10 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         effort_target = EFFORT_ORDER[min(EFFORT_ORDER.index(effort_target) + 1,
                                          EFFORT_ORDER.index("high"))]
         effort_basis = "escalation_step"
-    effort = nearest(effort_target, permitted_efforts(picked, policy.tier, policy))
+    # Efforts follow the tier the model was chosen for (one of its tiers; a
+    # light stretch model taking standard work keeps its light-tier efforts).
+    served = decision.get("tier") if decision.get("tier") in policy.tiers else policy.tier
+    effort = nearest(effort_target, permitted_efforts(picked, served, policy))
     decision["base_role_tier"] = base_role_tier
     decision["effort_basis"] = effort_basis
     return Choice(picked.connection_id, picked.route.model, effort, "auto", decision)
@@ -814,7 +821,6 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     ``models`` is routing.json ``models`` (tiers and policy per engine)."""
     superseded = superseded or {}
     policies = model_policy.resolve_policies(entries, dict(tiers=tier_overrides or {}, models=models or {}))
-    tiers = {route_id: policy.tier for route_id, policy in policies.items()}
     kind = work_kind(role)
 
     def purpose(e) -> bool:
@@ -823,7 +829,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     order = {e.route.id: index for index, e in enumerate(entries)}
 
     def serves(e, tier):
-        return tiers[e.route.id] == tier or (tier == "standard" and e.route.id in luna_standard)
+        return tier in policies[e.route.id].tiers or (tier == "standard" and e.route.id in luna_standard)
 
     for tier in _FALLBACK_ORDER[role_tier]:
         candidates = [e for e in usable if serves(e, tier)]
@@ -913,7 +919,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                                if serves(e, tier) and e.route.id not in policy_excluded
                                and (e.route.id in excluded or (usage(e) or 0.0) >= 100.0)),
             excluded_by_policy=sorted(_route_label(e) for e in entries
-                                      if tiers[e.route.id] == tier and e.route.id in policy_excluded
+                                      if tier in policies[e.route.id].tiers and e.route.id in policy_excluded
                                       and e.route.id not in superseded),
             superseded={_route_label(e): superseded[e.route.id] for e in entries if e.route.id in superseded},
             decided_by=decided_by,
@@ -928,7 +934,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 
 
 def _user_flagship(model_hint: str, user_request: Mapping | None, overrides: Mapping, allowed: Sequence,
-                   tiers: Mapping[str, str], blocked: frozenset, superseded: Mapping[str, str], usage):
+                   tiers: Mapping[str, Sequence[str]], blocked: frozenset, superseded: Mapping[str, str], usage):
     """``(entries, status)`` for an exact flagship ``model_hint``: the usable
     entries of the route the user asked for (status ``honoured``), or none
     and why not. ``status`` is ``None`` when the hint is not an exact route,
@@ -937,7 +943,7 @@ def _user_flagship(model_hint: str, user_request: Mapping | None, overrides: Map
     if not slash:
         return (), None
     offered = [e for e in allowed if e.route.engine == engine and e.route.model == model]
-    flagship = bool(offered) and all(tiers[e.route.id] == "flagship" for e in offered)
+    flagship = bool(offered) and all("flagship" in tiers[e.route.id] for e in offered)
     if user_request is None:
         return (), "not_requested_by_user" if flagship else None
     if _denied(overrides, engine, model):
@@ -1062,6 +1068,15 @@ def permitted_efforts(entry, tier: str, policy: model_policy.RoutePolicy | None 
     return permitted
 
 
+def efforts_in_any_tier(entry, policy: model_policy.RoutePolicy) -> tuple[str, ...]:
+    """:func:`permitted_efforts` of every tier ``policy`` places the model
+    in, weakest first (a pin or an explicit effort is not tied to a tier)."""
+    permitted = set()
+    for tier in policy.tiers or (policy.tier,):
+        permitted.update(permitted_efforts(entry, tier, policy))
+    return tuple(value for value in EFFORT_ORDER if value in permitted)
+
+
 def nearest(effort: str, permitted: Sequence[str]) -> str | None:
     if effort in permitted:
         return effort
@@ -1086,8 +1101,7 @@ def allowed_efforts(engine: str, model: str | None, project_root=None, environ=N
     match = next((e for e in entries if e.route.engine == engine and e.route.model == model), None)
     if match is None:
         return None
-    policy = policies[match.route.id]
-    return permitted_efforts(match, policy.tier, policy)
+    return efforts_in_any_tier(match, policies[match.route.id])
 
 
 def _entries(overrides, connections, environ) -> list:

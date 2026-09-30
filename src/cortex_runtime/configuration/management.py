@@ -1050,6 +1050,7 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
             connection_id=record.id, connection_name=record.name, connection_state=record.state.value,
             qualified=record.qualified, observed=not auto_route._is_seed(entry),
             tier=candidate_policy.tier if candidate_policy else None,
+            tiers=list(candidate_policy.tiers) if candidate_policy else [],
             tier_source=candidate_policy.tier_source if candidate_policy else None,
             configured_tier=(model_policy.engine_config(rules, engine).get("tiers") or {}).get(model),
             selection=policy.selection, auto_selected=policy.selected, policy=policy.attributes(),

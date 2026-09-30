@@ -480,7 +480,9 @@ export type PinRow = { role: string; engine: string; model: string; effort: stri
 export type TierRow = { model: string; tier: string };
 /** `engine: ""` means `null` (no affinity for that work kind). */
 export type AffinityRow = { kind: string; engine: string };
-export type ModelRulesForm = Record<string, { auto: string[] | null; tiers: Record<string, string>; policy: Record<string, Record<string, unknown>> }>;
+/** A model's configured tier is one tier or several (a candidate of each). */
+export type ModelTierValue = string | string[];
+export type ModelRulesForm = Record<string, { auto: string[] | null; tiers: Record<string, ModelTierValue>; policy: Record<string, Record<string, unknown>> }>;
 
 /** Each key is `null` while it is absent from the file (the built-in policy
  * applies); a present key keeps its exact order. */
@@ -554,14 +556,16 @@ export function routingRulesToForm(rules: Record<string, unknown> | undefined): 
     const models: ModelRulesForm = {};
     for (const [engine, raw] of Object.entries(rules.models)) {
       if (!isPlainObject(raw) || Object.keys(raw).some((key) => !["auto", "tiers", "policy"].includes(key))
-        || (raw.auto !== undefined && !isStringArray(raw.auto)) || (raw.tiers !== undefined && !isStringRecord(raw.tiers))
+        || (raw.auto !== undefined && !isStringArray(raw.auto))
+        || (raw.tiers !== undefined && !(isPlainObject(raw.tiers) && Object.values(raw.tiers).every((tier) => typeof tier === "string" || isStringArray(tier))))
         || (raw.policy !== undefined && !isPlainObject(raw.policy))) return unrepresentable("models");
       const policy: Record<string, Record<string, unknown>> = {};
       for (const [model, value] of Object.entries(raw.policy ?? {})) {
         if (!isPlainObject(value) || (value.preferred_for !== undefined && !isStringArray(value.preferred_for))) return unrepresentable("models.policy");
         policy[model] = { ...value };
       }
-      models[engine] = { auto: raw.auto === undefined ? null : [...raw.auto as string[]], tiers: raw.tiers === undefined ? {} : { ...raw.tiers as Record<string, string> }, policy };
+      models[engine] = { auto: raw.auto === undefined ? null : [...raw.auto as string[]], tiers: raw.tiers === undefined ? {} : Object.fromEntries(Object.entries(raw.tiers as Record<string, ModelTierValue>)
+        .map(([model, tier]) => [model, Array.isArray(tier) ? [...tier] : tier])), policy };
     }
     form.models = models;
   }
@@ -676,15 +680,19 @@ export function buildRoutingRules(form: RoutingForm, vocabulary: RoutingVocabula
     rules.providers = providers ?? [];
   }
   if (form.models != null) {
-    const models: Record<string, { auto?: string[]; tiers?: Record<string, string>; policy?: Record<string, Record<string, unknown>> }> = {};
+    const models: Record<string, { auto?: string[]; tiers?: Record<string, ModelTierValue>; policy?: Record<string, Record<string, unknown>> }> = {};
     for (const [engine, value] of Object.entries(form.models)) {
       if (!engines.includes(engine)) { addError(errors, `rules.models.${engine}`, `Engine must be one of ${engines.join(", ")}.`); continue; }
       const auto = checkList(value.auto, `rules.models.${engine}.auto`, errors, { noSpaces: true, maxItems: 1000 });
-      const tiers: Record<string, string> = {};
+      const tiers: Record<string, ModelTierValue> = {};
       for (const [model, tier] of Object.entries(value.tiers)) {
-        if (!model || SPACE_OR_CONTROL.test(model)) addError(errors, `rules.models.${engine}.tiers.${model}`, "Model id must not contain spaces.");
-        if (!vocabulary.tiers.includes(tier)) addError(errors, `rules.models.${engine}.tiers.${model}`, `Tier must be one of ${vocabulary.tiers.join(", ")}.`);
-        tiers[model] = tier;
+        const key = `rules.models.${engine}.tiers.${model}`;
+        const list = Array.isArray(tier) ? tier : [tier];
+        if (!model || SPACE_OR_CONTROL.test(model)) addError(errors, key, "Model id must not contain spaces.");
+        if (list.length === 0) addError(errors, key, "Choose at least one tier.");
+        else if (new Set(list).size !== list.length) addError(errors, key, "Each tier is chosen once.");
+        if (list.some((item) => !vocabulary.tiers.includes(item))) addError(errors, key, `Tier must be one of ${vocabulary.tiers.join(", ")}.`);
+        tiers[model] = Array.isArray(tier) ? [...tier] : tier;
       }
       for (const [model, policy] of Object.entries(value.policy)) {
         const preferred = policy.preferred_for;
@@ -868,8 +876,27 @@ export function setModelAutoSelected(form: RoutingForm, engine: string, model: s
   return { ...form, models };
 }
 export function setModelTier(form: RoutingForm, engine: string, model: string, tier: string): RoutingForm {
+  return setModelTiers(form, engine, model, [tier]);
+}
+
+/** The tiers `model` is configured for, else the tiers Cortex uses now. */
+export function modelTierValues(form: RoutingForm, route: Pick<CatalogRoute, "engine" | "model" | "tier" | "tiers">): string[] {
+  const configured = form.models?.[route.engine]?.tiers[route.model];
+  if (configured !== undefined) return Array.isArray(configured) ? [...configured] : [configured];
+  return route.tiers && route.tiers.length > 0 ? [...route.tiers] : route.tier ? [route.tier] : [];
+}
+
+/** Configure `model` for `tiers` (strongest first, as `vocabulary` orders
+ * them): one tier is written as a string, several as a list, none removes
+ * the setting so the built-in tier applies again. */
+export function setModelTiers(form: RoutingForm, engine: string, model: string, tiers: readonly string[], order: readonly string[] = []): RoutingForm {
   const models = { ...(form.models ?? {}) }; const current = models[engine] ?? { auto: null, tiers: {}, policy: {} };
-  models[engine] = { ...current, tiers: { ...current.tiers, [model]: tier } }; return { ...form, models };
+  const unique = [...new Set(tiers)];
+  const sorted = order.length ? [...unique].sort((a, b) => order.indexOf(a) - order.indexOf(b)) : unique;
+  const next = { ...current.tiers };
+  if (sorted.length === 0) delete next[model];
+  else next[model] = sorted.length === 1 ? sorted[0] : sorted;
+  models[engine] = { ...current, tiers: next }; return { ...form, models };
 }
 export function setModelPreferredFor(form: RoutingForm, engine: string, model: string, kind: string, enabled: boolean, builtinEligible = false): RoutingForm {
   const currentAuto = form.models?.[engine]?.auto;

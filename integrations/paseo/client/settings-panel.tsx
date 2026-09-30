@@ -51,7 +51,8 @@ import {
   modelGroups,
   modelAutoSelected,
   setModelAutoSelected,
-  setModelTier,
+  setModelTiers,
+  modelTierValues,
   setModelPreferredFor,
   removeRoutingToken,
   sameJson,
@@ -245,18 +246,21 @@ function ChoiceField<T extends string>({ label, value, options, onChange, theme,
 }
 
 /** Several choices among fixed options, as checkboxes. */
-function MultiChoiceField({ label, values, options, onChange, theme, error }: {
+function MultiChoiceField({ label, values, options, onChange, theme, error, hint, disabled }: {
   label: string; values: readonly string[]; options: ReadonlyArray<Option<string>>; onChange: (values: string[]) => void; theme: Theme; error?: string;
+  hint?: string; disabled?: boolean;
 }) {
   return <View>
     <Label text={label} theme={theme} />
+    <Hint text={hint} theme={theme} />
     <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
       {options.map((option) => {
         const checked = values.includes(option.value);
         const color = checked ? theme.colors.accent : theme.colors.foregroundMuted;
         return <Pressable key={option.value} accessibilityRole="checkbox" accessibilityLabel={`${label}: ${option.label}`}
-          accessibilityState={{ checked }} onPress={() => onChange(checked ? values.filter((item) => item !== option.value) : [...values, option.value])}
-          style={{ paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, borderWidth: 1, borderColor: color }}>
+          accessibilityState={{ checked, disabled: Boolean(disabled) }} disabled={disabled}
+          onPress={() => onChange(checked ? values.filter((item) => item !== option.value) : [...values, option.value])}
+          style={{ paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6, borderWidth: 1, borderColor: color, opacity: disabled ? 0.5 : 1 }}>
           <Text style={{ color, fontSize: 12 }}>{checked ? `☑ ${option.label}` : `☐ ${option.label}`}</Text>
         </Pressable>;
       })}
@@ -941,9 +945,11 @@ function ModelRow({ group, form, onChange, target, tiers, availableModels, workK
       value={modelAutoSelected(form, route.engine, route.model, route.auto_selected ?? route.automatic === "eligible")} disabled={deny.on} theme={theme}
       hint="Controls the configured automatic-routing candidate list; it does not affect manual selection."
       onValueChange={(on) => onChange(setModelAutoSelected(form, route.engine, route.model, on, availableModels))} />
-    <ChoiceField label={`Automatic tier for ${title}`} value={form.models?.[route.engine]?.tiers[route.model] ?? route.tier ?? tiers[0] ?? "standard"}
-      options={tiers.map((tier) => ({ value: tier, label: tier }))} onChange={(tier) => onChange(setModelTier(form, route.engine, route.model, tier))}
-      theme={theme} hint="The configured tier is used by runtime model ranking." disabled={deny.on} />
+    <MultiChoiceField label={`Automatic tiers for ${title}`} values={modelTierValues(form, route)}
+      options={tiers.map((tier) => ({ value: tier, label: tier }))} theme={theme} disabled={deny.on}
+      onChange={(next) => onChange(setModelTiers(form, route.engine, route.model, next, tiers))}
+      hint={"Runtime model ranking uses the model for work of every tier chosen here, at that tier's effort. "
+        + "Clearing every tier returns it to its built-in tier."} />
     <Group title={`Preferred work for ${title}`} theme={theme}
       hint="Preferences rank this model within its tier; they do not override availability, policy or plan usage. If built-in eligibility excludes it, select it for automatic ranking first.">
       {workKinds.map((kind) => <ToggleField key={kind} label={`${workKindLabels[kind] ?? kind} — ${title}`}

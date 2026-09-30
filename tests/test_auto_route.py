@@ -1508,3 +1508,22 @@ def test_configured_request_names_replace_the_builtin_spellings(tmp_path):
     assert auto_route.request_names(astra, project, environ) == ("звезд",)
     (project / ".cortex" / "routing.json").write_text("{broken")
     assert auto_route.request_names(astra, project, environ) == ("астр",)
+
+
+def test_a_model_in_several_tiers_is_a_candidate_of_each(tmp_path, monkeypatch):
+    routing = {"providers": ["codex-acp"], "models": {"codex-acp": {
+        "auto": ["gpt-5.6-terra"], "tiers": {"gpt-5.6-terra": ["light", "deep"]}}}}
+    project, environ = _configured(monkeypatch, tmp_path, routing)
+    menu = auto_route.route_menu(project, environ)
+    listed = {tier for tier, group in menu["tiers"].items() for item in group if item["route"] == "codex-acp/gpt-5.6-terra"}
+    assert listed == {"light", "deep"}
+    terra = next(item for item in menu["tiers"]["deep"] if item["route"] == "codex-acp/gpt-5.6-terra")
+    assert (terra["tiers"], terra["tier_source"]) == (["deep", "light"], "configured")
+    light = auto_route.choose("worker-explorer", project, environ)
+    deep = auto_route.choose("worker-architect", project, environ)
+    assert (light.model, light.decision["tier"], light.effort) == ("gpt-5.6-terra", "light", "low")
+    assert (deep.model, deep.decision["tier"], deep.effort) == ("gpt-5.6-terra", "deep", "high")
+    # Standard work has no standard candidate: the nearest tier (deep) serves it.
+    standard = auto_route.choose("worker-backend-dev", project, environ)
+    assert (standard.model, standard.decision["tier"]) == ("gpt-5.6-terra", "deep")
+    assert auto_route.allowed_efforts("codex-acp", "gpt-5.6-terra", project, environ)

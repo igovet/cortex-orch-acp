@@ -679,15 +679,20 @@ class TaskMachine:
             if '/' not in model:
                 item['preview_status'] = 'auto' if model == 'auto' else 'pending_dispatch'
                 return item
-            hinted_tier, hinted = next(((tier, entry) for tier, group in menu['tiers'].items()
-                                        for entry in group if entry['route'] == model), (None, {}))
+            # A model the owner placed in several tiers is listed under each.
+            hinted_tiers = [tier for tier, group in menu['tiers'].items()
+                            for entry in group if entry['route'] == model]
+            hinted = next((entry for group in menu['tiers'].values() for entry in group
+                           if entry['route'] == model), {})
             # A flagship route runs only on escalation or when the user asked
             # for its family in this task (auto_route.user_model_request).
-            request = user_model_request(self.store, channel.task_id, model) if hinted_tier == 'flagship' else None
+            request = (user_model_request(self.store, channel.task_id, model)
+                       if 'flagship' in hinted_tiers else None)
             if request is not None:
                 item.update(preview_status='pending_dispatch:user_request', user_request=request['source_ref'])
-            elif not hint_serves_tier(model.partition('/')[2], hinted_tier, role, item['tier_now'], complexity,
-                                      also_standard_for=(hinted.get('policy') or {}).get('also_standard_for')):
+            elif not any(hint_serves_tier(model.partition('/')[2], tier, role, item['tier_now'], complexity,
+                                          also_standard_for=(hinted.get('policy') or {}).get('also_standard_for'))
+                         for tier in hinted_tiers or [None]):
                 item['preview_status'] = 'ignored:tier_mismatch'
             else:
                 item['preview_status'] = 'pending_dispatch'

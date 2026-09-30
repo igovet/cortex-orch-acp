@@ -65,7 +65,8 @@ const defaultsPatch = z.strictObject({
 // The eight keys the routing loader supports; an omitted key is removed.
 const modelRules = z.strictObject({
   auto: z.array(text()).max(1000).optional(),
-  tiers: z.record(text(), text(64)).optional(),
+  // One tier, or several: the model is then a candidate of each of them.
+  tiers: z.record(text(), z.union([text(64), z.array(text(64)).min(1).max(4)])).optional(),
   policy: z.record(text(), z.record(text(), z.unknown())).optional(),
 });
 
@@ -327,6 +328,8 @@ const catalogRoute = z.object({
   // False for a seed catalog nothing has confirmed yet (never routed automatically).
   observed: z.boolean(),
   tier: z.string().nullable(),
+  // Every tier the model is a candidate of, strongest first (empty when it is not one).
+  tiers: z.array(z.string()).optional(),
   selectable: z.boolean(),
   in_selector: z.boolean(),
   disabled: z.boolean(),

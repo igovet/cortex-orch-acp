@@ -730,6 +730,25 @@ test("purpose choices require explicit auto selection and save OpenCode preferen
   assert.deepEqual(rules.models.opencode.policy["anthropic/claude-sonnet-4-5"].preferred_for, ["review"]);
 });
 
+test("engines & models: a model can be placed in several tiers and back to its built-in tier", async () => {
+  const screen = await openScreen();
+  await screen.section("Engines & models");
+  const checked = (label: string) => (screen.find(label, "Pressable").props.accessibilityState as { checked: boolean }).checked;
+  const tier = (name: string) => `Automatic tiers for codex-acp/gpt-6-luna: ${name}`;
+  assert.equal(checked(tier("light")), true, "the tier Cortex uses now is shown");
+  await screen.press(tier("standard"));
+  assert.deepEqual([checked(tier("light")), checked(tier("standard")), checked(tier("deep"))], [true, true, false]);
+  await screen.press("Save engine and model switches to the user routing file");
+  assert.deepEqual((screen.updates[0].rules as any).models["codex-acp"].tiers, { "gpt-6-luna": ["light", "standard"] });
+  const fresh = await openScreen();
+  await fresh.section("Engines & models");
+  await fresh.press(tier("standard"));
+  await fresh.press(tier("light"));
+  await fresh.press(tier("standard"));
+  await fresh.press("Save engine and model switches to the user routing file");
+  assert.equal((fresh.updates[0].rules as any).models?.["codex-acp"]?.tiers, undefined, "no tier left: the built-in tier applies");
+});
+
 test("user profiles show divergence and send revision-checked activation; conflicts offer reload", async () => {
   const screen = await openScreen();
   await screen.section("User routing profiles");
