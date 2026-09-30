@@ -651,9 +651,11 @@ def _worker_tool_details(
         if argument is None:
             server = raw_input.get("server")
             tool = raw_input.get("tool")
-            if server and tool:
-                argument = f"{server}.{tool}"
-                args = raw_input.get("arguments") or raw_input.get("input")
+            args = raw_input.get("arguments") or raw_input.get("input")
+            # OpenCode Code Mode's own helpers (``search``) have no server:
+            # engine.opencode_tool_calls gives them ``{tool, arguments}``.
+            if (server or "code" in raw_input) and tool:
+                argument = f"{server}.{tool}" if server else ""
                 if isinstance(args, Mapping):
                     values = [
                         _tool_argument_text(key, value)
@@ -663,7 +665,8 @@ def _worker_tool_details(
                         ][:4]
                     ]
                     if values:
-                        argument += " " + ", ".join(values)
+                        argument = " ".join(part for part in (argument, ", ".join(values)) if part)
+                argument = argument or None
             else:
                 values = [
                     _tool_argument_text(key, value)

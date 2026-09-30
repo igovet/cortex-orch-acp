@@ -5,6 +5,8 @@ import type {
   McpOperation,
   connectionsResult,
   mcpServersResult,
+  profileSections,
+  profileStates,
   projectCeilingResult,
   routeCatalogResult,
   routingResult,
@@ -32,7 +34,7 @@ export const SETTINGS_SECTIONS = [
   { id: "engines_models", title: "Engines & models" },
   { id: "project_ceiling", title: "Project ceiling" },
   { id: "routing", title: "Routing" },
-  { id: "routing_profiles", title: "User routing profiles" },
+  { id: "routing_profiles", title: "Profiles" },
   { id: "mcp_servers", title: "MCP servers" },
   { id: "connections", title: "Connections" },
 ] as const;
@@ -44,6 +46,12 @@ export type UserDefaultsView = z.infer<typeof userDefaultsResult>;
 export type ProjectCeilingView = z.infer<typeof projectCeilingResult>;
 export type RoutingView = z.infer<typeof routingResult>;
 export type RoutingProfilesView = z.infer<typeof routingProfilesResult>;
+/** The profiles view under its product name; the storage surface keeps its
+ * historical `routing_profiles` id. */
+export type ProfilesView = RoutingProfilesView;
+export type ProfileEntry = ProfilesView["profiles"][number];
+export type ProfileSection = typeof profileSections[number];
+export type ProfileState = typeof profileStates[number];
 export type RoutingSourceView = RoutingView["sources"][number];
 export type McpServersView = z.infer<typeof mcpServersResult>;
 export type McpServerView = McpServersView["servers"][number];
@@ -1222,4 +1230,181 @@ export function buildOnboard(view: ConnectionsView, optIn: boolean, name: string
   if (trimmed) cleanText(trimmed, "name", errors, "a name", 120);
   if (Object.keys(errors).length > 0) return { ok: false, errors };
   return { ok: true, value: { expected_revision: view.revision, explicit_opt_in: true, ...(trimmed ? { name: trimmed } : {}) } };
+}
+
+// --- profiles -----------------------------------------------------------------
+//
+// A profile is an owner-level snapshot of every user-level setting the
+// screen edits (user routing, user defaults, the MCP usage policy and the
+// per-connection session limits). Saving into a profile is explicit: the
+// section saves only ever write the backing files and leave the profile
+// untouched, so the profile state turns "modified" until the owner uses
+// Save to current profile or Save as new profile.
+
+/** Every section a profile can store; a profile missing one is partial. */
+const ALL_PROFILE_SECTIONS: readonly ProfileSection[] = ["routing", "user_defaults", "mcp_servers", "connections"];
+
+const PROFILE_NAME = /^[a-z0-9][a-z0-9-]{0,39}$/;
+
+/** The profile name the management API accepts (1-40 chars). */
+export function validProfileName(name: string): boolean {
+  return PROFILE_NAME.test(name.trim());
+}
+
+const PROFILE_SECTION_LABELS: Record<ProfileSection, string> = {
+  routing: "User routing",
+  user_defaults: "User defaults",
+  mcp_servers: "MCP servers",
+  connections: "Connections",
+};
+
+export function profileSectionLabel(section: ProfileSection): string {
+  return PROFILE_SECTION_LABELS[section];
+}
+
+/** A profile that predates a section (a migrated routing-only profile) —
+ * it stores only part of the settings until it is saved over. */
+export function profileIsPartial(profile: Pick<ProfileEntry, "sections">): boolean {
+  return ALL_PROFILE_SECTIONS.some((section) => !profile.sections.includes(section));
+}
+
+/** One readable line for the profiles bar's state banner, naming the
+ * modified sections and the differing keys (names only, never values). */
+export function profileStateText(view: Pick<ProfilesView, "active" | "state" | "pending" | "modified_sections" | "differences" | "problems">): string {
+  switch (view.state) {
+    case "none":
+      return "No profile is active. Every setting applies directly to its file; capture it with \"Save as new profile\".";
+    case "in_sync":
+      return view.active ? `Saved: the current settings match profile "${view.active}".` : "Saved.";
+    case "modified": {
+      const keys = new Map<ProfileSection, string[]>();
+      for (const difference of view.differences) {
+        const list = keys.get(difference.section) ?? [];
+        if (!list.includes(difference.key)) list.push(difference.key);
+        keys.set(difference.section, list);
+      }
+      const parts = (view.modified_sections.length > 0 ? view.modified_sections : [...keys.keys()])
+        .map((section) => `${PROFILE_SECTION_LABELS[section]}${keys.has(section) ? ` (${keys.get(section)!.join(", ")})` : ""}`);
+      return `Unsaved changes: profile "${view.active ?? ""}" differs in ${parts.join(", ")}. Use "Save to current profile" or "Save as new profile".`;
+    }
+    case "interrupted":
+      return view.pending
+        ? `Activation of "${view.pending.profile}" did not finish. Re-activate it, save the current settings over it, or detach.`
+        : "A profile activation did not finish. Re-activate it, save the current settings over it, or detach.";
+    case "unavailable": {
+      const detail = view.problems.map((problem) => `${PROFILE_SECTION_LABELS[problem.section]}: ${problem.message}`).join("; ");
+      return `A profile setting could not be read${detail ? `: ${detail}` : ""}. Fix the file, then reload; saving into the profile is disabled.`;
+    }
+  }
+}
+
+/** The four backing-file revisions every profile mutation is checked
+ * against, or a per-section error for a file that could not be read. */
+function profileExpectedRevisions(
+  view: ProfilesView, errors: FieldErrors,
+): { routing: string; user_defaults: string; mcp_servers: string; connections: string } | null {
+  const current = view.current_revisions;
+  const unreadable = ALL_PROFILE_SECTIONS.filter((section) => current[section] === null);
+  if (unreadable.length > 0) {
+    for (const section of unreadable) {
+      addError(errors, `current_revisions.${section}`, `${PROFILE_SECTION_LABELS[section]} could not be read; fix the file and reload first.`);
+    }
+    return null;
+  }
+  return { routing: current.routing!, user_defaults: current.user_defaults!, mcp_servers: current.mcp_servers!, connections: current.connections! };
+}
+
+function profileErrors(errors: FieldErrors): Built<ConfigUpdateInput> | null {
+  return Object.keys(errors).length > 0 ? { ok: false, errors } : null;
+}
+
+/** `save` (Save to current profile): overwrite `name` — the active profile
+ * by default; the pending one while an activation is `interrupted`. */
+export function buildProfileSave(view: ProfilesView, name: string = view.active ?? ""): Built<ConfigUpdateInput> {
+  const errors: FieldErrors = {};
+  const trimmed = name.trim();
+  if (!trimmed) addError(errors, "name", "No profile is selected. Use \"Save as new profile\" to capture the current settings.");
+  const revisions = profileExpectedRevisions(view, errors);
+  const failed = profileErrors(errors);
+  if (failed || !revisions) return failed ?? { ok: false, errors };
+  return {
+    ok: true,
+    value: { surface: "routing_profiles", action: "save", expected_revision: view.revision, expected_revisions: revisions, name: trimmed },
+  };
+}
+
+/** `create` (Save as new profile): capture the current settings into a new
+ * profile and make it active; the previously active profile keeps its saved
+ * content. */
+export function buildProfileCreate(view: ProfilesView, name: string, description = ""): Built<ConfigUpdateInput> {
+  const errors: FieldErrors = {};
+  const trimmed = name.trim();
+  if (!PROFILE_NAME.test(trimmed)) addError(errors, "name", "Use 1-40 lowercase letters, digits or '-', starting with a letter or digit.");
+  const cleaned = description.trim();
+  if (cleaned.length > 256) addError(errors, "description", "At most 256 characters.");
+  const revisions = profileExpectedRevisions(view, errors);
+  const failed = profileErrors(errors);
+  if (failed || !revisions) return failed ?? { ok: false, errors };
+  return {
+    ok: true,
+    value: {
+      surface: "routing_profiles", action: "create", expected_revision: view.revision, expected_revisions: revisions, name: trimmed,
+      ...(cleaned ? { description: cleaned } : {}),
+    },
+  };
+}
+
+/** `activate`: write every stored setting of `name` into its backing file.
+ * Unsaved changes of the current profile are only discarded when asked. */
+export function buildProfileActivate(view: ProfilesView, name: string, options: { discard?: boolean } = {}): Built<ConfigUpdateInput> {
+  const errors: FieldErrors = {};
+  const trimmed = name.trim();
+  if (!trimmed) addError(errors, "name", "Choose a profile to activate.");
+  const revisions = profileExpectedRevisions(view, errors);
+  const failed = profileErrors(errors);
+  if (failed || !revisions) return failed ?? { ok: false, errors };
+  return {
+    ok: true,
+    value: {
+      surface: "routing_profiles", action: "activate", expected_revision: view.revision, expected_revisions: revisions, name: trimmed,
+      ...(options.discard ? { discard_modifications: true as const } : {}),
+    },
+  };
+}
+
+/** `deactivate`: detach the active profile; the working settings stay as
+ * they are. */
+export function buildProfileDeactivate(view: ProfilesView): Built<ConfigUpdateInput> {
+  return { ok: true, value: { surface: "routing_profiles", action: "deactivate", expected_revision: view.revision } };
+}
+
+/** `update`: name and description only. A profile's settings are edited by
+ * activating it, changing the settings and saving back. */
+export function buildProfileRename(view: ProfilesView, name: string, renameTo: string, description: string): Built<ConfigUpdateInput> {
+  const errors: FieldErrors = {};
+  const current = name.trim();
+  const target = renameTo.trim();
+  if (!current) addError(errors, "name", "Choose a profile.");
+  if (target && !PROFILE_NAME.test(target)) addError(errors, "rename_to", "Use 1-40 lowercase letters, digits or '-', starting with a letter or digit.");
+  const cleaned = description.trim();
+  if (cleaned.length > 256) addError(errors, "description", "At most 256 characters.");
+  const failed = profileErrors(errors);
+  if (failed) return failed;
+  return {
+    ok: true,
+    value: {
+      surface: "routing_profiles", action: "update", expected_revision: view.revision, name: current,
+      ...(target && target !== current ? { rename_to: target } : {}),
+      description: cleaned,
+    },
+  };
+}
+
+/** Whether switching from the current profile to `target` needs a
+ * confirmation (unsaved or unreadable changes would be discarded). */
+export function profileSwitchDecision(
+  view: Pick<ProfilesView, "active" | "state">, target: string,
+): "direct" | "confirm" {
+  if (!target) return "direct";
+  return view.state === "modified" || view.state === "unavailable" ? "confirm" : "direct";
 }

@@ -220,27 +220,73 @@ export const routingResult = z.object({
   ...writeMeta,
 });
 
+/** The owner settings a profile stores. Project settings are never part of
+ * a profile. */
+export const profileSections = ["routing", "user_defaults", "mcp_servers", "connections"] as const;
+export type ProfileSection = typeof profileSections[number];
+const profileSection = z.enum(profileSections);
+export const profileStates = ["none", "in_sync", "modified", "interrupted", "unavailable"] as const;
+export type ProfileState = typeof profileStates[number];
+
+// The revision a read returned for each backing file of a profile; save,
+// create and activate are refused when any of them changed.
+const expectedRevisions = z.strictObject({
+  routing: revision,
+  user_defaults: revision,
+  mcp_servers: revision,
+  connections: revision,
+});
+
+// What a profile stores. An MCP entry is its usage policy only: a profile
+// never holds a server's command, arguments or environment.
+const profileSettings = z.object({
+  routing: z.record(z.string(), z.unknown()).optional(),
+  user_defaults: z.object({ defaults: z.record(z.string(), z.unknown()), ceiling }).optional(),
+  mcp_servers: z.record(z.string(), z.object({ enabled: z.boolean() }).catchall(z.unknown())).optional(),
+  connections: z.record(z.string(), z.object({ max_concurrent_sessions: z.number() })).optional(),
+});
+
 export const routingProfilesResult = z.object({
   surface: z.literal("routing_profiles"),
   path: z.string(),
   revision,
+  format: z.literal(2),
+  // 1 while a format-1 file is read; it is migrated on the first change.
+  migrated_from: z.literal(1).nullable(),
   active: z.string().nullable(),
-  state: z.enum(["none", "in_sync", "diverged"]),
+  state: z.enum(profileStates),
+  modified_sections: z.array(profileSection),
+  // Key names only, never values.
+  differences: z.array(z.object({ section: profileSection, key: z.string() })).max(200),
+  // An activation that did not finish (state "interrupted").
+  pending: z.object({ operation: z.literal("activate"), profile: z.string(), at: z.string() }).nullable(),
+  problems: z.array(z.object({ section: profileSection, code: z.string(), message: z.string() })),
   applied: z.record(z.string(), z.unknown()).nullable(),
+  // Null for a file that cannot be read safely.
+  current_revisions: z.object({
+    routing: revision.nullable(),
+    user_defaults: revision.nullable(),
+    mcp_servers: revision.nullable(),
+    connections: revision.nullable(),
+  }),
   profiles: z.array(z.object({
     name: z.string(), description: z.string(), revision,
-    rules: z.record(z.string(), z.unknown()),
+    sections: z.array(profileSection),
+    settings: profileSettings,
     created_at: z.string().nullable(), updated_at: z.string().nullable(),
     summary: z.object({
       providers: z.array(z.string()).nullable().optional(),
       denied_engines: z.array(z.string()),
       selected_models: z.record(z.string(), z.number()),
+      default_model: z.string().nullable(),
+      language: z.string().nullable(),
+      enabled_mcp_servers: z.number(),
+      ceiling_set: z.boolean(),
     }),
   })),
-  user_routing_revision: revision,
+  user_routing_revision: revision.nullable(),
   shadowed_by: z.string().nullable(),
   matches_profile: z.array(z.string()),
-  routing: routingResult.optional(),
   ...writeMeta,
 });
 
@@ -493,13 +539,19 @@ export const updateConfig = defineRpc({
       rules: routingRules,
     }),
     z.discriminatedUnion("action", [
+      // Save as new profile: captures every owner setting and selects it.
       z.strictObject({ surface: z.literal("routing_profiles"), action: z.literal("create"), workspaceId: workspaceId.optional(), expected_revision: revision,
-        name: text(40).min(1), description: text(256).optional(), rules: routingRules.optional(), from_current: z.literal(true).optional() }),
+        expected_revisions: expectedRevisions, name: text(40).min(1), description: text(256).optional() }),
+      // Save to current profile: overwrites the selected profile.
+      z.strictObject({ surface: z.literal("routing_profiles"), action: z.literal("save"), workspaceId: workspaceId.optional(), expected_revision: revision,
+        expected_revisions: expectedRevisions, name: text(40).min(1) }),
+      // Name and description only.
       z.strictObject({ surface: z.literal("routing_profiles"), action: z.literal("update"), workspaceId: workspaceId.optional(), expected_revision: revision,
-        name: text(40).min(1), rename_to: text(40).min(1).optional(), description: text(256).optional(), rules: routingRules.optional(), expected_routing_revision: revision.optional() }),
+        name: text(40).min(1), rename_to: text(40).min(1).optional(), description: text(256).optional() }),
       z.strictObject({ surface: z.literal("routing_profiles"), action: z.literal("delete"), workspaceId: workspaceId.optional(), expected_revision: revision, name: text(40).min(1) }),
+      // Unsaved changes of the selected profile are only discarded when asked.
       z.strictObject({ surface: z.literal("routing_profiles"), action: z.literal("activate"), workspaceId: workspaceId.optional(), expected_revision: revision,
-        expected_routing_revision: revision, name: text(40).min(1) }),
+        expected_revisions: expectedRevisions, name: text(40).min(1), discard_modifications: z.literal(true).optional() }),
       z.strictObject({ surface: z.literal("routing_profiles"), action: z.literal("deactivate"), workspaceId: workspaceId.optional(), expected_revision: revision }),
     ]),
     z.strictObject({

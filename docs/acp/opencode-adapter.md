@@ -7,7 +7,7 @@ Cortex can run [OpenCode v2](https://opencode.ai/v2/docs/cli/acp/) (`opencode ac
 - automatic worker routing never picks it unless `routing.json` opts in (a `models` selection list or an exact `auto_allow` entry);
 - only OpenCode **2.x.x** is accepted (1.x and 3.x are refused), and it runs only inside the engine jail with process isolation.
 
-Source: `engine/opencode_install.py` (binary trust and version), `engine/opencode_adapter_acp.py` (configuration, prompt, option mapping), plus OpenCode branches in `engine/process.py`, `engine/session_manager.py`, `orchestration/sandbox.py`, `delegation/live_adapters.py`, `catalog/refresh.py`, `routing/auto_route.py` and `scripts/cortex_acp_setup.py`.
+Source: `engine/opencode_install.py` (binary trust and version), `engine/opencode_adapter_acp.py` (configuration, prompt, option mapping), `engine/opencode_tool_calls.py` (Code Mode tool cards), plus OpenCode branches in `engine/process.py`, `engine/session_manager.py`, `orchestration/sandbox.py`, `delegation/live_adapters.py`, `catalog/refresh.py`, `routing/auto_route.py` and `scripts/cortex_acp_setup.py`.
 
 ## Onboarding
 
@@ -138,6 +138,34 @@ In the tested 2.0.19 build, a session's MCP servers are **not** separate model t
 - **Permission requests.** One `execute` call raises one permission request (kind `other`, title `execute`, `rawInput.code`). The calls inside it are not asked one by one. Every Cortex MCP call is still re-checked by the channel-bound gateway.
 - **Catalog.** Code Mode's catalog holds the session's MCP servers, `opencode` (session move/rename, model search, MCP resources) and `browser` (fails without OpenCode's desktop app). It has no shell or file tools, and `fetch` is available.
 - **Timing.** OpenCode connects MCP servers as `session/new` returns and fixes the session's tool catalog at its first prompt. A prompt sent within about 0.1 s of the servers' `tools/list` never sees them, in that turn or any later one. So after `session/new` Cortex waits until the broker observes OpenCode's own `tools/list` on the Cortex gateway, then another 1.0 s (`OPENCODE_MCP_SETTLE_SECONDS`). A gateway that never becomes ready fails the session (`opencode_mcp_not_ready`) instead of running without it. No ACP signal marks the registration, so this margin is a measured heuristic, not a guarantee.
+- **Tool cards.** OpenCode reports each Code Mode call as the wrapper itself: title `execute`, kind `other`, `rawInput.code`, and at completion `rawOutput.metadata.toolCalls` plus the returned text only in ACP `content`. Before any presenter sees it, Cortex rewrites it into the MCP card format Codex uses (`engine/opencode_tool_calls.py`, applied in `EngineSessionManager._translate_update` for OpenCode only):
+  - The title becomes `mcp.<server>.<tool>` (for example `mcp.cortex.read_report`). While the call runs, the name comes from the first `tools.<server>.<tool>(` in the code; that is a hint only, and the completed call list replaces it. A top-level helper such as `search` keeps its own name. A call whose inner tool is not known yet is titled `Code Mode`, never `execute`, which presenters would take for a shell. With several inner calls, the card is named after the first MCP call; all calls stay in `rawOutput.metadata.toolCalls`.
+  - `rawInput` becomes `{server, tool, arguments, code}`. The original JavaScript is kept in `code`.
+  - The returned text is also placed in `rawOutput.result.content`, next to OpenCode's own `metadata`.
+  - A completed call whose inner call reports `status: "error"`, or whose `metadata.error` is `true`, is shown as `failed`, with that text as `rawOutput.error`. An engine-reported `failed` wrapper also puts its returned text in `rawOutput.error`. Terminal updates repeat the resolved title so the durable completion observation keeps the MCP name rather than the initial `Code Mode` title.
+
+  Updates recorded before this change remain unchanged in the journal. The
+  Paseo plugin applies a presentation-only replay fallback
+  (`shared/gateway-presentation.ts`, `shared/tool-presentation.ts` and
+  `server/provider.ts`): an `execute` wrapper without native shell input
+  with retained JavaScript or an inner-call list uses the same provisional code
+  hint and authoritative inner-call naming rules,
+  MCP labels, arguments and native read/edit/shell detail as normalized calls.
+  An inner error changes a completed card to failed; engine-reported failures
+  remain failed. Native shell inputs and Codex/Claude MCP cards are unchanged.
+
+  A title-only pending snapshot is ambiguous after the bridge drops the kind;
+  it keeps the existing presentation until code or inner calls arrive, rather
+  than guessing and relabeling native shells.
+
+  The installed Paseo ACP bridge retains `rawInput` and `rawOutput`, but
+  drops ACP `content`. Therefore old cards whose returned text existed only
+  in `content` cannot display that text through this fallback. They show the
+  truthful label, arguments and status, with no invented output; execution
+  metadata alone is not displayed as a result. If a result already exists in
+  `rawOutput.result`, it uses the normal MCP output path. A failed replay card
+  uses available error/result text, otherwise a generic failure label.
+  No stored session or task evidence is rewritten.
 
 ## Process isolation (control-server credential)
 

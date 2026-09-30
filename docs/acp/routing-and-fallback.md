@@ -14,15 +14,28 @@ and from the explicitly authorized fallback path described below. Legacy
 mixed-team route profiles and fallback checks remain documented here for
 assignments that use them.
 
-User **routing profiles** are distinct from the per-revision `RouteProfile`
-below. A profile in `$XDG_CONFIG_HOME/cortex/routing-profiles.json` saves the
-eight managed routing keys; activation materializes them into the user
-`routing.json` under the connection lock. The loader's first-existing-file
-precedence remains project, `$CORTEX_ROUTING`, user, so a project or
-environment file shadows an active user profile. The profile management API
-reports `none`, `in_sync`, or `diverged`. Only an in-sync user routing save
-writes through to the active profile; project saves never do. Profiles cannot
-broaden a policy ceiling. See [configuration](../configuration.md#user-routing-profiles).
+User **owner profiles** are distinct from the per-revision `RouteProfile`
+below. The owner-only `$XDG_CONFIG_HOME/cortex/routing-profiles.json` (format
+2) snapshots the eight managed user-routing keys plus user defaults and owner
+ceiling, MCP usage policy, and connection concurrency limits. It excludes
+project routing/ceilings, MCP `command`/`args`/`env` installation definitions,
+and connection credentials. Saves are explicit: save to the selected profile
+or create a new one; ordinary settings writes do not automatically update a
+profile. Activation materializes the snapshot into the existing user backing
+files, with journaled recovery. States are `none`, `in_sync`, `modified`,
+`interrupted` and `unavailable`; modified activation requires an explicit
+discard choice or saving first. Format-1 routing-only profiles migrate on
+first mutation with a private verified backup and remain partial until saved
+as a full snapshot.
+
+The runtime routing loader still uses first-existing-file precedence:
+project, `$CORTEX_ROUTING`, then user. Thus project/environment routing
+shadows an activated user profile; activation does not override precedence or
+change an already-open worker route. Owner model preferences (`preferred_for`)
+rank within an eligible tier ahead of plan hints, plan-usage heuristics and retry diversification,
+but grant no route: pins, deny, automatic membership, providers, tier,
+availability and quota rules remain controlling. Preferences cannot promote
+a model into a different tier. See [configuration](../configuration.md#user-routing-profiles).
 
 ## Route profile: the authorized route set
 
@@ -351,7 +364,8 @@ every routing decision is the same as before rank version 8.
 `list_route_options` is the coordinator's only source of model names: every
 route carries `tier_source`, `selection`, `auto_reason` and its effective
 `policy` with each attribute's source; the result adds `affinity` (the
-effective engine per work kind), `affinity_source` (`routing.json` or `builtin`
+effective engine per work kind, or `null` when it has no auto-eligible route),
+`affinity_not_eligible` (the withheld engines), `affinity_source` (`routing.json` or `builtin`
 per kind), `role_work_kinds`, `preferred` (only auto-eligible routes per
 `preferred_for` work kind), `flagship` (`routes`, `request_names`, `rule`) and
 `stretch` (each light model with a stretch rule: `effort_floor`, `efforts` by
@@ -484,7 +498,7 @@ historic names (`luna`, `luna:<tier>`) for every stretch model.
   only for testing work (`LUNA_WORK_KINDS`: testing, that is `qa-engineer` and
   `build-verification`), where it ranks next to the tier's own models, such as
   `gpt-5.6-terra` and Claude Sonnet (`standard_candidate`). The ordinary rank then decides: preference,
-  hint, plan usage, diversify, purpose, affinity, quota band, used percent,
+  purpose, hint, plan usage, diversify, affinity, quota band, used percent,
   engine order. Luna is not always chosen. A Claude plan at least 10 points less
   used, a much hotter Codex plan than the alternative, or a hint for another
   model all move the work away from it. On one
@@ -541,7 +555,7 @@ version 6). How often an engine was chosen
 before never affects a hint. Other hint statuses include
 `ignored:provider_not_allowed`, `ignored:not_offered`,
 `ignored:tier_mismatch`, `ignored:superseded`, `ignored:auto_excluded`, `ignored:no_candidate_in_tier`,
-`ignored:unavailable`, `ignored:escalated`, and
+`ignored:unavailable`, `ignored:escalated`, `ignored:owner_preferred`, and
 `ignored:pinned`; the audit includes the reason and status. Older audit rows
 may carry `ignored:engine_overused` from the removed count balance.
 
@@ -559,21 +573,27 @@ eligible candidates the rank criteria are, first difference wins:
    when the preferred route's usage is both at or above 85% and meaningfully
    worse -- by more than `USAGE_MARGIN` (10) points -- than an available
    alternative's known usage).
-2. Honoured model hint for a new plan (see above), ignored on the same
+2. Purpose (rank version 9): a model whose `routing.json` `models` policy
+   lists the role's work kind under `preferred_for` -- the owner's choice --
+   ranks ahead of a new plan's hint, plan usage and retry diversification.
+   It never moves a tier or bypasses exclusions. Like a hint, it is passed
+   over for quota only when hot (at least 85%) and more than 10 points worse
+   than a known usable alternative. The audit records `purpose.status` as
+   `none`, `honoured` or `ignored:near_quota_limit`. A conflicting hint loses
+   with `ignored:owner_preferred`; coordinators use `auto` when the menu lists
+   owner preferences for the work kind. Legacy provider preference remains
+   first for pre-model stored plans.
+3. Honoured model hint for a new plan (see above), ignored on the same
    hot-and-meaningfully-worse basis.
-3. Plan usage, only when every candidate's usage is known: each full 10
+4. Plan usage, only when every candidate's usage is known: each full 10
    points (`USAGE_MARGIN`) above the least-used candidate ranks a candidate
    one step behind (`usage_band`). The plan with clearly more remaining quota
    takes the work; a smaller difference is left to the rest of the order
    below. This usage-gap signal, not the quota band, is what usually
    separates candidates on remaining quota.
-4. On escalation, an engine other than the one whose attempt fell short --
-   unless step 3 already sent the work to a meaningfully less-used plan,
+5. On escalation, an engine other than the one whose attempt fell short --
+   unless step 4 already sent the work to a meaningfully less-used plan,
    diversification does not retry onto a plan with meaningfully less room.
-5. Purpose (rank version 8): a model whose `routing.json` `models` policy
-   lists the role's work kind under `preferred_for` -- the owner's choice of
-   model for that kind of work -- ranks ahead of the tier's other
-   candidates. It never moves a tier and never overrides steps 1-4.
 6. Engine affinity (role suitability). Built-in defaults
    (`WORK_KIND_ENGINES`): implementation and operations lean to `codex-acp`;
    investigation, review, design, writing, planning and analysis lean to
@@ -591,19 +611,19 @@ eligible candidates the rank criteria are, first difference wins:
    cut ahead of plan usage because `used_percent` is the most-used open
    window (often a weekly one) and the rank never sees its reset time, so it
    could otherwise push cheap work into a plan about to run out -- rank
-   version 6 keeps that protection through the usage-gap signal in step 3
+   version 6 keeps that protection through the usage-gap signal in step 4
    instead, and only demotes the raw 85% crossing itself.
 8. Exact used percentage, only when every candidate has a known value.
 9. Stable engine order.
 
-`decided_by` names the first of these keys (`preference`, `hint`, `usage`,
-`diversify`, `purpose`, `affinity`, `quota`, `used_percent`, `engine_order`) that
+`decided_by` names the first of these keys (`preference`, `purpose`, `hint`, `usage`,
+`diversify`, `affinity`, `quota`, `used_percent`, `engine_order`) that
 separated the chosen candidate from the runner-up, or `only_candidate`; a pin
 records `pin`. It is never `balance`. The runner-up can be another model on
 the same engine, in which case `engine_order` is the usual answer.
 
 Unknown quota remains neutral and is never coerced to zero for percentage
-comparison: when any candidate's usage is unknown, steps 3 and 8 compare
+comparison: when any candidate's usage is unknown, steps 4 and 8 compare
 nothing and the order falls through to diversify, affinity or the quota tie
 breaker (`quota` is `false`/not-hot for unknown usage, so it still separates
 a known-hot candidate from an unknown one).
@@ -634,7 +654,7 @@ including `rank_version`, `role_tier`, tier and effort basis, `model_hint`,
 `default` or `routing.json` source), candidates with `used_percent`, `hot`,
 `quota_state`, `usage_band`, `suitability` and `preferred`, `decided_by`,
 `excluded_by_policy`, `unavailable`, `superseded`, `purpose` (`work_kind`
-and the `preferred` candidates), `luna` (`status`,
+and the `preferred` candidates, plus `status` since rank version 9), `luna` (`status`,
 `candidate`, `chosen`, and `outranked_by`, the rank key that put the best Luna
 candidate behind the chosen route), and whether usage percentages were
 comparable. `rank_version` history: 2 ranked by quota band,
@@ -652,7 +672,10 @@ and review fixes escalate as before version 5; 8 takes tiers, automatic
 selection and per-model policy from `routing.json` `models` before the
 built-in defaults, skips supersede on LISTED engines and adds the `purpose`
 key between `diversify` and `affinity` (no decision changes without
-`models`). Older rows keep their own fields
+`models`); 9 moves `purpose` just after legacy `preference`, ahead of hints,
+usage and diversification, and adds the hot-and-meaningfully-worse safety
+exception for owner preferences (no selection change without `preferred_for`).
+Older rows keep their own fields
 (`balance`, `balance_excess`, `cross_tier`, `chosen_cross_tier`) and still
 render. These fields are evidence of runtime decisions, not proof of
 the exact observed live surface.

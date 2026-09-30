@@ -293,39 +293,85 @@ try {
     assert.ok(family.error.errors.some((item: any) => item.code === "opencode_model_not_exact"));
   }
 
-  // User profiles are revision-checked snapshots and activation writes user routing.
+  // Owner profiles bind every user-level setting: create captures, an edit
+  // anywhere makes the selection modified, save stores it, and switching
+  // away from unsaved changes needs an explicit discard.
   {
-    const initial = await call(readConfig, { surface: "routing_profiles", workspaceId: WORKSPACE }, ctx);
+    const profiles = () => call(readConfig, { surface: "routing_profiles", workspaceId: WORKSPACE }, ctx);
+    const initial = await profiles();
     assert.equal(initial.ok, true, JSON.stringify(initial));
     assert.equal(initial.result.state, "none");
+    assert.equal(initial.result.format, 2);
+    const revisions = initial.result.current_revisions;
+    await rejects(updateConfig, { surface: "routing_profiles", action: "create", expected_revision: initial.result.revision, expected_revisions: revisions, name: "mix", from_current: true });
+    await rejects(updateConfig, { surface: "routing_profiles", action: "create", expected_revision: initial.result.revision, name: "mix" });
+    await rejects(updateConfig, { surface: "routing_profiles", action: "update", expected_revision: initial.result.revision, name: "mix", rules: {} });
+    await rejects(updateConfig, { surface: "routing_profiles", action: "activate", expected_revision: initial.result.revision, expected_revisions: revisions, name: "mix", discard_modifications: false });
     const created = await call(updateConfig, { surface: "routing_profiles", action: "create", workspaceId: WORKSPACE,
-      expected_revision: initial.result.revision, name: "mix", description: "All configured engines", from_current: true }, ctx);
+      expected_revision: initial.result.revision, expected_revisions: revisions, name: "mix", description: "All configured engines" }, ctx);
     assert.equal(created.ok, true, JSON.stringify(created));
-    assert.equal(created.result.profiles.length, 1);
+    assert.equal(created.result.active, "mix");
+    assert.equal(created.result.state, "in_sync");
+    assert.deepEqual(created.result.profiles[0].sections, ["routing", "user_defaults", "mcp_servers", "connections"]);
+    assert.equal(created.result.shadowed_by, "project");
+    noLeak(created);
     const stale = await call(updateConfig, { surface: "routing_profiles", action: "create",
-      expected_revision: initial.result.revision, name: "stale", from_current: true }, ctx);
+      expected_revision: initial.result.revision, expected_revisions: revisions, name: "stale" }, ctx);
     assert.equal(stale.ok, false);
     assert.equal(stale.error.code, "revision_conflict");
+
+    const toggleLanguage = async () => {
+      const defaults = await call(readConfig, { surface: "user_defaults" }, ctx);
+      const language = defaults.result.defaults.language === "ru" ? "en" : "ru";
+      const written = await call(updateConfig, { surface: "user_defaults", expected_revision: defaults.result.revision, defaults: { language } }, ctx);
+      assert.equal(written.ok, true, JSON.stringify(written));
+      return language;
+    };
+    const saved = await toggleLanguage();
+    const modified = await profiles();
+    assert.equal(modified.result.state, "modified");
+    assert.deepEqual(modified.result.modified_sections, ["user_defaults"]);
+    assert.deepEqual(modified.result.differences, [{ section: "user_defaults", key: "language" }]);
+    const stored = await call(updateConfig, { surface: "routing_profiles", action: "save", workspaceId: WORKSPACE,
+      expected_revision: modified.result.revision, expected_revisions: modified.result.current_revisions, name: "mix" }, ctx);
+    assert.equal(stored.ok, true, JSON.stringify(stored));
+    assert.equal(stored.result.state, "in_sync");
+    assert.equal(stored.result.profiles[0].settings.user_defaults.defaults.language, saved);
+
+    const other = await call(updateConfig, { surface: "routing_profiles", action: "create",
+      expected_revision: stored.result.revision, expected_revisions: stored.result.current_revisions, name: "other" }, ctx);
+    assert.equal(other.ok, true, JSON.stringify(other));
+    await toggleLanguage();
+    const dirty = await profiles();
+    assert.equal(dirty.result.active, "other");
+    assert.equal(dirty.result.state, "modified");
+    const refused = await call(updateConfig, { surface: "routing_profiles", action: "activate",
+      expected_revision: dirty.result.revision, expected_revisions: dirty.result.current_revisions, name: "mix" }, ctx);
+    assert.equal(refused.ok, false);
+    assert.equal(refused.error.code, "profile_modified");
+    const switched = await call(updateConfig, { surface: "routing_profiles", action: "activate", workspaceId: WORKSPACE,
+      expected_revision: dirty.result.revision, expected_revisions: dirty.result.current_revisions, name: "mix", discard_modifications: true }, ctx);
+    assert.equal(switched.ok, true, JSON.stringify(switched));
+    assert.equal(switched.result.active, "mix");
+    assert.equal(switched.result.state, "in_sync");
+    assert.equal(JSON.parse(readFileSync(join(configHome, "cortex", "defaults.json"), "utf8")).defaults.language, saved);
+    noLeak(switched);
+
     const renamed = await call(updateConfig, { surface: "routing_profiles", action: "update",
-      expected_revision: created.result.revision, name: "mix", rename_to: "claude-only",
-      description: "Claude alone", rules: { providers: ["claude-agent-acp"] } }, ctx);
+      expected_revision: switched.result.revision, name: "other", rename_to: "spare", description: "Spare" }, ctx);
     assert.equal(renamed.ok, true, JSON.stringify(renamed));
-    assert.deepEqual(renamed.result.profiles.map((item: any) => item.name), ["claude-only"]);
-    const activated = await call(updateConfig, { surface: "routing_profiles", action: "activate", workspaceId: WORKSPACE,
-      expected_revision: renamed.result.revision, expected_routing_revision: renamed.result.user_routing_revision, name: "claude-only" }, ctx);
-    assert.equal(activated.ok, true, JSON.stringify(activated));
-    assert.equal(activated.result.state, "in_sync");
-    assert.equal(activated.result.active, "claude-only");
-    assert.equal(activated.result.shadowed_by, "project");
-    noLeak(activated);
+    assert.deepEqual(renamed.result.profiles.map((item: any) => item.name), ["mix", "spare"]);
     const detached = await call(updateConfig, { surface: "routing_profiles", action: "deactivate",
-      expected_revision: activated.result.revision }, ctx);
+      expected_revision: renamed.result.revision }, ctx);
     assert.equal(detached.ok, true, JSON.stringify(detached));
     assert.equal(detached.result.state, "none");
-    const deleted = await call(updateConfig, { surface: "routing_profiles", action: "delete",
-      expected_revision: detached.result.revision, name: "claude-only" }, ctx);
-    assert.equal(deleted.ok, true, JSON.stringify(deleted));
-    assert.equal(deleted.result.profiles.length, 0);
+    let revision = detached.result.revision;
+    for (const name of ["mix", "spare"]) {
+      const deleted = await call(updateConfig, { surface: "routing_profiles", action: "delete", expected_revision: revision, name }, ctx);
+      assert.equal(deleted.ok, true, JSON.stringify(deleted));
+      revision = deleted.result.revision;
+    }
+    assert.deepEqual((await profiles()).result.profiles, []);
   }
 
   // The plugin contract preserves the exact OpenCode model selection, tier and purpose policy.
@@ -456,6 +502,28 @@ try {
     assert.equal(stale.ok, false);
     assert.equal(stale.error.code, "revision_conflict");
     assert.equal(stale.error.currentRevision, kept.result.revision);
+  }
+
+  // A profile stores MCP usage policy only: the command, arguments and env
+  // values never reach the profile file or a response.
+  {
+    const secrets = ["SUPERSECRET1234", "TOKENSECRET5678", "ENVSECRET9999"];
+    const view = await call(readConfig, { surface: "routing_profiles" }, ctx);
+    const created = await call(updateConfig, { surface: "routing_profiles", action: "create",
+      expected_revision: view.result.revision, expected_revisions: view.result.current_revisions, name: "with-mcp" }, ctx);
+    assert.equal(created.ok, true, JSON.stringify(created));
+    const profile = created.result.profiles.find((item: any) => item.name === "with-mcp");
+    assert.deepEqual(profile.settings.mcp_servers, { demo: { enabled: false, allowed_tools: ["search"] } });
+    const file = readFileSync(join(configHome, "cortex", "routing-profiles.json"), "utf8");
+    const read = await call(readConfig, { surface: "all" }, ctx);
+    assert.equal(read.result.routing_profiles.ok, true, JSON.stringify(read.result.routing_profiles));
+    assert.ok(!file.includes("demo-mcp"));
+    for (const secret of secrets) {
+      assert.ok(!file.includes(secret));
+      assert.ok(!JSON.stringify(created).includes(secret));
+      assert.ok(!JSON.stringify(read).includes(secret));
+    }
+    noLeak(read);
   }
 
   // OpenCode: discovery takes no client path and writes nothing; onboarding

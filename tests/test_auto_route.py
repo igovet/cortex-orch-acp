@@ -358,7 +358,7 @@ def test_plan_usage_decides_between_suitable_engines_before_affinity():
     assert auto_route.USAGE_MARGIN == 10.0
     picked, decision = _rank("standard", "worker-backend-dev", codex=30, claude=10)
     assert picked.route.model == "sonnet" and decision["decided_by"] == "usage"
-    assert decision["rank_version"] == 8
+    assert decision["rank_version"] == 9
     assert decision["usage"] == dict(compared=True, margin=10.0, least_used_percent=10)
     assert {c["route"]: c["usage_band"] for c in decision["candidates"]} == {
         "claude-agent-acp/sonnet": 0, "codex-acp/gpt-5.6-sol": 2, "codex-acp/gpt-5.6-terra": 2}
@@ -1349,7 +1349,7 @@ def test_a_selection_list_makes_exactly_the_listed_models_automatic(tmp_path, mo
     assert {c["route"] for c in choice.decision["candidates"]} == {
         "codex-acp/gpt-5.6-terra", "claude-agent-acp/claude-sonnet-5", f"opencode/{OPENCODE_VARIANT}"}
     assert choice.model == "gpt-5.6-terra" and choice.decision["decided_by"] == "affinity"
-    assert choice.decision["rank_version"] == 8
+    assert choice.decision["rank_version"] == 9
     # An exact hint may now name a route whose id holds '/' and ','.
     hinted = auto_route.choose("worker-backend-dev", project, environ, model_hint=f"opencode/{OPENCODE_VARIANT}",
                                model_reason="The owner selected it.")
@@ -1442,7 +1442,7 @@ def test_the_owners_preferred_model_for_a_kind_of_work_ranks_first(tmp_path, mon
     project, environ = _configured(monkeypatch, tmp_path, routing)
     choice = auto_route.choose("worker-security-auditor", project, environ)
     assert (choice.model, choice.decision["decided_by"]) == ("gpt-6-sol", "purpose")
-    assert choice.decision["purpose"] == dict(work_kind="review", preferred=["codex-acp/gpt-6-sol"])
+    assert choice.decision["purpose"] == dict(work_kind="review", preferred=["codex-acp/gpt-6-sol"], status="honoured")
     assert auto_route.route_menu(project, environ)["preferred"] == {
         "design": ["codex-acp/gpt-6-sol"], "review": ["codex-acp/gpt-6-sol"]}
     # It never moves a tier, and a meaningful plan-usage gap still wins.
@@ -1451,6 +1451,7 @@ def test_the_owners_preferred_model_for_a_kind_of_work_ranks_first(tmp_path, mon
     project, environ = _configured(monkeypatch, tmp_path, routing, codex=90.0, claude=10.0)
     busy = auto_route.choose("worker-security-auditor", project, environ)
     assert (busy.model, busy.decision["decided_by"]) == ("opus[1m]", "usage")
+    assert busy.decision["purpose"]["status"] == "ignored:near_quota_limit"
 
 
 def test_route_menu_only_advertises_eligible_preferences_and_affinity_source(tmp_path, monkeypatch):
@@ -1527,3 +1528,184 @@ def test_a_model_in_several_tiers_is_a_candidate_of_each(tmp_path, monkeypatch):
     standard = auto_route.choose("worker-backend-dev", project, environ)
     assert (standard.model, standard.decision["tier"]) == ("gpt-5.6-terra", "deep")
     assert auto_route.allowed_efforts("codex-acp", "gpt-5.6-terra", project, environ)
+
+
+# --- an owner configuration that prefers an OpenCode model --------------------
+
+# The owner's own shape: Codex disabled, Claude and OpenCode allowed, one
+# OpenCode model enabled, selected for automatic routing, placed in the light
+# and standard tiers and preferred for most kinds of work.
+OPENCODE_PREFERRED = {
+    "deny": ["codex-acp/*"],
+    "providers": ["claude-agent-acp", "opencode"],
+    "enabled": {"opencode": [OPENCODE_PLAIN]},
+    "models": {"opencode": {
+        "auto": [OPENCODE_PLAIN],
+        "tiers": {OPENCODE_PLAIN: ["light", "standard"]},
+        "policy": {OPENCODE_PLAIN: {"preferred_for": [
+            "implementation", "debugging", "testing", "investigation", "analysis", "writing"]}}}},
+}
+NEBULA = f"opencode/{OPENCODE_PLAIN}"
+
+
+def _opencode_preferred(monkeypatch, tmp_path, routing=None, claude=None, opencode=None):
+    project, environ = _configured(monkeypatch, tmp_path, routing or OPENCODE_PREFERRED,
+                                  [_opencode(OPENCODE_PLAIN)], claude=claude)
+    monkeypatch.setattr(quota, "used_percent", lambda record, *_: (
+        opencode if record.launch_command == ("opencode",) else
+        claude if record.launch_command == ("claude",) else None))
+    return project, environ
+
+
+@pytest.mark.parametrize("role", ["worker-backend-dev", "worker-debugger", "worker-qa-engineer"])
+def test_an_engine_hint_never_outranks_the_owners_preferred_model(tmp_path, monkeypatch, role):
+    """Regression: the coordinator was told to hint the built-in affinity
+    engine, and an honoured hint ranked above ``preferred_for``, so standard
+    work the owner prefers on OpenCode ran on Claude's standard model."""
+    project, environ = _opencode_preferred(monkeypatch, tmp_path)
+    plain = auto_route.choose(role, project, environ)
+    assert (_route(plain), plain.decision["tier"]) == (NEBULA, "standard")
+    hinted = auto_route.choose(role, project, environ, model_hint="claude-agent-acp",
+                               model_reason="Affinity engine for this kind of work.")
+    assert _route(hinted) == NEBULA
+    assert hinted.decision["decided_by"] == "purpose"
+    assert hinted.decision["model_hint_status"] == "ignored:owner_preferred"
+    assert hinted.decision["purpose"]["status"] == "honoured"
+    exact = auto_route.choose(role, project, environ, model_hint="claude-agent-acp/claude-sonnet-5",
+                              model_reason="Stronger prose.")
+    assert (_route(exact), exact.decision["model_hint_status"]) == (NEBULA, "ignored:owner_preferred")
+
+
+def test_a_hint_still_decides_work_the_owner_named_no_model_for(tmp_path, monkeypatch):
+    """``preferred_for`` is a rank key, not a grant: review is not listed,
+    so an honoured hint still decides among the tier's candidates."""
+    project, environ = _opencode_preferred(monkeypatch, tmp_path)
+    choice = auto_route.choose("worker-security-auditor", project, environ, complexity="low",
+                               model_hint="claude-agent-acp", model_reason="Review reads prose.")
+    assert choice.decision["purpose"] == dict(work_kind="review", preferred=[], status="none")
+    assert (choice.model, choice.decision["model_hint_status"]) == ("claude-sonnet-5", "honoured")
+
+
+def test_legacy_provider_preference_retains_priority_and_reports_the_winning_hint(tmp_path, monkeypatch):
+    project, environ = _opencode_preferred(monkeypatch, tmp_path)
+    choice = auto_route.choose("worker-backend-dev", project, environ,
+                               preference="claude-agent-acp", model_hint="claude-agent-acp")
+    assert _route(choice) == "claude-agent-acp/claude-sonnet-5"
+    assert choice.decision["decided_by"] == "preference"
+    assert choice.decision["model_hint_status"] == "honoured"
+
+
+def test_a_retry_stays_on_the_owners_preferred_model(tmp_path, monkeypatch):
+    """Retry diversification is a heuristic; the owner's preference wins it."""
+    routing = json.loads(json.dumps(OPENCODE_PREFERRED))
+    routing["models"]["opencode"]["tiers"][OPENCODE_PLAIN] = ["light", "standard", "deep"]
+    project, environ = _opencode_preferred(monkeypatch, tmp_path, routing)
+    retry = auto_route.choose("worker-backend-dev", project, environ, escalate=True, previous_engine="opencode")
+    assert (_route(retry), retry.decision["tier"], retry.decision["decided_by"]) == (NEBULA, "deep", "purpose")
+
+
+def test_deep_work_leaves_a_model_the_owner_placed_only_in_lower_tiers(tmp_path, monkeypatch):
+    """By design: ``preferred_for`` never moves a tier. A deep role, or
+    standard work the plan marks ``complexity: high``, runs on a deep model;
+    the owner puts the OpenCode model in the deep tier to keep it there."""
+    project, environ = _opencode_preferred(monkeypatch, tmp_path)
+    high = auto_route.choose("worker-backend-dev", project, environ, complexity="high")
+    assert (_route(high), high.decision["tier"]) == ("claude-agent-acp/opus[1m]", "deep")
+    routing = json.loads(json.dumps(OPENCODE_PREFERRED))
+    routing["models"]["opencode"]["tiers"][OPENCODE_PLAIN] = ["light", "standard", "deep"]
+    project, environ = _opencode_preferred(monkeypatch, tmp_path, routing)
+    high = auto_route.choose("worker-backend-dev", project, environ, complexity="high")
+    assert (_route(high), high.decision["tier"], high.decision["decided_by"]) == (NEBULA, "deep", "purpose")
+
+
+def test_route_menu_withholds_affinity_engines_the_owner_turned_off(tmp_path, monkeypatch):
+    project, environ = _opencode_preferred(monkeypatch, tmp_path)
+    menu = auto_route.route_menu(project, environ)
+    assert menu["affinity"]["implementation"] is None and menu["affinity"]["operations"] is None
+    assert menu["affinity_not_eligible"] == {"implementation": "codex-acp", "operations": "codex-acp"}
+    assert menu["affinity"]["review"] == "claude-agent-acp"
+    assert menu["preferred"]["implementation"] == [NEBULA]
+
+
+@pytest.mark.parametrize("opencode,claude,expected,status", [
+    (60, 10, NEBULA, "honoured"),  # non-hot usage gap does not override the owner
+    (86, 80, NEBULA, "honoured"),  # crossing the hot band alone is insufficient
+    (90, 10, "claude-agent-acp/claude-sonnet-5", "ignored:near_quota_limit"),
+    (100, 10, "claude-agent-acp/claude-sonnet-5", "none"),
+    (None, 10, NEBULA, "honoured"),
+])
+def test_owner_preference_keeps_quota_safety(tmp_path, monkeypatch, opencode, claude, expected, status):
+    project, environ = _opencode_preferred(monkeypatch, tmp_path, opencode=opencode, claude=claude)
+    choice = auto_route.choose("worker-backend-dev", project, environ)
+    assert _route(choice) == expected
+    assert choice.decision["purpose"]["status"] == status
+
+
+@pytest.mark.parametrize("constraint", ["deny", "providers", "enabled", "builtin", "unavailable", "pin"])
+def test_owner_preference_does_not_grant_a_route(tmp_path, monkeypatch, constraint):
+    routing = json.loads(json.dumps(OPENCODE_PREFERRED))
+    unavailable = ()
+    if constraint == "deny":
+        routing["deny"].append(NEBULA)
+    elif constraint == "providers":
+        routing["providers"] = ["claude-agent-acp"]
+    elif constraint == "enabled":
+        routing["enabled"]["opencode"] = []
+    elif constraint == "builtin":
+        del routing["models"]["opencode"]["auto"]  # preferred_for does not opt in
+    elif constraint == "unavailable":
+        unavailable = ({"connection_id": "opencode", "engine": "opencode", "model": OPENCODE_PLAIN,
+                        "reason": "engine_start_failed", "expires_at": "later"},)
+    else:
+        routing["pin"] = {"*": "claude-agent-acp/claude-sonnet-5"}
+    project, environ = _opencode_preferred(monkeypatch, tmp_path, routing)
+    choice = auto_route.choose("worker-backend-dev", project, environ, unavailable=unavailable)
+    assert _route(choice) == "claude-agent-acp/claude-sonnet-5"
+
+
+def test_profile_activation_materializes_preferences_but_does_not_override_project_or_env(tmp_path, monkeypatch):
+    from cortex_runtime.configuration import management
+    from cortex_runtime.connections import registry
+
+    project, environ = _opencode_preferred(monkeypatch, tmp_path)
+    user_root = registry.config_root(environ)
+    user_root.mkdir(parents=True, exist_ok=True)
+    project_path = project / ".cortex" / "routing.json"
+    project_path.rename(user_root / "routing.json")
+
+    def profiles(action, **kwargs):
+        view = management.execute({"surface": "routing_profiles", "action": "read"}, environ=environ)
+        assert view["ok"], view
+        view = view["result"]
+        request = dict(surface="routing_profiles", action=action, name="opencode-first",
+                       expected_revision=view["revision"], expected_revisions=view["current_revisions"], **kwargs)
+        response = management.execute(request, environ=environ)
+        assert response["ok"], response
+        return response["result"]
+
+    profiles("create")
+    changed = management.update_routing("user", management._revision((user_root / "routing.json").read_bytes()),
+                                        {"providers": ["claude-agent-acp"]}, environ=environ)
+    assert changed["profile"]["state"] == "modified"
+    assert auto_route.choose("worker-backend-dev", project, environ).connection_id == "claude"
+    profiles("activate", discard_modifications=True)
+    assert auto_route.load_overrides(project, environ) == OPENCODE_PREFERRED
+    choice = auto_route.choose("worker-backend-dev", project, environ, model_hint="claude-agent-acp")
+    assert _route(choice) == NEBULA
+    assert auto_route._effective_profile_label(project, environ) == {"name": "opencode-first", "state": "in_sync"}
+
+    env_path = tmp_path / "override.json"
+    env_path.write_text(json.dumps({"providers": ["claude-agent-acp"]}))
+    environ["CORTEX_ROUTING"] = str(env_path)
+    assert auto_route.choose("worker-backend-dev", project, environ).connection_id == "claude"
+    assert auto_route._effective_profile_label(project, environ) is None
+    project_path.write_text("{}")  # even an empty project file wins wholesale
+    assert auto_route.load_overrides(project, environ) == {}
+    assert auto_route._effective_profile_label(project, environ) is None
+    assert json.loads((user_root / "routing.json").read_text()) == OPENCODE_PREFERRED
+
+
+def _route(choice):
+    engine = "opencode" if choice.connection_id == "opencode" else (
+        "codex-acp" if choice.connection_id == "codex" else "claude-agent-acp")
+    return f"{engine}/{choice.model}"

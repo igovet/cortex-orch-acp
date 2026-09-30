@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildProfileSave, buildProfileCreate, buildProfileActivate, buildProfileDeactivate, buildProfileRename,
+  profileSwitchDecision, profileIsPartial, profileStateText, validProfileName, type ProfilesView,
   automaticText,
   canAutoAllow,
   emptyRoutingForm,
@@ -605,4 +607,80 @@ test("purpose preferences round-trip other policy attributes and require an auto
   if (removed.ok) assert.deepEqual(removed.value.models?.opencode?.policy?.["zai-coding-plan/glm-5"], {
     preferred_for: [], effort_floor: "medium",
   });
+});
+
+
+function profileView(): ProfilesView {
+  return {
+    surface: "routing_profiles", path: "routing-profiles.json", revision: REV("a"), format: 2, migrated_from: null,
+    active: "work", state: "modified", modified_sections: ["routing", "user_defaults", "mcp_servers", "connections"],
+    differences: [{ section: "routing", key: "models" }, { section: "user_defaults", key: "language" },
+      { section: "mcp_servers", key: "search" }, { section: "connections", key: "cn_0123456789ab" }],
+    pending: null, problems: [], applied: null, profiles: [], shadowed_by: null, matches_profile: [], user_routing_revision: REV("b"),
+    current_revisions: { routing: REV("b"), user_defaults: "absent", mcp_servers: REV("c"), connections: REV("d") },
+  };
+}
+
+test("profiles: save, create and activate bind every backing revision without legacy fields", () => {
+  const view = profileView();
+  const cases = [buildProfileSave(view), buildProfileCreate(view, " new-work ", " description "), buildProfileActivate(view, "other", { discard: true })];
+  for (const built of cases) {
+    assert.equal(built.ok, true);
+    if (!built.ok) continue;
+    assert.deepEqual((built.value as any).expected_revisions, view.current_revisions);
+    assert.equal(built.value.expected_revision, view.revision);
+    assert.equal("from_current" in built.value, false);
+    assert.equal("expected_routing_revision" in built.value, false);
+    assert.equal("rules" in built.value, false);
+  }
+  assert.deepEqual(buildProfileSave(view), { ok: true, value: { surface: "routing_profiles", action: "save", expected_revision: view.revision, expected_revisions: view.current_revisions, name: "work" } });
+  assert.deepEqual(buildProfileCreate(view, "new-work", " description "), { ok: true, value: { surface: "routing_profiles", action: "create", expected_revision: view.revision, expected_revisions: view.current_revisions, name: "new-work", description: "description" } });
+  const activation = buildProfileActivate(view, "other", { discard: true });
+  assert.equal(activation.ok && "discard_modifications" in activation.value && activation.value.discard_modifications, true);
+});
+
+test("profiles: validation blocks unreadable sections and invalid names", () => {
+  const view = profileView();
+  for (const section of ["routing", "user_defaults", "mcp_servers", "connections"] as const) {
+    const unavailable = { ...view, current_revisions: { ...view.current_revisions, [section]: null } };
+    for (const built of [buildProfileSave(unavailable), buildProfileCreate(unavailable, "new"), buildProfileActivate(unavailable, "other")]) {
+      assert.equal(built.ok, false);
+      if (!built.ok) assert.ok(built.errors[`current_revisions.${section}`]);
+    }
+  }
+  assert.equal(buildProfileSave({ ...view, active: null }).ok, false);
+  for (const name of ["", "UPPER", "-bad", "a".repeat(41), "has space"]) {
+    assert.equal(validProfileName(name), false);
+    assert.equal(buildProfileCreate(view, name).ok, false);
+  }
+  assert.equal(buildProfileCreate(view, "new", "a".repeat(257)).ok, false);
+});
+
+test("profiles: state text names every differing section and recovery state", () => {
+  const view = profileView();
+  const text = profileStateText(view);
+  for (const label of ["User routing (models)", "User defaults (language)", "MCP servers (search)", "Connections (cn_0123456789ab)"]) assert.ok(text.includes(label));
+  assert.match(profileStateText({ ...view, active: null, state: "none" }), /No profile/);
+  assert.match(profileStateText({ ...view, state: "in_sync" }), /match profile "work"/);
+  assert.match(profileStateText({ ...view, state: "interrupted", pending: { operation: "activate", profile: "other", at: "now" } }), /Activation of "other" did not finish/);
+  assert.match(profileStateText({ ...view, state: "unavailable", problems: [{ section: "mcp_servers", code: "invalid", message: "Invalid policy" }] }), /MCP servers: Invalid policy/);
+});
+
+test("profiles: switching and reverting modified settings require confirmation; detach does not", () => {
+  const view = profileView();
+  for (const state of ["modified", "unavailable"] as const) {
+    assert.equal(profileSwitchDecision({ ...view, state }, "other"), "confirm");
+    assert.equal(profileSwitchDecision({ ...view, state }, "work"), "confirm");
+  }
+  assert.equal(profileSwitchDecision(view, ""), "direct");
+  for (const state of ["none", "in_sync", "interrupted"] as const) assert.equal(profileSwitchDecision({ ...view, state }, "other"), "direct");
+  assert.equal(profileIsPartial({ sections: ["routing"] }), true);
+  assert.equal(profileIsPartial({ sections: ["routing", "user_defaults", "mcp_servers", "connections"] }), false);
+});
+
+test("profiles: rename is metadata-only and can clear description; detach keeps backing files", () => {
+  const view = profileView();
+  assert.deepEqual(buildProfileRename(view, "work", " renamed ", ""), { ok: true, value: { surface: "routing_profiles", action: "update", expected_revision: view.revision, name: "work", rename_to: "renamed", description: "" } });
+  assert.equal(buildProfileRename(view, "work", "INVALID", "").ok, false);
+  assert.deepEqual(buildProfileDeactivate(view), { ok: true, value: { surface: "routing_profiles", action: "deactivate", expected_revision: view.revision } });
 });

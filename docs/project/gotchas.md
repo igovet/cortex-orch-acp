@@ -1,5 +1,18 @@
 # Gotchas
 
+Owner model preferences are rank inputs, not route grants. They only decide
+among routes already eligible for the role's tier; optional OpenCode models
+need explicit automatic-selection opt-in, and pins, deny rules, provider
+limits, availability and quota remain in force. Routing uses the first
+existing project, `$CORTEX_ROUTING`, or user file rather than merging files,
+so project/environment routing can shadow an active user profile. A
+coordinator hint or retry diversification should no longer outrank an eligible
+owner `preferred_for` model, but tier/opt-in/shadowing differences are not
+profile activation failures. The five original-source regression failures in
+the routing repair report were the expected pre-fix reproduction. See
+[configuration routing](../configuration.md#routing-rules) and
+[the routing decision](decisions.md#2026-09-30-owner-profiles-snapshot-full-user-settings-routing-preferences-rank-within-eligibility).
+
 An ACP client session and an executor attempt are different identities. On
 resume or replacement, select the adapter from the actual attempt and engine;
 do not infer it from the coordinator.

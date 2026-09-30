@@ -830,3 +830,38 @@ def test_a_model_may_be_placed_in_several_tiers(home, monkeypatch):
     sol = _routes(management.read_route_catalog())["codex-acp/gpt-6-sol"]
     assert (sol["tier"], sol["tiers"], sol["tier_source"], sol["configured_tier"]) == (
         "deep", ["deep", "standard"], "configured", ["standard", "deep"])
+
+
+# --- owner profiles (request shape; behaviour in test_routing_profiles.py) ------------
+
+def test_routing_profiles_dispatch_fields_and_read_all_shape(home):
+    def run(**request):
+        return management.execute(dict(surface="routing_profiles", **request))
+
+    assert set(management.PROFILE_ACTION_FIELDS) == {"create", "save", "update", "delete", "activate", "deactivate"}
+    for action in management.PROFILE_ACTION_FIELDS:
+        for legacy in ("rules", "from_current", "expected_routing_revision"):
+            response = run(action=action, expected_revision="absent", **{legacy: None})
+            assert response["error"]["code"] == "unsupported_request_field", (action, legacy)
+    assert run(action="rename", expected_revision="absent")["error"]["code"] == "unsupported_action"
+    for revisions in (None, {"routing": "absent"}, {"routing": "x", "user_defaults": "absent",
+                                                     "mcp_servers": "absent", "connections": "absent"}):
+        response = run(action="create", expected_revision="absent", name="work", expected_revisions=revisions)
+        assert response["error"]["code"] == "invalid_expected_revisions"
+        assert response["error"]["field"] == "expected_revisions"
+    assert run(action="activate", expected_revision="absent", name="work", discard_modifications="yes",
+               expected_revisions=dict.fromkeys(("routing", "user_defaults", "mcp_servers", "connections"),
+                                                "absent"))["error"]["code"] == "invalid_value"
+    view = run(action="read")["result"]
+    assert view["format"] == 2 and view["state"] == "none" and view["migrated_from"] is None
+    assert set(view["current_revisions"]) == {"routing", "user_defaults", "mcp_servers", "connections"}
+    created = run(action="create", expected_revision=view["revision"], name="work",
+                  expected_revisions=view["current_revisions"])
+    assert created["ok"] and created["result"]["changed"] is True
+    saved = run(action="save", expected_revision=created["result"]["revision"], name="work",
+                expected_revisions=created["result"]["current_revisions"])
+    assert saved["ok"] and saved["result"]["state"] == "in_sync"
+    everything = management.read_all()["routing_profiles"]
+    assert everything["ok"] and everything["result"]["active"] == "work"
+    assert everything["result"]["profiles"][0]["sections"] == ["routing", "user_defaults", "mcp_servers", "connections"]
+    assert "rules" not in everything["result"]["profiles"][0]

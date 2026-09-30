@@ -1,6 +1,6 @@
 import { usePaseo, useRpc, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Switch, Text, TextInput, View } from "react-native";
 import {
   discoverOpenCode,
@@ -27,8 +27,12 @@ import {
   buildMcpUpsert,
   buildOnboard,
   buildProjectCeilingUpdate,
+  buildProfileActivate,
+  buildProfileCreate,
+  buildProfileDeactivate,
+  buildProfileRename,
+  buildProfileSave,
   buildRoutingUpdate,
-  buildRoutingRules,
   buildUserDefaultsUpdate,
   canAutoAllow,
   automaticText,
@@ -74,10 +78,14 @@ import {
   preservedDefaultKeys,
   projectCeilingRemoval,
   projectCeilingToForm,
+  profileIsPartial,
+  profileSectionLabel,
+  profileStateText,
+  profileSwitchDecision,
   routingTarget,
-  routingRulesToForm,
   routingVocabulary,
   userDefaultsToForm,
+  validProfileName,
   type AffinityRow,
   type CatalogEngine,
   type CeilingForm,
@@ -138,6 +146,25 @@ function Hint({ text, theme }: { text?: string | null; theme: Theme }) {
   return <Text style={{ color: theme.colors.foregroundMuted, fontSize: 11, marginBottom: 4 }}>{text}</Text>;
 }
 
+type FieldHelp = { effect: string; scope: string };
+const FIELD_HELP: Array<[RegExp, FieldHelp]> = [
+  [/^(Route id|Connection(?: id)?$|Model \(exact id\)|Language|Parameter)/i, { effect: "Sets the default route, language, or named runtime parameter used for new work.", scope: "User-wide and included in saved owner profiles." }],
+  [/^(Pin|Tier|Denied route|Deny list|Auto-allowed route|Auto-allow list|Automatic-routing engines|Restrict automatic routing|Engine affinity|Model tiers|Use .* for automatic ranking|Save switches to)/i, { effect: "Controls route selection, eligibility, model tier or ranking for matching work.", scope: "Routing rules; included in saved owner profiles for user routing, but project routing stays project-only." }],
+  [/^(Limit:|Spend limit|Fallback|Restrict |Project permission)/i, { effect: "Sets a policy ceiling or fallback constraint; project ceilings can only narrow the owner ceiling.", scope: "Owner or project policy. Owner defaults are profile-bound; a project ceiling is project-only and never saved in an owner profile." }],
+  [/^(Saved profile|New profile|Rename profile|Profile description)/i, { effect: "Selects or edits the saved profile's name or description; this does not change the settings captured by the profile.", scope: "User profile metadata; not itself part of a saved settings snapshot." }],
+  [/^(Arguments|Argument |Environment variables|Limit to roles|Roles|Limit to engines|Engines|Allowed |Blocked |Denied |Server name|Transport|Command)/i, { effect: "Configures an MCP server definition or where that server may be used.", scope: "User-wide MCP configuration; usage policy is profile-bound, while server command, arguments and environment are excluded from profiles." }],
+  [/^(.*session limit|Max concurrent sessions)/i, { effect: "Caps concurrent sessions for this connection.", scope: "User-wide connection setting; included in saved owner profiles." }],
+  [/^(Connection name|Rename connection|I want to enable OpenCode|Connection name \(optional\))/i, { effect: "Changes connection metadata or explicitly opts in to connection onboarding; it does not itself enable automatic routing.", scope: "User-wide connection setup; not included in saved profiles." }],
+  [/^(Pin \d+ role|Pin \d+ engine|Pin \d+ model|Pin \d+ effort|Tier \d+ model|Tier \d+ tier)/i, { effect: "Defines the role-to-route pin or model-to-tier assignment used by routing.", scope: "Routing rules; included in saved owner profiles for user routing, but project routing stays project-only." }],
+  [/^(Parameter \d+ name|Parameter \d+ value)/i, { effect: "Adds or changes one named runtime parameter in the user defaults.", scope: "User-wide and included in saved owner profiles." }],
+  [/^(Set an owner ceiling|Owner permission level|Spend limit enforceable)/i, { effect: "Enables or changes the widest policy ceiling or whether the spend limit is enforceable.", scope: "User-wide owner policy; included in saved owner profiles." }],
+];
+function fieldHelp(label: string, example?: string): string {
+  const match = FIELD_HELP.find(([pattern]) => pattern.test(label))?.[1];
+  const fallback = match ?? { effect: `Sets the ${label.toLowerCase()} value shown by this control.`, scope: "The setting belongs to this section; profile membership follows the section's saved-profile rules." };
+  return `${fallback.effect} Scope: ${fallback.scope}${example ? ` Example: ${example}.` : ""}`;
+}
+
 function ErrorText({ message, theme }: { message?: string; theme: Theme }) {
   if (!message) return null;
   return <Text accessibilityRole="alert" accessibilityLiveRegion="polite" style={{ color: theme.colors.statusDanger, fontSize: 11, marginTop: 3 }}>
@@ -167,6 +194,7 @@ function TextField({ label, value, onChangeText, theme, placeholder, hint, error
   return <View style={compact ? { flex: 1, minWidth: 120 } : undefined}>
     {compact ? null : <Label text={label} theme={theme} />}
     <Hint text={hint} theme={theme} />
+    <Hint text={fieldHelp(label, placeholder)} theme={theme} />
     <TextInput
       value={value}
       onChangeText={onChangeText}
@@ -197,6 +225,7 @@ function ToggleField({ label, value, onValueChange, theme, hint, disabled }: {
       <Switch value={value} onValueChange={onValueChange} disabled={disabled} accessibilityLabel={label} accessibilityRole="switch"
         accessibilityState={{ checked: value, disabled: Boolean(disabled) }} />
     </View>
+    <Hint text={fieldHelp(label, value ? "on" : "off")} theme={theme} />
     <Hint text={hint} theme={theme} />
   </View>;
 }
@@ -228,6 +257,7 @@ function ChoiceField<T extends string>({ label, value, options, onChange, theme,
 }) {
   return <View>
     {compact ? null : <Label text={label} theme={theme} />}
+    <Hint text={fieldHelp(label, options.length ? String(options[0].label) : undefined)} theme={theme} />
     <Hint text={hint} theme={theme} />
     <View accessibilityRole="radiogroup" accessibilityLabel={label} style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
       {options.map((option) => {
@@ -252,6 +282,7 @@ function MultiChoiceField({ label, values, options, onChange, theme, error, hint
 }) {
   return <View>
     <Label text={label} theme={theme} />
+    <Hint text={fieldHelp(label, options.length ? String(options[0].label) : undefined)} theme={theme} />
     <Hint text={hint} theme={theme} />
     <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
       {options.map((option) => {
@@ -408,7 +439,8 @@ type SaveError = { message: string; conflict: boolean; fields: FieldErrors };
 /** One surface's read/reload/save cycle. Every write carries the revision
  * the form was built from; a stale one comes back as a conflict the owner
  * resolves by reloading, never by overwriting. */
-function useConfigSurface<Result>(surface: string, workspaceId: string | null, requireWorkspace: boolean) {
+function useConfigSurface<Result>(surface: string, workspaceId: string | null, requireWorkspace: boolean, onWritten?: () => void) {
+  const lastSaved = useRef<Result | null>(null);
   const read = useRpc(readConfig);
   const write = useRpc(updateConfig);
   const [state, setState] = useState<ReadState<Result>>({ status: "loading" });
@@ -440,6 +472,8 @@ function useConfigSurface<Result>(surface: string, workspaceId: string | null, r
     try {
       const out = await write(input);
       if (out.ok) {
+        lastSaved.current = out.result as unknown as Result;
+        onWritten?.();
         setState({ status: "ready", result: out.result as unknown as Result, binding: out.binding });
         return true;
       }
@@ -452,14 +486,14 @@ function useConfigSurface<Result>(surface: string, workspaceId: string | null, r
     } finally {
       setSaving(false);
     }
-  }, [write]);
+  }, [write, onWritten]);
 
   // A result obtained another way (a catalog refresh) replaces the one read.
   const replace = useCallback((result: Result) => {
     setState((current) => current.status === "ready" ? { ...current, result } : current);
   }, []);
 
-  return { state, reload, save, saving, saveError, setSaveError, replace };
+  return { state, reload, save, saving, saveError, setSaveError, replace, lastSaved };
 }
 
 function SurfaceFrame<Result>({ state, reload, theme, children }: {
@@ -535,8 +569,8 @@ function CeilingEditor({ form, onChange, theme, errors, owner }: {
 
 // --- User defaults ---------------------------------------------------------------
 
-function UserDefaultsSection({ theme }: { theme: Theme }) {
-  const surface = useConfigSurface<UserDefaultsView>("user_defaults", null, false);
+function UserDefaultsSection({ theme, onWritten }: { theme: Theme; onWritten?: () => void }) {
+  const surface = useConfigSurface<UserDefaultsView>("user_defaults", null, false, onWritten);
   const connections = useConfigSurface<ConnectionsView>("connections", null, false);
   const [form, setForm] = useState<UserDefaultsForm | null>(null);
   const [clientErrors, setClientErrors] = useState<FieldErrors>({});
@@ -559,7 +593,7 @@ function UserDefaultsSection({ theme }: { theme: Theme }) {
     if (!built.ok) { setClientErrors(built.errors); surface.setSaveError(null); return; }
     setClientErrors({});
     if (built.value === null) { setNotice("Nothing changed."); return; }
-    if (await surface.save(built.value)) setNotice("Saved.");
+    if (await surface.save(built.value)) setNotice("Applied to settings files; the profile was not updated. Use Save to current profile or Save as new profile.");
   };
 
   const connectionOptions = (current: string) => {
@@ -633,6 +667,7 @@ function ProjectCeilingSection({ theme, workspaceId }: { theme: Theme; workspace
   }, [state]);
 
   if (!workspaceId) return <Card title="Project ceiling" theme={theme}>
+    <Hint theme={theme} text="Project setting: not part of profiles." />
     <Banner text="Select a project workspace above to read or set its ceiling." theme={theme} tone="muted" />
   </Card>;
 
@@ -652,6 +687,7 @@ function ProjectCeilingSection({ theme, workspaceId }: { theme: Theme; workspace
   };
 
   return <Card title="Project ceiling" theme={theme}>
+    <Hint theme={theme} text="Project setting: not part of profiles." />
     <SurfaceFrame state={state} reload={surface.reload} theme={theme}>
       {(result) => form ? <View style={{ gap: 10 }}>
         <ReadOnlyRow label="Project" value={result.project_root} theme={theme} />
@@ -767,8 +803,8 @@ function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
   </View>;
 }
 
-function RoutingSection({ theme, workspaceId }: { theme: Theme; workspaceId: string | null }) {
-  const surface = useConfigSurface<RoutingView>("routing", workspaceId, false);
+function RoutingSection({ theme, workspaceId, onWritten }: { theme: Theme; workspaceId: string | null; onWritten?: () => void }) {
+  const surface = useConfigSurface<RoutingView>("routing", workspaceId, false, onWritten);
   const [target, setTarget] = useState<"user" | "project">("user");
   const [form, setForm] = useState<RoutingForm | null>(null);
   const [clientErrors, setClientErrors] = useState<FieldErrors>({});
@@ -791,7 +827,7 @@ function RoutingSection({ theme, workspaceId }: { theme: Theme; workspaceId: str
     const built = buildRoutingUpdate(state.result, target, workspaceId, form);
     if (!built.ok) { setClientErrors(built.errors); surface.setSaveError(null); return; }
     setClientErrors({});
-    if (await surface.save(built.value)) setNotice("Saved.");
+    if (await surface.save(built.value)) setNotice(target === "user" ? "Applied to user routing; the profile was not updated." : "Applied to project routing; project settings are not part of profiles.");
   };
 
   return <Card title="Routing" theme={theme}>
@@ -830,84 +866,114 @@ function RoutingSection({ theme, workspaceId }: { theme: Theme; workspaceId: str
   </Card>;
 }
 
-function RoutingProfilesSection({ theme, workspaceId }: { theme: Theme; workspaceId: string | null }) {
+function ProfileBar({ theme, workspaceId, tick, onActivated, manage }: {
+  theme: Theme; workspaceId: string | null; tick: number; onActivated: () => void; manage: boolean;
+}) {
   const surface = useConfigSurface<RoutingProfilesView>("routing_profiles", workspaceId, false);
-  const routing = useConfigSurface<RoutingView>("routing", workspaceId, false);
-  const [selected, setSelected] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [form, setForm] = useState<RoutingForm | null>(null);
-  const [clientErrors, setClientErrors] = useState<FieldErrors>({});
-  const [notice, setNotice] = useState<string | null>(null);
+  const [selected, setSelected] = useState("");
+  const [rename, setRename] = useState("");
+  const [metadataDescription, setMetadataDescription] = useState("");
+  const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [errors, setErrors] = useState<FieldErrors>({});
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => { if (tick) { setNotice(null); surface.reload(); } }, [tick, surface.reload]);
   const profile = surface.state.status === "ready" ? surface.state.result.profiles.find((item) => item.name === selected) : undefined;
   useEffect(() => {
-    if (!profile) { setForm(null); return; }
-    setName(profile.name); setDescription(profile.description);
-    const parsed = routingRulesToForm(profile.rules);
-    setForm(parsed.ok ? parsed.form : null);
-    setClientErrors({});
-    setConfirmDelete(false);
-  }, [surface.state, selected]);
-  const mutate = async (input: ConfigUpdateInput): Promise<boolean> => {
+    setRename(profile?.name ?? ""); setMetadataDescription(profile?.description ?? ""); setConfirmDelete(false);
+  }, [profile]);
+  const mutate = async (built: ReturnType<typeof buildProfileSave>) => {
     setNotice(null);
-    if (await surface.save(input)) {
-      setNotice("Saved. Re-read the routing file before further profile changes.");
-      await routing.reload();
-      return true;
+    if (!built.ok) { setErrors(built.errors); return null; }
+    setErrors({});
+    if (!await surface.save({ ...built.value, ...(workspaceId ? { workspaceId } : {}) })) {
+      // A failed activation may have changed files or left a pending journal.
+      // Refresh forms but retain the error and explicit profile reload action.
+      if (built.value.surface === "routing_profiles" && built.value.action === "activate") onActivated();
+      return null;
     }
-    return false;
+    const next = surface.lastSaved.current!;
+    if (built.value.surface === "routing_profiles" && built.value.action === "activate") onActivated();
+    setNotice("Profile operation completed.");
+    setConfirmTarget(null);
+    return next;
   };
-  return <Card title="User routing profiles" theme={theme}>
+  const activate = (view: RoutingProfilesView, target: string) => {
+    if (profileSwitchDecision(view, target) === "confirm") { setConfirmTarget(target); return; }
+    void mutate(buildProfileActivate(view, target));
+  };
+  return <Card title="Profiles" theme={theme}>
     <SurfaceFrame state={surface.state} reload={surface.reload} theme={theme}>
-      {(view) => <View style={{ gap: 10 }}>
-        <Hint theme={theme} text="Profiles are owner-only snapshots of user routing. A project routing file or environment override still wins. Activating a profile writes its rules into the user routing file; projects have no profiles." />
-        <ReadOnlyRow label="Active" value={view.active ?? "none"} theme={theme} />
-        <ReadOnlyRow label="State" value={view.state} theme={theme} />
-        {view.state === "diverged" && <Banner text="The active profile and user routing differ. Reload, then re-activate to apply it or detach to keep the current user routing." theme={theme} tone="warning" />}
-        {view.shadowed_by && <Banner text={`The ${view.shadowed_by} routing file currently overrides user profiles here.`} theme={theme} tone="warning" />}
-        <TextField label="New profile name" value={name} onChangeText={setName} theme={theme} placeholder="my-profile" />
-        <TextField label="Description" value={description} onChangeText={setDescription} theme={theme} />
-        <Button title="Create from current user routing" theme={theme} disabled={surface.saving || !/^[a-z0-9][a-z0-9-]{0,39}$/.test(name)}
-          onPress={() => mutate({ surface: "routing_profiles", action: "create", workspaceId: workspaceId ?? undefined,
-            expected_revision: view.revision, name, description, from_current: true })} />
-        <ChoiceField label="Saved profile" value={selected} theme={theme}
-          options={[{ value: "", label: "Choose a profile" }, ...view.profiles.map((item) => ({ value: item.name, label: item.name }))]}
-          onChange={(value) => { setSelected(value); setName(value); }} />
-        {profile && <>
-          <ReadOnlyRow label="Saved route selections" value={Object.entries(profile.summary.selected_models).map(([engine, count]) => `${engine}: ${count}`).join(", ") || "built-in defaults"} theme={theme} />
-          <ReadOnlyRow label="Matching current user routing" value={view.matches_profile.includes(profile.name) ? "yes" : "no"} theme={theme} />
-          {!form ? <ReadOnlyNotice text="This profile has rules these fields cannot represent; edit the source file, then reload." theme={theme} />
-            : <SurfaceFrame state={routing.state} reload={routing.reload} theme={theme}>{(routes) => <>
-              <RoutingEditor form={form} onChange={setForm} vocabulary={routingVocabulary(routes)} theme={theme}
-                errors={mergeErrors(clientErrors, surface.saveError?.fields)} />
-              <Button title="Save profile rules and name" theme={theme} disabled={surface.saving}
-                onPress={() => {
-                  const built = buildRoutingRules(form, routingVocabulary(routes));
-                  if (!built.ok) { setClientErrors(built.errors); return; }
-                  setClientErrors({});
-                  const changedRules = !sameJson(built.value, profile.rules);
-                  mutate({ surface: "routing_profiles", action: "update", workspaceId: workspaceId ?? undefined,
-                    expected_revision: view.revision, expected_routing_revision: view.user_routing_revision,
-                    name: profile.name, rename_to: name, description, ...(changedRules ? { rules: built.value } : {}) })
-                    .then((ok) => { if (ok) setSelected(name); });
-                }} />
-            </>}</SurfaceFrame>}
-          <Button title="Activate profile" theme={theme} disabled={surface.saving}
-                onPress={() => mutate({ surface: "routing_profiles", action: "activate", workspaceId: workspaceId ?? undefined,
-                  expected_revision: view.revision, expected_routing_revision: view.user_routing_revision, name: profile.name })} />
-              {view.active === profile.name && <Button title="Deactivate profile (keep current user routing)" theme={theme} disabled={surface.saving}
-                onPress={() => mutate({ surface: "routing_profiles", action: "deactivate", workspaceId: workspaceId ?? undefined,
-                  expected_revision: view.revision })} />}
-              {view.active !== profile.name && (confirmDelete
-                ? <><Button title="Confirm delete profile" theme={theme} tone="danger" disabled={surface.saving}
-                    onPress={() => { mutate({ surface: "routing_profiles", action: "delete", workspaceId: workspaceId ?? undefined,
-                      expected_revision: view.revision, name: profile.name }).then((ok) => { if (ok) setSelected(""); }); }} />
-                  <Button title="Cancel delete" theme={theme} onPress={() => setConfirmDelete(false)} /></>
-                : <Button title="Delete profile" theme={theme} tone="danger" onPress={() => setConfirmDelete(true)} />)}
-        </>}
-        <SaveStatus saveError={surface.saveError} notice={notice} reload={surface.reload} theme={theme} />
-      </View>}
+      {(view) => {
+        const unreadable = Object.values(view.current_revisions).some((revision) => revision === null);
+        const current = view.profiles.find((item) => item.name === view.active);
+        return <View style={{ gap: 10 }}>
+          <Hint theme={theme} text="Save each section to apply its form edits first, then save those applied settings into a profile. Profiles bind user defaults, user routing (including engines/models), MCP usage policy and connection session limits. Project settings, credentials and MCP launch definitions are not stored. Activation reloads the settings and discards unapplied form edits." />
+          <ChoiceField label="Current profile" value={view.active ?? ""} theme={theme} disabled={surface.saving}
+            options={[{ value: "", label: "No profile" }, ...view.profiles.map((item) => ({ value: item.name, label: item.name }))]}
+            onChange={(target) => target ? activate(view, target) : void mutate(buildProfileDeactivate(view))} />
+          <Button title="Reload profile state" theme={theme} disabled={surface.saving} onPress={() => { setConfirmTarget(null); surface.reload(); }} />
+          <ReadOnlyRow label="Profile state" value={view.state} theme={theme} />
+          <Banner text={profileStateText(view)} theme={theme} tone={view.state === "in_sync" || view.state === "none" ? "muted" : "warning"} />
+          {view.shadowed_by && <Banner text={`The ${view.shadowed_by} routing file overrides profile routing here. Other bound user settings still apply.`} theme={theme} tone="warning" />}
+          {current && profileIsPartial(current) && <Banner theme={theme} tone="warning" text={`"${current.name}" stores only ${current.sections.map(profileSectionLabel).join(", ")}. Save to current profile to store every bound setting.`} />}
+          <Button title="Save to current profile" theme={theme} disabled={surface.saving || unreadable || !view.active}
+            onPress={() => void mutate(buildProfileSave(view))} />
+          {view.active && <Button title="Revert to saved" theme={theme} disabled={surface.saving || unreadable}
+            onPress={() => setConfirmTarget(view.active)} />}
+          {view.pending && <>
+            <Button title={`Re-activate ${view.pending.profile}`} theme={theme} disabled={surface.saving || unreadable}
+              onPress={() => activate(view, view.pending!.profile)} />
+            <Button title={`Save current settings to ${view.pending.profile}`} theme={theme} disabled={surface.saving || unreadable}
+              onPress={() => void mutate(buildProfileSave(view, view.pending!.profile))} />
+            <Button title="Detach" theme={theme} disabled={surface.saving} onPress={() => void mutate(buildProfileDeactivate(view))} />
+          </>}
+          {confirmTarget !== null && <Group title="Confirm profile activation" theme={theme}>
+            <Banner theme={theme} tone="warning" text={`Switch to "${confirmTarget}"? Applied changes not saved into the current profile and unapplied form edits will be discarded.`} />
+            <Button title="Save changes and switch" theme={theme} disabled={surface.saving || unreadable || !view.active}
+              onPress={async () => {
+                const target = confirmTarget;
+                const saved = await mutate(buildProfileSave(view));
+                if (saved) await mutate(buildProfileActivate(saved, target));
+              }} />
+            <Button title="Discard changes and switch" theme={theme} tone="danger" disabled={surface.saving || unreadable}
+              onPress={() => void mutate(buildProfileActivate(view, confirmTarget, { discard: true }))} />
+            <Button title="Cancel switch" theme={theme} disabled={surface.saving} onPress={() => setConfirmTarget(null)} />
+          </Group>}
+          <Group title="Save as new profile" theme={theme}>
+            <TextField label="New profile name" value={name} onChangeText={setName} theme={theme} placeholder="my-profile" error={errorFor(errors, "name")} />
+            <TextField label="New profile description" value={description} onChangeText={setDescription} theme={theme} error={errorFor(errors, "description")} />
+            <Button title="Save as new profile" theme={theme} disabled={surface.saving || unreadable || !validProfileName(name)}
+              onPress={() => void mutate(buildProfileCreate(view, name, description))} />
+          </Group>
+          {manage && <Group title="Manage saved profiles" theme={theme}>
+            <ChoiceField label="Saved profile" value={selected} theme={theme} disabled={surface.saving}
+              options={[{ value: "", label: "Choose a profile" }, ...view.profiles.map((item) => ({ value: item.name, label: item.name }))]} onChange={setSelected} />
+            {profile && <>
+              <ReadOnlyRow label="Stored sections" value={profile.sections.map(profileSectionLabel).join(", ")} theme={theme} />
+              <ReadOnlyRow label="Updated" value={profile.updated_at ?? "unknown"} theme={theme} />
+              <ReadOnlyRow label="Matches applied settings" value={view.matches_profile.includes(profile.name) ? "yes" : "no"} theme={theme} />
+              <ReadOnlyRow label="Saved route selections" value={Object.entries(profile.summary.selected_models).map(([engine, count]) => `${engine}: ${count}`).join(", ") || "built-in defaults"} theme={theme} />
+              <ReadOnlyRow label="Default model / language" value={`${profile.summary.default_model ?? "automatic"} / ${profile.summary.language ?? "automatic"}`} theme={theme} />
+              <ReadOnlyRow label="Enabled MCP servers" value={String(profile.summary.enabled_mcp_servers)} theme={theme} />
+              <TextField label="Rename profile to" value={rename} onChangeText={setRename} theme={theme} error={errorFor(errors, "rename_to")} />
+              <TextField label="Profile description" value={metadataDescription} onChangeText={setMetadataDescription} theme={theme} />
+              <Button title="Save profile name and description" theme={theme} disabled={surface.saving}
+                onPress={async () => { if (await mutate(buildProfileRename(view, profile.name, rename, metadataDescription))) setSelected(rename.trim() || profile.name); }} />
+              <Button title="Activate profile" theme={theme} disabled={surface.saving || unreadable} onPress={() => activate(view, profile.name)} />
+              {profile.name !== view.active && profile.name !== view.pending?.profile && (confirmDelete ? <>
+                <Button title="Confirm delete profile" theme={theme} tone="danger" disabled={surface.saving}
+                  onPress={async () => { if (await mutate({ ok: true, value: { surface: "routing_profiles", action: "delete", expected_revision: view.revision, name: profile.name } })) setSelected(""); }} />
+                <Button title="Cancel delete" theme={theme} disabled={surface.saving} onPress={() => setConfirmDelete(false)} />
+              </> : <Button title="Delete profile" theme={theme} tone="danger" disabled={surface.saving} onPress={() => setConfirmDelete(true)} />)}
+            </>}
+          </Group>}
+          <ErrorText message={Object.values(errors).flat().join(" ")} theme={theme} />
+          <SaveStatus saveError={surface.saveError} notice={notice} reload={surface.reload} theme={theme} />
+        </View>;
+      }}
     </SurfaceFrame>
   </Card>;
 }
@@ -1036,12 +1102,12 @@ type RoutingSwitchesProps = { cat: RouteCatalogView; form: RoutingForm; setForm:
 /** One routing file's switches over the route catalog: the save target, the
  * shadowing warnings and the save button are shared by Models and Engines &
  * models; `tools` renders above the switches even when the file is read-only. */
-function RoutingSwitchesCard({ title, saveLabel, theme, workspaceId, legend, tools, children }: {
-  title: string; saveLabel: string; theme: Theme; workspaceId: string | null; legend: React.ReactNode;
+function RoutingSwitchesCard({ title, saveLabel, theme, workspaceId, legend, tools, children, onWritten }: {
+  onWritten?: () => void; title: string; saveLabel: string; theme: Theme; workspaceId: string | null; legend: React.ReactNode;
   tools?: (cat: RouteCatalogView, replace: (next: RouteCatalogView) => void) => React.ReactNode;
   children: (props: RoutingSwitchesProps) => React.ReactNode;
 }) {
-  const routing = useConfigSurface<RoutingView>("routing", workspaceId, false);
+  const routing = useConfigSurface<RoutingView>("routing", workspaceId, false, onWritten);
   const catalog = useConfigSurface<RouteCatalogView>("route_catalog", workspaceId, false);
   const [target, setTarget] = useState<"user" | "project">("user");
   const [picked, setPicked] = useState(false);
@@ -1069,7 +1135,7 @@ function RoutingSwitchesCard({ title, saveLabel, theme, workspaceId, legend, too
     if (!built.ok) { setClientErrors(built.errors); routing.setSaveError(null); return; }
     setClientErrors({});
     if (await routing.save(built.value)) {
-      setNotice("Saved. The states below were read again from the files Cortex now uses.");
+      setNotice(target === "user" ? "Applied to user routing; the profile was not updated." : "Applied to project routing; project settings are not part of profiles.");
       await catalog.reload();
     }
   };
@@ -1118,8 +1184,8 @@ function RoutingSwitchesCard({ title, saveLabel, theme, workspaceId, legend, too
   </Card>;
 }
 
-function EnginesModelsSection({ theme, workspaceId }: { theme: Theme; workspaceId: string | null }) {
-  return <RoutingSwitchesCard title="Engines & models" saveLabel="engine and model switches" theme={theme} workspaceId={workspaceId} legend={<SwitchLegend theme={theme} />}>
+function EnginesModelsSection({ theme, workspaceId, onWritten }: { theme: Theme; workspaceId: string | null; onWritten?: () => void }) {
+  return <RoutingSwitchesCard title="Engines & models" saveLabel="engine and model switches" onWritten={onWritten} theme={theme} workspaceId={workspaceId} legend={<SwitchLegend theme={theme} />}>
     {({ cat, form, setForm, target, view }) => <>
       {cat.engines.map((engine) => <EngineBlock key={engine.engine} engine={engine} catalog={cat} form={form} onChange={setForm}
         target={target} engines={routingVocabulary(view).engines} workKinds={view.builtin.work_kinds} workKindLabels={view.builtin.work_kind_labels} theme={theme} />)}
@@ -1226,9 +1292,9 @@ function EngineModels({ engine, catalog, form, onChange, target, query, theme }:
   </View>;
 }
 
-function ModelsSection({ theme, workspaceId }: { theme: Theme; workspaceId: string | null }) {
+function ModelsSection({ theme, workspaceId, onWritten }: { theme: Theme; workspaceId: string | null; onWritten?: () => void }) {
   const [query, setQuery] = useState("");
-  return <RoutingSwitchesCard title="Models" saveLabel="model switches" theme={theme} workspaceId={workspaceId}
+  return <RoutingSwitchesCard title="Models" saveLabel="model switches" onWritten={onWritten} theme={theme} workspaceId={workspaceId}
     legend={<Hint theme={theme} text={"Switch on the models Cortex may use. Only these appear in the model selector, under Engines & models and in "
       + "automatic routing; a model switched off is refused when chosen or pinned. Codex and Claude models are on until switched off; "
       + "OpenCode v2 models are off until switched on. Connections and logins are never touched."} />}
@@ -1344,8 +1410,8 @@ function McpServerEditor({ name, isNew, initial, existingNames, engines, onCance
   </View>;
 }
 
-function McpServersSection({ theme }: { theme: Theme }) {
-  const surface = useConfigSurface<McpServersView>("mcp_servers", null, false);
+function McpServersSection({ theme, onWritten }: { theme: Theme; onWritten?: () => void }) {
+  const surface = useConfigSurface<McpServersView>("mcp_servers", null, false, onWritten);
   const [editing, setEditing] = useState<{ name: string; isNew: boolean; form: McpServerForm } | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -1355,11 +1421,12 @@ function McpServersSection({ theme }: { theme: Theme }) {
     if (state.status !== "ready") return false;
     setNotice(null);
     const ok = await surface.save(mcpUpdate(state.result, operation), MCP_ERROR_PREFIXES);
-    if (ok) { setNotice(done); setEditing(null); setConfirmRemove(null); }
+    if (ok) { setNotice(`${done} Applied to the file; the profile was not updated.`); setEditing(null); setConfirmRemove(null); }
     return ok;
   };
 
   return <Card title="Owner MCP servers" theme={theme}>
+    <Hint theme={theme} text="Profiles store MCP usage policy only. Command, arguments and environment values are shared by all profiles." />
     <SurfaceFrame state={state} reload={surface.reload} theme={theme}>
       {(result) => {
         const names = result.servers.map((server) => server.name);
@@ -1487,8 +1554,8 @@ function opencodeOnboardedText(onboarded: { version: string; nextAction: string 
   return `Onboarded OpenCode ${onboarded.version} — ${next} Automatic routing: ${onboarded.automaticRouting}.`;
 }
 
-function ConnectionsSection({ theme }: { theme: Theme }) {
-  const surface = useConfigSurface<ConnectionsView>("connections", null, false);
+function ConnectionsSection({ theme, onWritten }: { theme: Theme; onWritten?: () => void }) {
+  const surface = useConfigSurface<ConnectionsView>("connections", null, false, onWritten);
   const discover = useRpc(discoverOpenCode);
   const onboard = useRpc(onboardOpenCode);
   const [discovery, setDiscovery] = useState<Discovery>({ status: "idle" });
@@ -1539,6 +1606,7 @@ function ConnectionsSection({ theme }: { theme: Theme }) {
   };
 
   return <Card title="Connections" theme={theme}>
+    <Hint theme={theme} text="Session limits belong to profiles; names, credentials, validation and removal do not." />
     <SurfaceFrame state={state} reload={surface.reload} theme={theme}>
       {(result) => <View style={{ gap: 10 }}>
         {result.connections.length === 0 && <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>No connections registered.</Text>}
@@ -1612,6 +1680,11 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
   const [section, setSection] = useState<SettingsSectionId>("user_defaults");
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
 
+  const [profileTick, setProfileTick] = useState(0);
+  const [settingsEpoch, setSettingsEpoch] = useState(0);
+  const onWritten = useCallback(() => setProfileTick((tick) => tick + 1), []);
+  const onActivated = useCallback(() => setSettingsEpoch((epoch) => epoch + 1), []);
+
   return <ScrollView style={{ flex: 1, backgroundColor: theme.colors.surface0 }} contentContainerStyle={{ padding: 14, gap: 14 }}>
     <Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: 18, fontWeight: "700" }}>Cortex settings</Text>
     <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
@@ -1619,15 +1692,15 @@ export function SettingsScreen({ theme }: PluginSurfaceProps) {
       elsewhere since loading is refused, never overwritten. Settings Cortex manages elsewhere are shown read-only.
     </Text>
     <WorkspacePicker theme={theme} workspaceId={workspaceId} onChange={setWorkspaceId} />
+    <ProfileBar theme={theme} workspaceId={workspaceId} tick={profileTick} onActivated={onActivated} manage={section === "routing_profiles"} />
     <ChoiceField label="Section" value={section} theme={theme} onChange={setSection}
       options={SETTINGS_SECTIONS.map((entry) => ({ value: entry.id, label: entry.title }))} />
-    {section === "user_defaults" && <UserDefaultsSection theme={theme} />}
-    {section === "models" && <ModelsSection theme={theme} workspaceId={workspaceId} />}
-    {section === "engines_models" && <EnginesModelsSection theme={theme} workspaceId={workspaceId} />}
-    {section === "project_ceiling" && <ProjectCeilingSection theme={theme} workspaceId={workspaceId} />}
-    {section === "routing" && <RoutingSection theme={theme} workspaceId={workspaceId} />}
-    {section === "routing_profiles" && <RoutingProfilesSection theme={theme} workspaceId={workspaceId} />}
-    {section === "mcp_servers" && <McpServersSection theme={theme} />}
-    {section === "connections" && <ConnectionsSection theme={theme} />}
+    {section === "user_defaults" && <UserDefaultsSection key={settingsEpoch} onWritten={onWritten} theme={theme} />}
+    {section === "models" && <ModelsSection key={settingsEpoch} onWritten={onWritten} theme={theme} workspaceId={workspaceId} />}
+    {section === "engines_models" && <EnginesModelsSection key={settingsEpoch} onWritten={onWritten} theme={theme} workspaceId={workspaceId} />}
+    {section === "project_ceiling" && <ProjectCeilingSection key={settingsEpoch} theme={theme} workspaceId={workspaceId} />}
+    {section === "routing" && <RoutingSection key={settingsEpoch} onWritten={onWritten} theme={theme} workspaceId={workspaceId} />}
+    {section === "mcp_servers" && <McpServersSection key={settingsEpoch} onWritten={onWritten} theme={theme} />}
+    {section === "connections" && <ConnectionsSection key={settingsEpoch} onWritten={onWritten} theme={theme} />}
   </ScrollView>;
 }

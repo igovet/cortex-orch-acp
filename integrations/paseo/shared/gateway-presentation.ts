@@ -1,7 +1,46 @@
+const fields = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
+/** Legacy OpenCode Code Mode snapshot, using the same naming rules as
+ * engine/opencode_tool_calls.py. Never evaluate JS or recover absent ACP content. */
+export function codeModePresentation(title: string, rawInput: unknown, rawOutput: unknown, kind?: unknown) {
+  const input = fields(rawInput);
+  if (title.trim() !== "execute" || (kind != null && kind !== "other")
+    || "command" in input || "cmd" in input || "argv" in input) return null;
+  const metadata = fields(fields(rawOutput).metadata);
+  const calls = Array.isArray(metadata.toolCalls)
+    ? metadata.toolCalls.map(fields).filter(call => typeof call.tool === "string" && call.tool.trim())
+    : [];
+  // The ACP bridge drops kind. A title-only pending snapshot is ambiguous
+  // with a native shell; wait for code or inner calls rather than relabel it.
+  if (kind !== "other" && typeof input.code !== "string" && calls.length === 0) return null;
+  const operation = (name: string): [string | null, string] => {
+    const dot = name.indexOf(".");
+    return dot > 0 && dot < name.length - 1 ? [name.slice(0, dot), name.slice(dot + 1)] : [null, name];
+  };
+  const primary = calls.find(call => operation((call.tool as string).trim())[0]) ?? calls[0];
+  const code = typeof input.code === "string" ? input.code : undefined;
+  const match = code?.match(/\btools\s*\.\s*([A-Za-z_$][\w$]*)\s*\.\s*([A-Za-z_$][\w$]*)\s*\(/);
+  const resolved = primary ? operation((primary.tool as string).trim())
+    : match ? [match[1], match[2]] : null;
+  const name = resolved ? resolved[0] ? `mcp.${resolved[0]}.${resolved[1]}` : resolved[1] : "Code Mode";
+  const envelope = resolved ? {
+    ...(resolved[0] ? { server: resolved[0] } : {}),
+    tool: resolved[1],
+    ...(primary ? { arguments: fields(primary.input) } : {}),
+    ...(code === undefined ? {} : { code }),
+  } : input;
+  return {
+    name, input: envelope, output: rawOutput,
+    failed: metadata.error === true || calls.some(call => call.status === "error"),
+  };
+}
+
 /** Presentation only: retain the original ACP payload alongside this projection. */
 export function gatewayPresentation(title: string, rawInput: unknown, rawOutput: unknown) {
-  const fields = (value: unknown): Record<string, unknown> =>
-    value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const codeMode = codeModePresentation(title, rawInput, rawOutput);
+  title = codeMode?.name ?? title;
+  rawInput = codeMode?.input ?? rawInput;
   const envelope = fields(rawInput);
   const name = envelope.server === "cortex" && typeof envelope.tool === "string"
     ? envelope.tool : title.match(/^(?:mcp\.cortex\.|mcp__cortex__)([a-z_]+)$/)?.[1];

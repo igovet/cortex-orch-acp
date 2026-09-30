@@ -108,3 +108,39 @@ test("a call titled with its own command line shows that command, not its first 
   assert.equal(presentToolSemantics({ name: "Grep" }).label, "Grep");
   assert.equal(presentToolSemantics({ name: "mcp__other__search_code", input: { query: "q" } }).label, "Search Code");
 });
+
+test("normalized OpenCode Code Mode calls render like the Codex and Claude calls", () => {
+  // engine.opencode_tool_calls rewrites OpenCode's `execute` wrapper into
+  // Codex's MCP spelling; the retained JavaScript never makes it a shell row.
+  const code = 'return await tools.cortex.answer_submit({ answer: "yes" })';
+  const opencode = presentToolSemantics({
+    name: "mcp.cortex.answer_submit", toolKind: "other",
+    rawInput: { server: "cortex", tool: "answer_submit", arguments: { answer: "yes" }, code },
+  });
+  const claude = presentToolSemantics({ name: "mcp__cortex__answer_submit", toolKind: "other", rawInput: { answer: "yes" } });
+  assert.equal(opencode.label, "Submit answer");
+  assert.deepEqual(opencode, claude);
+  const read = presentToolSemantics({
+    name: "mcp.cortex.read_report", toolKind: "other",
+    rawInput: { server: "cortex", tool: "read_report", arguments: { report_id: "r_abc" }, code: "return 1" },
+  });
+  assert.equal(read.label, "Read report — r_abc");
+  const unresolved = presentToolSemantics({ name: "Code Mode", toolKind: "other", rawInput: { code: "return 1" } });
+  assert.notEqual(unresolved.kind, "shell");
+  assert.equal(unresolved.label, "Code Mode");
+});
+
+test("raw OpenCode replay uses authoritative inner names and provisional code hints", () => {
+  const code = 'return await tools.cortex.answer_submit({answer: "yes"})';
+  const rawInput = { code };
+  assert.deepEqual(presentToolSemantics({ name: "execute", toolKind: "other", rawInput }),
+    presentToolSemantics({ name: "mcp__cortex__answer_submit", rawInput: { answer: "yes" } }));
+  assert.equal(presentToolSemantics({ name: "execute", toolKind: "other", rawInput,
+    rawOutput: { metadata: { toolCalls: [
+      { tool: "search", input: {} }, { tool: "cortex.read_report", input: { report_id: "r_abc" } },
+    ] } } }).label, "Read report — r_abc");
+  assert.equal(presentToolSemantics({ name: "execute", toolKind: "other", rawInput: {} }).label, "Code Mode");
+  assert.equal(presentToolSemantics({ name: "execute", rawInput: { code: "return 1" } }).kind, "generic");
+  assert.equal(presentToolSemantics({ name: "execute", toolKind: "execute", rawInput: { command: "pwd" } }).label, "Shell — pwd");
+  assert.equal(presentToolSemantics({ name: "execute", rawInput: { command: "pwd" } }).label, "Shell — pwd");
+});

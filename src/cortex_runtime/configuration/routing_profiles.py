@@ -1,10 +1,32 @@
-"""Owner routing snapshots materialized into the user routing.json.
+"""Owner profiles: snapshots of every user-level setting, materialized into
+the files the runtime already reads.
 
-Profiles are a management surface, not another runtime routing source. The
-loader continues to read routing.json with its existing precedence.
+A profile governs up to four sections (:data:`PROFILE_SECTIONS`):
+
+- ``routing`` -- the eight supported keys of the user ``routing.json``;
+- ``user_defaults`` -- ``defaults.json``: the route default, its parameters,
+  the language and the owner ceiling;
+- ``mcp_servers`` -- the usage policy of each ``mcp-servers.json`` server
+  (``enabled`` and its tool/path/network/role/engine limits). ``command``,
+  ``args`` and ``env`` are an installation definition that may carry
+  credentials: they are never captured, stored or written from a profile;
+- ``connections`` -- ``max_concurrent_sessions`` of each registered
+  connection.
+
+Profiles are a management surface, not another runtime source: the loaders
+keep reading the backing files with their existing precedence. Saving is
+explicit (``save`` into the selected profile, ``create`` as a new one); an
+edit anywhere only makes the selected profile ``modified``. Activation
+validates every target first, journals ``pending`` in the profiles file,
+replaces the changed backing files in a fixed order and rolls back in
+process on failure; an unfinished activation reads as ``interrupted``.
+Project-level settings (project routing, project ceiling) are never part of
+a profile.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -13,16 +35,37 @@ import stat
 from typing import Mapping
 
 from ..connections import registry
+from ..connections.model import MAX_CONCURRENT_SESSIONS_LIMIT, SUPPORTED_ENGINES
 from ..portable.errors import PortableError
 from . import management as m
+from . import store as configuration_store
+from .policy import PolicyCeiling
+
+FORMAT = 2
+PROFILE_SECTIONS = ("routing", "user_defaults", "mcp_servers", "connections")
+#: Server keys a profile never stores: installation definition and secrets.
+MCP_DEFINITION_KEYS = ("command", "args", "env")
+PROFILE_MCP_KEYS = tuple(key for key in m.MCP_SERVER_KEYS if key not in MCP_DEFINITION_KEYS)
+STATES = ("none", "in_sync", "modified", "interrupted", "unavailable")
 
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,39}\Z")
 _MAX_PROFILES = 32
+_MAX_DIFFERENCES = 200
+_SECTION_LABELS = dict(routing="routing (user)", user_defaults="user_defaults", mcp_servers="mcp_servers",
+                       connections="connections")
+_DEFAULT_GROUPS = (("route", m.ROUTE_DEFAULT_KEYS), ("parameters", ("parameters",)), ("language", ("language",)))
+_UNRESTRICTED = m.ceiling_to_dict(PolicyCeiling())
 
 
 def _paths(environ):
     root = registry.config_root(environ)
     return root / "routing-profiles.json", root / "routing.json"
+
+
+def _section_path(section, environ):
+    root = registry.config_root(environ)
+    return dict(routing=root / "routing.json", user_defaults=root / "defaults.json",
+                mcp_servers=root / "mcp-servers.json", connections=registry.registry_path(environ))[section]
 
 
 def _read_file(path):
@@ -36,49 +79,91 @@ def _read_file(path):
     return m._read_plain(path)
 
 
-def _document(data):
-    if data is None:
-        return {"format": 1, "active": None, "applied": None, "profiles": {}}
-    value = m._json_object(data, "routing-profiles.json", "invalid_profiles")
-    if type(value.get("format")) is not int or value["format"] != 1:
-        raise m._error("unsupported_profiles_format", "routing-profiles.json format must be 1.", field="format")
-    profiles = value.get("profiles")
-    if (not isinstance(profiles, dict) or len(profiles) > _MAX_PROFILES
-            or not all(isinstance(k, str) and _NAME.fullmatch(k) and isinstance(v, dict)
-                       for k, v in profiles.items())
-            or value.get("active") is not None and value.get("active") not in profiles
-            or value.get("applied") is not None and not isinstance(value.get("applied"), dict)):
-        raise m._error("invalid_profiles", "routing-profiles.json has invalid profile metadata.")
-    for entry in profiles.values():
-        if (not isinstance(entry.get("rules"), dict)
-                or not isinstance(entry.get("description"), str)
-                or len(entry["description"]) > 256 or m._CONTROL.search(entry["description"])):
-            raise m._error("invalid_profiles", "A routing profile has invalid rules or description.")
-    return value
+# --- section validation, capture and comparison ------------------------------------
+
+def _prefixed(error, field):
+    """``error`` (a validation refusal) with every field under ``field``."""
+    if isinstance(error, m.ConfigValidationError):
+        items = []
+        for item in error.errors:
+            where = item["field"]
+            where = field + where[len("rules"):] if where == "rules" or where.startswith("rules.") else f"{field}.{where}"
+            items.append(dict(item, field=where))
+        return m.ConfigValidationError(items)
+    return m.ConfigValidationError([dict(field=field, code=error.code, message=error.remediation)])
 
 
-def _entry_revision(entry):
-    return "sha256:" + hashlib.sha256(json.dumps(entry, sort_keys=True, separators=(",", ":"),
-                                             ensure_ascii=False).encode("utf-8")).hexdigest()
-
-
-def _state(doc, routing_revision):
-    name = doc.get("active")
-    if name is None:
-        return "none"
-    applied = doc.get("applied") or {}
-    if (applied.get("profile") == name and applied.get("routing_revision") == routing_revision
-            and applied.get("profile_revision") == _entry_revision(doc["profiles"][name])):
-        return "in_sync"
-    return "diverged"
-
-
-def _load(environ):
-    path, routing_path = _paths(environ)
-    data = _read_file(path)
-    doc = _document(data)
-    routing_data = m._read_plain(routing_path)
-    return path, routing_path, data, doc, routing_data
+def _normalize_section(section, value):
+    """The canonical form of one section of a profile (stored or captured);
+    raises :class:`management.ConfigValidationError` naming every problem."""
+    field = f"settings.{section}"
+    errors = m._Errors()
+    if section == "routing":
+        try:
+            return m.validate_routing_rules(value)
+        except PortableError as error:
+            raise _prefixed(error, field) from None
+    if section == "user_defaults":
+        if not isinstance(value, Mapping) or set(value) != {"defaults", "ceiling"} \
+                or not isinstance(value.get("defaults"), Mapping):
+            errors.add(field, "invalid_type", "must be an object with a 'defaults' object and a 'ceiling'")
+            errors.raise_if_any()
+        defaults = dict(value["defaults"])
+        patch = m._Errors()
+        m._validate_default_patch(defaults, patch)
+        for item in patch.items:
+            errors.add(f"{field}.{item['field']}", item["code"], item["message"])
+        for key, item in defaults.items():
+            if item is None:
+                errors.add(f"{field}.defaults.{key}", "invalid_value", "an unset default is omitted, never null")
+        present = [key for key in m.ROUTE_DEFAULT_KEYS if key in defaults]
+        if present and len(present) != len(m.ROUTE_DEFAULT_KEYS):
+            errors.add(f"{field}.defaults", "route_incomplete",
+                       "route_id, route_connection_id and route_model are stored together")
+        ceiling = None
+        try:
+            ceiling = m.parse_ceiling(value["ceiling"], field=f"{field}.ceiling")
+        except m.ConfigValidationError as error:
+            errors.absorb(error)
+        errors.raise_if_any()
+        return dict(defaults=defaults, ceiling=m.ceiling_to_dict(ceiling))
+    if section == "mcp_servers":
+        if not isinstance(value, Mapping):
+            errors.add(field, "invalid_type", "must map a server name to its usage policy")
+            errors.raise_if_any()
+        for name, policy in value.items():
+            where = f"{field}.{name}"
+            if not isinstance(name, str) or not m._SERVER_NAME.fullmatch(name) or name == "cortex":
+                errors.add(where, "invalid_server_name", "must be a configured server name other than 'cortex'")
+            elif not isinstance(policy, Mapping):
+                errors.add(where, "invalid_type", "must be an object")
+            else:
+                for key in sorted(policy, key=str):
+                    if key in MCP_DEFINITION_KEYS:
+                        errors.add(f"{where}.{key}", "definition_not_allowed",
+                                   "command, args and env stay in mcp-servers.json; a profile never stores them")
+                    elif key not in PROFILE_MCP_KEYS:
+                        errors.add(f"{where}.{key}", "unsupported_setting", f"use one of {', '.join(PROFILE_MCP_KEYS)}")
+                if type(policy.get("enabled")) is not bool:
+                    errors.add(f"{where}.enabled", "invalid_type", "must be true or false")
+        errors.raise_if_any()
+        return {name: dict(policy) for name, policy in value.items()}
+    if section == "connections":
+        if not isinstance(value, Mapping):
+            errors.add(field, "invalid_type", "must map a connection id to its session limit")
+            errors.raise_if_any()
+        for connection_id, item in value.items():
+            where = f"{field}.{connection_id}"
+            if not isinstance(connection_id, str) or not m._CONNECTION_ID.fullmatch(connection_id):
+                errors.add(where, "invalid_connection_id", "must be cn_<12 hex>")
+            elif (not isinstance(item, Mapping) or set(item) != {"max_concurrent_sessions"}
+                  or not m._non_negative_int(item["max_concurrent_sessions"])
+                  or not 1 <= item["max_concurrent_sessions"] <= MAX_CONCURRENT_SESSIONS_LIMIT):
+                errors.add(where, "invalid_value", "must be {\"max_concurrent_sessions\": 1-"
+                                                   f"{MAX_CONCURRENT_SESSIONS_LIMIT}}}")
+        errors.raise_if_any()
+        return {connection_id: dict(item) for connection_id, item in value.items()}
+    raise m._error("invalid_profiles", "Unknown profile section.", field="sections")
 
 
 def _routing_rules(data):
@@ -93,169 +178,662 @@ def _routing_rules(data):
     return {k: value[k] for k in m.ROUTING_KEYS if k in value}
 
 
-def _view(doc, path, data, routing_data, project_root, environ):
-    state = _state(doc, m._revision(routing_data))
-    try:
-        current = _routing_rules(routing_data)
-    except PortableError:
-        current = None
+def _capture(section, data):
+    """The working state of ``section`` in profile form, from its file bytes."""
+    if section == "routing":
+        return _routing_rules(data)
+    if section == "user_defaults":
+        defaults, ceiling, _ = m._parse_user_defaults(data)
+        captured = {key: defaults[key] for key in ("route_id", "route_connection_id", "route_model", "language")
+                    if defaults.get(key) is not None}
+        # The ACP picker writes {} for "no parameters"; both mean unset.
+        if defaults.get("parameters"):
+            captured["parameters"] = defaults["parameters"]
+        return dict(defaults=captured, ceiling=m.ceiling_to_dict(ceiling))
+    if section == "mcp_servers":
+        document, key = m._mcp_document(data)
+        captured = {}
+        for name, spec in document[key].items():
+            if not isinstance(spec, Mapping):
+                raise m._error("invalid_mcp_registry", "mcp-servers.json has a server entry that is not an object.")
+            policy = {item: spec[item] for item in PROFILE_MCP_KEYS if item in spec and item != "enabled"}
+            policy["enabled"] = spec.get("enabled", True) is not False
+            captured[name] = policy
+        return captured
+    state = registry._parse_registry_bytes(data or b"")
+    return {connection_id: dict(max_concurrent_sessions=record.max_concurrent_sessions)
+            for connection_id, record in sorted(state.connections.items())}
+
+
+def _read_section(section, path):
+    return m._read_plain(path) if section == "routing" else registry.read_owner_file(path)
+
+
+def _snapshot(environ):
+    """Every section's path, bytes, revision and capture (or why not)."""
+    snapshot = {}
+    for section in PROFILE_SECTIONS:
+        item = dict(path=_section_path(section, environ), data=None, revision=None,
+                    read_error=None, capture=None, capture_error=None)
+        try:
+            item["data"] = _read_section(section, item["path"])
+            item["revision"] = m._revision(item["data"])
+        except PortableError as error:
+            item["read_error"] = item["capture_error"] = error
+            snapshot[section] = item
+            continue
+        try:
+            item["capture"] = _normalize_section(section, _capture(section, item["data"]))
+        except PortableError as error:
+            item["capture_error"] = error
+        snapshot[section] = item
+    return snapshot
+
+
+def _compare(section, saved, current):
+    """``(differing keys, notes)`` of a saved section against the working
+    state: key names only, never values."""
+    notes = []
+    if section == "routing":
+        keys = sorted(key for key in set(saved) | set(current) if saved.get(key) != current.get(key))
+    elif section == "user_defaults":
+        keys = [group for group, members in _DEFAULT_GROUPS
+                if any(saved["defaults"].get(key) != current["defaults"].get(key) for key in members)]
+        if saved["ceiling"] != current["ceiling"]:
+            keys.append("ceiling")
+    elif section == "mcp_servers":
+        keys = sorted([name for name, policy in saved.items() if current.get(name) != policy]
+                      + [name for name, policy in current.items() if name not in saved and policy.get("enabled")])
+    else:
+        keys = sorted(connection_id for connection_id, item in saved.items()
+                      if connection_id in current and current[connection_id] != item)
+        notes = [f"connection_missing:{connection_id}" for connection_id in sorted(saved) if connection_id not in current]
+    return keys, notes
+
+
+def _problem(section, error):
+    return dict(section=section, code=error.code, message=error.remediation)
+
+
+def _status(doc, snapshot):
+    """The selected profile's state against the working settings."""
+    name = doc.get("active")
+    pending = doc.get("pending")
+    problems = [_problem(section, snapshot[section]["capture_error"]) for section in PROFILE_SECTIONS
+                if snapshot[section]["capture_error"] is not None]
+    modified, differences, notes, unavailable = [], [], [], False
+    if name is not None:
+        entry = doc["profiles"][name]
+        for section in entry["sections"]:
+            item = snapshot[section]
+            if item["capture_error"] is not None:
+                unavailable = True
+                continue
+            keys, section_notes = _compare(section, entry["settings"][section], item["capture"])
+            notes.extend(section_notes)
+            if keys:
+                modified.append(section)
+                differences.extend(dict(section=section, key=key) for key in keys)
+    if pending is not None:
+        state = "interrupted"
+    elif name is None:
+        state = "none"
+    elif unavailable:
+        state = "unavailable"
+    else:
+        state = "modified" if modified else "in_sync"
+    return dict(state=state, modified_sections=modified, differences=differences[:_MAX_DIFFERENCES],
+                problems=problems, notes=notes)
+
+
+def _matches(entry, snapshot):
+    for section in entry["sections"]:
+        item = snapshot[section]
+        if item["capture_error"] is not None or _compare(section, entry["settings"][section], item["capture"])[0]:
+            return False
+    return True
+
+
+# --- the profiles document ------------------------------------------------------
+
+def _invalid(message, field=None):
+    return m._error("invalid_profiles", message, field=field)
+
+
+def _check_description(value):
+    return isinstance(value, str) and len(value) <= 256 and not m._CONTROL.search(value)
+
+
+def _check_profiles_map(value):
+    profiles = value.get("profiles")
+    if (not isinstance(profiles, dict) or len(profiles) > _MAX_PROFILES
+            or not all(isinstance(k, str) and _NAME.fullmatch(k) and isinstance(v, dict) for k, v in profiles.items())
+            or value.get("active") is not None and value.get("active") not in profiles
+            or value.get("applied") is not None and not isinstance(value.get("applied"), dict)):
+        raise _invalid("routing-profiles.json has invalid profile metadata.")
+    return profiles
+
+
+def _document_v1(value):
+    profiles = _check_profiles_map(value)
+    for entry in profiles.values():
+        if not isinstance(entry.get("rules"), dict) or not _check_description(entry.get("description")):
+            raise _invalid("A routing profile has invalid rules or description.")
+    return value
+
+
+def _document_v2(value):
+    """A validated format-2 document with every section in canonical form."""
+    profiles = _check_profiles_map(value)
+    result = {key: item for key, item in value.items() if key != "profiles"}
+    result["profiles"] = {}
+    for name, entry in profiles.items():
+        where = f"profiles.{name}"
+        sections = entry.get("sections")
+        settings = entry.get("settings")
+        if (not _check_description(entry.get("description"))
+                or any(entry.get(key) is not None and not isinstance(entry.get(key), str)
+                       for key in ("created_at", "updated_at"))
+                or not isinstance(sections, list) or not sections
+                or not all(isinstance(item, str) and item in PROFILE_SECTIONS for item in sections)
+                or len(set(sections)) != len(sections)
+                or not isinstance(settings, dict) or set(settings) != set(sections)
+                or set(entry) - {"description", "created_at", "updated_at", "sections", "settings"}):
+            raise _invalid("A profile has an invalid description, sections or settings.", where)
+        normalized = {}
+        for section in PROFILE_SECTIONS:
+            if section not in sections:
+                continue
+            try:
+                normalized[section] = _normalize_section(section, settings[section])
+            except PortableError as error:
+                raise _invalid("A profile holds an invalid setting; repair or delete that profile.",
+                               f"{where}.{error.field or 'settings.' + section}") from None
+        result["profiles"][name] = dict(entry, sections=[s for s in PROFILE_SECTIONS if s in sections],
+                                        settings=normalized)
+    pending = value.get("pending")
+    if pending is not None and (not isinstance(pending, dict) or pending.get("operation") != "activate"
+                                or pending.get("profile") not in profiles
+                                or not isinstance(pending.get("at"), str)):
+        raise _invalid("routing-profiles.json has an invalid pending activation.", "pending")
+    result.setdefault("pending", None)
+    result.setdefault("applied", None)
+    result.setdefault("active", None)
+    return result
+
+
+def _migrate_v1(doc):
+    """The format-2 form of a validated format-1 document (pure; routing only)."""
+    profiles = {}
+    for name, entry in doc["profiles"].items():
+        migrated = dict(description=entry["description"])
+        for key in ("created_at", "updated_at"):
+            if isinstance(entry.get(key), str):
+                migrated[key] = entry[key]
+        migrated.update(sections=["routing"], settings=dict(routing=entry["rules"]))
+        profiles[name] = migrated
+    applied = doc.get("applied")
+    if isinstance(applied, dict) and applied.get("profile") in profiles:
+        applied = dict(profile=applied["profile"], at=applied.get("at"),
+                       revisions=dict(routing=applied.get("routing_revision")))
+    else:
+        applied = None
+    return dict(format=FORMAT, active=doc.get("active"), applied=applied, pending=None, profiles=profiles)
+
+
+def _parse(data):
+    """``(format-2 document, migrated_from)``; nothing is written."""
+    if data is None:
+        return dict(format=FORMAT, active=None, applied=None, pending=None, profiles={}), None
+    value = m._json_object(data, "routing-profiles.json", "invalid_profiles")
+    version = value.get("format")
+    if type(version) is int and version == 1:
+        original = _document_v1(value)
+        return _document_v2(_migrate_v1(original)), 1
+    if type(version) is not int or version != FORMAT:
+        raise m._error("unsupported_profiles_format", "routing-profiles.json format must be 2 (or 1, which is "
+                                                      "migrated on the first change).", field="format")
+    return _document_v2(value), None
+
+
+def _load(environ):
+    path, _ = _paths(environ)
+    data = _read_file(path)
+    doc, migrated_from = _parse(data)
+    return path, data, doc, migrated_from
+
+
+def _entry_revision(entry):
+    return "sha256:" + hashlib.sha256(json.dumps(entry, sort_keys=True, separators=(",", ":"),
+                                             ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _summary(entry):
+    settings = entry["settings"]
+    rules = settings.get("routing") or {}
+    models = rules.get("models") if isinstance(rules.get("models"), dict) else {}
+    deny = rules.get("deny") if isinstance(rules.get("deny"), list) else []
+    user = settings.get("user_defaults")
+    defaults = user["defaults"] if user else {}
+    servers = settings.get("mcp_servers") or {}
+    return dict(
+        providers=rules.get("providers"),
+        denied_engines=[engine for engine in SUPPORTED_ENGINES if f"{engine}/*" in deny],
+        selected_models={engine: len(config.get("auto", [])) for engine, config in models.items()
+                         if isinstance(config, dict) and isinstance(config.get("auto"), list)},
+        default_model=defaults.get("route_model"), language=defaults.get("language"),
+        enabled_mcp_servers=sum(1 for policy in servers.values() if policy.get("enabled") is True),
+        ceiling_set=bool(user) and user["ceiling"] != _UNRESTRICTED,
+    )
+
+
+def _view(doc, path, data, migrated_from, snapshot, project_root, environ):
+    status = _status(doc, snapshot)
     shadowed = next((label for label, source in m._routing_sources(project_root, environ)
                      if label != "user" and source.is_file()), None)
     profiles = []
     for name, entry in sorted(doc["profiles"].items()):
-        rules = entry["rules"]
-        models = rules.get("models") if isinstance(rules.get("models"), dict) else {}
-        deny = rules.get("deny") if isinstance(rules.get("deny"), list) else []
-        profiles.append(dict(name=name, description=entry.get("description", ""),
-                             revision=_entry_revision(entry), rules=rules,
+        profiles.append(dict(name=name, description=entry.get("description", ""), revision=_entry_revision(entry),
+                             sections=list(entry["sections"]), settings=entry["settings"],
                              created_at=entry.get("created_at"), updated_at=entry.get("updated_at"),
-                             summary=dict(providers=rules.get("providers"),
-                                          denied_engines=[engine for engine in m.SUPPORTED_ENGINES
-                                                          if f"{engine}/*" in deny],
-                                          selected_models={engine: len(config.get("auto", []))
-                                                           for engine, config in models.items()
-                                                           if isinstance(config, dict) and isinstance(config.get("auto"), list)})))
-    matches = [item["name"] for item in profiles if item["rules"] == current]
-    return dict(surface="routing_profiles", path=str(path), revision=m._revision(data),
-                active=doc.get("active"), state=state, applied=doc.get("applied"), profiles=profiles,
-                user_routing_revision=m._revision(routing_data), shadowed_by=shadowed,
-                matches_profile=matches)
+                             summary=_summary(entry)))
+    current = {section: snapshot[section]["revision"] for section in PROFILE_SECTIONS}
+    return dict(surface="routing_profiles", path=str(path), revision=m._revision(data), format=FORMAT,
+                migrated_from=migrated_from, active=doc.get("active"), state=status["state"],
+                modified_sections=status["modified_sections"], differences=status["differences"],
+                pending=doc.get("pending"), problems=status["problems"], applied=doc.get("applied"),
+                current_revisions=current, profiles=profiles, user_routing_revision=current["routing"],
+                shadowed_by=shadowed,
+                matches_profile=[name for name, entry in sorted(doc["profiles"].items()) if _matches(entry, snapshot)],
+                notes=status["notes"])
 
 
 def read_profiles(project_root=None, environ=None):
     env = m._env(environ)
-    path, _, data, doc, routing_data = _load(env)
-    return _view(doc, path, data, routing_data, project_root, env)
+    path, data, doc, migrated_from = _load(env)
+    return _view(doc, path, data, migrated_from, _snapshot(env), project_root, env)
 
 
-def _name(name):
+# --- mutations ---------------------------------------------------------------------
+
+def _name(name, field="name"):
     if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise m._error("invalid_profile_name", "Profile name must be 1-40 lowercase letters, digits or hyphens.",
-                       field="name")
+                       field=field)
 
 
 def _description(value):
-    if not isinstance(value, str) or len(value) > 256 or m._CONTROL.search(value):
+    if not _check_description(value):
         raise m._error("invalid_profile_description", "Description must be at most 256 printable characters.",
                        field="description")
 
 
-def _save(path, doc):
-    m._replace_file(path, m._pretty(doc))
+def _expected_revisions(value):
+    if (not isinstance(value, Mapping) or set(value) != set(PROFILE_SECTIONS)
+            or not all(isinstance(item, str) and (item == m.ABSENT or m._REVISION.fullmatch(item))
+                       for item in value.values())):
+        raise m._error("invalid_expected_revisions",
+                       "expected_revisions must hold the revision a read returned for each of "
+                       f"{', '.join(PROFILE_SECTIONS)} ('absent' or 'sha256:<64 hex>').", field="expected_revisions")
+    return dict(value)
 
 
-def _apply(routing_path, routing_data, rules):
-    previous = m._json_object(routing_data, "routing.json", "invalid_routing_overrides") if routing_data else {}
-    preserved = {key: value for key, value in previous.items() if key not in m.ROUTING_KEYS}
-    body = m._pretty({**rules, **preserved})
-    m._replace_file(routing_path, body)
-    return m._revision(body)
+def _check_sections(snapshot, expected):
+    for section in PROFILE_SECTIONS:
+        item = snapshot[section]
+        if item["read_error"] is not None:
+            raise item["read_error"]
+        m._check(_SECTION_LABELS[section], expected[section], item["revision"])
 
 
-def mutate(action, expected_revision, *, name=None, description=None, rules=None, from_current=False,
-           rename_to=None, expected_routing_revision=None, project_root=None, environ=None):
-    """Revision-checked profile mutation under the connections registry lock."""
+def _capture_all(snapshot):
+    captured = {}
+    for section in PROFILE_SECTIONS:
+        error = snapshot[section]["capture_error"]
+        if error is not None:
+            raise m._error("profile_section_unavailable",
+                           f"The current {_SECTION_LABELS[section]} settings cannot be stored in a profile "
+                           f"({error.code}); repair them first. Nothing was written.", field=f"settings.{section}")
+        captured[section] = snapshot[section]["capture"]
+    return captured
+
+
+def _applied(name, now, revisions):
+    return dict(profile=name, at=now, revisions=dict(revisions))
+
+
+def _backup(path, data, environ):
+    root = registry.config_root(environ)
+    directory = root / ".migration-backups"
+    registry.ensure_private_dir(directory, root=root, environ=environ)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    target = directory / f"{path.stem}.format-1.{stamp}.json"
+    registry.atomic_write_private(target, data, directory=directory)
+    return target
+
+
+def _preserves(original, parsed, touched, active_touched):
+    """The migrated document keeps every untouched format-1 profile."""
+    for name, entry in original["profiles"].items():
+        if name in touched:
+            continue
+        got = parsed["profiles"].get(name)
+        if (got is None or got["settings"].get("routing") != entry["rules"]
+                or got.get("description") != entry["description"]
+                or got.get("created_at") != entry.get("created_at")):
+            return False
+    return active_touched or parsed.get("active") == original.get("active")
+
+
+class _Profiles:
+    """Writes the profiles document; the first write of a format-1 file is
+    the verified migration (private backup, re-read check, restore)."""
+
+    def __init__(self, path, data, migrated_from, environ, touched, active_touched):
+        self.path, self.data, self.environ = path, data, environ
+        self.migrating = migrated_from == 1
+        self.touched, self.active_touched = touched, active_touched
+        self.notes = []
+
+    def write(self, doc):
+        body = m._pretty(doc)
+        if not self.migrating:
+            m._replace_file(self.path, body)
+            return
+        original = _document_v1(m._json_object(self.data, "routing-profiles.json", "invalid_profiles"))
+        _backup(self.path, self.data, self.environ)
+        m._replace_file(self.path, body)
+        try:
+            parsed, _ = _parse(_read_file(self.path))
+            verified = parsed == json.loads(body) and _preserves(original, parsed, self.touched, self.active_touched)
+        except (PortableError, ValueError):
+            verified = False
+        if not verified:
+            m._replace_file(self.path, self.data)
+            raise m._error("profile_migration_failed",
+                           "Migrating routing-profiles.json to format 2 could not be verified; the original file "
+                           "was restored and a private backup kept in .migration-backups. Nothing was changed.")
+        self.migrating = False
+        self.notes.append("migrated_from_format_1")
+
+
+def _build(section, settings, item, environ, now, notes):
+    """The new bytes of one backing file, validated with the runtime's own
+    rules; ``None`` when it already holds the profile's settings."""
+    data = item["data"]
+    if item["capture_error"] is None and not _compare(section, settings, item["capture"])[0]:
+        if section == "connections":
+            notes.extend(_compare(section, settings, item["capture"])[1])
+        return None
+    field = f"settings.{section}"
+    if section == "routing":
+        try:
+            rules = m.validate_routing_rules(settings)
+        except PortableError as error:
+            raise _prefixed(error, field) from None
+        previous = m._json_object(data, "routing.json", "invalid_routing_overrides") if data else {}
+        preserved = {key: value for key, value in previous.items() if key not in m.ROUTING_KEYS}
+        return m._pretty({**rules, **preserved}), None
+    if section == "user_defaults":
+        current, current_ceiling, document = m._parse_user_defaults(data)
+        merged = {key: value for key, value in current.items() if key not in m.USER_DEFAULT_KEYS}
+        merged.update(settings["defaults"])
+        if merged.get("route_connection_id") is not None \
+                and merged["route_connection_id"] not in registry.inspect_registry(environ).connections:
+            raise m._error("profile_reference_missing", "The profile's default route names a connection that is not "
+                                                        "registered here; nothing was written.",
+                           field=f"{field}.defaults.route_connection_id")
+        ceiling = m.parse_ceiling(settings["ceiling"], field=f"{field}.ceiling")
+        if m.ceiling_to_dict(ceiling) != m.ceiling_to_dict(current_ceiling):
+            notes.append("owner_ceiling_changed")
+        payload = {key: value for key, value in document.items() if key not in ("defaults", "ceiling")}
+        payload.update(defaults=merged, ceiling=m.ceiling_to_dict(ceiling))
+        return configuration_store._encode(payload).encode("utf-8"), None
+    if section == "mcp_servers":
+        document, key = m._mcp_document(data)
+        if document.get("version", 1) != 1:
+            raise m._error("unsupported_mcp_registry_version", "mcp-servers.json 'version' must be 1.",
+                           field="version")
+        missing = [name for name in settings if name not in document[key]]
+        if missing:
+            raise m._error("profile_mcp_server_missing", "The profile names an MCP server that is not configured "
+                                                         "here; add it again or save the profile. Nothing was written.",
+                           field=f"{field}.{missing[0]}")
+        servers = {}
+        for name, spec in document[key].items():
+            if not isinstance(spec, Mapping):
+                servers[name] = spec
+            elif name in settings:
+                kept = {item: value for item, value in spec.items() if item not in PROFILE_MCP_KEYS}
+                servers[name] = {**kept, **settings[name]}
+            else:
+                # Never deleted: its definition and env values stay.
+                servers[name] = dict(spec, enabled=False)
+        document = dict(document)
+        document.setdefault("version", 1)
+        document[key] = servers
+        try:
+            from . import mcp_servers as mcp_registry
+            mcp_registry._normalize_entries(document, item["path"])
+        except PortableError as error:
+            raise m.ConfigValidationError([dict(field=field, code=error.code, message=error.remediation)]) from None
+        return m._pretty(document), None
+    state = registry._parse_registry_bytes(data or b"")
+    for connection_id, value in settings.items():
+        record = state.connections.get(connection_id)
+        if record is None:
+            notes.append(f"connection_missing:{connection_id}")
+        elif record.max_concurrent_sessions != value["max_concurrent_sessions"]:
+            state.connections[connection_id] = replace(
+                record, max_concurrent_sessions=value["max_concurrent_sessions"], updated_at=now)
+    return state.to_json_bytes(), state
+
+
+def _write_section(section, item, body, state, environ):
+    path = item["path"]
+    if section == "routing":
+        m._replace_file(path, body)
+    elif section == "connections":
+        registry.write_registry(state, environ)
+    else:
+        registry.ensure_private_dir(path.parent, root=registry.config_root(environ), environ=environ)
+        registry.atomic_write_private(path, body, directory=path.parent)
+
+
+def _restore(section, item):
+    path, data = item["path"], item["data"]
+    if data is None:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    elif section == "routing":
+        m._replace_file(path, data)
+    else:
+        registry.atomic_write_private(path, data, directory=path.parent)
+
+
+def _activate(doc, name, snapshot, profiles, environ, now, notes):
+    entry = doc["profiles"][name]
+    targets = []
+    for section in PROFILE_SECTIONS:
+        if section not in entry["sections"]:
+            continue
+        item = snapshot[section]
+        built = _build(section, entry["settings"][section], item, environ, now, notes)
+        if built is not None:
+            targets.append((section, item, built[0], built[1]))
+    doc["pending"] = dict(operation="activate", profile=name, at=now)
+    profiles.write(doc)
+    written = []
+    try:
+        for section, item, body, state in targets:
+            _write_section(section, item, body, state, environ)
+            written.append((section, item))
+    except BaseException:
+        restored = True
+        for section, item in reversed(written):
+            try:
+                _restore(section, item)
+            except Exception:
+                restored = False
+        if restored:
+            doc["pending"] = None
+            try:
+                profiles.write(doc)
+            except Exception:
+                pass
+        raise
+    revisions = {section: snapshot[section]["revision"] for section in PROFILE_SECTIONS}
+    revisions.update({section: m._revision(body) for section, _, body, _ in targets})
+    doc.update(active=name, applied=_applied(name, now, revisions), pending=None)
+    profiles.write(doc)
+
+
+_TOUCHED = dict(create=False, save=True, update=True, delete=True, activate=False, deactivate=False)
+
+
+def mutate(action, expected_revision, *, name=None, description=None, rename_to=None, expected_revisions=None,
+           discard_modifications=False, project_root=None, environ=None):
+    """Revision-checked profile mutation under the owner configuration lock.
+
+    ``create`` captures every section as a new profile and selects it;
+    ``save`` overwrites the selected (or interrupted) profile with the
+    current settings; ``activate`` materializes a profile into its backing
+    files (a modified selection needs ``discard_modifications: true``);
+    ``deactivate`` only clears the selection; ``update`` edits the name and
+    description; ``delete`` removes an unselected profile. ``create``,
+    ``save`` and ``activate`` also need the ``expected_revisions`` of all
+    four backing files. Nothing is written on any refusal.
+    """
+    if action not in _TOUCHED:
+        raise m._error("unsupported_action", "Unknown routing profile operation.", field="action")
     expected = m._expected(expected_revision)
+    revisions = _expected_revisions(expected_revisions) if action in ("create", "save", "activate") else None
+    if type(discard_modifications) is not bool:
+        raise m._error("invalid_value", "discard_modifications must be true or false.", field="discard_modifications")
     env = m._env(environ)
+    notes = []
     with m._owner_config_lock(env):
-        path, routing_path, data, doc, routing_data = _load(env)
+        path, data, doc, migrated_from = _load(env)
         m._check("routing_profiles", expected, m._revision(data))
         entries = doc["profiles"]
         now = m._now_iso()
+        if action != "deactivate" and action != "create":
+            _name(name)
+            if name not in entries:
+                raise m._error("profile_not_found", "No profile has that name.", field="name")
+        touched = {name} if _TOUCHED[action] else set()
+        profiles = _Profiles(path, data, migrated_from, env, touched, action != "delete")
+        pending = doc.get("pending")
+        pending_name = pending["profile"] if pending else None
+        snapshot = None
+        if revisions is not None:
+            snapshot = _snapshot(env)
+            _check_sections(snapshot, revisions)
         if action == "create":
             _name(name)
             if name in entries:
                 raise m._error("profile_exists", "A profile with that name already exists.", field="name")
             if len(entries) >= _MAX_PROFILES:
                 raise m._error("too_many_profiles", "At most 32 profiles are supported.")
-            if (rules is None) == (from_current is not True):
-                raise m._error("invalid_profile_source", "Supply exactly one of rules or from_current: true.")
             _description(description if description is not None else "")
-            chosen = _routing_rules(routing_data) if from_current else m.validate_routing_rules(rules)
-            entries[name] = dict(description=description or "", rules=chosen, created_at=now, updated_at=now)
+            entries[name] = dict(description=description or "", created_at=now, updated_at=now,
+                                 sections=list(PROFILE_SECTIONS), settings=_capture_all(snapshot))
+            doc.update(active=name, applied=_applied(name, now, {s: snapshot[s]["revision"] for s in PROFILE_SECTIONS}),
+                       pending=None)
+            profiles.write(doc)
+        elif action == "save":
+            if doc.get("active") is None and pending_name is None:
+                raise m._error("no_active_profile", "No profile is selected; create a new profile instead.",
+                               field="name")
+            if name not in (doc.get("active"), pending_name):
+                raise m._error("profile_not_active", "Only the selected profile can be saved; select it first or "
+                                                     "save as a new profile.", field="name")
+            entry = dict(entries[name], sections=list(PROFILE_SECTIONS), settings=_capture_all(snapshot),
+                         updated_at=now)
+            entries[name] = entry
+            doc.update(active=name, applied=_applied(name, now, {s: snapshot[s]["revision"] for s in PROFILE_SECTIONS}),
+                       pending=None)
+            profiles.write(doc)
         elif action == "update":
-            _name(name)
-            if name not in entries:
-                raise m._error("profile_not_found", "No profile has that name.", field="name")
             if rename_to is not None:
-                _name(rename_to)
+                _name(rename_to, "rename_to")
                 if rename_to != name and rename_to in entries:
                     raise m._error("profile_exists", "A profile with that name already exists.", field="rename_to")
             if description is not None:
                 _description(description)
-            was_active = doc.get("active") == name
-            if was_active and rules is not None and _state(doc, m._revision(routing_data)) != "in_sync":
-                raise m._error("profile_diverged", "Active profile diverged; re-apply it or detach first.")
             entry = dict(entries[name])
             if description is not None:
                 entry["description"] = description
-            if rules is not None:
-                entry["rules"] = m.validate_routing_rules(rules)
             entry["updated_at"] = now
             target = rename_to or name
-            if target != name:
-                del entries[name]
-            entries[target] = entry
-            if was_active:
-                if rules is not None:
-                    m._check("routing (user)", m._expected(expected_routing_revision), m._revision(routing_data))
-                    routing_revision = _apply(routing_path, routing_data, entry["rules"])
-                else:
-                    routing_revision = m._revision(routing_data)
-                doc["active"] = target
-                doc["applied"] = dict(profile=target, routing_revision=routing_revision,
-                                      profile_revision=_entry_revision(entry), at=now)
-        elif action == "delete":
-            _name(name)
-            if name not in entries:
-                raise m._error("profile_not_found", "No profile has that name.", field="name")
+            renamed = {key: value for key, value in entries.items() if key != name}
+            renamed[target] = entry
+            doc["profiles"] = dict(sorted(renamed.items()))
             if doc.get("active") == name:
-                raise m._error("profile_active", "Detach the active profile before deleting it.", field="name")
+                doc["active"] = target
+            if isinstance(doc.get("applied"), dict) and doc["applied"].get("profile") == name:
+                doc["applied"] = dict(doc["applied"], profile=target)
+            if pending_name == name:
+                doc["pending"] = dict(pending, profile=target)
+            profiles.write(doc)
+        elif action == "delete":
+            if doc.get("active") == name or pending_name == name:
+                raise m._error("profile_active", "Detach the selected profile before deleting it.", field="name")
             del entries[name]
+            profiles.write(doc)
         elif action == "activate":
-            _name(name)
-            if name not in entries:
-                raise m._error("profile_not_found", "No profile has that name.", field="name")
-            m._check("routing (user)", m._expected(expected_routing_revision), m._revision(routing_data))
-            chosen = m.validate_routing_rules(entries[name]["rules"])
-            routing_revision = _apply(routing_path, routing_data, chosen)
-            doc["active"] = name
-            doc["applied"] = dict(profile=name, routing_revision=routing_revision,
-                                  profile_revision=_entry_revision(entries[name]), at=now)
-        elif action == "deactivate":
-            doc["active"] = None
-            doc["applied"] = None
+            active = doc.get("active")
+            recovering = pending_name == name
+            if active is not None and discard_modifications is not True and not recovering:
+                status = _status(dict(doc, pending=None), snapshot)
+                if status["state"] in ("modified", "unavailable"):
+                    raise m._error("profile_modified",
+                                   f"The selected profile '{active}' has unsaved changes; save them, or activate "
+                                   "with discard_modifications: true. Nothing was written.",
+                                   field="discard_modifications")
+            _activate(doc, name, snapshot, profiles, env, now, notes)
         else:
-            raise m._error("unsupported_action", "Unknown routing profile operation.", field="action")
-        _save(path, doc)
+            doc.update(active=None, applied=None, pending=None)
+            profiles.write(doc)
     result = read_profiles(project_root, env)
     result["changed"] = True
-    if action in ("activate", "update") and result["active"] is not None:
-        result["routing"] = m.read_routing(project_root, env)
+    result["notes"] = profiles.notes + sorted(set(notes) | set(result.get("notes", [])))
     return result
 
 
-def write_through(doc, routing_data, new_rules, body, path):
-    """Called by management.update_routing while holding connections.lock."""
-    name = doc.get("active")
-    if name is None:
-        return None
-    if _state(doc, m._revision(routing_data)) != "in_sync":
-        return dict(name=name, state="diverged")
-    entry = dict(doc["profiles"][name], rules=new_rules, updated_at=m._now_iso())
-    doc["profiles"][name] = entry
-    doc["applied"] = dict(profile=name, routing_revision=m._revision(body),
-                          profile_revision=_entry_revision(entry), at=m._now_iso())
-    _save(path, doc)
-    return dict(name=name, written_through=True, state="in_sync")
+# --- read-only helpers for other surfaces -------------------------------------------
+
+def selection_status(environ=None):
+    """``{name, state}`` of the selected profile after another surface's
+    save (``None`` without a selection); best-effort, never raises."""
+    try:
+        env = m._env(environ)
+        _, _, doc, _ = _load(env)
+        name = doc.get("active") or (doc.get("pending") or {}).get("profile")
+        if name is None:
+            return None
+        return dict(name=name, state=_status(doc, _snapshot(env))["state"])
+    except PortableError as error:
+        return dict(state="unavailable", code=error.code)
 
 
 def effective_label(environ, routing_revision):
-    """Best-effort audit label; never affects routing."""
+    """Best-effort audit label of the profile whose routing the loader read;
+    never affects routing."""
     try:
-        view = read_profiles(environ=environ)
+        env = m._env(environ)
+        _, _, doc, _ = _load(env)
+        name = doc.get("active")
+        if name is None or doc.get("pending") is not None:
+            return None
+        entry = doc["profiles"][name]
+        if "routing" not in entry["sections"]:
+            return None
+        data = m._read_plain(_paths(env)[1])
+        if m._revision(data) != routing_revision or _routing_rules(data) != entry["settings"]["routing"]:
+            return None
     except PortableError:
         return None
-    if view["state"] == "in_sync" and view["user_routing_revision"] == routing_revision:
-        return dict(name=view["active"], state="in_sync")
-    return None
+    return dict(name=name, state="in_sync")

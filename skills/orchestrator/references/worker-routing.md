@@ -7,14 +7,18 @@ do not describe it as an enforced capability without retained runtime evidence.
 Read the exact reports returned in task context through bounded report reads.
 A worker's chat text is not its structured result and does not finish an assignment.
 
-Use `auto` only when there is no work-specific reason. Otherwise call
-`list_route_options` and recommend the engine it lists under `affinity` for the
-node's kind of work (`role_work_kinds`), or another engine or an exact route
-with a reason, and include `model_reason`. `list_route_options` reports only
-the models the owner configured for Cortex, each with its tier, `policy` and
-whether it is `auto_eligible`, and under `preferred` the models the owner
-prefers for a kind of work, which the runtime already ranks first among a
-tier's candidates. The runtime still decides availability, tier, effort and
+Call `list_route_options` before recommending anything but `auto`. When it
+lists a model under `preferred` for the node's kind of work
+(`role_work_kinds`), use `auto`: those are the owner's choices, and the runtime
+ranks them first among a tier's candidates, ahead of any hint (a hint naming
+another route is recorded `ignored:owner_preferred`). Use `auto` also when
+there is no work-specific reason. Otherwise recommend the engine it lists under
+`affinity` for that kind of work (`null` means none; `affinity_not_eligible`
+names engines the owner's settings keep out of automatic routing, never hint
+those), or another engine or an exact route with a reason, and include
+`model_reason`. `list_route_options` reports only the models the owner
+configured for Cortex, each with its tier, `policy` and whether it is
+`auto_eligible`. The runtime still decides availability, tier, effort and
 the exact model. Apart from the flagship exception below, a hint never raises
 the task's tier: light work stays on a light model even if the hinted engine
 has none there. A hint is ignored when the hinted route is excluded, not

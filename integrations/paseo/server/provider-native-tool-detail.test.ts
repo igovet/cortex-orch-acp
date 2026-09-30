@@ -320,3 +320,54 @@ test("a typed detail whose required key cannot fit falls back to plain_text", ()
   const detail = event.item.detail as Record<string, unknown>;
   assert.ok(detail.type === "plain_text" || typeof detail.query === "string");
 });
+
+test("raw Code Mode replay has MCP detail/status parity without inventing dropped output", () => {
+  const code = 'return await tools.cortex.command_run({argv: ["pwd"]})';
+  const rawOutput = { metadata: { toolCalls: [
+    { tool: "search", input: {}, status: "completed" },
+    { tool: "cortex.command_run", input: { argv: ["pwd"] }, status: "completed" },
+  ] } };
+  const event = (name: string, input: any, output: any, status: any = "completed"): any => ({
+    type: "timeline.item", sessionId: "s", item: {
+      type: "tool_call", id: "code-1", callId: "code-1", name, status, error: null,
+      detail: { type: "unknown", input, output },
+    },
+  });
+  const raw = event("execute", { code }, rawOutput);
+  const projected: any = presentTimeline(raw);
+  assert.equal(projected.item.name, "Shell — pwd");
+  assert.deepEqual({ ...projected.item.detail }, { type: "shell", command: "pwd" });
+  assert.deepEqual(raw.item.detail.output, rawOutput, "presentation never mutates source");
+  const withResult = { ...rawOutput, result: { content: [{ type: "text", text: "/project" }] } };
+  const normalized = event("mcp.cortex.command_run",
+    { server: "cortex", tool: "command_run", arguments: { argv: ["pwd"] }, code }, withResult);
+  assert.deepEqual(presentTimeline(event("execute", { code }, withResult)), presentTimeline(normalized));
+
+  const innerError = { metadata: { toolCalls: [
+    { tool: "cortex.answer_submit", input: { answer: "yes" }, status: "error" },
+  ] } };
+  const failed: any = presentTimeline(event("execute", { code }, innerError));
+  assert.equal(failed.item.name, "Submit answer");
+  assert.equal(failed.item.status, "failed");
+  assert.equal(failed.item.detail.output, null);
+  assert.equal(failed.item.error, "Code Mode tool call failed");
+  const failedWithText: any = presentTimeline(event("execute", { code },
+    { ...innerError, result: { content: [{ type: "text", text: "answer rejected" }] } }));
+  assert.equal(failedWithText.item.error, "answer rejected");
+  const nativeFailed: any = presentTimeline(event("execute", { code }, innerError, "failed"));
+  assert.equal(nativeFailed.item.status, "failed");
+  assert.equal(nativeFailed.item.error, "Code Mode tool call failed");
+  const metadataError: any = presentTimeline(event("execute", { code },
+    { metadata: { ...rawOutput.metadata, error: true } }));
+  assert.equal(metadataError.item.status, "failed");
+  const running: any = presentTimeline(event("execute", { code }, innerError, "running"));
+  assert.equal(running.item.status, "running", "only completed inner errors fail the wrapper");
+
+  const helper: any = presentTimeline(event("execute", { code: "return search({})" },
+    { metadata: { toolCalls: [{ tool: "search", input: {}, status: "completed" }] } }));
+  assert.equal(helper.item.name, "Search");
+  const unresolved: any = presentTimeline(event("execute", {}, null, "running"));
+  assert.equal(unresolved.item.name, "Shell", "the bridge has not retained kind or code yet");
+  const shell: any = presentTimeline(event("execute", { command: "pwd" }, "/project"));
+  assert.equal(shell.item.name, "Shell — pwd");
+});

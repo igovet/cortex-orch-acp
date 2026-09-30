@@ -229,6 +229,33 @@ function sanitizeConnection(raw: unknown, scope: Scope): Record<string, unknown>
   return connection;
 }
 
+/** Profile problems scrubbed; and, as defence in depth (the API refuses
+ * such a profile), never an MCP command, argument or env value from a
+ * stored profile. */
+function sanitizeProfiles(result: Record<string, unknown>, scope: Scope): void {
+  if (Array.isArray(result.problems)) {
+    result.problems = result.problems.map((item) => {
+      const problem = { ...record(item) };
+      if (typeof problem.message === "string") problem.message = scrubText(problem.message, scope);
+      return problem;
+    });
+  }
+  if (Array.isArray(result.profiles)) {
+    result.profiles = result.profiles.map((item) => {
+      const profile = { ...record(item) };
+      const settings = { ...record(profile.settings) };
+      if (settings.mcp_servers !== undefined) {
+        settings.mcp_servers = Object.fromEntries(Object.entries(record(settings.mcp_servers)).map(([name, policy]) => {
+          const { command: _command, args: _args, env: _env, ...kept } = record(policy);
+          return [name, kept];
+        }));
+      }
+      profile.settings = settings;
+      return profile;
+    });
+  }
+}
+
 /** A surface result as the settings UI may receive it. Editable values
  * (defaults, ceilings, rules, MCP tool/path grants) stay verbatim so they
  * round-trip; only metadata is put in display form. */
@@ -248,9 +275,7 @@ export function sanitizeSurface(surface: ConfigReadSurface, raw: unknown, scope:
       return source;
     });
   }
-  if (surface === "routing_profiles" && result.routing !== undefined) {
-    result.routing = sanitizeSurface("routing", result.routing, scope);
-  }
+  if (surface === "routing_profiles") sanitizeProfiles(result, scope);
   if (surface === "mcp_servers" && Array.isArray(result.servers)) {
     result.servers = result.servers.map((server) => sanitizeMcpServer(server, scope));
   }
@@ -489,9 +514,8 @@ export const updateConfigHandler = guarded(async (input: ConfigUpdateInput, cont
           ...("name" in input ? { name: input.name } : {}),
           ...("description" in input && input.description !== undefined ? { description: input.description } : {}),
           ...("rename_to" in input && input.rename_to !== undefined ? { rename_to: input.rename_to } : {}),
-          ...("rules" in input && input.rules !== undefined ? { rules: input.rules } : {}),
-          ...("from_current" in input && input.from_current === true ? { from_current: true } : {}),
-          ...("expected_routing_revision" in input ? { expected_routing_revision: input.expected_routing_revision } : {}),
+          ...("expected_revisions" in input ? { expected_revisions: input.expected_revisions } : {}),
+          ...("discard_modifications" in input && input.discard_modifications === true ? { discard_modifications: true } : {}),
           ...(scope.projectRoot ? { project: scope.projectRoot } : {}),
         };
         break;

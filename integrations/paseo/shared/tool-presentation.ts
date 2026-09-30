@@ -1,5 +1,5 @@
 import { isHiddenOperation } from "./timeline-visibility.ts";
-import { gatewayPresentation } from "./gateway-presentation.ts";
+import { codeModePresentation, gatewayPresentation } from "./gateway-presentation.ts";
 import { shellCommand } from "./shell-command.ts";
 /** Shared semantic projection for collapsed tool rows.
  *
@@ -40,6 +40,7 @@ export type ToolPresentationInput = {
   toolKind?: unknown;
   input?: unknown;
   rawInput?: unknown;
+  rawOutput?: unknown;
   metadata?: unknown;
 };
 
@@ -183,6 +184,9 @@ function targetFor(name: string, input: ToolPresentationInput, action: string): 
 
 /** Return one safe semantic label for native and Cortex tool calls. */
 export function presentToolSemantics(input: ToolPresentationInput): ToolPresentation {
+  const codeMode = codeModePresentation(String(input.name ?? input.title ?? ""),
+    input.rawInput ?? input.input, input.rawOutput, input.toolKind);
+  if (codeMode) input = { ...input, name: codeMode.name, title: codeMode.name, rawInput: codeMode.input };
   const name = operationName(input);
   if (isHiddenOperation(name) || isHiddenOperation(input.toolKind)) {
     return { kind: "generic", icon: "Wrench", action: "", target: null, label: "", expandable: false, systemOperation: true, visible: false };

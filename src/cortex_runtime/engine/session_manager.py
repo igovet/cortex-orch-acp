@@ -22,6 +22,7 @@ from .client import EngineClient, EngineProtocolError, EngineTransportClosed
 from .correlation import CorrelationTables
 from .fs_bridge import FsBridge, FsBridgeError
 from .mcp_bridge import build_mcp_servers, host_mcp_servers
+from .opencode_tool_calls import CodeModeToolCalls
 from .permissions import DuplicateEnginePermissionRequestId, PermissionBridge
 from .process import EngineProcess
 from .resource_binding import BindingRegistry, ResourceBinding
@@ -339,6 +340,9 @@ class EngineSessionManager:
         # Keyed by the exact ACP wire session/tool pair. Tool ids can be
         # reused by an engine across sessions, so neither part may be omitted.
         self._streamed_terminal_output: dict[tuple[str, str], tuple[str, bool]] = {}
+        # OpenCode only: its Code Mode ``execute`` wrapper, rewritten into
+        # the common MCP card shape (see engine.opencode_tool_calls).
+        self._code_mode_tool_calls = CodeModeToolCalls()
 
     def _clear_streamed_terminal_output(self, wire_session_id: str | None) -> None:
         if wire_session_id is None:
@@ -347,6 +351,7 @@ class EngineSessionManager:
             stale = [key for key in self._streamed_terminal_output if key[0] == wire_session_id]
             for key in stale:
                 self._streamed_terminal_output.pop(key, None)
+        self._code_mode_tool_calls.clear_session(wire_session_id)
 
     def _terminal_output_from_meta(self, wire_session_id: str, wire_tool_call_id: str,
                                    meta: object) -> tuple[str | None, bool]:
@@ -1308,6 +1313,11 @@ class EngineSessionManager:
             if isinstance(meta, dict) and isinstance(meta.get("contextCompaction"), dict) and ref is not None:
                 status = update.get("status") if isinstance(update.get("status"), str) else "unknown"
                 return EngineEvent(kind=EngineEventKind.COMPACTION_SIGNAL, tool_call_ref=ref, compaction_reason=status)
+            if getattr(self._record, "engine", None) == "opencode":
+                # OpenCode reaches MCP only through its Code Mode `execute`
+                # wrapper; present the inner MCP call the way Codex and
+                # Claude report theirs (engine.opencode_tool_calls).
+                update = self._code_mode_tool_calls.normalize(str(wire_session_id), update)
             wire_tool_call_id = update.get("toolCallId")
             if isinstance(wire_tool_call_id, str) and isinstance(meta, dict):
                 self._terminal_output_from_meta(

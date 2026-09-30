@@ -155,7 +155,7 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     assert detail["decision_detail"]["route_basis"] == "auto"
     assert detail["decision_detail"]["effort"] == "high"
     decision = detail["decision_detail"]["route_decision"]
-    assert decision["rank_version"] == 8
+    assert decision["rank_version"] == 9
     assert "balance" not in decision
     assert decision["used_percent_compared"] is False
     assert decision["usage"] == dict(compared=False, margin=10.0, least_used_percent=None)

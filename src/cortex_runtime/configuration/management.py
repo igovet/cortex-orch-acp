@@ -26,9 +26,14 @@ Surfaces (:data:`SURFACES`):
   file, validated by ``auto_route._validate``. ``$CORTEX_ROUTING`` is
   read-only. ``models`` holds the owner's per-engine automatic-routing
   selection, model tiers and model policy (``routing.model_policy``).
-- ``routing_profiles`` -- owner-only user routing snapshots. Activation
-  materializes one snapshot into user ``routing.json``; it does not add a
-  routing source or create a project profile.
+- ``routing_profiles`` -- owner profiles (``routing-profiles.json``, format
+  2): snapshots of every user-level setting -- user ``routing.json``, the
+  ``defaults.json`` route default/parameters/language/owner ceiling, each
+  MCP server's usage policy (never its ``command``/``args``/``env``) and
+  each connection's session limit. Saving into a profile is explicit
+  (``save``, ``create``); activation materializes every section into its
+  backing file under the lock, journaled and rolled back on failure. It
+  adds no runtime source and never holds a project setting.
 - ``mcp_servers`` -- ``$XDG_CONFIG_HOME/cortex/mcp-servers.json``. Every
   result redacts ``env`` values; a write may keep an existing value without
   ever reading it back. The whole written registry must pass
@@ -127,6 +132,16 @@ MCP_SERVER_KEYS = (
     "always_load_tools", "read_paths", "write_paths", "network", "runtime_dir_env", "roles", "engines",
 )
 CONNECTION_OPERATIONS = ("rename", "set_max_concurrent_sessions", "validate", "remove")
+#: ``routing_profiles`` mutations and their request fields (besides
+#: ``api_version``/``action``/``surface``).
+PROFILE_ACTION_FIELDS = {
+    "create": ("expected_revision", "expected_revisions", "name", "description", "project"),
+    "save": ("expected_revision", "expected_revisions", "name", "project"),
+    "update": ("expected_revision", "name", "rename_to", "description", "project"),
+    "delete": ("expected_revision", "name", "project"),
+    "activate": ("expected_revision", "expected_revisions", "name", "discard_modifications", "project"),
+    "deactivate": ("expected_revision", "project"),
+}
 
 _KEEP = object()
 _REVISION = re.compile(r"sha256:[0-9a-f]{64}")
@@ -883,17 +898,7 @@ def update_routing(target: str, expected_revision, rules, *, project_root: str |
     document = validate_routing_rules(rules)
     env = _env(environ)
     path = _project_routing_path(project_root) if target == "project" else registry.config_root(env) / "routing.json"
-    profile_result = None
     with _owner_config_lock(env):
-        if target == "user":
-            from . import routing_profiles
-            try:
-                profiles_path, _, profiles_data, profiles_doc, _ = routing_profiles._load(env)
-            except PortableError as error:
-                # Profiles are not a routing source: a damaged or newer
-                # profile file must not prevent an ordinary routing save.
-                profiles_data = None
-                profile_result = dict(state="unavailable", code=error.code)
         data = _read_plain(path)
         _check(f"routing ({target})", expected, _revision(data))
         preserved = {}
@@ -902,8 +907,13 @@ def update_routing(target: str, expected_revision, rules, *, project_root: str |
             preserved = {key: value for key, value in existing.items() if key not in ROUTING_KEYS}
         body = _pretty({**document, **preserved})
         _replace_file(path, body)
-        if target == "user" and profiles_data is not None:
-            profile_result = routing_profiles.write_through(profiles_doc, data, document, body, profiles_path)
+    # Profiles are saved explicitly and are not a routing source: a user save
+    # only reports whether the selected profile now differs, and a damaged or
+    # newer profiles file never prevents it.
+    profile_result = None
+    if target == "user":
+        from . import routing_profiles
+        profile_result = routing_profiles.selection_status(env)
     view = read_routing(project_root, env)
     return dict(view, changed=body != data, target=target, written_revision=_revision(body),
                 shadowed_by=None if view["effective_source"] == target else view["effective_source"],
@@ -1554,21 +1564,13 @@ def _dispatch(request, environ) -> dict[str, object]:
         if action == "read":
             _fields(request, ("project",))
             return routing_profiles.read_profiles(request.get("project"), environ)
-        if action in ("create", "update", "delete", "activate", "deactivate"):
-            fields = {
-                "create": ("expected_revision", "name", "description", "rules", "from_current", "project"),
-                "update": ("expected_revision", "name", "description", "rules", "rename_to",
-                           "expected_routing_revision", "project"),
-                "delete": ("expected_revision", "name", "project"),
-                "activate": ("expected_revision", "expected_routing_revision", "name", "project"),
-                "deactivate": ("expected_revision", "project"),
-            }[action]
-            _fields(request, fields)
+        if action in PROFILE_ACTION_FIELDS:
+            _fields(request, PROFILE_ACTION_FIELDS[action])
             return routing_profiles.mutate(
                 action, request.get("expected_revision"), name=request.get("name"),
-                description=request.get("description"), rules=request.get("rules"),
-                from_current=request.get("from_current", False), rename_to=request.get("rename_to"),
-                expected_routing_revision=request.get("expected_routing_revision"),
+                description=request.get("description"), rename_to=request.get("rename_to"),
+                expected_revisions=request.get("expected_revisions"),
+                discard_modifications=request.get("discard_modifications", False),
                 project_root=request.get("project"), environ=environ)
     if surface == "mcp_servers" and action == "read":
         _fields(request, ())

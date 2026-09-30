@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { runAcpProvider } from "@getpaseo/plugin/server/acp";
 import { ReplayController } from "./replay-connector.ts";
@@ -66,6 +67,27 @@ for line in sys.stdin:
     elif req.get("method") == "session/load":
         sid = req["params"]["sessionId"]
         if sid == "crash-before": os._exit(7)
+
+        if sid == "code-mode":
+            for cid, tool, args, inner_status, result in [
+                ("raw-read", "cortex.read_report", {"report_id": "r_abc"}, "error", None),
+                ("raw-shell", "cortex.command_run", {"argv": ["pwd"]}, "completed", None),
+                ("raw-result", "cortex.command_run", {"argv": ["pwd"]}, "completed", "/project"),
+            ]:
+                updates = [
+                    {"sessionUpdate":"tool_call","toolCallId":cid,"title":"execute","kind":"other","status":"pending","rawInput":{}},
+                    {"sessionUpdate":"tool_call_update","toolCallId":cid,"status":"in_progress",
+                     "rawInput":{"code":"return await tools.cortex.command_run({})"}},
+                    {"sessionUpdate":"tool_call_update","toolCallId":cid,"status":"completed",
+                     "rawOutput":{"metadata":{"toolCalls":[{"tool":tool,"input":args,"status":inner_status}]}},
+                     "content":[{"type":"content","content":{"type":"text","text":"content discarded by installed ACP bridge"}}]},
+                ]
+                if result is not None:
+                    updates[-1]["rawOutput"]["result"] = {"content":[{"type":"text","text":result}]}
+                for update in updates:
+                    send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})
+            send({"jsonrpc":"2.0","id":req["id"],"result":{}})
+            continue
         for i in range(4097):
             update = ({"sessionUpdate":"tool_call","toolCallId":f"card:{i}","title":f"Card {i}","status":"completed","kind":"other"} if i % 3 == 0 else
                       {"sessionUpdate":"user_message_chunk" if i % 3 == 1 else "agent_message_chunk",
@@ -80,7 +102,7 @@ for line in sys.stdin:
 `);
 async function load(nativeId: string | null, staleConfig = false, configureAfter = false) {
   const command = ["env", "CORTEX_ACP_TARGET=" + JSON.stringify({ argv: ["python3", "-B", fixture] }),
-    process.execPath, resolve("server/acp-load-shim.mjs")] as [string, ...string[]];
+    process.execPath, fileURLToPath(new URL("./acp-load-shim.mjs", import.meta.url))] as [string, ...string[]];
   const replay = new ReplayController(command);
   const base = runAcpProvider({ id: "cortex", label: "Cortex", connector: replay.connect });
   const connection = wrapCortexConnection(replay.wrap(await base.connect({
@@ -117,6 +139,18 @@ async function load(nativeId: string | null, staleConfig = false, configureAfter
   } finally { await connection.close(); }
 }
 try {
+
+  const codeMode = await load("code-mode");
+  assert.equal(codeMode.filter(e => e.type === "request.failed").length, 0);
+  assert.equal(codeMode.at(-1).type, "session.ready");
+  const cards = codeMode.filter(e => e.type === "timeline.item" && e.item.type === "tool_call");
+  const final = (id: string) => cards.filter(e => e.item.callId === id).at(-1).item;
+  assert.equal(cards[0].item.name, "Shell", "title-only pending snapshot is ambiguous after the bridge");
+  assert.equal(final("raw-read").name, "Read report — r_abc");
+  assert.equal(final("raw-read").status, "failed");
+  assert.equal(final("raw-read").detail.output, null, "ACP content is not available after the installed bridge");
+  assert.deepEqual({ ...final("raw-shell").detail }, { type: "shell", command: "pwd" });
+  assert.deepEqual({ ...final("raw-result").detail }, { type: "shell", command: "pwd", output: "/project" });
   const first = await load("history");
   assert.equal(first.filter(e => e.type === "request.failed").length, 0);
   assert.equal(first.at(-1).type, "session.ready");
@@ -157,4 +191,4 @@ try {
     assert.ok(!events.some(e => e.type === "session.ready"), id);
   }
 } finally { rmSync(dir, { recursive: true, force: true }); }
-console.log("replay: spool boundaries, UTF-8, 4097-item bridge, stable reload and crash checks passed");
+console.log("replay: raw Code Mode cards, spool boundaries, UTF-8, 4097-item bridge, stable reload and crash checks passed");

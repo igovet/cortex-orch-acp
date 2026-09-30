@@ -1,29 +1,42 @@
-## 2026-09-30 user routing profiles materialize into routing.json
+## 2026-09-30 owner profiles snapshot full user settings; routing preferences rank within eligibility
 
-User routing profiles are saved owner-level snapshots in
-`$XDG_CONFIG_HOME/cortex/routing-profiles.json` (format 1), not another
-runtime routing source. Activation validates a profile and writes its eight
-managed routing keys into the user `routing.json` under `connections.lock`,
-preserving unrelated keys. This keeps the loader and precedence unchanged:
-project and `$CORTEX_ROUTING` files still win wholesale. The file retains
-`active` and `applied` revisions so external edits or an interrupted two-file
-write show as `diverged`; writes cannot be transactional across these files,
-and no silent reapplication occurs. User routing saves write through only
-while the profile is `in_sync`; a diverged profile requires explicit
-re-activation or detachment. Project saves never change user profiles.
+This supersedes the earlier 2026-09-30 decision “user routing profiles
+materialize into routing.json”. Owner profiles in
+`$XDG_CONFIG_HOME/cortex/routing-profiles.json` use format 2 and snapshot
+four user-level sections: the eight managed routing keys; defaults and owner
+policy ceiling; MCP server usage policy; and per-connection concurrent-session
+limits. They are a management surface, not another runtime source. Activation
+validates and materializes those sections into existing backing files under
+the owner configuration lock, writes a pending journal before replacement, and
+rolls back in-process on failure.
 
-The management API requires the profile file's expected revision for every
-mutation and the user routing revision for activation or active rules edits.
-An older runtime ignores the profiles file but continues to read the
-materialized routing file. This design was chosen over adding a new loader
-precedence layer, which would make project overrides and old installations
-behave differently.
+Profile states are `none`, `in_sync`, `modified`, `interrupted` and
+`unavailable`. Saving is explicit: save current applied settings to the
+selected profile or create a new profile; ordinary edits never write through.
+Metadata update changes only name/description. Switching away from a modified
+snapshot requires an explicit save or discard; detaching leaves working
+settings unchanged. Format 1 is read as a routing-only snapshot and migrated
+to format 2 on first mutation with a private verified backup; it stays partial
+until a full snapshot is explicitly saved. Project routing and ceilings, MCP
+`command`/`args`/`env`, and connection credentials/login state are excluded.
+The runtime continues to read materialized backing files using the existing
+precedence: project routing, then `$CORTEX_ROUTING`, then user routing. No
+profile bypasses project scope or a policy ceiling.
 
-The ten existing work kinds are the purpose vocabulary for
-`models.<engine>.policy.<model>.preferred_for`; a preferred model in an
-explicit `models.auto` list must also be selected there. The route menu
-publishes only auto-eligible preferences and the source of each work-kind
-affinity. These are ranking preferences, never authorization grants.
+A separate routing defect was fixed in rank version 9: within the role's
+eligible tier, the owner's model `preferred_for` choice now outranks a new
+plan hint, plan-usage heuristics and retry diversification. This fixes the
+reproduced case where an otherwise eligible preferred OpenCode model lost to
+a coordinator engine hint or retry diversification. It does not grant routes
+or remove gating: a preference cannot cross tiers or bypass pin/deny,
+`enabled`/automatic selection, providers, connection/catalog readiness,
+recorded unavailability or quota rules. In particular, OpenCode remains
+excluded from automatic selection unless explicitly enabled/selected (or
+pinned), and the first existing project/environment/user routing file still
+wins wholesale, so project or `$CORTEX_ROUTING` configuration can shadow a
+user profile. A test that loads the original source and sees five expected
+pre-fix regression failures is causal reproduction, not a post-fix failure.
+
 
 ## 2026-09-30 model selection, tiers and policy come from configuration
 
@@ -45,9 +58,10 @@ name-keyed rules moved to `routing/model_policy.py` as built-in defaults that
 apply only where the file is silent, so an existing installation routes
 exactly as before (rank version 8; the golden tests are unchanged apart from
 the version). `preferred_for` answers the owner's request to say which models
-suit which purposes: it is a rank key between retry diversification and
-engine affinity, never a tier change, so plan usage, hints and pins keep
-their precedence. A selection list disables supersede for its engine,
+suit which purposes: rank version 9 evaluates the owner's preference after
+legacy provider preference and ahead of new-plan hints, plan-usage heuristics
+and retry diversification, within the eligible tier. It never changes a tier
+or authorizes a route; pins and hard eligibility rules still control. A selection list disables supersede for its engine,
 because silently dropping an explicitly selected older version would
 contradict the owner's list.
 

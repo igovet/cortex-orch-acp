@@ -35,13 +35,14 @@ async function compilePanel(): Promise<string> {
   return `(function(require) {\nconst module = { exports: {} };\nconst exports = module.exports;\n${result.outputFiles[0].text}\nreturn module.exports;\n})`;
 }
 
-type Element = { type: unknown; props: Record<string, unknown> };
+type Element = { key?: string; type: unknown; props: Record<string, unknown> };
 type EffectSlot = { deps?: unknown[]; cleanup?: (() => void) | void };
 
 /** A minimal hook runtime: state is keyed by component path, effects run
  * after each render pass, and `settle` re-renders until quiescent. */
 function createRuntime() {
   const hooks = new Map<string, unknown[]>();
+  const mounted = new Set<string>();
   let pending: Array<() => void> = [];
   let current: { path: string; index: number } | null = null;
   let dirty = false;
@@ -95,7 +96,8 @@ function createRuntime() {
     assert.ok(typeof type === "string" || typeof type === "function", `element type at ${path} is ${String(type)}`);
     elements.push(element);
     if (typeof type === "string") { render(element.props?.children, `${path}/${type}`); return; }
-    const childPath = `${path}/${type.name || "anonymous"}`;
+    const childPath = `${path}/${type.name || "anonymous"}:${element.key ?? ""}`;
+    mounted.add(childPath);
     current = { path: childPath, index: 0 };
     const output = (type as (props: unknown) => unknown)(element.props);
     current = null;
@@ -107,7 +109,15 @@ function createRuntime() {
     for (let round = 0; round < 40; round += 1) {
       dirty = false;
       elements = [];
+      mounted.clear();
       render(root(), "root");
+      for (const [path, values] of hooks) {
+        if (mounted.has(path)) continue;
+        for (const value of values) {
+          if (value && typeof value === "object" && "cleanup" in value) (value as EffectSlot).cleanup?.();
+        }
+        hooks.delete(path);
+      }
       const effects = pending;
       pending = [];
       for (const effect of effects) effect();
@@ -198,11 +208,13 @@ function fixtures() {
     },
     routing_profiles: {
       surface: "routing_profiles", path: "~/.config/cortex/routing-profiles.json", revision: REV("q"),
-      active: "mix", state: "diverged", applied: null, user_routing_revision: REV("b"), shadowed_by: null,
+      format: 2, migrated_from: null, active: "mix", state: "modified", applied: null,
+      pending: null, problems: [], modified_sections: ["routing"], differences: [{ section: "routing", key: "providers" }],
+      current_revisions: { routing: REV("b"), user_defaults: REV("a"), mcp_servers: REV("m"), connections: REV("c") }, user_routing_revision: REV("b"), shadowed_by: null,
       matches_profile: [], profiles: [{
         name: "mix", description: "All engines", revision: REV("r"),
-        rules: { providers: ["codex-acp", "opencode"] }, created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z",
-        summary: { providers: ["codex-acp", "opencode"], denied_engines: [], selected_models: {} },
+        sections: ["routing", "user_defaults", "mcp_servers", "connections"], settings: { routing: { providers: ["codex-acp", "opencode"] } }, created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z",
+        summary: { providers: ["codex-acp", "opencode"], denied_engines: [], selected_models: {}, default_model: null, language: "en", enabled_mcp_servers: 1, ceiling_set: true },
       }],
     },
     mcp_servers: {
@@ -257,9 +269,8 @@ const binding = { apiVersion: 1, configHome: "~/.config/cortex", project: null }
 const colors = new Proxy({}, { get: () => "#808080" });
 const theme = { colors, spacing: new Proxy({}, { get: () => 4 }) };
 
-async function openScreen() {
+async function openScreen(data = fixtures()) {
   const runtime = createRuntime();
-  const data = fixtures();
   const reads: Array<Record<string, unknown>> = [];
   const updates: Array<Record<string, unknown>> = [];
   const onboards: Array<Record<string, unknown>> = [];
@@ -269,12 +280,12 @@ async function openScreen() {
   const rpcs: Record<string, (input: Record<string, unknown>) => Promise<unknown>> = {
     "cortex.config.read": async (input) => {
       reads.push(input);
-      return { ok: true, binding, result: data[input.surface as string] };
+      return { ok: true, binding, result: structuredClone(data[input.surface as string]) };
     },
     "cortex.config.update": async (input) => {
       updates.push(input);
       const reply = replies.shift();
-      return reply ?? { ok: true, binding, result: data[input.surface as string] };
+      return reply ?? { ok: true, binding, result: structuredClone(data[input.surface as string]) };
     },
     "cortex.config.catalog.refresh": async (input) => {
       refreshes.push(input);
@@ -293,8 +304,8 @@ async function openScreen() {
   const modules: Record<string, unknown> = {
     react: runtime.react,
     "react/jsx-runtime": {
-      jsx: (type: unknown, props: Record<string, unknown>) => ({ type, props }),
-      jsxs: (type: unknown, props: Record<string, unknown>) => ({ type, props }),
+      jsx: (type: unknown, props: Record<string, unknown>, key?: string) => ({ type, props, key }),
+      jsxs: (type: unknown, props: Record<string, unknown>, key?: string) => ({ type, props, key }),
       Fragment: "Fragment",
     },
     "react-native": new Proxy({}, { get: (_target, key) => String(key) }),
@@ -334,7 +345,7 @@ test("no section offers a raw JSON entry field, and every control is labelled", 
     ["Models", async () => {}],
     ["Project ceiling", async () => {}],
     ["Routing", async () => {}],
-    ["User routing profiles", async () => {}],
+    ["Profiles", async () => {}],
     ["MCP servers", async () => { await screen.press("Edit search"); await screen.press("Add MCP server"); }],
     ["Connections", async () => { await screen.press("Check for OpenCode"); }],
   ];
@@ -373,13 +384,15 @@ test("user defaults: a selector change saves exactly that field against the read
   await screen.press("Language: ru");
   await screen.press("Save");
   assert.deepEqual(screen.updates, [{ surface: "user_defaults", expected_revision: REV("a"), defaults: { language: "ru" } }]);
-  assert.ok(screen.texts().includes("Saved."));
+  assert.ok(screen.texts().some((text) => text.includes("profile was not updated")));
   assert.ok(screen.texts().some((text) => text.includes("legacy_flag")), "preserved key shown read-only");
 });
 
 test("user defaults: invalid input is flagged on the field and nothing is written", async () => {
   const screen = await openScreen();
   await screen.type("Route id", "codex-acp/gpt-5");
+  assert.ok(screen.texts().some((text) => text.includes("default route") && text.includes("saved owner profiles")), "field help explains effect and profile scope");
+  assert.ok(screen.texts().some((text) => text.includes("Example:") && text.includes("route")), "field help includes an example");
   await screen.type("Limit: tokens", "many");
   await screen.press("Save");
   assert.equal(screen.updates.length, 0);
@@ -617,7 +630,7 @@ test("engines & models: switches save exact routing entries to the chosen file, 
     },
   }]);
   assert.ok(catalogReads() > before, "the effective state is read again after saving");
-  assert.ok(screen.texts().some((text) => text.startsWith("Saved.")));
+  assert.ok(screen.texts().some((text) => text.startsWith("Applied to user routing")));
   assert.deepEqual(screen.onboards, [], "no switch registers OpenCode");
 });
 
@@ -749,21 +762,25 @@ test("engines & models: a model can be placed in several tiers and back to its b
   assert.equal((fresh.updates[0].rules as any).models?.["codex-acp"]?.tiers, undefined, "no tier left: the built-in tier applies");
 });
 
-test("user profiles show divergence and send revision-checked activation; conflicts offer reload", async () => {
+test("profiles show modified sections, confirm revert, and retain revision conflicts", async () => {
   const screen = await openScreen();
-  await screen.section("User routing profiles");
-  assert.ok(screen.texts().some((text) => text.includes("active profile and user routing differ")));
+  assert.ok(screen.texts().some((text) => text.includes("User routing (providers)")));
+  await screen.section("Profiles");
   await screen.press("Saved profile: mix");
-  await screen.type("New profile name", "renamed");
+  await screen.type("New profile name", "new-profile");
+  await screen.type("Rename profile to", "renamed");
+  assert.equal(screen.find("New profile name", "TextInput").props.value, "new-profile");
   screen.replies.push({ ok: false, binding, error: { code: "revision_conflict", message: "Profile changed", field: "expected_revision", currentRevision: REV("s") } });
   await screen.press("Activate profile");
+  assert.equal(screen.updates.length, 0);
+  await screen.press("Discard changes and switch");
   assert.deepEqual(screen.updates[0], {
-    surface: "routing_profiles", action: "activate", workspaceId: undefined,
-    expected_revision: REV("q"), expected_routing_revision: REV("b"), name: "mix",
+    surface: "routing_profiles", action: "activate", expected_revision: REV("q"),
+    expected_revisions: screen.data.routing_profiles.current_revisions, name: "mix", discard_modifications: true,
   });
   assert.ok(screen.has("Reload latest (discards edits here)"));
   await screen.press("Reload latest (discards edits here)");
-  assert.equal(screen.find("New profile name", "TextInput").props.value, "mix");
+  assert.equal(screen.find("Current profile: mix", "Pressable").props.accessibilityState.checked, true);
 });
 
 test("routing and ceilings say what each setting actually does", async () => {
@@ -776,4 +793,145 @@ test("routing and ceilings say what each setting actually does", async () => {
   await screen.section("Project ceiling");
   await screen.toggle("Restrict allowed connections", true);
   assert.ok(screen.texts().some((text) => text.startsWith("Recorded and checked for narrowing only")));
+});
+
+
+test("profiles: explicit save and create capture all applied sections, independently of rename", async () => {
+  const screen = await openScreen();
+  const expected = screen.data.routing_profiles.current_revisions;
+  await screen.press("Save to current profile");
+  assert.deepEqual(screen.updates[0], { surface: "routing_profiles", action: "save", name: "mix", expected_revision: REV("q"), expected_revisions: expected });
+  await screen.type("New profile name", "fresh");
+  await screen.type("New profile description", "New snapshot");
+  await screen.press("Save as new profile");
+  assert.deepEqual(screen.updates[1], { surface: "routing_profiles", action: "create", name: "fresh", description: "New snapshot", expected_revision: REV("q"), expected_revisions: expected });
+  await screen.section("Profiles");
+  await screen.press("Saved profile: mix");
+  await screen.type("Rename profile to", "renamed");
+  await screen.type("Profile description", "");
+  await screen.press("Save profile name and description");
+  assert.deepEqual(screen.updates[2], { surface: "routing_profiles", action: "update", name: "mix", rename_to: "renamed", description: "", expected_revision: REV("q") });
+  assert.equal(screen.find("New profile name", "TextInput").props.value, "fresh");
+});
+
+test("profiles: save then switch uses the save result's revisions, cancel writes nothing", async () => {
+  const data = fixtures();
+  const other = { ...(data.routing_profiles.profiles as any[])[0], name: "other" };
+  (data.routing_profiles.profiles as any[]).push(other);
+  const screen = await openScreen(data);
+  await screen.press("Current profile: other");
+  await screen.press("Cancel switch");
+  assert.equal(screen.updates.length, 0);
+  await screen.press("Current profile: other");
+  const saved = { ...data.routing_profiles, state: "in_sync", revision: REV("s"), current_revisions: { routing: REV("t"), user_defaults: REV("u"), mcp_servers: REV("v"), connections: REV("w") } };
+  screen.replies.push({ ok: true, binding, result: saved });
+  await screen.press("Save changes and switch");
+  assert.equal(screen.updates.length, 2);
+  assert.equal(screen.updates[0].action, "save");
+  assert.deepEqual(screen.updates[1], { surface: "routing_profiles", action: "activate", name: "other", expected_revision: REV("s"), expected_revisions: saved.current_revisions });
+});
+
+test("profiles: failed save before switching never activates", async () => {
+  const screen = await openScreen();
+  await screen.press("Revert to saved");
+  screen.replies.push({ ok: false, binding, error: { code: "revision_conflict", message: "Changed" } });
+  await screen.press("Save changes and switch");
+  assert.deepEqual(screen.updates.map((item) => item.action), ["save"]);
+  assert.ok(screen.has("Reload latest (discards edits here)"));
+});
+
+test("profiles: section saves refresh profile differences while project settings stay independent", async () => {
+  const screen = await openScreen();
+  const reads = () => screen.reads.filter((item) => item.surface === "routing_profiles").length;
+  const before = reads();
+  screen.data.routing_profiles.modified_sections = ["user_defaults"];
+  screen.data.routing_profiles.differences = [{ section: "user_defaults", key: "language" }];
+  await screen.press("Language: ru");
+  await screen.press("Save");
+  assert.ok(reads() > before);
+  assert.ok(screen.texts().some((text) => text.includes("User defaults (language)")));
+  assert.equal(screen.updates.some((item) => item.surface === "routing_profiles"), false);
+  await screen.section("MCP servers");
+  const beforeMcp = reads();
+  await screen.toggle("search enabled", false);
+  assert.ok(reads() > beforeMcp);
+  await screen.section("Connections");
+  const beforeConnections = reads();
+  await screen.type("Max concurrent sessions for Codex (1-8)", "2");
+  await screen.press("Apply max concurrent sessions for Codex");
+  assert.ok(reads() > beforeConnections);
+});
+
+for (const section of ["User defaults", "Routing", "Models", "Engines & models", "MCP servers", "Connections", "Project ceiling"]) {
+  test(`profiles: activation reloads the mounted ${section} form and all later sections`, async () => {
+    const screen = await openScreen();
+    await screen.press("Project (for project ceiling and project routing): ws1");
+    await screen.section(section);
+    const before = screen.reads.length;
+    screen.data.user_defaults.defaults = { ...(screen.data.user_defaults.defaults as object), language: "ru" };
+    await screen.press("Revert to saved");
+    await screen.press("Discard changes and switch");
+    const surface = section === "User defaults" ? "user_defaults" : section === "MCP servers" ? "mcp_servers"
+      : section === "Connections" ? "connections" : section === "Project ceiling" ? "project_ceiling" : "routing";
+    assert.ok(screen.reads.slice(before).some((item) => item.surface === surface), `${surface} re-read after activation`);
+    await screen.section("User defaults");
+    assert.equal(screen.find("Language: ru", "Pressable").props.accessibilityState.checked, true);
+  });
+}
+
+test("profiles: none, in-sync, partial, interrupted and unavailable have observable controls", async () => {
+  for (const state of ["none", "in_sync", "interrupted", "unavailable"]) {
+    const data = fixtures();
+    data.routing_profiles.state = state;
+    if (state === "none") data.routing_profiles.active = null;
+    if (state === "interrupted") data.routing_profiles.pending = { operation: "activate", profile: "mix", at: "now" };
+    if (state === "unavailable") {
+      data.routing_profiles.current_revisions = { ...(data.routing_profiles.current_revisions as object), mcp_servers: null };
+      data.routing_profiles.problems = [{ section: "mcp_servers", code: "invalid", message: "Invalid policy" }];
+    }
+    (data.routing_profiles.profiles as any[])[0].sections = ["routing"];
+    const screen = await openScreen(data);
+    assert.ok(screen.texts().includes(state));
+    if (state !== "none") assert.ok(screen.texts().some((text) => text.includes("stores only User routing")));
+    if (state === "none" || state === "unavailable") assert.equal(screen.find("Save to current profile", "Pressable").props.disabled, true);
+    if (state === "unavailable") assert.ok(screen.texts().some((text) => text.includes("MCP servers: Invalid policy")));
+    if (state === "interrupted") {
+      assert.ok(screen.has("Re-activate mix"));
+      await screen.press("Save current settings to mix");
+      assert.equal(screen.updates[0].action, "save");
+      await screen.press("Detach");
+      assert.equal(screen.updates[1].action, "deactivate");
+    }
+    if (state === "none") {
+      await screen.type("New profile name", "new");
+      await screen.press("Save as new profile");
+      assert.equal(screen.updates[0].action, "create");
+    }
+  }
+});
+
+
+test("profiles: activation failure refreshes forms and reload exposes the pending recovery state", async () => {
+  const screen = await openScreen();
+  await screen.press("Language: ru");
+  await screen.press("Revert to saved");
+  screen.data.routing_profiles.state = "interrupted";
+  screen.data.routing_profiles.pending = { operation: "activate", profile: "mix", at: "now" };
+  screen.replies.push({ ok: false, binding, error: { code: "activation_failed", message: "Could not finish activation" } });
+  const before = screen.reads.length;
+  await screen.press("Discard changes and switch");
+  assert.ok(screen.reads.slice(before).some((item) => item.surface === "user_defaults"));
+  assert.ok(screen.texts().some((text) => text.includes("Could not finish activation")));
+  assert.equal(screen.find("Language: en", "Pressable").props.accessibilityState.checked, true);
+  await screen.press("Reload profile state");
+  assert.ok(screen.has("Re-activate mix"));
+  assert.ok(screen.texts().some((text) => text.includes('Activation of "mix" did not finish')));
+});
+
+test("profiles: detach does not discard unapplied form edits", async () => {
+  const screen = await openScreen();
+  await screen.press("Language: ru");
+  await screen.press("Current profile: No profile");
+  assert.equal(screen.updates[0].action, "deactivate");
+  assert.equal(screen.find("Language: ru", "Pressable").props.accessibilityState.checked, true);
 });

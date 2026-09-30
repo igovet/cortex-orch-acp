@@ -17,16 +17,18 @@ available -- replaces the hand-maintained per-role ``route-policy.json``.
    version is the one routed. A model whose version cannot be parsed is
    never treated as older.
 3. Among models of the role's tier (nearest other tier when none is usable),
-   rank by honoured provider preference, honoured model hint, a different
-   engine on escalation, subscription plan usage (a plan more than
-   :data:`USAGE_MARGIN` points more used than the least-used candidate's
+   rank by honoured provider preference, the owner's preferred model for
+   the role's kind of work (routing.json ``models`` policy
+   ``preferred_for``), honoured model hint, subscription plan usage (a plan
+   more than :data:`USAGE_MARGIN` points more used than the least-used candidate's
    ranks behind it; compared only when every candidate's usage is known),
-   engine affinity, the quota band as a late tie breaker (an account at or
-   above :data:`HOT_PERCENT` ranks behind one below it only once plan usage
+   a different engine on escalation, engine affinity, the quota band as a late
+   tie breaker (an account at or above :data:`HOT_PERCENT` ranks behind one below it only once plan usage
    and affinity left the candidates tied -- crossing the band alone no
    longer overrides them), exact used percent, and engine order
-   (:func:`rank`). A preference or model hint is ignored for quota only when
-   its usage is both at or above :data:`HOT_PERCENT` and meaningfully worse
+   (:func:`rank`). A preference, owner-preferred model or model hint is
+   ignored for quota only when its usage is both at or above
+   :data:`HOT_PERCENT` and meaningfully worse
    (by more than :data:`USAGE_MARGIN`) than an available alternative's, not
    merely for crossing the band. How often an engine was chosen recently
    never counts: frequency is not evidence of fit. A model of a stronger
@@ -386,7 +388,10 @@ def route_menu(project_root=None, environ=None, unavailable=()):
     each route's tier and policy come from routing.json ``models`` first,
     then the built-in defaults (:mod:`routing.model_policy`), and the
     ``flagship``, ``stretch``, ``preferred`` and ``affinity`` summaries are
-    derived from them. Prompts and tool schemas name no model."""
+    derived from them. ``affinity`` names only engines with an automatically
+    eligible route (``affinity_not_eligible`` lists the rest); ``preferred``
+    lists the owner's preferred models per kind of work, which the rank
+    puts ahead of any hint. Prompts and tool schemas name no model."""
     from ..connections import quota
     from ..connections import registry as connection_registry
     from . import availability
@@ -403,6 +408,7 @@ def route_menu(project_root=None, environ=None, unavailable=()):
                    and role not in {"worker-code-reviewer", "worker-build-verification"})
     result = {tier: [] for tier in TIERS}
     flagship, stretch, preferred = [], [], {}
+    eligible_engines = set()
     for entry in entries:
         engine, model = entry.route.engine, entry.route.model
         policy = policies[entry.route.id]
@@ -438,13 +444,21 @@ def route_menu(project_root=None, environ=None, unavailable=()):
                     role, "standard", kinds=policy.also_standard_for) == "standard_candidate"],
                 never="complexity high, deep or flagship work, deep roles"))
         if reason is None:
+            eligible_engines.add(engine)
             for kind in sorted(policy.preferred_for):
                 preferred.setdefault(kind, []).append(label)
     return dict(tiers=result, roles={role: {complexity: tier_for(role, complexity=complexity)
                                           for complexity in ("low", "normal", "high")}
                                      for role in roles},
                 role_work_kinds={role: work_kind(role) for role in roles},
-                affinity={kind: kind_engine(kind, affinity) for kind in WORK_KIND_ENGINES},
+                # Only an engine with a route automatic selection may use is
+                # worth a hint: a denied, disabled or unselected engine (or
+                # one outside ``providers``) is withheld and named below.
+                affinity={kind: (kind_engine(kind, affinity) if kind_engine(kind, affinity) in eligible_engines
+                                 else None) for kind in WORK_KIND_ENGINES},
+                affinity_not_eligible={kind: kind_engine(kind, affinity) for kind in WORK_KIND_ENGINES
+                                       if kind_engine(kind, affinity) is not None
+                                       and kind_engine(kind, affinity) not in eligible_engines},
                 affinity_source={kind: "routing.json" if kind in affinity or "*" in affinity else "builtin"
                                  for kind in WORK_KIND_ENGINES},
                 preferred=preferred,
@@ -750,13 +764,21 @@ def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
 # light model may carry the stretch (Luna) rule, and a ``purpose`` key (the
 # model's ``preferred_for`` work kinds) ranks between retry diversification
 # and engine affinity. Without ``models`` every decision is unchanged.
-RANK_VERSION = 8
+# 9: ``purpose`` (the owner's ``preferred_for`` choice) moves up to right
+# after ``preference``, ahead of a coordinator hint, plan usage and retry
+# diversification: an owner configuration preferring one engine's model for
+# a kind of work was overridden by any honoured engine hint (the coordinator
+# was told to hint the built-in affinity engine) or by a retry. It is passed
+# over only when its plan is hot and meaningfully worse, like a hint; a hint
+# that names no preferred route then records ``ignored:owner_preferred``.
+# Without ``preferred_for`` every decision is unchanged.
+RANK_VERSION = 9
 # The rank key's parts in order, named for the decision's ``decided_by``.
 # ``quota`` moved from right after ``hint`` to right before ``used_percent``
 # in rank version 6: it is now a late tie breaker rather than an early hard
 # cut, behind the usage-gap signal (``usage``), retry diversification and
 # affinity (see RANK_VERSION).
-RANK_KEYS = ("preference", "hint", "usage", "diversify", "purpose", "affinity", "quota", "used_percent",
+RANK_KEYS = ("preference", "purpose", "hint", "usage", "diversify", "affinity", "quota", "used_percent",
              "engine_order")
 
 
@@ -783,19 +805,22 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
        :data:`HOT_PERCENT` and meaningfully worse (by more than
        :data:`USAGE_MARGIN`) than an available alternative's. Otherwise it
        is ignored and the reason recorded.
-    2. an honoured model hint (see :data:`HINT_TOLERANCE`), ignored on the
-       same hot-and-meaningfully-worse basis;
-    3. subscription plan usage, only if every candidate's usage is known:
+    2. ``purpose``: a model whose routing.json ``models`` policy lists the
+       role's work kind under ``preferred_for`` (the owner's choice of model
+       for that kind of work) ranks ahead of the tier's other candidates,
+       unless its plan is hot and meaningfully worse on the same basis
+       (``decision["purpose"]["status"]``). It never moves the tier;
+    3. an honoured model hint (see :data:`HINT_TOLERANCE`), ignored on the
+       same hot-and-meaningfully-worse basis; a hint naming no preferred
+       route loses to ``purpose`` and records ``ignored:owner_preferred``;
+    4. subscription plan usage, only if every candidate's usage is known:
        each full :data:`USAGE_MARGIN` points above the least-used candidate
        ranks a candidate one step behind (``usage_band``) -- this usage-gap
        signal, not the quota band below, is what usually separates
        candidates on remaining quota;
-    4. on escalation, an engine other than the one that fell short (a large
+    5. on escalation, an engine other than the one that fell short (a large
        usage gap above still wins first: diversification does not send a
        retry to a plan that is meaningfully more used);
-    5. ``purpose``: a model whose routing.json ``models`` policy lists the
-       role's work kind under ``preferred_for`` (the owner's choice of model
-       for that kind of work) ranks ahead of the tier's other candidates;
     6. engine affinity (:func:`suitability`), the task's fit;
     7. the quota band, as a late tie breaker only (unknown is not hot): once
        plan usage and affinity leave candidates tied, one at or above
@@ -883,12 +908,26 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             else:
                 hint_status = "honoured"
 
+        # The owner's preferred model for this kind of work (routing.json
+        # ``models`` policy ``preferred_for``) ranks right after the runtime's
+        # own provider preference: a coordinator hint, plan usage and retry
+        # diversification never outrank the owner's explicit choice. Like a
+        # hint it is passed over only when its plan is both hot and
+        # meaningfully worse than an available alternative's.
+        purposed = [e for e in candidates if purpose(e)]
+        if not purposed:
+            purpose_status = "none"
+        elif _meaningfully_worse(purposed, candidates, usage):
+            purpose_status = "ignored:near_quota_limit"
+        else:
+            purpose_status = "honoured"
+
         def key(e):
             return (e.route.engine != honoured,
+                    not (purpose_status == "honoured" and purpose(e)),
                     not (hint_status == "honoured" and e in hinted),
                     usage_band(e) or 0,
                     not (escalated and previous_engine and e.route.engine != previous_engine),
-                    not purpose(e),
                     -suitability(role, e.route.engine, affinity),
                     _hot(usage(e)),
                     usage(e) if used_percent_compared else 0.0, order[e.route.id])
@@ -902,17 +941,24 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
             decided_by = next(name for name, a, b in zip(RANK_KEYS, first, second) if a != b)
         best_luna = next((e for e in ranked if policies[e.route.id].stretch), None)
         affinity_kind = kind
+        reported_hint_status = hint_status
+        if (hint_status == "honoured" and purpose_status == "honoured" and purpose(best)
+                and not any(purpose(e) for e in hinted)):
+            # The hint named only routes the owner does not prefer for this
+            # kind of work; the owner's preference outranked it.
+            reported_hint_status = "ignored:owner_preferred"
         decision = dict(
             role=role, role_tier=role_tier, tier=tier, basis="rank", rank_version=RANK_VERSION,
             preference=preference, preference_status=status,
-            model_hint=model_hint, model_hint_status=hint_status,
+            model_hint=model_hint, model_hint_status=reported_hint_status,
             model_hint_reason=model_reason, diversify_from=previous_engine if escalated else None,
             usage=dict(compared=used_percent_compared, margin=USAGE_MARGIN, least_used_percent=least_used),
             affinity=dict(work_kind=affinity_kind, engine=affinity_engine(role, affinity),
                           source=("routing.json" if affinity_kind is not None and affinity
                                   and (affinity_kind in affinity or "*" in affinity) else "default")),
             used_percent_compared=used_percent_compared,
-            purpose=dict(work_kind=kind, preferred=[_route_label(e) for e in ranked if purpose(e)]),
+            purpose=dict(work_kind=kind, preferred=[_route_label(e) for e in ranked if purpose(e)],
+                         status=purpose_status),
             candidates=[_candidate(e, usage, role, e.route.engine == honoured, usage_band(e),
                                    affinity=affinity) for e in ranked],
             unavailable=sorted(_route_label(e) for e in entries

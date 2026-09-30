@@ -104,6 +104,7 @@
     "src/cortex_runtime/engine/mcp_bridge.py",
     "src/cortex_runtime/engine/opencode_adapter_acp.py",
     "src/cortex_runtime/engine/opencode_install.py",
+    "src/cortex_runtime/engine/opencode_tool_calls.py",
     "src/cortex_runtime/engine/permissions.py",
     "src/cortex_runtime/engine/process.py",
     "src/cortex_runtime/engine/process_identity.py",

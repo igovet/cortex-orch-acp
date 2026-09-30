@@ -2,7 +2,7 @@ import { ReplayController } from "./replay-connector.ts";
 import { ReplaySpool } from "./replay-spool.mjs";
 import { isHiddenOperation } from "../shared/timeline-visibility.ts";
 import { presentToolSemantics } from "../shared/tool-presentation.ts";
-import { gatewayPresentation } from "../shared/gateway-presentation.ts";
+import { codeModePresentation, gatewayPresentation } from "../shared/gateway-presentation.ts";
 import { shellCommand } from "../shared/shell-command.ts";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -98,7 +98,35 @@ function firstNumber(value: unknown, keys: readonly string[]): number | undefine
  */
 export function nativeToolDetail(event: ProviderEvent): ProviderEvent {
   if (event.type !== "timeline.item" || event.item.type !== "tool_call") return event;
-  const item = event.item as ToolCallTimelineItem;
+  let item = event.item as ToolCallTimelineItem;
+  if (item.detail.type !== "unknown") return event;
+  const originalDetail = item.detail;
+  const codeMode = codeModePresentation(item.name, originalDetail.input, originalDetail.output);
+  if (codeMode) {
+    const output = codeMode.output;
+    // Metadata describes execution, not the returned value. The installed
+    // ACP bridge drops content, so a metadata-only replay has no result.
+    const metadataOnly = output && typeof output === "object" && !Array.isArray(output)
+      && Object.keys(output).every(key => key === "metadata");
+    const failed = item.status === "failed" || (item.status === "completed" && codeMode.failed);
+    const result = output && typeof output === "object" && !Array.isArray(output)
+      ? (output as Record<string, unknown>).result : undefined;
+    const content = result && typeof result === "object" && !Array.isArray(result)
+      ? (result as Record<string, unknown>).content : undefined;
+    const texts = Array.isArray(content) ? content.flatMap(block =>
+      block && block.type === "text" && typeof block.text === "string" ? [block.text] : []) : [];
+    const errorText = firstString(output, ["error"]) ?? (texts.length ? texts.join("\n") : undefined);
+    item = {
+      ...item, name: codeMode.name,
+      status: failed ? "failed" : item.status,
+      error: failed ? errorText ?? (typeof item.error === "string" && item.error !== `Tool call failed: ${item.name}`
+        ? item.error : "Code Mode tool call failed") : item.error,
+      detail: { type: "unknown", input: codeMode.input, output: metadataOnly ? null : output },
+      metadata: { ...item.metadata, cortexRawInput: codeMode.input,
+        cortexCodeModeInput: originalDetail.input, cortexCodeModeOutput: originalDetail.output },
+    } as ToolCallTimelineItem;
+    event = { ...event, item };
+  }
   if (item.detail.type !== "unknown") return event;
   const rawInput = item.detail.input;
   const rawOutput = item.detail.output;
