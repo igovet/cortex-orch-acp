@@ -2,6 +2,10 @@
 
 ## 1.0.0 (unreleased)
 
+Persisted Cortex sessions in Paseo now reopen without reapplying cached model,
+mode, effort or settings. A removed or denied saved model no longer prevents
+read-only history loading; new and explicit configuration choices remain validated.
+
 Coordinator live-stream redaction now preserves path-embedded script names, including
 digit-only, hyphenated and underscored names, while continuing to redact credentials
 split across stream chunks.

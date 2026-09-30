@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -49,13 +49,20 @@ const dir = mkdtempSync(join(tmpdir(), "cortex-replay-test-"));
 const fixture = join(dir, "agent.py");
 writeFileSync(fixture, `
 import json, sys, os
+config_calls = os.path.join(os.path.dirname(__file__), "config-calls.jsonl")
 def send(frame): print(json.dumps(frame, ensure_ascii=False), flush=True)
 for line in sys.stdin:
     req = json.loads(line)
     if req.get("method") == "initialize":
         send({"jsonrpc":"2.0","id":req["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":True}}})
-    elif req.get("method") == "session/set_config_option":
-        send({"jsonrpc":"2.0","id":req["id"],"result":{"configOptions":[]}})
+    elif req.get("method") in ("session/set_config_option", "session/set_mode"):
+        with open(config_calls, "a") as log: log.write(json.dumps(req) + "\\n")
+        send({"jsonrpc":"2.0","id":req["id"],"error":{"code":-32602,
+              "message":"'gpt-6-sol' is not a valid value for configId 'model'."}})
+    elif req.get("method") == "session/new":
+        send({"jsonrpc":"2.0","id":req["id"],"result":{"sessionId":"new-session","configOptions":[
+            {"id":"model","name":"Model","category":"model","type":"select","currentValue":"available-model",
+             "options":[{"value":"available-model","name":"Available"}]}]}})
     elif req.get("method") == "session/load":
         sid = req["params"]["sessionId"]
         if sid == "crash-before": os._exit(7)
@@ -66,10 +73,12 @@ for line in sys.stdin:
             if sid == "invalid-card" and i == 99: update["status"] = "impossible"
             send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})
             if sid == "crash-mid" and i == 100: os._exit(8)
-        send({"jsonrpc":"2.0","id":req["id"],"result":{}})
+        send({"jsonrpc":"2.0","id":req["id"],"result":{"configOptions":[
+            {"id":"model","name":"Model","category":"model","type":"select","currentValue":"available-model",
+             "options":[{"value":"available-model","name":"Available"}]}]}})
         if sid == "crash-after": os._exit(9)
 `);
-async function load(nativeId: string) {
+async function load(nativeId: string | null, staleConfig = false, configureAfter = false) {
   const command = ["env", "CORTEX_ACP_TARGET=" + JSON.stringify({ argv: ["python3", "-B", fixture] }),
     process.execPath, resolve("server/acp-load-shim.mjs")] as [string, ...string[]];
   const replay = new ReplayController(command);
@@ -86,17 +95,36 @@ async function load(nativeId: string) {
   });
   try {
     await connection.send({type:"session.open", requestId:"open",sessionId:"boundary",
-      history:"replay",persistence:{version:1,data:{sessionId:nativeId}},
-      config:{cwd:dir,env:{},mcpServers:{},settings:{language:"english"},persist:false}});
+      history:"replay",...(nativeId ? {persistence:{version:1,data:{sessionId:nativeId}}} : {}),
+      config:{cwd:dir,env:{},mcpServers:{},settings:staleConfig ? {retired_setting:"old"} : {},persist:false,
+        ...(staleConfig ? {model:"gpt-6-sol",mode:"retired-mode",thinkingOption:"retired-effort"} : {})}});
     let timer: ReturnType<typeof setTimeout>;
     await Promise.race([done, new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error("test load timed out")), 15000);
     })]).finally(() => clearTimeout(timer!));
+    if (configureAfter) {
+      const configured = new Promise<void>(resolve => connection.onEvent(event => {
+        if ((event.type === "request.failed" || event.type === "request.completed") && event.requestId === "configure") resolve();
+      }));
+      await connection.send({type:"session.configure",requestId:"configure",sessionId:"boundary",
+        changes:{model:"gpt-6-sol"}});
+      let configTimer: ReturnType<typeof setTimeout>;
+      await Promise.race([configured, new Promise((_, reject) => {
+        configTimer = setTimeout(() => reject(new Error("test configure timed out")), 5000);
+      })]).finally(() => clearTimeout(configTimer!));
+    }
     return events;
   } finally { await connection.close(); }
 }
 try {
   const first = await load("history");
+  assert.equal(first.filter(e => e.type === "request.failed").length, 0);
+  assert.equal(first.at(-1).type, "session.ready");
+  const restored = await load("history", true);
+  assert.equal(restored.filter(e => e.type === "request.failed").length, 0, JSON.stringify(restored.slice(-2)));
+  assert.equal(restored.at(-1).type, "session.ready");
+  assert.equal(restored.filter(e => e.type === "timeline.item").length, 4097);
+  assert.equal(existsSync(join(dir, "config-calls.jsonl")), false, "restoring history must not configure the task");
   const second = await load("history");
   for (const events of [first, second]) {
     assert.equal(events.filter(e => e.type === "request.failed").length, 0, JSON.stringify(events.slice(-2)));
@@ -109,6 +137,20 @@ try {
     assert.equal(items[1].item.text, "🙂я 1");
   }
   assert.deepEqual(first.filter(e => e.type === "timeline.item"), second.filter(e => e.type === "timeline.item"));
+  const fresh = await load(null, true);
+  assert.ok(fresh.some(e => e.type === "request.failed" && e.error.message.includes("not a valid value")));
+  assert.ok(!fresh.some(e => e.type === "session.ready"));
+  let calls = readFileSync(join(dir, "config-calls.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params.value, "gpt-6-sol");
+  rmSync(join(dir, "config-calls.jsonl"));
+  const configured = await load("history", false, true);
+  assert.ok(configured.some(e => e.type === "session.ready"));
+  assert.ok(configured.some(e => e.type === "request.failed" && e.requestId === "configure"
+    && e.error.message.includes("not a valid value")));
+  calls = readFileSync(join(dir, "config-calls.jsonl"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params.value, "gpt-6-sol");
   for (const id of ["crash-before", "crash-mid", "crash-after", "invalid-card"]) {
     const events = await load(id);
     assert.ok(events.some(e => e.type === "request.failed"), id);

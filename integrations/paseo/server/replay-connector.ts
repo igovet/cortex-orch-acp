@@ -192,6 +192,13 @@ export class ReplayController {
               nativeId: data.sessionId, items: [], count: 0, bytes: 0, hash: createHash("sha256"), complete: false,
               timer: setTimeout(() => this.fail(load, "Incomplete history: replay timed out"), 120000) };
             this.loads.set(input.sessionId, load);
+            // session/load restores the task's own configuration. The SDK
+            // otherwise reapplies Paseo's cached composer settings before
+            // session.opened, turning display-only history into mutations
+            // (or a load failure when an old model/effort is no longer valid).
+            input = { ...input, config: { ...input.config,
+              model: undefined, mode: undefined, thinkingOption: undefined, settings: {},
+            } };
           }
         } else if ("sessionId" in input && this.loads.has(input.sessionId)) {
           if (input.type === "session.close") this.fail(this.loads.get(input.sessionId)!);

@@ -228,6 +228,19 @@ equality and a runtime call-count assertion. A replayed
 `agent_message_chunk` is never captured as a new source event (there is no
 capture path anywhere near `_session_load`).
 
+The Cortex Paseo provider also preserves this boundary when reopening a
+persisted native session. Paseo's ACP bridge otherwise reapplies its cached
+composer model, mode, effort and settings after `session/load`, before
+`session.opened`. A formerly selectable model can now be denied or absent,
+so this extra `session/set_config_option` used to fail an otherwise valid
+history load with "Couldn't refresh agent history." The replay connector
+omits those cached selection fields only for a persisted-session open;
+the configuration returned by Cortex remains authoritative. Request-local
+cwd, environment and MCP configuration are still forwarded. New-session
+selection and explicit later `session.configure` requests remain unchanged
+and invalid choices still fail normally. No route is enabled, no policy
+denial is bypassed, and no history is reconstructed.
+
 During that same read-only replay, Cortex also checks any worker card that
 is still `in_progress` against its durable process identity.  If `/proc`
 proves that exact worker process is absent, Cortex sends one ephemeral
