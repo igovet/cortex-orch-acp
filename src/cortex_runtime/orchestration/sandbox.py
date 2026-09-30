@@ -661,10 +661,10 @@ ENGINE_CONFIG = {
     'claude-agent-acp': {'settings.json': '{}\n', 'settings.local.json': '{}\n', 'CLAUDE.md': '',
                          'AGENTS.md': '', 'skills': None, 'agents': None, 'commands': None,
                          'hooks': None, 'output-styles': None, 'rules': None},
-    # OpenCode's data directory ($XDG_DATA_HOME/opencode) holds its
-    # credentials and session database, which it must write, and ``bin``:
-    # helper executables it downloads and later runs in the owner's own
-    # interactive sessions, outside any jail. Its configuration lives in
+    # OpenCode's data directory ($XDG_DATA_HOME/opencode) holds the session
+    # database and native logins, opened in place by OpenCode, and
+    # ``bin``: helper executables it downloads and later runs in the owner's
+    # own interactive sessions, outside any jail. Its configuration lives in
     # ~/.config/opencode, which the OpenCode jail hides (``masked``).
     'opencode': {'bin': None},
 }

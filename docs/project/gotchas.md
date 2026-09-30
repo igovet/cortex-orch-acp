@@ -20,6 +20,13 @@ Live Zed qualification requires an isolated disposable environment. The
 offline suite cannot establish real-client behavior or paid engine behavior;
 those checks remain explicitly unverified until run.
 
+Installing a newer codex-acp package does not make Cortex select it until
+its exact version and bundle patch are supported. The current supported
+newest version is 2.0.1 (Codex CLI 0.159.1, including `gpt-6.1-sol` in its
+offline catalog). New sessions discover it; an existing session keeps its
+already running engine. claude-agent-acp 0.84.0 is already installed and
+selected. See [Codex compatibility](../acp/codex-acp-adapter.md#one-time-adapter-update-2026-09-30).
+
 In `integrations/paseo`, a local sibling import must use its real `.ts`
 extension. `tsc`/esbuild remap a `.js` specifier to the sibling `.ts` file, so
 `npm run typecheck` and the plugin build both stay silent, but
@@ -144,3 +151,27 @@ visible.
 A Paseo "cancel" (`session/cancel`) pauses the whole task and cancels every
 running and queued worker (`turn_interrupted`). That is by design, not a
 worker failure. A cancelled queued worker is reported only as cancelled.
+
+`opencode models` and a Cortex OpenCode catalog disagreed for two separate
+reasons (observed 2026-09-30 on OpenCode 2.0.20). First, a custom provider
+exists only in the owner's `~/.config/opencode`, which the engine jail hides;
+Cortex carries its provider definitions over
+(`engine.opencode_adapter_acp.owner_provider_config`). Second, `opencode acp`
+fixes each directory's `session/new` catalog as soon as any model and primary
+agent exist, and a login in the database it opens makes models exist before
+the supplied configuration (agents and providers) is applied, so it offered
+`build`/`plan` and only logged-in providers. It is a race, not ignored
+configuration: waiting does not help, because the catalog is memoized per
+directory. Selecting `cortex` after a delay, another `session/new` or
+`session/load` does not refresh that catalog. Merging the owner's config with
+Cortex's and delivering it through every config channel did not help either:
+all of them are applied by the same late configuration plugins. The fix removes
+the built-in `opencode.agent`/`opencode.plan` plugins through Cortex's own
+`plugin` list, which the server resolves before starting any plugin, so no
+`build` agent exists and the catalog waits for `cortex`. The alternate-database
+and extracted-login workaround was rejected and removed: OpenCode opens its
+native `opencode.db` in place, with no copied database credentials. The catalog
+guard (`opencode_cortex_mode_not_advertised`) still rejects a catalog without
+`cortex`. OpenCode 2.x keeps logins in `opencode.db` (`credential` table), not
+`auth.json`. See
+[the OpenCode adapter](../acp/opencode-adapter.md#evidence-and-limits).

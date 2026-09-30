@@ -30,7 +30,7 @@ Codex session and every catalog refresh then failed closed with
 `codex_manual_review_adapter_unsupported` — Codex was entirely unavailable
 and no new model could reach the catalogue (live, 2026-09-22).
 
-Qualified versions: **1.12.0** and **1.13.0**. What was verified for 1.13.0,
+Qualified versions: **1.12.0**, **1.13.0** and **2.0.1**. What was verified for 1.13.0,
 against the installed bundle rather than assumed:
 
 - All 15 patched call sites match; exactly one differs from 1.12.0
@@ -56,6 +56,33 @@ against the installed bundle rather than assumed:
 1.13.0 bundles Codex CLI 0.155.1 instead of 0.154.0, which is what makes that
 CLI's `gpt-6-sol` / `gpt-6-luna` models reachable: `catalog.discovery` only
 records models a live adapter session actually advertised.
+
+### One-time adapter update (2026-09-30)
+
+The npm latest versions checked on this date were codex-acp **2.0.1**
+(bundled Codex CLI **0.159.1**) and claude-agent-acp **0.84.0**. Both were
+already installed under Cortex's engine directory; Claude already selected
+0.84.0, while Codex selected the supported 1.13.0. Adding explicit 2.0.1
+compatibility lets ordinary discovery select that installed version. The
+background install/update policy is unchanged; other Codex versions remain
+unsupported until their compatibility is verified.
+
+2.0.1 changes the agent mode label to `Auto review` and replaces the 1.x
+response-item and history helpers with typed reporters. Its separate,
+exact-source-checked patch preserves the manual reviewer, developer
+instructions, native-agent restrictions, explicit MCP configuration,
+per-turn permissions and custom-tool lifecycle. The renderer restores
+`_meta.contextCompaction` for ordinary ACP clients as well as AIR clients.
+The installed CLI's offline `debug models` catalog lists `gpt-6.1-sol`;
+that establishes catalog presence, not a successful paid model turn.
+
+The no-paid installed-bundle trace uses a fake App Server, including a
+completed compaction event. The installed CLI/jail check uses a loopback
+fake provider. Real paid turns and rendered client behavior are not run:
+`paid live check not requested by the owner`. Raw custom-tool recovery from
+retained 2.0.1 history has not been qualified; custom items returned directly
+by its typed history path are translated, without recreating the removed
+1.x rollout reader.
 
 Still unverified for both versions, as before: the behaviour of native
 developer instructions after Codex internal compaction has never been

@@ -19,7 +19,8 @@ from types import SimpleNamespace
 import pytest
 
 from cortex_runtime.engine.process import (
-    _CODEX_AGENT_REVIEWER_MANUAL, _CODEX_NEW_SESSION_PATCHED, _CODEX_SESSION_CONFIG_PATCHED,
+    _CODEX_AGENT_REVIEWER_MANUAL, _CODEX_AGENT_REVIEWER_2_MANUAL,
+    _CODEX_NEW_SESSION_PATCHED, _CODEX_SESSION_CONFIG_PATCHED,
     _CODEX_SEND_PROMPT_BY_VERSION,
     _prepare_codex_manual_review_adapter,
 )
@@ -35,10 +36,15 @@ import json
 import os
 import sys
 
+turn_count = 0
 with open(os.environ["CORTEX_APP_SERVER_TRACE"], "w", encoding="utf-8") as trace:
     for line in sys.stdin:
         request = json.loads(line)
         method = request.get("method")
+        if method == "turn/start":
+            turn_count += 1
+        turn_id = f"turn-fixture-{turn_count}"
+        thread_id = request.get("params", {}).get("threadId", "thread-fixture")
         if method in ("thread/start", "turn/start"):
             trace.write(json.dumps(request, sort_keys=True) + "\n")
             trace.flush()
@@ -49,25 +55,31 @@ with open(os.environ["CORTEX_APP_SERVER_TRACE"], "w", encoding="utf-8") as trace
                 "native": {"command": "/bin/false", "enabled": False}
             }, **({} if os.environ.get("CORTEX_TEST_NATIVE") == "omit" else {"developer_instructions": "Native developer rule."})}},
             "skills/list": {"data": []},
-            "thread/start": {"thread": {"id": "thread-fixture"}, "model": "gpt-5.6-luna", "reasoningEffort": "medium", "modelProvider": "openai"},
-            "turn/start": {"turn": {"id": "turn-fixture"}},
+            "thread/start": {"thread": {"id": "title-fixture" if request.get("params", {}).get("ephemeral") else "thread-fixture"}, "model": "gpt-5.6-luna", "reasoningEffort": "medium", "modelProvider": "openai"},
+            "turn/start": {"turn": {"id": turn_id}},
             "model/list": {"data": [{"id": "gpt-5.6-luna", "displayName": "gpt-5.6-luna", "description": "fixture", "isDefault": True, "defaultReasoningEffort": "medium", "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": "fixture"}]}], "nextCursor": None},
         }
         if "id" in request:
             print(json.dumps({"id": request["id"], "result": results.get(method, {})}), flush=True)
             if method == "turn/start":
                 print(json.dumps({"method": "turn/started", "params": {
-                    "threadId": "thread-fixture", "turn": {"id": "turn-fixture"},
+                    "threadId": thread_id, "turn": {"id": turn_id},
                 }}), flush=True)
+                if os.environ.get("CORTEX_TEST_COMPACTION") == "1":
+                    for method, status in (("item/started", "inProgress"), ("item/completed", "completed")):
+                        print(json.dumps({"method": method, "params": {
+                            "threadId": thread_id, "turnId": turn_id,
+                            "item": {"type": "contextCompaction", "id": "compact-fixture", "status": status},
+                        }}), flush=True)
                 if os.environ.get("CORTEX_TEST_RAW_CUSTOM_TOOL") == "1":
                     print(json.dumps({"method": "rawResponseItem/completed", "params": {
-                        "threadId": "thread-fixture", "item": {
+                        "threadId": thread_id, "item": {
                             "type": "custom_tool_call", "call_id": "exec-call-1",
                             "name": "exec", "input": {"cmd": "python3 tests/check_focus_render.py", "workdir": os.getcwd()},
                         },
                     }}), flush=True)
                     print(json.dumps({"method": "rawResponseItem/completed", "params": {
-                        "threadId": "thread-fixture", "item": {
+                        "threadId": thread_id, "item": {
                             "type": "custom_tool_call_output", "call_id": "exec-call-1",
                             "output": {"stdout": "ok", "exit_code": 0},
                         },
@@ -75,14 +87,14 @@ with open(os.environ["CORTEX_APP_SERVER_TRACE"], "w", encoding="utf-8") as trace
                 if os.environ.get("CORTEX_TEST_ITEM_CUSTOM_TOOL") == "1":
                     item_call_id = "exec-call-1" if os.environ.get("CORTEX_TEST_DUPLICATE_CUSTOM_TOOL") == "1" else "item-call-1"
                     print(json.dumps({"method": "item/started", "params": {
-                        "threadId": "thread-fixture", "item": {
+                        "threadId": thread_id, "item": {
                             "type": "custom_tool_call", "id": item_call_id,
                             "call_id": item_call_id, "name": "exec",
                             "input": {"cmd": "python3 tests/check_focus_render.py", "workdir": os.getcwd()},
                         },
                     }}), flush=True)
                     print(json.dumps({"method": "item/completed", "params": {
-                        "threadId": "thread-fixture", "item": {
+                        "threadId": thread_id, "item": {
                             "type": "custom_tool_call", "id": item_call_id,
                             "call_id": item_call_id, "name": "exec",
                             "status": os.environ.get("CORTEX_TEST_ITEM_CUSTOM_TOOL_STATUS", "completed"), "output": {"stdout": "ok", "exit_code": 0},
@@ -97,21 +109,21 @@ with open(os.environ["CORTEX_APP_SERVER_TRACE"], "w", encoding="utf-8") as trace
                                    "output": {"stdout": "rich output", "exit_code": 0}}
                     if lifecycle == "reversed":
                         for item in (output_item, start_item):
-                            print(json.dumps({"method": "rawResponseItem/completed", "params": {"item": item}}), flush=True)
+                            print(json.dumps({"method": "rawResponseItem/completed", "params": {"threadId": thread_id, "item": item}}), flush=True)
                     elif lifecycle == "richer":
                         start_item["status"] = "completed"
-                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"item": start_item}}), flush=True)
-                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"item": output_item}}), flush=True)
+                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"threadId": thread_id, "item": start_item}}), flush=True)
+                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"threadId": thread_id, "item": output_item}}), flush=True)
                     elif lifecycle == "rich_then_empty":
-                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"item": start_item}}), flush=True)
-                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"item": output_item}}), flush=True)
-                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"item": {"type": "custom_tool_call_output", "id": call_id, "call_id": call_id}}}), flush=True)
+                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"threadId": thread_id, "item": start_item}}), flush=True)
+                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"threadId": thread_id, "item": output_item}}), flush=True)
+                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"threadId": thread_id, "item": {"type": "custom_tool_call_output", "id": call_id, "call_id": call_id}}}), flush=True)
                     else:
-                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"item": start_item}}), flush=True)
-                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"item": output_item}}), flush=True)
+                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"threadId": thread_id, "item": start_item}}), flush=True)
+                        print(json.dumps({"method": "rawResponseItem/completed", "params": {"threadId": thread_id, "item": output_item}}), flush=True)
                 print(json.dumps({"method": "turn/completed", "params": {
-                    "threadId": "thread-fixture",
-                    "turn": {"id": "turn-fixture", "status": "completed", "items": []},
+                    "threadId": thread_id,
+                    "turn": {"id": turn_id, "status": "completed", "items": []},
                 }}), flush=True)
 '''
 
@@ -247,7 +259,7 @@ def test_installed_private_adapter_forwards_and_preserves_native_developer_instr
     )
     environ = isolated_environ(tmp_path)
     copied = Path(_prepare_codex_manual_review_adapter(install, new_connection_id(), environ))
-    assert _CODEX_AGENT_REVIEWER_MANUAL in copied.read_bytes()
+    assert (_CODEX_AGENT_REVIEWER_2_MANUAL if version == "2.0.1" else _CODEX_AGENT_REVIEWER_MANUAL) in copied.read_bytes()
     assert _CODEX_NEW_SESSION_PATCHED in copied.read_bytes()
     assert _CODEX_SESSION_CONFIG_PATCHED in copied.read_bytes()
     adapter_text = copied.read_bytes()
@@ -358,7 +370,7 @@ def test_installed_private_adapter_forwards_raw_custom_exec_tool_with_exact_call
     fake_binary.chmod(0o700)
     trace = tmp_path / "app-server-trace.jsonl"
     process_env = dict(environ, CODEX_PATH=str(fake_binary), CORTEX_APP_SERVER_TRACE=str(trace),
-                       CORTEX_TEST_RAW_CUSTOM_TOOL="1", NO_BROWSER="1",
+                       CORTEX_TEST_RAW_CUSTOM_TOOL="1", CORTEX_TEST_COMPACTION="1", NO_BROWSER="1",
                        CODEX_CONFIG=json.dumps({"model_reasoning_effort": "medium"}))
     node_binary = shutil.which("node")
     assert node_binary is not None
@@ -384,6 +396,9 @@ def test_installed_private_adapter_forwards_raw_custom_exec_tool_with_exact_call
         assert "error" not in _read_response(proc, 3, seen)
         updates = [value.get("params", {}).get("update", {}) for value in seen if value.get("method") == "session/update"]
         custom = [update for update in updates if update.get("toolCallId") == "exec-call-1"]
+        compactions = [update for update in updates if update.get("toolCallId") == "compact-fixture"]
+        assert compactions and any(update.get("status") == "completed" for update in compactions)
+        assert all(isinstance(update.get("_meta", {}).get("contextCompaction"), dict) for update in compactions)
         assert [update.get("sessionUpdate") for update in custom] == ["tool_call", "tool_call_update"]
         assert custom[0]["kind"] == "execute"
         assert custom[0]["title"] == "python3 tests/check_focus_render.py"
@@ -598,7 +613,8 @@ def test_installed_private_adapter_resets_custom_tool_ids_each_turn(tmp_path):
             assert "error" not in _read_response(proc, request_id, seen)
         updates = [value.get("params", {}).get("update", {}) for value in seen if value.get("method") == "session/update"]
         custom = [update for update in updates if update.get("toolCallId") == "lifecycle-call-1"]
-        assert [update.get("sessionUpdate") for update in custom] == ["tool_call", "tool_call_update", "tool_call", "tool_call_update", "tool_call", "tool_call_update"]
+        # Exactly two requested turns, each with its own non-replayed turn ID.
+        assert [update.get("sessionUpdate") for update in custom] == ["tool_call", "tool_call_update", "tool_call", "tool_call_update"]
     finally:
         proc.terminate()
         try:

@@ -111,11 +111,11 @@ def _read_catalog_from_engine(record, workspace_root, *, environ=None, timeout: 
     try:
         initialized = client.call("initialize", dict(protocolVersion=1, clientCapabilities={}), timeout=timeout)
         if record.engine == "opencode":
-            from ..engine.opencode_install import qualified_versions
+            from ..connections.discovery import is_qualified
 
             info = initialized.get("agentInfo") if isinstance(initialized, dict) else None
-            if not isinstance(info, dict) or info.get("version") not in qualified_versions():
-                raise RuntimeError("opencode_version_unqualified")
+            if not isinstance(info, dict) or not is_qualified("opencode", info.get("version")):
+                raise RuntimeError("opencode_version_unqualified: expected OpenCode 2.x.x")
         result = client.call("session/new", dict(cwd=workspace_root, mcpServers=[]), timeout=timeout)
         options = result.get("configOptions") if isinstance(result, dict) else None
         if record.engine in ('claude-agent-acp', 'opencode') and options:
@@ -191,6 +191,14 @@ def _codex_effort_ceiling(record, install, environ, timeout):
         return None
 
 
+def _opencode_cortex_mode_advertised(observation) -> bool:
+    """Models alone cannot establish that Cortex's required agent is usable."""
+    from ..engine.opencode_adapter_acp import AGENT
+
+    mode = next((option for option in observation.options if option.id == "mode"), None)
+    return mode is not None and mode.type == "select" and AGENT in dict(mode.select_options)
+
+
 def perform_refresh(
     record, workspace_root, *, environ=None, timeout: float = DEFAULT_REFRESH_TIMEOUT_SECONDS, install=None,
 ) -> RefreshOutcome:
@@ -232,6 +240,8 @@ def perform_refresh(
         return RefreshOutcome(record.id, True, False, f"invalid_observation:{error.code}", None, at)
     if not observation.model_options():
         return RefreshOutcome(record.id, True, False, "no_model_options_advertised", None, at)
+    if record.engine == "opencode" and not _opencode_cortex_mode_advertised(observation):
+        return RefreshOutcome(record.id, True, False, "opencode_cortex_mode_not_advertised", None, at)
     ceiling = _codex_effort_ceiling(record, install, environ, timeout)
     effort_enrichment = None
     if record.engine == "codex-acp":

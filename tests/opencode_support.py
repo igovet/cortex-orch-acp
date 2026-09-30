@@ -34,6 +34,9 @@ class FakeProvider:
         self.router = router
         self.requests: list[dict] = []
         self.agent_requests: list[dict] = []
+        # The Authorization header of each request, in order: which
+        # credential OpenCode actually sent.
+        self.authorizations: list[str | None] = []
         self._lock = threading.Lock()
         self._release = threading.Event()
         provider = self
@@ -47,6 +50,7 @@ class FakeProvider:
                 self.end_headers()
 
             def do_POST(self):
+                provider.authorizations.append(self.headers.get("Authorization"))
                 length = int(self.headers.get("Content-Length", "0"))
                 try:
                     body = json.loads(self.rfile.read(length) or b"{}")
@@ -292,3 +296,63 @@ def option_values(config_options, option_id) -> list:
         if option.get("id") == option_id:
             return [choice.get("value") for choice in option.get("options") or []]
     return []
+
+
+def bootstrap_login_database(binary, data_dir, scratch, logins, timeout=60.0):
+    """The owner's OpenCode data directory as OpenCode itself creates it --
+    its database schema and cached models.dev catalog, from one prompt-free
+    ``session/new`` in a disposable HOME -- plus stand-in API-key logins
+    (``{provider: key}``) in its ``credential`` table. No model is called."""
+    import os
+    import select
+    import sqlite3
+    from pathlib import Path
+
+    data_dir, scratch = Path(data_dir), Path(scratch)
+    home, work = scratch / "bootstrap-home", scratch / "bootstrap-work"
+    for directory in (home, work, data_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
+           "XDG_DATA_HOME": str(data_dir.parent), "XDG_STATE_HOME": str(home / ".state"),
+           "XDG_CACHE_HOME": str(home / ".cache"), "OPENCODE_DISABLE_AUTOUPDATE": "1"}
+    process = subprocess.Popen([str(binary), "acp"], cwd=work, env=env, stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    answered = False
+    try:
+        for index, (method, params) in enumerate((("initialize", {"protocolVersion": 1, "clientCapabilities": {}}),
+                                                  ("session/new", {"cwd": str(work), "mcpServers": []}))):
+            process.stdin.write((json.dumps({"jsonrpc": "2.0", "id": index, "method": method,
+                                             "params": params}) + "\n").encode())
+            process.stdin.flush()
+            deadline = time.monotonic() + timeout
+            answered = False
+            while not answered and time.monotonic() < deadline:
+                if not select.select([process.stdout], [], [], 0.5)[0]:
+                    continue
+                line = process.stdout.readline()
+                if not line:
+                    break
+                try:
+                    answered = json.loads(line).get("id") == index
+                except ValueError:
+                    continue
+            if not answered:
+                break
+    finally:
+        process.terminate()
+        try:
+            process.wait(10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(10)
+    database = data_dir / "opencode.db"
+    if not answered or not database.is_file():
+        raise RuntimeError("OpenCode did not create its data directory")
+    with sqlite3.connect(database) as db:
+        for index, (provider, key) in enumerate(sorted(logins.items())):
+            db.execute("INSERT INTO credential (id, integration_id, label, value, active, time_created, time_updated) "
+                       "VALUES (?, ?, 'API key', ?, NULL, 1, 1)",
+                       (f"cred_0standin{index:017d}", provider, json.dumps({"type": "key", "key": key})))
+    db.close()
+    os.chmod(data_dir, 0o700)
+    return database

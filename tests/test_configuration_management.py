@@ -390,7 +390,7 @@ def test_connections_view_never_exposes_credential_values_or_paths(home):
     assert item["credential"] == {"kind": "secret_file"} and item["state"] == "configured"
     engines = {entry["engine"]: entry for entry in view["engines"]}
     assert engines["opencode"]["optional"] is True and engines["opencode"]["onboarding"] == "explicit_opt_in"
-    assert engines["opencode"]["qualified_versions"] == ["2.0.19"] and engines["opencode"]["connection_ids"] == []
+    assert engines["opencode"]["qualified_versions"] == ["2.x.x"] and engines["opencode"]["connection_ids"] == []
     assert engines["codex-acp"]["connection_ids"] == [record.id]
 
 
@@ -441,8 +441,9 @@ def _fake_opencode(monkeypatch, home, version="2.0.19"):
     return binary, calls
 
 
-def test_opencode_is_onboarded_only_on_explicit_opt_in_and_never_activated(home, monkeypatch):
-    binary, calls = _fake_opencode(monkeypatch, home)
+@pytest.mark.parametrize("version", ["2.0.19", "2.0.20", "2.7.3"])
+def test_opencode_is_onboarded_only_on_explicit_opt_in_and_never_activated(home, monkeypatch, version):
+    binary, calls = _fake_opencode(monkeypatch, home, version=version)
     seen = management.read_connections()
     with pytest.raises(PortableError) as caught:
         management.onboard_opencode(seen["revision"], explicit_opt_in=False)
@@ -455,7 +456,7 @@ def test_opencode_is_onboarded_only_on_explicit_opt_in_and_never_activated(home,
     assert result["connection"]["engine"] == "opencode"
     assert result["connection"]["launch_command"] == [str(binary), "acp"]
     assert result["connection"]["credential"] == {"kind": "engine_native_dir", "owned": False}
-    assert result["opencode"] == {"version": "2.0.19", "next_action": "opencode_auth_login",
+    assert result["opencode"] == {"version": version, "next_action": "opencode_auth_login",
                                   "automatic_routing": "excluded_until_routing_opts_in"}
     assert calls == [str(binary)]
     assert not (home.config / "routing.json").exists()
@@ -466,8 +467,9 @@ def test_opencode_is_onboarded_only_on_explicit_opt_in_and_never_activated(home,
     assert found["found"] and found["qualified"] and found["onboarded_connection_ids"] == [result["connection"]["id"]]
 
 
-def test_opencode_unqualified_version_is_refused_without_registering(home, monkeypatch):
-    binary, _ = _fake_opencode(monkeypatch, home, version="2.0.20")
+@pytest.mark.parametrize("version", ["1.99.99", "3.0.0"])
+def test_opencode_unqualified_version_is_refused_without_registering(home, monkeypatch, version):
+    binary, _ = _fake_opencode(monkeypatch, home, version=version)
     seen = management.read_connections()
     response = management.execute({"action": "onboard_opencode", "surface": "connections",
                                    "expected_revision": seen["revision"], "explicit_opt_in": True})
@@ -735,3 +737,18 @@ def test_route_catalog_reports_selection_tier_source_and_policy(home, monkeypatc
             engines["codex-acp"]["unmatched_selected"]) == ("listed", ["gpt-5.6-luna", "gpt-9-missing"], ["gpt-9-missing"])
     assert (engines["claude-agent-acp"]["selection"], engines["claude-agent-acp"]["selected_models"],
             engines["claude-agent-acp"]["unmatched_selected"]) == ("builtin", None, [])
+
+
+def test_opencode_acp_observation_exposes_byteplus_only_when_offered(home, monkeypatch):
+    _codex, _claude, opencode = _catalog_fixture(home, monkeypatch)
+    target = "byteplus-plan/glm-5.3-flash"
+    management.update_routing("user", "absent", {"models": {"opencode": {"auto": [target]}}})
+    before = management.read_route_catalog()
+    assert "opencode/" + target not in _routes(before)
+    assert _engines(before)["opencode"]["unmatched_selected"] == [target]
+    _observe(opencode, [(target, "GLM 5.3 Flash")])
+    after = management.read_route_catalog()
+    offered = _routes(after)["opencode/" + target]
+    assert offered["observed"] and offered["in_selector"] and offered["automatic"] == "eligible"
+    assert offered["auto_selected"] is True
+    assert _engines(after)["opencode"]["unmatched_selected"] == []

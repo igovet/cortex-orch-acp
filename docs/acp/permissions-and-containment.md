@@ -38,7 +38,8 @@ engine environment and each `command_run` also receive the display session and
 ssh prompts then appear on the owner's desktop and the answers bypass the model.
 See [SECURITY.md](../../SECURITY.md#optional-ssh-password-dialog).
 
-The supported Codex CLI is 0.155.1 with codex-acp 1.12.0. A verified private
+The current supported Codex CLI is 0.159.1 with codex-acp 2.0.1;
+codex-acp 1.12.0 and 1.13.0 remain supported. A verified private
 adapter and per-process launcher disable native agents, multi-agent, plugin,
 hook and app features and each inherited MCP server; only session-specific
 brokered servers are re-enabled. Every turn runs with `dangerFullAccess`
@@ -55,7 +56,7 @@ in place of Claude Code's preset, with `skills: []` and attribution and git
 instructions switched off. Every role receives the same options; roles differ
 only in their jail scopes.
 
-The optional OpenCode 2.0.19 engine runs in the same jail with three additions
+The optional OpenCode v2 engine runs in the same jail with three additions
 (`engine_jail(isolate_processes=, masked=, data_files=)`):
 
 - its own user, PID and IPC namespaces, so no sibling jail can read its
@@ -64,7 +65,17 @@ The optional OpenCode 2.0.19 engine runs in the same jail with three additions
 - its role prompt mounted read-only from memory.
 
 Cortex supplies its whole configuration: one `cortex` agent with
-`"*": "ask"` and subagents, questions and skills denied. Project configuration
+`"*": "ask"` and subagents, questions and skills denied, and OpenCode's built-in
+`opencode.agent`/`opencode.plan` plugins removed (no plugin is loaded). From the hidden owner
+configuration it carries only provider definitions and the provider on/off
+lists, with configured credentials mounted read-only from memory rather than
+placed in the environment. OpenCode opens its native `opencode.db` in place;
+Cortex neither extracts database logins nor selects an alternate database.
+The native database remains writable for OpenCode session state. With no
+built-in primary agent, the installed 2.0.20 ACP catalog waits for `cortex`;
+an observation without `cortex` is still rejected, never used to run a
+`build`/`plan` turn.
+Project configuration
 and auto-update are off, and the data directory's `bin` is read-only. MCP tools,
 including the Cortex gateway, are reached through its `execute` (Code Mode)
 tool: one permission request per `execute` call, with each Cortex MCP call still

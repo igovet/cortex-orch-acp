@@ -44,10 +44,11 @@
    ``OPENAI_API_KEY``, ``CODEX_CONFIG``, ``MODEL_PROVIDER``,
    ``DEFAULT_AUTH_REQUEST``, ``INITIAL_AGENT_MODE``, or ``APP_SERVER_LOGS``.
    The one other engine that may use it is ``opencode``, and only with
-   exactly ``{"OPENCODE_CONFIG_CONTENT", "OPENCODE_DISABLE_PROJECT_CONFIG",
-   "OPENCODE_DISABLE_AUTOUPDATE"}``: the Cortex-built process configuration
-   (a JSON object, see ``engine.opencode_adapter_acp.build_opencode_config``)
-   and the two switches, each exactly ``"1"``.
+   exactly ``{"OPENCODE_CONFIG_CONTENT",
+   "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_DISABLE_AUTOUPDATE"}``: the
+   Cortex-built process configuration (a JSON object, see
+   ``engine.opencode_adapter_acp.build_opencode_config``) and the two
+   switches, each exactly ``"1"``. No database override is accepted.
 7. For ``opencode`` the isolation variable is ``XDG_DATA_HOME``, set to the
    *parent* of the connection's credential directory (OpenCode keeps its
    state in ``$XDG_DATA_HOME/opencode``); a credential directory not named
@@ -160,7 +161,9 @@ def _validate_channel_credentials(channel_credentials: tuple[str, str, str]) -> 
 
 _PINNED_ENGINE_VAR_NAMES = {"CODEX_PATH", "NO_BROWSER"}
 _PINNED_ENGINE_VAR_ENGINE = "codex-acp"
-_OPENCODE_PINNED_VAR_NAMES = {"OPENCODE_CONFIG_CONTENT", "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_DISABLE_AUTOUPDATE"}
+_OPENCODE_PINNED_VAR_NAMES = {
+    "OPENCODE_CONFIG_CONTENT", "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_DISABLE_AUTOUPDATE",
+}
 
 
 def _apply_opencode_pinned_vars(result: dict[str, str], pinned_engine_vars) -> None:

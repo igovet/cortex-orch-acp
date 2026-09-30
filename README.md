@@ -65,13 +65,21 @@ Purpose preferences use the same ten work kinds as engine affinity and are
 read from configuration, not prompt text. See
 [user routing profiles](docs/configuration.md#user-routing-profiles).
 
-OpenCode v2 (`opencode acp`, exactly version 2.0.19) is an optional third engine.
+The current Codex adapter is codex-acp 2.0.1 with Codex CLI 0.159.1, whose observed offline catalog includes `gpt-6.1-sol`. The installed Claude adapter is claude-agent-acp 0.84.0. Codex 1.12.0 and 1.13.0 remain supported fallbacks; later Codex adapters still need explicit compatibility support. This one-time update does not change the existing background installer. See [adapter compatibility](docs/acp/codex-acp-adapter.md).
+
+OpenCode v2 (`opencode acp`, any `2.x.x` release) is an optional third engine.
+It uses your native OpenCode logins and your configured custom providers
+together, with Cortex's own `cortex` agent; no alternate database or extracted
+login is used. Cortex removes OpenCode's built-in `build`/`plan` agent plugins so
+that ACP offers `cortex`; see [native logins](docs/acp/opencode-adapter.md#native-logins-and-the-2020-catalog-snapshot).
 It is never discovered at startup and runs only after the explicit
 `python3 -B scripts/cortex_acp_setup.py add-opencode-connection` step. Automatic
 worker routing skips it unless `routing.json` opts in. It runs only inside the
 engine jail, in its own user/PID/IPC namespaces, with Cortex's own configuration
 (one `cortex` agent that asks permission for every native tool) and the Cortex
-gateway reached through its `execute` tool. The
+gateway reached through its `execute` tool. Catalog refresh refuses observations
+without the required `cortex` mode and preserves the previous snapshot. Imported
+provider substitutions stay in read-only jail files, not process environment values. The
 [OpenCode adapter page](docs/acp/opencode-adapter.md) lists what works, what
 does not, and the no-paid evidence; no paid or live OpenCode run was made.
 

@@ -379,6 +379,35 @@ def test_private_codex_adapter_rejects_missing_session_config_guard(tmp_path):
     assert excinfo.value.code == "codex_manual_review_adapter_unsupported"
 
 
+@pytest.mark.parametrize("site", ["history", "compaction", "helpers"])
+@pytest.mark.parametrize("mutation", ["missing", "duplicated"])
+def test_private_codex_2_adapter_rejects_changed_reporter_sites(tmp_path, site, mutation):
+    from types import SimpleNamespace
+    from cortex_runtime.engine.process import (
+        _CODEX_AGENT_REVIEWER_2_SOURCE, _CODEX_SEND_PROMPT_BY_VERSION,
+        _CODEX_HISTORY_2_SOURCE, _CODEX_COMPACTION_2_SOURCE, _CODEX_HELPERS_2_SOURCE,
+    )
+
+    source = _pinned_bundle().replace(_CODEX_AGENT_REVIEWER_SOURCE, _CODEX_AGENT_REVIEWER_2_SOURCE)
+    source = source.replace(_CODEX_SEND_PROMPT_SOURCE, _CODEX_SEND_PROMPT_BY_VERSION["2.0.1"][0])
+    sites = {"history": _CODEX_HISTORY_2_SOURCE, "compaction": _CODEX_COMPACTION_2_SOURCE,
+             "helpers": _CODEX_HELPERS_2_SOURCE}
+    source += b"\n" + b"\n".join(sites.values())
+    source = source.replace(sites[site], b"") if mutation == "missing" else source + b"\n" + sites[site]
+    package = tmp_path / "install/node_modules/@agentclientprotocol/codex-acp"
+    (package / "dist").mkdir(parents=True)
+    original = package / "dist/index.js"
+    original.write_bytes(source)
+    package_json = package / "package.json"
+    package_json.write_text('{"version":"2.0.1","type":"module"}')
+    install = SimpleNamespace(package_version="2.0.1", adapter_entry=str(original),
+                              adapter_entry_sha256=hashlib.sha256(source).hexdigest(),
+                              package_json=str(package_json))
+    with pytest.raises(PortableError) as excinfo:
+        _prepare_codex_manual_review_adapter(install, new_connection_id(), isolated_environ(tmp_path))
+    assert excinfo.value.code == "codex_manual_review_adapter_unsupported"
+
+
 def test_build_codex_launch_rejects_non_codex_engine(tmp_path):
     scenario = dict(agent_capabilities={}, session_id="sess-1", config_options=[])
     install = _make_install(tmp_path, scenario)

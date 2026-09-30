@@ -66,7 +66,15 @@ model provider. They skip unless their variable names the binary:
 
 - **Codex.** `CORTEX_PINNED_CODEX_BINARY=<codex binary>` enables
   `tests/test_engine_native_gateway.py`.
-- **OpenCode.** `CORTEX_PINNED_OPENCODE_BINARY=<opencode 2.0.19 binary>`
+  `CORTEX_CODEX_ACP_TEST_PACKAGE=<installed codex-acp package directory>`
+  enables `tests/test_codex_developer_instructions.py`, which uses a fake
+  App Server and sends no paid model request. On 2026-09-30 its 13 tests
+  passed against 2.0.1 and the retained 1.13.0; the installed Codex CLI
+  0.159.1 wrapper/jail checks also passed. A separate prompt-free dev catalog
+  refresh observed `gpt-6.1-sol` on 2.0.1 and refreshed Claude 0.84.0.
+  This does not qualify paid turns, retained raw custom-tool history or
+  rendered client behavior (`paid live check not requested by the owner`).
+- **OpenCode.** `CORTEX_PINNED_OPENCODE_BINARY=<opencode 2.x.x binary>`
   enables `tests/test_engine_opencode_qualification.py`. It runs the binary
   through `EngineSessionManager`, the engine jail with process isolation, the
   brokered Cortex MCP server and the permission bridge, in a disposable HOME

@@ -137,8 +137,9 @@ SUPPORT_MATRIX: dict[str, dict[AuthMode, _AuthSupport]] = {
             qualified=True,
             qualification="observed_no_paid",
             key_kinds=None,
-            basis=("OBSERVED: opencode 2.0.19 initialize authMethods [opencode-login] "
-                   "(`opencode auth login` in a terminal); no-paid ACP probes only"),
+            basis=("OBSERVED on opencode 2.0.19: initialize authMethods [opencode-login] "
+                   "(`opencode auth login` in a terminal); no-paid ACP probes only; "
+                   "2.x releases accepted by version policy"),
         ),
     },
 }

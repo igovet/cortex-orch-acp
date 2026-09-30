@@ -244,7 +244,7 @@ function fixtures() {
       }],
       engines: [
         { engine: "codex-acp", optional: false, onboarding: "native", auth_modes: { native: true }, qualified_versions: ["1.13.0"], connection_ids: ["cn_0123456789ab"] },
-        { engine: "opencode", optional: true, onboarding: "explicit_opt_in", auth_modes: {}, qualified_versions: ["2.0.19"], connection_ids: [] },
+        { engine: "opencode", optional: true, onboarding: "explicit_opt_in", auth_modes: {}, qualified_versions: ["2.x.x"], connection_ids: [] },
       ],
       operations: ["rename", "set_max_concurrent_sessions", "validate", "remove"], max_concurrent_sessions_limit: 8,
     },
@@ -274,7 +274,7 @@ async function openScreen() {
       return reply ?? { ok: true, binding, result: data[input.surface as string] };
     },
     "cortex.config.opencode.discover": async () => ({
-      ok: true, binding, result: { found: true, version: "2.0.19", qualified: true, qualified_versions: ["2.0.19"], onboarded_connection_ids: [] },
+      ok: true, binding, result: { found: true, version: "2.0.20", qualified: true, qualified_versions: ["2.x.x"], onboarded_connection_ids: [] },
     }),
     "cortex.config.opencode.onboard": async (input) => {
       onboards.push(input);
@@ -508,6 +508,7 @@ test("connections: numeric session limits are validated; OpenCode v2 needs an ex
   }]);
 
   await screen.press("Check for OpenCode");
+  assert.ok(screen.texts().some((text) => text.includes("Found version 2.0.20") && text.includes("supported versions: 2.x.x")));
   assert.equal((screen.find("Enable OpenCode v2", "Pressable").props.accessibilityState as { disabled: boolean }).disabled, true);
   await screen.toggle("I want to enable OpenCode v2 for this owner", true);
   await screen.press("Enable OpenCode v2");

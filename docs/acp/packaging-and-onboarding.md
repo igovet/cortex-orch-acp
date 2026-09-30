@@ -73,8 +73,9 @@ current reference.
   (`cortex_runtime.portable.version.CONTRACT_VERSION`);
 - the vendored ACP schema fixture's pinned sha256
   (`tests/fixtures/acp/schema-1.4.0.json`);
-- each supported engine adapter's pinned package version (codex-acp
-  1.12.0, claude-agent-acp 0.78.0 — see
+- each supported engine adapter's pinned compatibility basis (codex-acp
+  2.0.1 with Codex CLI 0.159.1; Claude's instruction-channel basis remains
+  0.78.0 while the installed current adapter is 0.84.0 — see
   [codex-acp-adapter.md](codex-acp-adapter.md) and
   [claude-agent-acp-adapter.md](claude-agent-acp-adapter.md) for the
   verified-digest install-record mechanism those pinned versions rely on).
@@ -133,7 +134,7 @@ python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
 - **`add-opencode-connection [--binary PATH]`** onboards the optional
   OpenCode v2 engine, which is never discovered at startup. It finds a
   trusted `opencode` binary and reads its version in a network-less sandbox,
-  refusing any version but `2.0.19`. It then registers a connection that
+  refusing versions outside `2.x.x`. It then registers a connection that
   references the owner's own `~/.local/share/opencode` login (never copied)
   and prints the next step: `opencode auth login`, `chmod 700` of that
   directory, or `refresh-catalog`. See the

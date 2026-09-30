@@ -724,11 +724,12 @@ class EngineSessionManager:
         version -- the binary may have changed since its install was checked.
         Nothing is created on an unqualified engine; the caller releases it."""
         from .opencode_install import qualified_versions
+        from ..connections.discovery import is_qualified
 
         info = initialize_result.get("agentInfo") if isinstance(initialize_result, dict) else None
         version = info.get("version") if isinstance(info, dict) else None
         self._process.logs.observe("engine_agent_version", version=version if isinstance(version, str) else None)
-        if version not in qualified_versions():
+        if not is_qualified("opencode", version):
             self._agent_capabilities = {}
             raise _fail(
                 "opencode_version_unqualified",

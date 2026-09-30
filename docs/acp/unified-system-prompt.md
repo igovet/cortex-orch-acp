@@ -190,7 +190,7 @@ Claude's `managedSettings` layer drops `attribution`; it works only through the
 `settings` layer. See the [Codex adapter](codex-acp-adapter.md) for the private
 adapter fields.
 
-The optional OpenCode 2.0.19 engine ignores `session/new` `_meta.systemPrompt`.
+The tested OpenCode 2.0.19 build ignores `session/new` `_meta.systemPrompt`; Cortex uses its launch-time agent prompt for all supported 2.x releases.
 Its whole prompt is the prompt of the `cortex` agent Cortex configures at process
 launch, a read-only file mounted into the jail. In order, it holds:
 

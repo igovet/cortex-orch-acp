@@ -145,13 +145,10 @@ _AUTOMATIC_LIMITATION = (
 _TIER_REGISTRY: dict[tuple[str, str], CompactionTier] = {
     ("codex-acp", "1.12.0"): CompactionTier("codex-acp", "1.12.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("codex-acp", "1.13.0"): CompactionTier("codex-acp", "1.13.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
+    ("codex-acp", "2.0.1"): CompactionTier("codex-acp", "2.0.1", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("claude-agent-acp", "0.78.0"): CompactionTier("claude-agent-acp", "0.78.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("claude-agent-acp", "0.77.0"): CompactionTier("claude-agent-acp", "0.77.0", AUTOMATIC, _AUTOMATIC_LIMITATION),
     ("claude-agent-acp", "*"): CompactionTier("claude-agent-acp", "*", AUTOMATIC, _AUTOMATIC_LIMITATION),
-    # OpenCode 2.0.19 documents a /compact command and advertises only the
-    # init/review commands over ACP; no compaction signal was observed in
-    # the no-paid probes, so Cortex claims no more than its own boundaries.
-    ("opencode", "2.0.19"): CompactionTier("opencode", "2.0.19", CONTROLLED_BOUNDARY, _CONTROLLED_BOUNDARY_LIMITATION),
 }
 
 
@@ -167,6 +164,13 @@ def tier_for(engine: str, version: str) -> CompactionTier:
     exact = _TIER_REGISTRY.get((engine, version))
     if exact is not None:
         return exact
+    if engine == "opencode":
+        from ..connections.discovery import is_qualified
+
+        if is_qualified(engine, version):
+            # No ACP compaction signal was observed on the tested 2.0.19;
+            # never infer automatic compaction for another 2.x release.
+            return CompactionTier(engine, version, CONTROLLED_BOUNDARY, _CONTROLLED_BOUNDARY_LIMITATION)
     wildcard = _TIER_REGISTRY.get((engine, "*"))
     if wildcard is not None:
         return wildcard

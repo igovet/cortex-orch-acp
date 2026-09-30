@@ -33,7 +33,10 @@ class CodexAcpDelivery:
     developer instructions after Codex internal compaction has not yet been
     observed in a real client and remains unverified.
 
-    Registered for 1.12.0 and 1.13.0. Both are verified against the same
+    Registered for 1.12.0, 1.13.0 and 2.0.1. All use the source-checked
+    session/new to thread/start channel. 2.0.1 has separate typed-reporter
+    patches and passes the installed-bundle no-paid trace. The 1.x pair is
+    verified against the same
     delivery mechanism: the ``session/new``/``thread/start`` call sites the
     private adapter patch rewrites are byte-identical in the two bundles
     (see ``engine.process._CODEX_SEND_PROMPT_BY_VERSION``, whose only
@@ -186,8 +189,9 @@ class ClaudeAgentAcpUnrecognizedVersionDelivery:
 
 @dataclass(frozen=True)
 class OpenCodeAgentPromptDelivery:
-    """OpenCode 2.0.19: the role text is the prompt of the ``cortex`` agent
-    the process is started with -- QUALIFIED on observed evidence.
+    """OpenCode v2: the role text is the prompt of the ``cortex`` agent
+    the process is started with. The channel was observed on 2.0.19;
+    version policy now accepts any 2.x release.
 
     2.0.19 ignores ``session/new`` ``_meta.systemPrompt`` (a marker sent there
     never reached the model), and has no other per-session instruction
@@ -204,7 +208,7 @@ class OpenCodeAgentPromptDelivery:
     """
 
     engine: str = "opencode"
-    version: str = "2.0.19"
+    version: str = "2.0.0"
 
     def plan(self, role: RoleInstructionSet, user_blocks: list) -> DeliveryPlan:
         return DeliveryPlan(
@@ -217,29 +221,32 @@ class OpenCodeAgentPromptDelivery:
         )
 
 
-# Registry keyed by (engine, version). An unknown engine or an unknown
-# version of a known engine resolves to UnsupportedDelivery -- never a
-# guessed/interpolated qualification.
+# Exact registrations for the npm adapters. OpenCode uses the supported
+# major range in delivery_for rather than a patch-specific entry.
 _REGISTRY: dict[tuple[str, str], InstructionDelivery] = {
     ("codex-acp", "1.12.0"): CodexAcpDelivery(version="1.12.0"),
     ("codex-acp", "1.13.0"): CodexAcpDelivery(version="1.13.0"),
+    ("codex-acp", "2.0.1"): CodexAcpDelivery(version="2.0.1"),
     ("claude-agent-acp", "0.78.0"): ClaudeAgentAcp0_78Delivery(),
     ("claude-agent-acp", "*"): ClaudeAgentAcpUnrecognizedVersionDelivery(),
-    ("opencode", "2.0.19"): OpenCodeAgentPromptDelivery(),
 }
 
 
 def has_exact_registration(engine: str, version: str) -> bool:
-    """True iff ``(engine, version)`` has its own registration here -- not
-    merely the engine's ``"*"`` wildcard, which for an unrecognised version
-    is UNSUPPORTED."""
+    """True for an exact npm registration or a supported OpenCode v2
+    version. Wildcards do not count as qualified registrations."""
+    if engine == "opencode":
+        from ..connections.discovery import is_qualified
+
+        return is_qualified(engine, version)
     return (engine, version) in _REGISTRY
 
 
 def delivery_for(engine: str, version: str) -> InstructionDelivery:
     """Look up the delivery mechanism for an exact engine+version.
 
-    Falls back, in order: exact (engine, version); (engine, "*") wildcard
+    OpenCode v2 is selected by major range. Otherwise falls back in order:
+    exact (engine, version); (engine, "*") wildcard
     registration (used for any claude-agent-acp version other than the
     pinned 0.78.0, which has no version-specific evidence of its own);
     otherwise :class:`UnsupportedDelivery`.
@@ -263,6 +270,11 @@ def delivery_for(engine: str, version: str) -> InstructionDelivery:
     exact = _REGISTRY.get((engine, version))
     if exact is not None:
         return exact
+    if engine == "opencode":
+        from ..connections.discovery import is_qualified
+
+        if is_qualified(engine, version):
+            return OpenCodeAgentPromptDelivery(version=version)
     wildcard = _REGISTRY.get((engine, "*"))
     if wildcard is not None:
         return wildcard

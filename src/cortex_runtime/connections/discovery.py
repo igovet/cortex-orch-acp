@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 
 # Registry package name -> engine id this project has an adapter for.
@@ -45,7 +46,7 @@ _NATIVE_CREDENTIAL_SUBDIR = {
 
 SUPPORTED_ENGINES: tuple[str, ...] = tuple(_PACKAGE_NAME)
 
-# The adapter versions Cortex has actually qualified for launch. codex-acp
+# The adapter versions Cortex accepts for launch. codex-acp
 # is byte-verified twice over -- ``engine.process
 # ._prepare_codex_manual_review_adapter`` patches one exact bundle shape,
 # and ``engine.instruction_delivery_registry`` qualifies one exact version
@@ -59,22 +60,23 @@ SUPPORTED_ENGINES: tuple[str, ...] = tuple(_PACKAGE_NAME)
 # 2026-09-22). ``claude-agent-acp`` has a version-independent delivery
 # registration and no byte-level patch, so any installed version launches.
 QUALIFIED_ADAPTER_VERSIONS: dict[str, tuple[str, ...] | None] = {
-    "codex-acp": ("1.12.0", "1.13.0"),
+    "codex-acp": ("1.12.0", "1.13.0", "2.0.1"),
     "claude-agent-acp": None,
-    # OpenCode's configuration keys, tool names, permission requests and
-    # Code Mode catalog were observed on exactly this release (no-paid
-    # probes, docs/acp/opencode-adapter.md); any other version is refused.
-    "opencode": ("2.0.19",),
+    # OpenCode v2 is accepted by major version. Keep the range visible to
+    # settings clients; do not interpret it as an exact-version allowlist.
+    "opencode": ("2.x.x",),
 }
 
 
 def is_qualified(engine: str, version: str) -> bool:
-    """True iff Cortex has qualified ``version`` of ``engine`` for launch.
+    """True iff Cortex's version policy accepts ``version`` for launch.
 
     ``None`` in :data:`QUALIFIED_ADAPTER_VERSIONS` means every version; an
     engine with no entry at all is never qualified.
     """
     allowed = QUALIFIED_ADAPTER_VERSIONS.get(engine, ())
+    if engine == "opencode":
+        return isinstance(version, str) and re.fullmatch(r"2\.[0-9]+\.[0-9]+", version) is not None
     return allowed is None or version in allowed
 
 
@@ -83,6 +85,8 @@ def is_pinned(engine: str, version: str) -> bool:
     qualified for -- an engine qualified for every version (``None``) has
     no pinned version to protect, so its installs are pruned normally."""
     allowed = QUALIFIED_ADAPTER_VERSIONS.get(engine)
+    if engine == "opencode":
+        return False
     return isinstance(allowed, tuple) and version in allowed
 
 

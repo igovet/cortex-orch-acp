@@ -31,8 +31,11 @@ def test_an_unregistered_installed_version_keeps_the_pinned_registration(tmp_pat
 
 
 def test_a_registered_installed_version_is_the_one_named(tmp_path):
-    record = _record(tmp_path, "codex-acp", "@agentclientprotocol/codex-acp", "1.13.0")
-    assert _pinned_version_for("codex-acp", record) == "1.13.0"
+    for version in ("1.13.0", "2.0.1"):
+        record = _record(tmp_path, "codex-acp", "@agentclientprotocol/codex-acp", version)
+        assert _pinned_version_for("codex-acp", record) == version
+        plan = delivery_for("codex-acp", version).plan(load_role("worker-debugger"), [])
+        assert plan.qualification == DeliveryQualification.QUALIFIED
 
 
 def test_no_record_resolves_the_pinned_version():

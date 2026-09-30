@@ -13,6 +13,7 @@ import json
 import stat
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -119,6 +120,51 @@ def test_refresh_never_sends_prompt(tmp_path):
     assert "session/new" in logged_methods
 
 
+@pytest.mark.parametrize("version,accepted", [
+    ("2.0.19", True), ("2.0.20", True), ("2.7.3", True),
+    ("1.99.99", False), ("3.0.0", False),
+])
+def test_opencode_refresh_checks_major_version_before_session_new(monkeypatch, tmp_path, version, accepted):
+    from cortex_runtime.engine import client as engine_client, process as engine_process
+
+    calls = []
+
+    class FakeProcess:
+        def __init__(self, *args, **kwargs):
+            assert kwargs["jail"] == {"scopes": [], "readonly": []}
+            self.logs = SimpleNamespace()
+
+        def release(self, **kwargs):
+            calls.append("release")
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return self
+
+        def call(self, method, params, *, timeout):
+            calls.append(method)
+            if method == "initialize":
+                return {"agentInfo": {"version": version}}
+            return {"sessionId": "s1", "configOptions": []}
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(engine_process, "EngineProcess", FakeProcess)
+    monkeypatch.setattr(engine_client, "EngineClient", FakeClient)
+    if accepted:
+        assert catalog_refresh._read_catalog_from_engine(SimpleNamespace(engine="opencode"), str(tmp_path), timeout=5.0) == []
+        assert calls[:2] == ["initialize", "session/new"]
+    else:
+        with pytest.raises(RuntimeError, match="opencode_version_unqualified: expected OpenCode 2.x.x"):
+            catalog_refresh._read_catalog_from_engine(SimpleNamespace(engine="opencode"), str(tmp_path), timeout=5.0)
+        assert calls[0:1] == ["initialize"] and "session/new" not in calls
+    assert calls[-2:] == ["close", "release"]
+
+
 def test_live_catalog_capture_keeps_codex_per_model_effort_ceiling(tmp_path, monkeypatch):
     """A live session capture must not overwrite per-model Codex efforts.
 
@@ -201,6 +247,62 @@ def environ_catalog_dir(environ, connection_id):
     from cortex_runtime.connections import registry
 
     return registry.state_root(environ) / "catalog" / connection_id
+
+
+@pytest.mark.parametrize("parsed", [False, True])
+@pytest.mark.parametrize("modes", [None, ["build", "plan"]])
+def test_opencode_refresh_requires_cortex_mode_and_preserves_snapshot(monkeypatch, tmp_path, parsed, modes):
+    environ = isolated_environ(tmp_path)
+    record = _connection(new_connection_id(), "opencode")
+    options = [
+        {"id": "model", "name": "Model", "category": "model", "type": "select",
+         "currentValue": "custom/m", "options": [{"value": "custom/m", "name": "Model"}]},
+        {"id": "mode", "name": "Mode", "category": "mode", "type": "select",
+         "currentValue": "cortex", "options": [{"value": "cortex", "name": "Cortex"}]},
+    ]
+    monkeypatch.setattr(catalog_refresh, "_read_catalog_from_engine",
+                        lambda *args, **kwargs: parse_observation(options) if parsed else options)
+    first = catalog_refresh.perform_refresh(record, str(tmp_path), environ=environ, install=object())
+    assert first.success
+    directory = environ_catalog_dir(environ, record.id)
+    before = {path.name: path.read_bytes() for path in directory.glob("cs_*.json")}
+    assert len(before) == 1
+    if modes is None:
+        options.pop()
+    else:
+        options[1].update(currentValue=modes[0], options=[{"value": m, "name": m} for m in modes])
+    failed = catalog_refresh.perform_refresh(record, str(tmp_path), environ=environ, install=object())
+    assert failed.attempted and not failed.success
+    assert failed.reason == "opencode_cortex_mode_not_advertised"
+    assert failed.snapshot_id is None
+    assert {path.name: path.read_bytes() for path in directory.glob("cs_*.json")} == before
+    view = catalog_store.load_connection_snapshot(record.id, first.snapshot_id, environ)
+    assert view and all(("mode", "cortex") in entry.route.supported_parameters for entry in view.entries)
+    options[:] = [options[0], {"id": "mode", "name": "Mode", "category": "mode", "type": "select",
+                              "currentValue": "cortex", "options": [{"value": "cortex", "name": "Cortex"}]}]
+    retried = catalog_refresh.perform_refresh(record, str(tmp_path), environ=environ, install=object())
+    assert retried.success and retried.reason is None
+
+
+@pytest.mark.parametrize("modes", [[], ["build", "plan"], ["cortex"]])
+def test_opencode_session_capture_requires_cortex_mode(monkeypatch, tmp_path, modes):
+    from cortex_runtime.catalog import model_efforts
+
+    environ = isolated_environ(tmp_path)
+    record = _connection(new_connection_id(), "opencode")
+    options = [{"id": "model", "name": "Model", "category": "model", "type": "select",
+                "currentValue": "custom/m", "options": [{"value": "custom/m", "name": "Model"}]}]
+    if modes:
+        options.append({"id": "mode", "name": "Mode", "category": "mode", "type": "select",
+                        "currentValue": modes[0], "options": [{"value": m, "name": m} for m in modes]})
+    monkeypatch.setattr(model_efforts, "observe_model_efforts", lambda *args, **kwargs: {})
+    manager = SimpleNamespace(observed_config_options=lambda _: options,
+                              _client=SimpleNamespace(call=lambda *args: None),
+                              correlation=SimpleNamespace(wire_session_id=lambda _: "wire"))
+    adapter = EngineSessionManagerAdapter(lambda _: record, lambda _: str(tmp_path), environ=environ)
+    adapter._capture_catalog_observation(manager, record, "session")
+    entries = acp_config_options.selectable_entries_from_snapshots({record.id: record}, environ)
+    assert bool(entries) == ("cortex" in modes)
 
 
 def test_empty_config_options_is_a_recorded_failure_not_a_crash(tmp_path):

@@ -1,4 +1,4 @@
-"""Pinned OpenCode v2 install: one standalone ``opencode`` binary, checked before launch.
+"""Verified OpenCode v2 install: one standalone ``opencode`` binary, checked before launch.
 
 OpenCode is not an npm package: its installer writes a single executable
 (by default ``~/.opencode/bin/opencode``) that serves ACP through
@@ -154,7 +154,9 @@ def verify_install(install: OpenCodeInstall, environ: dict[str, str] | None = No
     if not isinstance(install, OpenCodeInstall):
         raise _validation_error("invalid_field", "install must be an OpenCodeInstall instance.", field="install")
     trusted_binary(install.binary, environ)
-    if install.version not in qualified_versions():
+    from ..connections.discovery import is_qualified
+
+    if not is_qualified(ENGINE, install.version):
         raise _validation_error(
             "opencode_version_unqualified",
             f"OpenCode {install.version} is not a version Cortex qualified "

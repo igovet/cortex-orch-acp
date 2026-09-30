@@ -144,7 +144,7 @@ COORDINATOR_MODE_FLOOR: Mapping[str, str] = {
 WORKER_MODE_FLOOR: Mapping[str, str] = {
     "codex-acp": "agent",
     "claude-agent-acp": "default",
-    # opencode 2.0.19: the ``cortex`` agent Cortex configures
+    # OpenCode v2: the ``cortex`` agent Cortex configures
     # (engine.opencode_adapter_acp) with ``"*": "ask"`` -- observed to turn
     # every native tool call into session/request_permission -- and the
     # only mode such a session offers.

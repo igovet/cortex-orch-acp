@@ -1412,7 +1412,7 @@ function ConnectionsSection({ theme }: { theme: Theme }) {
           {discovery.status === "idle" && discovery.found !== undefined && <View style={{ gap: 6 }}>
             <Text style={{ color: theme.colors.foregroundMuted, fontSize: 12 }}>
               {discovery.found
-                ? `Found version ${discovery.version ?? "unknown"} — ${discovery.qualified ? "qualified" : "not qualified"} (qualified versions: ${discovery.qualifiedVersions})`
+                ? `Found version ${discovery.version ?? "unknown"} — ${discovery.qualified ? "qualified" : "not qualified"} (supported versions: ${discovery.qualifiedVersions})`
                 : "No OpenCode binary found in the standard locations."}
             </Text>
             {discovery.found && discovery.qualified && <>

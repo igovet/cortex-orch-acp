@@ -437,7 +437,45 @@ _CODEX_SEND_PROMPT_BY_VERSION = {
         _CODEX_SEND_PROMPT_SOURCE.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
         _CODEX_SEND_PROMPT_PATCHED.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
     ),
+    "2.0.1": (
+        _CODEX_SEND_PROMPT_SOURCE.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
+        _CODEX_SEND_PROMPT_PATCHED.replace(*_CODEX_SEND_PROMPT_1_13_RENAME),
+    ),
 }
+
+# 2.0.1 renamed the mode label and replaced the response-item/history helpers
+# with typed reporters. Keep its verified patch sites separate from 1.x.
+_CODEX_AGENT_REVIEWER_2_SOURCE = _CODEX_AGENT_REVIEWER_SOURCE.replace(b'"Approve for me"', b'"Auto review"')
+_CODEX_AGENT_REVIEWER_2_MANUAL = _CODEX_AGENT_REVIEWER_MANUAL.replace(b'"Approve for me"', b'"Auto review"')
+_CODEX_CUSTOM_TOOL_HELPERS_2_INSERT = (
+    b'function cortexStringValue(value) { return typeof value === "string" ? value : null; }\n'
+    b'function cortexAsRecord(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : null; }\n'
+    + _CODEX_CUSTOM_TOOL_HELPERS_INSERT.replace(b'stringValue(', b'cortexStringValue(').replace(b'asRecord3(', b'cortexAsRecord(')
+)
+_CODEX_HISTORY_2_SOURCE = b'''  async createHistoryUpdates(item, sessionState) {
+    const renderer = new AcpToolCallRenderer(sessionState.clientCapabilities);
+    switch (item.type) {
+'''
+_CODEX_HISTORY_2_PATCHED = _CODEX_HISTORY_2_SOURCE + b'''      case "custom_tool_call": {
+        const update = createCustomToolCallUpdate(item);
+        return update ? [update] : [];
+      }
+      case "custom_tool_call_output": {
+        const update = createCustomToolCallOutputUpdate(item);
+        return update ? [update] : [];
+      }
+'''
+_CODEX_COMPACTION_2_SOURCE = b'''    const fields = {
+      ...rendered,
+      ...Object.keys(meta3).length > 0 ? { _meta: meta3 } : {}
+    };'''
+_CODEX_COMPACTION_2_PATCHED = b'''    const fields = {
+      ...rendered,
+      ...(Object.keys(meta3).length > 0 || facts4.contextCompaction !== void 0) ? {
+        _meta: { ...meta3, ...(facts4.contextCompaction === void 0 ? {} : { contextCompaction: facts4.contextCompaction }) }
+      } : {}
+    };'''
+_CODEX_HELPERS_2_SOURCE = b'function stripShellPrefix(command) {'
 
 
 def _private_verified_file(path: Path, content: bytes, *, mode: int = 0o600) -> None:
@@ -490,6 +528,9 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
             + ", ".join(sorted(_CODEX_SEND_PROMPT_BY_VERSION)) + ".",
         )
     send_prompt_source, send_prompt_patched = send_prompt
+    reporter_v2 = install.package_version == "2.0.1"
+    reviewer_source = _CODEX_AGENT_REVIEWER_2_SOURCE if reporter_v2 else _CODEX_AGENT_REVIEWER_SOURCE
+    reviewer_manual = _CODEX_AGENT_REVIEWER_2_MANUAL if reporter_v2 else _CODEX_AGENT_REVIEWER_MANUAL
     package_dir = Path(install.package_json).parent
     if (
         Path(install.adapter_entry) != package_dir / "dist" / "index.js"
@@ -501,7 +542,7 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
     source = Path(install.adapter_entry).read_bytes()
     if (
         hashlib.sha256(source).hexdigest() != install.adapter_entry_sha256
-        or source.count(_CODEX_AGENT_REVIEWER_SOURCE) != 1
+        or source.count(reviewer_source) != 1
         or source.count(_CODEX_NEW_SESSION_SOURCE) != 1
         or source.count(_CODEX_SESSION_CONFIG_SOURCE) != 1
         or source.count(_CODEX_MCP_DEDUP_SOURCE) != 1
@@ -512,28 +553,41 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
         or source.count(_CODEX_TURN_STARTED_SOURCE) != 1
         or source.count(_CODEX_ITEM_EVENT_SWITCH_SOURCE) != 1
         or source.count(_CODEX_COMPLETE_ITEM_EVENT_SWITCH_SOURCE) != 1
-        or source.count(_CODEX_FUNCTION_CALL_SOURCE) != 1
-        or source.count(_CODEX_RESPONSE_ITEM_TYPES_SOURCE) != 1
-        or source.count(_CODEX_HISTORY_CASE_BLOCK_SOURCE) != 1
+        or (reporter_v2 and (
+            source.count(_CODEX_HISTORY_2_SOURCE) != 1
+            or source.count(_CODEX_COMPACTION_2_SOURCE) != 1
+            or source.count(_CODEX_HELPERS_2_SOURCE) != 1
+        ))
+        or (not reporter_v2 and (
+            source.count(_CODEX_FUNCTION_CALL_SOURCE) != 1
+            or source.count(_CODEX_RESPONSE_ITEM_TYPES_SOURCE) != 1
+            or source.count(_CODEX_HISTORY_CASE_BLOCK_SOURCE) != 1
+        ))
     ):
         raise _validation_error(
             "codex_manual_review_adapter_unsupported",
             "The verified codex-acp adapter call sites do not match the supported shape.",
         )
-    patched = source.replace(_CODEX_AGENT_REVIEWER_SOURCE, _CODEX_AGENT_REVIEWER_MANUAL, 1)
+    patched = source.replace(reviewer_source, reviewer_manual, 1)
     patched = patched.replace(_CODEX_NEW_SESSION_SOURCE, _CODEX_NEW_SESSION_PATCHED, 1)
     patched = patched.replace(_CODEX_SESSION_CONFIG_SOURCE, _CODEX_SESSION_CONFIG_PATCHED, 1)
     patched = patched.replace(_CODEX_MCP_DEDUP_SOURCE, _CODEX_MCP_DEDUP_PATCHED, 1)
     patched = patched.replace(_CODEX_MCP_ENTRY_SOURCE, _CODEX_MCP_ENTRY_PATCHED, 1)
     patched = patched.replace(send_prompt_source, send_prompt_patched, 1)
-    patched = patched.replace(_CODEX_FUNCTION_CALL_SOURCE, _CODEX_CUSTOM_TOOL_HELPERS_INSERT + _CODEX_FUNCTION_CALL_SOURCE, 1)
+    if reporter_v2:
+        patched = patched.replace(_CODEX_HELPERS_2_SOURCE, _CODEX_CUSTOM_TOOL_HELPERS_2_INSERT + _CODEX_HELPERS_2_SOURCE, 1)
+        patched = patched.replace(_CODEX_HISTORY_2_SOURCE, _CODEX_HISTORY_2_PATCHED, 1)
+        patched = patched.replace(_CODEX_COMPACTION_2_SOURCE, _CODEX_COMPACTION_2_PATCHED, 1)
+    else:
+        patched = patched.replace(_CODEX_FUNCTION_CALL_SOURCE, _CODEX_CUSTOM_TOOL_HELPERS_INSERT + _CODEX_FUNCTION_CALL_SOURCE, 1)
     patched = patched.replace(_CODEX_UPDATE_EVENT_SOURCE, _CODEX_RAW_RESPONSE_METHOD_INSERT + _CODEX_UPDATE_EVENT_SOURCE, 1)
     patched = patched.replace(_CODEX_RAW_RESPONSE_CASE_SOURCE, _CODEX_RAW_RESPONSE_CASE_PATCHED, 1)
     patched = patched.replace(_CODEX_TURN_STARTED_SOURCE, _CODEX_TURN_STARTED_PATCHED, 1)
     patched = patched.replace(_CODEX_ITEM_EVENT_SWITCH_SOURCE, _CODEX_ITEM_EVENT_SWITCH_PATCHED, 1)
     patched = patched.replace(_CODEX_COMPLETE_ITEM_EVENT_SWITCH_SOURCE, _CODEX_COMPLETE_ITEM_EVENT_SWITCH_PATCHED, 1)
-    patched = patched.replace(_CODEX_RESPONSE_ITEM_TYPES_SOURCE, _CODEX_RESPONSE_ITEM_TYPES_PATCHED, 1)
-    patched = patched.replace(_CODEX_HISTORY_CASE_BLOCK_SOURCE, _CODEX_HISTORY_CASE_BLOCK_PATCHED, 1)
+    if not reporter_v2:
+        patched = patched.replace(_CODEX_RESPONSE_ITEM_TYPES_SOURCE, _CODEX_RESPONSE_ITEM_TYPES_PATCHED, 1)
+        patched = patched.replace(_CODEX_HISTORY_CASE_BLOCK_SOURCE, _CODEX_HISTORY_CASE_BLOCK_PATCHED, 1)
     state_dir = registry.connection_state_dir(connection_id, "codex-acp", environ)
     private_package = state_dir / "manual-review-adapter"
     private_dist = private_package / "dist"
@@ -800,11 +854,21 @@ class EngineProcess:
                     field="launch_command",
                 )
             if opencode:
-                from .opencode_adapter_acp import CATALOG_PROBE_PROMPT, PROMPT_FILE_NAME, process_environment
+                from .opencode_adapter_acp import (
+                    CATALOG_PROBE_PROMPT, PROMPT_FILE_NAME, owner_provider_config, process_environment,
+                )
 
                 opencode_prompt_path = str(self._jail_dir / "tmp" / PROMPT_FILE_NAME)
                 opencode_prompt = engine_instructions or CATALOG_PROBE_PROMPT
-                pinned_engine_vars = process_environment(opencode_prompt_path)
+                # Carry only provider definitions from the hidden owner
+                # configuration. OpenCode reads its own native logins in place.
+                owner_env = dict(os.environ if environ is None else environ)
+                owner_providers = owner_provider_config(
+                    owner_env.get("HOME"), str(self._jail_dir / "tmp"), owner_env,
+                )
+                self.logs.observe("opencode_owner_providers", imported=list(owner_providers.imported),
+                                  skipped=[list(item) for item in owner_providers.skipped])
+                pinned_engine_vars = process_environment(opencode_prompt_path, owner_providers.config)
             if record.engine == "codex-acp":
                 adapter_entry_override = _prepare_codex_manual_review_adapter(
                     verified_install, record.id, environ,
@@ -873,6 +937,7 @@ class EngineProcess:
                 from ..connections.environment import engine_state_dir
                 state = engine_state_dir(record.engine, process_env)
                 isolation = {}
+                sealed = []
                 if opencode:
                     from .opencode_adapter_acp import USER_CONFIG_RELATIVE
 
@@ -880,7 +945,7 @@ class EngineProcess:
                     isolation = dict(
                         isolate_processes=True,
                         masked=[str(Path(home).joinpath(*USER_CONFIG_RELATIVE))] if home else [],
-                        data_files={opencode_prompt_path: opencode_prompt.encode("utf-8")},
+                        data_files={opencode_prompt_path: opencode_prompt.encode("utf-8"), **owner_providers.files},
                     )
                 # Opt-in: ssh in the native shell asks for a password in a
                 # desktop dialog (see orchestration.ssh_askpass).
@@ -891,7 +956,7 @@ class EngineProcess:
                 launch_command, fds = self._jail_stack.enter_context(engine_jail(
                     cwd, self._jail_dir / "tmp", launch_command, jail["scopes"], env=process_env,
                     state_dirs={state: record.engine}, writable=[self._socket_dir],
-                    readonly=jail.get("readonly") or (), sealed=[askpass_dir] if askpass_env else (),
+                    readonly=jail.get("readonly") or (), sealed=[*sealed, *([askpass_dir] if askpass_env else ())],
                     **isolation,
                 ))
                 process_env = {"PATH": "/usr/bin:/bin"}

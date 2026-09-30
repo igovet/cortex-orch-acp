@@ -90,6 +90,8 @@ def test_a_qualified_codex_adapter_wins_over_a_newer_unqualified_one(tmp_path):
     # claude-agent-acp qualifies every version, so it still tracks newest.
     assert discovery.is_qualified("claude-agent-acp", "0.99.0")
     assert not discovery.is_qualified("codex-acp", "1.14.0")
+    _install_codex(tmp_path, "2.0.1")
+    assert discovery.discover_engine("codex-acp", environ=_environ(tmp_path)).version == "2.0.1"
 
 
 def test_the_newest_install_is_still_reported_when_none_is_qualified(tmp_path):

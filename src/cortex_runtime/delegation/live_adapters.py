@@ -60,9 +60,9 @@ from typing import Callable, Mapping
 _PINNED_ENGINE_VERSION: dict[str, str] = {
     "codex-acp": "1.12.0",
     "claude-agent-acp": "0.78.0",
-    # The one qualified OpenCode release; initialize re-checks the running
-    # binary's own agentInfo.version against it (engine.session_manager).
-    "opencode": "2.0.19",
+    # Placeholder only when a connection is not available to probe; all 2.x
+    # versions are accepted, and actual sessions use their binary's version.
+    "opencode": "2.0.0",
 }
 
 
@@ -78,14 +78,16 @@ def unified_base_prompt_enabled(environ: Mapping[str, str] | None = None) -> boo
 
 
 def _installed_version_for(record) -> str | None:
-    """The adapter version actually installed at ``record``'s own launch
-    command, read from that package's own ``package.json`` (the same
-    declaration ``connections.discovery`` selects installs by). ``None``
-    when there is no install-shaped launch command to read -- a test
-    double, or a record configured some other way."""
+    """Version at ``record``'s launch command: a sandboxed OpenCode
+    ``--version`` probe or the npm adapter's own ``package.json``.
+    ``None`` when no supported install-shaped command can be read."""
     command = getattr(record, "launch_command", None) or ()
     if len(command) != 2 or not isinstance(command[1], str):
         return None
+    if record.engine == "opencode" and command[1] == "acp":
+        from ..engine.opencode_install import probe_version
+
+        return probe_version(command[0])
     from ..connections.discovery import _declared_bin
 
     declared = _declared_bin(Path(command[1]).parent.parent / "package.json")
@@ -1000,7 +1002,7 @@ class EngineSessionManagerAdapter:
             if "mcp_role" not in manager_kwargs:
                 manager_kwargs["mcp_role"] = recipient
             if record.engine == "opencode" and "engine_instructions" not in manager_kwargs:
-                # OpenCode 2.0.19 takes its role prompt at process launch
+                # OpenCode v2 takes its role prompt at process launch
                 # only (engine.instruction_delivery_registry
                 # .OpenCodeAgentPromptDelivery); session/new gets no _meta.
                 from ..engine.opencode_adapter_acp import build_agent_prompt
@@ -1163,6 +1165,11 @@ class EngineSessionManagerAdapter:
             from ..catalog import store as catalog_store
 
             observation = catalog_discovery.parse_observation(raw)
+            if record.engine == "opencode":
+                from ..catalog.refresh import _opencode_cortex_mode_advertised
+
+                if not _opencode_cortex_mode_advertised(observation):
+                    return
             # ACP's initial configOptions is a connection-level snapshot.  In
             # Codex, the engine's effort selector is model-dependent, while
             # the initial payload can contain one shared fallback set.  The

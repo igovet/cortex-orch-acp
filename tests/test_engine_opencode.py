@@ -7,11 +7,13 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,6 +29,7 @@ from cortex_runtime.engine import opencode_adapter_acp, opencode_install
 from cortex_runtime.engine.instruction_delivery_registry import delivery_for
 from cortex_runtime.engine.mcp_bridge import host_mcp_servers
 from cortex_runtime.engine.process import EngineProcess
+from cortex_runtime.engine.session_manager import EngineSessionManager
 from cortex_runtime.orchestration.sandbox import engine_jail
 from cortex_runtime.portable.errors import PortableError
 from cortex_runtime.portable.identity import ConfigurationRevision, ExecutionRoute
@@ -74,27 +77,46 @@ def test_opencode_is_registered_for_native_login_only():
             model.validate_auth_selection("opencode", mode, "openai_api_key" if mode == AuthMode.API_KEY else None)
 
 
-def test_only_the_observed_release_is_qualified_and_startup_never_discovers_it(tmp_path):
-    assert discovery.QUALIFIED_ADAPTER_VERSIONS["opencode"] == ("2.0.19",)
-    assert discovery.is_qualified("opencode", "2.0.19")
-    assert not discovery.is_qualified("opencode", "2.0.20")
+def test_major_version_two_is_qualified_and_startup_never_discovers_it(tmp_path):
+    assert discovery.QUALIFIED_ADAPTER_VERSIONS["opencode"] == ("2.x.x",)
+    for version in ("2.0.0", "2.0.19", "2.0.20", "2.7.3"):
+        assert discovery.is_qualified("opencode", version)
+    for version in ("1.99.99", "3.0.0", "2.0", "2.x.x"):
+        assert not discovery.is_qualified("opencode", version)
     assert "opencode" not in discovery.SUPPORTED_ENGINES
     environ = {"HOME": str(tmp_path), "PATH": "/nonexistent"}
     assert "opencode" not in discovery.discover_all(environ=environ, node_binary="/nonexistent/node")
     assert discovery.discover_opencode(environ=environ) is None
 
 
-def test_modes_tiers_and_delivery_are_registered_for_exactly_2_0_19():
+def test_modes_tiers_and_delivery_are_registered_for_major_two():
     assert WORKER_MODE_FLOOR["opencode"] == COORDINATOR_MODE_FLOOR["opencode"] == opencode_adapter_acp.AGENT
     assert generations.tier_for("opencode", "2.0.19").tier == generations.CONTROLLED_BOUNDARY
     plan = delivery_for("opencode", "2.0.19").plan(type("Role", (), {"body_portable": "role"})(), [])
     assert plan.qualification == DeliveryQualification.QUALIFIED
     assert plan.blocks == () and plan.session_new_meta is None
-    other = delivery_for("opencode", "2.0.20").plan(type("Role", (), {"body_portable": "role"})(), [])
-    assert other.qualification == DeliveryQualification.UNSUPPORTED
-    assert _pinned_version_for("opencode") == "2.0.19"
+    for version in ("2.0.20", "2.7.3"):
+        assert delivery_for("opencode", version).plan(type("Role", (), {"body_portable": "role"})(), []).qualification == DeliveryQualification.QUALIFIED
+        assert generations.tier_for("opencode", version).tier == generations.CONTROLLED_BOUNDARY
+    for version in ("1.9.9", "3.0.0"):
+        assert delivery_for("opencode", version).plan(type("Role", (), {"body_portable": "role"})(), []).qualification == DeliveryQualification.UNSUPPORTED
+    assert _pinned_version_for("opencode") == "2.0.0"
     # Nothing is sent as session/new _meta: the role goes in at launch.
     assert _session_new_meta_for("opencode", "2.0.19", "role text") is None
+
+
+def test_initialize_checks_open_code_major_version_before_session_creation():
+    seen = []
+    manager = SimpleNamespace(_process=SimpleNamespace(logs=SimpleNamespace(observe=lambda *a, **kw: seen.append(kw))),
+                              _agent_capabilities={"present": True})
+    for version in ("2.0.19", "2.0.20", "2.7.3"):
+        EngineSessionManager._require_qualified_opencode(manager, {"agentInfo": {"version": version}})
+    for version in ("1.9.9", "3.0.0", None):
+        with pytest.raises(PortableError) as refused:
+            EngineSessionManager._require_qualified_opencode(manager, {"agentInfo": {"version": version}})
+        assert refused.value.code == "opencode_version_unqualified"
+        assert "2.x.x" in refused.value.remediation
+        assert manager._agent_capabilities == {}
 
 
 def test_host_mcp_entries_may_name_opencode():
@@ -112,13 +134,20 @@ def test_process_configuration_is_cortex_owned_and_names_no_provider():
     assert all(config["agent"][name] == {"disable": True} for name in ("build", "plan", "title"))
     assert config["permission"] == {"*": "ask", "task": "deny", "question": "deny", "skill": "deny"}
     assert config["autoupdate"] is False and config["share"] == "disabled"
-    assert not {"provider", "model", "small_model", "mcp", "plugin", "instructions"} & set(config)
+    assert not {"provider", "model", "small_model", "mcp", "instructions"} & set(config)
+    # Only removals of OpenCode's own build/plan plugins: nothing is loaded, and
+    # no built-in primary agent can answer session/new before `cortex` exists.
+    assert config["plugin"] == ["-opencode.agent", "-opencode.plan"]
+    assert all(entry.startswith("-opencode.") for entry in config["plugin"])
     for bad in ("relative.md", "/tmp/x}/a.md"):
         with pytest.raises(ValueError):
             opencode_adapter_acp.build_opencode_config(bad)
     env = opencode_adapter_acp.process_environment("/tmp/x/p.md")
-    assert set(env) == {"OPENCODE_CONFIG_CONTENT", "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_DISABLE_AUTOUPDATE"}
+    assert set(env) == {"OPENCODE_CONFIG_CONTENT", "OPENCODE_DISABLE_PROJECT_CONFIG",
+                        "OPENCODE_DISABLE_AUTOUPDATE"}
     assert json.loads(env["OPENCODE_CONFIG_CONTENT"])["agent"]["cortex"]["prompt"] == "{file:/tmp/x/p.md}"
+    # Native OpenCode opens its normal database; Cortex cannot override it.
+    assert "OPENCODE_DB" not in env
 
 
 def test_agent_prompt_carries_base_prompt_code_mode_note_role_and_project_rules(tmp_path):
@@ -134,6 +163,255 @@ def test_agent_prompt_carries_base_prompt_code_mode_note_role_and_project_rules(
     assert base_prompt_mode({"opencodeAgentPrompt": native}) == "native"
     with pytest.raises(ValueError):
         opencode_adapter_acp.build_agent_prompt(" ", role="worker", project_root=None)
+
+
+# --- the owner's own providers ----------------------------------------------
+
+def _owner_config(home, name, text):
+    directory = Path(home) / ".config" / "opencode"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / name).write_text(text)
+
+
+def _file_ref(value):
+    assert value.startswith("{file:") and value.endswith("}"), value
+    return value[len("{file:"):-1]
+
+
+def test_owner_providers_are_imported_with_credentials_only_in_jail_files(tmp_path):
+    """A custom provider exists only in the owner's hidden ~/.config/opencode
+    (the live byteplus-plan case): Cortex carries its definition, and nothing
+    else of that configuration, with every credential moved into a file."""
+    home = tmp_path / "home"
+    (home / "keys").mkdir(parents=True)
+    (home / "keys" / "file-key.txt").write_text("FILE-KEY-VALUE\n")
+    _owner_config(home, "config.json", json.dumps({"provider": {"custom": {"name": "Old", "npm": "@ai-sdk/openai"}}}))
+    _owner_config(home, "opencode.jsonc", """{
+      // the owner's own providers, JSONC as OpenCode accepts it
+      "$schema": "https://opencode.ai/config.json",
+      "provider": {
+        "custom": {
+          "name": "Custom", /* inline comment */
+          "options": {"baseURL": "https://example.invalid/api/v3", "apiKey": "LITERAL-KEY-VALUE",},
+          "models": {"glm-5.3-flash": {"name": "glm-5.3-flash", "limit": {"context": 1024000, "output": 65536}}},
+        },
+        "envp": {"npm": "@ai-sdk/openai-compatible",
+                 "options": {"apiKey": "{env:ENVP_KEY}", "baseURL": "{env:ENVP_BASE}", "headers": {"X-Team": "team-a"}},
+                 "models": {"m": {}}},
+        "filep": {"options": {"apiKey": "{file:~/keys/file-key.txt}"}, "models": {"m": {}}},
+        "emptyp": {"options": {"apiKey": "{env:UNSET_KEY}"}, "models": {"m": {}}},
+        "evil": {"npm": "evil-provider", "models": {"m": {}}},
+        "missing": {"options": {"apiKey": "{file:~/keys/absent.txt}"}},
+      },
+      "agent": {"owneragent": {"mode": "primary", "prompt": "OWNER"}},
+      "mcp": {"ownermcp": {"type": "local", "command": ["/bin/true"]}},
+      "plugin": ["owner-plugin"],
+      "disabled_providers": ["nvidia"],
+    }""")
+    result = opencode_adapter_acp.owner_provider_config(
+        str(home), "/jail/tmp", {"ENVP_KEY": "ENV-KEY-VALUE", "ENVP_BASE": "https://env.invalid/v1"})
+
+    assert result.imported == ("custom", "emptyp", "envp", "filep")
+    assert dict(result.skipped) == {"evil": "package_not_allowed", "missing": "file_reference_unreadable"}
+    config = result.config
+    assert set(config) == {"provider", "disabled_providers"} and config["disabled_providers"] == ["nvidia"]
+    text = json.dumps(config)
+    for secret in ("LITERAL-KEY-VALUE", "ENV-KEY-VALUE", "FILE-KEY-VALUE", "team-a"):
+        assert secret not in text
+    custom = config["provider"]["custom"]
+    # opencode.jsonc overrides config.json field by field, as OpenCode merges them.
+    assert custom["name"] == "Custom" and custom["npm"] == "@ai-sdk/openai"
+    assert custom["options"]["baseURL"] == "https://example.invalid/api/v3"
+    assert custom["models"]["glm-5.3-flash"]["limit"] == {"context": 1024000, "output": 65536}
+    envp, filep = config["provider"]["envp"], config["provider"]["filep"]
+    assert "apiKey" not in config["provider"]["emptyp"]["options"]
+    files = result.files
+    assert files[_file_ref(custom["options"]["apiKey"])] == b"LITERAL-KEY-VALUE"
+    assert files[_file_ref(envp["options"]["apiKey"])] == b"ENV-KEY-VALUE"
+    assert files[_file_ref(envp["options"]["baseURL"])] == b"https://env.invalid/v1"
+    assert files[_file_ref(envp["options"]["headers"]["X-Team"])] == b"team-a"
+    assert files[_file_ref(filep["options"]["apiKey"])] == b"FILE-KEY-VALUE"
+    assert len(files) == 5
+    assert all(Path(p).parent == Path("/jail/tmp") and Path(p).name.startswith(opencode_adapter_acp.CREDENTIAL_FILE_PREFIX)
+               for p in files)
+
+
+@pytest.mark.parametrize("field", ["accessKeyId", "privateKey", "customCredential"])
+@pytest.mark.parametrize("source", ["env", "file"])
+def test_owner_provider_substitutions_never_inline_unclassified_values(tmp_path, field, source):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "credential.txt").write_text("SUBSTITUTED-STAND-IN\n")
+    ref = "{env:PROVIDER_VALUE}" if source == "env" else "{file:~/credential.txt}"
+    _owner_config(home, "opencode.json", json.dumps({"provider": {
+        "custom": {"options": {field: "prefix-" + ref, "nested": [{"arbitrary": ref}]}}
+    }}))
+    result = opencode_adapter_acp.owner_provider_config(
+        str(home), "/jail/tmp", {"PROVIDER_VALUE": "SUBSTITUTED-STAND-IN"})
+    assert result.imported == ("custom",) and not result.skipped
+    pins = opencode_adapter_acp.process_environment("/jail/prompt", result.config)
+    assert all("SUBSTITUTED-STAND-IN" not in value for value in pins.values())
+    options = result.config["provider"]["custom"]["options"]
+    assert result.files[_file_ref(options[field])] == b"prefix-SUBSTITUTED-STAND-IN"
+    assert result.files[_file_ref(options["nested"][0]["arbitrary"])] == b"SUBSTITUTED-STAND-IN"
+
+
+def test_owner_provider_import_is_empty_or_skipped_when_it_cannot_be_faithful(tmp_path):
+    assert opencode_adapter_acp.owner_provider_config(str(tmp_path / "nohome"), "/j") == opencode_adapter_acp.OwnerProviders()
+    assert opencode_adapter_acp.owner_provider_config(None, "/j") == opencode_adapter_acp.OwnerProviders()
+    for bad in ("relative", "/j}x"):
+        with pytest.raises(ValueError):
+            opencode_adapter_acp.owner_provider_config(str(tmp_path), bad)
+    home = tmp_path / "home"
+    _owner_config(home, "opencode.json", "{ not json")
+    _owner_config(home, "opencode.jsonc", json.dumps({
+        "provider": {"inline": {"options": {"baseURL": "{file:/nonexistent/base}"}},
+                     "bad id!": {"models": {}}},
+        "enabled_providers": "all"}))
+    result = opencode_adapter_acp.owner_provider_config(str(home), "/j")
+    assert result.config == {} and result.files == {} and result.imported == ()
+    assert set(result.skipped) == {("*", "opencode.json:unreadable"), ("inline", "file_reference_unreadable"),
+                                   ("?", "invalid_provider_id"), ("*", "invalid_enabled_providers")}
+    _owner_config(home, "opencode.json", json.dumps({"provider": {"big": {"models": {
+        f"m{i}": {"name": "x" * 100} for i in range(1000)}}}}))
+    _owner_config(home, "opencode.jsonc", "{}")
+    assert opencode_adapter_acp.owner_provider_config(str(home), "/j").skipped == (("*", "configuration_too_large"),)
+
+
+def test_owner_providers_join_the_cortex_configuration_and_cortex_keeps_its_own(tmp_path):
+    owner = {"provider": {"custom": {"name": "Owner", "options": {"apiKey": "{file:/j/k}"}}},
+             "disabled_providers": ["nvidia"]}
+    pins = opencode_adapter_acp.process_environment("/tmp/x/p.md", owner)
+    config = json.loads(pins["OPENCODE_CONFIG_CONTENT"])
+    assert config["provider"] == owner["provider"] and config["disabled_providers"] == ["nvidia"]
+    base = opencode_adapter_acp.build_opencode_config("/tmp/x/p.md")
+    assert {key: config[key] for key in base} == base
+    assert json.loads(opencode_adapter_acp.process_environment("/tmp/x/p.md")["OPENCODE_CONFIG_CONTENT"]) == base
+    environ = isolated_environ(tmp_path)
+    record = make_connection_record(new_connection_id(), ("/usr/bin/true", "acp"), engine="opencode", environ=environ)
+    env = environment.build_process_env(record, {"PATH": "/usr/bin"}, environ=environ, pinned_engine_vars=pins)
+    assert env["OPENCODE_CONFIG_CONTENT"] == pins["OPENCODE_CONFIG_CONTENT"]
+
+
+def _login_database(data_dir, rows):
+    """The owner's OpenCode 2.x login database: its ``credential`` table."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / "opencode.db"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE credential (id text PRIMARY KEY, integration_id text, label text NOT NULL, "
+                   "value text NOT NULL, connector_id text, method_id text, active integer, "
+                   "time_created integer NOT NULL, time_updated integer NOT NULL)")
+        for index, (provider, value, active) in enumerate(rows):
+            db.execute("INSERT INTO credential VALUES (?, ?, 'API key', ?, NULL, NULL, ?, 1, 1)",
+                       (f"cred_{index}", provider, json.dumps(value), active))
+    db.close()
+    return path
+
+
+def test_owner_database_credentials_are_not_extracted(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    data = home / ".local" / "share" / "opencode"
+    database = _login_database(data, [("nvidia", {"type": "key", "key": "LOGIN-ONLY"}, None)])
+    before = database.read_bytes()
+    _owner_config(home, "opencode.json", json.dumps({"provider": {"custom": {"models": {"m": {}}}}}))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Cortex must not open the owner's login database")
+
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    result = opencode_adapter_acp.owner_provider_config(str(home), "/jail/tmp", {})
+    assert result.config == {"provider": {"custom": {"models": {"m": {}}}}}
+    assert result.files == {} and database.read_bytes() == before
+    assert "OPENCODE_DB" not in opencode_adapter_acp.process_environment("/jail/prompt", result.config)
+
+
+@needs_bwrap
+def test_the_launched_process_uses_native_database_without_extracting_logins(tmp_path):
+    """The native engine, not Cortex, reads and writes its existing database."""
+    environ = isolated_environ(tmp_path)
+    binary = tmp_path / "bin" / "opencode"
+    binary.parent.mkdir()
+    binary.write_text("""#!/bin/sh
+if [ "$1" = "--version" ]; then echo 'opencode v2.0.20'; exit 0; fi
+exec /usr/bin/python3 -c '
+import json, os, sqlite3, sys
+from pathlib import Path
+config = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])
+data = Path(os.environ["XDG_DATA_HOME"]) / "opencode"
+with sqlite3.connect(data / "opencode.db") as db:
+    native_login = json.loads(db.execute("SELECT value FROM credential").fetchone()[0])["key"] == "LOGIN-KEY-3b9"
+    db.execute("CREATE TABLE native_session (id text)")
+print(json.dumps({"override": "OPENCODE_DB" in os.environ, "native_login": native_login,
+                  "extracted": "nvidia" in config.get("provider", {}),
+                  "env": any("LOGIN-KEY-3b9" in v for v in os.environ.values())}), flush=True)
+sys.stdin.read()
+'
+""")
+    binary.chmod(0o755)
+    record = make_connection_record(new_connection_id(), (str(binary), "acp"), engine="opencode", environ=environ)
+    data = Path(environment.credential_directory(record, environ))
+    database = _login_database(data, [("nvidia", {"type": "key", "key": "LOGIN-KEY-3b9"}, None)])
+    install = opencode_install.OpenCodeInstall(binary=str(binary), version="2.0.20")
+    project = tmp_path / "project"
+    project.mkdir()
+    process = EngineProcess(record, str(project), environ=environ, install=install, jail={"scopes": []})
+    try:
+        line = process.process.stdout.readline()
+    finally:
+        process.release(grace=5)
+    assert line, (process.logs.directory / "stderr.log").read_text()
+    assert json.loads(line) == {"override": False, "native_login": True, "extracted": False, "env": False}
+    assert sorted(path.name for path in data.glob("*.db")) == ["opencode.db"]
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT count(*) FROM native_session").fetchone() == (0,)
+    observed = (process.logs.directory / "observations.jsonl").read_text()
+    assert "LOGIN-KEY-3b9" not in observed
+
+
+@needs_bwrap
+@pytest.mark.parametrize("field,source", [("apiKey", "literal"), ("accessKeyId", "env"), ("privateKey", "file")])
+def test_the_launched_process_reads_owner_credentials_from_jail_files_not_its_environment(tmp_path, field, source):
+    """EngineProcess -> engine jail: the owner's provider joins the process
+    configuration, its key is readable only from the mounted file, and
+    neither the key nor the owner's agent reaches the environment."""
+    environ = isolated_environ(tmp_path)
+    home = Path(environ["HOME"])
+    environ["OWNER_TEST_KEY"] = "OWNER-KEY-7c1"
+    (home / "credential.txt").write_text("OWNER-KEY-7c1")
+    value = {"literal": "OWNER-KEY-7c1", "env": "{env:OWNER_TEST_KEY}", "file": "{file:~/credential.txt}"}[source]
+    _owner_config(home, "opencode.json", json.dumps({
+        "provider": {"custom": {"npm": "@ai-sdk/openai", "options": {field: value}, "models": {"m": {}}}},
+        "agent": {"owneragent": {"mode": "primary", "prompt": "OWNER"}}}))
+    binary = tmp_path / "bin" / "opencode"
+    binary.parent.mkdir()
+    binary.write_text("""#!/bin/sh
+if [ "$1" = "--version" ]; then echo 'opencode v2.0.19'; exit 0; fi
+exec /usr/bin/python3 -c '
+import json, os, re, sys
+config = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])
+ref = next(iter(config["provider"]["custom"]["options"].values()))
+path = re.fullmatch(r"\\{file:(.*)\\}", ref).group(1)
+print(json.dumps({"key": open(path).read(), "env": any("OWNER-KEY-7c1" in v for v in os.environ.values()),
+                  "agents": sorted(config["agent"]), "writable": os.access(path, os.W_OK)}), flush=True)
+sys.stdin.read()
+'
+""")
+    binary.chmod(0o755)
+    record = make_connection_record(new_connection_id(), (str(binary), "acp"), engine="opencode", environ=environ)
+    install = opencode_install.OpenCodeInstall(binary=str(binary), version="2.0.19")
+    project = tmp_path / "project"
+    project.mkdir()
+    process = EngineProcess(record, str(project), environ=environ, install=install, jail={"scopes": []})
+    try:
+        line = process.process.stdout.readline()
+    finally:
+        process.release(grace=5)
+    assert line, (process.logs.directory / "stderr.log").read_text()
+    seen = json.loads(line)
+    assert seen == {"key": "OWNER-KEY-7c1", "env": False, "agents": ["build", "cortex", "plan", "title"],
+                    "writable": False}
+    observed = (process.logs.directory / "observations.jsonl").read_text()
+    assert '"imported": ["custom"]' in observed and "OWNER-KEY-7c1" not in observed
 
 
 # --- option mapping -----------------------------------------------------------
@@ -172,8 +450,10 @@ def test_process_environment_isolates_data_dir_and_accepts_only_opencode_pins(tm
     assert env["XDG_DATA_HOME"] == str(data_dir.parent)
     assert environment.engine_state_dir("opencode", env) == str(data_dir)
     assert env["OPENCODE_DISABLE_PROJECT_CONFIG"] == env["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
+    assert "OPENCODE_DB" not in env
     for bad in ({**pins, "OPENCODE_CONFIG": "/x"}, {**pins, "OPENCODE_CONFIG_CONTENT": "[]"},
-                {**pins, "OPENCODE_DISABLE_AUTOUPDATE": "0"}, {"CODEX_PATH": "/bin/true", "NO_BROWSER": "1"}):
+                {**pins, "OPENCODE_DISABLE_AUTOUPDATE": "0"}, {"CODEX_PATH": "/bin/true", "NO_BROWSER": "1"},
+                {**pins, "OPENCODE_DB": "opencode.db"}, {**pins, "OPENCODE_DB": "cortex-opencode.db"}, {**pins, "OPENCODE_DB": "/tmp/x.db"}):
         with pytest.raises(PortableError):
             environment.build_process_env(record, {"PATH": "/usr/bin"}, environ=environ, pinned_engine_vars=bad)
     codex = make_connection_record(new_connection_id(), ("/usr/bin/true", "x"), environ=environ)
@@ -201,9 +481,12 @@ def test_install_trust_refuses_links_shared_writes_and_unqualified_versions(tmp_
     with pytest.raises(PortableError):
         opencode_install.trusted_binary(str(binary))
     binary.chmod(0o755)
-    with pytest.raises(PortableError) as refused:
-        opencode_install.verify_install(opencode_install.OpenCodeInstall(binary=str(binary), version="2.0.18"))
-    assert refused.value.code == "opencode_version_unqualified"
+    for version in ("1.9.9", "3.0.0"):
+        with pytest.raises(PortableError) as refused:
+            opencode_install.verify_install(opencode_install.OpenCodeInstall(binary=str(binary), version=version))
+        assert refused.value.code == "opencode_version_unqualified"
+        assert "2.x.x" in refused.value.remediation
+    assert opencode_install.verify_install(opencode_install.OpenCodeInstall(binary=str(binary), version="2.0.20"))
 
 
 @needs_bwrap
@@ -215,6 +498,10 @@ def test_version_is_read_in_a_sandbox_and_discovery_reports_it(tmp_path):
     assert found.native_credential_dir == str(tmp_path / ".local" / "share" / "opencode")
     install = opencode_install.build_install(str(binary))
     assert install.version == "2.0.19"
+    newer = _fake_binary(tmp_path / "newer", version="2.0.20")
+    newer_record = make_connection_record(new_connection_id(), (str(newer), "acp"), engine="opencode",
+                                          environ={"HOME": str(tmp_path), "PATH": "/nonexistent"})
+    assert _pinned_version_for("opencode", newer_record) == "2.0.20"
     silent = tmp_path / "silent"
     silent.write_text("#!/bin/sh\nexit 0\n")
     silent.chmod(0o755)
@@ -446,7 +733,11 @@ def test_add_opencode_connection_references_the_owners_login(tmp_path):
     ready = cortex_acp_setup.add_opencode_connection(binary=str(binary), environ=environ)
     assert ready["state"] == "configured" and ready["launch_command"] == [str(binary), "acp"]
     assert ready["credential_dir_kind"] == "referenced" and ready["version"] == "2.0.19"
-    old = _fake_binary(tmp_path / "old", version="2.0.18")
-    with pytest.raises(SystemExit) as refused:
-        cortex_acp_setup.add_opencode_connection(binary=str(old), environ=environ)
-    assert "opencode_version_unqualified" in str(refused.value)
+    newer = _fake_binary(tmp_path / "newer", version="2.0.20")
+    accepted = cortex_acp_setup.add_opencode_connection(binary=str(newer), environ=environ)
+    assert accepted["state"] == "configured" and accepted["version"] == "2.0.20"
+    for version in ("1.9.9", "3.0.0"):
+        incompatible = _fake_binary(tmp_path / version, version=version)
+        with pytest.raises(SystemExit) as refused:
+            cortex_acp_setup.add_opencode_connection(binary=str(incompatible), environ=environ)
+        assert "opencode_version_unqualified" in str(refused.value)

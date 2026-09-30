@@ -88,6 +88,14 @@ The Paseo client wraps its rendered panels, composer popover, and timeline card 
 
 ## Tool access and containment
 
+The supported Codex adapter versions are 1.12.0, 1.13.0 and 2.0.1. The
+2.0.1 private copy retains exact-source checks for role delivery, manual
+review, session configuration, per-turn permissions and MCP setup. Its new
+typed renderer preserves Cortex's compaction metadata; missing or duplicated
+patch sites block launch. This is explicit compatibility support for one
+release, not permission to launch arbitrary future adapters. No native account
+or production Paseo installation is changed by the compatibility patch.
+
 Each channel-bound engine process runs in a Linux `bwrap` engine jail. Codex's
 native tools remain jail-bounded. In Claude Cortex sessions, adapter-level
 `disallowedTools` also disallows native Bash, file/search/edit, notebook edit and
@@ -129,11 +137,11 @@ read what the owner can read.
 
 ### OpenCode (optional engine)
 
-OpenCode 2.0.19 is launched only after the owner's explicit
+OpenCode v2 is launched only after the owner's explicit
 `add-opencode-connection` step, only from a trusted binary whose sandboxed
-`--version` and `initialize` `agentInfo.version` are both exactly `2.0.19`, and
+`--version` and `initialize` `agentInfo.version` are both in the `2.x.x` range, and
 only inside the engine jail. Anything else fails before a session. Its additional
-boundaries, all checked by no-paid tests against the installed binary
+boundaries, checked by no-paid tests against the installed binary
 ([OpenCode adapter](docs/acp/opencode-adapter.md)):
 
 - **Process isolation.** Each `opencode acp` starts a loopback control server
@@ -147,16 +155,45 @@ boundaries, all checked by no-paid tests against the installed binary
   behind an empty private tmpfs, project `opencode.json`/`.opencode/` is
   disabled (`OPENCODE_DISABLE_PROJECT_CONFIG=1`), and auto-update is off.
   Cortex supplies one `cortex` agent whose rules ask for every native tool
-  call and deny subagents, questions and skills. It names no provider, so a
+  call and deny subagents, questions and skills. Its `plugin` list only removes
+  OpenCode's built-in `opencode.agent` and `opencode.plan` plugins (the source
+  of `build`, `plan` and the helper agents); it loads no plugin. It names no model, so a
   session runs only on a model Cortex confirmed; OpenCode's own default is a
-  free third-party model.
+  free third-party model. Prompt-free refresh and session catalog capture do not
+  save observations missing the required `cortex` mode; the previous snapshot is
+  retained. Refresh reports `opencode_cortex_mode_not_advertised`.
+- **Owner provider definitions.** From the hidden `~/.config/opencode`
+  (`config.json`, `opencode.json`, `opencode.jsonc`) Cortex carries exactly the
+  `provider` definitions and the `enabled_providers`/`disabled_providers`
+  lists into its own configuration, because a custom provider (for example an
+  OpenAI-compatible endpoint) exists only there. No agent, permission, MCP
+  server, plugin, command or instruction is taken, and a provider that would
+  load a package outside `@ai-sdk/` is left out. Recognized credential values (any
+  API-key, token, secret, password, authorization or cookie field, and every
+  `headers` value), and every expanded `{env:…}` or `{file:…}` string regardless
+  of its field name, never enter the process environment: each is mounted
+  read-only from memory into the jail, like the role prompt, and named with
+  `{file:<path>}`. Inside that jail it is readable, the same trust class as
+  the owner's own OpenCode logins. An `{env:NAME}`
+  reference is resolved from the Cortex runtime's environment for exactly the
+  named variable, and a `{file:path}` reference from the owner's home. The
+  engine observations record provider names and skip reasons only. For arbitrary
+  provider-specific credential fields, use substitutions rather than literal
+  values: unknown literal fields cannot be classified as credentials.
+- **Owner logins.** OpenCode itself opens the owner's native `opencode.db`
+  in the existing data directory. Cortex does not read its credential rows,
+  extract API keys, copy logins or select an alternate database. `OPENCODE_DB`
+  overrides are not accepted. Native session state and logins share that
+  database, as in the owner's own OpenCode. Because no built-in primary agent
+  exists, the installed 2.0.20 ACP catalog waits for the configured `cortex`
+  agent instead of snapshotting `build`/`plan` first. A catalog without `cortex`
+  is still rejected; Cortex never falls back to `build` or `plan`.
 - **Role prompt.** The prompt is mounted read-only into the jail from memory;
   the host holds only an empty mount point.
-- **State.** The owner's `~/.local/share/opencode` (login and session
-  database, shared with the owner's own OpenCode sessions) is referenced in
-  place, never copied, and must be owner-private. Its `bin` directory of
-  downloaded helpers is read-only in the jail. Each process gets a private
-  disposable `XDG_STATE_HOME`.
+- **State.** The owner's `~/.local/share/opencode` is referenced in place,
+  never copied, and must be owner-private. It stays writable in the jail for
+  the native database, logs and tool output. The `bin` directory of downloaded
+  helpers is read-only. Each process gets a private disposable `XDG_STATE_HOME`.
 - **Code Mode.** Session MCP servers, the Cortex gateway included, are reached
   only through OpenCode's `execute` (Code Mode) tool. One `execute` call is one
   permission request, and the calls inside it are not asked individually. Every
@@ -167,6 +204,11 @@ boundaries, all checked by no-paid tests against the installed binary
   Codex. A refused permission ends OpenCode's whole turn as `cancelled`; Cortex
   treats its own refusal as a refusal and continues that session (at most three
   times per prompt), never a user cancellation.
+
+The compatibility gate is deliberately major-version-wide: accepting a new 2.x
+release does **not** mean its behavior was independently qualified. The
+version-independent binary trust, jail and permission boundaries above remain
+mandatory; model, effort and mode choices still require ACP confirmation.
 
 `~/.cache` stays writable to every jailed process, as it is for other tools.
 Whether OpenCode later loads executable content from its cache there was not

@@ -42,9 +42,11 @@ Implemented production paths:
 
 ## Installed capabilities and the engine jail
 
-Local inspection verified the production adapter’s bundled Codex CLI 0.154.0,
-the separately installed CLI 0.155.1, codex-acp 1.12.0 and the production
-pinned claude-agent-acp 0.78.0 (SDK 0.3.270). The installed hosts expose no
+The 2026-09-30 one-time adapter update adds codex-acp 2.0.1 with Codex CLI
+0.159.1 to the supported versions. The latest installed Claude adapter is
+0.84.0; its instruction-channel registration still uses the 0.78.0 basis.
+Earlier inspection verified Codex CLI 0.154.0/0.155.1, codex-acp
+1.12.0/1.13.0 and claude-agent-acp 0.78.0 (SDK 0.3.270). The installed hosts expose no
 universal native-action approval callback, so native tools are not gated per
 call. Each engine process instead runs in the engine jail, which makes only the
 assignment's scopes writable; native subagents, user MCP, hooks and plugins stay
@@ -61,7 +63,7 @@ GUI qualification.
 
 ## 2026-09-29 optional OpenCode v2 engine
 
-OpenCode 2.0.19 (`opencode acp`) is registered as an optional third engine,
+OpenCode v2 (`opencode acp`, any `2.x.x` release) is registered as an optional third engine,
 fail-closed. It is onboarded only by `add-opencode-connection`, never discovered
 at startup, and excluded from automatic worker routing unless opted in. Launches
 are refused without a verified install, the engine jail, unprivileged bubblewrap
@@ -82,8 +84,13 @@ permission bridge, with a loopback fake provider. It observed:
 - cancellation and usage;
 - a sibling jail denied the control server's environment.
 
-No paid model, real provider, Zed or Paseo run was made. Live qualification was
-not run because the owner did not request a paid live check. See the
+The earlier no-paid 2.0.20 pass used an alternate database and extracted logins;
+that workaround has been removed. The native-login qualification now passes on
+installed 2.0.20 because Cortex removes OpenCode's built-in `opencode.agent` and
+`opencode.plan` plugins; ACP offers only `cortex`, the logged-in and custom
+providers, and a `/compact` turn completes. No paid or live Paseo turn has
+qualified it. Release-specific 2.x compatibility is still not an admission gate.
+No paid model or real provider was used by those installed-binary tests. See the
 [OpenCode adapter](opencode-adapter.md) for the parity table and limits.
 
 ## Verification boundary
