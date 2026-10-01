@@ -488,20 +488,31 @@ def test_restored_chat_shows_saved_outcome_after_a_connection_close(tmp_path):
     assert record["history"] == "complete" and record["runtime_version"]
     assert machine.context(task_id)["state"] == "COMPLETED"
 
-    # After the restart, the reopened chat shows the saved outcome; loading writes nothing.
+    # The close interrupted nothing: the reopened chat shows no notice, and loading writes nothing.
     loader, transport = _agent(_IdleRuntime(), environ)
     before = _counts(store, task_id)
     loader._session_load(3, dict(sessionId=session_id, cwd=str(project), mcpServers=[]))
     assert _counts(store, task_id) == before
+    assert not any(n["params"]["update"].get("messageId", "").startswith("cortex-connection:")
+                   for n in transport.notifications)
+    assert "error" not in transport.responses[-1]
+
+    # A later close that cut off a running worker is shown with the saved state.
+    from cortex_runtime.delegation import events as delegation_events
+
+    delegation_events.append_event(store, task_id, "progress", "disconnect:interrupting", dict(
+        kind="host_disconnected", session_id=session_id, task_id=task_id,
+        interrupted_workers=[dict(node_id="n1", assignment_ref="a1", attempt_id="att1")],
+        unknown_outcome_actions=[]), origin="runtime")
+    loader, transport = _agent(_IdleRuntime(), environ)
+    loader._session_load(5, dict(sessionId=session_id, cwd=str(project), mcpServers=[]))
     notice = transport.notifications[-1]["params"]["update"]
     assert notice["sessionUpdate"] == "agent_message_chunk"
     assert notice["messageId"].startswith("cortex-connection:")
-    assert "COMPLETED" in notice["content"]["text"] and "Результат задачи не изменился" in notice["content"]["text"]
-    assert notice["_meta"]["cortexConnectionNotice"]["taskState"] == "COMPLETED"
-    assert "error" not in transport.responses[-1]
+    assert "COMPLETED" in notice["content"]["text"] and "Прерванных воркеров: 1" in notice["content"]["text"]
+    assert notice["_meta"]["cortexConnectionNotice"]["interruptedWorkers"] == 1
 
     # The next user message ends the notice.
-    from cortex_runtime.delegation import events as delegation_events
 
     delegation_events.append_event(store, task_id, "user_message", "user_message:after-restart",
                                    dict(content="ещё", session_id=session_id), origin=session_id)
@@ -841,3 +852,99 @@ def test_recovery_adds_no_second_row_for_a_card_the_host_already_shows(tmp_path)
     [correction] = [u for u in replay_store.terminal_worker_card_reconciliation(store, task_id, history)
                     if u["toolCallId"] == card]
     assert correction["title"] == shown + " · Interrupted"
+
+
+def test_user_stop_says_paused_with_cut_off_actions_and_a_later_reload_adds_no_notice(tmp_path):
+    """Stop pauses the task and reports, at once, the worker action it cut off;
+    a host restart afterwards finds nothing in flight and adds no notice."""
+    from cortex_runtime.recovery.worker_reconciliation import host_disconnect_notice, unknown_outcome_actions
+
+    store, task_id = _task(tmp_path)
+    marker = tmp_path / "side-effect.log"
+    command = ["python3", "-B", "-c", f"open({str(marker)!r}, 'a').write('ran\\n')"]
+    started = threading.Event()
+
+    def router(store, channel, session_ref, launch, instructions):
+        def behavior(store, channel, ref, message, call_index, cancel_event):
+            if channel.role == "coordinator":
+                context = mcp_tools.dispatch(store, channel, "task_get_context", {})
+                mcp_tools.dispatch(store, channel, "plan_submit",
+                                   dict(plan=_plan(), request_key="plan-" + str(context["revision"])))
+                return PromptOutcome(StopReason.END_TURN, "Planned")
+            with patch("cortex_runtime.recovery.large_output_store.persist_output", side_effect=_ProcessKilled()):
+                try:
+                    mcp_tools.dispatch(store, channel, "command_run", dict(argv=command, request_key="cut-off"))
+                except _ProcessKilled:
+                    pass
+            started.set()
+            cancel_event.wait(20)
+            return PromptOutcome(StopReason.CANCELLED, "")
+        return behavior
+
+    runtime, _engine = _runtime(store, router)
+    stop, emitted, outcome = threading.Event(), [], []
+    turn = threading.Thread(target=lambda: outcome.append(runtime.start_prompt(
+        task_id, SESSION, "Inspect part 0", lambda text: emitted.append(text) or True, stop,
+        emit_tool_call=lambda _update: True)))
+    turn.start()
+    try:
+        assert started.wait(20), "worker never started"
+        stop.set()  # the user's Stop (session/cancel), not a transport loss
+        turn.join(20)
+        assert not turn.is_alive()
+        text = "".join(emitted)
+        assert "Paused. Send a message to continue this task" in text
+        assert "The stop cut off 1 worker action(s) mid-way" in text
+        assert TaskMachine(store).context(task_id)["state"] == "RECOVERING"
+        with store.connection() as db:
+            assert len(unknown_outcome_actions(db, task_id, revoked_only=True)) == 1
+        runtime.disconnect_session(SESSION)
+    finally:
+        runtime.shutdown()
+    [record] = _disconnect_records(store, task_id)
+    assert record["unknown_outcome_actions"] == [] and record["interrupted_workers"] == []
+    assert host_disconnect_notice(store, task_id, SESSION) is None
+
+
+def test_read_only_external_calls_are_never_unknown_outcome_actions(tmp_path):
+    from cortex_runtime.recovery.worker_reconciliation import unknown_outcome_actions
+
+    store, task_id = _task(tmp_path)
+
+    def open_external_calls(store, channel):
+        with store.connection() as db:
+            for key, read_only in (("external:s:1", True), ("external:s:2", False)):
+                db.execute("INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)", (
+                    task_id, key, channel.channel_id, "external_call", "d" + key,
+                    json.dumps(dict(complete=False, read_only=read_only))))
+            db.commit()
+
+    runtime, _engine, turn, _outcome = _start_with_blocking_worker(store, task_id, open_external_calls)
+    try:
+        with store.connection() as db:
+            assert len(unknown_outcome_actions(db, task_id)) == 1
+        _disconnect(runtime, turn)
+    finally:
+        runtime.shutdown()
+    [record] = _disconnect_records(store, task_id)
+    assert len(record["unknown_outcome_actions"]) == 1
+
+
+def test_continuing_after_a_restart_does_not_announce_a_new_session_but_records_it(tmp_path):
+    store, task_id = _task(tmp_path)
+    runtime, _engine = _runtime(store, _finishing_router())
+    try:
+        runtime.start_prompt(task_id, SESSION, "Inspect part 0", lambda _text: True, threading.Event(),
+                             emit_tool_call=lambda _update: True)
+    finally:
+        runtime.shutdown()
+    emitted = []
+    restarted, _engine = _runtime(store, _finishing_router())
+    try:
+        restarted.start_prompt(task_id, SESSION, "continue", lambda text: emitted.append(text) or True,
+                               threading.Event(), emit_tool_call=lambda _update: True)
+    finally:
+        restarted.shutdown()
+    assert not any("new coordinator session" in text or "новой сессией координатора" in text for text in emitted)
+    assert any(e["payload"].get("message_key") == "coordinator_recovery_new_session"
+               for e in _task_events(store, task_id, "progress"))

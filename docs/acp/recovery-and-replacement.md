@@ -75,8 +75,10 @@ always a restart). It now calls `recovery.coordinator_recovery.recover`:
    or vice versa. An authorized route change reports
    `coordinator_recovery_new_engine` (localized, T020-style), built from
    canonical Cortex state (the T021 capsule), never a provider-native
-   resume; the plain-replacement case reports
-   `coordinator_recovery_new_session`. Neither ever says "resumed".
+   resume; the plain-replacement case records
+   `coordinator_recovery_new_session` as a task progress event only, without
+   a chat message (same task, same chat, rebuilt from recorded state).
+   Neither ever says "resumed".
 
 Worker reconciliation's own "already published" check and its
 `assignment_failed(recovery_worker_lost)` write are not two independent

@@ -103,7 +103,11 @@ anywhere for an external mutation whose fate cannot be observed.
 ## 3. Cancellation (`session/cancel`)
 
 `session/cancel` interrupts the current turn, revokes current worker channels,
-terminates owned sessions and persists RECOVERING. It is distinct from a queued
+terminates owned sessions and persists RECOVERING (paused: the next message
+continues the task; `/cortex-stop` closes it). When it pauses a non-terminal
+task, the turn ends with a localized `turn_paused` line saying so, plus
+`turn_paused_unknown_actions` with the number of worker actions this stop cut
+off mid-way (open receipts whose channel the stop revoked). It is distinct from a queued
 Paseo steer, which uses a concurrent configuration request and does not call
 `session/cancel`. The cancellation path records `TURN_INTERRUPTED`, not
 `USER_STEERING`; `turn_interrupted` classifies as `cancellation` even when
@@ -203,10 +207,14 @@ host-owned and cannot be suppressed from inside the plugin. Inside Cortex:
 - On `session/load`, while this session's latest `host_disconnected`
   record has no later `user_message`, the agent appends one read-only,
   localized notice after the replayed history (message id
-  `cortex-connection:<event id>`, `_meta.cortexConnectionNotice`). It
-  states the saved task state (and that a completed result is unchanged),
-  the number of interrupted workers and the number of actions with an
-  unknown outcome. Loading writes nothing.
+  `cortex-connection:<event id>`, `_meta.cortexConnectionNotice`), but only
+  when that disconnect interrupted something: a running worker or a worker
+  action in flight (open receipt on a still-open worker channel). A finished,
+  paused or idle chat reopens without it, and actions an earlier stop already
+  fenced are not re-counted. It states the saved task state (and that a
+  completed result is unchanged) and those two counts from the disconnect
+  record. External MCP calls to a tool the server lists in `read_only_tools`
+  are never counted as unknown outcomes. Loading writes nothing.
 
 Native engine tools are not gated per call, so a native edit or shell
 command in flight at the disconnect has no gateway receipt and cannot be

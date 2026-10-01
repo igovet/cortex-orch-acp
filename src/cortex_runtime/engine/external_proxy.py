@@ -202,7 +202,8 @@ def main():
                                     print(json.dumps(saved['receipt']),flush=True)
                                     continue
                                 db.execute('INSERT INTO runtime_requests VALUES(?,?,?,?,?,?)',
-                                           (channel.task_id,receipt_key,channel.channel_id,'external_call',digest,encoded(dict(complete=False))))
+                                           (channel.task_id,receipt_key,channel.channel_id,'external_call',digest,
+                                            encoded(dict(complete=False,read_only=tool in (config.get('read_only_tools') or ())))))
                                 event(db,channel.task_id,'EXTERNAL_TOOL_AUTHORIZED',dict(server=config['name'],tool=tool,request_id=identifier),channel.channel_id)
                                 db.commit()
                         with store.connection() as db:

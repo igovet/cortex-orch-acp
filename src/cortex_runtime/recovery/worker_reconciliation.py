@@ -278,25 +278,31 @@ def runtime_version() -> str:
         return "unknown"
 
 
-def unknown_outcome_actions(db, task_id: str, *, revoked_only: bool = False, limit: int = MAX_LISTED + 1) -> list[dict]:
+def unknown_outcome_actions(db, task_id: str, *, revoked_only: bool = False, live_only: bool = False,
+                            limit: int = MAX_LISTED + 1) -> list[dict]:
     """Worker gateway actions of this task whose outcome was never retained.
 
     ``revoked_only`` keeps only actions whose worker channel can no longer
     complete them (lost, cancelled or replaced), so a live worker's call that
-    is merely still running is not reported as unknown.
+    is merely still running is not reported as unknown.  ``live_only`` keeps
+    only actions whose worker channel is still open: the calls in flight at
+    this moment, not ones an earlier stop or loss already fenced.  An external
+    MCP call to a tool the server declares read-only has no effect to
+    reconcile and is never listed.
     """
     rows = db.execute(
         "SELECT r.operation, r.result_json, c.attempt_id, c.revoked_at FROM runtime_requests r "
         "JOIN trusted_channels c ON c.channel_id=r.actor "
         f"WHERE r.task_id=? AND c.role='worker' AND r.operation IN ({','.join('?' for _ in MUTATING_OPERATIONS)}) "
         + ("AND c.revoked_at IS NOT NULL " if revoked_only else "")
+        + ("AND c.revoked_at IS NULL " if live_only else "")
         + "ORDER BY r.rowid LIMIT ?",
         (task_id, *MUTATING_OPERATIONS, limit),
     ).fetchall()
     actions = []
     for row in rows:
         receipt = json.loads(row["result_json"])
-        if receipt.get("complete"):
+        if receipt.get("complete") or receipt.get("read_only"):
             continue
         actions.append(dict(operation=row["operation"], tool_call_ref=receipt.get("tool_call_ref"),
                             attempt_id=row["attempt_id"]))
@@ -324,7 +330,8 @@ def _host_disconnect_snapshot(store, task_id: str, session_id: str, **observed) 
             orchestration = db.execute("SELECT coordinator_attempt_ref FROM task_orchestration WHERE task_id=?",
                                        (task_id,)).fetchone()
             workers = _interrupted_workers(db, task_id)
-            actions = unknown_outcome_actions(db, task_id)
+            # Only calls in flight now; earlier stops already fenced theirs.
+            actions = unknown_outcome_actions(db, task_id, live_only=True)
     except Exception as error:  # noqa: BLE001 - a diagnostic must never block teardown
         record.update(history=f"unavailable:{type(error).__name__}")
         return record
@@ -406,7 +413,10 @@ def host_disconnect_notice(store, task_id: str, session_id: str) -> dict | None:
 
     The host itself marks the chat with its connection error; this is the
     saved state beside it.  ``None`` when this session saw no disconnect
-    since its last user message.
+    since its last user message, or when that disconnect interrupted nothing
+    (no running worker, no action in flight): a finished, stopped or idle
+    chat reopens without a notice.  Counts come from the disconnect record,
+    so earlier stops are never re-reported here.
     """
     with store.connection() as db:
         latest = None
@@ -422,11 +432,12 @@ def host_disconnect_notice(store, task_id: str, session_id: str) -> dict | None:
         if db.execute("SELECT 1 FROM task_events WHERE task_id=? AND event_type='user_message' AND id>? LIMIT 1",
                       (task_id, latest[0])).fetchone():
             return None
+        payload = latest[1]
+        running = len(payload.get("interrupted_workers") or ())
+        unknown = len(payload.get("unknown_outcome_actions") or ())
+        if not running and not unknown:
+            return None
         task = db.execute("SELECT state FROM runtime_tasks WHERE task_id=?", (task_id,)).fetchone()
-        running = db.execute(
-            "SELECT COUNT(*) FROM runtime_nodes n JOIN runtime_tasks t ON t.task_id=n.task_id AND t.revision=n.revision "
-            "WHERE n.task_id=? AND n.status='running'", (task_id,)).fetchone()[0]
-        unknown = len(unknown_outcome_actions(db, task_id))
     return dict(event_id=latest[0], session_id=session_id, task_id=task_id,
                 state=task["state"] if task else "unknown", interrupted_workers=running,
                 unknown_outcome_actions=unknown)

@@ -290,6 +290,14 @@ _CATALOG: dict[str, dict[str, str]] = {
         "en": "Reconnected this task with a new coordinator session, rebuilt from recorded task state (this is a new session, not a resumed one).",
         "ru": "Задача переподключена с новой сессией координатора, восстановленной из сохранённого состояния задачи (это новая сессия, а не возобновлённая).",
     },
+    "turn_paused": {
+        "en": "Paused. Send a message to continue this task, or /cortex-stop to close it.",
+        "ru": "Задача на паузе. Отправьте сообщение, чтобы продолжить её, или /cortex-stop, чтобы закрыть.",
+    },
+    "turn_paused_unknown_actions": {
+        "en": " The stop cut off {count} worker action(s) mid-way; their outcome is unknown. They are not re-run automatically: the coordinator checks the project for their effect when you continue.",
+        "ru": " Остановка прервала действий исполнителей на середине: {count}; их результат неизвестен. Они не повторяются автоматически: при продолжении координатор проверит их последствия в проекте.",
+    },
     "connection_closed_notice": {
         "en": "Cortex restarted after the host connection closed. Any connection error concerns the transport only; the saved task state is authoritative: {state}.",
         "ru": "Cortex перезапущен после закрытия соединения с хостом. Ошибка соединения, если она показана, касается только транспорта; достоверно сохранённое состояние задачи: {state}.",

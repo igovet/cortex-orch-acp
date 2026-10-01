@@ -179,7 +179,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
     reopened = False
     while True:
         if cancel_event.is_set() or _transport_lost(runtime, task_id):
-            return _stop_turn(runtime, task_id, machine, emit_tool_call)
+            return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
         # Read before the pass: a change committed during it moves the value.
         fingerprint = machine.change_fingerprint(task_id)
         context = machine.context(task_id)
@@ -342,7 +342,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                 runtime._finalize_generation_delivery(session_ref, delivery_id,
                                                      failure_kind=type(error).__name__, stop_reason=None)
                 if cancel_event.is_set() or _transport_lost(runtime, task_id):
-                    return _stop_turn(runtime, task_id, machine, emit_tool_call)
+                    return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
                 else:
                     kind = getattr(error, 'kind', None)
                     if kind in _COORDINATOR_SESSION_DEAD_KINDS:
@@ -378,7 +378,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
                     and machine.get_state(task_id) not in {'ANSWER_READY', 'WAITING_USER'}):
                 emit_update(outcome.text)
             if outcome.stop_reason == StopReason.CANCELLED:
-                return _stop_turn(runtime, task_id, machine, emit_tool_call)
+                return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
             if outcome.stop_reason != StopReason.END_TURN:
                 failure_stop_reason = outcome.stop_reason
                 machine.move(task_id,'BLOCKED',blocker='coordinator_turn_failed:'+outcome.stop_reason.value)
@@ -468,7 +468,7 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             # A worker ends early when its turn is cancelled or its host
             # connection closes; that is not a lost worker to retry here.
             if cancel_event.is_set() or _transport_lost(runtime, task_id):
-                return _stop_turn(runtime, task_id, machine, emit_tool_call)
+                return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
             if any(n['status'] == 'failed' for n in nodes):
                 # Wait only for nodes still working; a finished node's session
                 # teardown must never hold the task (it hung here once).
@@ -728,7 +728,7 @@ def _transport_lost(runtime, task_id):
     return bool(lost is not None and lost(task_id))
 
 
-def _stop_turn(runtime, task_id, machine, emit_tool_call):
+def _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update=None, language='en'):
     """End an interrupted turn. Only a user's cancel pauses the task.
 
     A closed host connection (a plugin update restarts the provider) or the
@@ -738,7 +738,21 @@ def _stop_turn(runtime, task_id, machine, emit_tool_call):
     outcome was not retained).
     """
     if not _transport_lost(runtime, task_id):
+        from ..acp import messages
+        from ..recovery.worker_reconciliation import unknown_outcome_actions
+        with runtime._store.connection() as db:
+            fenced = len(unknown_outcome_actions(db, task_id, revoked_only=True))
+        paused = machine.get_state(task_id) not in {'COMPLETED', 'FAILED', 'CANCELLED'}
         _pause_turn(runtime, task_id, machine, emit_tool_call)
+        if paused and emit_update is not None:
+            # Say what the stop did now, not after a later reload: the task is
+            # paused, and how many worker actions it cut off mid-way.
+            with runtime._store.connection() as db:
+                cut = len(unknown_outcome_actions(db, task_id, revoked_only=True)) - fenced
+            text = messages.render('turn_paused', language)
+            if cut > 0:
+                text += messages.render('turn_paused_unknown_actions', language, count=cut)
+            emit_update('\n\n' + text)
     return StopReason.CANCELLED
 
 

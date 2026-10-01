@@ -2366,7 +2366,9 @@ class OrchestratingRuntime:
                     engine=recovery_notice.get("engine") or "?",
                 )
             else:
-                self._emit_localized(task_id, emit_update, notice_language, "coordinator_recovery_new_session")
+                # Same task, same chat: the coordinator was rebuilt from the
+                # recorded task state. Keep that on the record, not in the chat.
+                self._record_progress(task_id, "coordinator_recovery_new_session")
         # T020: route this prompt against any still-open coordinator
         # question *before* recording it as an ordinary user_message/
         # steering turn -- see docs/acp/steering-and-questions.md's
@@ -2512,7 +2514,9 @@ class OrchestratingRuntime:
                     engine=recovery_notice.get("engine") or "?",
                 )
             else:
-                self._emit_localized(task_id, emit_update, language, "coordinator_recovery_new_session")
+                # Same task, same chat: the coordinator was rebuilt from the
+                # recorded task state. Keep that on the record, not in the chat.
+                self._record_progress(task_id, "coordinator_recovery_new_session")
         delegation_events.append_event(
             self._store, task_id, "progress", f"question_answered:{question.id}",
             dict(kind="question_answered", question_id=question.id, answer_text=answer_text, session_id=session_id),
@@ -2942,6 +2946,14 @@ class OrchestratingRuntime:
             emit_update(text)
         delegation_events.append_event(
             self._store, task_id, "progress", f"progress:{new_id('p_')}", dict(note=text), origin="runtime",
+        )
+
+    def _record_progress(self, task_id: str, key: str, **params) -> None:
+        """Record a runtime progress event (English note) without showing it in the chat."""
+        delegation_events.append_event(
+            self._store, task_id, "progress", f"progress:{new_id('p_')}",
+            dict(note=acp_messages.render(key, "en", **params), message_key=key, message_params=params),
+            origin="runtime",
         )
 
     def _emit_localized(self, task_id: str, emit_update: Callable[[str], bool], language: str, key: str, **params) -> None:

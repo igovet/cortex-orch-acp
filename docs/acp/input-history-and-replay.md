@@ -268,9 +268,10 @@ suffix, which the runtime appends to the whole title
 After the replayed history, while this session's latest `host_disconnected`
 record has no later `user_message`, `session/load` appends one localized
 `agent_message_chunk` (message id `cortex-connection:<event id>`, with
-`_meta.cortexConnectionNotice`). It reports the saved task state, states that
-a completed result is unchanged, and counts interrupted workers and actions
-with an unknown outcome. Paseo's own `Provider connection closed` error is
+`_meta.cortexConnectionNotice`) when that disconnect interrupted a running
+worker or an in-flight worker action; otherwise nothing is appended. It
+reports the saved task state, states that a completed result is unchanged,
+and gives those counts from the disconnect record. Paseo's own `Provider connection closed` error is
 host-owned; this notice is the persisted outcome shown beside it. It is sent
 before the load response, so the Paseo shim includes it in the checked replay
 manifest. Building it only reads the store.
