@@ -1474,3 +1474,39 @@ export function buildProfileDelete(view: ProfilesView, name: string): Built<Extr
   if (view.pending) return { ok: false, errors: { name: "An activation is pending; resolve it and reload before deleting." } };
   return { ok: true, value: { surface: "routing_profiles", action: "delete", name, expected_revision: view.revision } };
 }
+
+/** The Paseo workspace fields the project picker reads (`WorkspaceDescriptorPayload`). */
+export type WorkspaceEntry = {
+  id: string;
+  projectDisplayName?: string | null;
+  projectCustomName?: string | null;
+  projectRootPath?: string | null;
+  workspaceDirectory?: string | null;
+  workspaceKind?: string | null;
+  worktreeSlug?: string | null;
+  name?: string | null;
+  archivingAt?: string | null;
+};
+
+/**
+ * One choice per project directory. A Paseo workspace is a per-task place
+ * inside a project (its `title` is the task title), and many share one
+ * directory; the plugin resolves the project from the chosen workspace's
+ * directory, so any one of them stands for that directory. The main checkout
+ * (directory equal to the project root) is preferred; archiving entries are
+ * skipped.
+ */
+export function projectChoices(entries: readonly WorkspaceEntry[]): Array<{ id: string; label: string }> {
+  const byDirectory = new Map<string, WorkspaceEntry>();
+  for (const entry of entries) {
+    if (entry.archivingAt) continue;
+    const directory = entry.workspaceDirectory ?? entry.projectRootPath ?? entry.id;
+    const kept = byDirectory.get(directory);
+    if (!kept || (kept.workspaceKind === "worktree" && entry.workspaceKind !== "worktree")) byDirectory.set(directory, entry);
+  }
+  return [...byDirectory.entries()].map(([directory, entry]) => {
+    const project = entry.projectCustomName || entry.projectDisplayName || entry.name || entry.id;
+    const worktree = entry.workspaceKind === "worktree" ? ` (worktree ${entry.worktreeSlug || entry.name || entry.id})` : "";
+    return { id: entry.id, label: directory === entry.id ? `${project}${worktree}` : `${project}${worktree} — ${directory}` };
+  }).sort((a, b) => a.label.localeCompare(b.label));
+}

@@ -300,7 +300,10 @@ async function openScreen(data = fixtures()) {
       return reply ?? { ok: true, binding, result: data.connections };
     },
   };
-  const paseo = { workspaces: { list: async () => ({ entries: [{ id: "ws1", title: null, name: "ws1" }] }) } };
+  const paseo = { workspaces: { list: async () => ({ entries: [
+    { id: "ws1", title: "Fix the add function", name: "main", projectDisplayName: "demo", projectRootPath: "/p/demo", workspaceDirectory: "/p/demo", workspaceKind: "local_checkout" },
+    { id: "ws2", title: "Another task", name: "main", projectDisplayName: "demo", projectRootPath: "/p/demo", workspaceDirectory: "/p/demo", workspaceKind: "local_checkout" },
+  ] }) } };
   const modules: Record<string, unknown> = {
     react: runtime.react,
     "react/jsx-runtime": {
@@ -339,7 +342,7 @@ async function openScreen(data = fixtures()) {
 
 test("no section offers a raw JSON entry field, and every control is labelled", async () => {
   const screen = await openScreen();
-  await screen.press("Project (for project ceiling and project routing): ws1");
+  await screen.press("Project (for project ceiling and project routing): demo — /p/demo");
   const visits: Array<[string, () => Promise<void>]> = [
     ["User defaults", async () => {}],
     ["Models", async () => {}],
@@ -559,7 +562,7 @@ test("connections: a successful OpenCode onboard shows its own next-step guidanc
 
 test("project ceiling: typed ceiling fields save with the workspace and revision", async () => {
   const screen = await openScreen();
-  await screen.press("Project (for project ceiling and project routing): ws1");
+  await screen.press("Project (for project ceiling and project routing): demo — /p/demo");
   await screen.section("Project ceiling");
   assert.ok(!screen.has("Limit: tokens") && !screen.has("Project permission level") && !screen.has("Spend limit (blank = none)"),
     "settings this version does not apply are hidden");
@@ -713,7 +716,7 @@ test("engines & models: a shadowing project file is named; an unregistered OpenC
     engines: (catalog.engines as Array<Record<string, unknown>>).map((engine) => (engine.engine === "opencode" ? { ...engine, connections: [], route_count: 0 } : engine)),
     routes: (catalog.routes as Array<Record<string, unknown>>).filter((route) => route.engine !== "opencode"),
   };
-  await screen.press("Project (for project ceiling and project routing): ws1");
+  await screen.press("Project (for project ceiling and project routing): demo — /p/demo");
   await screen.section("Engines & models");
   const checked = (label: string) => (screen.find(label, "Pressable").props.accessibilityState as { checked: boolean }).checked;
   assert.equal(checked("Save switches to: Project routing file"), true, "the file in use is edited by default");
@@ -790,7 +793,7 @@ test("routing and ceilings say what each setting actually does", async () => {
   const texts = screen.texts();
   assert.ok(texts.some((text) => text.startsWith("Engines automatic worker routing, failover and pins may use")));
   assert.ok(!texts.some((text) => /built-in deny list|engine preference/i.test(text)));
-  await screen.press("Project (for project ceiling and project routing): ws1");
+  await screen.press("Project (for project ceiling and project routing): demo — /p/demo");
   await screen.section("Project ceiling");
   await screen.toggle("Restrict allowed connections", true);
   assert.ok(screen.texts().some((text) => text.startsWith("When on, Cortex runs models only through the listed connection ids")));
@@ -866,7 +869,7 @@ test("profiles: section saves refresh profile differences while project settings
 for (const section of ["User defaults", "Routing", "Models", "Engines & models", "MCP servers", "Connections", "Project ceiling"]) {
   test(`profiles: activation reloads the mounted ${section} form and all later sections`, async () => {
     const screen = await openScreen();
-    await screen.press("Project (for project ceiling and project routing): ws1");
+    await screen.press("Project (for project ceiling and project routing): demo — /p/demo");
     await screen.section(section);
     const before = screen.reads.length;
     screen.data.user_defaults.defaults = { ...(screen.data.user_defaults.defaults as object), language: "ru" };

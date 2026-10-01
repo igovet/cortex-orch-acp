@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  projectChoices,
   buildProfileSave,
   buildProfileDelete, buildProfileCreate, buildProfileActivate, buildProfileDeactivate, buildProfileRename,
   profileSwitchDecision, profileIsPartial, profileStateText, validProfileName, type ProfilesView,
@@ -751,4 +752,20 @@ test("quota window rules round-trip exact renamed identities and shared/empty sc
   assert.equal(ambiguous.ok, false);
   assert.equal(routingRulesToForm({ quota_windows: { "codex-acp": [{ window: "account", models: null, future: true }] } }).ok, false);
   assert.deepEqual(rules.quota_windows["codex-acp"][0].models, ["RENAMED@9", "WITHDRAWN@7"]);
+});
+
+test("project picker lists one choice per project directory, named by project, never by task title", () => {
+  const base = { projectDisplayName: "demo", projectRootPath: "/p/demo" };
+  const choices = projectChoices([
+    { ...base, id: "w1", name: "main", workspaceDirectory: "/p/demo", workspaceKind: "local_checkout", title: "Task one" } as never,
+    { ...base, id: "w2", name: "main", workspaceDirectory: "/p/demo", workspaceKind: "local_checkout", title: "Task two" } as never,
+    { ...base, id: "w3", name: "feature", worktreeSlug: "feature-x", workspaceDirectory: "/p/demo-wt/feature-x", workspaceKind: "worktree" },
+    { ...base, id: "w4", name: "old", workspaceDirectory: "/p/demo-wt/old", workspaceKind: "worktree", archivingAt: "2026-10-01T00:00:00Z" },
+    { id: "w5", projectDisplayName: "other", projectCustomName: "Other app", projectRootPath: "/p/other", workspaceDirectory: "/p/other", workspaceKind: "local_checkout" },
+  ]);
+  assert.deepEqual(choices, [
+    { id: "w1", label: "demo — /p/demo" },
+    { id: "w3", label: "demo (worktree feature-x) — /p/demo-wt/feature-x" },
+    { id: "w5", label: "Other app — /p/other" },
+  ]);
 });

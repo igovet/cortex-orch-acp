@@ -81,6 +81,7 @@ import {
   profileIsPartial,
   profileSectionLabel,
   profileStateText,
+  projectChoices,
   profileSwitchDecision,
   routingTarget,
   routingVocabulary,
@@ -1744,12 +1745,9 @@ function WorkspacePicker({ theme, workspaceId, onChange }: { theme: Theme; works
     let cancelled = false;
     paseo.workspaces.list().then((listed) => {
       if (cancelled) return;
-      setWorkspaces(listed.entries.map((entry) => {
-        // The daemon's workspace descriptor carries a display name under one
-        // of a few keys depending on host version; fall back to the id.
-        const named = entry as unknown as { title?: string | null; name?: string | null; workspaceDirectory?: string };
-        return { id: entry.id, label: named.title ?? named.name ?? named.workspaceDirectory ?? entry.id };
-      }));
+      // Workspaces are per-task places inside projects: show one choice per
+      // project directory, named after the project, never the task title.
+      setWorkspaces(projectChoices(listed.entries));
     }).catch(() => { if (!cancelled) setWorkspaces([]); });
     return () => { cancelled = true; };
   }, [paseo]);
