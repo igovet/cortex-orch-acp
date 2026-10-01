@@ -391,8 +391,8 @@ test("user defaults: a selector change saves exactly that field against the read
 test("user defaults: invalid input is flagged on the field and nothing is written", async () => {
   const screen = await openScreen();
   await screen.type("Route id", "codex-acp/gpt-5");
-  assert.ok(screen.texts().some((text) => text.includes("default route") && text.includes("saved owner profiles")), "field help explains effect and profile scope");
-  assert.ok(screen.texts().some((text) => text.includes("Example:") && text.includes("route")), "field help includes an example");
+  assert.ok(screen.texts().some((text) => text.includes("• Route id —") && text.includes("• Recommended —")), "default route help explains each field with a recommendation");
+  assert.ok(screen.texts().some((text) => text.includes("• Route id —") && text.includes("• Рекомендация —")), "the same help is shown in Russian");
   await screen.type("Limit: tokens", "many");
   await screen.press("Save");
   assert.equal(screen.updates.length, 0);
@@ -788,12 +788,12 @@ test("routing and ceilings say what each setting actually does", async () => {
   const screen = await openScreen();
   await screen.section("Routing");
   const texts = screen.texts();
-  assert.ok(texts.some((text) => text.startsWith("Automatic worker routing, failover and pins use only these engines")));
+  assert.ok(texts.some((text) => text.startsWith("Engines automatic worker routing, failover and pins may use")));
   assert.ok(!texts.some((text) => /built-in deny list|engine preference/i.test(text)));
   await screen.press("Project (for project ceiling and project routing): ws1");
   await screen.section("Project ceiling");
   await screen.toggle("Restrict allowed connections", true);
-  assert.ok(screen.texts().some((text) => text.startsWith("Recorded and checked for narrowing only")));
+  assert.ok(screen.texts().some((text) => text.startsWith("Recorded and checked only so a narrower layer cannot widen it")));
 });
 
 
@@ -1054,7 +1054,7 @@ test("quota typed controls edit exact labels and scopes and retain unrelated dat
   const saved = screen.updates[0].rules as any;
   assert.deepEqual(saved.quota_windows, { "codex-acp": [{ window: "Renamed / Label@8", models: null }] });
   assert.deepEqual(saved.models, rules.models);
-  assert.ok(screen.texts().some((text) => text.includes("Unmapped labels remain conservatively shared")));
+  assert.ok(screen.texts().some((text) => text.includes("Without it every window counts for every model of that engine")));
 });
 
 test("unknown quota rule shape remains read-only with no destructive save", async () => {
@@ -1065,4 +1065,14 @@ test("unknown quota rule shape remains read-only with no destructive save", asyn
   assert.ok(screen.texts().some((text) => text.includes("cannot show without changing it")));
   assert.equal(screen.updates.length, 0);
   assert.equal(rules.quota_windows["codex-acp"][0].future, true);
+});
+
+test("help language switch shows field help in English, Russian or both", async () => {
+  const screen = await openScreen();
+  const has = (fragment: string) => screen.texts().some((text) => text.includes(fragment));
+  assert.ok(has("• Recommended —") && has("• Рекомендация —"), "both languages by default");
+  await screen.press("Help language / Язык подсказок: EN");
+  assert.ok(has("• Recommended —") && !has("• Рекомендация —"), "English only");
+  await screen.press("Help language / Язык подсказок: RU");
+  assert.ok(!has("• Recommended —") && has("• Рекомендация —"), "Russian only");
 });
