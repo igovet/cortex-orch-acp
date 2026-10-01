@@ -393,11 +393,11 @@ test("user defaults: invalid input is flagged on the field and nothing is writte
   await screen.type("Route id", "codex-acp/gpt-5");
   assert.ok(screen.texts().some((text) => text.includes("• Route id —") && text.includes("• Recommended —")), "default route help explains each field with a recommendation");
   assert.ok(screen.texts().some((text) => text.includes("• Route id —") && text.includes("• Рекомендация —")), "the same help is shown in Russian");
-  await screen.type("Limit: tokens", "many");
+  await screen.type("Limit: attempts", "many");
   await screen.press("Save");
   assert.equal(screen.updates.length, 0);
   assert.match(String(screen.find("Route id", "TextInput").props.accessibilityHint), /xr_/);
-  assert.match(String(screen.find("Limit: tokens", "TextInput").props.accessibilityHint), /whole number/);
+  assert.match(String(screen.find("Limit: attempts", "TextInput").props.accessibilityHint), /whole number/);
   const alerts = screen.runtime.elements().filter((element) => element.type === "Text" && element.props.accessibilityRole === "alert");
   assert.ok(alerts.length >= 2, "field errors are announced");
 });
@@ -561,15 +561,16 @@ test("project ceiling: typed ceiling fields save with the workspace and revision
   const screen = await openScreen();
   await screen.press("Project (for project ceiling and project routing): ws1");
   await screen.section("Project ceiling");
-  assert.equal(screen.find("Limit: tokens", "TextInput").props.value, "1000");
-  await screen.press("Project permission level: READ_ONLY");
+  assert.ok(!screen.has("Limit: tokens") && !screen.has("Project permission level") && !screen.has("Spend limit (blank = none)"),
+    "settings this version does not apply are hidden");
+  assert.ok(screen.texts().some((text) => text.includes("not applied by this Cortex version: permission level STANDARD, limit tokens 1000")));
   await screen.toggle("Restrict allowed routes", true);
   await screen.press("Add allowed routes");
   await screen.type("Allowed routes 1", "codex-acp/gpt-5");
   await screen.press("Save");
   assert.deepEqual(screen.updates, [{
     surface: "project_ceiling", workspaceId: "ws1", expected_revision: REV("p"),
-    ceiling: { ...OPEN_CEILING, allowed_routes: ["codex-acp/gpt-5"], permission_level: "READ_ONLY", limits: { tokens: 1000 } },
+    ceiling: { ...OPEN_CEILING, allowed_routes: ["codex-acp/gpt-5"], permission_level: "STANDARD", limits: { tokens: 1000 } },
   }]);
 });
 
@@ -603,7 +604,6 @@ test("engines & models: every engine and model is a labelled switch with full id
   assert.doesNotMatch(texts, /route xr_bbbbbbbbbbbb/);
   assert.match(texts, /model selector: shown · automatic routing: no \(engine switched off for automatic routing\)/);
   assert.match(texts, /automatic routing: no \(OpenCode v2 routes need an opt-in\)/);
-  assert.match(texts, /not enforced by this Cortex version/);
   assert.ok(!screen.texts().some((text) => /\bJSON\b/.test(text)));
 });
 
@@ -793,7 +793,7 @@ test("routing and ceilings say what each setting actually does", async () => {
   await screen.press("Project (for project ceiling and project routing): ws1");
   await screen.section("Project ceiling");
   await screen.toggle("Restrict allowed connections", true);
-  assert.ok(screen.texts().some((text) => text.startsWith("Recorded and checked only so a narrower layer cannot widen it")));
+  assert.ok(screen.texts().some((text) => text.startsWith("When on, Cortex runs models only through the listed connection ids")));
 });
 
 

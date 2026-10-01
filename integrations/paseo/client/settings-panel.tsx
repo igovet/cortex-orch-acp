@@ -416,14 +416,15 @@ function ReadOnlyNotice({ text, theme }: { text: string; theme: Theme }) {
 const listText = (values: readonly string[] | null, unset = "any"): string => (values === null ? unset : values.length === 0 ? "none" : values.join(", "));
 
 function CeilingSummary({ ceiling, theme }: { ceiling: CeilingView; theme: Theme }) {
-  const limits = Object.entries(ceiling.limits).map(([key, value]) => `${key} ${value}`).join(", ") || "none";
+  const limits = Object.entries(ceiling.limits).filter(([key]) => key !== "attempts").map(([key, value]) => `${key} ${value}`).join(", ");
   return <View style={{ gap: 2 }}>
     <ReadOnlyRow label="Allowed routes" value={listText(ceiling.allowed_routes)} theme={theme} />
     <ReadOnlyRow label="Allowed connections" value={listText(ceiling.allowed_connections)} theme={theme} />
     <ReadOnlyRow label="Allowed data recipients" value={listText(ceiling.allowed_data_recipients)} theme={theme} />
-    <ReadOnlyRow label="Permission level" value={ceiling.permission_level ?? "unrestricted"} theme={theme} />
-    <ReadOnlyRow label="Limits" value={limits} theme={theme} />
-    <ReadOnlyRow label="Spend limit" value={ceiling.spend_limit === null ? "none" : `${ceiling.spend_limit}${ceiling.spend_limit_enforceable ? " (enforceable)" : ""}`} theme={theme} />
+    <ReadOnlyRow label="Attempts limit" value={ceiling.limits.attempts === undefined ? "none" : String(ceiling.limits.attempts)} theme={theme} />
+    {ceiling.permission_level && <ReadOnlyRow label="Permission level (not applied)" value={ceiling.permission_level} theme={theme} />}
+    {limits && <ReadOnlyRow label="Other limits (not applied)" value={limits} theme={theme} />}
+    {ceiling.spend_limit !== null && <ReadOnlyRow label="Spend limit (not applied)" value={`${ceiling.spend_limit}${ceiling.spend_limit_enforceable ? " (enforceable)" : ""}`} theme={theme} />}
     <ReadOnlyRow label="Fallback target routes" value={listText(ceiling.fallback_policy.allowed_target_routes)} theme={theme} />
     <ReadOnlyRow label="Fallback failure classes" value={listText(ceiling.fallback_policy.allowed_failure_classes)} theme={theme} />
     <ReadOnlyRow label="Fallback budget" value={ceiling.fallback_policy.budget === null ? "none" : String(ceiling.fallback_policy.budget)} theme={theme} />
@@ -528,7 +529,19 @@ function SaveStatus({ saveError, notice, reload, theme }: { saveError: SaveError
 
 // --- ceiling editor (owner and project) ----------------------------------------
 
-function CeilingEditor({ form, onChange, theme, errors, owner }: {
+const INERT_LIMIT_KEYS = LIMIT_KEYS.filter((key) => key !== "attempts");
+
+/** Stored ceiling values this Cortex version does not apply, or null. */
+function inertCeilingText(form: CeilingForm): string | null {
+  const parts = [
+    ...(form.permission_level ? [`permission level ${form.permission_level}`] : []),
+    ...Object.entries(form.limits).filter(([key, value]) => key !== "attempts" && value.trim()).map(([key, value]) => `limit ${key} ${value}`),
+    ...(form.spend_limit.trim() ? [`spend limit ${form.spend_limit}${form.spend_limit_enforceable ? " (enforceable)" : ""}`] : []),
+  ];
+  return parts.length ? `Kept unchanged, not applied by this Cortex version: ${parts.join(", ")}.` : null;
+}
+
+function CeilingEditor({ form, onChange, theme, errors }: {
   form: CeilingForm; onChange: (form: CeilingForm) => void; theme: Theme; errors: FieldErrors; owner: string;
 }) {
   const set = (patch: Partial<CeilingForm>) => onChange({ ...form, ...patch });
@@ -545,21 +558,17 @@ function CeilingEditor({ form, onChange, theme, errors, owner }: {
     {restricted("allowed_routes", "allowed routes", "ceiling.allowed_routes", "exact route id", HELP.allowedRoutes)}
     {restricted("allowed_connections", "allowed connections", "ceiling.allowed_connections", "cn_…", HELP.allowedConnections)}
     {restricted("allowed_data_recipients", "allowed data recipients", "ceiling.allowed_data_recipients", "recipient", HELP.allowedRecipients)}
-    <ChoiceField label={`${owner} permission level`} value={form.permission_level ?? ""} theme={theme} help={HELP.permissionLevel}
-      options={[{ value: "", label: "Unrestricted" }, ...PERMISSION_LEVELS.map((level) => ({ value: level, label: level }))]}
-      onChange={(value) => set({ permission_level: value || null })} error={errorFor(errors, "ceiling.permission_level")} />
     <View style={{ gap: 6 }}>
-      <Label text="Limits (blank = no limit)" theme={theme} />
-      <Hint text={HELP.limits} theme={theme} />
-      {[...LIMIT_KEYS, ...Object.keys(form.limits).filter((key) => !(LIMIT_KEYS as readonly string[]).includes(key))].map((key) =>
-        <TextField key={key} label={`Limit: ${key}`} value={form.limits[key] ?? ""} numeric theme={theme} placeholder="no limit"
-          onChangeText={(text) => set({ limits: { ...form.limits, [key]: text } })} error={errorFor(errors, `ceiling.limits.${key}`)} />)}
+      <TextField label="Limit: attempts" value={form.limits.attempts ?? ""} numeric theme={theme} placeholder="no limit" help={HELP.limits}
+        onChangeText={(text) => set({ limits: { ...form.limits, attempts: text } })} error={errorFor(errors, "ceiling.limits.attempts")} />
       <ErrorText message={errorAt(errors, "ceiling.limits")} theme={theme} />
     </View>
-    <TextField label="Spend limit (blank = none)" value={form.spend_limit} numeric theme={theme} placeholder="none" help={HELP.spendLimit}
-      onChangeText={(text) => set({ spend_limit: text })} error={errorFor(errors, "ceiling.spend_limit")} />
-    <ToggleField label="Spend limit enforceable" value={form.spend_limit_enforceable} theme={theme}
-      onValueChange={(value) => set({ spend_limit_enforceable: value })} help={HELP.spendEnforceable} />
+    {/* Permission level, the other limits and the spend limit are saved and
+        validated but not applied by this Cortex version: hidden, kept as stored. */}
+    {inertCeilingText(form) && <ReadOnlyNotice theme={theme} text={inertCeilingText(form)!} />}
+    {[errorFor(errors, "ceiling.permission_level"), errorFor(errors, "ceiling.spend_limit"),
+      ...INERT_LIMIT_KEYS.map((key) => errorFor(errors, `ceiling.limits.${key}`))].map((message, index) =>
+      <ErrorText key={index} message={message} theme={theme} />)}
     <Group title="Fallback policy" theme={theme} hint={HELP.fallback}>
       {restricted("fallback_allowed_target_routes", "fallback target routes", "ceiling.fallback_policy.allowed_target_routes", "exact route id")}
       {restricted("fallback_allowed_failure_classes", "fallback failure classes", "ceiling.fallback_policy.allowed_failure_classes",

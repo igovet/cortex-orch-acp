@@ -155,37 +155,16 @@ export const HELP = {
     "Если включено, Cortex может запускать работу только на перечисленных маршрутах (xr_…, видны у моделей в Engines & models); всё остальное, включая закрепления, отклоняется. Пустой список не разрешает ничего. Рекомендация: выключено — включайте и выключайте модели в Models.",
   ),
   allowedConnections: h(
-    "Recorded and checked only so a narrower layer cannot widen it; this Cortex version does not block a connection with it. Recommended: off; to stop using an engine, switch it off under Engines & models.",
-    "Записывается и проверяется только на то, чтобы нижний уровень его не расширил; эта версия Cortex не блокирует им подключения. Рекомендация: выключено; чтобы не использовать движок, выключите его в Engines & models.",
+    "When on, Cortex runs models only through the listed connection ids (cn_…): automatic routing skips other connections and a dispatch through any other connection is refused. An empty list allows nothing. Recommended: off; to stop using an engine, switch it off under Engines & models.",
+    "Если включено, Cortex запускает модели только через перечисленные подключения (cn_…): автоматика пропускает остальные, а запуск через любое другое подключение отклоняется. Пустой список не разрешает ничего. Рекомендация: выключено; чтобы не использовать движок, выключите его в Engines & models.",
   ),
   allowedRecipients: h(
-    "Which providers (connection provider ids, for example openai or anthropic) may receive task data in automatic worker routing. An empty list allows none. Recommended: off, unless a project's code must not reach a particular provider.",
-    "Каким провайдерам (id провайдера подключения, например openai или anthropic) можно передавать данные задачи при автоматическом выборе исполнителей. Пустой список не разрешает никого. Рекомендация: выключено, если код проекта не должен уходить определённому провайдеру.",
+    "Which providers (connection provider ids, for example openai or anthropic) may receive task data: other providers are skipped by automatic routing and refused at dispatch. An empty list allows none. Recommended: off, unless a project's code must not reach a particular provider.",
+    "Каким провайдерам (id провайдера подключения, например openai или anthropic) можно передавать данные задачи: остальных автоматика пропускает, а запуск через них отклоняется. Пустой список не разрешает никого. Рекомендация: выключено, если код проекта не должен уходить определённому провайдеру.",
   ),
-  permissionLevel: h(
-    "Policy label READ_ONLY < STANDARD < ELEVATED; the strictest layer wins. This version records and passes it on but does not block actions with it — real file and command access is set by the task's access mode (Guarded or Auto). Recommended: Unrestricted.",
-    "Метка политики READ_ONLY < STANDARD < ELEVATED; побеждает самый строгий уровень. Эта версия записывает и передаёт её, но не блокирует ею действия — реальный доступ к файлам и командам задаёт режим доступа задачи (Guarded или Auto). Рекомендация: Unrestricted.",
-  ),
-  limits: helpBlock(
-    h("Whole-number caps per task; blank means no limit.", "Целочисленные лимиты на задачу; пусто — без лимита."),
-    [
-      ["Limit: attempts", h(
-        "Maximum model runs (workers, retries, fallbacks) a task may dispatch; the next one is refused. Recommended: blank, or about 8–12 to stop runaway retry loops.",
-        "Сколько всего запусков моделей (исполнители, повторы, fallback) может сделать задача; следующий отклоняется. Рекомендация: пусто или примерно 8–12, чтобы остановить бесконечные повторы.",
-      )],
-      ["Limit: calls / tokens / concurrency", h(
-        "Accepted and kept, but not metered or enforced by this version. Recommended: blank.",
-        "Принимаются и сохраняются, но эта версия их не считает и не применяет. Рекомендация: пусто.",
-      )],
-    ],
-  ),
-  spendLimit: h(
-    "Monetary cap for a task. Cortex requires Spend limit enforceable for it, and because this version does not meter cost, unknown cost is never treated as zero — work can be refused. Recommended: blank.",
-    "Денежный лимит на задачу. Требует включённого Spend limit enforceable, а поскольку эта версия не считает стоимость, неизвестная стоимость не считается нулём — работа может отклоняться. Рекомендация: пусто.",
-  ),
-  spendEnforceable: h(
-    "Declares that the spend limit must be enforced. Required whenever a spend limit is set. Recommended: off with a blank spend limit.",
-    "Объявляет, что денежный лимит обязателен к соблюдению. Нужен, если лимит задан. Рекомендация: выключено, лимит пустой.",
+  limits: h(
+    "Maximum model runs (workers, retries, fallbacks) one task may dispatch; the next one is refused. Blank means no limit. Recommended: blank, or about 8–12 to stop runaway retry loops.",
+    "Сколько всего запусков моделей (исполнители, повторы, fallback) может сделать одна задача; следующий отклоняется. Пусто — без лимита. Рекомендация: пусто или примерно 8–12, чтобы остановить бесконечные повторы.",
   ),
   fallback: helpBlock(
     h(
@@ -371,8 +350,8 @@ export const HELP = {
         "Точное исключение для модели, по умолчанию не участвующей в автоматике; членство и уровень всё равно нужны.",
       )],
       ["Now", h(
-        "State under the rules Cortex uses at the moment. Quota and recorded unavailability are decided per dispatch and not shown. The ceilings' allowed connections are not enforced by this Cortex version and cannot switch anything off.",
-        "Состояние по правилам, которые Cortex использует сейчас. Лимиты и недоступность решаются при каждом запуске и здесь не показаны. Allowed connections в ограничениях этой версией Cortex не применяется и ничего не выключает.",
+        "State under the rules Cortex uses at the moment. Quota and recorded unavailability are decided per dispatch and not shown.",
+        "Состояние по правилам, которые Cortex использует сейчас. Лимиты и недоступность решаются при каждом запуске и здесь не показаны.",
       )],
     ],
   ),
