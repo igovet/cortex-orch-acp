@@ -142,6 +142,54 @@ def test_finish_deletions_covers_every_fk_to_tasks_table(tmp_path):
     assert not missing, f"finish_deletions does not reference: {missing}"
 
 
+def test_finish_deletions_covers_fk_children_of_every_deleted_table(tmp_path):
+    """Lazily created tables (e.g. the instruction-bundle ledger) carry no
+    FK to ``tasks`` yet may be FK children of a table finish_deletions
+    deletes from; each such child must be deleted too, or replay of a
+    committed deletion intent fails with FOREIGN KEY constraint failed."""
+    import inspect
+    import re
+    from cortex_runtime import cleanup as cleanup_module
+    from cortex_runtime.portable.instruction_bundle import InstructionBundleLedger
+
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    with store.connection() as db:
+        InstructionBundleLedger(store)._schema(db)
+        tables = [row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        edges = {table: {row[2] for row in db.execute(f"PRAGMA foreign_key_list({table})")} for table in tables}
+    source = inspect.getsource(cleanup_module.finish_deletions)
+    # Direct DELETEs, _delete_if_present("<table>", ...) and the quoted
+    # table names iterated by f-string DELETE loops.
+    deleted = set(re.findall(r'DELETE FROM (\w+)', source)) | (set(re.findall(r'"(\w+)"', source)) & set(tables))
+    missing = sorted(table for table, targets in edges.items() if targets & deleted and table not in deleted)
+    assert not missing, f"finish_deletions does not delete FK children: {missing}"
+
+
+def test_clear_tasks_removes_instruction_bundle_deliveries(tmp_path):
+    from cortex_runtime.portable.instruction_bundle import InstructionBundleLedger
+
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    task = call_store(store, 'create_task', dict(project_root=str(tmp_path), request='Old', request_key='old'))['task_id']
+    now = store._now()
+    with store.connection() as db:
+        InstructionBundleLedger(store)._schema(db)
+        db.execute(
+            "INSERT INTO instruction_bundles (bundle_id,task_id,assignment_ref,attempt_id,role_id,role_kind,engine,engine_version,"
+            "assembled_text,assembled_sha256,sources_json,intended_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ('ib_1', task, 'as_1', 'at_1', 'backend-dev', 'specialist', 'codex', '1', 'x', 'h', '[]', '{}', now, now))
+        db.execute(
+            "INSERT INTO instruction_bundle_deliveries (bundle_id,session_ref,representation,representation_sha256,engine,engine_version,"
+            "attempt_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            ('ib_1', 's_1', b'x', 'h', 'codex', '1', 'at_1', now, now))
+    assert clear_tasks(store, str(tmp_path), 0)['deleted_tasks'] == 1
+    with store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM instruction_bundles").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM instruction_bundle_deliveries").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM pending_deletions").fetchone()[0] == 0
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
 def test_clear_tasks_end_to_end_removes_every_group_row_with_integrity_ok(tmp_path):
     """Populate one row in every T005-T020 optional-group table for a
     single task (bootstrap for identity/ownership, direct inserts for the

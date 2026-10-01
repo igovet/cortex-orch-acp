@@ -136,6 +136,9 @@ def finish_deletions(store,db,task):
         # the task/project store and are covered by the task teardown above.
         _delete_if_present("check_evidence_operations", "task_id=?", (task,))
         _delete_if_present("check_evidence", "task_id=?", (task,))
+        # instruction_bundle_deliveries references instruction_bundles(bundle_id)
+        # and has no task_id of its own -- must go before the bundles.
+        _delete_if_present("instruction_bundle_deliveries","bundle_id IN (SELECT bundle_id FROM instruction_bundles WHERE task_id=?)",(task,))
         _delete_if_present("instruction_bundles", "task_id=?", (task,))
         # Lineage and seed bindings are auxiliary rows around T025 workspace
         # records.  The lineage table references workspace_snapshots and must
