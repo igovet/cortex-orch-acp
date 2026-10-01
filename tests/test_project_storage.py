@@ -249,6 +249,28 @@ def _run_cortex_clear(argv):
         sys.argv = old_argv
 
 
+@pytest.mark.parametrize('days', [0, 1, 36500])
+@pytest.mark.parametrize('flags', [[], ['--dry-run'], ['--force'], ['--force', '--dry-run']])
+def test_clear_without_database_reports_cutoff_without_creating_store(tmp_path, capsys, days, flags):
+    import json
+    from datetime import timezone
+
+    before = datetime.now(timezone.utc) - timedelta(days=days)
+    _run_cortex_clear(['--project-root', str(tmp_path), '--days', str(days), *flags])
+    after = datetime.now(timezone.utc) - timedelta(days=days)
+    result = json.loads(capsys.readouterr().out)
+    cutoff = datetime.fromisoformat(result.pop('cutoff'))
+    assert cutoff.utcoffset() == timedelta(0)
+    assert before <= cutoff <= after
+    expected = dict(deleted_tasks=0, retention_days=days, skipped_protected=0,
+                    force='--force' in flags, deleted_orphan_sessions=0,
+                    vacuum_status='not_needed', reclaimed_bytes=0)
+    if '--dry-run' in flags:
+        expected.update(would_delete_tasks=0, would_delete_orphan_sessions=0)
+    assert result == expected
+    assert not (tmp_path / '.cortex').exists()
+
+
 def test_keep_thread_flag_protects_a_bound_task_but_codex_env_no_longer_does(tmp_path, monkeypatch):
     """B5/S3,N1: the only accepted protection route is the real, repeatable
     ``--keep-thread <id>`` flag matched against ``thread_bindings``. The
@@ -275,7 +297,11 @@ def test_keep_thread_flag_protects_a_bound_task_but_codex_env_no_longer_does(tmp
     assert {key: unprotected[key] for key in
             ("deleted_tasks", "retention_days", "skipped_protected")} == dict(
                 deleted_tasks=1, retention_days=0, skipped_protected=0)
-    assert set(unprotected) == {"deleted_tasks", "retention_days", "skipped_protected", "cutoff"}
+    assert set(unprotected) == {
+        "deleted_tasks", "retention_days", "skipped_protected", "cutoff", "force",
+        "deleted_orphan_sessions", "vacuum_status", "reclaimed_bytes",
+        "db_bytes_before", "db_bytes_after",
+    }
     cutoff = datetime.fromisoformat(unprotected["cutoff"].replace("Z", "+00:00"))
     assert cutoff.tzinfo is not None and cutoff.utcoffset() == timedelta(0)
     with store.connection() as db:
@@ -297,7 +323,10 @@ def test_keep_thread_flag_protects_a_bound_task_but_codex_env_no_longer_does(tmp
     assert {key: protected[key] for key in
             ("deleted_tasks", "retention_days", "skipped_protected")} == dict(
                 deleted_tasks=0, retention_days=0, skipped_protected=1)
-    assert set(protected) == {"deleted_tasks", "retention_days", "skipped_protected", "cutoff"}
+    assert set(protected) == {
+        "deleted_tasks", "retention_days", "skipped_protected", "cutoff", "force",
+        "deleted_orphan_sessions", "vacuum_status", "reclaimed_bytes",
+    }
     cutoff = datetime.fromisoformat(protected["cutoff"].replace("Z", "+00:00"))
     assert cutoff.tzinfo is not None and cutoff.utcoffset() == timedelta(0)
     with store2.connection() as db:

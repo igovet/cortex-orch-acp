@@ -4,10 +4,12 @@ Cortex advertises `/skill-management <request>` as an ACP session command. It ac
 
 ## Runtime retention command
 
-`/cortex-clear <N|Nd|days N|before YYYY-MM-DD|YYYY-MM-DD> [confirm]` is also
+`/cortex-clear <N|Nd|days N|before YYYY-MM-DD|YYYY-MM-DD> [force] [confirm]` is also
 advertised. It previews deletion by default; trailing `confirm` authorizes
-runtime-owned cleanup of old unprotected tasks in this project, not a model
-workflow. `/clear` is not an alias. See [retention maintenance](packaging-and-onboarding.md#retention-maintenance)
+runtime-owned cleanup of old tasks and orphan chat sessions in this project,
+not a model workflow. `force` bypasses stale active/loaded-session protection,
+never the invoking task, and still requires `confirm`. Successful deletion
+attempts SQLite space reclamation; vacuum failure does not undo deletion. `/clear` is not an alias. See [retention maintenance](packaging-and-onboarding.md#retention-maintenance)
 for cutoff semantics, protection, counts and the manual CLI alternative.
 
 ## What the workflow does

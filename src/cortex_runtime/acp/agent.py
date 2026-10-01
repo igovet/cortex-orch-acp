@@ -1978,26 +1978,47 @@ class Agent:
                 _reply("Cortex cleanup cancelled; no deletion started.")
                 return
             from ..cleanup import clear_tasks
-            # Protect every session bound in this agent, including the invoking
-            # session even when its task is terminal. Durable active protection
-            # covers workers/coordinators and other runtime instances.
+            # Loaded sessions and durable active rows are soft protection.
+            # Even force must keep the invoking session and its task.
             protected = {item.get("task_id") for item in tuple(self.sessions.values())
                          if item.get("project") == session["project"] and item.get("task_id")}
             if session.get("task_id"):
                 protected.add(session["task_id"])
+            def forget_deleted(kind, identity):
+                # Called after each commit, under the cleanup lock. No second
+                # store read can race another connection or miss partial success.
+                for sid, item in tuple(self.sessions.items()):
+                    if sid != session_id and item.get("project") == session["project"]:
+                        if ((kind == "task" and item.get("task_id") == identity)
+                                or (kind == "session" and sid == identity)):
+                            self.sessions.pop(sid, None)
+
             try:
                 result = clear_tasks(
                     store, session["project"], parsed["days"], keep_threads=(session_id,),
                     cutoff=parsed["cutoff"], dry_run=not parsed["confirm"],
-                    protected_task_ids=protected, protect_active=True,
+                    protected_task_ids=protected, protect_active=True, force=parsed["force"],
+                    on_deleted=forget_deleted,
+                    keep_task_ids=(session["task_id"],) if session.get("task_id") else (),
+                    keep_session_ids=(session_id,),
+                    protected_session_ids=tuple(sid for sid, item in tuple(self.sessions.items())
+                                                if item.get("project") == session["project"]),
                 )
             except (StoreError, OSError, ValueError, sqlite3.Error):
                 _reply("Cortex cleanup refused or incomplete: store busy, active-task conflict, or storage failure. No success is claimed; retry only after activity is idle and storage is healthy.")
                 return
+            force_text = "; force=true (assumes stale processes are dead; no OS processes killed)" if parsed["force"] else ""
             if parsed["confirm"]:
-                _reply(f"cutoff={result['cutoff']}; deleted_tasks={result['deleted_tasks']}; skipped_protected={result['skipped_protected']}")
+                space_text = f"; vacuum={result['vacuum_status']}; reclaimed_bytes={result['reclaimed_bytes']}"
+                if "db_bytes_before" in result:
+                    space_text += f"; db_bytes_before={result['db_bytes_before']}"
+                if "db_bytes_after" in result:
+                    space_text += f"; db_bytes_after={result['db_bytes_after']}"
+                if result.get("vacuum_error"):
+                    space_text += "; VACUUM failed: deletion remains committed; check free disk space before retrying reclamation."
+                _reply(f"cutoff={result['cutoff']}; deleted_tasks={result['deleted_tasks']}; deleted_orphan_sessions={result['deleted_orphan_sessions']}; skipped_protected={result['skipped_protected']}" + force_text + space_text)
             else:
-                _reply(f"Dry run: cutoff={result['cutoff']}; would_delete_tasks={result['would_delete_tasks']}; skipped_protected={result['skipped_protected']}\nConfirm: {parsed['confirm_command']}")
+                _reply(f"Dry run: cutoff={result['cutoff']}; would_delete_tasks={result['would_delete_tasks']}; would_delete_orphan_sessions={result['would_delete_orphan_sessions']}; skipped_protected={result['skipped_protected']}" + force_text + f"\nConfirm: {parsed['confirm_command']}")
             return
         if command_id == acp_commands.CORTEX_STATUS:
             entries, connections = self._selectable_entries_and_connections(session["project"])

@@ -221,34 +221,72 @@ The date means strictly earlier than 00:00 UTC; a bare `YYYY-MM-DD` also works.
 For retention relative to now, use `7`, `7d` or `days 7` (integer 0..36500).
 Invalid or future dates and malformed arguments return usage with no deletion.
 Without trailing `confirm`, output gives `would_delete_tasks`,
-`skipped_protected`, the UTC cutoff and the exact confirm command. With
-`confirm`, output gives `deleted_tasks`, `skipped_protected` and the cutoff.
-Relative days are recalculated when confirming; use an absolute date for a
-fixed boundary. Neither output exposes task text or private reports.
+`would_delete_orphan_sessions`, `skipped_protected`, the UTC cutoff and the
+exact confirm command. With `confirm`, output gives `deleted_tasks`,
+`deleted_orphan_sessions`, `skipped_protected` and the cutoff. Relative days
+are recalculated when confirming; use an absolute date for a fixed boundary.
+Neither output exposes task text or private reports.
 
-Chat cleanup protects all tasks bound to this agent's sessions (including the
-current terminal task), every non-terminal runtime task, unreleased capacity
-reservations and unterminated process records. Unknown task states and ambiguous
-activity remain protected. A nonblocking exclusive store lock fences concurrent
-access through selection, committed deletion intents and filesystem cleanup;
-busy access or a protected pending intent is refused. An in-flight prompt cannot
-consume this command as a question answer or queue it as model work.
-
-The existing CLI is still owner-run, never coordinator/worker-run:
+Chat cleanup normally protects loaded-session tasks, every non-terminal runtime
+task, unreleased capacity reservations and unterminated process records.
+Unknown states and ambiguous activity remain protected. To delete stale
+protected tasks, explicitly request force (still preview first):
 
 ```
-python3 -B src/cortex_clear.py --project-root <path> --days N [--keep-thread <id>]
+/cortex-clear days 1 force
+/cortex-clear days 1 force confirm
+```
+
+The same suffix works with `before YYYY-MM-DD`, bare dates, `N` and `Nd`.
+Force always keeps the invoking session, its task and kept threads. It releases
+stale reservations and marks process records terminated with an owner-force
+assumption before replaying deletion. **It assumes those processes are already
+dead and does not kill OS processes.** Do not use force on genuinely running work.
+Deleted sessions are evicted from the agent's cache.
+
+Old unbound sessions, or sessions referencing absent tasks, are also cleaned up:
+their last activity is the maximum of session creation, close and latest
+`host_transcript`/`host_updates` timestamps. The invoking session and, without
+force, other loaded sessions are excluded. Transcript/update rows and session
+workspace bindings are deleted before session metadata.
+
+A nonblocking exclusive store lock fences concurrent access through selection,
+committed deletion intents, filesystem cleanup and space reclamation. Busy access
+or a pending intent conflicting with remaining keeps is refused even with force.
+An in-flight prompt cannot consume this command as a question answer or queue it
+as model work.
+
+After a confirmed cleanup removes anything, SQLite `VACUUM` runs outside a
+transaction while the exclusive lock remains held. Output reports vacuum status,
+`reclaimed_bytes` and `db_bytes_before`/`db_bytes_after` when measured.
+VACUUM may need substantial temporary disk space. A reclamation failure is
+reported separately: **deletion remains committed**, not rolled back.
+The manual `src/cortex_clear.py` CLI emits JSON with `deleted_tasks`,
+`retention_days`, `skipped_protected`, `cutoff`, `force`,
+`deleted_orphan_sessions`, `vacuum_status` and `reclaimed_bytes`; when a
+VACUUM runs it adds `db_bytes_before` and `db_bytes_after`, or `vacuum_error`
+on failure. `--dry-run` adds `would_delete_tasks` and
+`would_delete_orphan_sessions`.
+
+The CLI is still owner-run, never coordinator/worker-run:
+
+```
+python3 -B src/cortex_clear.py --project-root <path> --days N [--keep-thread <id>] [--force] [--dry-run]
 ```
 
 Its canonical `--project-root`, `--days` (0..36500), and repeatable
 `--keep-thread` flags retain their manual retention semantics. Unlike chat,
-it deletes directly and only protects explicitly named threads, so run it only
-when the project runtime is idle. Activity selection remains the existing
+it deletes directly unless `--dry-run` is given and only protects explicitly
+named threads: it already ignores active protection without `--force`.
+The optional force flag explicitly marks stale live-state records
+released/terminated before deletion, but never overrides kept threads.
+Run it only when the project runtime is idle. Activity selection remains the
 maximum of task creation and published report/pipeline edition update times.
 Cleanup removes project task directories and unambiguously associated drafts;
-it retains transactional `pending_deletions` intents for crash recovery. Pending
-committed deletions are included in preview/deletion counts without being
-replayed during a dry run. CLI output is a counts-only JSON summary with cutoff.
+transactional `pending_deletions` intents remain recoverable after interruption.
+Pending committed deletions are included in preview/deletion counts without
+being replayed during a dry run. CLI JSON is counts/settings and reclamation
+metadata only; it includes the same orphan cleanup and vacuum behavior.
 
 ## Uninstall
 

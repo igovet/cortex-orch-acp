@@ -682,3 +682,122 @@ def test_clear_reports_failure_without_success_or_private_content(tmp_path, monk
     output = json.dumps(transport.notifications)
     assert 'refused or incomplete' in output
     assert 'deleted_tasks=' not in output and 'private-secret' not in output
+
+
+@pytest.mark.parametrize('text,canonical', [
+    ('1', 'days 1'), ('1d', 'days 1'), ('days 1', 'days 1'),
+    ('before 2026-01-01', 'before 2026-01-01'), ('2026-01-01', 'before 2026-01-01')])
+@pytest.mark.parametrize('confirm', [False, True])
+def test_clear_force_grammar(text, canonical, confirm):
+    parsed = acp_commands.parse_clear_argument(text + ' force' + (' confirm' if confirm else ''))
+    assert parsed['force'] is True and parsed['confirm'] is confirm
+    assert parsed['confirm_command'] == f'/cortex-clear {canonical} force confirm'
+
+
+@pytest.mark.parametrize('text', ['force', 'force confirm', 'force 1', '1 confirm force',
+                                  '1 force force', '1 force extra confirm', 'days force 1',
+                                  '1 FORCE confirm', 'before 2999-01-01 force confirm'])
+def test_clear_force_invalid_grammar(text):
+    assert acp_commands.parse_clear_argument(text) is None
+
+
+def test_force_chat_keeps_invoker_evicts_other_loaded_sessions_and_reclaims(tmp_path, monkeypatch):
+    from unittest.mock import patch
+    from storage_fixture import call_store
+    from cortex_runtime.store import Store
+    from cortex_runtime.orchestration.state import SCHEMA
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / 'project'; project.mkdir()
+    agent, transport = _new_agent(environ)
+    sid, other_sid, orphan_sid = [agent._session_new(dict(cwd=str(project), mcpServers=[]))['sessionId'] for _ in range(3)]
+    store = agent._store_for(str(project))
+    old = '2025-01-01T00:00:00.000000+00:00'
+    with patch.object(Store, '_now', return_value=old):
+        tasks = [call_store(store, 'create_task', dict(project_root=str(project), request=key, request_key=key))['task_id']
+                 for key in ('invoker-private', 'loaded-private')]
+    for host_sid, task in zip((sid, other_sid), tasks):
+        agent.sessions[host_sid]['task_id'] = task
+        acp_sessions.bind_task(store, host_sid, task)
+    with store.connection() as db:
+        db.executescript(SCHEMA)
+        db.execute('UPDATE acp_host_sessions SET created_at=?', (old,))
+        for task in tasks:
+            db.execute('INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES(?,?,?,?,?)',
+                       (task, 'EXECUTING', 'private', old, old))
+        db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,created_at) VALUES(?,1,'user_message',?,?)",
+                   (orphan_sid, 'private' * 200000, old))
+    for rid, argument in [(810, 'before 2026-01-01 force'), (811, 'before 2026-01-01 force confirm')]:
+        agent._session_prompt(rid, dict(sessionId=sid, prompt=[dict(type='text', text='/cortex-clear ' + argument)]))
+        for worker in tuple(agent._workers):
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+        with store.connection() as db:
+            assert {row[0] for row in db.execute('SELECT id FROM tasks')} == (set(tasks) if rid == 810 else {tasks[0]})
+        assert set(agent.sessions) == ({sid, other_sid, orphan_sid} if rid == 810 else {sid})
+    output = json.dumps(transport.notifications)
+    assert 'force=true' in output and 'no OS processes killed' in output
+    assert 'would_delete_tasks=1' in output and 'would_delete_orphan_sessions=1' in output
+    assert '/cortex-clear before 2026-01-01 force confirm' in output
+    assert 'deleted_tasks=1' in output and 'deleted_orphan_sessions=1' in output
+    assert 'vacuum=completed' in output and 'reclaimed_bytes=' in output
+    assert 'db_bytes_before=' in output and 'db_bytes_after=' in output
+    assert 'invoker-private' not in output and 'loaded-private' not in output
+
+
+def test_clear_chat_vacuum_failure_keeps_committed_reply(tmp_path, monkeypatch):
+    from cortex_runtime import cleanup
+    from storage_fixture import call_store
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / 'project'; project.mkdir()
+    agent, transport = _new_agent(environ)
+    sid = agent._session_new(dict(cwd=str(project), mcpServers=[]))['sessionId']
+    store = agent._store_for(str(project))
+    task = call_store(store, 'create_task', dict(project_root=str(project), request='private', request_key='k'))['task_id']
+    monkeypatch.setattr(cleanup, '_reclaim_space', lambda *args: dict(
+        vacuum_status='failed', reclaimed_bytes=0, vacuum_error='space reclamation failed; deletion remains committed'))
+    agent._run_command_body(812, sid, agent.sessions[sid], ('cortex-clear', '0 confirm'), threading.Event())
+    output = json.dumps(transport.notifications)
+    assert 'deleted_tasks=1' in output and 'VACUUM failed: deletion remains committed' in output
+    assert 'refused or incomplete' not in output
+    with store.connection() as db:
+        assert db.execute('SELECT 1 FROM tasks WHERE id=?', (task,)).fetchone() is None
+
+
+def test_force_chat_evicts_committed_task_even_if_later_teardown_fails(tmp_path, monkeypatch):
+    from cortex_runtime import cleanup
+    from storage_fixture import call_store
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / 'project'; project.mkdir()
+    agent, transport = _new_agent(environ)
+    sid, first_sid, second_sid = [agent._session_new(dict(cwd=str(project), mcpServers=[]))['sessionId'] for _ in range(3)]
+    store = agent._store_for(str(project))
+    bound = {}
+    for host_sid in (first_sid, second_sid):
+        task = call_store(store, 'create_task', dict(project_root=str(project), request=host_sid, request_key=host_sid))['task_id']
+        agent.sessions[host_sid]['task_id'] = task
+        acp_sessions.bind_task(store, host_sid, task)
+        bound[task] = host_sid
+    original = cleanup.finish_deletions
+    removed = []
+    reclaimed = []
+    vacuum = cleanup._reclaim_space
+    def record_vacuum(store, db):
+        assert not db.in_transaction
+        reclaimed.append(True)
+        return vacuum(store, db)
+    monkeypatch.setattr(cleanup, '_reclaim_space', record_vacuum)
+    def partial(store, db, task):
+        if removed:
+            raise OSError('simulated later teardown failure')
+        original(store, db, task)
+        removed.append(task)
+    monkeypatch.setattr(cleanup, 'finish_deletions', partial)
+    agent._run_command_body(813, sid, agent.sessions[sid], ('cortex-clear', '0 force confirm'), threading.Event())
+    assert len(removed) == 1 and reclaimed == [True]
+    assert bound[removed[0]] not in agent.sessions
+    assert sid in agent.sessions and len(agent.sessions) == 2
+    output = json.dumps(transport.notifications)
+    assert 'refused or incomplete' in output and 'deleted_tasks=' not in output
+    with store.connection() as db:
+        assert db.execute('SELECT 1 FROM tasks WHERE id=?', (removed[0],)).fetchone() is None
+        assert db.execute('SELECT COUNT(*) FROM pending_deletions').fetchone()[0] == 1

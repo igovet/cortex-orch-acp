@@ -81,7 +81,7 @@ _TRIGGERS: tuple[tuple[str, str], ...] = (
 )
 
 AVAILABLE_COMMANDS: tuple[dict, ...] = (
-    dict(name=CORTEX_CLEAR, description="Preview old project task deletion; trailing confirm deletes unprotected tasks. No model call.", input=dict(hint="<N|Nd|days N|before YYYY-MM-DD|YYYY-MM-DD> [confirm]")),
+    dict(name=CORTEX_CLEAR, description="Preview old project task deletion; trailing confirm deletes; force bypasses stale active protection except the invoking task. No model call.", input=dict(hint="<N|Nd|days N|before YYYY-MM-DD|YYYY-MM-DD> [force] [confirm]")),
     dict(name=CORTEX_STATUS, description="Show model/thought-level, connection state, and engine execution mode. Never changes anything.", input=None),
     dict(name=CORTEX_MODEL, description="Select the model by its route label or route id.", input=dict(hint="<route label or route id>")),
     dict(name=CORTEX_EFFORT, description="Select the thought_level (reasoning effort) value for the current model.", input=dict(hint="<value>")),
@@ -97,7 +97,7 @@ AVAILABLE_COMMANDS: tuple[dict, ...] = (
 )
 
 
-CLEAR_USAGE = "Usage: /cortex-clear <N|Nd|days N|before YYYY-MM-DD|YYYY-MM-DD> [confirm] (N: 0..36500; date: non-future, 00:00 UTC). Omit confirm to preview."
+CLEAR_USAGE = "Usage: /cortex-clear <N|Nd|days N|before YYYY-MM-DD|YYYY-MM-DD> [force] [confirm] (N: 0..36500; date: non-future, 00:00 UTC). Omit confirm to preview."
 
 
 def parse_clear_argument(argument: str, *, now=None) -> dict | None:
@@ -106,13 +106,17 @@ def parse_clear_argument(argument: str, *, now=None) -> dict | None:
     confirm = bool(words and words[-1] == "confirm")
     if confirm:
         words.pop()
+    force = bool(words and words[-1] == "force")
+    if force:
+        words.pop()
+    force_suffix = " force" if force else ""
     value = " ".join(words)
     match = re.fullmatch(r"(?:days )?([0-9]{1,5})(d)?", value)
     if match and not (value.startswith("days ") and match[2]):
         days = int(match[1])
         if days <= 36500:
-            return dict(days=days, cutoff=None, confirm=confirm,
-                        confirm_command=f"/cortex-clear days {days} confirm")
+            return dict(days=days, cutoff=None, confirm=confirm, force=force,
+                        confirm_command=f"/cortex-clear days {days}{force_suffix} confirm")
     match = re.fullmatch(r"(?:before )?([0-9]{4}-[0-9]{2}-[0-9]{2})", value)
     if match:
         try:
@@ -120,8 +124,8 @@ def parse_clear_argument(argument: str, *, now=None) -> dict | None:
         except ValueError:
             return None
         if cutoff <= (now or datetime.now(timezone.utc)):
-            return dict(days=None, cutoff=cutoff, confirm=confirm,
-                        confirm_command=f"/cortex-clear before {match[1]} confirm")
+            return dict(days=None, cutoff=cutoff, confirm=confirm, force=force,
+                        confirm_command=f"/cortex-clear before {match[1]}{force_suffix} confirm")
     return None
 
 

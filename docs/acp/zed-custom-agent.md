@@ -108,7 +108,8 @@ anything.
   model call. No host-policy repair
   is required for normal operation.
 - `/cortex-clear` previews project task retention without a model call; trailing
-  `confirm` deletes only unprotected tasks. Use this name, not host-reserved
+  `confirm` deletes old unprotected tasks and orphan chats; optional `force` bypasses
+  stale active protection but never the invoking task. Use this name, not host-reserved
   `/clear`; see [retention](packaging-and-onboarding.md#retention-maintenance).
   This implementation has no new live Zed rendering evidence.
 - Sending any ordinary prompt before a connection is configured returns

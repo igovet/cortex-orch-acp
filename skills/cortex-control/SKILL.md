@@ -27,7 +27,7 @@ For example, preview tasks with last activity before 1 October 2026 at 00:00 UTC
 /cortex-clear before 2026-10-01
 ```
 
-The runtime preview reports deletion/protection counts and cutoff. CLI JSON reports exact `deleted_tasks`, `retention_days`, and `skipped_protected` counts/settings plus `cutoff` as an ISO-8601 UTC timestamp. The runtime also gives the exact command to confirm:
+The runtime preview reports deletion/protection counts and cutoff. Manual CLI JSON includes `deleted_tasks`, `retention_days`, `skipped_protected`, `cutoff` (ISO-8601 UTC), `force`, `deleted_orphan_sessions`, `vacuum_status`, and `reclaimed_bytes`; after actual reclamation it also includes `db_bytes_before` and `db_bytes_after` (and `vacuum_error` on failure). Dry runs add `would_delete_tasks` and `would_delete_orphan_sessions` instead of deleting or vacuuming. The runtime also gives the exact command to confirm:
 
 ```
 /cortex-clear before 2026-10-01 confirm
@@ -36,10 +36,27 @@ The runtime preview reports deletion/protection counts and cutoff. CLI JSON repo
 Retention days are also accepted: `/cortex-clear 7`, `/cortex-clear 7d`, or
 `/cortex-clear days 7`; integers must be 0..36500. A bare `YYYY-MM-DD` works
 as an absolute cutoff. Malformed, invalid and future dates are refused.
-Without trailing `confirm` nothing is deleted. Chat cleanup protects tasks
-bound to this agent's sessions, non-terminal tasks and live or ambiguously
-live coordinator/worker activity. It refuses busy-store and protected pending
-intent races. Ask the owner to retry from an idle session, not to bypass guards.
+Without trailing `confirm` nothing is deleted, even with `force`. Chat cleanup
+normally protects loaded-session tasks, non-terminal tasks and live/ambiguous
+coordinator/worker activity. To delete stale protected tasks, the owner can use:
+
+```
+/cortex-clear days 1 force
+/cortex-clear days 1 force confirm
+```
+
+Force also works with dates and bare days. It always keeps the invoking session
+and its task/kept threads; it assumes other processes are already dead, marks
+stale reservation/process rows released/terminated, and never kills OS processes.
+Never recommend force for genuinely running work. Busy-store access and pending
+intents conflicting with remaining keeps are still refused.
+
+Cleanup also removes old unbound/orphan host sessions and their transcript/update
+rows, excluding the invoking session and (without force) other loaded sessions.
+Their last activity includes creation, close and latest transcript/update times.
+Preview reports `would_delete_orphan_sessions`; confirmation reports
+`deleted_orphan_sessions`, `reclaimed_bytes`, and before/after DB sizes after
+SQLite `VACUUM`. A vacuum failure leaves deletion committed and is stated separately.
 
 The bundled [CLI](../../src/cortex_clear.py) remains an alternative the owner
 runs manually in their shell, not something the coordinator executes:
@@ -52,6 +69,8 @@ python3 -B src/cortex_clear.py --project-root <path> --days N [--keep-thread <id
 `--keep-thread <id>` is repeatable and protects the exact known thread.
 The CLI retains its manual retention/keep-thread contract: it is not the
 chat preview/confirm workflow and does not automatically protect active tasks.
+Optional `--force` explicitly marks stale live-state rows released/terminated;
+the CLI already ignores active protection without it. `--dry-run` previews only.
 Use it only when the project runtime is idle and name every thread to keep.
 
 Cleanup removes matching old task records and project task directories, plus

@@ -35,9 +35,13 @@ delivered only after the commit can also be omitted; see the
 Preview `/cortex-clear before 2026-10-01`, then use the displayed command ending
 in `confirm` to delete old unprotected tasks. Dates mean strictly before
 00:00 UTC; `7`, `7d` or `days 7` instead select retention days (0..36500).
-The runtime handles this without a model call, protects current/session-bound
-and active tasks, and prints only counts/cutoff. Invalid input and busy-store
-races are refused. `/clear` is host-reserved, not a Cortex alias.
+The runtime handles this without a model call and normally protects loaded-session
+and active tasks. To remove stale protected tasks, preview `/cortex-clear days 1 force`,
+then use `/cortex-clear days 1 force confirm`. Force always keeps the invoking
+session's task; it assumes other processes are already dead and does not kill them.
+Cleanup also removes old unbound/orphan chat sessions, then runs SQLite `VACUUM`
+after committed deletion and reports reclaimed bytes (or an honest vacuum failure).
+Invalid input and busy-store races are refused. `/clear` is host-reserved, not a Cortex alias.
 See [retention maintenance](docs/acp/packaging-and-onboarding.md#retention-maintenance)
 for safety details and the owner-run CLI alternative.
 

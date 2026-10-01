@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 
 from .contracts import StoreError
 from .project_storage import project_store_directory
@@ -227,12 +228,57 @@ def protected_active_tasks(db):
     return keep
 
 
+def _orphan_sessions(db, project, cutoff, keep):
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "acp_host_sessions" not in tables:
+        return []
+    activity = ["s.created_at", "COALESCE(s.closed_at,s.created_at)"]
+    for table in ("host_transcript", "host_updates"):
+        if table in tables:
+            activity.append(f"COALESCE((SELECT MAX(created_at) FROM {table} WHERE session_id=s.session_id),s.created_at)")
+    rows = db.execute(f'''SELECT s.session_id FROM acp_host_sessions s
+        WHERE s.project_root=? AND (s.task_id IS NULL OR NOT EXISTS
+            (SELECT 1 FROM tasks t WHERE t.id=s.task_id))
+        AND MAX({','.join(activity)})<?''', (project, cutoff))
+    return [row[0] for row in rows if row[0] not in keep]
+
+
+def _delete_host_session(db, session_id):
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for table in ("host_transcript", "host_updates", "acp_session_workspaces", "acp_host_sessions"):
+        if table in tables:
+            db.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))
+
+
+def _reclaim_space(store, db):
+    """Deletion is already committed; a vacuum failure must not disguise it."""
+    result = dict(vacuum_status="failed", reclaimed_bytes=0)
+    try:
+        if db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
+            raise sqlite3.OperationalError("checkpoint busy")
+        result["db_bytes_before"] = store.path.stat().st_size
+        db.execute("VACUUM")
+        if db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]:
+            raise sqlite3.OperationalError("checkpoint busy")
+        result["db_bytes_after"] = store.path.stat().st_size
+        result["reclaimed_bytes"] = max(0, result["db_bytes_before"] - result["db_bytes_after"])
+        result["vacuum_status"] = "completed"
+    except (sqlite3.Error, OSError):
+        # Do not expose private paths or SQL/error bodies in owner replies.
+        result["vacuum_error"] = "space reclamation failed; deletion remains committed"
+    return result
+
+
 def clear_tasks(store,project_root,days=None,keep_threads=(),now=None,*,
-                cutoff=None,dry_run=False,protected_task_ids=(),protect_active=False):
+                cutoff=None,dry_run=False,protected_task_ids=(),protect_active=False,
+                force=False,keep_task_ids=(),keep_session_ids=(),protected_session_ids=(),
+                on_deleted=None):
     """Select and journal retention under an exclusive, nonblocking store lock.
 
-    Chat callers require active protection; the manual CLI retains its existing
-    retention/keep-thread contract. Dry runs never replay pending deletions.
+    Force bypasses soft active/loaded-session protection, never explicit keeps.
+    It assumes stale processes are dead and does not signal OS processes.
+    Dry runs never replay pending deletions or reclaim space. The optional
+    in-memory observer receives (kind, identity) only after each deletion commits.
     """
     current = now or datetime.now(timezone.utc)
     if cutoff is None:
@@ -254,21 +300,66 @@ def clear_tasks(store,project_root,days=None,keep_threads=(),now=None,*,
                 COALESCE((SELECT MAX(e.updated_at) FROM reports r JOIN editions e ON e.report_id=r.id WHERE r.task_id=t.id),t.created_at)) AS activity
             FROM tasks t) WHERE project_root=? AND activity<?''',(str(project),cutoff_text)).fetchall()
         keep={entry["task_id"] for thread in keep_threads for entry in db.execute("SELECT task_id FROM thread_bindings WHERE thread_id=?",(thread,))}
-        keep.update(protected_task_ids)
-        if protect_active:
-            keep.update(protected_active_tasks(db))
+        keep.update(keep_task_ids)
+        # An explicitly kept host session also keeps its bound task.
+        for sid in keep_session_ids:
+            row = db.execute("SELECT task_id FROM acp_host_sessions WHERE session_id=?", (sid,)).fetchone()
+            if row and row[0]:
+                keep.add(row[0])
+        if not force:
+            keep.update(protected_task_ids)
+            if protect_active:
+                keep.update(protected_active_tasks(db))
         selected=[row["id"] for row in rows if row["id"] not in keep]
         pending=[row[0] for row in db.execute("SELECT d.task_id FROM pending_deletions d JOIN tasks t ON t.id=d.task_id WHERE t.project_root=?",(str(project),))]
         if set(pending) & keep:
             raise StoreError("retention_active_conflict")
+        session_keep = set(keep_session_ids) | set(keep_threads)
+        if not force:
+            session_keep.update(protected_session_ids)
+        orphans = _orphan_sessions(db, str(project), cutoff_text, session_keep)
         result = dict(deleted_tasks=0 if dry_run else len(set(pending) | set(selected)),retention_days=days,
-                      skipped_protected=sum(row["id"] in keep for row in rows),cutoff=cutoff_text)
+                      skipped_protected=sum(row["id"] in keep for row in rows),cutoff=cutoff_text,
+                      force=force, deleted_orphan_sessions=0 if dry_run else len(orphans),
+                      vacuum_status="not_needed", reclaimed_bytes=0)
         if dry_run:
             result["would_delete_tasks"] = len(set(pending) | set(selected))
+            result["would_delete_orphan_sessions"] = len(orphans)
             db.rollback()
             return result
         for task in selected: db.execute("INSERT OR IGNORE INTO pending_deletions VALUES (?)",(task,))
+        if force:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for task in set(pending) | set(selected):
+                if "capacity_reservations" in tables:
+                    db.execute("UPDATE capacity_reservations SET state='released',updated_at=?,release_observation='owner_force_retention_assumed_dead' WHERE task_id=? AND state!='released'",
+                               (current.isoformat(timespec="microseconds"), task))
+                if "attempt_process_registry" in tables:
+                    db.execute("UPDATE attempt_process_registry SET terminated_at=?,termination_reason='owner_force_retention_assumed_dead' WHERE task_id=? AND terminated_at IS NULL",
+                               (current.isoformat(timespec="microseconds"), task))
         db.commit()
-        for task in set(pending) | set(selected):
-            db.execute("BEGIN IMMEDIATE"); finish_deletions(store,db,task); db.commit()
+        removed = False
+        try:
+            for task in set(pending) | set(selected):
+                db.execute("BEGIN IMMEDIATE"); finish_deletions(store,db,task); db.commit()
+                removed = True
+                if on_deleted is not None:
+                    on_deleted("task", task)
+            if orphans:
+                db.execute("BEGIN IMMEDIATE")
+                for sid in orphans:
+                    _delete_host_session(db, sid)
+                db.commit()
+                removed = True
+                if on_deleted is not None:
+                    for sid in orphans:
+                        on_deleted("session", sid)
+        finally:
+            if removed:
+                # A later teardown failure must not prevent reclaiming earlier
+                # committed deletions. Its pending intent survives rollback.
+                if db.in_transaction:
+                    db.rollback()
+                # Outside every transaction, still fenced by the exclusive lock.
+                result.update(_reclaim_space(store, db))
     return result

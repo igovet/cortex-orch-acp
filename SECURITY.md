@@ -281,19 +281,35 @@ project's `.cortex` store and unambiguously task-linked drafts. The command
 starts no coordinator/model turn. It never returns task contents or reports.
 `/clear` is not registered because hosts reserve that name.
 
-Chat retention protects tasks bound to this agent's sessions, every non-terminal
-runtime task and unreleased/ambiguous capacity or unterminated process records.
+Chat retention normally protects tasks bound to this agent's sessions, every
+non-terminal runtime task and unreleased/ambiguous capacity or unterminated
+process records. Explicit `force` before `confirm` bypasses those protections
+except the invoking session, its bound task and kept threads. Force assumes
+stale processes are already dead: it releases reservation rows and marks process
+records terminated with an owner-force assumption, but never kills OS processes.
+Do not force-delete genuinely running work. Deleted sessions are evicted from
+the agent's cache, including after partial committed teardown.
 Selection and cleanup hold a nonblocking exclusive store access lock: competing
-store access and protected pending deletion conflicts fail closed. In-flight
+store access and pending intents conflicting with remaining keeps fail closed. In-flight
 chat prompts cannot interpret this command as an answer or model work. Journaled
 `pending_deletions` still permit recovery of committed deletions after partial
 filesystem failure; an error does not claim successful cleanup or rollback of
 already removed files. Dry runs do not replay intents. Preview counts include
 already committed pending deletions; relative days recalculate on confirmation.
 
+Old unbound host sessions (or sessions whose task is absent) are also removed,
+with their `host_transcript`/`host_updates` and workspace bindings, only when
+their creation/close/latest transcript/update activity is before the cutoff.
+The invoking session is always kept; other loaded sessions are kept unless forced.
+After deletion commits, SQLite `VACUUM` runs outside the transaction under the
+same lock. Counts and DB byte sizes report reclamation; a vacuum failure does
+not undo deletion and is reported as committed deletion with failed reclamation.
+
 The owner-run `src/cortex_clear.py --project-root PATH --days N` alternative
 retains its direct manual semantics and repeatable `--keep-thread` protection;
-it is not automatically active-task-aware. Run it only with the runtime idle.
+it is not automatically active-task-aware. Optional `--force` explicitly marks
+stale live-state records released/terminated; `--dry-run` previews without deletion.
+Run it only with the runtime idle.
 Models/coordinators/workers must never run either deletion route on behalf of
 the owner. See [retention maintenance](docs/acp/packaging-and-onboarding.md#retention-maintenance).
 

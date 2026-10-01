@@ -479,3 +479,182 @@ def test_retention_failure_keeps_recoverable_intent(tmp_path, monkeypatch):
     with store.connection() as db:
         assert {r[0] for r in db.execute('SELECT task_id FROM pending_deletions')} == {task}
     assert clear_tasks(store, str(tmp_path), 0, protect_active=True)['deleted_tasks'] == 1
+
+
+@pytest.mark.parametrize('state', ['EXECUTING', 'UNKNOWN'])
+@pytest.mark.parametrize('pending', [False, True])
+def test_force_cleans_live_records_but_never_explicit_keeps(tmp_path, monkeypatch, state, pending):
+    from cortex_runtime import cleanup
+    from cortex_runtime.orchestration.state import SCHEMA
+    store = Store(tmp_path / 'private')
+    tasks = [call_store(store, 'create_task', dict(project_root=str(tmp_path), request=key, request_key=key))['task_id']
+             for key in ('stale', 'invoking')]
+    stale, invoking = tasks
+    with store.connection() as db:
+        db.executescript(SCHEMA)
+        for task in tasks:
+            db.execute('INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES(?,?,?,?,?)',
+                       (task, state, 'private', store._now(), store._now()))
+            db.execute('INSERT INTO capacity_reservations(reservation_id,connection_id,task_id,attempt_id,kind,state,reserved_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
+                       (task, 'cn1', task, task, 'worker', 'ambiguous', store._now(), store._now()))
+            db.execute('INSERT INTO attempt_process_registry(attempt_id,task_id,role,pid,pgid,start_ticks,boot_id,launch_command_digest,recorded_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                       (task, task, 'orchestrator', 1, 1, '0', 'fake', 'fake', store._now()))
+        if pending:
+            db.execute('INSERT INTO pending_deletions VALUES (?)', (stale,))
+    options = dict(force=True, protect_active=True, protected_task_ids=tasks,
+                   keep_threads=(thread_for(store, invoking),))
+    preview = clear_tasks(store, str(tmp_path), 0, dry_run=True, **options)
+    assert preview['would_delete_tasks'] == 1 and preview['skipped_protected'] == 1
+    with store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM capacity_reservations WHERE state='ambiguous'").fetchone()[0] == 2
+        assert db.execute('SELECT COUNT(*) FROM attempt_process_registry WHERE terminated_at IS NULL').fetchone()[0] == 2
+    original = cleanup.finish_deletions
+    def checked_finish(store, db, task):
+        assert task == stale
+        row = db.execute('SELECT state,release_observation FROM capacity_reservations WHERE task_id=?', (task,)).fetchone()
+        assert tuple(row) == ('released', 'owner_force_retention_assumed_dead')
+        row = db.execute('SELECT terminated_at,termination_reason FROM attempt_process_registry WHERE task_id=?', (task,)).fetchone()
+        assert row[0] and row[1] == 'owner_force_retention_assumed_dead'
+        original(store, db, task)
+    monkeypatch.setattr(cleanup, 'finish_deletions', checked_finish)
+    result = clear_tasks(store, str(tmp_path), 0, **options)
+    assert result['deleted_tasks'] == 1 and result['force']
+    with store.connection() as db:
+        assert {row[0] for row in db.execute('SELECT id FROM tasks')} == {invoking}
+        assert db.execute('SELECT terminated_at FROM attempt_process_registry').fetchone()[0] is None
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+def test_force_still_refuses_kept_pending_intent(tmp_path):
+    store = Store(tmp_path / 'private')
+    task = call_store(store, 'create_task', dict(project_root=str(tmp_path), request='k', request_key='k'))['task_id']
+    with store.connection() as db:
+        db.execute('INSERT INTO pending_deletions VALUES (?)', (task,))
+    for dry_run in (True, False):
+        with pytest.raises(StoreError, match='retention_active_conflict'):
+            clear_tasks(store, str(tmp_path), 0, force=True, dry_run=dry_run, keep_task_ids=(task,))
+    assert (tmp_path / '.cortex' / task).exists()
+
+
+def _retention_session(store, project, sid, created, *, transcript=None, update=None, closed=None):
+    from cortex_runtime.acp.sessions import create_session
+    create_session(store, sid, str(project), {}, {}, [], workspace_root=str(project))
+    with store.connection() as db:
+        db.execute('UPDATE acp_host_sessions SET created_at=?,closed_at=? WHERE session_id=?', (created, closed, sid))
+        if transcript:
+            db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,created_at) VALUES(?,1,'user_message',?,?)",
+                       (sid, 'private' * 200000, transcript))
+        if update:
+            db.execute('INSERT INTO host_updates(session_id,seq,update_json,created_at) VALUES(?,2,?,?)',
+                       (sid, '{"private":"' + 'x' * 1000000 + '"}', update))
+
+
+@pytest.mark.parametrize('force', [False, True])
+@pytest.mark.parametrize('journal_mode', ['DELETE', 'WAL'])
+def test_orphan_transcripts_use_last_activity_and_reclaim_file(tmp_path, force, journal_mode):
+    store = Store(tmp_path / 'private')
+    with store.connection() as db:
+        assert db.execute(f'PRAGMA journal_mode={journal_mode}').fetchone()[0].upper() == journal_mode
+    foreign = tmp_path / 'foreign'; foreign.mkdir()
+    old = '2025-01-01T00:00:00.000000+00:00'
+    cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    recent = '2026-01-01T00:00:00.000000+00:00'
+    for sid in ('old', 'loaded', 'invoking', 'missing-task'):
+        _retention_session(store, tmp_path, sid, old, transcript=old, update=old)
+    _retention_session(store, tmp_path, 'recent-text', old, transcript=recent)
+    _retention_session(store, tmp_path, 'recent-update', old, update=recent)
+    _retention_session(store, tmp_path, 'recent-close', old, closed=recent)
+    _retention_session(store, foreign, 'foreign', old, transcript=old)
+    # Legacy corruption: a host session can reference a task already absent.
+    import sqlite3
+    with sqlite3.connect(store.path) as db:
+        db.execute("UPDATE acp_host_sessions SET task_id='missing' WHERE session_id='missing-task'")
+    options = dict(cutoff=cutoff, force=force, keep_session_ids=('invoking',), protected_session_ids=('loaded',))
+    before = store.path.read_bytes()
+    preview = clear_tasks(store, str(tmp_path), dry_run=True, **options)
+    assert preview['would_delete_orphan_sessions'] == (3 if force else 2)
+    assert preview['would_delete_tasks'] == 0 and store.path.read_bytes() == before
+    result = clear_tasks(store, str(tmp_path), **options)
+    assert result['deleted_tasks'] == 0
+    assert result['deleted_orphan_sessions'] == (3 if force else 2)
+    assert result['vacuum_status'] == 'completed'
+    assert result['db_bytes_after'] < result['db_bytes_before']
+    assert result['reclaimed_bytes'] == result['db_bytes_before'] - result['db_bytes_after']
+    assert store.path.stat().st_size == result['db_bytes_after']
+    with store.connection() as db:
+        remaining = {row[0] for row in db.execute('SELECT session_id FROM acp_host_sessions')}
+        expected = {'invoking', 'recent-text', 'recent-update', 'recent-close', 'foreign'} | (set() if force else {'loaded'})
+        assert remaining == expected
+        for table in ('host_transcript', 'host_updates'):
+            assert not {row[0] for row in db.execute(f'SELECT session_id FROM {table}')} - expected
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+    assert clear_tasks(store, str(tmp_path), **options)['vacuum_status'] == 'not_needed'
+
+
+def test_vacuum_failure_reports_committed_deletion_under_lock(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    import sqlite3
+    store = Store(tmp_path / 'private')
+    task = call_store(store, 'create_task', dict(project_root=str(tmp_path), request='k', request_key='k'))['task_id']
+    original = store.connection
+    calls = []
+    class Connection:
+        def __init__(self, db):
+            self.db = db
+        def __getattr__(self, name):
+            return getattr(self.db, name)
+        def execute(self, sql, *args):
+            if sql == 'VACUUM':
+                calls.append(sql)
+                assert not self.db.in_transaction
+                with pytest.raises(StoreError, match='storage_busy'):
+                    with original():
+                        pytest.fail('vacuum must still hold the exclusive lock')
+                raise sqlite3.OperationalError('private disk failure')
+            return self.db.execute(sql, *args)
+    @contextmanager
+    def connection(**kwargs):
+        with original(**kwargs) as db:
+            yield Connection(db)
+    monkeypatch.setattr(store, 'connection', connection)
+    result = clear_tasks(store, str(tmp_path), 0)
+    assert calls == ['VACUUM']
+    assert result['deleted_tasks'] == 1 and result['vacuum_status'] == 'failed'
+    assert result['reclaimed_bytes'] == 0
+    assert 'private' not in result['vacuum_error'] and 'committed' in result['vacuum_error']
+    with original() as db:
+        assert db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM pending_deletions').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('force', [False, True])
+def test_cli_keeps_manual_active_unaware_selection_and_explicit_threads(tmp_path, monkeypatch, capsys, force):
+    import json
+    from cortex_runtime.orchestration.state import SCHEMA
+    store = Store(tmp_path / '.cortex', project_root=str(tmp_path))
+    old = '2025-01-01T00:00:00.000000+00:00'
+    with patch.object(Store, '_now', return_value=old):
+        tasks = [call_store(store, 'create_task', dict(project_root=str(tmp_path), request=key, request_key=key))['task_id']
+                 for key in ('stale', 'kept')]
+    with store.connection() as db:
+        db.executescript(SCHEMA)
+        for task in tasks:
+            db.execute('INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES(?,?,?,?,?)',
+                       (task, 'EXECUTING', 'private', old, old))
+    argv = ['cortex_clear.py', '--project-root', str(tmp_path), '--days', '1', '--keep-thread', thread_for(store, tasks[1])]
+    if force:
+        argv.append('--force')
+    monkeypatch.setattr('sys.argv', argv + ['--dry-run'])
+    cortex_clear.main()
+    preview = json.loads(capsys.readouterr().out)
+    assert preview['deleted_tasks'] == 0 and preview['would_delete_tasks'] == 1
+    assert preview['force'] == force
+    with store.connection() as db:
+        assert db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 2
+    monkeypatch.setattr('sys.argv', argv)
+    cortex_clear.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result['deleted_tasks'] == 1 and result['skipped_protected'] == 1
+    assert result['vacuum_status'] == 'completed'
+    with store.connection() as db:
+        assert {row[0] for row in db.execute('SELECT id FROM tasks')} == {tasks[1]}
