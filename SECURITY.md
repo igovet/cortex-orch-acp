@@ -18,12 +18,24 @@ that decision as `REVIEW_NOT_REQUIRED` and binds verification to the same digest
 Any project change, every fix cycle, or an unobservable project still requires
 independent review. No model hint can waive review. A model tool call cannot
 select a task state, accept the task or directly create an engine session.
-A model hint also cannot raise a worker to a flagship model on its own: the
-runtime grants a flagship route only for a node whose exact hint names a model
-family the user asked for in the task's own recorded messages or answers, never
-from model-authored text, and `pin`, `deny`, `providers`, availability and
-quota still apply (see
-[user-requested flagship route](docs/acp/routing-and-fallback.md#user-requested-flagship-route)).
+A model hint cannot grant a route or infer model family/quality. Eligibility, tier, effort and automatic membership come from the effective version-2 owner routing settings and current observed catalogs; the runtime also enforces pins, denies, provider policy, availability, quota and user authorization. New or renamed identities are not automatically eligible. New audits identify configured stretch policy with the neutral `stretch` key and effort basis; no historical audit is rewritten and this label grants no authorization. Policy refusals happen before worker capacity reservation or engine launch; the coordinator route-menu tool reports the named validation failure without claiming an uncertain storage write. See [settings-only routing](docs/acp/routing-and-fallback.md#settings-only-routing).
+
+Retained user-source model grants require the complete case-sensitive
+`engine/model` token or a separately configured request label. Opaque identity
+punctuation is not a substring boundary: another variant or provider path
+cannot authorize a shorter flagship identity. Ambiguous unquoted punctuation
+is refused; paired quotes explicitly delimit an identity from prose. Request
+and negation grammar, source provenance, label ambiguity refusal and all route
+eligibility checks still apply. No source or settings rewrite repairs a refusal.
+
+ACP selection carries the owner/project ceiling into selected and active
+revisions without passing the saved identity envelope as native parameters.
+Route/effort changes cannot discard task narrowing or an explicit role profile.
+Automatic dispatch filters candidates by route, connection and data-recipient
+ceilings, then rechecks the actual chosen observed identity before capacity
+reservation. Missing, stale, unmatched or ambiguous automatic identities fail
+closed; the coordinator route is not an authorization proxy. This does not
+establish paid-live or rendered-host qualification.
 
 After a coordinator question commits `WAITING_USER`, further coordinator text
 received in that turn is suppressed, not released by delayed tool callbacks.
@@ -460,6 +472,18 @@ refuses a pre-existing directory with broader permissions. The refusal keeps the
 path and expected mode and tells the local owner the exact `chmod 700` command;
 it does not weaken the check or repair a pre-existing directory automatically.
 
+The [bound task inspector](docs/acp/observability.md#bound-task-inspection) is
+metadata-only. It requires an explicit project/session/task/current owner-epoch
+binding, validates owned non-symlink storage, and takes the existing access lock
+exclusively without creating it. SQLite is read-only/immutable only after a
+nonempty WAL has been ruled out under that lock; busy or uncheckpointed storage
+is refused, never checkpointed or silently read without its WAL. It does not
+construct a writable/non-initializing Store, migrate schemas, initialize files,
+read report bodies, print tool arguments/output or probe processes. Pagination
+is digest-bound and refuses changed or oversized snapshots. Collection
+completeness is not acceptance; host identity, native resource liveness and
+report-file digest verification require independent evidence.
+
 ## Attack-surface review and limits
 
 The external attack-surface review below was performed during qualification.
@@ -473,3 +497,29 @@ pins.
 - Sandboxing assumes Linux user/mount/PID/network namespaces and bubblewrap.
 - Scope strings are not treated as proof of authorization; they are validated and
   checked at each operation boundary.
+
+
+Quota-window associations are exact owner settings, not model-family inference. Unmapped windows conservatively retain account-wide applicability, including exhaustion; missing numeric evidence is not zero. Settings validation precedes quota IO, and invalid reset policy cannot erase an engine-reported refusal. Associations cannot expand enabled/deny/provider/consent eligibility. See [the quota settings contract](docs/configuration.md#exact-quota-window-associations); install data is not a runtime overlay and existing profiles/configuration require explicit adoption.
+
+Brokered Cortex MCP channel loss is indeterminate and does not grant route fallback or permission to replay an uncertain mutation. The existing bounded recovery path requires a fresh attempt after confirming the old one is absent. Replacement MCP servers must supply fresh, request-matched tool/schema evidence before readiness; old-generation replies/exits cannot clear current failures. Incomplete or malformed tool lists fail closed. Serialization failure is contained to the request; none of these protections establish the cause of a historical production disconnect. See [failures](docs/acp/failures-and-cancellation.md). Captured steering remains immutable; native host composer queue manipulation is not a grant to erase source history. Normal queue draining waits for background continuation ownership instead of cancelling it. Explicit Stop/cancel still fences waiting prompts and unfinished work; pending, unacknowledged prompts cannot authorize dispatch after interruption. See [delivery ownership](docs/acp/steering-and-questions.md#continuation-delivery-ownership).
+
+## Dev qualification binding boundary
+
+`scripts/cortex_paseo_dev.py binding` is an internal read-only dev CLI helper,
+not a plugin RPC or a new host capability. It accepts only an exact owned agent
+UUID, workspace and canonical disposable project outside the checkout and both
+Paseo homes. It checks private, bounded, owned, non-linked dev/production PID
+records for distinct endpoint/PID/server identities, and fences read races and
+endpoint/server drift. Reading those external records requires explicit permission;
+this command does not grant it. It removes inherited PASEO overrides and uses
+only the fixed dev loopback endpoint, with no daemon auto-start or credentials.
+Authentication-required hosts refuse rather than opening an account/login route.
+
+Only the exact agent is fetched/refetched: provider, workspace, cwd and the
+strict existing runtime wrapper must match. Guarded immutable storage discovery
+rechecks the exact session/task/current durable owner and binding digest. No
+latest-task fallback, unrelated enumeration, report-body reads, initialization,
+migration, checkpoint or lifecycle writes occur. Observation is not an ownership
+lease, engine confirmation, disconnect/resource-release receipt or acceptance.
+Timeout/output/identity/storage/auth refusals expose safe codes, not exception
+text or raw logs. See [the binding procedure](docs/acp/dev-paseo-environment.md#read-only-dev-binding).

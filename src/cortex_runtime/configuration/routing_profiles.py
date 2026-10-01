@@ -53,7 +53,7 @@ _MAX_PROFILES = 32
 _MAX_DIFFERENCES = 200
 _SECTION_LABELS = dict(routing="routing (user)", user_defaults="user_defaults", mcp_servers="mcp_servers",
                        connections="connections")
-_DEFAULT_GROUPS = (("route", m.ROUTE_DEFAULT_KEYS), ("parameters", ("parameters",)), ("language", ("language",)))
+_DEFAULT_GROUPS = (("route", ("coordinator", *m.ROUTE_DEFAULT_KEYS)), ("parameters", ("parameters",)), ("language", ("language",)))
 _UNRESTRICTED = m.ceiling_to_dict(PolicyCeiling())
 
 
@@ -100,7 +100,9 @@ def _normalize_section(section, value):
     errors = m._Errors()
     if section == "routing":
         try:
-            return m.validate_routing_rules(value)
+            known = {k: v for k, v in value.items() if k in m.ROUTING_KEYS} if isinstance(value, Mapping) else value
+            m.validate_routing_rules(known, require_policy=False)
+            return dict(value)
         except PortableError as error:
             raise _prefixed(error, field) from None
     if section == "user_defaults":
@@ -116,6 +118,8 @@ def _normalize_section(section, value):
         for key, item in defaults.items():
             if item is None:
                 errors.add(f"{field}.defaults.{key}", "invalid_value", "an unset default is omitted, never null")
+        if defaults.get("coordinator") is not None and any(k in defaults for k in m.ROUTE_DEFAULT_KEYS):
+            errors.add(field, "route_conflict", "portable coordinator and bound route are mutually exclusive")
         present = [key for key in m.ROUTE_DEFAULT_KEYS if key in defaults]
         if present and len(present) != len(m.ROUTE_DEFAULT_KEYS):
             errors.add(f"{field}.defaults", "route_incomplete",
@@ -172,7 +176,7 @@ def _routing_rules(data):
     value = m._json_object(data, "routing.json", "invalid_routing_overrides")
     try:
         from ..routing import auto_route
-        auto_route._validate(value)
+        auto_route._validate(value, require_policy=False)
     except ValueError:
         raise m._error("invalid_routing_overrides", "The user routing.json is invalid; repair it first.") from None
     return {k: value[k] for k in m.ROUTING_KEYS if k in value}
@@ -184,7 +188,7 @@ def _capture(section, data):
         return _routing_rules(data)
     if section == "user_defaults":
         defaults, ceiling, _ = m._parse_user_defaults(data)
-        captured = {key: defaults[key] for key in ("route_id", "route_connection_id", "route_model", "language")
+        captured = {key: defaults[key] for key in ("coordinator", "route_id", "route_connection_id", "route_model", "language")
                     if defaults.get(key) is not None}
         # The ACP picker writes {} for "no parameters"; both mean unset.
         if defaults.get("parameters"):
@@ -560,6 +564,8 @@ class _Profiles:
 def _build(section, settings, item, environ, now, notes):
     """The new bytes of one backing file, validated with the runtime's own
     rules; ``None`` when it already holds the profile's settings."""
+    if section == "routing":
+        m.validate_routing_rules({k: v for k, v in settings.items() if k in m.ROUTING_KEYS})
     data = item["data"]
     if item["capture_error"] is None and not _compare(section, settings, item["capture"])[0]:
         if section == "connections":
@@ -568,12 +574,13 @@ def _build(section, settings, item, environ, now, notes):
     field = f"settings.{section}"
     if section == "routing":
         try:
-            rules = m.validate_routing_rules(settings)
+            rules = m.validate_routing_rules({k: v for k, v in settings.items() if k in m.ROUTING_KEYS})
         except PortableError as error:
             raise _prefixed(error, field) from None
         previous = m._json_object(data, "routing.json", "invalid_routing_overrides") if data else {}
         preserved = {key: value for key, value in previous.items() if key not in m.ROUTING_KEYS}
-        return m._pretty({**rules, **preserved}), None
+        saved_unknown = {k: v for k, v in settings.items() if k not in m.ROUTING_KEYS}
+        return m._pretty({**rules, **preserved, **saved_unknown}), None
     if section == "user_defaults":
         current, current_ceiling, document = m._parse_user_defaults(data)
         merged = {key: value for key, value in current.items() if key not in m.USER_DEFAULT_KEYS}
@@ -702,7 +709,7 @@ def mutate(action, expected_revision, *, name=None, description=None, rename_to=
     current settings; ``activate`` materializes a profile into its backing
     files (a modified selection needs ``discard_modifications: true``);
     ``deactivate`` only clears the selection; ``update`` edits the name and
-    description; ``delete`` removes an unselected profile. ``create``,
+    description; ``delete`` removes only the named snapshot and clears its selection linkage. ``create``,
     ``save`` and ``activate`` also need the ``expected_revisions`` of all
     four backing files. Nothing is written on any refusal.
     """
@@ -724,7 +731,7 @@ def mutate(action, expected_revision, *, name=None, description=None, rename_to=
             if name not in entries:
                 raise m._error("profile_not_found", "No profile has that name.", field="name")
         touched = {name} if _TOUCHED[action] else set()
-        profiles = _Profiles(path, data, migrated_from, env, touched, action != "delete")
+        profiles = _Profiles(path, data, migrated_from, env, touched, action != "delete" or doc.get("active") == name)
         pending = doc.get("pending")
         pending_name = pending["profile"] if pending else None
         snapshot = None
@@ -779,11 +786,22 @@ def mutate(action, expected_revision, *, name=None, description=None, rename_to=
                 doc["pending"] = dict(pending, profile=target)
             profiles.write(doc)
         elif action == "delete":
-            if doc.get("active") == name or pending_name == name:
-                raise m._error("profile_active", "Detach the selected profile before deleting it.", field="name")
+            if pending is not None:
+                raise m._error("profile_interrupted", "Resolve the interrupted activation before deleting a profile.", field="name")
+            if doc.get("active") == name:
+                doc.update(active=None, applied=None)
             del entries[name]
-            profiles.write(doc)
+            try:
+                profiles.write(doc)
+                if _read_file(path) != m._pretty(doc):
+                    raise m._error("profile_delete_failed", "Profile deletion could not be verified.")
+            except (PortableError, OSError):
+                if _read_file(path) != data:
+                    m._replace_file(path, data)
+                raise m._error("profile_delete_failed", "Profile deletion failed; original snapshot bytes retained or restored.") from None
         elif action == "activate":
+            if "routing" in entries[name]["settings"]:
+                m.validate_routing_rules({k: v for k, v in entries[name]["settings"]["routing"].items() if k in m.ROUTING_KEYS})
             active = doc.get("active")
             recovering = pending_name == name
             if active is not None and discard_modifications is not True and not recovering:

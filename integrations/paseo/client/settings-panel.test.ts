@@ -192,8 +192,8 @@ function fixtures() {
         { source: "env", path: "(unset)", writable: false, exists: false, revision: null },
         {
           source: "user", path: "~/.config/cortex/routing.json", writable: true, exists: true, revision: REV("b"), valid: true,
-          rules: { pin: { "*": "opencode/anthropic/claude-sonnet-4-5:high" }, deny: ["claude-agent-acp/opus"], providers: ["codex-acp", "opencode"],
-            enabled: { opencode: ["anthropic/claude-sonnet-4-5"] } },
+          rules: { model_policy_version: 2, pin: { "*": "opencode/anthropic/claude-sonnet-4-5:high" }, deny: ["claude-agent-acp/opus"], providers: ["codex-acp", "opencode"],
+            enabled: { "codex-acp": ["gpt-6-luna"], "claude-agent-acp": ["opus[1m]", "claude-sonnet-5"], opencode: ["anthropic/claude-sonnet-4-5"] } },
           ignored_keys: ["comment"],
         },
       ],
@@ -444,8 +444,8 @@ test("routing: a per-model effort is edited as a typed pin and saved to its own 
   await screen.press("Save user routing");
   assert.deepEqual(screen.updates, [{
     surface: "routing", target: "user", expected_revision: REV("b"),
-    rules: { pin: { "*": "opencode/anthropic/claude-sonnet-4-5:medium" }, deny: ["claude-agent-acp/opus"], providers: ["codex-acp", "opencode"],
-      enabled: { opencode: ["anthropic/claude-sonnet-4-5"] } },
+    rules: { model_policy_version: 2, pin: { "*": "opencode/anthropic/claude-sonnet-4-5:medium" }, deny: ["claude-agent-acp/opus"], providers: ["codex-acp", "opencode"],
+      enabled: { "codex-acp": ["gpt-6-luna"], "claude-agent-acp": ["opus[1m]", "claude-sonnet-5"], opencode: ["anthropic/claude-sonnet-4-5"] } },
   }]);
 });
 
@@ -622,9 +622,10 @@ test("engines & models: switches save exact routing entries to the chosen file, 
   assert.deepEqual(screen.updates, [{
     surface: "routing", target: "user", expected_revision: REV("b"),
     rules: {
+      model_policy_version: 2,
       pin: { "*": "opencode/anthropic/claude-sonnet-4-5:high" },
       deny: ["claude-agent-acp/opus", "codex-acp/*"],
-      enabled: { opencode: ["anthropic/claude-sonnet-4-5"] },
+      enabled: { "codex-acp": ["gpt-6-luna"], "claude-agent-acp": ["opus[1m]", "claude-sonnet-5"], opencode: ["anthropic/claude-sonnet-4-5"] },
       auto_allow: ["opencode/anthropic/claude-sonnet-4-5"],
       providers: ["codex-acp", "opencode", "claude-agent-acp"],
     },
@@ -658,7 +659,7 @@ test("models: removing a broader entry is explicit; a conflict writes nothing an
   assert.equal(screen.find(opus, "Switch").props.value, false, "edits here were discarded");
 });
 
-test("models: default-on engines write deny entries, OpenCode writes its enabled list, and the lists refresh without a prompt", async () => {
+test("models: explicitly listed engines update exact enabled lists, and the lists refresh without a prompt", async () => {
   const screen = await openScreen();
   const catalog = screen.data.route_catalog;
   screen.data.route_catalog = {
@@ -681,8 +682,8 @@ test("models: default-on engines write deny entries, OpenCode writes its enabled
   await screen.toggle("Claude Sonnet 4.5 (opencode/anthropic/claude-sonnet-4-5)", false);
   await screen.press("Save model switches to the user routing file");
   const rules = screen.updates[0].rules as { deny: string[]; enabled: Record<string, string[]> };
-  assert.deepEqual(rules.deny, ["claude-agent-acp/opus", "codex-acp/gpt-6-luna"]);
-  assert.deepEqual(rules.enabled, { opencode: ["nvidia/nemotron-ultra"] });
+  assert.deepEqual(rules.deny, ["claude-agent-acp/opus"]);
+  assert.deepEqual(rules.enabled, { "codex-acp": [], "claude-agent-acp": ["opus[1m]", "claude-sonnet-5"], opencode: ["nvidia/nemotron-ultra"] });
 
   screen.data.route_catalog = { ...screen.data.route_catalog, refresh: [
     { connection_id: CONN.codex[0], success: true, reason: null },
@@ -743,7 +744,7 @@ test("purpose choices require explicit auto selection and save OpenCode preferen
   assert.deepEqual(rules.models.opencode.policy["anthropic/claude-sonnet-4-5"].preferred_for, ["review"]);
 });
 
-test("engines & models: a model can be placed in several tiers and back to its built-in tier", async () => {
+test("engines & models: a model can be placed in several tiers and back to unplaced", async () => {
   const screen = await openScreen();
   await screen.section("Engines & models");
   const checked = (label: string) => (screen.find(label, "Pressable").props.accessibilityState as { checked: boolean }).checked;
@@ -759,7 +760,7 @@ test("engines & models: a model can be placed in several tiers and back to its b
   await fresh.press(tier("light"));
   await fresh.press(tier("standard"));
   await fresh.press("Save engine and model switches to the user routing file");
-  assert.equal((fresh.updates[0].rules as any).models?.["codex-acp"]?.tiers, undefined, "no tier left: the built-in tier applies");
+  assert.equal((fresh.updates[0].rules as any).models?.["codex-acp"]?.tiers, undefined, "no tier left: no placement");
 });
 
 test("profiles show modified sections, confirm revert, and retain revision conflicts", async () => {
@@ -934,4 +935,134 @@ test("profiles: detach does not discard unapplied form edits", async () => {
   await screen.press("Current profile: No profile");
   assert.equal(screen.updates[0].action, "deactivate");
   assert.equal(screen.find("Language: ru", "Pressable").props.accessibilityState.checked, true);
+});
+
+
+for (const kind of ["inactive", "selected", "last"] as const) test(`delete ${kind} profile confirms exact name, cancels without mutation and keeps working settings`, async () => {
+  const data = fixtures();
+  if (kind !== "last") data.routing_profiles.profiles.push({ ...data.routing_profiles.profiles[0], name: "spare" });
+  const name = kind === "inactive" ? "spare" : "mix";
+  const before = structuredClone(data.user_defaults);
+  const screen = await openScreen(data);
+  await screen.section("Profiles");
+  await screen.press(`Saved profile: ${name}`);
+  await screen.press("Delete profile");
+  assert.ok(screen.texts().some((text) => text.includes(`Delete profile "${name}"?`) && text.includes("Current working settings stay unchanged")));
+  await screen.press("Cancel delete");
+  assert.equal(screen.updates.length, 0);
+  await screen.press("Delete profile");
+  const result = { ...data.routing_profiles, revision: REV("e"), profiles: data.routing_profiles.profiles.filter((profile) => profile.name !== name),
+    active: kind === "inactive" ? "mix" : null, state: kind === "inactive" ? "modified" : "none", applied: null };
+  screen.replies.push({ ok: true, binding, result });
+  await screen.press("Confirm delete profile");
+  assert.deepEqual(screen.updates, [{ surface: "routing_profiles", action: "delete", name, expected_revision: REV("q") }]);
+  assert.deepEqual(data.user_defaults, before);
+  assert.ok(!screen.has(`Saved profile: ${name}`));
+  if (kind === "last") assert.ok(screen.texts().some((text) => text.startsWith("No saved profiles.")));
+  assert.equal(screen.updates.some((input) => input.action === "activate"), false);
+});
+
+for (const code of ["revision_conflict", "profile_delete_failed"]) test(`delete ${code} preserves state and requires reload before another submission`, async () => {
+  const screen = await openScreen();
+  await screen.section("Profiles");
+  await screen.press("Saved profile: mix");
+  await screen.press("Delete profile");
+  screen.replies.push({ ok: false, binding, error: { code, message: "Nothing was deleted; reload profile state.", field: "expected_revision" } });
+  await screen.press("Confirm delete profile");
+  assert.equal(screen.updates.length, 1);
+  assert.ok(screen.has("Saved profile: mix"));
+  assert.equal(screen.find("Delete profile", "Pressable").props.disabled, true);
+  await screen.press("Reload profile state");
+  assert.equal(screen.find("Delete profile", "Pressable").props.disabled, false);
+  assert.equal(screen.updates.length, 1);
+});
+
+test("profile deletion gates duplicate submissions while pending", async () => {
+  const screen = await openScreen();
+  await screen.section("Profiles"); await screen.press("Saved profile: mix"); await screen.press("Delete profile");
+  let finish!: (value: unknown) => void;
+  screen.replies.push(new Promise((resolve) => { finish = resolve; }));
+  const press = screen.find("Confirm delete profile", "Pressable").props.onPress as () => void;
+  press(); press(); await screen.runtime.settle();
+  assert.equal(screen.updates.length, 1);
+  assert.equal(screen.find("Confirm delete profile", "Pressable").props.disabled, true);
+  finish({ ok: false, binding, error: { code: "profile_delete_failed", message: "Reload" } });
+  await screen.runtime.settle();
+});
+
+test("exact model policy controls edit arbitrary withdrawn IDs and preserve unsupported attributes", async () => {
+  const data = fixtures();
+  const rules = data.routing.sources.find((source) => source.source === "user")!.rules as any;
+  rules.models = { "codex-acp": { auto: ["ARBITRARY@9"], tiers: { "ARBITRARY@9": ["light", "standard"] }, policy: { "ARBITRARY@9": {
+    effort_floor: "medium", max_effort: "high", effort_ladder: ["medium", "high"], also_standard_for: ["review"], preferred_for: ["review"], request_names: ["Owner choice"], future: { retain: true },
+  } } } };
+  const screen = await openScreen(data); await screen.section("Routing");
+  await screen.press("effort_floor for codex-acp/ARBITRARY@9: high");
+  await screen.press("Save user routing");
+  const saved = screen.updates[0].rules as any;
+  assert.deepEqual(saved.models["codex-acp"].policy["ARBITRARY@9"], { ...rules.models["codex-acp"].policy["ARBITRARY@9"], effort_floor: "high" });
+  assert.equal(saved.model_policy_version, 2);
+  assert.ok(screen.texts().some((text) => text.includes("future is not supported here; kept unchanged")));
+});
+
+test("portable ambiguity and missing policy diagnostics survive rendering without substituting a model", async () => {
+  const data = fixtures() as any;
+  data.user_defaults.defaults = { coordinator: { engine: "codex-acp", model: "ARBITRARY@9", parameters: { mode: "agent" } } };
+  data.user_defaults.coordinator_resolution = { state: "unavailable", error: { code: "portable_coordinator_ambiguous", message: "Several exact matches; choose explicitly." } };
+  const screen = await openScreen(data);
+  assert.ok(screen.texts().some((text) => text.includes("portable_coordinator_ambiguous")));
+  assert.equal(screen.find("Coordinator model (exact id)", "TextInput").props.value, "ARBITRARY@9");
+  await screen.section("Routing");
+  assert.ok(screen.texts().some((text) => text.includes("Model policy version")));
+  delete data.routing.sources.find((source: any) => source.source === "user").rules.model_policy_version;
+  const legacy = await openScreen(data);
+  await legacy.section("Routing");
+  assert.ok(legacy.texts().some((text) => text.includes("missing — explicit migration required")));
+});
+
+
+test("portable save re-reads resolution, keeps exact parameters and clearing constrained policy lists writes neutral null", async () => {
+  const data = fixtures() as any;
+  data.user_defaults.defaults = { coordinator: { engine: "codex-acp", model: "OLD@9", parameters: { mode: "agent" } } };
+  const screen = await openScreen(data);
+  await screen.type("Coordinator model (exact id)", "RENAMED@10");
+  data.user_defaults.defaults.coordinator.model = "RENAMED@10";
+  data.user_defaults.coordinator_resolution = { state: "unavailable", error: { code: "portable_coordinator_unavailable", message: "No exact observed match" } };
+  const before = screen.reads.filter((input) => input.surface === "user_defaults").length;
+  await screen.press("Save");
+  assert.deepEqual(screen.updates[0], { surface: "user_defaults", expected_revision: REV("a"), defaults: { coordinator: { engine: "codex-acp", model: "RENAMED@10", parameters: { mode: "agent" } } } });
+  assert.equal(screen.reads.filter((input) => input.surface === "user_defaults").length, before + 1);
+  assert.ok(screen.texts().some((text) => text.includes("portable_coordinator_unavailable")));
+  const rules = data.routing.sources.find((source: any) => source.source === "user").rules;
+  rules.models = { "codex-acp": { auto: [], tiers: {}, policy: { "NEUTRAL@9": { effort_ladder: ["medium"], request_names: ["owner-choice"] } } } };
+  await screen.section("Routing");
+  await screen.press("Remove effort_ladder for codex-acp/NEUTRAL@9 1");
+  await screen.press("Remove request_names for codex-acp/NEUTRAL@9 1");
+  await screen.press("Save user routing");
+  assert.deepEqual((screen.updates[1].rules as any).models["codex-acp"].policy["NEUTRAL@9"], { effort_ladder: null, request_names: null });
+});
+
+
+test("quota typed controls edit exact labels and scopes and retain unrelated data", async () => {
+  const data = fixtures();
+  const rules = data.routing.sources.find((source) => source.source === "user")!.rules as any;
+  rules.quota_windows = { "codex-acp": [{ window: "Owner exact@7", models: ["WITHDRAWN@9"] }] };
+  const screen = await openScreen(data); await screen.section("Routing");
+  await screen.type("codex-acp window 1 exact label", "Renamed / Label@8");
+  await screen.press("codex-acp window 1 scope: Shared / account");
+  await screen.press("Save user routing");
+  const saved = screen.updates[0].rules as any;
+  assert.deepEqual(saved.quota_windows, { "codex-acp": [{ window: "Renamed / Label@8", models: null }] });
+  assert.deepEqual(saved.models, rules.models);
+  assert.ok(screen.texts().some((text) => text.includes("Unmapped labels remain conservatively shared")));
+});
+
+test("unknown quota rule shape remains read-only with no destructive save", async () => {
+  const data = fixtures();
+  const rules = data.routing.sources.find((source) => source.source === "user")!.rules as any;
+  rules.quota_windows = { "codex-acp": [{ window: "future", models: null, future: true }] };
+  const screen = await openScreen(data); await screen.section("Routing");
+  assert.ok(screen.texts().some((text) => text.includes("cannot show without changing it")));
+  assert.equal(screen.updates.length, 0);
+  assert.equal(rules.quota_windows["codex-acp"][0].future, true);
 });

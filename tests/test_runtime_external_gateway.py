@@ -280,3 +280,37 @@ def test_external_gateway_marks_only_configured_tools_always_load(proxy):
         assert '_meta' not in tools['forbidden']
     finally:
         close(proc)
+
+
+def test_describe_arguments_fills_only_undescribed_known_arguments():
+    from cortex_runtime.engine.mcp_bridge import EXTERNAL_ARGUMENT_DESCRIPTIONS, describe_arguments
+    tool={'name':'search_graph','inputSchema':{'type':'object','properties':{
+        'file_pattern':{'type':'string'},'name_pattern':{'type':'string','description':'Server text.'},
+        'project':{'type':'string'}}}}
+    described=describe_arguments('codebase-memory-mcp',tool)
+    properties=described['inputSchema']['properties']
+    assert properties['file_pattern']['description']==EXTERNAL_ARGUMENT_DESCRIPTIONS['codebase-memory-mcp']['search_graph']['file_pattern']
+    assert 'Glob' in properties['file_pattern']['description'] and 'not a regular expression' in properties['file_pattern']['description']
+    assert properties['name_pattern']['description']=='Server text.'
+    assert 'description' not in properties['project']
+    assert 'description' not in tool['inputSchema']['properties']['file_pattern']
+    assert describe_arguments('other-server',tool) is tool
+    other_tool=dict(tool,name='search_code')
+    assert describe_arguments('codebase-memory-mcp',other_tool) is other_tool
+
+
+def test_external_gateway_describes_undocumented_code_index_patterns(proxy, tmp_path):
+    store,task,machine,root,start=proxy
+    script=tmp_path/'index.py'
+    script.write_text(SERVER.replace("[{'name':name,'inputSchema':{'type':'object'}} for name in ['inspect','forbidden']]",
+        "[{'name':'search_graph','inputSchema':{'type':'object','properties':{'file_pattern':{'type':'string'},'query':{'type':'string','description':'BM25.'}}}}]"))
+    proc=start(dict(name='codebase-memory-mcp',args=['-B',str(script)],read_paths=[str(script)],
+                    allowed_tools=['search_graph'],read_only_tools=['search_graph']))
+    try:
+        assert 'result' in call(proc,1,'initialize')
+        (tool,)=call(proc,2,'tools/list')['result']['tools']
+        properties=tool['inputSchema']['properties']
+        assert properties['file_pattern']['description'].startswith('Glob on the project-relative file path')
+        assert properties['query']['description']=='BM25.'
+    finally:
+        close(proc)

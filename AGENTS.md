@@ -111,8 +111,10 @@ the isolated dev Paseo setup: the permanent `~/.paseo-dev` daemon, its separate
 Electron profile at `~/.config/Paseo-dev`, a disposable project, and the Cortex
 runtime launched by that daemon from the explicit absolute checkout plugin path.
 Never use production `~/.paseo` or the production Cortex agent. Preserve the
-production-account rules above. Use `gpt-5.6-luna` at medium/high effort; heavy
-models remain prohibited in routine live qualification. Check native login
+production-account rules above. Use only an explicit owner-selected route
+for a requested check, supported by current settings and observed host data;
+do not substitute or automatically escalate to another route. Heavy models
+remain prohibited in routine live qualification. Check native login
 status without printing credentials before relying on either engine.
 
 The no-paid default automated suite
@@ -141,7 +143,9 @@ that dev home only with python3 -B scripts/cortex_paseo_clone.py while its dev d
 is stopped; the production home is read-only to that utility. Before using an
 isolation flag or environment variable, verify it against the installed Paseo version
 and ACP bridge. Follow [the dev Paseo environment guide](docs/acp/dev-paseo-environment.md).
-For the current installed Linux Paseo 0.10.0, invoke python3 -B scripts/cortex_paseo_dev.py --
+Read-only package/bundle inspection on 2026-09-30 reported installed Paseo 0.10.2;
+CLI/isolation observations for 0.10.0 below are historical, not qualification of 0.10.2.
+Recheck the installed CLI/bridge and guarded wrapper before live use. Invoke python3 -B scripts/cortex_paseo_dev.py --
 ...; it defaults to ~/.paseo-dev, rejects ~/.paseo, and blocks command-level endpoint
 overrides. If the installed build cannot be shown to isolate every required state and
 the daemon endpoint, do not launch Paseo or install the plugin; report the missing
@@ -159,7 +163,7 @@ described below. See the dev Paseo environment guide for the `cli` commands.
 ### Dev Paseo GUI verification
 
 For a requested `desktop` check, use the persistent isolated dev home with the
-Paseo Electron Desktop application. The installed Paseo 0.10.0 CLI help lists CLI commands but no web-client launch
+Paseo Electron Desktop application. The historically inspected Paseo 0.10.0 CLI help listed CLI commands but no web-client launch
 command. This does not establish whether a daemon-served UI exists. Use the
 Electron app connected to the isolated dev daemon for rendered behavior unless
 a supported alternative is independently verified. Until recovery is qualified for the deployed version, apply plugin updates between active tasks. A host SIGKILL without SIGTERM cannot be recorded; native engine actions have no retained command receipt. Outside a
@@ -219,7 +223,7 @@ python3 -B scripts/cortex_paseo_dev.py -- logs <agent-id> --json
 
 For retained-history checks, omit `--tail` and retain the exit status, output
 byte count, structural event count, safe first/last event identities and any
-explicit error. Paseo 0.10.0's `logs --help` and retained-history behavior must be checked before
+explicit error. The currently installed Paseo's `logs --help` and retained-history behavior must be checked before
 relying on historical 0.9.2 observations; if completeness cannot be independently
 established, mark that check unverified. Do not store message bodies or raw logs in
 repository documents or reports.

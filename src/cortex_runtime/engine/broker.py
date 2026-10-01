@@ -44,6 +44,8 @@ class McpBroker:
         # observation log): the server's own tracebacks land there.
         self._stderr_log = stderr_log
         self._server_config = server_config
+        self._state_lock = threading.RLock()
+        self._generation = 0
         self._ready = threading.Event()
         self._closed = threading.Event()
         self._failure = None
@@ -85,25 +87,31 @@ class McpBroker:
         defer MCP startup until the first prompt, so a timeout is explicitly
         inconclusive rather than evidence that the server failed.
         """
-        if self._failure is not None:
-            return self._failure
-        if self._ready.wait(timeout):
-            return "ready"
-        if self._closed.is_set():
-            return self._failure or "connection_closed"
-        return "not_observed"
+        with self._state_lock:
+            if self._failure is not None:
+                return self._failure
+        self._ready.wait(timeout)
+        with self._state_lock:
+            if self._failure is not None:
+                return self._failure
+            if self._ready.is_set():
+                return "ready"
+            if self._closed.is_set():
+                return "connection_closed"
+            return "not_observed"
 
     @property
     def tools_receipt(self) -> dict:
         """Return the bounded, in-memory receipt for this broker's MCP server.
 
         A broker serves one trusted Cortex channel.  The receipt therefore
-        applies to every session using this broker, while callers attach their
+        applies only to the current server generation; callers attach their
         own session id when exposing it as session diagnostics.  ``None`` is
         intentionally represented as ``not_observed``: an engine may defer
         ``tools/list`` until after the first prompt.
         """
-        receipt = self._tools_receipt
+        with self._state_lock:
+            receipt = self._tools_receipt
         if receipt is None:
             return {
                 "state": "not_observed",
@@ -124,50 +132,83 @@ class McpBroker:
             "worker_result_submit_present": receipt["worker_result_submit_present"],
         }
 
-    def _observe_tools_list(self, reply, pid):
-        result = reply.get("result")
-        if not isinstance(result, dict) or not isinstance(result.get("tools"), list):
-            return
-        tools = result["tools"]
-        names = set()
-        schema_digests = {}
-        for tool in tools:
-            if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
-                continue
-            name = tool["name"]
-            names.add(name)
-            # Only the digest crosses the observation boundary.  In particular,
-            # descriptions and inputSchema values never reach persistent logs.
-            schema_digests[name] = _schema_digest(tool.get("inputSchema"))
-        sorted_names = sorted(names)
-        missing = [name for name in _BASE_REPORT_TOOLS if name not in names]
-        state = "complete" if not missing else "incomplete"
-        receipt = {
-            "state": state,
-            "tool_count": len(tools),
-            "tool_names": sorted_names,
-            "schema_digests": {name: schema_digests[name] for name in sorted(schema_digests)},
-            "required_tools": list(_BASE_REPORT_TOOLS),
-            "missing_required_tools": missing,
-            "worker_result_submit_present": _WORKER_REPORT_TOOL in names,
-        }
-        self._tools_receipt = receipt
-        if missing:
-            self._failure = "mcp_tools_incomplete"
+    def _begin_generation(self):
+        with self._state_lock:
+            self._generation += 1
+            self._ready.clear()
+            self._tools_receipt = None
+            self._closed.clear()
+            # Keep a known loss until the replacement proves its own tools.
+            return self._generation
+
+    def _observe_tools_list(self, reply, pid, generation):
+        with self._state_lock:
+            if (generation != self._generation or self._closed.is_set()
+                    or self._tools_receipt is not None):
+                return
+            result = reply.get("result")
+            tools = result.get("tools") if isinstance(result, dict) else None
+            malformed = not isinstance(tools, list) or bool(result.get("nextCursor"))
+            tools = tools if isinstance(tools, list) else []
+            names = set()
+            valid_names = set()
+            schema_digests = {}
+            for tool in tools:
+                if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+                    malformed = True
+                    continue
+                name = tool["name"]
+                schema = tool.get("inputSchema")
+                valid = bool(name) and name not in names and isinstance(schema, dict) and schema.get("type") == "object"
+                malformed |= not valid
+                names.add(name)
+                if valid:
+                    valid_names.add(name)
+                # Only digests cross the observation boundary, never schemas.
+                schema_digests[name] = _schema_digest(schema)
+            sorted_names = sorted(names)
+            missing = [name for name in _BASE_REPORT_TOOLS if name not in valid_names]
+            state = "incomplete" if missing or malformed else "complete"
+            receipt = {
+                "state": state,
+                "tool_count": len(tools),
+                "tool_names": sorted_names,
+                "schema_digests": {name: schema_digests[name] for name in sorted(schema_digests)},
+                "required_tools": list(_BASE_REPORT_TOOLS),
+                "missing_required_tools": missing,
+                "worker_result_submit_present": _WORKER_REPORT_TOOL in valid_names,
+            }
+            self._tools_receipt = receipt
+            if state == "incomplete":
+                self._failure = "mcp_tools_incomplete"
+                self._event(
+                    "mcp_tools_incomplete", pid=pid, tool_count=len(tools),
+                    tool_names=sorted_names, schema_digests=receipt["schema_digests"],
+                    missing_required_tools=missing,
+                    worker_result_submit_present=receipt["worker_result_submit_present"],
+                )
+                return
+            self._failure = None
+            self._ready.set()
             self._event(
-                "mcp_tools_incomplete", pid=pid, tool_count=len(tools),
+                "mcp_tools_ready", pid=pid, tool_count=len(tools),
                 tool_names=sorted_names, schema_digests=receipt["schema_digests"],
-                missing_required_tools=missing,
+                required_tools=receipt["required_tools"],
                 worker_result_submit_present=receipt["worker_result_submit_present"],
             )
-            return
-        self._ready.set()
-        self._event(
-            "mcp_tools_ready", pid=pid, tool_count=len(tools),
-            tool_names=sorted_names, schema_digests=receipt["schema_digests"],
-            required_tools=receipt["required_tools"],
-            worker_result_submit_present=receipt["worker_result_submit_present"],
-        )
+
+    def _server_exited(self, generation, pid, code):
+        with self._state_lock:
+            if generation != self._generation:
+                return
+            ready = self._ready.is_set()
+            if not ready and self._tools_receipt is None:
+                self._failure = "mcp_server_exited" if code else "connection_closed_before_tools"
+            elif ready and code != 0 and not self._stop.is_set():
+                self._failure = "mcp_server_crashed"
+            # Fence even delayed replies from this exited generation.
+            self._closed.set()
+            self._event("mcp_server_exited", pid=pid, exit_code=code, tools_ready=ready)
 
     def _serve(self):
         while not self._stop.is_set():
@@ -180,8 +221,9 @@ class McpBroker:
             try:
                 self._serve_connection(conn)
             except Exception as exc:
-                self._failure = "broker_exception"
-                self._closed.set()
+                with self._state_lock:
+                    self._failure = "broker_exception"
+                    self._closed.set()
                 self._event("mcp_broker_failure", reason="broker_exception",
                             exception_type=type(exc).__name__)
                 try:
@@ -204,6 +246,7 @@ class McpBroker:
             self._event("mcp_broker_failure", reason="relay_handshake_rejected")
             return
         self._event("mcp_relay_connected")
+        generation = self._begin_generation()
         conn.settimeout(None)
         channel_id, secret, project_root = self._credentials
         env = dict(os.environ)
@@ -215,7 +258,8 @@ class McpBroker:
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE if self._stderr_log is not None else subprocess.DEVNULL,
                                  start_new_session=True)
-        self._child = child
+        with self._state_lock:
+            self._child = child
         self._event("mcp_server_started", pid=child.pid)
         if self._stderr_log is not None:
             def drain_stderr():
@@ -227,7 +271,44 @@ class McpBroker:
                 except (OSError, ValueError):
                     pass
             threading.Thread(target=drain_stderr, name="mcp-server-stderr", daemon=True).start()
+        pending_tools = set()
+        pending_lock = threading.Lock()
+
+        def frames():
+            # Bounded JSON lines only; oversized frames cannot prove readiness.
+            buffered = bytearray()
+            dropping = False
+            def feed(data):
+                nonlocal dropping
+                for part in data.splitlines(keepends=True):
+                    if not dropping:
+                        buffered.extend(part)
+                        if len(buffered) > 2_000_000:
+                            buffered.clear()
+                            dropping = True
+                    if part.endswith(b"\n"):
+                        if not dropping:
+                            try:
+                                value = json.loads(buffered)
+                                if isinstance(value, dict):
+                                    yield value
+                            except (ValueError, TypeError):
+                                pass
+                        buffered.clear()
+                        dropping = False
+            return feed
+
+        request_frames = frames()
+        def observe_requests(data):
+            for request in request_frames(data):
+                request_id = request.get("id")
+                if request.get("method") == "tools/list" and type(request_id) in (int, str):
+                    with pending_lock:
+                        if len(pending_tools) < 64:
+                            pending_tools.add((type(request_id), request_id))
+
         if remainder:
+            observe_requests(remainder)
             child.stdin.write(remainder)
             child.stdin.flush()
 
@@ -237,6 +318,7 @@ class McpBroker:
                     data = conn.recv(IO_CHUNK)
                     if not data:
                         break
+                    observe_requests(data)
                     child.stdin.write(data)
                     child.stdin.flush()
             except (OSError, BrokenPipeError):
@@ -248,47 +330,42 @@ class McpBroker:
                     pass
 
         def child_to_socket():
-            buffered = bytearray()
+            response_frames = frames()
             try:
                 while True:
                     data = os.read(child.stdout.fileno(), IO_CHUNK)
                     if not data:
                         break
-                    # Inspect only bounded JSON-RPC response structure; never
-                    # retain or persist tool schemas, content, or error text.
-                    if self._tools_receipt is None and len(buffered) <= 2_000_000:
-                        buffered.extend(data)
-                        while b"\n" in buffered:
-                            line, _, rest = buffered.partition(b"\n")
-                            buffered = bytearray(rest)
-                            try:
-                                reply = json.loads(line)
-                                if isinstance(reply, dict):
-                                    self._observe_tools_list(reply, child.pid)
-                            except (ValueError, TypeError, AttributeError):
-                                pass
+                    for reply in response_frames(data):
+                        reply_id = reply.get("id")
+                        if type(reply_id) not in (int, str):
+                            continue
+                        key = (type(reply_id), reply_id)
+                        with pending_lock:
+                            observed = key in pending_tools
+                            pending_tools.discard(key)
+                        if observed:
+                            self._observe_tools_list(reply, child.pid, generation)
                     conn.sendall(data)
             except (OSError, BrokenPipeError):
                 pass
 
         threading.Thread(target=socket_to_child, daemon=True).start()
-        threading.Thread(target=child_to_socket, daemon=True).start()
+        response_thread = threading.Thread(target=child_to_socket, daemon=True)
+        response_thread.start()
         code = child.wait()
-        if not self._ready.is_set() and self._tools_receipt is None:
-            self._failure = "mcp_server_exited" if code else "connection_closed_before_tools"
-            self._closed.set()
-        elif not self._ready.is_set():
-            # An observed incomplete tools/list is a stronger, fail-closed
-            # diagnostic than the transport's later ordinary EOF.
-            self._closed.set()
-        self._event("mcp_server_exited", pid=child.pid, exit_code=code,
-                    tools_ready=self._ready.is_set())
+        # Drain already-written evidence before fencing the exit. A stalled
+        # relay must not block recovery indefinitely; late evidence is refused.
+        response_thread.join(timeout=1.0)
+        self._server_exited(generation, child.pid, code)
         try:
             conn.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
         conn.close()
-        self._child = None
+        with self._state_lock:
+            if generation == self._generation:
+                self._child = None
 
     def close(self):
         self._stop.set()

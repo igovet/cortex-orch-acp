@@ -439,7 +439,15 @@ def _coordinator_read_diagnostics(store, channel: ChannelContext, args: Mapping[
 
 def _coordinator_route_options(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
     from ..routing import auto_route, availability
-    return auto_route.route_menu(store.project_root, unavailable=availability.active(store))
+    from ..portable.errors import PortableError
+
+    try:
+        return auto_route.route_menu(store.project_root, unavailable=availability.active(store))
+    except PortableError as error:
+        # Policy validation is an actionable read refusal, not an
+        # indeterminate storage write in the MCP server's generic catch.
+        raise StoreError(error.code, error.field or "routing",
+                         correction=error.remediation) from error
 
 
 _COORDINATOR_HANDLERS = dict(
@@ -588,8 +596,9 @@ def _enumerate_skills(schema: dict, role_kind: str, role_id: str | None) -> dict
     properties["skill"] = dict(
         properties["skill"],
         anyOf=[
-            dict(enum=sorted(ids), description="Named Cortex shared or reference skill id for this role."),
-            dict(description="Exact project/user SKILL.md path listed in this session; the runtime checks its session grant."),
+            dict(type="string", enum=sorted(ids), description="Named Cortex shared or reference skill id for this role."),
+            # Typed, or Codex code mode renders this branch as `unknown`.
+            dict(type="string", description="Exact project/user SKILL.md path listed in this session; the runtime checks its session grant."),
         ],
         description=properties["skill"].get("description", "Exact skill id or listed path.")
         + " Shared/reference ids for this role: " + ", ".join(sorted(ids))

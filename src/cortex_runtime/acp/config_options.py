@@ -9,9 +9,7 @@ Zed receives three independent axes: ``provider`` (category ``provider``),
     omitted because the selected route already identifies the account. All
     options are built from
 the *actual* connection registry + cached catalog snapshots
-(``catalog.store``, falling back to a static, honestly-labelled
-``catalog.model_seed`` seed when a connection has never yet been observed
-live -- see ``selectable_entries_from_snapshots``) and the task's own
+(``catalog.store``; no models are offered before observation) and the task's own
 configuration history (``configuration.store`` / ``ConfigurationService``)
 -- never a fabricated placeholder value.
 
@@ -144,17 +142,11 @@ def _is_cross_connection_placeholder(view: catalog_store.ConnectionSnapshotView)
     e.g. a pre-fix ``pin_route`` call declaring one connection while
     passing the *whole* registry).
 
-    ``catalog.discovery.build_catalog`` only ever sets
-    ``unavailable[connection_id]`` (-> this file's ``unavailable_reason``)
-    when that connection's own ``observations`` entry was ``None`` --
-    "this call made no observation attempt for you", never "I observed
-    you and you have nothing". A genuine zero-model observation (an
-    engine whose payload legitimately advertised no ``model`` option) has
-    ``unavailable_reason is None`` and remains fully honoured -- see the
-    module docstring's "distinguishable" requirement -- only the noise
-    case (empty entries *and* a reason) is skipped here.
+    A retained ``no_models_observed`` diagnostic is a genuine observed empty
+    catalogue: it withdraws old identities and must not resurrect an older
+    snapshot. Other entry-less failed/unattempted snapshots remain placeholders.
     """
-    return not view.entries and view.unavailable_reason is not None
+    return not view.entries and view.unavailable_reason not in (None, "no_models_observed")
 
 
 def selectable_entries_from_snapshots(
@@ -224,20 +216,6 @@ def selectable_entries_from_snapshots(
             view = candidate
             break
         if view is None:
-            # T035: no real snapshot has ever been cached for this
-            # connection yet -- fall back to its engine's static seed
-            # catalog (never persisted to disk; recomputed every call, and
-            # unconditionally superseded the moment a real snapshot file
-            # exists -- see catalog.discovery.seed_observation).
-            observation = catalog_discovery.seed_observation(record.engine)
-            if observation is None:
-                continue
-            snapshot = catalog_discovery.build_catalog(
-                {connection_id: record}, {connection_id: observation},
-                seeded_connection_ids=frozenset({connection_id}))
-            for entry in snapshot.entries:
-                if entry.is_selectable(record.state, record.auth_mode.value):
-                    selectable.append(entry)
             continue
         for entry in view.entries:
             if entry.is_selectable(record.state, record.auth_mode.value):
@@ -735,6 +713,13 @@ def build_config_options(
             options.append(thought_option)
     if include_language:
         options.append(build_language_option(language_current, as_mode=language_as_mode))
+    if current.get("resolution_error"):
+        for option in options:
+            if option["category"] in ("provider", "model", "thought_level"):
+                option["description"] = _UNAVAILABLE_DESCRIPTION
+                option["_meta"] = {"_cortex": {"state": "default_unavailable", "revision": current_revision,
+                                               "diagnostic": current["resolution_error"],
+                                               "configured_coordinator": current.get("coordinator")}}
     return options + access
 
 

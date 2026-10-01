@@ -397,6 +397,7 @@ def test_init_storage_is_idempotent(tmp_path, monkeypatch):
     assert second["routing"] == {
         "routing": {**first["routing"]["routing"], "status": "current", "changed": False},
         "route_policy": first["routing"]["route_policy"],
+        "defaults": {**first["routing"]["defaults"], "status": "current", "changed": False},
     }
     assert {**second, "routing": None} == {**first, "routing": None}
 

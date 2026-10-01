@@ -64,12 +64,9 @@ an unrelated one:
    single explicit Cortex-on-Paseo installation command; it is idempotent,
    preserves unrelated daemon configuration/plugins, and verifies the plugin
    reaches ``running``. It never runs implicitly when an ACP session starts.
-8. ``apply-routing-defaults`` -- write the default user-global
-   ``routing.json`` (``{"deny": ["gpt-5.5", "haiku"]}``) when it is absent,
-   append any missing default ``deny`` token to an existing one, and drop
-   denied models from a leftover ``route-policy.json`` (see
-   ``cortex_runtime.routing.defaults``). ``init-storage`` and
-   ``install-paseo-plugin`` run it too.
+8. ``apply-routing-defaults`` -- validate the public model settings asset and
+   exclusively create absent routing/default files. Existing owner settings are
+   never patched or replaced; legacy repair is an explicit migration.
 9. ``add-opencode-connection`` -- the one way to onboard the optional
    OpenCode v2 engine (never discovered at startup): finds a trusted
    ``opencode`` binary, reads its version in a network-less sandbox, refuses
@@ -535,8 +532,8 @@ def install_paseo_plugin(*, plugin_dir=None, paseo_cli=None, environ=None, runne
         # through the native provider without a duplicate entry.
         if migration.get("migrated"):
             invoke(["reload", "--json"])
-        # The global routing defaults the installed runtime reads (Haiku and
-        # gpt-5.5 denied); an existing routing.json keeps its settings.
+        # Install the default model settings template; an existing routing.json
+        # or defaults.json keeps its settings.
         routing = init_storage(env)["routing"]
         return {"plugin_id": manifest["id"], "source": str(root), "status": "running", "payload_sha256": payload_sha256,
                 "launch_config": launch_config, "legacy_provider_migration": migration, "routing": routing}
@@ -547,6 +544,7 @@ def install_paseo_plugin(*, plugin_dir=None, paseo_cli=None, environ=None, runne
 
 def init_storage(environ=None):
     """Create/verify the owner-private config/state roots; idempotent."""
+    routing_defaults.load_model_settings_template()  # Validate complete asset before initialization writes.
     config_root = registry.config_root(environ)
     state_root = registry.state_root(environ)
     registry.ensure_private_dir(config_root, root=config_root, environ=environ)
@@ -710,6 +708,7 @@ def pin_route(*, connection_id, model, environ=None):
                           "documented/qualified combination -- see connections.model.SUPPORT_MATRIX).")
     current = configuration_store.read_user_defaults(environ)
     defaults = dict(current["defaults"])
+    defaults.pop("coordinator", None)
     defaults["route_id"] = entry.route.id
     # T035 FINDING-05: the stable identity alongside the fingerprint id --
     # see cortex_runtime.configuration.resolution.resolve_saved_route.
@@ -763,6 +762,7 @@ def record_observation(*, connection_id, model, config_options_file, environ=Non
         raise SystemExit("error: the observed model was not accepted (see catalog.discovery.build_catalog).")
     current = configuration_store.read_user_defaults(environ)
     defaults = dict(current["defaults"])
+    defaults.pop("coordinator", None)
     defaults["route_id"] = entry.route.id
     defaults["route_connection_id"] = connection_id
     defaults["route_model"] = model
@@ -892,7 +892,7 @@ def main(argv=None):
     sub.add_parser("install-paseo-plugin", help="Install and verify the Cortex provider plugin in Paseo (explicit setup only).")
     sub.add_parser(
         "apply-routing-defaults",
-        help="Write/complete the default global routing.json and drop denied models from route-policy.json.",
+        help="Install absent routing/default files only; preserve all existing owner settings.",
     )
 
     p_validate = sub.add_parser(

@@ -28,6 +28,7 @@ from cortex_runtime.portable.identity import OwnershipEpoch, SourceEvent
 from cortex_runtime.routing import store as routing_store
 from cortex_runtime.store import Store
 
+from model_policy_fixtures import write_policy
 from engine_fakes import default_scenario, fake_launch_command, isolated_environ, make_connection_record, new_connection_id, write_scenario
 
 
@@ -61,6 +62,7 @@ def _make_pair(tmp_path, *, same_provider=True):
     engine_dir = tmp_path / "engine"
     engine_dir.mkdir()
     environ = isolated_environ(engine_dir)
+    write_policy(environ, {"codex-acp": {"shared-model": "standard", "other-model": "standard"}})
     # T035: this file's own fixture entries always name "shared-model" or
     # "other-model" (never "gpt-x", ``default_scenario``'s own placeholder)
     # -- override just the "model" option's values so the worker-mode-floor

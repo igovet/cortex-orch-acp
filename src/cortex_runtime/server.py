@@ -340,6 +340,41 @@ class Server:
         return dict(content=[dict(type='text',text=json.dumps(data))],isError=True)
 
 
+INTERNAL_FAILURE_MESSAGE = ('The server failed to complete this request. Do not change arguments to guess a repair. '
+                            'Check the local server; a write may be uncertain, so preserve and retry only its exact '
+                            'original request and delivery key.')
+_LONE_SURROGATE = re.compile('[\ud800-\udfff]')
+
+
+def encode_reply(reply):
+    """Serialize one JSON-RPC reply as one strict UTF-8 line; never raise.
+
+    The reply used to be encoded outside the per-request error handling, so
+    one unencodable value ended the whole server process. A non-UTF-8 file
+    name is the ordinary source: ``os.listdir`` decodes it with
+    ``surrogateescape``, and a lone surrogate cannot be written as UTF-8.
+    The engine's MCP client then reports ``Transport closed`` for every later
+    Cortex call of the session -- a worker can neither publish its result nor
+    ask a question. A lone surrogate is shown as U+FFFD instead. A value that
+    is not JSON at all becomes this request's own -32603 reply: its effect,
+    if any, is already durable, so only an exact retry is directed.
+    """
+    try:
+        text = json.dumps(reply, ensure_ascii=False)
+    except (TypeError, ValueError, RecursionError):
+        _log_unexpected('reply')
+        request_id = reply.get('id') if isinstance(reply, dict) else None
+        if type(request_id) not in (str, int):
+            request_id = None
+        text = json.dumps(dict(jsonrpc='2.0', id=request_id,
+                               error=dict(code=-32603, message=INTERNAL_FAILURE_MESSAGE)), ensure_ascii=False)
+    try:
+        data = text.encode('utf-8')
+    except UnicodeEncodeError:
+        data = _LONE_SURROGATE.sub('\ufffd', text).encode('utf-8')
+    return data + b'\n'
+
+
 def reject_duplicates(pairs):
     result = {}
     for key, value in pairs:
@@ -384,6 +419,9 @@ def main():
             reply = dict(jsonrpc='2.0',id=None,error=dict(code=-32700,message='Cannot parse the request. Send one valid UTF-8 JSON object per line without duplicate keys; keep each line within 2,000,000 bytes. Nothing in this frame was executed.'))
         except Exception:
             _log_unexpected('dispatch')
-            reply = dict(jsonrpc='2.0',id=request_id,error=dict(code=-32603,message='The server failed to complete this request. Do not change arguments to guess a repair. Check the local server; a write may be uncertain, so preserve and retry only its exact original request and delivery key.'))
-        sys.stdout.write(json.dumps(reply,ensure_ascii=False)+'\n')
-        sys.stdout.flush()
+            reply = dict(jsonrpc='2.0',id=request_id,error=dict(code=-32603,message=INTERNAL_FAILURE_MESSAGE))
+        # One reply that cannot be encoded must never end this process: the
+        # engine's MCP client would report every later Cortex call of the
+        # session as a closed transport (see encode_reply).
+        sys.stdout.buffer.write(encode_reply(reply))
+        sys.stdout.buffer.flush()

@@ -1,6 +1,8 @@
 # Persistent isolated dev Paseo environment
 
-## Installed Paseo 0.10.0 boundary
+## Installed Paseo version boundary
+
+> On 2026-09-30, read-only package/bundle inspection reported Paseo 0.10.2. The 0.10.0 CLI/isolation observations below are historical, not qualification of 0.10.2. Recheck the installed CLI, bridge and guarded wrapper before a requested live launch; do not infer unchanged capabilities from the version number.
 
 The installed Linux CLI is `/opt/Paseo/resources/bin/paseo`; a read-only `--version` check on 2026-09-29 returned 0.10.0. Do not assume older 0.9.2 command or isolation observations still apply without checking the installed CLI and bridge. The guarded wrapper's current `--check` was run on 2026-09-29: it selected `/home/igovet/.paseo-dev` and reported `/home/igovet/.paseo` as the protected production home (exit 0). This validates wrapper selection only, not daemon endpoint or GUI isolation.
 
@@ -41,8 +43,10 @@ prompts through production `~/.paseo` or the production Cortex agent.
 The existing production Codex and Claude native accounts remain the approved
 engine accounts. Do not create test accounts, copy credentials, or run isolated
 engine login. Before relying on an engine, check its native login status without
-printing credentials. Default live model is `gpt-5.6-luna` at medium/high effort;
-heavy models remain prohibited in routine live qualification.
+printing credentials. Use only the owner's explicitly selected, currently observed economical settings
+route; resolve its exact model and effort from settings and supported CLI options.
+Do not substitute a fixed example model or automatically escalate the coordinator.
+Heavy models remain prohibited in routine live qualification.
 
 For a requested guarded paid probe, supply both required flags and a reference
 naming the owner's request:
@@ -60,22 +64,31 @@ exact surface being checked.
 
 `cli` mode drives a Cortex agent headlessly through the guarded wrapper, without
 Electron. Verify that the installed Paseo CLI help supports the commands and flags used here, and check the dev daemon's actual provider/model configuration before use.
-Start the daemon and check the plugin as in the setup section, then, from a
+For a later freshly authorized CLI qualification, include startup, exercise,
+waits and cleanup within ten minutes as described below; individual waits must
+not exceed 60 seconds. This recipe does not authorize a paid launch now. The variables below are placeholders for the owner's
+explicitly selected supported settings route, not defaults. Start the daemon
+and check the plugin as in the setup section, then, from a
 disposable project directory outside this checkout:
 
 ~~~bash
 W="python3 -B $CHECKOUT/scripts/cortex_paseo_dev.py --"
-$W run --provider cortex --model gpt-5.6-luna --thinking medium \
+$W run --provider cortex --model "$MODEL_FROM_SETTINGS" --thinking "$EFFORT_FROM_SETTINGS" \
   --cwd "$PROJECT" --background --json "<scenario prompt>"
 $W permit ls --json                      # pending permission requests
 $W permit allow <agent-id> <request-id>  # or: permit deny
 $W send <agent-id> --prompt "<steering message>" --no-wait
-$W wait <agent-id> --timeout 1800 --json
+$W wait <agent-id> --timeout 60 --json
 $W inspect <agent-id> --json
 ~~~
 
 Check outcomes against the disposable project's `.cortex/cortex.sqlite3`
 store, opened read-only: tasks, reports, review and verification records.
+The [bound inspector](observability.md#bound-task-inspection) provides a
+metadata-only paged route once an exact owned host-to-ACP/task/epoch binding
+has actually been observed. It refuses busy/uncheckpointed storage and never
+initializes or repairs it. An opaque host agent ID or daemon stop alone is not
+binding, engine confirmation or a resource-release receipt.
 On 2026-09-28, `logs <agent-id> --json` on 0.9.2 printed a text timeline, not
 JSON, so do not parse it as structured evidence; use it only under the
 retained-history rules below. A `cli` check establishes runtime and protocol
@@ -91,7 +104,10 @@ python3 -B scripts/cortex_paseo_clone.py
 ~~~
 
 The clone utility permits only `~/.paseo` as source and `~/.paseo-dev` as target,
-skips sockets, PID files, and locks, copies normal files to a staging directory, and
+skips sockets, PID files, and locks, never copies production's daemon identity
+(top-level `server-id` and `daemon-keypair.json`; it keeps the dev home's own
+copies when they differ from production's, otherwise installed Paseo 0.10.2
+creates new ones on start), copies normal files to a staging directory, and
 uses SQLite's backup API for databases. It atomically replaces the dev home and
 preserves the previous dev home as a timestamped rollback directory. It never
 writes to production.
@@ -194,3 +210,90 @@ For retained-history checks, omit `--tail` and retain exit status, output byte
 count, structural event count, safe first/last event identities and any explicit
 error. The 0.9.2 observation that `--tail`, `--filter` and `--since` existed without pagination must not be carried forward to 0.10.0 without checking its logs command help. If completeness cannot be independently established, mark the check unverified. Do not store message bodies or raw logs
 in repository documents or reports.
+
+
+## Native queue workaround and qualification limit
+
+The owner-selected workflow uses default `sendBehavior: "steer"` plus
+Ctrl/Cmd+Enter to enter Paseo's native pre-delivery queue. Native **Edit** restores
+a queued item into the existing composer without sending; cancellation is
+**Edit**, then clear text and restored attachments. Save any existing draft
+first: Edit overwrites it without confirmation, native enqueue trims surrounding
+whitespace, and exact user-attachment filtering is unverified. Native queue
+persistence on reload is inferred only. Do not change the owner's send behavior
+or drafts to test this.
+
+Inspected 0.10.2 `queue` send behavior selects explicit interruption for Send
+now and question-card sending; keep `steer`. Cortex's normal prompt/continuation
+handoff no longer interrupts unrelated active workers, but explicit Stop/cancel
+still must do so. See [the delivery ownership contract](steering-and-questions.md#continuation-delivery-ownership).
+
+No Cortex Cancel/Edit UI or composer hook was added. A requested CLI run can
+check runtime delivery, question/steering handling and cancellation in the
+disposable project; it cannot exercise Ctrl/Cmd+Enter or prove native Edit,
+draft replacement, attachment restoration or rendered controls. Desktop was
+not requested for the current work, so those interactions remain unqualified.
+
+## Read-only dev binding
+
+With a fresh explicit read grant for the owned dev endpoint PID records and
+NEW disposable project, use the exact full UUID/workspace from that owned run:
+
+~~~bash
+python3 -B scripts/cortex_paseo_dev.py binding --agent "$AGENT_ID" \
+  --workspace "$WORKSPACE_ID" --project "$PROJECT" --timeout 10
+~~~
+
+This is a dev-only helper, not a plugin RPC. `binding` has no `--home`, endpoint
+or executable override and never auto-starts the daemon, registers a plugin,
+launches an engine, sends a prompt or changes settings. Observation timeout is
+1–30 seconds with separately bounded owned-child cleanup; output is bounded to
+8 KiB. Both private owned PID records must have valid provenance and distinct
+listen/PID/serverId; only the fixed dev loopback endpoint is used. Inherited
+PASEO variables are removed. Canonical project paths cannot overlap this checkout
+or either Paseo home. Permissions to read external files are not implied by this
+example; a refusal must not be bypassed.
+
+Anonymous connection only: authentication-required hosts refuse; do not copy
+credentials or synthesize an authenticated result. Two exact-agent fetches check
+provider/workspace/cwd and the strict existing runtimeInfo wrapper. Two guarded
+immutable reads check session/task/current durable owner, with canonical binding
+digest validation and before/after endpoint/server checks. No unrelated agent,
+workspace or latest-task enumeration occurs. Missing/ambiguous/stale/changed
+bindings, busy locks, unsafe/legacy storage and nonempty WAL refuse safely.
+Output retains `host`, `binding`, `binding_sha256`, `endpoint_sha256` and explicit
+`provenance`; retain the observation as an identity, not a lease or acceptance.
+Use its session/task/epoch in [bound task inspection](observability.md#bound-task-inspection).
+
+Repository client 0.9.1 fake-wire tests establish the executable helper's
+positive/refusal behavior, not real installed-daemon behavior. Static inspection
+of installed Paseo/client 0.10.2 found the used exact-agent refresh/current,
+server-info and anonymous connection APIs; it does not prove current endpoint,
+authentication or owned-agent availability. A future authorized run must observe
+those facts afresh. Fixtures/exported metadata do not explain or fix the unknown
+cause of an earlier short live run, or prove engine, cycle, disconnect or resource
+closure. CLI is never rendered UI evidence.
+
+## Later ten-minute CLI recipe (not current authorization)
+
+Before the timed phase, finish static source/package/profile checks, targeted
+isolated tests, link/help validation and static installed-host API/isolation
+inspection. Do not prelaunch a paid task. The timed phase requires fresh owner
+CLI authorization, authorized NEW disposable project and explicit read/mutation
+grants, backup/digests of the final default settings and dev-only destination,
+and observed dev isolation. Production remains untouched. Use the real final
+`policy/model-settings-default.json`, not a simplified replacement; preserve
+native parameters, ceilings and settings revision/digest bindings.
+
+Start the clock before startup/environment work. By minute 2, all permitted
+backup/config/plugin/endpoint readiness and explicit owned route evidence must
+be ready to dispatch; otherwise abort before any paid call and clean up. Exercise
+only the authorized scenario, retaining exact agent/workspace/session/task/epoch,
+selected versus ACTIVE configuration, actual native confirmations and complete
+inspection pages/command receipts. Start cleanup no later than 6:30 and finish
+by minute 10, with bounded waits (at most 60 seconds each). Retain cleanup,
+disconnect and resource-release observations separately: task closure or daemon
+stop is not their proof. If readiness, cycle, history or cleanup evidence is
+missing, report the run incomplete rather than extending the budget or passing
+an absent signal. Restore only the owned dev changes against retained backups
+and matching revisions; never touch production or another task's resources.

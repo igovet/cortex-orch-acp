@@ -19,6 +19,7 @@ from cortex_runtime.ownership import current_owner_epoch
 from cortex_runtime.portable.identity import OwnershipEpoch, SourceEvent
 from cortex_runtime.store import Store
 
+from model_policy_fixtures import write_policy
 from engine_fakes import default_scenario, fake_launch_command, isolated_environ, make_connection_record, new_connection_id, write_scenario
 from test_delegation_worker_mode_floor import _MODE_OPTIONS, _entry
 
@@ -58,6 +59,7 @@ def _bootstrap(tmp_path, name):
 
 def _connection_and_config(tmp_path):
     environ = isolated_environ(tmp_path)
+    write_policy(environ, {"codex-acp": {"shared-model": "standard"}})
     config_options = [
         dict(id="model", currentValue="shared-model", options=[dict(value="shared-model", name="shared-model")]),
         dict(id="mode", currentValue=_MODE_OPTIONS[0]["value"], options=_MODE_OPTIONS),
@@ -181,6 +183,7 @@ def test_worker_native_edit_is_allowed_and_delete_asks_the_user_via_real_fake_en
     with consent)."""
     store, task_id, epoch = _bootstrap(tmp_path, "delete")
     environ = isolated_environ(tmp_path)
+    write_policy(environ, {"codex-acp": {"shared-model": "standard"}})
 
     edit_request = dict(
         method="session/request_permission",

@@ -32,6 +32,7 @@ import {
   buildProfileDeactivate,
   buildProfileRename,
   buildProfileSave,
+  buildProfileDelete,
   buildRoutingUpdate,
   buildUserDefaultsUpdate,
   canAutoAllow,
@@ -102,6 +103,7 @@ import {
   type ProjectCeilingView,
   type RouteCatalogView,
   type RoutingForm,
+  type QuotaWindowRow,
   type RoutingView,
   type RoutingProfilesView,
   type RoutingVocabulary,
@@ -466,7 +468,10 @@ function useConfigSurface<Result>(surface: string, workspaceId: string | null, r
 
   useEffect(() => { reload(); }, [reload]);
 
+  const writePending = useRef(false);
   const save = useCallback(async (input: ConfigUpdateInput, prefixes: readonly string[] = []): Promise<boolean> => {
+    if (writePending.current) return false;
+    writePending.current = true;
     setSaving(true);
     setSaveError(null);
     try {
@@ -484,6 +489,7 @@ function useConfigSurface<Result>(surface: string, workspaceId: string | null, r
       setSaveError({ message: error instanceof Error ? error.message : "Save failed", conflict: false, fields: {} });
       return false;
     } finally {
+      writePending.current = false;
       setSaving(false);
     }
   }, [write, onWritten]);
@@ -593,7 +599,10 @@ function UserDefaultsSection({ theme, onWritten }: { theme: Theme; onWritten?: (
     if (!built.ok) { setClientErrors(built.errors); surface.setSaveError(null); return; }
     setClientErrors({});
     if (built.value === null) { setNotice("Nothing changed."); return; }
-    if (await surface.save(built.value)) setNotice("Applied to settings files; the profile was not updated. Use Save to current profile or Save as new profile.");
+    if (await surface.save(built.value)) {
+      if (built.value.defaults && "coordinator" in built.value.defaults) await surface.reload();
+      setNotice("Applied to settings files; the profile was not updated. Use Save to current profile or Save as new profile.");
+    }
   };
 
   const connectionOptions = (current: string) => {
@@ -616,10 +625,23 @@ function UserDefaultsSection({ theme, onWritten }: { theme: Theme; onWritten?: (
             : <TextField label="Connection id" value={form.route_connection_id} onChangeText={(value) => set({ route_connection_id: value })} theme={theme}
               placeholder="cn_…" hint="The connection list could not be read; enter the id." error={errorFor(errors, "defaults.route_connection_id")} />}
           <TextField label="Model (exact id)" value={form.route_model} onChangeText={(value) => set({ route_model: value })} theme={theme}
-            hint="The route's full model id; OpenCode ids include the provider, e.g. anthropic/claude-sonnet-4-5."
+            hint="The route's full model id; OpenCode ids include the provider, e.g. provider/model."
             error={errorFor(errors, "defaults.route_model")} />
           <Button title="Clear default route" tone="muted" theme={theme} onPress={() => set({ route_id: "", route_connection_id: "", route_model: "" })} />
           <ErrorText message={errors.defaults} theme={theme} />
+        </Group>
+        <Group title="Portable coordinator default" theme={theme} hint="Exact engine/model and supported parameters; no account is picked when matches are ambiguous. Clear the bound route before setting this preference.">
+          <TextField label="Coordinator engine" value={form.coordinator_engine} onChangeText={(coordinator_engine) => set({ coordinator_engine })} theme={theme} />
+          <TextField label="Coordinator model (exact id)" value={form.coordinator_model} onChangeText={(coordinator_model) => set({ coordinator_model })} theme={theme} />
+          <RowList<KeyValueRow> errorKey="defaults.coordinator.parameters" label="Coordinator parameter" rows={form.coordinator_parameters} onChange={(coordinator_parameters) => set({ coordinator_parameters })} theme={theme}
+            addLabel="Add coordinator parameter" newRow={() => ({ key: "", value: "" })}
+            renderRow={(row, update) => <View style={{ gap: 6 }}>
+              <TextField label="Coordinator parameter name" value={row.key} onChangeText={(key) => update({ ...row, key })} theme={theme} />
+              <TextField label="Coordinator parameter value" value={row.value} onChangeText={(value) => update({ ...row, value })} theme={theme} />
+            </View>} />
+          <ErrorText message={errorFor(errors, "defaults.coordinator")} theme={theme} />
+          {result.coordinator_resolution && <Banner theme={theme} tone={result.coordinator_resolution.state === "bound" ? "muted" : "warning"}
+            text={`Coordinator: ${result.coordinator_resolution.state}${result.coordinator_resolution.error ? ` — ${result.coordinator_resolution.error.code}: ${result.coordinator_resolution.error.message}` : ""}`} />}
         </Group>
         <ChoiceField label="Language" value={form.language} theme={theme} error={errorFor(errors, "defaults.language")}
           options={[{ value: "", label: "Automatic" }, ...(result.languages.length > 0 ? result.languages : ["en", "ru"]).map((code) => ({ value: code, label: code }))]}
@@ -725,12 +747,80 @@ function ProjectCeilingSection({ theme, workspaceId }: { theme: Theme; workspace
 
 // --- Routing ----------------------------------------------------------------------
 
+function PolicyEditor({ form, onChange, vocabulary, theme }: {
+  form: RoutingForm; onChange: (form: RoutingForm) => void; vocabulary: RoutingVocabulary; theme: Theme;
+}) {
+  const [engine, setEngine] = useState("");
+  const [model, setModel] = useState("");
+  const put = (engineId: string, modelId: string, key: string, value: unknown) => {
+    const models = { ...(form.models ?? {}) };
+    const current = models[engineId] ?? { auto: null, tiers: {}, policy: {} };
+    const policy = { ...current.policy, [modelId]: { ...current.policy[modelId], [key]: value } };
+    models[engineId] = { ...current, policy };
+    onChange({ ...form, models });
+  };
+  return <Group title="Exact model policy" theme={theme} hint="Request names are explicit lowercase word/stem labels (2–32 letters/digits/underscore/hyphen), not inferred families. Backend validation decides ambiguity and effort support. Owner policy only. Missing automatic membership enables nothing; missing tiers leave a model unplaced. Unmatched identities stay configured. These settings never authorize paid execution.">
+    <TextField label="Policy engine (exact id)" value={engine} onChangeText={setEngine} theme={theme} />
+    <TextField label="Policy model (exact id)" value={model} onChangeText={setModel} theme={theme} />
+    <Button title="Add model policy" theme={theme} disabled={!vocabulary.engines.includes(engine) || !model.trim()}
+      onPress={() => put(engine, model.trim(), "request_names", form.models?.[engine]?.policy[model.trim()]?.request_names ?? null)} />
+    {Object.entries(form.models ?? {}).map(([engineId, rules]) => <Group key={engineId} title={engineId} theme={theme}>
+      <StringListField errorKey={`rules.models.${engineId}.auto`} label={`Automatic members for ${engineId}`} values={rules.auto ?? []} theme={theme}
+        onChange={(auto) => onChange({ ...form, models: { ...form.models, [engineId]: { ...rules, auto } } })} />
+      {[...new Set([...(rules.auto ?? []), ...Object.keys(rules.tiers), ...Object.keys(rules.policy)])].map((modelId) => {
+        const policy = rules.policy[modelId] ?? {};
+        const id = `${engineId}/${modelId}`;
+        return <Group key={modelId} title={id} theme={theme}>
+          <MultiChoiceField label={`Policy tiers for ${id}`} values={typeof rules.tiers[modelId] === "string" ? [rules.tiers[modelId] as string] : rules.tiers[modelId] ?? []}
+            options={vocabulary.tiers.map((value) => ({ value, label: value }))} theme={theme}
+            onChange={(values) => onChange(setModelTiers(form, engineId, modelId, values, vocabulary.tiers))} />
+          {["effort_floor", "max_effort"].map((key) => typeof policy[key] === "string" || policy[key] == null
+            ? <ChoiceField key={key} label={`${key} for ${id}`} value={policy[key] as string ?? ""} theme={theme}
+              options={[{ value: "", label: "Neutral (unset)" }, ...(vocabulary.policyEfforts ?? vocabulary.efforts).map((value) => ({ value, label: value }))]}
+              onChange={(value) => put(engineId, modelId, key, value || null)} />
+            : <ReadOnlyNotice key={key} theme={theme} text={`${key} has unsupported data; kept unchanged.`} />)}
+          {["effort_ladder", "also_standard_for", "preferred_for", "request_names"].map((key) => policy[key] == null || (Array.isArray(policy[key]) && (policy[key] as unknown[]).every((item) => typeof item === "string"))
+            ? <StringListField key={key} errorKey={`rules.models.${engineId}.policy.${modelId}.${key}`} label={`${key} for ${id}`} values={policy[key] as string[] ?? []} theme={theme}
+              ordered={key === "effort_ladder"} onChange={(value) => put(engineId, modelId, key, value.length === 0 && (key === "effort_ladder" || key === "request_names") ? null : value)} />
+            : <ReadOnlyNotice key={key} theme={theme} text={`${key} has unsupported data; kept unchanged.`} />)}
+          {Object.keys(policy).filter((key) => !["effort_floor", "max_effort", "effort_ladder", "also_standard_for", "preferred_for", "request_names"].includes(key)).map((key) => <ReadOnlyNotice key={key} theme={theme} text={`${key} is not supported here; kept unchanged.`} />)}
+        </Group>;
+      })}
+    </Group>)}
+  </Group>;
+}
+
 function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
   form: RoutingForm; onChange: (form: RoutingForm) => void; vocabulary: RoutingVocabulary; theme: Theme; errors: FieldErrors;
 }) {
   const set = (patch: Partial<RoutingForm>) => onChange({ ...form, ...patch });
   const engineOptions = vocabulary.engines.map((engine) => ({ value: engine, label: vocabulary.optionalEngines.includes(engine) ? `${engine} (optional)` : engine }));
   return <View style={{ gap: 12 }}>
+    <ReadOnlyRow label="Model policy version" value={form.model_policy_version === undefined ? "missing — explicit migration required" : String(form.model_policy_version)} theme={theme} />
+    <PolicyEditor form={form} onChange={onChange} vocabulary={vocabulary} theme={theme} />
+    <Optional label="Quota window associations" value={form.quota_windows ?? null} emptyValue={() => ({} as Record<string, QuotaWindowRow[]>)}
+      onChange={(quota_windows) => set({ quota_windows })} theme={theme}
+      unsetText="Unmapped windows conservatively apply to every model; unknown usage is not zero.">
+      {(windows) => <>
+        <Hint theme={theme} text="Exact provider window labels and exact model ids only. Shared applies to all models. A scoped empty list explicitly excludes this window for all models. Unmapped labels remain conservatively shared; no family matching or install-template fallback." />
+        {[...new Set([...vocabulary.engines, ...Object.keys(windows)])].map((engine) =>
+          <Optional key={engine} label={`${engine} quota windows`} value={windows[engine] ?? null} emptyValue={() => [] as QuotaWindowRow[]}
+            onChange={(rows) => { const next = { ...windows }; if (rows === null) delete next[engine]; else next[engine] = rows; set({ quota_windows: next }); }}
+            theme={theme} unsetText="No explicit associations; reported windows conservatively shared.">
+            {(rows) => <RowList<QuotaWindowRow> label="Quota window" rows={rows} theme={theme} errors={errors} errorKey={`rules.quota_windows.${engine}`}
+              addLabel={`Add ${engine} quota window`} newRow={() => ({ window: "", models: null })}
+              onChange={(rows) => set({ quota_windows: { ...windows, [engine]: rows } })}
+              renderRow={(row, update, index) => <View style={{ gap: 6 }}>
+                <TextField label={`${engine} window ${index + 1} exact label`} value={row.window} theme={theme} onChangeText={(window) => update({ ...row, window })} />
+                <ChoiceField label={`${engine} window ${index + 1} scope`} value={row.models === null ? "shared" : "models"} theme={theme}
+                  options={[{ value: "shared", label: "Shared / account" }, { value: "models", label: "Exact models" }]}
+                  onChange={(scope) => update({ ...row, models: scope === "shared" ? null : [] })} />
+                {row.models !== null && <StringListField label="Applicable exact model id" values={row.models} theme={theme} errors={errors}
+                  errorKey={`rules.quota_windows.${engine}[${index}]`} onChange={(models) => update({ ...row, models })} />}
+              </View>} />}
+          </Optional>)}
+      </>}
+    </Optional>
     <Optional label="Pin roles to routes" value={form.pin} emptyValue={() => [] as PinRow[]} onChange={(pin) => set({ pin })} theme={theme}
       unsetText="Not set: roles are routed automatically." error={errorAt(errors, "rules.pin")}>
       {(rows) => <RowList<PinRow> label="Pin" rows={rows} onChange={(pin) => set({ pin })} theme={theme} errors={errors} errorKey="rules.pin"
@@ -742,7 +832,7 @@ function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
             ? [...engineOptions, { value: row.engine, label: `${row.engine} (unknown)` }] : engineOptions} theme={theme}
             onChange={(engine) => update({ ...row, engine })} />
           <TextField label={`Pin ${index + 1} model (full id)`} value={row.model} theme={theme}
-            placeholder={row.engine === "opencode" ? "provider/model, e.g. anthropic/claude-sonnet-4-5" : "model id"}
+            placeholder={row.engine === "opencode" ? "provider/model" : "model id"}
             onChangeText={(model) => update({ ...row, model })} />
           <ChoiceField label={`Pin ${index + 1} effort`} value={row.effort} theme={theme}
             options={[{ value: "", label: "Engine default" }, ...vocabulary.efforts.map((effort) => ({ value: effort, label: effort })),
@@ -754,9 +844,9 @@ function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
     <Optional label="Deny list" value={form.deny} emptyValue={() => [] as string[]} onChange={(deny) => set({ deny })} theme={theme}
       unsetText="Not set: this file denies nothing.">
       {(values) => <>
-        <Hint theme={theme} text="Each entry is an exact model id, engine/model, a family (haiku) or versioned id that covers its variants, or engine/* for a whole engine. Denied routes are hidden from the model selector and refused. Engines & models switches write the same entries." />
+        <Hint theme={theme} text="Each entry is an exact model id, engine/model, or engine/* for a whole engine. Denied routes are hidden from the model selector and refused. Engines & models switches write the same entries." />
         <StringListField label="Denied route or engine" values={values} onChange={(deny) => set({ deny })} theme={theme}
-          errors={errors} errorKey="rules.deny" placeholder="model, engine/model, family or engine/*" />
+          errors={errors} errorKey="rules.deny" placeholder="model, engine/model or engine/*" />
       </>}
     </Optional>
     <Optional label="Auto-allow list" value={form.auto_allow} emptyValue={() => [] as string[]} onChange={(auto_allow) => set({ auto_allow })} theme={theme}
@@ -768,7 +858,7 @@ function RoutingEditor({ form, onChange, vocabulary, theme, errors }: {
       </>}
     </Optional>
     <Optional label="Model tiers" value={form.tiers} emptyValue={() => [] as TierRow[]} onChange={(tiers) => set({ tiers })} theme={theme}
-      unsetText="Not set: built-in tiers apply." error={errorAt(errors, "rules.tiers")}>
+      unsetText="Not set: no placement. Legacy top-level tiers require explicit migration." error={errorAt(errors, "rules.tiers")}>
       {(rows) => <RowList<TierRow> label="Tier" rows={rows} onChange={(tiers) => set({ tiers })} theme={theme} errors={errors} errorKey="rules.tiers"
         addLabel="Add model tier" newRow={() => ({ model: "", tier: vocabulary.tiers[0] ?? "" })}
         renderRow={(row, update, index) => <View style={{ gap: 6 }}>
@@ -837,6 +927,7 @@ function RoutingSection({ theme, workspaceId, onWritten }: { theme: Theme; works
         const current = routingTarget(result, target);
         return <View style={{ gap: 10 }}>
           <View style={{ gap: 2 }}>
+            {!result.effective_valid && <Banner theme={theme} tone="warning" text="Model policy is missing or invalid. Repair or explicitly migrate the owner candidate with the backend CLI, then reload. There is no model-specific fallback." />}
             <ReadOnlyRow label="Effective source" value={`${result.effective_source}${result.effective_valid ? "" : " (invalid)"}`} theme={theme} />
             <ReadOnlyRow label="Precedence" value={result.precedence.join(" → ")} theme={theme} />
             {result.sources.map((source) => <ReadOnlyRow key={source.source} label={`${source.source} file`} theme={theme}
@@ -877,6 +968,7 @@ function ProfileBar({ theme, workspaceId, tick, onActivated, manage }: {
   const [metadataDescription, setMetadataDescription] = useState("");
   const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const deletePending = useRef(false);
   const [errors, setErrors] = useState<FieldErrors>({});
   const [notice, setNotice] = useState<string | null>(null);
   useEffect(() => { if (tick) { setNotice(null); surface.reload(); } }, [tick, surface.reload]);
@@ -914,7 +1006,7 @@ function ProfileBar({ theme, workspaceId, tick, onActivated, manage }: {
           <ChoiceField label="Current profile" value={view.active ?? ""} theme={theme} disabled={surface.saving}
             options={[{ value: "", label: "No profile" }, ...view.profiles.map((item) => ({ value: item.name, label: item.name }))]}
             onChange={(target) => target ? activate(view, target) : void mutate(buildProfileDeactivate(view))} />
-          <Button title="Reload profile state" theme={theme} disabled={surface.saving} onPress={() => { setConfirmTarget(null); surface.reload(); }} />
+          <Button title="Reload profile state" theme={theme} disabled={surface.saving} onPress={() => { setConfirmTarget(null); setConfirmDelete(false); surface.reload(); }} />
           <ReadOnlyRow label="Profile state" value={view.state} theme={theme} />
           <Banner text={profileStateText(view)} theme={theme} tone={view.state === "in_sync" || view.state === "none" ? "muted" : "warning"} />
           {view.shadowed_by && <Banner text={`The ${view.shadowed_by} routing file overrides profile routing here. Other bound user settings still apply.`} theme={theme} tone="warning" />}
@@ -948,6 +1040,7 @@ function ProfileBar({ theme, workspaceId, tick, onActivated, manage }: {
             <Button title="Save as new profile" theme={theme} disabled={surface.saving || unreadable || !validProfileName(name)}
               onPress={() => void mutate(buildProfileCreate(view, name, description))} />
           </Group>
+          {view.profiles.length === 0 && <Hint theme={theme} text="No saved profiles. Current working settings still apply; save them as a new profile if needed." />}
           {manage && <Group title="Manage saved profiles" theme={theme}>
             <ChoiceField label="Saved profile" value={selected} theme={theme} disabled={surface.saving}
               options={[{ value: "", label: "Choose a profile" }, ...view.profiles.map((item) => ({ value: item.name, label: item.name }))]} onChange={setSelected} />
@@ -955,7 +1048,7 @@ function ProfileBar({ theme, workspaceId, tick, onActivated, manage }: {
               <ReadOnlyRow label="Stored sections" value={profile.sections.map(profileSectionLabel).join(", ")} theme={theme} />
               <ReadOnlyRow label="Updated" value={profile.updated_at ?? "unknown"} theme={theme} />
               <ReadOnlyRow label="Matches applied settings" value={view.matches_profile.includes(profile.name) ? "yes" : "no"} theme={theme} />
-              <ReadOnlyRow label="Saved route selections" value={Object.entries(profile.summary.selected_models).map(([engine, count]) => `${engine}: ${count}`).join(", ") || "built-in defaults"} theme={theme} />
+              <ReadOnlyRow label="Saved route selections" value={Object.entries(profile.summary.selected_models).map(([engine, count]) => `${engine}: ${count}`).join(", ") || "none configured"} theme={theme} />
               <ReadOnlyRow label="Default model / language" value={`${profile.summary.default_model ?? "automatic"} / ${profile.summary.language ?? "automatic"}`} theme={theme} />
               <ReadOnlyRow label="Enabled MCP servers" value={String(profile.summary.enabled_mcp_servers)} theme={theme} />
               <TextField label="Rename profile to" value={rename} onChangeText={setRename} theme={theme} error={errorFor(errors, "rename_to")} />
@@ -963,11 +1056,17 @@ function ProfileBar({ theme, workspaceId, tick, onActivated, manage }: {
               <Button title="Save profile name and description" theme={theme} disabled={surface.saving}
                 onPress={async () => { if (await mutate(buildProfileRename(view, profile.name, rename, metadataDescription))) setSelected(rename.trim() || profile.name); }} />
               <Button title="Activate profile" theme={theme} disabled={surface.saving || unreadable} onPress={() => activate(view, profile.name)} />
-              {profile.name !== view.active && profile.name !== view.pending?.profile && (confirmDelete ? <>
+              {confirmDelete ? <>
+                <Banner theme={theme} tone="warning" text={`Delete profile "${profile.name}"? Only this saved snapshot is removed. Current working settings stay unchanged, including when this is the selected or last profile. No other profile is activated.`} />
                 <Button title="Confirm delete profile" theme={theme} tone="danger" disabled={surface.saving}
-                  onPress={async () => { if (await mutate({ ok: true, value: { surface: "routing_profiles", action: "delete", expected_revision: view.revision, name: profile.name } })) setSelected(""); }} />
+                  onPress={async () => {
+                    if (deletePending.current) return;
+                    deletePending.current = true;
+                    try { if (await mutate(buildProfileDelete(view, profile.name))) setSelected(""); setConfirmDelete(false); }
+                    finally { deletePending.current = false; }
+                  }} />
                 <Button title="Cancel delete" theme={theme} disabled={surface.saving} onPress={() => setConfirmDelete(false)} />
-              </> : <Button title="Delete profile" theme={theme} tone="danger" disabled={surface.saving} onPress={() => setConfirmDelete(true)} />)}
+              </> : <Button title="Delete profile" theme={theme} tone="danger" disabled={surface.saving || !!view.pending || !!surface.saveError} onPress={() => setConfirmDelete(true)} />}
             </>}
           </Group>}
           <ErrorText message={Object.values(errors).flat().join(" ")} theme={theme} />
@@ -987,8 +1086,7 @@ function SwitchLegend({ theme }: { theme: Theme }) {
       + "Connections and logins are never touched."} />
     <Hint theme={theme} text={"Automatic routing may use …: off only keeps automatic worker routing, failover and pins away from the engine; "
       + "its models stay selectable by hand. Saved as the engine list of automatic routing."} />
-    <Hint theme={theme} text={"Allow … in automatic routing: only for models Cortex leaves out of automatic routing by default (OpenCode v2 "
-      + "routes, the Claude Haiku family). Saved as an exact auto-allow entry."} />
+    <Hint theme={theme} text={"Allow … in automatic routing: exact identity exceptions only; automatic membership and tiers must still be configured. Saved as an exact auto-allow entry."} />
     <Hint theme={theme} text={"Now: the state under the rules Cortex uses at the moment. Recorded unavailability and plan quota are decided per "
       + "dispatch and are not shown. The ceilings' allowed connections are not enforced by this Cortex version and cannot switch anything off."} />
   </Group>;
@@ -1015,9 +1113,9 @@ function ModelRow({ group, form, onChange, target, tiers, availableModels, workK
       options={tiers.map((tier) => ({ value: tier, label: tier }))} theme={theme} disabled={deny.on}
       onChange={(next) => onChange(setModelTiers(form, route.engine, route.model, next, tiers))}
       hint={"Runtime model ranking uses the model for work of every tier chosen here, at that tier's effort. "
-        + "Clearing every tier returns it to its built-in tier."} />
+        + "Clearing every tier leaves it unplaced; automatic membership requires an explicit tier."} />
     <Group title={`Preferred work for ${title}`} theme={theme}
-      hint="Preferences rank this model within its tier; they do not override availability, policy or plan usage. If built-in eligibility excludes it, select it for automatic ranking first.">
+      hint="Preferences rank this model within its tier; they do not override availability, policy or plan usage. Select it for automatic ranking first.">
       {workKinds.map((kind) => <ToggleField key={kind} label={`${workKindLabels[kind] ?? kind} — ${title}`}
         value={(form.models?.[route.engine]?.policy?.[route.model]?.preferred_for as string[] | undefined)?.includes(kind) ?? false}
         disabled={deny.on || (form.models?.[route.engine]?.auto == null
@@ -1149,7 +1247,7 @@ function RoutingSwitchesCard({ title, saveLabel, theme, workspaceId, legend, too
         return <View style={{ gap: 10 }}>
           {legend}
           <ReadOnlyRow label="Rules Cortex uses now" theme={theme}
-            value={`${view.effective_source === "builtin" ? "built-in (no routing file)" : `${view.effective_source} file`}${view.effective_valid ? "" : " (invalid)"}`} />
+            value={`${view.effective_source === "missing" ? "missing — explicit model policy migration required" : `${view.effective_source} file`}${view.effective_valid ? "" : " (invalid)"}`} />
           <ChoiceField label="Save switches to" value={target} theme={theme} onChange={(value) => { setPicked(true); setTarget(value); }}
             options={[{ value: "user", label: "User routing file" }, { value: "project", label: "Project routing file", disabled: !workspaceId }]}
             hint={workspaceId ? undefined : "Select a project workspace above to switch engines or models for one project only."} />
@@ -1161,6 +1259,7 @@ function RoutingSwitchesCard({ title, saveLabel, theme, workspaceId, legend, too
           <SurfaceFrame state={catalog.state} reload={catalog.reload} theme={theme}>
             {(cat) => <View style={{ gap: 10 }}>
               {tools?.(cat, catalog.replace)}
+              {cat.engines.filter((engine) => (engine.unmatched_selected?.length ?? 0) > 0).map((engine) => <Banner key={engine.engine} theme={theme} tone="warning" text={`Unmatched automatic identities for ${engine.engine}: ${engine.unmatched_selected!.join(", ")}. Kept configured; no replacement is inferred. Edit exact model policy in Routing.`} />)}
               {!current.editable || !form
                 ? <ReadOnlyNotice theme={theme} text={current.reason ?? "This routing file is read-only."} />
                 : <View style={{ gap: 10 }}>
@@ -1296,11 +1395,11 @@ function ModelsSection({ theme, workspaceId, onWritten }: { theme: Theme; worksp
   const [query, setQuery] = useState("");
   return <RoutingSwitchesCard title="Models" saveLabel="model switches" onWritten={onWritten} theme={theme} workspaceId={workspaceId}
     legend={<Hint theme={theme} text={"Switch on the models Cortex may use. Only these appear in the model selector, under Engines & models and in "
-      + "automatic routing; a model switched off is refused when chosen or pinned. Codex and Claude models are on until switched off; "
-      + "OpenCode v2 models are off until switched on. Connections and logins are never touched."} />}
+      + "automatic routing; a model switched off is refused when chosen or pinned. Only explicitly enabled identities are on; "
+      + "new or omitted models stay off. Connections and logins are never touched."} />}
     tools={(cat, replace) => <CatalogRefresh cat={cat} replace={replace} workspaceId={workspaceId} theme={theme} />}>
     {({ cat, form, setForm, target }) => <>
-      <TextField label="Filter models" value={query} onChangeText={setQuery} theme={theme} placeholder="e.g. sol, sonnet, nvidia"
+      <TextField label="Filter models" value={query} onChangeText={setQuery} theme={theme} placeholder="words in model id or display name"
         hint="Words in the model name or id; the switch-all buttons apply to the models shown." />
       {cat.engines.map((engine) => <EngineModels key={engine.engine} engine={engine} catalog={cat} form={form} onChange={setForm}
         target={target} query={query} theme={theme} />)}

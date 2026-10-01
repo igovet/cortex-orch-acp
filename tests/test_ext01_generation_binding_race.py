@@ -131,3 +131,47 @@ def test_adapter_reports_the_engine_context_window_for_fresh_sessions(tmp_path):
     assert adapter.context_window("es_new") == 1_000_000
     assert adapter.context_window("es_other") is None
     assert adapter.context_window("es_unknown") is None
+
+
+def test_adapter_reports_the_context_fill_from_before_each_compaction(tmp_path):
+    """``last_usage`` is the engine's own ``usage_update.used`` from right
+    before the latest observed compaction -- never a later fill, and never a
+    figure left over from an earlier compaction."""
+    from types import SimpleNamespace
+
+    from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter
+
+    store = Store(tmp_path / ".cortex", project_root=tmp_path)
+    task_id = bootstrap_task(store, SourceEvent(origin="cli", event_id=str(uuid.uuid4())), "Build it.", "owner-1").task_id
+    session_ref = "es_fill"
+    delegation_generations.ensure_owner(
+        store, task_id=task_id, engine_session_ref=session_ref, engine="codex-acp", version="1.12.0",
+    )
+    adapter = EngineSessionManagerAdapter(
+        connection_record_factory=lambda task_id: (_ for _ in ()).throw(AssertionError("not exercised")),
+        workspace_root_factory=lambda task_id: (_ for _ in ()).throw(AssertionError("not exercised")),
+        store=store,
+    )
+    adapter._session_meta[session_ref] = dict(
+        task_id=task_id, recipient="coordinator", assignment_ref=None, attempt_id="att_1", tier="automatic",
+    )
+    manager = SimpleNamespace(invalidate_generation=lambda *_args: None)
+
+    def compaction(ref, reason):
+        adapter._observe_compaction_signal(manager, session_ref, SimpleNamespace(tool_call_ref=ref, compaction_reason=reason))
+
+    assert adapter.last_usage(session_ref) is None
+    adapter._observe_context_used(session_ref, 180_000)
+    compaction("tc-1", "started")
+    adapter._observe_context_used(session_ref, 40_000)
+    compaction("tc-1", "completed")
+    assert adapter.last_usage(session_ref) == {"tokens": 180_000, "basis": "engine_reported"}
+
+    # The next compaction measures the latest fill reported before it.
+    adapter._observe_context_used(session_ref, 120_000)
+    compaction("tc-2", "completed")
+    assert adapter.last_usage(session_ref) == {"tokens": 120_000, "basis": "engine_reported"}
+    # One with no report since the previous compaction has no measured size.
+    compaction("tc-3", "completed")
+    assert adapter.last_usage(session_ref) is None
+    assert adapter.last_usage("es_unknown") is None

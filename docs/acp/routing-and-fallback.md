@@ -1,5 +1,7 @@
 # Automatic routing, mixed teams, and authorized fallback
 
+> **Current contract:** former built-in name/family/position-based model rules described in historical sections below are removed. Current automatic and coordinator routing requires explicit version-2 owner settings and observed catalog identities. See [settings-only routing](#settings-only-routing).
+
 Cortex automatically selects worker engine, model, and effort from the runtime's
 current model catalog, task tier, work kind, routing policy and each engine's
 observed subscription plan usage; how often an engine was chosen before is not
@@ -49,11 +51,13 @@ insert) is one of:
   (`role_routes=None`). For explicit profile resolution and fallback, each
   role inherits the revision's own route unless the task proposes a different
   profile. Runtime automatic worker routing uses its separately audited
-  `auto`/`auto:pin` basis before opening a worker session.
+  `auto`/`auto:pin`/`auto:user_request` basis and settings-eligible observed
+  candidates narrowed by the task ceiling before opening a worker session.
 - **Explicit mixed-team profile** — `RouteProfile(role_routes={role:
   {route_id, ...}})`. A role present in the mapping is authorized only for
-  its own listed route ids; a role *absent* from the mapping still falls
-  back to the coordinator's own route (never to "any route"); an empty set
+  its own listed route ids; a named specialist *absent* from the mapping is
+  denied. Only the generic `worker`/`coordinator` buckets inherit the
+  coordinator route when absent; an empty set
   for a role means that role may never be dispatched at all.
 
 `routing.authorization.allowed_routes_for_role` additionally narrows
@@ -112,6 +116,21 @@ alias (`opus[1m] (alias)`) rather than presenting it as though it were the
 concrete model. Never a guessed version string.
 
 ## Pre-dispatch enforcement
+
+ACP selections propagate owner/project ceilings into the selected and active
+task revision and keep prior task narrowing across route/effort changes.
+Automatic selection first filters observed candidates by route, connection and
+provider-recipient ceilings and any explicit role profile. With no explicit
+profile, settings-authorized mixed-engine workers/reviewers remain valid within
+the ceiling; default single-route inheritance is not applied to reject all
+automatic alternates. A pinned route outside that intersection refuses rather
+than falling back. The actual choice carries its exact observed route ID and
+must still match one current connection/engine/model identity before capacity
+reservation. Missing/stale/unmatched/ambiguous automatic identities refuse with
+`automatic_route_identity_unavailable`; a missing or mismatched task revision
+refuses with `dispatch_configuration_unavailable`. No coordinator-proxy check
+authorizes an automatic alternate. Empty allowlists grant nothing; null/absent
+sets do not restrict their layer. Automated coverage is not live qualification.
 
 `EngineSessionManagerAdapter.open` calls `_authorize_dispatch` (via
 `routing.authorization.authorize_dispatch`) **before** `_reserve_capacity_
@@ -464,60 +483,40 @@ receipt's `model_hints` preview shows `pending_dispatch:user_request` with the
 user's `user_request` source ref, or `ignored:tier_mismatch` when no request
 was found.
 
-### Codex Luna
+### Configured stretch policy
 
-The Codex Luna line (`gpt-6-luna`, `gpt-5.6-luna`, and any later
-`gpt-<n>-luna`; the newest non-denied version is routed) is very cheap and
-very effective, so it has its own rule in `routing.auto_route` (rank version
-7). Since rank version 8 this is the built-in default of the *stretch* rule
-(`routing.model_policy.BUILTIN_STRETCH_POLICY`): a `routing.json` `models`
-policy with `effort_floor`, `effort_ladder` and `also_standard_for` gives any
-light model the same rule, and setting them to `null` takes it away from
-Luna. Everything below describes the built-in values; the audit keeps the
-historic names (`luna`, `luna:<tier>`) for every stretch model.
+A stretch model is any owner-configured light-tier model with an
+`effort_ladder` or `also_standard_for` policy. No model identity receives
+this rule by name. The installation template is owner-editable data, not
+a built-in fallback. Setting the attributes to `null` removes them.
 
-- **Effort floor.** Luna never runs below `high` (`LUNA_EFFORT_FLOOR`). The
-  floor also applies to a pin (`codex-acp/gpt-6-luna:low` runs at `high`) and
-  to a worker's requested effort at dispatch. `max` is allowed on Luna even
-  when a `tiers` override moves it out of the light tier. A Luna build that
-  offers nothing at or above `high` keeps what it offers.
-- **Effort by work** (`LUNA_EFFORTS`, `luna_effort`): `high` for light work;
-  `xhigh` for ordinary standard-tier testing; `max` for standard-tier testing
-  that is a retry or a fix after review requested changes (`escalate`). That
-  work has already proved harder than planned but does not justify a deep
-  model. Eligibility uses the base task tier before generic escalation:
-  normal standard-tier testing stays in the standard pool on a retry or
-  review fix. Luna targets `max`; another selected model raises effort one
-  step (normally medium to high). Retry diversification and quota still
-  apply, and an unusable standard pool falls back through the usual tier
-  order. The audit retains `base_role_tier` as well as the effective
-  `role_tier`. Other standard-tier work, explicit high complexity and deep
-  roles retain their normal escalation and Luna exclusions. Escalated light work (explorer) gets `xhigh`.
-- **Candidacy** (`luna_status`, recorded as `luna.status`). Luna remains the
-  light tier's model (`light_tier`). In the standard tier it is a candidate
-  only for testing work (`LUNA_WORK_KINDS`: testing, that is `qa-engineer` and
-  `build-verification`), where it ranks next to the tier's own models, such as
-  `gpt-5.6-terra` and Claude Sonnet (`standard_candidate`). The ordinary rank then decides: preference,
-  purpose, hint, plan usage, diversify, affinity, quota band, used percent,
-  engine order. Luna is not always chosen. A Claude plan at least 10 points less
-  used, a much hotter Codex plan than the alternative, or a hint for another
-  model all move the work away from it. On one
-  Codex plan with equal affinity, Codex's own list order (newest generation
-  first) puts `gpt-6-luna` ahead of the older `gpt-5.6-terra`. All other
-  standard-tier work -- implementation, operations, debugging, design,
-  review, planning, writing and analysis -- stays on the tier's own models
-  (`not_candidate:work_kind_<kind>`).
-- **Never Luna** (`excluded:<reason>`): `complexity: high` work, deep or
-  flagship work, and a deep role (architect, database architect, security
-  auditor, senior consultant) even at `complexity: low`. This applies even as
-  a fallback. When only Luna is usable, such work is refused with
-  `no_available_route` and the reason is named.
-- A `tiers` override that moves a Luna model out of the light tier makes it
-  route like any model of that tier. Only its effort floor and `max` still
-  apply.
+- **Effort floor and ladder.** `effort_floor` applies to pins and worker
+  dispatch as well as automatic selection. `stretch_effort` uses the
+  configured ladder for light work, standard work and escalated standard
+  work. For example, a ladder of `high`, `xhigh`, `max` uses those
+  steps respectively; escalated light work advances one step. Required
+  unsupported steps fail closed rather than silently inventing support.
+- **Candidacy.** `stretch_status` records `light_tier`,
+  `standard_candidate`, `not_candidate:work_kind_<kind>` or
+  `excluded:<reason>`. Standard candidacy requires the work kind in the
+  model's configured `also_standard_for`. Normal standard-tier retries
+  of those kinds retain the standard pool before generic escalation.
+  Ranking, hints, preferences, quota safety and retry diversification still
+  apply; stretch candidacy does not guarantee selection.
+- **Exclusions.** High complexity, deep/flagship work and deep roles
+  exclude light stretch candidates, even as a fallback. When no permitted
+  route remains, dispatch refuses with `no_available_route`.
+- **Audits.** New decisions emit `stretch` (`status`, `candidate`,
+  `chosen`, `outranked_by`; pins emit `status` and `chosen`).
+  Ladder-derived effort uses `stretch:<tier>` or
+  `stretch:<tier>:escalated`. These names do not depend on the configured
+  model. The former `luna` key and `luna:<tier>` effort labels are not
+  re-emitted. Stored audits/events/reports are not rewritten; historical
+  rows remain readable by the existing model/effort/tier summary renderer,
+  which does not depend on either policy key.
 
-An exact Luna hint on standard-tier testing work is not a tier mismatch,
-either at plan submission (`hint_serves_tier`) or at dispatch.
+An exact stretch-model hint serves standard work only when the configured
+work-kind allowance permits it, both at plan submission and dispatch.
 
 Only the newest version of each model family per engine is routed
 automatically (`routing.auto_route.superseded_routes`). Family and version
@@ -631,7 +630,7 @@ a known-hot candidate from an unknown one).
 Effort is derived from the runtime-selected tier, task complexity/escalation,
 and each model's supported effort list. `effort_basis` records whether it came
 from the role tier, escalation step, a stretch model's effort ladder (the
-Luna rule; recorded as `luna:<tier>` or `luna:<tier>:escalated`), or a pin. A pin may explicitly name an
+configured stretch rule; recorded as `stretch:<tier>` or `stretch:<tier>:escalated`), or a pin. A pin may explicitly name an
 effort; otherwise the runtime chooses a supported effort. A model hint cannot
 raise tier or effort.
 
@@ -654,8 +653,8 @@ including `rank_version`, `role_tier`, tier and effort basis, `model_hint`,
 `default` or `routing.json` source), candidates with `used_percent`, `hot`,
 `quota_state`, `usage_band`, `suitability` and `preferred`, `decided_by`,
 `excluded_by_policy`, `unavailable`, `superseded`, `purpose` (`work_kind`
-and the `preferred` candidates, plus `status` since rank version 9), `luna` (`status`,
-`candidate`, `chosen`, and `outranked_by`, the rank key that put the best Luna
+and the `preferred` candidates, plus `status` since rank version 9), `stretch` (`status`,
+`candidate`, `chosen`, and `outranked_by`, the rank key that put the best stretch
 candidate behind the chosen route), and whether usage percentages were
 comparable. `rank_version` history: 2 ranked by quota band,
 count balance (tolerance 4) and suitability; 3 added plan usage, engine
@@ -846,3 +845,33 @@ running attempt's audited route unchanged, an unauthorized/unavailable
 route refused before dispatch, consent denial refusing a cross-provider
 fallback before any data transfer, an exhausted attempt budget, and
 concurrent allocation at a connection's own limit).
+
+## Settings-only routing
+
+Routing decisions consume only effective settings and current engine-confirmed catalogs; first-existing project, $CORTEX_ROUTING, then user precedence remains non-merging. The required version-2 marker binds exact per-engine enabled/automatic identities, tier placement and optional policy attributes. Absence or invalidity is a visible migration/repair error, never a reason to use built-in model names, families, list position, or the installation template at runtime. Unlisted and renamed identities are not automatically eligible. A coordinator recommendation is limited to options generated from the same effective settings and current catalog; final dispatch revalidates eligibility. Preferences rank only inside eligibility. Role tier/complexity fallback is generic policy and cannot infer a model's quality from its name.
+
+An explicit user request authorizes only the complete, case-sensitive configured
+`engine/model` identity, including provider nesting and punctuation in the ID.
+It must be a whole whitespace-delimited token, or isolated inside paired double
+or single quotes, backticks, `«…»` or `“…”`. After a closing quote, one prose
+punctuation character (`. , ! ? ; :`) is supported before whitespace/end.
+Unquoted attached punctuation is conservatively treated as identity data: a
+request for `engine/unit.v2`, `engine/unit-extended` or `engine/unit[wide]`
+cannot authorize `engine/unit`, and even `Use engine/unit.` is ambiguous. Use
+`Use "engine/unit".` or `Use engine/unit` instead. Prefixes, suffixes, case
+changes and partial provider paths grant nothing for a different identity.
+Separately configured `request_names` retain their existing case-insensitive
+label/ending matching; no label is inferred from an ID. The existing request,
+negation and same-sentence grammar still applies. Only retained user sources
+and user answers supply grants, never plan hints, questions or model output;
+source references and exact matched text are retained. A grant does not bypass
+enabled/deny/provider/automatic-membership, observed-catalog, availability or
+quota checks. These current identity rules supersede the historical family
+recognition examples above.
+
+The public policy/model-settings-default.json is validated install-only data. Fresh installation creates only missing owner settings without replacement. Existing settings/profiles require explicit preview/apply migration against exact checked revisions and profile-specific candidate data; see [model-policy migration](packaging-and-onboarding.md#model-policy-installation-and-explicit-migration). Unknown or ambiguous portable coordinator bindings remain unavailable diagnostics; no substitute account or route is selected.
+
+
+### Settings-only quota applicability
+
+Model-window associations are optional `quota_windows` settings, never a built-in family/version substring table. Exact per-engine labels map to `models: null` (shared), exact model lists, or an explicit empty exclusion list; duplicate labels are refused. Unmapped windows conservatively apply to every model, including exhausted windows; no numeric evidence remains unknown rather than zero. The same effective first-existing routing file governs route menus, automatic selection and failure reset lookup. Invalid reset policy cannot erase a genuine engine refusal: availability retains its bounded default expiry. Provider time/cache/authentication algorithms and quota rankings are unchanged. See [exact field, diagnostics and migration semantics](../configuration.md#exact-quota-window-associations). The route menu includes `quota_window_policy` with effective rules and its conservative-unmapped decision, while raw status remains provider evidence.

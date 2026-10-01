@@ -192,6 +192,8 @@ def _register_work_connection(tmp_path, engine_dir, environ, *, session_new_para
         key_kind="anthropic_api_key" if engine=="claude-agent-acp" else "openai_api_key", api_key_reader=lambda: secret_file.read_bytes(),
         launch_command=fake_launch_command(scenario_path), environ=environ,
     )
+    from model_policy_fixtures import write_policy
+    write_policy(environ, {engine: {_MODEL: "standard"}}, automatic={engine: [_MODEL]})
     pinned = setup.pin_route(connection_id=conn["connection_id"], model=_MODEL, environ=environ)
     return conn, pinned
 

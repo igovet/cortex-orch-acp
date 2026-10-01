@@ -238,6 +238,8 @@ def test_coordinator_list_route_options_reaches_its_handler_not_unknown_operatio
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path_factory.mktemp('xdg-config')))
     store, task_id, coordinator = _task(tmp_path)
 
+    (tmp_path / ".cortex" / "routing.json").write_text(json.dumps({"model_policy_version": 2}))
+
     assert "list_route_options" not in runtime_mcp.schemas("coordinator")
     result = mcp_tools.dispatch(store, coordinator, "list_route_options", {})
     assert set(result["tiers"]) == {"flagship", "deep", "standard", "light"}
@@ -359,3 +361,35 @@ def test_committed_worker_result_repairs_running_graph_without_mcp_replay(tmp_pa
         coordinator.parent_principal_thread_id, trusted=True,
     )
     assert graph.get_assignment(assignment["assignment_id"])["status"] == "reported"
+
+
+@pytest.mark.parametrize("policy,code", [
+    (None, "model_policy_migration_required"),
+    ("{}", "model_policy_migration_required"),
+    ('{"model_policy_version": 3}', "model_policy_version_unsupported"),
+    ('{"model_policy_version": 2, "enabled": []}', "invalid_routing_overrides"),
+    ("{", "invalid_routing_overrides"),
+])
+def test_route_menu_policy_diagnostic_is_actionable_without_mutation(tmp_path, monkeypatch, policy, code):
+    from cortex_runtime.routing import auto_route
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("CORTEX_ROUTING", raising=False)
+    store, task_id, coordinator = _task(tmp_path)
+    path = tmp_path / ".cortex" / "routing.json"
+    if policy is not None:
+        path.write_text(policy)
+    monkeypatch.setattr(auto_route, "_entries", lambda *_: pytest.fail("invalid policy reached catalogue"))
+    with store.connection() as db:
+        before = db.execute("SELECT COUNT(*) FROM configuration_revisions").fetchone()[0]
+    with pytest.raises(StoreError, match=code) as error:
+        mcp_tools.dispatch(store, coordinator, "list_route_options", {})
+    assert error.value.correction
+    assert error.value.field == ("routing" if code == "invalid_routing_overrides" else "model_policy_version")
+    with store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM configuration_revisions").fetchone()[0] == before
+        assert db.execute("SELECT COUNT(*) FROM attempt_route_audit").fetchone()[0] == 0
+    assert path.exists() == (policy is not None)
+    if policy is not None:
+        assert path.read_text() == policy

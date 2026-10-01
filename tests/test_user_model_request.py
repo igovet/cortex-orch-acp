@@ -2,12 +2,16 @@
 recorded request in the task -- never by model-authored text, and never by a bare mention."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from cortex_runtime.acp import questions_store
 from cortex_runtime.bootstrap import append_source_event, bootstrap_task
 from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.routing import auto_route
+from cortex_runtime.portable.errors import PortableError
+from model_policy_fixtures import routing_fixture
 from cortex_runtime.store import Store
 
 # The owner's own request in the task that introduced this feature.
@@ -112,13 +116,20 @@ OWNER_REQUEST = ("Ещё вопрос, можно ли сделать так ч�
 ])
 def test_requests_family_needs_an_explicit_request_and_no_negation_before_a_whole_word_match(
         text, family, expected):
-    assert auto_route.requests_family(text, family) == expected
+    # Labels are fixture/owner data, not derived from model names.
+    labels = {"astra": ["astra", "астр"], "fable": ["fable", "фейбл", "фэйбл"],
+              "mythos": ["mythos", "мифос", "майтос", "митос"]}
+    exact = {"astra": "codex-acp/gpt-6-astra", "fable": "claude-agent-acp/claude-fable-5-1[1m]",
+             "mythos": "claude-agent-acp/claude-mythos-1"}[family]
+    if text == "run it on codex-acp/gpt-6-astra please":
+        expected = "codex-acp/gpt-6-astra"
+    assert auto_route.requests_family(text, exact, labels[family]) == expected
 
 
 def test_family_of_takes_the_family_from_an_exact_route_only():
-    assert auto_route.family_of("codex-acp/gpt-6-astra") == "astra"
-    assert auto_route.family_of("claude-agent-acp/claude-fable-5-1[1m]") == "fable"
-    assert auto_route.family_of("claude-agent-acp/claude-mythos-1") == "mythos"
+    assert auto_route.family_of("codex-acp/gpt-6-astra") == "codex-acp/gpt-6-astra"
+    assert auto_route.family_of("claude-agent-acp/claude-fable-5-1[1m]") == "claude-agent-acp/claude-fable-5-1[1m]"
+    assert auto_route.family_of("claude-agent-acp/claude-mythos-1") == "claude-agent-acp/claude-mythos-1"
     assert auto_route.family_of("codex-acp") is None
     assert auto_route.family_of("auto") is None
 
@@ -127,6 +138,9 @@ def test_family_of_takes_the_family_from_an_exact_route_only():
 def task(tmp_path):
     store = Store(tmp_path / ".cortex", project_root=tmp_path)
     created = bootstrap_task(store, SourceEvent(origin="test", event_id="one"), "Implement the feature", "owner")
+    routing = routing_fixture({"models": {"claude-agent-acp": {"policy": {
+        "claude-mythos-1": {"request_names": ["mythos", "мифос", "майтос", "митос"]}}}}})
+    (tmp_path / ".cortex" / "routing.json").write_text(json.dumps(routing))
     return store, created.task_id
 
 
@@ -172,9 +186,9 @@ def test_the_owners_own_request_grants_both_named_families(task):
     store, task_id = task
     added = append_source_event(store, SourceEvent(origin="test", event_id="owner"), OWNER_REQUEST, task_id)
     assert auto_route.user_model_request(store, task_id, "codex-acp/gpt-6-astra") == dict(
-        source_ref=f"{added.report_id}:-1", family="astra", matched="астры")
+        source_ref=f"{added.report_id}:-1", family="codex-acp/gpt-6-astra", matched="астры")
     assert auto_route.user_model_request(store, task_id, "claude-agent-acp/claude-mythos-1") == dict(
-        source_ref=f"{added.report_id}:-1", family="mythos", matched="майтоса")
+        source_ref=f"{added.report_id}:-1", family="claude-agent-acp/claude-mythos-1", matched="майтоса")
 
 
 def test_a_later_user_message_grants_with_its_source_ref(task):
@@ -183,7 +197,7 @@ def test_a_later_user_message_grants_with_its_source_ref(task):
     added = append_source_event(store, SourceEvent(origin="test", event_id="two"),
                                 "Реализацию сделай на Астре", task_id)
     granted = auto_route.user_model_request(store, task_id, "codex-acp/gpt-6-astra")
-    assert granted == dict(source_ref=f"{added.report_id}:-1", family="astra", matched="Астре")
+    assert granted == dict(source_ref=f"{added.report_id}:-1", family="codex-acp/gpt-6-astra", matched="Астре")
     # The grant names one family: another flagship family stays ungranted.
     assert auto_route.user_model_request(store, task_id, "claude-agent-acp/claude-fable-5-1[1m]") is None
     # Engine-only hints never carry a family.
@@ -195,7 +209,7 @@ def test_the_users_typed_answer_grants_with_its_answer_ref(task):
     question = questions_store.create_if_absent(store, task_id, "q-model", "Which model should review?")
     assert questions_store.answer(store, question.id, "Use Fable for the review", "text")
     granted = auto_route.user_model_request(store, task_id, "claude-agent-acp/claude-fable-5-1[1m]")
-    assert granted == dict(source_ref=questions_store.answer_ref(question.id), family="fable", matched="Fable")
+    assert granted == dict(source_ref=questions_store.answer_ref(question.id), family="claude-agent-acp/claude-fable-5-1[1m]", matched="Fable")
 
 
 def test_a_grant_never_crosses_tasks(task):

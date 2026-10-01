@@ -396,3 +396,74 @@ presentation rule does not affect acceptance, worker evidence, or final replies.
 ## Paseo invoke latency and request coalescing
 
 The plugin's GUI RPC handlers that previously used synchronous child-process calls now use asynchronous `execFile` with bounded concurrency. Worker-history identities are cached, and overlapping worker-history and pipeline poll requests are coalesced. `cortex-acp.invoke` timeout diagnostics identify the RPC method so a slow history read can be distinguished from other handlers. These measures remove the observed event-loop serialization cause and reduce duplicate work; they do not by themselves establish a timeout-free workload or a rendered GUI result. Use the plugin typecheck and unit-test commands in [verification guidance](../project/verification.md), and inspect the actual Electron timeline for GUI claims.
+
+## Bound task inspection
+
+`scripts/cortex_inspect_task.py` is a no-model-call, bounded metadata reader.
+Use it only on a newly owned disposable qualification project with an actual
+read grant. Obtain the exact ACP session from the owned host's current
+`runtimeInfo`, using the [dev binding exporter](dev-paseo-environment.md#read-only-dev-binding)
+and the existing strict `parsePaseoRuntimeSessionId` wrapper parser. The exporter
+fetches/refetches only the exact owned agent and rechecks guarded durable ownership.
+It returns host/wrapper, endpoint and binding digests with explicit provenance. An opaque host
+agent ID or an acknowledged send alone is not an ACP/task binding. If the
+installed CLI does not expose that observation, verify the existing plugin API
+against the installed host; do not guess an ID, reopen a denied store or infer
+binding from completion. This helper adds no host API or daemon startup.
+
+Once the exact session is observed, discovery can read its task/current owner
+without guessing either identity:
+
+```bash
+python3 -B scripts/cortex_inspect_task.py --discover --project "$PROJECT" --session "$ACP_SESSION"
+```
+
+`--discover` cannot be combined with task/epoch/cursor or non-default limit
+arguments. It shares the same guarded, non-mutating storage refusal boundary;
+it does not enumerate sessions or choose the newest task. Use its returned
+binding for the explicit paged command below; ownership can change afterward.
+
+```bash
+python3 -B scripts/cortex_inspect_task.py --project "$PROJECT" \
+  --session "$ACP_SESSION" --task "$TASK" --owner-epoch "$OWNER_EPOCH" --limit 100
+# Continue with the exact returned next_cursor, retaining every page:
+python3 -B scripts/cortex_inspect_task.py --project "$PROJECT" \
+  --session "$ACP_SESSION" --task "$TASK" --owner-epoch "$OWNER_EPOCH" \
+  --cursor "$NEXT_CURSOR" --limit 100
+```
+
+The project must be an absolute logical project root. Session/task/epoch must
+match durable current ownership. A page reports `offset`, `total`,
+`snapshot_sha256`, `next_cursor` and collection `complete`; only the last page
+is complete. Retain all pages with that same digest, checking offsets/counts.
+Any projected change invalidates the cursor. Wrong/missing/stale bindings,
+unsafe paths, unsupported/legacy storage, more than 10,000 metadata rows,
+over 32 MiB of source JSON per inspected stream or 4 MiB of projected metadata,
+busy access locks and nonempty WALs refuse instead of yielding a truncated
+success. The reader never creates files, checkpoints WAL, migrates or repairs.
+Wait for a checkpointed snapshot through the normal runtime connection lifecycle
+and re-observe; do not stop a completed task to manufacture timestamps.
+
+The projection contains configuration revisions (selected/pending/ACTIVE kept
+distinct), dispatch audits, provisioned attempts, plan/review node identities,
+report edition digests/sizes, verification command hashes/exit/completeness and
+retained-output identities, synthesis hash, source identity hashes, ordered
+task/runtime event IDs, action-receipt completeness, process-termination
+observations and reservation releases. No report bodies, prompts, raw tool
+arguments/output or private host logs are returned. Event payload hashes retain
+identity without exposing those bodies. Missing records remain missing.
+
+Dispatch audit is intent, not engine confirmation. Successful worker/reviewer
+native configuration now appends `worker_configuration_confirmed` with the
+exact attempt/session/config/connection/model, applied effort/mode and actual
+confirmation reference. It is recorded only after the engine confirm-or-fail
+call returns evidence. Coordinator confirmation remains the ACTIVE revision's
+reference. Neither host Thinking text nor a dispatch effort substitutes for
+these observations. Unknown native parameter keys are hash-only.
+
+`closed_at` is not a transport disconnect receipt. Use a retained
+`host_disconnected` event and its history-completeness/unknown-action counts;
+truncated history or incomplete action receipts block qualification. The
+inspector does not probe `/proc`, prove native resource liveness, verify report
+body bytes, or invent SIGKILL telemetry. It has no acceptance verdict. Missing
+host/cleanup/engine evidence still requires an explicit limitation, not a pass.

@@ -43,6 +43,7 @@ from cortex_runtime.routing import store as routing_store
 from cortex_runtime.store import Store
 from cortex_runtime.trusted_channel import resolve_channel
 
+from model_policy_fixtures import write_policy
 from engine_fakes import default_scenario, fake_launch_command, isolated_environ, make_connection_record, new_connection_id, write_scenario
 
 REVIEWER_ROLE_ID = resolve_role("code-reviewer")
@@ -93,6 +94,8 @@ def _entry(connection, model):
 def _setup_mixed_team(tmp_path, *, allow_role_alternate: bool):
     store, task_id, channel, epoch, project = _bootstrap(tmp_path)
     environ = isolated_environ(tmp_path)
+    write_policy(environ, {"codex-acp": {"coordinator-model": "deep"},
+                           "claude-agent-acp": {"reviewer-model": "deep"}})
     log_a, log_b = tmp_path / "requests-a.jsonl", tmp_path / "requests-b.jsonl"
     connection_a = _make_connection(tmp_path, environ, engine="codex-acp", model="coordinator-model", request_log=log_a)
     connection_b = _make_connection(tmp_path, environ, engine="claude-agent-acp", model="reviewer-model", request_log=log_b)
@@ -192,6 +195,8 @@ def test_role_absent_from_mixed_team_profile_is_still_denied_by_default(tmp_path
     resolution, still enforced by ``open``'s pre-dispatch authorization."""
     store, task_id, channel, epoch, project = _bootstrap(tmp_path)
     environ = isolated_environ(tmp_path)
+    write_policy(environ, {"codex-acp": {"coordinator-model": "deep"},
+                           "claude-agent-acp": {"reviewer-model": "deep"}})
     connection_a = _make_connection(tmp_path, environ, engine="codex-acp", model="coordinator-model", request_log=tmp_path / "a.jsonl")
     connection_b = _make_connection(tmp_path, environ, engine="claude-agent-acp", model="reviewer-model", request_log=tmp_path / "b.jsonl")
     entry_a, entry_b = _entry(connection_a, "coordinator-model"), _entry(connection_b, "reviewer-model")
@@ -232,6 +237,7 @@ def test_fallback_applies_the_targets_model_not_the_sources(tmp_path):
     opened against."""
     store, task_id, channel, epoch, project = _bootstrap(tmp_path)
     environ = isolated_environ(tmp_path)
+    write_policy(environ, {"codex-acp": {"source-model": "standard", "target-model": "standard"}})
     log_a, log_b = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
     connection_a = _make_connection(tmp_path, environ, engine="codex-acp", model="source-model", request_log=log_a)
     connection_b = _make_connection(tmp_path, environ, engine="codex-acp", model="target-model", request_log=log_b)

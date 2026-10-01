@@ -14,8 +14,7 @@ that dev daemon from the explicit absolute checkout plugin path. Never use
 production `~/.paseo` or its production Cortex agent. Existing production
 Codex and Claude accounts remain the approved engine accounts; do not create
 test accounts, copy credentials, or perform isolated engine login. Check native
-login status without printing credentials. Use `gpt-5.6-luna` at medium/high
-effort; heavy models are prohibited in routine live qualification.
+login status without printing credentials. Use only the exact route explicitly selected by the owner for this requested check, and confirm it is supported by the installed host and current owner settings/catalog. Never substitute or automatically escalate to another route. Heavy models remain prohibited in routine live qualification.
 
 The paid probes still require both `--i-authorize-paid-call` and
 `--approval-ref`; pass a reference naming the owner's request. The default automated suite stays no-paid.

@@ -55,6 +55,7 @@ const ceilingInput = z.strictObject({
 // A key maps to its new value; null removes it. The route default is set or
 // cleared as the whole route_id/route_connection_id/route_model group.
 const defaultsPatch = z.strictObject({
+  coordinator: z.strictObject({ engine: text(64).min(1), model: text().min(1), parameters: z.record(text(64), text(128)).optional() }).nullable().optional(),
   route_id: text(80).nullable().optional(),
   route_connection_id: text(32).nullable().optional(),
   route_model: text().nullable().optional(),
@@ -62,7 +63,7 @@ const defaultsPatch = z.strictObject({
   language: z.enum(["en", "ru"]).nullable().optional(),
 });
 
-// The eight keys the routing loader supports; an omitted key is removed.
+// Managed routing keys. The marker is never filled from installation data.
 const modelRules = z.strictObject({
   auto: z.array(text()).max(1000).optional(),
   // One tier, or several: the model is then a candidate of each of them.
@@ -71,10 +72,12 @@ const modelRules = z.strictObject({
 });
 
 const routingRules = z.strictObject({
+  quota_windows: z.record(text(64), z.array(z.strictObject({ window: text().min(1), models: z.array(text().min(1)).max(1000).nullable() })).max(1000)).optional(),
+  model_policy_version: z.number().int().optional(),
   pin: z.record(text(128), text()).optional(),
   deny: z.array(text()).max(1000).optional(),
   // Per engine, the only exact model ids it may use in Cortex (Settings >
-  // Models); an engine not listed keeps its default (OpenCode: none).
+  // Models); an engine not listed enables nothing.
   enabled: z.record(text(64), z.array(text()).max(1000)).optional(),
   auto_allow: z.array(text()).max(1000).optional(),
   tiers: z.record(text(), text(64)).optional(),
@@ -160,6 +163,7 @@ export const userDefaultsResult = z.object({
   languages: z.array(z.string()),
   ceiling,
   ceiling_set: z.boolean(),
+  coordinator_resolution: z.object({ state: z.string(), route_id: z.string().optional(), connection_id: z.string().optional(), error: configError.optional() }).optional(),
   ...writeMeta,
 });
 
@@ -195,11 +199,17 @@ export const routingResult = z.object({
   project_root: z.string().nullable(),
   precedence: z.array(z.string()),
   sources: z.array(routingSource),
-  // The file the loader uses (files never merge), or the built-in policy.
-  effective_source: z.enum(["project", "env", "user", "builtin"]),
+  // The file the loader uses (files never merge), or missing policy.
+  effective_source: z.enum(["project", "env", "user", "missing", "builtin"]),
   effective_valid: z.boolean(),
   effective_rules: z.record(z.string(), z.unknown()).nullable(),
   builtin: z.object({
+    model_policy_version: z.number().optional(),
+    policy_attributes: z.array(z.string()).optional(),
+    policy_efforts: z.array(z.string()).optional(),
+    selection_modes: z.array(z.string()).optional(),
+    tier_sources: z.array(z.string()).optional(),
+    max_request_names: z.number().optional(),
     supported_engines: z.array(z.string()),
     optional_engines: z.array(z.string()),
     default_auto_deny_engines: z.array(z.string()),
@@ -376,6 +386,10 @@ const catalogRoute = z.object({
   tier: z.string().nullable(),
   // Every tier the model is a candidate of, strongest first (empty when it is not one).
   tiers: z.array(z.string()).optional(),
+  tier_source: z.string().nullable().optional(),
+  configured_tier: z.union([z.string(), z.array(z.string())]).nullable().optional(),
+  selection: z.string().optional(),
+  policy: z.record(z.string(), z.unknown()).optional(),
   selectable: z.boolean(),
   in_selector: z.boolean(),
   disabled: z.boolean(),
@@ -402,6 +416,9 @@ const catalogEngine = z.object({
   connections: z.array(z.object({ id: z.string(), name: z.string(), state: z.string(), qualified: z.boolean(),
     catalog_observed_at: z.string().nullable() })),
   // Exact ids listed under routing "enabled" (null: not listed, the default applies).
+  selection: z.string().optional(),
+  selected_models: z.array(z.string()).optional(),
+  unmatched_selected: z.array(z.string()).optional(),
   enabled_models: z.array(z.string()).nullable(),
   enabled_default: z.boolean(),
   unmatched_enabled: z.array(z.string()),
@@ -416,7 +433,7 @@ export const routeCatalogResult = z.object({
   surface: z.literal("route_catalog"),
   project_root: z.string().nullable(),
   precedence: z.array(z.string()),
-  effective_source: z.enum(["project", "env", "user", "builtin"]),
+  effective_source: z.enum(["project", "env", "user", "missing", "builtin"]),
   effective_valid: z.boolean(),
   providers: z.array(z.string()).nullable(),
   engines: z.array(catalogEngine),

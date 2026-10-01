@@ -86,8 +86,8 @@ def test_refresh_supersedes_a_previously_seeded_snapshot():
     from cortex_runtime.catalog import discovery
 
     record = _connection("cn_" + "3" * 12, "codex-acp")
-    seed_observation = discovery.seed_observation("codex-acp")
-    assert seed_observation is not None
+    assert discovery.seed_observation("codex-acp") is None
+    seed_observation = parse_observation(_load_options("codex_acp_config_options.json"))
     seed_snapshot = build_catalog(
         {record.id: record}, {record.id: seed_observation}, seeded_connection_ids=frozenset({record.id}))
     real_observation = parse_observation(_load_options("codex_acp_config_options.json"))

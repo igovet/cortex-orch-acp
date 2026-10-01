@@ -20,3 +20,8 @@ The Paseo plugin displays per-worker context occupancy and token counts on worke
 The default (no-paid) pytest suite never spawns the real CLI: every call passes through `connections.quota._run_claude_usage_subprocess`, which `tests/conftest.py`'s `_forbid_real_claude_usage_cli` autouse fixture replaces with a failing stub for every test by default; a test that needs this path (see `tests/test_usage_accounting.py`) monkeypatches its own fake runner instead.
 
 The automated tests verify per-call aggregation, cache-inclusive fallback totals, and unknown-call disclosure. They do not establish rendered Paseo behavior; that requires an isolated real-client observation.
+
+
+## Model applicability is owner data
+
+Reported window labels do not imply a model family. Routing consumers apply exact `quota_windows` associations from the winning routing file. Unmapped labels conservatively apply to every model; unknown numeric evidence is never zero. Shared and scoped windows keep their original timestamps, expiry and latest-observation/cache behavior. Raw status lists all reported live windows without estimating model headroom. See [exact quota-window associations](../configuration.md#exact-quota-window-associations). The implementation and fake CLI/cache tests do not establish a current live quota observation or production adoption.

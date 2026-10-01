@@ -215,6 +215,17 @@ _CODEX_MCP_ENTRY_SOURCE = b'''"mcp_servers": Object.fromEntries(serversToConfigu
 # which would cut a long command_run short. One year is effectively
 # unbounded and stays inside tokio's timer range (~2 years).
 _CODEX_MCP_ENTRY_PATCHED = b'''"mcp_servers": Object.fromEntries(serversToConfigure.map((mcp) => [mcp.name, { ...this.createMcpSeverConfig(mcp.server), enabled: true, default_tools_approval_mode: "approve", tool_timeout_sec: 31536000 }]))'''
+# Codex compacts an MCP tool input schema larger than
+# tool_input_schema_max_bytes (default 5,000 normalized bytes) and its first
+# pass strips every description, so plan_submit and result_submit reached a
+# code-mode model as bare types (Codex 0.159.1 json_schema/compaction.rs).
+# 32 KiB keeps every Cortex schema whole; the same limit also raises code
+# mode's declaration budget. Codex 0.155.1 (codex-acp 1.x) has no such key.
+CODEX_MCP_TOOL_SCHEMA_MAX_BYTES = 32_768
+_CODEX_MCP_ENTRY_2_PATCHED = _CODEX_MCP_ENTRY_PATCHED.replace(
+    b"tool_timeout_sec: 31536000 }",
+    b"tool_timeout_sec: 31536000, tool_input_schema_max_bytes: " + str(CODEX_MCP_TOOL_SCHEMA_MAX_BYTES).encode() + b" }",
+)
 
 # Codex runs inside Cortex's engine jail (orchestration.sandbox.engine_jail),
 # which is the boundary: its own sandbox cannot start in a nested user
@@ -572,7 +583,7 @@ def _prepare_codex_manual_review_adapter(install, connection_id: str, environ=No
     patched = patched.replace(_CODEX_NEW_SESSION_SOURCE, _CODEX_NEW_SESSION_PATCHED, 1)
     patched = patched.replace(_CODEX_SESSION_CONFIG_SOURCE, _CODEX_SESSION_CONFIG_PATCHED, 1)
     patched = patched.replace(_CODEX_MCP_DEDUP_SOURCE, _CODEX_MCP_DEDUP_PATCHED, 1)
-    patched = patched.replace(_CODEX_MCP_ENTRY_SOURCE, _CODEX_MCP_ENTRY_PATCHED, 1)
+    patched = patched.replace(_CODEX_MCP_ENTRY_SOURCE, _CODEX_MCP_ENTRY_2_PATCHED if reporter_v2 else _CODEX_MCP_ENTRY_PATCHED, 1)
     patched = patched.replace(send_prompt_source, send_prompt_patched, 1)
     if reporter_v2:
         patched = patched.replace(_CODEX_HELPERS_2_SOURCE, _CODEX_CUSTOM_TOOL_HELPERS_2_INSERT + _CODEX_HELPERS_2_SOURCE, 1)

@@ -88,6 +88,28 @@ class ConfigurationRejected(Exception):
         self.reason = reason
 
 
+def _parameter_defaults(defaults):
+    """Separate persisted owner identity/UI fields from native parameters.
+
+    Project defaults also support the existing flat parameter mapping.
+    """
+    if not defaults:
+        return {}
+    if not isinstance(defaults, Mapping):
+        raise _fail(PortableErrorCategory.VALIDATION, "invalid_parameter_defaults",
+                    "Defaults must be a mapping with a parameter mapping, not an engine envelope.", False)
+    if "coordinator" in defaults:
+        from .resolution import portable_from_defaults
+        return portable_from_defaults(defaults)["parameters"]
+    if "parameters" in defaults:
+        if not isinstance(defaults["parameters"], Mapping):
+            raise _fail(PortableErrorCategory.VALIDATION, "invalid_parameter_defaults",
+                        "defaults.parameters must be a mapping.", False)
+        return defaults["parameters"]
+    return {key: value for key, value in defaults.items()
+            if key not in {"route_id", "route_connection_id", "route_model", "language", "ceiling"}}
+
+
 class ConfigurationService:
     """Owns every configuration mutation and read for one project's ``Store``."""
 
@@ -115,11 +137,12 @@ class ConfigurationService:
         "ceiling": PolicyCeiling}`` mappings; omitted layers default to
         empty defaults and an unrestricted ceiling (never widening what a
         narrower layer already set -- an absent layer is simply skipped by
-        the merge, not "unrestricted wins").
+        the merge, not "unrestricted wins"). A prior task ceiling is retained
+        and intersected with supplied layers; omission cannot reset it.
 
         ``route_profile`` (T027) is this revision's explicit mixed-team
-        route authorization: ``None`` (the default) means every worker
-        role only ever inherits this revision's own ``inputs.route`` --
+        route authorization: omitted means retain the prior profile, or on
+        the first revision inherit this revision's own ``inputs.route`` --
         see :class:`~.policy.RouteProfile`. Every route id named anywhere
         in a non-default profile must already be a member of the
         *effective* ceiling's ``allowed_routes`` (when the ceiling
@@ -138,6 +161,7 @@ class ConfigurationService:
         entry here is still accepted for authorization purposes, but can
         never later be *chosen* as a fallback target.
         """
+        layers_omitted = user_layer is None and project_layer is None
         user_layer = user_layer or dict(defaults={}, ceiling=PolicyCeiling())
         # A project ceiling may only narrow the user ceiling; an expansion is
         # rejected outright rather than silently discarded by intersect(). An
@@ -165,9 +189,14 @@ class ConfigurationService:
                     raise _fail(PortableErrorCategory.VALIDATION, "stale_configuration_revision",
                                 "This is not the latest configuration revision; re-read the latest revision and retry.", True, field="expected_revision")
                 task_layer = configuration_store._row_dict(latest) if latest is not None else None
+                if task_layer is not None:
+                    # Changing route/effort is not permission to discard the
+                    # task's previously materialized narrowing.
+                    effective_ceiling = (task_layer["ceiling_snapshot"] if layers_omitted else
+                                         effective_ceiling.intersect(task_layer["ceiling_snapshot"]))
                 parameters = merge_layers(
-                    user_layer.get("defaults"),
-                    project_layer.get("defaults"),
+                    _parameter_defaults(user_layer.get("defaults")),
+                    _parameter_defaults(project_layer.get("defaults")),
                     task_layer["parameters"] if task_layer is not None else None,
                     inputs.parameters,
                 )
@@ -205,7 +234,9 @@ class ConfigurationService:
                     raise _fail(PortableErrorCategory.VALIDATION, "route_catalog_mismatch",
                                 "catalog_entry.route must match inputs.route exactly.", False, field="route")
                 row = configuration_store.insert_revision_tx(db, task_id, latest_number + 1, inputs.route, parameters, candidate_ceiling)
-                profile = route_profile if route_profile is not None else RouteProfile(role_routes=None)
+                previous_extras = routing_store.get_route_extras_tx(db, latest["id"]) if latest is not None else None
+                profile = (route_profile if route_profile is not None else
+                           previous_extras["route_profile"] if previous_extras is not None else RouteProfile())
                 if profile.role_routes is not None and candidate_ceiling.allowed_routes is not None:
                     every_named_route = frozenset().union(*profile.role_routes.values()) if profile.role_routes else frozenset()
                     if not every_named_route.issubset(candidate_ceiling.allowed_routes):
@@ -215,6 +246,8 @@ class ConfigurationService:
                     route_id: dict(engine=route.engine, connection_id=route.connection_id, model=route.model)
                     for route_id, route in (route_details or {}).items()
                 }
+                if route_profile is None and previous_extras is not None:
+                    encoded_details = dict(previous_extras["route_details"], **encoded_details)
                 encoded_details.setdefault(
                     inputs.route.id,
                     dict(engine=inputs.route.engine, connection_id=inputs.route.connection_id, model=inputs.route.model),

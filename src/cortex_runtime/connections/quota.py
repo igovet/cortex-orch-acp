@@ -11,7 +11,8 @@ engine itself reports it -- never estimated from Cortex's own token counts.
 
   1. The adapter forwards the SDK's ``rate_limit_event`` as
      ``usage_update._meta["_claude/rateLimit"]`` (one window per event:
-     ``five_hour``, ``seven_day``, ``seven_day_opus``, ...). Nothing on disk
+     ``five_hour``, ``seven_day``, or a provider-reported scoped label).
+     Nothing on disk
      holds it, so ``engine.session_manager`` hands each one to
      :func:`observe`. This rarely carries ``utilization``, so on its own it
      leaves Claude usage unknown almost always.
@@ -40,7 +41,9 @@ engine itself reports it -- never estimated from Cortex's own token counts.
 Both sources are kept under ``<state_root>/quota/<connection_id>.json``.
 
 A window whose ``resets_at`` has passed no longer counts. ``None`` means
-the engine never said -- unknown, not zero. When the CLI is unavailable or
+the engine never said -- unknown, not zero. Applicability comes only from
+exact ``quota_windows`` settings; unmapped labels conservatively apply to
+all models, without family inference. When the CLI is unavailable or
 fails, a window is simply not refreshed by it; it still expires under the
 same ``resets_at`` rule as any other source, never falls back to a stale
 value beyond that.
@@ -60,12 +63,13 @@ from pathlib import Path
 from typing import Mapping
 
 from . import environment, registry
+from ..routing.model_policy import _model_id
+from .model import SUPPORTED_ENGINES
 
 _ROLLOUT_TAIL_BYTES = 256 * 1024
 _ROLLOUT_FILES_SCANNED = 10
 # Paid extra usage is not part of the plan and must not look like headroom.
 _IGNORED_WINDOWS = ("overage",)
-_MODEL_SCOPED = ("opus", "sonnet", "haiku", "fable")
 
 # The Claude Code CLI's own local `/usage` command: refreshed lazily, at
 # most this often per connection (successes and failures alike).
@@ -82,31 +86,31 @@ _RESET_DATE_FORMATS = ("%b %d, %I:%M%p", "%b %d, %I%p")
 
 
 def used_percent(record, model: str | None, environ: Mapping[str, str] | None = None,
-                 now: float | None = None) -> float | None:
+                 now: float | None = None, *, routing: Mapping | None = None) -> float | None:
     """The highest still-open window's used percentage (0-100) that applies
     to ``model`` on this connection, or ``None`` when nothing is known."""
     now = time.time() if now is None else now
+    rules = _quota_associations(routing, record.engine)
     windows = _windows_for(record, environ, now)
-    model = (model or "").casefold()
     live = [
         float(window["used"]) for name, window in windows.items()
-        if _applies(name, model) and isinstance(window.get("used"), (int, float))
+        if _applies(name, model, rules) and isinstance(window.get("used"), (int, float))
         and not (isinstance(window.get("resets_at"), (int, float)) and window["resets_at"] <= now)
     ]
     return max(live) if live else None
 
 
 def resets_at(record, model: str | None, environ: Mapping[str, str] | None = None,
-              now: float | None = None) -> float | None:
+              now: float | None = None, *, routing: Mapping | None = None) -> float | None:
     """When the most-used still-open window that applies to ``model``
     resets (epoch seconds), as the engine reported it; ``None`` when the
     engine never said."""
     now = time.time() if now is None else now
+    rules = _quota_associations(routing, record.engine)
     windows = _windows_for(record, environ, now)
-    model = (model or "").casefold()
     live = [
         (float(window["used"]), float(window["resets_at"])) for name, window in windows.items()
-        if _applies(name, model) and isinstance(window.get("used"), (int, float))
+        if _applies(name, model, rules) and isinstance(window.get("used"), (int, float))
         and isinstance(window.get("resets_at"), (int, float)) and window["resets_at"] > now
     ]
     return max(live)[1] if live else None
@@ -172,12 +176,53 @@ def _windows_for(record, environ: Mapping[str, str] | None, now: float) -> dict:
     return _load(getattr(record, "id", None) or "", environ)
 
 
-def _applies(window: str, model: str) -> bool:
-    window = window.casefold()
-    if any(marker in window for marker in _IGNORED_WINDOWS):
+class QuotaValidationError(ValueError):
+    def __init__(self, field, message):
+        self.field = field
+        super().__init__(message)
+
+
+def validate_quota_windows(value) -> None:
+    if not isinstance(value, dict):
+        raise QuotaValidationError("quota_windows", "must map engines to window rule lists")
+    for engine, rules in value.items():
+        field = f"quota_windows.{engine}"
+        if engine not in SUPPORTED_ENGINES or not isinstance(rules, list) or len(rules) > 1000:
+            raise QuotaValidationError(field, "needs a supported engine and at most 1000 rules")
+        seen = set()
+        for index, rule in enumerate(rules):
+            field = f"quota_windows.{engine}[{index}]"
+            if not isinstance(rule, dict) or set(rule) != {"window", "models"}:
+                raise QuotaValidationError(field, "needs exactly window and models")
+            window, models = rule["window"], rule["models"]
+            if (not isinstance(window, str) or not window or len(window) > 256
+                    or any(ord(c) < 32 or ord(c) == 127 for c in window)):
+                raise QuotaValidationError(field, "window must be nonempty text without controls, at most 256 characters")
+            if window in seen:
+                raise QuotaValidationError(field, "ambiguous quota window: each exact label may appear only once per engine")
+            seen.add(window)
+            if models is not None and (not isinstance(models, list) or len(models) > 1000
+                    or not all(_model_id(m) and (engine != "opencode" or
+                               ("/" in m and not m.startswith("/") and not m.endswith("/")))
+                               for m in models) or len(set(models)) != len(models)):
+                raise QuotaValidationError(field, "models must be null (shared) or unique exact model ids (OpenCode: provider/model)")
+
+
+def _quota_associations(routing, engine) -> dict:
+    value = {} if routing is None else routing.get("quota_windows", {})
+    validate_quota_windows(value)  # Before any provider/cache IO, including direct accessors.
+    return {rule["window"]: rule["models"] for rule in value.get(engine, [])}
+
+
+def _quota_applies(window, model, rules) -> bool:
+    models = rules.get(window)
+    return models is None or model in models
+
+
+def _applies(window: str, model: str | None, rules: Mapping) -> bool:
+    if any(marker in window.casefold() for marker in _IGNORED_WINDOWS):
         return False
-    scoped = next((family for family in _MODEL_SCOPED if family in window), None)
-    return scoped is None or scoped in model
+    return _quota_applies(window, model, rules)
 
 
 def _quota_dir(environ) -> Path:

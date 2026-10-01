@@ -95,6 +95,14 @@ python3 -B scripts/cortex_diagnose.py --format text
 Reports engines, connection state, and storage/schema; never makes a model
 call.
 
+For final-default propagation and bound lifecycle metadata, run the complete
+`tests/test_final_parameter_fidelity.py` and `tests/test_task_inspection.py`
+with the targeted pytest command above. These use the real installer, ACP
+selection and adapter with a fake downstream subprocess, plus executable
+metadata-reader and refusal fixtures. They do not prove paid host behavior.
+See [bound task inspection](../acp/observability.md#bound-task-inspection)
+for the exact read-only command, binding/pagination requirements and limits.
+
 ## Setup status (read-only)
 
 ```
@@ -114,9 +122,7 @@ the permanent `~/.paseo-dev` daemon, separate `~/.config/Paseo-dev` Electron
 profile, a disposable project, and the Cortex runtime launched by that daemon
 from the explicit absolute checkout plugin path. Do not use production
 `~/.paseo` or the production Cortex agent. Keep the existing production
-Codex/Claude account and credential-isolation rules. Check login status without
-printing credentials. Use `gpt-5.6-luna` at medium/high effort; heavy models
-remain prohibited in routine live qualification.
+Codex/Claude account and credential-isolation rules. Check native login status without printing credentials. Use an explicit owner-selected route supported by current settings and verified host/catalog capabilities; do not substitute or automatically escalate to the deep coordinator. Heavy models remain prohibited in routine live qualification.
 
 The paid probes retain their safety guard and require both flags, with an
 approval reference naming the owner's request:
@@ -132,6 +138,14 @@ surface it exercises.
 
 `scripts/cortex_acp_smoke.py` is the no-paid startup smoke harness
 (schema-validated launch/protocol surface only, not GUI evidence).
+Run both documented fixture forms from the checkout root after source/package checks:
+
+```
+python3 -B scripts/cortex_acp_smoke.py
+python3 -B scripts/cortex_acp_smoke.py --fixture-connection
+```
+
+The second mode supplies only an isolated fake identity with explicit version-2 eligibility in temporary XDG settings; it verifies selector exposure, not migration of owner data or paid execution.
 
 ## Paseo plugin (`integrations/paseo/`)
 
@@ -211,3 +225,45 @@ in repository documents or reports.
 ## What automated evidence cannot close
 
 The no-paid automated suite cannot reach a paid engine and does not establish rendered GUI behavior. The settings screen's client-bundle render-walk uses compiled UI plus host shims; it is not a visual Paseo Desktop result. The UI test coverage also includes `client/settings-model.test.ts` (run with `node --experimental-strip-types integrations/paseo/client/settings-model.test.ts`) and the config RPC end-to-end test. Use isolated dev Paseo for applicable live checks. A rendered desktop check must inspect the actual Settings screen and relevant behaviors (workspace selection, read/update, conflicts/redaction, and OpenCode opt-in) in the Electron app; CLI, logs, simulated render-walk, or CDP alone are not GUI evidence. Each probe or GUI observation supports only the exact surface exercised.
+
+## Settings-only routing and profile deletion checks
+
+For routing/settings changes, run applicable focused tests including tests/test_no_hardcoded_model_names.py, tests/test_model_settings_template.py, tests/test_settings_only_routing.py, tests/test_model_settings_integration.py, and the complete unfiltered routing/profile integration tests. For Paseo settings changes run documented typecheck and complete config/settings scripts, not a filtered pass. Automated tests do not prove production migration or installed GUI reachability. Production migration is a separately authorized config-only operation: inspect current revision, preview candidate, review preservation/diff and digests, obtain consent, apply against that exact revision, then verify resulting settings and backup/rollback evidence. Never mutate production during package verification. Paid qualification is not requested by default and, if requested, requires a named mode and explicit owner-selected route; do not silently select a substitute.
+
+
+Quota settings changes additionally run the complete unfiltered `tests/test_quota_settings.py`, `tests/test_usage_accounting.py`, `tests/test_route_availability.py` and existing quota/routing/configuration/profile modules. They cover exact arbitrary identities/labels, conservative missing/unmapped mappings, ambiguity refusal before IO, project precedence, shuffled catalogs, menu/selection agreement, expiry, explicit candidate migration and snapshot round-trip. Keep existing authentication/CLI zero-cost/TTL/negative-cache tests; no global owner-template injection, skips or deselection. Run the documented plugin `ci`, `typecheck`, `test:config`, `test:settings` and `test:client-bundle` sequentially for typed quota controls. Package payload stamping and final whole-suite verification remain separate downstream steps; these source/component checks establish neither live quota evidence nor rendered host reachability.
+
+## Fresh-process isolated targeted launcher
+
+Use `scripts/cortex_test_isolated.py` when targeted tests need final HOME/XDG/TMPDIR
+at Python startup. Obtain explicit permission first for NEW scratch outside every
+Git repository and for reading the existing interpreter-compatible dependency
+path; no installation or credential copying is needed. Create private owned
+mode-0700 scratch and `home`, `config`, `state`, `cache`, `tmp` child directories
+before invoking the launcher. For the current Python 3.12 toolchain, the explicit
+existing dependency path is `/home/igovet/.local/lib/python3.12/site-packages`;
+verify compatibility/existence rather than assuming it on another machine.
+
+```bash
+python3 -B scripts/cortex_test_isolated.py --environment-root "$SCRATCH" \
+  --dependency-path /home/igovet/.local/lib/python3.12/site-packages tests/test_package.py
+```
+
+The launcher rejects root, aliased/public/foreign/Git scratch, incompatible or
+noncanonical dependency paths and anything other than explicit existing
+`tests/test_*.py` modules. It removes inherited PYTHONHOME and starts import
+preflight in a NEW Python process, then NEW `PYTHONDONTWRITEBYTECODE=1 python3 -B
+-m pytest -q MODULE...` under identical final HOME/XDG_CONFIG_HOME/XDG_STATE_HOME/
+XDG_CACHE_HOME/TMPDIR and explicit dependency-plus-checkout-src/scripts PYTHONPATH.
+PYTEST_ADDOPTS is empty. Do not change HOME after interpreter startup or silently
+fall back to ambient dependencies. Child failure exits propagate unchanged.
+
+Binding regression commands use the same launcher with explicit
+`tests/test_qualification_binding.py`, `tests/test_task_inspection.py` and
+`tests/test_cortex_test_isolated.py`. The fake-wire matrix creates NEW fixtures
+and supervises owned children; it is not a live daemon/paid result. Also use
+`npm --prefix integrations/paseo run test:qualification-binding` for the TS contract.
+See [binding provenance and limits](../acp/dev-paseo-environment.md#read-only-dev-binding).
+After all edits, sequentially stamp, validate, check profiles, run isolated
+`tests/test_package.py`, then validate again. Runtime independent review and
+current-artifact final verification remain separate from these worker checks.

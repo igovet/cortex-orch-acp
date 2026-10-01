@@ -707,11 +707,10 @@ def test_immediate_overflow_after_delivery_is_blocked_with_bounded_retries(tmp_p
 
 def test_repeated_observed_compactions_are_blocked_with_explicit_localized_message(tmp_path):
     """A session that keeps reporting a fresh compaction every turn (never
-    meaningfully recovering: 'before' is always estimated from the full
-    capsule size, 'after' is always the same small mandatory reconstruction,
-    so recovery never drops below the frequency window) trips
-    recovery.compaction_guard's bounded frequency check and stops -- no
-    unbounded loop of ever-more compactions."""
+    meaningfully recovering: this fake engine reports no context fill, so
+    every attempt is unmeasured and only the frequency window can apply)
+    trips recovery.compaction_guard's bounded frequency check and stops --
+    no unbounded loop of ever-more compactions."""
     from cortex_runtime.recovery import compaction_guard
 
     seen_messages = []

@@ -2,10 +2,9 @@
 
 This page documents the no-paid automated suite and its limits. Paid live checks run only on an explicit owner request naming `cli` or `desktop`, through the isolated dev Paseo environment documented separately.
 
-Current candidate coverage includes deterministic DAG scheduling, authenticated
+Current candidate coverage includes settings-only routing, exact model-policy validation and profile management alongside deterministic DAG scheduling, authenticated
 file/command/external MCP gateways, mandatory review, exact revision verification,
-steering, bounded recovery and unfiltered transcript replay. Authorized real Codex Luna and Claude Haiku tasks ran through isolated Paseo;
-see the [retained observations](evidence/paseo-2026-09-21/runtime-rewrite.md).
+steering, bounded recovery and unfiltered transcript replay. Historical paid qualification used the then-configured routes in an isolated test project; it is not evidence for current settings or a production route. See the [retained observations](evidence/paseo-2026-09-21/runtime-rewrite.md).
 The standalone paid probe scripts were not used in this campaign. See [current results](runtime-rewrite-status.md).
 The broker suite forces a random token whose first byte is `-`, then checks that the stdio relay still connects and advertises tools. It also checks an MCP child that exits before `tools/list` and prompt-level error classification. These tests cover the runtime broker behavior exercised by the fixtures.
 
@@ -14,8 +13,9 @@ Focused no-paid routing checks are `tests/test_routing_profiles.py`
 storage refusals), `tests/test_model_policy.py` (purpose-selection validation),
 `tests/test_auto_route.py` (eligible preferences and affinity source),
 `tests/test_configuration_management.py` (management API/catalog contract),
-and `tests/test_no_hardcoded_model_names.py` (prompt/schema guards). They do
-not establish rendered settings UI behavior or a live paid engine result.
+and `tests/test_no_hardcoded_model_names.py` (current template-derived prompt/schema guards). Also run `tests/test_model_settings_template.py`, `tests/test_settings_only_routing.py` and `tests/test_model_settings_integration.py` for version-2 installation, routing and migration behavior. These do not establish rendered settings UI behavior, production migration or a live paid engine result.
+
+Positive mode/permission/session/fallback fixtures must write the minimum exact version-2 owner policy into disposable project or HOME/XDG roots. `tests/model_policy_fixtures.py` supplies opt-in helpers; no global autouse production template or unknown-model enablement is permitted. Keep missing/malformed/denied policy cases separate. `tests/test_delegation_mcp_tools.py`, `tests/test_stdio.py` and `tests/test_delegation_worker_mode_floor.py` cover actionable route-menu diagnostics and refusal before capacity/engine launch.
 
 ## The non-paid default command
 
@@ -120,3 +120,5 @@ on the historical T034 count.
 Remaining conditional guards are platform guards (POSIX FIFO support,
 symlink support, `tmux` presence) whose logic is also covered by unconditional
 tests; they are not the sole coverage of any mandatory case.
+
+Settings-only routing/install behavior is covered by tests/test_no_hardcoded_model_names.py, tests/test_model_settings_template.py, tests/test_settings_only_routing.py and tests/test_model_settings_integration.py; profile deletion is covered by integration and typed form/API tests. No-paid tests do not establish production migration, installed desktop reachability or a paid route. Migration tests use disposable fixtures; live checks remain gated by explicit owner consent and an owner-selected supported route.

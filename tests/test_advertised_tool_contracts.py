@@ -30,7 +30,10 @@ def test_result_submit_describes_receipt_sources_and_exclusive_report_forms():
     entry = next(t for t in mcp_tools.tool_definitions("worker", role_id="worker-backend-dev", stage="execution")
                  if t["name"] == "result_submit")
     schema = entry["inputSchema"]
-    assert len(schema["oneOf"]) == 2
+    # Exactly one report form, as if/then/else: a root oneOf hides every field from Codex code mode.
+    assert "oneOf" not in schema
+    assert (schema["if"], schema["then"], schema["else"]) == (
+        {"required": ["report_ref"]}, {"not": {"required": ["report"]}}, {"required": ["report"]})
     assert "write_report.report_id" in entry["description"]
     assert "command_run" in entry["description"] and "tool_call_ref" in entry["description"]
     assert "write_report" in schema["properties"]["report_ref"]["description"]

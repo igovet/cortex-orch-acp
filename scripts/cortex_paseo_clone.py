@@ -16,6 +16,9 @@ import time
 
 RUNTIME_NAMES = {"daemon.pid", "daemon.lock", "daemon.sock", "paseo.sock"}
 RUNTIME_SUFFIXES = {".pid", ".lock", ".sock"}
+# Per-home daemon identity (Paseo 0.10.2 loads or creates both on start). Copying
+# production's would give the dev daemon the same serverId and relay keypair.
+IDENTITY_NAMES = {"server-id", "daemon-keypair.json"}
 
 
 def resolved(value: str) -> Path:
@@ -64,13 +67,19 @@ def clone_home(source: Path, target: Path) -> None:
             directories[:] = retained_directories
             for name in files:
                 candidate = root_path / name
-                if skip(candidate):
+                if skip(candidate) or (relative == Path(".") and name in IDENTITY_NAMES):
                     continue
                 destination = destination_root / name
                 if is_sqlite(candidate):
                     copy_sqlite(candidate, destination)
                 else:
                     shutil.copy2(candidate, destination, follow_symlinks=False)
+        # Keep the dev home's own identity; never adopt production's.
+        for name in IDENTITY_NAMES:
+            own = target / name
+            if (own.is_file() and not own.is_symlink()
+                    and not ((source / name).is_file() and own.read_bytes() == (source / name).read_bytes())):
+                shutil.copy2(own, stage / name, follow_symlinks=False)
         if target.exists():
             previous = target.with_name(f"{target.name}.previous-{int(time.time())}")
             target.rename(previous)

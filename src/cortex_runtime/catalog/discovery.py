@@ -334,6 +334,11 @@ def build_catalog(
             reason = "authorization_required" if record.state == ConnectionState.AUTHORIZATION_REQUIRED else "discovery_unavailable"
             unavailable[connection_id] = reason
             continue
+        if not observation.model_options():
+            # Persist an observed empty list as unavailable, not as absent data:
+            # otherwise save_snapshot would leave old selectable identities alive.
+            unavailable[connection_id] = "no_models_observed"
+            continue
         for model, model_name in observation.model_options():
             # T035 follow-up: per-model override when the caller attached
             # one (see Observation.with_model_thought_levels); an unchanged

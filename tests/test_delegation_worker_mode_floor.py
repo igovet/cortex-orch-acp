@@ -27,6 +27,7 @@ from cortex_runtime.ownership import current_owner_epoch
 from cortex_runtime.portable.identity import OwnershipEpoch, SourceEvent
 from cortex_runtime.store import Store
 
+from model_policy_fixtures import write_policy
 from engine_fakes import default_scenario, fake_launch_command, isolated_environ, make_connection_record, new_connection_id, write_scenario
 
 
@@ -61,6 +62,7 @@ _MODE_OPTIONS = [
 
 def _connection_and_config(tmp_path, *, mode_options=_MODE_OPTIONS, model="shared-model", configure_behavior_by_option=None):
     environ = isolated_environ(tmp_path)
+    write_policy(environ, {"codex-acp": {model: "standard"}})
     config_options = [
         dict(id="model", currentValue=model, options=[dict(value=model, name=model)]),
     ]
@@ -204,6 +206,7 @@ def test_confirmed_worker_mode_and_permission_classifier_work_together(tmp_path)
     isolation."""
     store, task_id, epoch = _bootstrap(tmp_path)
     environ = isolated_environ(tmp_path)
+    write_policy(environ, {"codex-acp": {"shared-model": "standard"}})
 
     host_calls = []
 
@@ -380,6 +383,7 @@ _CLAUDE_EFFORTS = [dict(value=v, name=v) for v in ("default", "low", "medium", "
 
 def _claude_haiku_connection(tmp_path, request_log, *, drop_on_model_switch=("effort",)):
     environ = isolated_environ(tmp_path)
+    write_policy(environ, {"claude-agent-acp": {"default": "deep", "haiku": "light"}})
     config_options = [
         dict(id="mode", category="mode", type="select", currentValue="acceptEdits", options=_CLAUDE_MODES),
         dict(id="model", category="model", type="select", currentValue="default",
@@ -522,3 +526,45 @@ def test_a_worker_effort_is_lowered_before_raised_to_what_its_session_offers(req
     from cortex_runtime.delegation.live_adapters import _effort_within
 
     assert _effort_within(requested, offered) == expected
+
+
+@pytest.mark.parametrize("policy,code", [
+    (None, "model_policy_migration_required"),
+    ({}, "model_policy_migration_required"),
+    ({"model_policy_version": 9}, "model_policy_version_unsupported"),
+    ({"model_policy_version": 2, "enabled": []}, "invalid_routing_overrides"),
+    ({"model_policy_version": 2, "enabled": {"codex-acp": []}}, "route_denied"),
+    ({"model_policy_version": 2, "enabled": {"codex-acp": ["shared-model"]},
+      "deny": ["codex-acp/shared-model"]}, "route_denied"),
+    ({"model_policy_version": 2, "enabled": {"codex-acp": ["shared-model"]},
+      "providers": ["claude-agent-acp"]}, "route_provider_excluded"),
+])
+def test_invalid_or_denied_policy_refuses_before_capacity_and_engine(tmp_path, monkeypatch, policy, code):
+    import json
+    from pathlib import Path
+    from cortex_runtime.portable.errors import PortableError
+    from cortex_runtime.routing import store as routing_store
+
+    store, task_id, epoch = _bootstrap(tmp_path)
+    environ, connection = _connection_and_config(tmp_path)
+    row = _propose_and_apply(store, task_id, epoch, connection)
+    path = Path(environ["XDG_CONFIG_HOME"]) / "cortex" / "routing.json"
+    if policy is None:
+        path.unlink()
+    else:
+        path.write_text(json.dumps(policy))
+    adapter = EngineSessionManagerAdapter(
+        lambda _: connection, lambda _: str(tmp_path), environ=environ, call_timeout=10.0, store=store)
+    monkeypatch.setattr(adapter, "_reserve_capacity_blocking",
+                        lambda *_, **__: pytest.fail("policy refusal reached capacity/engine launch"))
+    with pytest.raises(PortableError, match=code):
+        adapter.open("shared_project_root",
+                     dict(task_id=task_id, attempt_id="xa_policy", assignment_id="asg-policy",
+                          config_revision=row["id"]), "instructions")
+    assert capacity.count_active(store, connection.id) == 0
+    assert routing_store.list_audit_for_task(store, task_id) == ()
+    assert not adapter._managers and not adapter._sessions and not adapter._opening
+    if policy is None:
+        assert not path.exists()
+    else:
+        assert json.loads(path.read_text()) == policy

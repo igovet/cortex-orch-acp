@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildProfileSave, buildProfileCreate, buildProfileActivate, buildProfileDeactivate, buildProfileRename,
+  buildProfileSave,
+  buildProfileDelete, buildProfileCreate, buildProfileActivate, buildProfileDeactivate, buildProfileRename,
   profileSwitchDecision, profileIsPartial, profileStateText, validProfileName, type ProfilesView,
   automaticText,
   canAutoAllow,
@@ -18,6 +19,7 @@ import {
   setModelAutoAllowed,
   setModelEnabled,
   setModelAutoSelected,
+  modelAutoSelected,
   setModelPreferredFor,
   shadowingSource,
   unmatchedTokens,
@@ -579,12 +581,12 @@ test("engines & models: a new project file starts from the rules in use; a shado
   assert.equal(engineModelsTarget({ ...view, effective_valid: false }, "project").seededFrom, null, "an invalid file is never copied");
 });
 
-test("routing validation: the only wildcard is <engine>/* in the deny list", () => {
+test("routing validation: the only wildcard is an exact <engine>/* selector", () => {
   const vocabulary = routingVocabulary(routing({}));
   assert.ok(buildRoutingRules({ ...emptyRoutingForm(), deny: ["codex-acp/*", "opencode/*"] }, vocabulary).ok);
   const bad = buildRoutingRules({ ...emptyRoutingForm(), deny: ["*", "gemini/*", "gpt-*"], auto_allow: ["opencode/*"] }, vocabulary);
   assert.equal(bad.ok, false);
-  if (!bad.ok) assert.deepEqual(Object.keys(bad.errors).sort(), ["rules.auto_allow[0]", "rules.deny[0]", "rules.deny[1]", "rules.deny[2]"]);
+  if (!bad.ok) assert.deepEqual(Object.keys(bad.errors).sort(), ["rules.deny[0]", "rules.deny[1]", "rules.deny[2]"]);
 });
 
 test("purpose preferences round-trip other policy attributes and require an auto-selected model", () => {
@@ -683,4 +685,70 @@ test("profiles: rename is metadata-only and can clear description; detach keeps 
   assert.deepEqual(buildProfileRename(view, "work", " renamed ", ""), { ok: true, value: { surface: "routing_profiles", action: "update", expected_revision: view.revision, name: "work", rename_to: "renamed", description: "" } });
   assert.equal(buildProfileRename(view, "work", "INVALID", "").ok, false);
   assert.deepEqual(buildProfileDeactivate(view), { ok: true, value: { surface: "routing_profiles", action: "deactivate", expected_revision: view.revision } });
+});
+
+
+test("v2 arbitrary identities round-trip complete policy, neutral attributes and disabled engines", () => {
+  const rules = { model_policy_version: 2, enabled: { "codex-acp": ["RENAMED-abc@v9"], opencode: [] }, deny: ["opencode/*"],
+    models: { "codex-acp": { auto: ["RENAMED-abc@v9"], tiers: { "RENAMED-abc@v9": ["light", "standard"] },
+      policy: { "RENAMED-abc@v9": { effort_floor: "medium", max_effort: "high", effort_ladder: ["medium", "high"],
+        also_standard_for: ["review"], preferred_for: ["review"], request_names: ["owner-choice"], future: { keep: true } },
+        dormant: { effort_floor: null, max_effort: null, preferred_for: null, request_names: null } } } } };
+  const parsed = routingRulesToForm(rules);
+  assert.ok(parsed.ok);
+  if (!parsed.ok) return;
+  const built = buildRoutingRules(parsed.form, routingVocabulary(routing(rules)));
+  assert.ok(built.ok);
+  if (built.ok) assert.deepEqual(built.value, rules);
+  assert.equal(modelAutoSelected(emptyRoutingForm(), "codex-acp", "RENAMED-abc@v9", true), false);
+});
+
+test("portable coordinator changes use exact IDs, preserve unrelated fields and reject bound-route conflicts", () => {
+  const view = userDefaults({ defaults: { coordinator: { engine: "codex-acp", model: "RENAMED@9", parameters: { mode: "agent" } }, future: { keep: true } } });
+  const form = userDefaultsToForm(view);
+  assert.deepEqual(buildUserDefaultsUpdate(view, form), { ok: true, value: null });
+  form.coordinator_model = "DifferentExactID";
+  const built = buildUserDefaultsUpdate(view, form);
+  assert.ok(built.ok);
+  if (built.ok && built.value) assert.deepEqual(built.value.defaults, { coordinator: { engine: "codex-acp", model: "DifferentExactID", parameters: { mode: "agent" } } });
+  form.route_id = "xr_0123456789ab"; form.route_connection_id = "cn_0123456789ab"; form.route_model = "Other";
+  assert.equal(buildUserDefaultsUpdate(view, form).ok, false);
+});
+
+test("delete profile payload is closed, exact and valid for selected/last snapshots; pending activation blocks", () => {
+  const view = profileView();
+  for (const name of view.profiles.map((profile) => profile.name)) {
+    assert.deepEqual(buildProfileDelete(view, name), { ok: true, value: { surface: "routing_profiles", action: "delete", name, expected_revision: view.revision } });
+  }
+  assert.equal(buildProfileDelete(view, "absent").ok, false);
+  assert.equal(buildProfileDelete({ ...view, pending: { operation: "activate", profile: "mix", at: "now" } }, "mix").ok, false);
+});
+
+
+test("unsupported portable fields remain intact and cannot be dropped by a coordinator edit", () => {
+  const view = userDefaults({ defaults: { coordinator: { engine: "codex-acp", model: "EXACT@9", future: { retain: true } } } });
+  const form = userDefaultsToForm(view);
+  form.language = "ru";
+  const unrelated = buildUserDefaultsUpdate(view, form);
+  assert.ok(unrelated.ok);
+  if (unrelated.ok && unrelated.value) assert.deepEqual(unrelated.value.defaults, { language: "ru" });
+  form.coordinator_model = "OTHER@9";
+  assert.equal(buildUserDefaultsUpdate(view, form).ok, false);
+  assert.deepEqual((view.defaults.coordinator as any).future, { retain: true });
+});
+
+
+test("quota window rules round-trip exact renamed identities and shared/empty scopes", () => {
+  const rules = { model_policy_version: 2, quota_windows: { "codex-acp": [
+    { window: "Owner window / EXACT@7", models: ["RENAMED@9", "WITHDRAWN@7"] },
+    { window: "account", models: null }, { window: "excluded", models: [] },
+  ] } };
+  const parsed = routingRulesToForm(rules); assert.ok(parsed.ok);
+  if (!parsed.ok) return;
+  assert.deepEqual(buildRoutingRules(parsed.form, routingVocabulary(routing({}))), { ok: true, value: rules });
+  parsed.form.quota_windows!["codex-acp"].push({ window: "account", models: ["RENAMED@9"] });
+  const ambiguous = buildRoutingRules(parsed.form, routingVocabulary(routing({})));
+  assert.equal(ambiguous.ok, false);
+  assert.equal(routingRulesToForm({ quota_windows: { "codex-acp": [{ window: "account", models: null, future: true }] } }).ok, false);
+  assert.deepEqual(rules.quota_windows["codex-acp"][0].models, ["RENAMED@9", "WITHDRAWN@7"]);
 });

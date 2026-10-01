@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test:qualification-binding": "node --experimental-strip-types server/qualification-binding.test.ts",
     "test:activation": "node --experimental-strip-types server/plugin-activation.test.ts",
     "test:steer": "node --experimental-strip-types server/provider-steer.test.ts",
     "test:diff": "node --experimental-strip-types client/worker-panel-diff.test.ts",

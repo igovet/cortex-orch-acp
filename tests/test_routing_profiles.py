@@ -10,6 +10,14 @@ from cortex_runtime.configuration.policy import PolicyCeiling
 from cortex_runtime.connections import onboarding, registry
 from cortex_runtime.connections.model import AuthMode
 from cortex_runtime.routing import auto_route
+from model_policy_fixtures import routing_fixture
+
+
+
+def update_routing(target, revision, rules, **kwargs):
+    # Tests explicitly supply a full v2 policy; legacy snapshots below stay legacy.
+    return management.update_routing(target, revision, routing_fixture(rules), **kwargs)
+
 
 SECRET = "SENTINEL-SECRET-VALUE-7f3a"
 ZERO = "sha256:" + "0" * 64
@@ -68,7 +76,7 @@ def owner(env):
         "command": "/usr/bin/gh-mcp", "args": ["--token", SECRET], "env": {"GITHUB_TOKEN": SECRET},
         "enabled": True, "allowed_tools": ["search"], "network": True}}})
     management.update_user_defaults("absent", defaults={"language": "ru"}, environ=env)
-    management.update_routing("user", "absent", {"providers": ["claude-agent-acp"]}, environ=env)
+    update_routing("user", "absent", {"providers": ["claude-agent-acp"]}, environ=env)
     return record.id
 
 
@@ -104,10 +112,10 @@ def test_format1_read_is_migrated_in_memory_without_writing(env):
     assert view["applied"]["revisions"] == {"routing": "sha256:" + "a" * 64}
     assert (_root(env) / "routing-profiles.json").read_bytes() == original
     routing = management.read_routing(environ=env)["sources"][-1]["revision"]
-    management.update_routing("user", routing, {"deny": ["codex-acp/*"]}, environ=env)
+    update_routing("user", routing, {"deny": ["codex-acp/*"]}, environ=env)
     changed = _read(env)
     assert changed["state"] == "modified"
-    assert changed["differences"] == [{"section": "routing", "key": "deny"}]
+    assert changed["differences"] == [{"section": "routing", "key": k} for k in ("deny", "enabled", "model_policy_version", "models")]
     assert (_root(env) / "routing-profiles.json").read_bytes() == original
 
 
@@ -148,9 +156,9 @@ def test_unknown_or_string_format_fails_closed(env):
         _write(path, document)
         response = management.execute({"surface": "routing_profiles", "action": "read"}, environ=env)
         assert response["error"]["code"] == "unsupported_profiles_format"
-    saved = management.update_routing("user", "absent", {"deny": ["opencode/*"]}, environ=env)
+    saved = update_routing("user", "absent", {"deny": ["opencode/*"]}, environ=env)
     assert saved["profile"] == {"state": "unavailable", "code": "unsupported_profiles_format"}
-    assert auto_route.load_overrides(environ=env) == {"deny": ["opencode/*"]}
+    assert auto_route.load_overrides(environ=env) == routing_fixture({"deny": ["opencode/*"]})
     path.unlink()
     target = path.parent / "target"
     target.write_text("{}")
@@ -167,7 +175,7 @@ def test_create_captures_all_sections_and_activates_without_touching_files(env, 
     assert result["active"] == "work" and result["state"] == "in_sync" and result["matches_profile"] == ["work"]
     profile = result["profiles"][0]
     assert profile["sections"] == ["routing", "user_defaults", "mcp_servers", "connections"]
-    assert profile["settings"]["routing"] == {"providers": ["claude-agent-acp"]}
+    assert profile["settings"]["routing"] == routing_fixture({"providers": ["claude-agent-acp"]})
     assert profile["settings"]["user_defaults"]["defaults"] == {"language": "ru"}
     assert profile["settings"]["mcp_servers"] == {"github": {"enabled": True, "allowed_tools": ["search"],
                                                              "network": True}}
@@ -214,7 +222,7 @@ def _edit_connection(env, connection_id):
 
 def _edit_routing(env, _):
     revision = management.read_routing(environ=env)["sources"][-1]["revision"]
-    management.update_routing("user", revision, {"providers": ["codex-acp"]}, environ=env)
+    update_routing("user", revision, {"providers": ["codex-acp"]}, environ=env)
 
 
 def _edit_picker(env, _):
@@ -248,7 +256,7 @@ def test_project_edits_do_not_mark_modified(env, owner, tmp_path):
     store = Store(project_store_directory(root), initialize=True, project_root=root)
     _ok(_run(env, "create", name="work"))
     before = (_root(env) / "routing-profiles.json").read_bytes()
-    management.update_routing("project", "absent", {"deny": ["codex-acp/*"]}, project_root=str(root), environ=env)
+    update_routing("project", "absent", {"deny": ["codex-acp/*"]}, project_root=str(root), environ=env)
     management.update_project_ceiling(store, str(root), "absent", {"limits": {"attempts": 3}}, environ=env)
     view = routing_profiles.read_profiles(str(root), env)
     assert view["state"] == "in_sync" and view["shadowed_by"] == "project"
@@ -311,7 +319,7 @@ def test_create_as_new_from_modified_keeps_previous_profile_content(env, owner):
 
 def test_activate_materializes_every_section_and_preserves_unmanaged_parts(env, owner):
     root = _root(env)
-    _write(root / "routing.json", {"providers": ["claude-agent-acp"], "_comment": "kept"})
+    _write(root / "routing.json", routing_fixture({"providers": ["claude-agent-acp"], "_comment": "kept"}))
     defaults = json.loads((root / "defaults.json").read_text())
     defaults["defaults"]["future_key"] = 1
     defaults["other"] = True
@@ -328,7 +336,7 @@ def test_activate_materializes_every_section_and_preserves_unmanaged_parts(env, 
     result = _ok(_run(env, "activate", name="a", discard_modifications=True))
     assert result["state"] == "in_sync" and result["active"] == "a" and result["pending"] is None
     assert result["applied"]["revisions"] == result["current_revisions"]
-    assert json.loads((root / "routing.json").read_text()) == {"providers": ["claude-agent-acp"], "_comment": "kept"}
+    assert json.loads((root / "routing.json").read_text()) == routing_fixture({"providers": ["claude-agent-acp"], "_comment": "kept"})
     written = json.loads((root / "defaults.json").read_text())
     assert written["defaults"] == {"future_key": 1, "language": "ru"} and written["other"] is True
     servers = json.loads((root / "mcp-servers.json").read_text())["servers"]
@@ -367,7 +375,7 @@ def _hand_edit_activation_refused(env, change, code, field):
 
 def test_activate_validates_everything_before_first_write(env, owner):
     def reference(doc):
-        doc["profiles"]["a"]["settings"]["routing"] = {"providers": ["codex-acp"]}
+        doc["profiles"]["a"]["settings"]["routing"] = routing_fixture({"providers": ["codex-acp"]})
         doc["profiles"]["a"]["settings"]["user_defaults"]["defaults"].update(
             route_id="xr_" + "1" * 12, route_connection_id="cn_ffffffffffff", route_model="gpt-5")
     _hand_edit_activation_refused(env, reference, "profile_reference_missing",
@@ -376,7 +384,7 @@ def test_activate_validates_everything_before_first_write(env, owner):
 
 def test_activate_refuses_policy_the_mcp_loader_rejects(env, owner):
     def policy(doc):
-        doc["profiles"]["a"]["settings"]["routing"] = {"providers": ["codex-acp"]}
+        doc["profiles"]["a"]["settings"]["routing"] = routing_fixture({"providers": ["codex-acp"]})
         doc["profiles"]["a"]["settings"]["mcp_servers"]["github"] = {"enabled": True}
     _hand_edit_activation_refused(env, policy, "invalid_configuration", "settings.mcp_servers")
 
@@ -499,7 +507,7 @@ def test_unrecoverable_failure_is_interrupted_and_recoverable(env, owner, monkey
     _interrupt(env, monkeypatch)
     view = _read(env)
     assert view["state"] == "interrupted" and view["pending"]["profile"] == "a" and view["active"] == "b"
-    assert _run(env, "delete", name="a")["error"]["code"] == "profile_active"
+    assert _run(env, "delete", name="a")["error"]["code"] == "profile_interrupted"
     recovered = _ok(_run(env, "activate", name="a"))
     assert recovered["state"] == "in_sync" and recovered["pending"] is None and recovered["active"] == "a"
     _ok(_run(env, "save", name="a"))
@@ -523,20 +531,21 @@ def test_update_is_metadata_only_and_legacy_fields_are_refused(env, owner):
     renamed = _ok(_run(env, "update", name="a", rename_to="work", description="Renamed"))
     assert renamed["active"] == "work" and renamed["applied"]["profile"] == "work"
     assert renamed["profiles"][0]["description"] == "Renamed" and renamed["state"] == "in_sync"
-    assert _run(env, "delete", name="work")["error"]["code"] == "profile_active"
-    _ok(_run(env, "deactivate"))
-    assert _ok(_run(env, "delete", name="work"))["profiles"] == []
+    before = _files(env)
+    deleted = _ok(_run(env, "delete", name="work"))
+    assert deleted["profiles"] == [] and deleted["active"] is None
+    assert _files(env) == before
 
 
 def test_user_routing_save_no_longer_writes_through(env, owner, tmp_path):
     _ok(_run(env, "create", name="a"))
     revision = management.read_routing(environ=env)["sources"][-1]["revision"]
-    saved = management.update_routing("user", revision, {"deny": ["opencode/*"]}, environ=env)
+    saved = update_routing("user", revision, {"deny": ["opencode/*"]}, environ=env)
     assert saved["profile"] == {"name": "a", "state": "modified"}
-    assert _read(env)["profiles"][0]["settings"]["routing"] == {"providers": ["claude-agent-acp"]}
+    assert _read(env)["profiles"][0]["settings"]["routing"] == routing_fixture({"providers": ["claude-agent-acp"]})
     project = tmp_path / "project"
     (project / ".cortex").mkdir(parents=True)
-    written = management.update_routing("project", "absent", {"deny": ["codex-acp/*"]},
+    written = update_routing("project", "absent", {"deny": ["codex-acp/*"]},
                                         project_root=str(project), environ=env)
     assert written["profile"] is None
 

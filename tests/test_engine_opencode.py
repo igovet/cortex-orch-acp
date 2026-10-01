@@ -699,16 +699,25 @@ def test_a_user_cancellation_is_never_continued():
 
 # --- routing ------------------------------------------------------------------
 
-def test_automatic_routing_never_picks_opencode_unless_opted_in():
+@pytest.mark.parametrize("model", ["anthropic/claude-sonnet-4-5", "vendor/renamed-identity", "opaque-id-47"])
+def test_automatic_routing_never_picks_opencode_unless_opted_in(model):
     from cortex_runtime.routing.auto_route import _default_auto_denied
 
     entry = type("Entry", (), {"route": ExecutionRoute(engine="opencode", connection_id=new_connection_id(),
-                                                       model="anthropic/claude-sonnet-4-5")})()
+                                                       model=model)})()
     assert _default_auto_denied({}, entry)
-    assert not _default_auto_denied({"auto_allow": ["opencode/anthropic/claude-sonnet-4-5"]}, entry)
+    from model_policy_fixtures import exact_policy
+
+    selected = exact_policy({"opencode": {entry.route.model: "standard"}},
+                            automatic={"opencode": [entry.route.model]})
+    assert not _default_auto_denied(selected, entry)
+    assert _default_auto_denied(exact_policy({"opencode": {entry.route.model: "standard"}}), entry)
     codex = type("Entry", (), {"route": ExecutionRoute(engine="codex-acp", connection_id=new_connection_id(),
                                                        model="gpt-6-sol")})()
-    assert not _default_auto_denied({}, codex)
+    assert _default_auto_denied({}, codex)  # No engine has hidden automatic membership.
+    selected = exact_policy({"codex-acp": {codex.route.model: "deep"}},
+                            automatic={"codex-acp": [codex.route.model]})
+    assert not _default_auto_denied(selected, codex)
 
 
 # --- onboarding ---------------------------------------------------------------

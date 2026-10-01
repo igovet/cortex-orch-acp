@@ -53,6 +53,53 @@ def always_load(tool: dict) -> dict:
     return {**tool, "_meta": {**(meta if isinstance(meta, dict) else {}), ALWAYS_LOAD_META_KEY: True}}
 
 
+#: Argument descriptions for forwarded servers whose own ``inputSchema``
+#: leaves an argument undescribed, keyed server name -> tool -> argument.
+#: codebase-memory-mcp 0.10.8 (and 0.11.0) describes none of search_graph's
+#: three patterns although one is a glob and two are regular expressions; a
+#: model then sent a regex file_pattern (``src/.*``) and got zero results
+#: with no error (live, 2026-09-30). Semantics are from its store.c
+#: (``cbm_glob_to_like`` -> SQL LIKE; ``iregexp``) and were checked against
+#: a live index. A description the server supplies itself always wins.
+EXTERNAL_ARGUMENT_DESCRIPTIONS = {
+    "codebase-memory-mcp": {
+        "search_graph": {
+            "file_pattern": (
+                "Glob on the project-relative file path, not a regular expression: * and ** match any "
+                "characters including '/', ? matches one character (e.g. src/** or **/auto_route.py). "
+                "A value without * or ? matches anywhere in the path (e.g. auto_route). Regex syntax such "
+                "as .*, (a|b), ^, $ or \\. is taken literally and usually matches nothing, with no error."
+            ),
+            "name_pattern": (
+                "Regular expression searched anywhere in the symbol name, case-insensitive; anchor it "
+                "(e.g. ^route_menu$) for an exact name. Ignored when query is set."
+            ),
+            "qn_pattern": (
+                "Regular expression searched anywhere in the qualified name "
+                "(<project>.<path segments>.<module>.<symbol>), case-insensitive, e.g. routing\\.auto_route\\."
+            ),
+        },
+    },
+}
+
+
+def describe_arguments(server: str, tool: dict) -> dict:
+    """A copy of one forwarded tool with Cortex's description for each
+    argument the server left undescribed (see
+    :data:`EXTERNAL_ARGUMENT_DESCRIPTIONS`); unchanged otherwise."""
+    missing = EXTERNAL_ARGUMENT_DESCRIPTIONS.get(server, {}).get(tool.get("name"))
+    schema = tool.get("inputSchema")
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not missing or not isinstance(properties, dict):
+        return tool
+    filled = {
+        name: dict(value, description=missing[name])
+        if name in missing and isinstance(value, dict) and not value.get("description") else value
+        for name, value in properties.items()
+    }
+    return {**tool, "inputSchema": {**schema, "properties": filled}}
+
+
 def coordinator_tools(entry) -> list[str]:
     """The tools a coordinator may call on a registry server:
     ``coordinator_tools`` when set, else ``read_only_tools``."""

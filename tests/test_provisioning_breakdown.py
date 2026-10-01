@@ -39,12 +39,15 @@ from __future__ import annotations
 
 import time
 import uuid
+from pathlib import Path
 
 from cortex_runtime.bootstrap import bootstrap_task
+from cortex_runtime.catalog import store as catalog_store
 from cortex_runtime.catalog.discovery import build_catalog, parse_observation
 from cortex_runtime.configuration.resolution import ConfigurationInputs
 from cortex_runtime.configuration.service import ConfigurationService
 from cortex_runtime.connections import registry as connection_registry
+from cortex_runtime.delegation import capacity
 from cortex_runtime.delegation.live_adapters import (
     ConfigurationServiceSnapshotSource,
     EngineSessionManagerAdapter,
@@ -57,6 +60,7 @@ from cortex_runtime.portable.identity import OwnershipEpoch, SourceEvent
 from cortex_runtime.store import Store
 from cortex_runtime.trusted_channel import resolve_channel
 
+from model_policy_fixtures import write_policy
 from engine_fakes import default_scenario, fake_launch_command, isolated_environ, make_connection_record, new_connection_id, write_scenario
 
 
@@ -92,14 +96,22 @@ def _setup(tmp_path, monkeypatch):  # returns (store, channel, service, adapter,
         epoch = OwnershipEpoch(epoch=current_owner_epoch(db, result.task_id), owner="owner-1")
 
     environ = isolated_environ(tmp_path)
+    write_policy(environ, {"codex-acp": {"gpt-x": "standard"}}, automatic={"codex-acp": ["gpt-x"]})
     scenario_path = write_scenario(tmp_path, default_scenario())
     connection = make_connection_record(new_connection_id(), fake_launch_command(scenario_path), environ=environ)
+    # Explicitly signed-in *fake* native directory, as required by catalog
+    # selection; no production account or credentials are consulted.
+    home = Path(connection.credential_ref.path)
+    home.mkdir(parents=True, exist_ok=True)
+    home.chmod(0o700)
+    (home / "auth.json").write_text("{}")
     with connection_registry.transaction(environ) as state:
         state.connections[connection.id] = connection
 
     options = [dict(id="model", name="Model", category="model", type="select", currentValue="gpt-x",
                      options=[dict(value="gpt-x", name="GPT X")])]
     snapshot = build_catalog({connection.id: connection}, {connection.id: parse_observation(options)})
+    catalog_store.save_snapshot(snapshot, environ)
     entry = snapshot.entries[0]
     config_service = ConfigurationService(store)
     revision = config_service.propose(
@@ -151,11 +163,19 @@ def test_provisioning_stage_breakdown_against_the_fake_engine(tmp_path, monkeypa
     store, channel, service, adapter, timings = _setup(tmp_path, monkeypatch)
 
     wall_start = time.perf_counter()
-    outcome = service.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", "req-1")
-    wall_total = time.perf_counter() - wall_start
+    try:
+        outcome = service.delegate(channel, "Title", "Brief", "backend-dev", "Acceptance", "req-1")
+        wall_total = time.perf_counter() - wall_start
+    finally:
+        for attempt_id in list(adapter._managers):
+            adapter.terminate_owned(attempt_id)
 
     assert outcome.status == "ready"
-    adapter.terminate_owned(outcome.attempt_id)  # no leaked fake-engine process/threads past this test
+    assert not adapter._managers
+    with store.connection() as db:
+        connection_id = db.execute("SELECT route_connection_id FROM configuration_revisions WHERE task_id=?",
+                                   (channel.task_id,)).fetchone()["route_connection_id"]
+    assert capacity.count_active(store, connection_id) == 0
 
     report_lines = ["provisioning breakdown (fake engine, one delegate() call):"]
     for key in ("_step_workspace", "_step_channel", "_step_config_snapshot", "_step_context_snapshot", "_step_engine_session",

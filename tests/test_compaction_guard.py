@@ -11,6 +11,7 @@ from cortex_runtime.portable.identity import SourceEvent
 from cortex_runtime.recovery.compaction_guard import (
     MAX_COMPACTIONS_PER_WINDOW,
     MIN_CONSECUTIVE_LOW_RECOVERY,
+    UNMEASURED_BASIS,
     evaluate_compaction,
 )
 from cortex_runtime.store import Store
@@ -100,3 +101,44 @@ def test_every_attempt_is_recorded_even_when_blocked(tmp_path):
             "SELECT COUNT(*) FROM compaction_recovery_events WHERE engine_session_ref='es_recorded'"
         ).fetchone()[0]
     assert count == MAX_COMPACTIONS_PER_WINDOW + 2
+
+
+def test_unmeasured_compactions_never_block_as_low_recovery(tmp_path):
+    """No engine-reported pre-compaction size is an absent signal, not a
+    zero recovery: repeated unmeasured attempts stay ok until the
+    frequency bound, and only that bound stops them."""
+    store, task_id = _task(tmp_path)
+    results = [
+        evaluate_compaction(
+            store, task_id=task_id, engine_session_ref="es_unmeasured", generation_id=None,
+            before_tokens=0, before_basis=UNMEASURED_BASIS, after_tokens=45_000, after_basis="estimated",
+            mandatory_tokens_after=45_000, usable_window_tokens=200_000,
+        )
+        for _ in range(MAX_COMPACTIONS_PER_WINDOW + 1)
+    ]
+    assert [r["status"] for r in results[:MAX_COMPACTIONS_PER_WINDOW]] == ["ok"] * MAX_COMPACTIONS_PER_WINDOW
+    assert all(r["recovered_tokens"] == 0 for r in results)
+    assert results[-1]["reason"] == "compaction_frequency_exceeded"
+    with store.connection() as db:
+        bases = {row[0] for row in db.execute(
+            "SELECT before_basis FROM compaction_recovery_events WHERE engine_session_ref='es_unmeasured'")}
+    assert bases == {UNMEASURED_BASIS}
+
+
+def test_unmeasured_attempts_are_not_part_of_a_low_recovery_streak(tmp_path):
+    store, task_id = _task(tmp_path)
+
+    def attempt(basis, before):
+        return evaluate_compaction(
+            store, task_id=task_id, engine_session_ref="es_gap", generation_id=None,
+            before_tokens=before, before_basis=basis, after_tokens=9_500, after_basis="estimated",
+            mandatory_tokens_after=3_000, usable_window_tokens=28_800,
+        )
+
+    attempt(UNMEASURED_BASIS, 0)
+    attempt(UNMEASURED_BASIS, 0)
+    assert attempt("engine_reported", 10_000)["status"] == "ok"
+    assert attempt("engine_reported", 10_000)["status"] == "ok"
+    blocked = attempt("engine_reported", 10_000)
+    assert blocked["status"] == "blocked"
+    assert blocked["reason"] == "consecutive_low_recovery"

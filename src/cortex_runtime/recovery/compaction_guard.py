@@ -29,7 +29,11 @@ retry loop -- task card line 43 / lead decision 4):
    :data:`MIN_RECOVERY_RATIO` of the pre-compaction size (using exact
    usage-derived before/after figures when available, the shared estimator
    otherwise -- see :mod:`recovery.token_budget`) -- compaction is running
-   but not actually freeing meaningful space.
+   but not actually freeing meaningful space. An attempt whose
+   pre-compaction size was never observed (:data:`UNMEASURED_BASIS`) has no
+   ratio at all: it is recorded as unmeasured, never counted as a low
+   recovery, and never part of a streak -- an absent signal is not evidence
+   that compaction failed.
 
 A blocked result is a terminal, explicit state (never silently retried):
 the caller surfaces the returned ``reason``/``message`` as a localized (via
@@ -45,6 +49,9 @@ MAX_COMPACTIONS_PER_WINDOW = 5
 WINDOW_SIZE = 5
 MIN_RECOVERY_RATIO = 0.15
 MIN_CONSECUTIVE_LOW_RECOVERY = 3
+# ``before_basis`` of an attempt whose pre-compaction context size no
+# source reported; its stored ratio is a placeholder, never a measurement.
+UNMEASURED_BASIS = "unmeasured"
 
 
 def _recent_events(store, engine_session_ref: str, limit: int) -> list[dict]:
@@ -73,8 +80,9 @@ def evaluate_compaction(
     ``compaction_recovery_events`` row for this attempt (whether ``ok`` or
     ``blocked``), so the next call's window/consecutive-ratio checks see it.
     """
-    recovered_tokens = max(before_tokens - after_tokens, 0)
-    recovered_ratio = (recovered_tokens / before_tokens) if before_tokens > 0 else 0.0
+    measured = before_basis != UNMEASURED_BASIS
+    recovered_tokens = max(before_tokens - after_tokens, 0) if measured else 0
+    recovered_ratio = (recovered_tokens / before_tokens) if measured and before_tokens > 0 else 0.0
 
     recent = _recent_events(store, engine_session_ref, WINDOW_SIZE)
     status, reason, message = "ok", None, None
@@ -96,9 +104,10 @@ def evaluate_compaction(
             "capsule and mandatory role/tool content immediately refill the context, so compacting "
             "again cannot help. Ask the coordinator to split the assignment or change the execution approach."
         )
-    else:
+    elif measured:
         low_recovery_streak = [recovered_ratio < MIN_RECOVERY_RATIO]
-        for event in recent[: MIN_CONSECUTIVE_LOW_RECOVERY - 1]:
+        measured_recent = [event for event in recent if event["before_basis"] != UNMEASURED_BASIS]
+        for event in measured_recent[: MIN_CONSECUTIVE_LOW_RECOVERY - 1]:
             low_recovery_streak.append(bool(event["recovered_ratio"] < MIN_RECOVERY_RATIO))
         if len(low_recovery_streak) >= MIN_CONSECUTIVE_LOW_RECOVERY and all(low_recovery_streak[:MIN_CONSECUTIVE_LOW_RECOVERY]):
             status = "blocked"

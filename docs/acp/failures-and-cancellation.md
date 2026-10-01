@@ -36,6 +36,37 @@ host-connection-level markers (`broken_pipe`, `connection_reset`,
 `writer_closed`) this codebase does not currently raise as an
 `EngineTurnFailed` kind.
 
+A worker's Cortex MCP channel is separate from its engine process. When the
+brokered Cortex MCP server has already answered `tools/list` and then exits
+nonzero on its own, `engine.broker.McpBroker.readiness` reports
+`mcp_server_crashed`. The running prompt turn is cancelled and fails as
+`cortex_mcp_connection_failed:mcp_server_crashed`. That kind classifies as
+`indeterminate`, so it is never fallback-eligible. It is recorded as
+`assignment_failed` only when the assignment has no `worker_result` or
+`worker_question`, and it never gets the same-session completion follow-up,
+which could only ask for publication through the lost tools. The runtime's
+bounded retry (`orchestration.recovery.retry_lost`) then opens a fresh attempt,
+with a fresh server, only after it confirms the old attempt is absent. An
+uncertain action receipt or the retry limit returns the node to the coordinator
+instead. A clean exit (the engine closed its own client) and the runtime's own
+release are not losses. Before this, the broker kept reporting `ready`, so a
+worker whose Cortex calls then all failed with `Transport closed` could end its
+turn and be recorded as `worker_ended_without_result`. The stdio server itself no longer
+ends on a reply it cannot encode. A non-UTF-8 file name (decoded with
+`surrogateescape`) is shown as U+FFFD. A reply that is not JSON becomes that
+request's own `-32603` error, which directs only an exact retry.
+
+An authenticated replacement relay starts a new server generation and discards
+the previous generation's readiness and tool/schema receipt. A known failure
+remains visible until a matching response to that replacement's actual
+`tools/list` proves a complete list with the required publication tools and
+object input schemas. An incomplete, malformed or paginated list fails closed
+as `mcp_tools_incomplete`; merely connecting or answering `initialize` cannot
+suppress the prompt watcher's named loss. Replies and exits from older
+generations, or replies arriving after their server's exit, cannot alter current
+readiness. A complete replacement creates fresh evidence; it does not authorize
+replaying an uncertain action or bypassing attempt reconciliation.
+
 Separately, `engine.failure_classification.route_failure(error)` decides
 whether an engine's JSON-RPC error is about the route rather than the work.
 It reads only the adapters' own structured `data` fields, never message text:

@@ -394,3 +394,26 @@ installed `plugin reload` command. This restarts its provider process, so perfor
 updates between active tasks. A plugin's `running` state alone does not certify
 MCP operations; retained startup and real gateway checks are recorded in the
 [production repair observation](evidence/paseo-2026-09-21/production-mcp-repair.md).
+
+## Model-policy installation and explicit migration
+
+The public policy/model-settings-default.json is an installation-only, schema-validated candidate. It is packaged with the runtime, but runtime routing never reads or merges it. Fresh setup creates only absent settings files with private no-replacement writes; existing, partial, legacy owner settings and saved profiles remain unchanged. The candidate is derived from retained production configuration and observed route policy, not dev/example files. Its portable coordinator preference contains engine/model/parameters, not machine-specific route, connection or account identifiers. Installation is not evidence that production was updated or a live route qualified.
+
+For an existing installation, derive a candidate from owner settings preserving explicit denies, providers, preferences and dormant policy. Run preview, review the diff/diagnostics and source/candidate digests, then apply only with explicit consent and the exact preview revision/digest. The tool verifies a private backup before replacement, verifies new bytes and attempts exact rollback on failure; rollback failure is explicit. Migrate each saved profile separately from that profile's own candidate. Do not apply a working-settings candidate to inactive profiles. Portable coordinator binding is accepted only for one exact currently selectable catalog identity and requested parameter set; unavailable or multiple matches require owner resolution, never automatic substitution.
+
+Checkout commands:
+
+    python3 -B scripts/cortex_model_policy_migrate.py preview --candidate /path/to/owner-candidate.json
+    python3 -B scripts/cortex_model_policy_migrate.py apply --candidate /path/to/owner-candidate.json --expected-revision sha256:<preview-source-digest> --candidate-sha256 <preview-candidate-digest> --i-consent
+
+Apply is a configuration mutation and requires explicit owner authorization. Saved-profile deletion is separate and revision-checked: confirmation identifies the exact profile; cancel changes nothing; deleting the selected profile clears its linkage without resetting materialized settings; deleting the last profile is permitted. Errors preserve profile/settings and require explicit reload before retry.
+
+### Routing-only assertion preview
+
+For a bounded, nonmutating check of current owner routing/default files:
+
+    python3 -B scripts/cortex_routing_preview_check.py --config-root /absolute/config/cortex
+
+This utility checks owner-private regular non-symlink files, a bounded allowlisted non-secret routing schema and coordinator/parameter shape; completes only missing fields from reviewed public installation data; asserts preservation and agreement between the migration API and real CLI preview; and verifies exact before/after bytes. It reads only routing/default files, not profiles, registry, accounts or logs. Unknown top-level routing keys refuse this narrow utility rather than being copied into a candidate; the general migration tool retains unknown owner fields and requires a purpose-specific owner candidate. Existing tier/list ordering is retained. The temporary candidate is private and deleted on exit; the output contains full hashes and assertion outcomes, not private identifiers or settings bodies. No apply is performed.
+
+The apply command above holds the owner-private `connections.lock`, creates and verifies a new 0600 backup under `.migration-backups/`, and atomically replaces routing with 0600 bytes. Defaults and saved profiles are outside a routing-only apply. Source or candidate drift requires a new preview. Automatic failure rollback verifies the original bytes; there is no public CLI action for restoring a backup after a successful migration. Such a later restore needs a separately authorized, lock-protected operation with current-source and backup-digest preconditions; do not use migration apply to bypass preservation checks. A preview does not qualify production adoption, live quota labels or an installed runtime/plugin.

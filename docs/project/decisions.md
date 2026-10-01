@@ -1,9 +1,13 @@
+## 2026-09-30 quota applicability uses exact owner settings
+
+`routing.quota_windows` maps supported engines to unique exact window-label rules with shared (`null`) or exact-model-list applicability. No model-family substring table remains in executable quota logic. Unmapped evidence conservatively applies to all models; unknown values stay unknown. Menu/automatic routing/reset lookup consume the same effective settings. Installation data preserves canonical old scoped-window behavior for the retained configured identities without granting routes or assuming provider capability. API v1/policy v2 and explicit profile snapshots carry the optional field; no runtime template merge, profile rewrite, or production adoption occurs. See [contract and migration](../configuration.md#exact-quota-window-associations).
+
 ## 2026-09-30 owner profiles snapshot full user settings; routing preferences rank within eligibility
 
 This supersedes the earlier 2026-09-30 decision “user routing profiles
 materialize into routing.json”. Owner profiles in
 `$XDG_CONFIG_HOME/cortex/routing-profiles.json` use format 2 and snapshot
-four user-level sections: the eight managed routing keys; defaults and owner
+four user-level sections: the managed routing keys (including exact quota associations); defaults and owner
 policy ceiling; MCP server usage policy; and per-connection concurrent-session
 limits. They are a management surface, not another runtime source. Activation
 validates and materializes those sections into existing backing files under
@@ -490,13 +494,7 @@ be used through the approved isolated setup; do not create test accounts, copy
 credentials, or perform isolated engine login. Check native login status
 without printing credentials before relying on either engine.
 
-The default live model remains `gpt-5.6-luna` at medium/high effort; heavy
-models remain prohibited in routine live qualification. This standing approval
-authorizes the paid probe flags with approval reference
-`owner-standing-2026-09-24`; the probe scripts still enforce both
-`--i-authorize-paid-call` and `--approval-ref`. The default automated pytest
-suite remains no-paid. General evidence rules still apply: never mark an
-unobserved check as passed.
+Historical rule (superseded and revoked): the 2026-09-24 standing paid-call approval and named route are no longer valid. Current qualification is no-paid by default; only a new explicit owner request naming an allowed mode and exact supported route can authorize a paid check. Heavy models remain prohibited in routine live qualification. The probe scripts still require both `--i-authorize-paid-call` and `--approval-ref`. Never mark an unobserved check as passed.
 
 ## 2026-09-28 review follow-ups, prompt rollback and worker hand-off
 
@@ -525,3 +523,9 @@ and [observability](../acp/observability.md).
   controller rewrite is adopted. Durable SQLite reads and current polling and
   reconciliation remain; route metrics remain diagnostic only, not automatic
   model-selection evidence.
+
+## 2026-09-30 exact model policy is owner data; installation asset is not runtime policy
+
+Following the production-derived baseline review, executable model classification and fixed model-name instruction defaults were removed. Current routing requires version-2 explicit owner settings and current catalogs. Exact engine/model identities explicitly define enabled and automatic membership, tiers and optional per-model policy. No model-name classifier, family/version table, list-position tier, seed list, or hidden installation-template overlay may fill missing settings. The public policy/model-settings-default.json is a validated install-only candidate; fresh installation writes only absent owner files, while existing settings and saved profiles require explicit digest/revision-bound preview/apply migration. The production-derived candidate retains observed policy without claiming quality validation or live qualification; portable coordinator resolution refuses ambiguous/unavailable identities. See [settings-only model policy](../configuration.md#settings-only-model-policy) and [migration](../acp/packaging-and-onboarding.md#model-policy-installation-and-explicit-migration).
+
+Saved-profile deletion is explicit, revision-checked and local: selection unlink does not reset current materialized settings, deleting the final profile is allowed, and refusal/failure preserves data.

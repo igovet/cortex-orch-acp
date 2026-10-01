@@ -120,12 +120,85 @@ def resolve_saved_route(
     """
     if not connection_id or not model:
         return SavedRouteResolution(entry=None, unresolved=True)
-    entry = next(
-        (e for e in entries if e.connection_id == connection_id and e.route.model == model), None
-    )
-    if entry is not None:
-        return SavedRouteResolution(entry=entry)
+    matches = [e for e in entries if e.connection_id == connection_id and e.route.model == model]
+    if len(matches) > 1:
+        raise _portable_error("saved_route_ambiguous", "The saved identity has multiple current routes; select an exact route.")
+    if matches:
+        return SavedRouteResolution(entry=matches[0])
     return SavedRouteResolution(entry=None, withdrawn_model=model)
+
+
+def _portable_error(code, message):
+    return PortableError(category=PortableErrorCategory.VALIDATION, code=code,
+                         remediation=message, retry_eligible=False, field="defaults.coordinator")
+
+
+def validate_portable_coordinator(value):
+    from ..connections.model import SUPPORTED_ENGINES
+    if (not isinstance(value, Mapping) or set(value) != {"engine", "model", "parameters"}
+            or value["engine"] not in SUPPORTED_ENGINES
+            or not isinstance(value["model"], str) or not value["model"].strip()
+            or not isinstance(value["parameters"], Mapping)
+            or not all(isinstance(k, str) and k and isinstance(v, str) and v
+                       for k, v in value["parameters"].items())):
+        raise _portable_error("invalid_portable_coordinator", "Use exact engine/model and a parameter string mapping.")
+    return dict(value, parameters=dict(value["parameters"]))
+
+
+
+def portable_from_defaults(values):
+    value = validate_portable_coordinator(values["coordinator"])
+    if "parameters" in values:
+        value["parameters"] = values["parameters"]
+        value = validate_portable_coordinator(value)
+    return value
+
+
+def resolve_portable_coordinator(entries, value):
+    """Bind only a unique exact, observed current identity; never mint a route."""
+    from ..catalog.evidence import Fact, ProvenanceSource
+    value = validate_portable_coordinator(value)
+    matches = [entry for entry in entries if entry.route.engine == value["engine"]
+               and entry.route.model == value["model"]
+               and entry.evidence.get(Fact.CATALOG_OBTAINED) is not None
+               and entry.evidence.get(Fact.CATALOG_OBTAINED).source == ProvenanceSource.DISCOVERY]
+    if not matches:
+        raise _portable_error("portable_coordinator_unavailable", "The configured coordinator is not currently observed/selectable.")
+    if len(matches) != 1:
+        raise _portable_error("portable_coordinator_ambiguous", "Multiple current connections/routes match; explicitly select one.")
+    entry = matches[0]
+    supported = set(entry.route.supported_parameters)
+    if any((key, val) not in supported for key, val in value["parameters"].items()):
+        raise _portable_error("unsupported_dependent_setting", "The configured coordinator parameters are not all observed on this route.")
+    return entry
+
+
+def resolve_owner_coordinator(value, environ=None):
+    """Read-only local binding, without login, engine or network discovery.
+
+    Deliberately does NOT apply the ``providers`` restriction: ``providers``
+    scopes automatic worker routing, failover and pins (see
+    ``routing.auto_route.choose``/``rank`` and the dispatch-time
+    ``route_provider_excluded`` check in ``delegation.live_adapters``), not
+    manual/portable coordinator selection. A uniquely observed, enabled,
+    non-denied coordinator outside ``providers`` must still bind here so
+    management diagnostics and picker metadata agree with the first-prompt
+    ``resolve_portable_coordinator`` binding for the same identity.
+    """
+    from ..connections import registry
+    from ..catalog import store as catalog_store
+    from ..routing import auto_route
+    records = registry.inspect_registry(environ).connections
+    entries = []
+    for record in records.values():
+        view = catalog_store.latest_connection_snapshot(record.id, environ)
+        if view is not None and record.launch_command is not None:
+            entries.extend(entry for entry in view.entries
+                           if entry.is_selectable(record.state, record.auth_mode.value))
+    rules = auto_route.load_overrides(environ=environ)
+    entries = [e for e in entries if auto_route.model_enabled(rules, e.route.engine, e.route.model)
+               and not auto_route._denied(rules, e.route.engine, e.route.model)]
+    return resolve_portable_coordinator(entries, value)
 
 
 def validate_dependent_settings(entry: CatalogEntry, parameters: Mapping[str, Any]) -> None:

@@ -378,3 +378,26 @@ different, larger surface this task does not implement.
   `session/load`'s transcript is never engine input.
 - **T023**: reconnect continuity (recognizing a new ACP session as "the same
   logical conversation" instead of a new `origin`).
+
+
+## Native queue and continuation handoff
+
+Paseo 0.10.2's inspected native composer queue is **pre-delivery host state**,
+not the source/delivery ledger above. The owner-selected workaround is native
+Edit (back to the composer), or Edit then clear text and attachments to cancel.
+It can overwrite an existing draft, trims surrounding whitespace and does not
+guarantee restoration of all attachment kinds; reload durability is only
+inferred. Keep default `steer` behavior and use Ctrl/Cmd+Enter for that queue;
+`queue` mode can explicitly interrupt work. See
+[steering and native Edit limits](steering-and-questions.md#owner-selected-native-edit-workaround).
+
+Normal prompts arriving during a background continuation wait in a bounded,
+session-owned FIFO until that controller exits. They retain their original
+text/content blocks/`_meta` and use normal source capture only when admitted:
+there is no successful acknowledgement or durable-source claim while waiting.
+Explicit cancellation returns cancelled for waiting requests before capture;
+disconnect does not auto-dispatch them. Once captured, sources are immutable.
+Config-channel steering remains capture-before-ack, keyed by its original
+session/message identity, including when a lost acknowledgement is replayed.
+Handoff never replays `session/load`, synthesizes history, or rolls back a
+source that a coordinator or worker already saw.

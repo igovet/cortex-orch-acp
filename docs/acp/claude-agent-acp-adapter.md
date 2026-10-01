@@ -167,8 +167,10 @@ the first `session/prompt`: a no-model-call, real `session/new` diagnostic on
 therefore records the actual relay's connection and successful `tools/list`,
 or its child PID and exit status if it closes first. A premature close during
 the prompt cancels that turn and reports `cortex_mcp_connection_failed` with
-a bounded reason. An absent pre-prompt connection never counts as failure or
-success. The relay token now has a fixed leading letter because an unprefixed
+a bounded reason. A server that already answered `tools/list` and later exits
+nonzero on its own is reported the same way as `mcp_server_crashed` (see
+[failures and cancellation](failures-and-cancellation.md)). An absent
+pre-prompt connection never counts as failure or success. The relay token now has a fixed leading letter because an unprefixed
 URL-safe token could begin with `-` and be parsed as an option by the
 installed Python `argparse` relay launcher. This explains a reproducible
 no-paid startup-close regression; the transient live failure's discarded

@@ -2235,7 +2235,11 @@ class OrchestratingRuntime:
             if usage and usage.get("tokens") is not None:
                 before_tokens, before_basis = usage["tokens"], usage.get("basis", token_budget.ENGINE_REPORTED_BASIS)
             else:
-                before_tokens, before_basis = token_budget.estimate_tokens(total_capsule_bytes), token_budget.ESTIMATED_BASIS
+                # No engine-reported context fill from before this
+                # compaction. The capsule size is not the pre-compaction
+                # context size (it is part of the mandatory "after"), so a
+                # ratio from it would always read as no recovery.
+                before_tokens, before_basis = 0, compaction_guard.UNMEASURED_BASIS
             usable_window = (
                 int(decision.context_window_tokens * token_budget.SAFETY_MARGIN_FRACTION)
                 if decision.context_window_basis != token_budget.ESTIMATED_BASIS else None

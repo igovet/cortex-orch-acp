@@ -115,6 +115,12 @@ def _register_connection(tmp_path, engine_dir, *, name, model, config_options=No
         key_kind="anthropic_api_key", api_key_reader=lambda: secret_file.read_bytes(),
         launch_command=fake_launch_command(scenario_path),
     )
+    from cortex_runtime.configuration import management
+    from model_policy_fixtures import routing_fixture
+    revision = management.read_routing()["sources"][-1]["revision"]
+    management.update_routing("user", revision, routing_fixture({
+        "enabled": {"claude-agent-acp": [model]},
+        "models": {"claude-agent-acp": {"auto": [model], "tiers": {model: "deep"}}}}))
     pinned = setup.pin_route(connection_id=conn["connection_id"], model=model)
     return conn, pinned
 

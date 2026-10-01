@@ -263,6 +263,11 @@ export function sanitizeSurface(surface: ConfigReadSurface, raw: unknown, scope:
   const result = { ...record(raw) };
   displayField(result, "path", scope);
   displayField(result, "project_root", scope);
+  if (surface === "user_defaults" && result.coordinator_resolution !== undefined) {
+    const resolution = { ...record(result.coordinator_resolution) };
+    if (resolution.error !== undefined) resolution.error = convertError(resolution.error, scope);
+    result.coordinator_resolution = resolution;
+  }
   if (surface === "routing" && Array.isArray(result.sources)) {
     result.sources = result.sources.map((item) => {
       const source = { ...record(item) };

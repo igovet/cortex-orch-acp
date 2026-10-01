@@ -100,7 +100,13 @@ on any of: too many compactions within a recent window, a fresh
 generation's mandatory content already exceeding the usable budget right
 after compaction (immediate refill; skipped when the route's real window is
 unknown), or several consecutive attempts each
-recovering less than a minimum ratio of space. A blocked result is
+recovering less than a minimum ratio of space. The pre-compaction size is
+the context fill (`usage_update.used`) the engine last reported before the
+compaction signal, kept in memory by the engine session adapter. When no
+such report exists (none arrived, or the Cortex process restarted), the
+attempt is recorded with `before_basis` `unmeasured`: it has no ratio, never
+counts as low recovery and never joins a streak, so only the frequency and
+immediate-refill checks apply to it. A blocked result is
 localized via `acp.messages` (`compaction_blocked`) — the same mechanism
 `budget_overflow`/`summarizer_fallback` use for the other two explicit,
 never-silent runtime lines this task adds.

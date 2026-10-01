@@ -22,7 +22,7 @@ Surfaces (:data:`SURFACES`):
 - ``routing`` -- the precedence of ``routing.auto_route.load_overrides``
   (project ``.cortex/routing.json``, then ``$CORTEX_ROUTING``, then the user
   ``routing.json``). Reads report every source, the effective one and its
-  rules; writes replace the eight supported keys of the user or project
+  rules; writes replace the supported keys of the user or project
   file, validated by ``auto_route._validate``. ``$CORTEX_ROUTING`` is
   read-only. ``models`` holds the owner's per-engine automatic-routing
   selection, model tiers and model policy (``routing.model_policy``).
@@ -116,7 +116,7 @@ READ_ONLY_SURFACES = (ROUTE_CATALOG,)
 ABSENT = "absent"
 OPENCODE = "opencode"
 
-USER_DEFAULT_KEYS = ("route_id", "route_connection_id", "route_model", "parameters", "language")
+USER_DEFAULT_KEYS = ("coordinator", "route_id", "route_connection_id", "route_model", "parameters", "language")
 ROUTE_DEFAULT_KEYS = ("route_id", "route_connection_id", "route_model")
 LANGUAGES = ("en", "ru")
 CEILING_KEYS = (
@@ -125,7 +125,7 @@ CEILING_KEYS = (
 )
 FALLBACK_KEYS = ("allowed_target_routes", "allowed_failure_classes", "budget", "data_recipient_consent")
 LIMIT_KEYS = ("attempts", "calls", "tokens", "concurrency")
-ROUTING_KEYS = ("pin", "deny", "enabled", "auto_allow", "tiers", "providers", "engine_affinity", "models")
+ROUTING_KEYS = ("model_policy_version", "pin", "deny", "enabled", "auto_allow", "tiers", "providers", "engine_affinity", "models", "quota_windows")
 ROUTING_TARGETS = ("project", "user")
 MCP_SERVER_KEYS = (
     "command", "args", "env", "enabled", "allowed_tools", "read_only_tools", "coordinator_tools",
@@ -489,7 +489,16 @@ def read_user_defaults(environ: Mapping[str, str] | None = None) -> dict[str, ob
     """``defaults.json`` as the runtime reads it; creates nothing."""
     env = _env(environ)
     path = _user_defaults_path(env)
-    return _user_defaults_view(path, registry.read_owner_file(path))
+    view = _user_defaults_view(path, registry.read_owner_file(path))
+    value = view["defaults"].get("coordinator")
+    if value is not None:
+        from .resolution import portable_from_defaults, resolve_owner_coordinator
+        try:
+            entry = resolve_owner_coordinator(portable_from_defaults(view["defaults"]), env)
+            view["coordinator_resolution"] = dict(state="bound", route_id=entry.route.id, connection_id=entry.connection_id)
+        except PortableError as error:
+            view["coordinator_resolution"] = dict(state="unavailable", error=error_payload(error))
+    return view
 
 
 def _validate_default_patch(patch, errors: _Errors) -> dict:
@@ -504,6 +513,12 @@ def _validate_default_patch(patch, errors: _Errors) -> dict:
             errors.add(field, "unsupported_setting", f"is not an editable default; use {', '.join(USER_DEFAULT_KEYS)}")
         elif value is None:
             continue
+        elif key == "coordinator":
+            from .resolution import validate_portable_coordinator
+            try:
+                validate_portable_coordinator(value)
+            except PortableError as error:
+                errors.add(field, error.code, error.remediation)
         elif key == "route_id" and not (isinstance(value, str) and _ROUTE_ID.fullmatch(value)):
             errors.add(field, "invalid_value", "must be an observed route id (xr_<hex>)")
         elif key == "route_connection_id" and not (isinstance(value, str) and _CONNECTION_ID.fullmatch(value)):
@@ -556,6 +571,9 @@ def update_user_defaults(expected_revision, *, defaults=None, ceiling=_KEEP,
                 merged.pop(key, None)
             else:
                 merged[key] = value
+        if merged.get("coordinator") is not None and any(merged.get(k) is not None for k in ROUTE_DEFAULT_KEYS):
+            errors.add("defaults.coordinator", "route_conflict", "remove the bound route before setting a portable coordinator")
+            errors.raise_if_any()
         if any(key in patch for key in ROUTE_DEFAULT_KEYS):
             present = [key for key in ROUTE_DEFAULT_KEYS if merged.get(key) is not None]
             if present and len(present) != len(ROUTE_DEFAULT_KEYS):
@@ -688,6 +706,9 @@ def _routing_file_view(source: str, path: Path) -> dict[str, object]:
     try:
         document = json.loads(data.decode("utf-8"))
         auto_route._validate(document)
+    except PortableError as error:
+        view.update(valid=False, error=error_payload(error))
+        return view
     except (UnicodeDecodeError, ValueError) as error:
         view.update(valid=False, error=dict(code="invalid_routing_overrides", message=str(error)))
         return view
@@ -697,18 +718,16 @@ def _routing_file_view(source: str, path: Path) -> dict[str, object]:
 
 
 def _routing_builtin() -> dict[str, object]:
-    from ..routing.defaults import DEFAULT_DENY
-
     return dict(
         supported_engines=list(SUPPORTED_ENGINES),
         optional_engines=list(OPTIONAL_ENGINES),
-        default_auto_deny_engines=sorted(getattr(auto_route, "DEFAULT_AUTO_DENY_ENGINES", ())),
-        default_auto_deny_families=sorted(auto_route.DEFAULT_AUTO_DENY_FAMILIES),
+        model_policy_version=2, default_auto_deny_engines=[],
+        default_auto_deny_families=[],
         tiers=list(auto_route.TIERS), efforts=list(auto_route.EFFORT_ORDER),
         work_kinds=list(model_policy.WORK_KINDS), work_kind_labels=dict(model_policy.WORK_KIND_LABELS),
         work_kind_roles={kind: sorted(role for role, role_kind in auto_route.ROLE_WORK_KINDS.items()
                                       if role_kind == kind) for kind in model_policy.WORK_KINDS},
-        builtin_affinity=dict(auto_route.WORK_KIND_ENGINES), default_user_deny=list(DEFAULT_DENY),
+        builtin_affinity=dict(auto_route.WORK_KIND_ENGINES), default_user_deny=[],
         selection_modes=list(model_policy.SELECTION_MODES), tier_sources=list(model_policy.TIER_SOURCES),
         policy_attributes=list(model_policy.POLICY_ATTRIBUTES), policy_efforts=list(model_policy.POLICY_EFFORTS),
         max_request_names=model_policy.MAX_REQUEST_NAMES,
@@ -724,8 +743,8 @@ def read_routing(project_root: str | None = None, environ: Mapping[str, str] | N
     effective = next((view for (_, path), view in zip(pairs, views) if path.is_file()), None)
     return dict(
         surface="routing", project_root=project_root, precedence=[view["source"] for view in views],
-        sources=views, effective_source=effective["source"] if effective is not None else "builtin",
-        effective_valid=effective is None or bool(effective.get("valid")),
+        sources=views, effective_source=effective["source"] if effective is not None else "missing",
+        effective_valid=effective is not None and bool(effective.get("valid")),
         effective_rules={} if effective is None else effective.get("rules"),
         builtin=_routing_builtin(),
     )
@@ -736,8 +755,8 @@ def _opencode_model(model: str) -> bool:
     return bool(slash and provider and name)
 
 
-def validate_routing_rules(rules) -> dict[str, object]:
-    """The eight supported keys, checked strictly (every problem at once) and
+def validate_routing_rules(rules, *, require_policy=True) -> dict[str, object]:
+    """The supported keys, checked strictly (every problem at once) and
     then by the loader itself (``auto_route._validate``).
 
     Beyond the loader: a pin names a supported engine and an effort from
@@ -745,8 +764,7 @@ def validate_routing_rules(rules) -> dict[str, object]:
     ``/`` starts with an engine id; and an OpenCode pin or ``auto_allow``
     names the exact ``opencode/<provider>/<model>`` route -- OpenCode model
     ids contain a ``/``, so a bare id would be read as a foreign engine
-    prefix, and a family token would lift OpenCode's automatic-routing
-    exclusion for more than the route the owner chose.
+    prefix, and a selector must use an exact identity, not an inferred family.
 
     ``models`` (``routing.model_policy.validate_models``) maps a supported
     engine to ``auto`` (its automatic-routing selection), ``tiers`` and
@@ -779,7 +797,7 @@ def validate_routing_rules(rules) -> dict[str, object]:
                     errors.add(field, "invalid_pin", f"must be engine/model[:effort] with engine one of {', '.join(engines)}")
                 elif engine == OPENCODE and not _opencode_model(model):
                     errors.add(field, "opencode_model_not_exact",
-                               "an OpenCode pin names the exact provider/model id, e.g. opencode/anthropic/claude-sonnet-4-5")
+                               "an OpenCode pin names the exact provider/model id, e.g. opencode/provider/model")
                 if colon and effort not in auto_route.EFFORT_ORDER:
                     errors.add(field, "invalid_effort", f"effort must be one of {', '.join(auto_route.EFFORT_ORDER)}")
     for key in ("deny", "auto_allow"):
@@ -793,12 +811,12 @@ def validate_routing_rules(rules) -> dict[str, object]:
         for token in tokens:
             prefix, slash, rest = token.partition("/")
             if "*" in token:
-                if key == "deny" and slash and prefix in engines and rest == auto_route.ENGINE_WILDCARD:
+                if slash and prefix in engines and rest == auto_route.ENGINE_WILDCARD:
                     continue
                 errors.add(f"rules.{key}", "unsupported_wildcard",
                            f"{token!r}: the only wildcard is <engine>/* in deny, which disables that whole engine"
                            if key == "deny" else
-                           f"{token!r}: auto_allow names an exact model or family, never a wildcard")
+                           f"{token!r}: only exact models or engine/* selectors are supported")
                 continue
             if not slash:
                 continue
@@ -850,7 +868,7 @@ def validate_routing_rules(rules) -> dict[str, object]:
                     errors.add(field, "invalid_type", "must be an array of unique exact model ids without spaces")
                 elif engine == OPENCODE and not all(_opencode_model(m) for m in models):
                     errors.add(field, "opencode_model_not_exact",
-                               "an OpenCode model is its exact provider/model id, e.g. anthropic/claude-sonnet-4-5")
+                               "an OpenCode model is its exact provider/model id, e.g. provider/model")
     if "models" in rules:
         for where, code, message in model_policy.validate_models(
                 rules["models"], engines=engines, work_kinds=tuple(auto_route.WORK_KIND_ENGINES),
@@ -858,10 +876,16 @@ def validate_routing_rules(rules) -> dict[str, object]:
                 exact_model=lambda engine, model: engine != OPENCODE or _opencode_model(model),
                 prefix="rules.models"):
             errors.add(where, code, message)
+    if "quota_windows" in rules:
+        from ..connections import quota
+        try:
+            quota.validate_quota_windows(rules["quota_windows"])
+        except quota.QuotaValidationError as error:
+            errors.add(f"rules.{error.field}", "invalid_quota_windows", str(error))
     errors.raise_if_any()
     document = {key: rules[key] for key in ROUTING_KEYS if key in rules}
     try:
-        auto_route._validate(document)
+        auto_route._validate(document, require_policy=require_policy)
     except ValueError as error:
         raise ConfigValidationError([dict(field="rules", code="invalid_routing_overrides", message=str(error))]) from None
     return document
@@ -885,7 +909,7 @@ def _project_routing_path(project_root) -> Path:
 
 def update_routing(target: str, expected_revision, rules, *, project_root: str | None = None,
                    environ: Mapping[str, str] | None = None) -> dict[str, object]:
-    """Replace the eight supported keys of the ``user`` or ``project`` routing
+    """Replace the supported keys of the ``user`` or ``project`` routing
     file with ``rules`` (an omitted key is removed); other keys in the file
     are kept. The result's ``shadowed_by`` names the source that still wins
     when the written file is not the effective one."""
@@ -928,18 +952,12 @@ def _catalog_entries(record, environ) -> tuple[tuple, str | None]:
     snapshot was observed (``None`` for the seed), without the selector's
     live connection revalidation, which may rewrite the registry."""
     from ..acp.config_options import presented_entries
-    from ..catalog import discovery as catalog_discovery
     from ..catalog import store as catalog_store
 
     view = catalog_store.latest_connection_snapshot(record.id, environ)
     if view is not None:
         return presented_entries(view.entries), view.created_at
-    observation = catalog_discovery.seed_observation(record.engine)
-    if observation is None:
-        return (), None
-    entries = catalog_discovery.build_catalog(
-        {record.id: record}, {record.id: observation}, seeded_connection_ids=frozenset({record.id})).entries
-    return presented_entries(entries), None
+    return (), None
 
 
 #: Per-connection bound of one prompt-free catalog refresh; connections are
@@ -1033,7 +1051,6 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
         deny_tokens = _token_matches(deny, engine, model, wildcard=True)
         enabled = auto_route.model_enabled(rules, engine, model)
         allow_tokens = _token_matches(rules.get("auto_allow"), engine, model, wildcard=False)
-        builtin_excluded = auto_route._default_auto_denied({}, entry)
         exclusion = auto_route._auto_exclusion(rules, entry)
         candidate_policy = policies.get(entry.route.id)
         policy = candidate_policy or model_policy.policy_for(engine, model, rules)
@@ -1069,8 +1086,7 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
             selectable=selectable, in_selector=selectable and not deny_tokens and enabled,
             disabled=bool(deny_tokens) or not enabled, deny_tokens=deny_tokens, enabled=enabled,
             engine_disabled=auto_route.engine_wildcard(engine) in deny,
-            default_auto_excluded=(None if not builtin_excluded else
-                                   "optional_engine" if engine in auto_route.DEFAULT_AUTO_DENY_ENGINES else "family"),
+            default_auto_excluded=None,
             auto_allow_tokens=allow_tokens, automatic=automatic, superseded_by=superseded.get(entry.route.id),
             matches={source: dict(deny=_token_matches(values.get("deny"), engine, model, wildcard=True),
                                   auto_allow=_token_matches(values.get("auto_allow"), engine, model, wildcard=False))
@@ -1080,21 +1096,21 @@ def read_route_catalog(project_root: str | None = None, environ: Mapping[str, st
     for engine in SUPPORTED_ENGINES:
         token = auto_route.engine_wildcard(engine)
         config = model_policy.engine_config(rules, engine)
-        selected = list(config.get("auto") or ()) if "auto" in config else None
+        selected = list(config.get("auto") or ())
         offered_models = {entry.route.model for entry, record in pairs if record.engine == engine}
         enabled_models = auto_route.enabled_models(rules, engine)
         engines.append(dict(
             engine=engine, optional=engine in OPTIONAL_ENGINES,
-            selection="builtin" if selected is None else "listed", selected_models=selected,
+            selection="listed", selected_models=selected,
             unmatched_selected=[model for model in selected or () if model not in offered_models],
             enabled_models=None if enabled_models is None else list(enabled_models),
-            enabled_default=engine not in auto_route.DEFAULT_DISABLED_ENGINES,
+            enabled_default=False,
             unmatched_enabled=[model for model in enabled_models or () if model not in offered_models],
             connections=[dict(id=record.id, name=record.name, state=record.state.value, qualified=record.qualified,
                               catalog_observed_at=observed_at.get(record.id))
                          for record in records if record.engine == engine],
             disabled=token in deny, automatic=providers is None or engine in providers,
-            default_auto_excluded=engine in auto_route.DEFAULT_AUTO_DENY_ENGINES,
+            default_auto_excluded=False,
             route_count=sum(1 for _, record in pairs if record.engine == engine),
             matches={source: dict(disabled=token in (values.get("deny") or ()),
                                   automatic=values.get("providers") is None or engine in values["providers"])
@@ -1604,6 +1620,9 @@ def execute(request, *, environ: Mapping[str, str] | None = None) -> dict[str, o
         result = _dispatch(request, _env(environ))
     except PortableError as error:
         return dict(api_version=API_VERSION, ok=False, error=error_payload(error))
+    except OSError:
+        return dict(api_version=API_VERSION, ok=False, error=dict(category="validation", code="storage_error",
+                    message="Owner configuration storage refused the operation.", field=None, retry_eligible=False))
     except StoreError as error:
         code = error.args[0] if error.args and isinstance(error.args[0], str) else "storage_error"
         return dict(api_version=API_VERSION, ok=False, error=dict(

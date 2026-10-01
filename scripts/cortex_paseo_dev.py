@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import select
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 
@@ -126,6 +128,13 @@ def _live_singleton_owner(user_data_dir: Path) -> int | None:
 
 
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == 'binding':
+        parser = argparse.ArgumentParser(description='Read-only dev qualification binding; never start or mutate an agent.')
+        parser.add_argument('--agent', required=True, help='exact full owned UUID, not a prefix or title')
+        parser.add_argument('--workspace', required=True, help='exact owned workspace id')
+        parser.add_argument('--project', required=True, help='absolute disposable project outside this checkout')
+        parser.add_argument('--timeout', type=int, default=15, help='total seconds (1-30)')
+        return _run_binding(parser.parse_args(argv[1:]))
     # Check if this is a gui subcommand invocation
     if argv and argv[0] == "gui":
         parser = argparse.ArgumentParser(description=__doc__, add_help=True)
@@ -305,6 +314,136 @@ def _run_cli(args) -> int:
     # Pass this worktree root explicitly to the isolated daemon for directory plugins.
     env["CORTEX_PASEO_SOURCE_ROOT"] = str(Path(__file__).resolve().parent.parent)
     return subprocess.run([str(paseo), "--home", str(home), *command], env=env, check=False).returncode
+
+
+def _private_json(path: Path) -> dict:
+    info = path.lstat()
+    # Paseo writes paseo.pid under the user's umask (e.g. 0664); privacy comes from
+    # the 0700 home checked by the caller, so refuse only world-writable files.
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o002 or info.st_size > 4096):
+        raise ValueError('binding_endpoint_refused')
+    def identity(value):
+        return tuple(getattr(value, key) for key in ('st_dev', 'st_ino', 'st_mode', 'st_uid',
+                                                    'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns'))
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(fd)
+        if identity(opened) != identity(info):
+            raise ValueError('binding_endpoint_refused')
+        raw = os.read(fd, 4097)
+        if (identity(os.fstat(fd)) != identity(opened) or identity(path.lstat()) != identity(opened)
+                or len(raw) > 4096):
+            raise ValueError('binding_endpoint_refused')
+    finally:
+        os.close(fd)
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('binding_endpoint_refused')
+            result[key] = value
+        return result
+    result = json.loads(raw, object_pairs_hook=unique)
+    if not isinstance(result, dict):
+        raise ValueError('binding_endpoint_refused')
+    return result
+
+
+def _binding_endpoint(home: Path) -> tuple[str, str]:
+    # Only endpoint/PID provenance, never credentials, config, registry or logs.
+    # Require both homes' metadata so a copied production endpoint fails closed.
+    production = Path.home() / '.paseo'
+    for directory in (home, production):
+        if str(directory.resolve(strict=True)) != str(directory) or not directory.is_dir():
+            raise ValueError('binding_endpoint_refused')
+        info = directory.stat()
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            raise ValueError('binding_endpoint_refused')
+    dev = _private_json(home / 'paseo.pid')
+    prod = _private_json(production / 'paseo.pid')
+    for metadata in (dev, prod):
+        if (metadata.get('uid') != os.getuid() or metadata.get('hostname') != socket.gethostname()
+                or type(metadata.get('pid')) is not int or metadata['pid'] < 1
+                or any(not isinstance(metadata.get(key), str) or not metadata[key]
+                       for key in ('listen', 'startedAt', 'serverId'))):
+            raise ValueError('binding_endpoint_refused')
+    listen = dev.get('listen')
+    match = re.fullmatch(r'127\.0\.0\.1:([0-9]{1,5})', listen or '')
+    if (match is None or not 1 <= int(match[1]) <= 65535
+            or any(dev.get(k) == prod.get(k) for k in ('listen', 'pid', 'serverId'))):
+        raise ValueError('binding_endpoint_refused')
+    # Heartbeats may touch mtime, so fence the retained identity, not the inode.
+    identity = {k: dev.get(k) for k in ('listen', 'pid', 'startedAt', 'serverId', 'uid', 'hostname')}
+    return 'ws://' + listen + '/ws', hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def _run_binding(args) -> int:
+    process = None
+    try:
+        root = Path(__file__).resolve().parents[1]
+        home = Path.home() / '.paseo-dev'
+        project = Path(args.project)
+        if (not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', args.agent)
+                or not re.fullmatch(r'[A-Za-z0-9_-]{1,256}', args.workspace)
+                or not project.is_absolute() or str(project.resolve(strict=True)) != str(project)
+                or not project.is_dir() or not 1 <= args.timeout <= 30
+                or any(project == p or project.is_relative_to(p) or p.is_relative_to(project)
+                       for p in (root, home, Path.home() / '.paseo'))):
+            raise ValueError('binding_invalid_input')
+        url, endpoint_digest = _binding_endpoint(home)
+        env = isolated_environment(home)
+        for key in list(env):
+            if key.startswith('PASEO_'):
+                del env[key]
+        env['PYTHONDONTWRITEBYTECODE'] = '1'
+        argv = ['node', '--experimental-strip-types', str(root / 'integrations/paseo/server/qualification-binding.ts'),
+                url, args.agent, args.workspace, str(project), str(args.timeout), sys.executable, str(root)]
+        process = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+        # Bounded pipe read: do not capture an unlimited downstream body.
+        import time
+        deadline = time.monotonic() + args.timeout
+        output = bytearray()
+        assert process.stdout is not None
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError('binding_timeout')
+            ready, _, _ = select.select([process.stdout], [], [], remaining)
+            if not ready:
+                raise ValueError('binding_timeout')
+            chunk = os.read(process.stdout.fileno(), 4096)
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > 8192:
+                raise ValueError('binding_output_overflow')
+        status = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+        if status != 0:
+            try:
+                failure = json.loads(output)
+            except (ValueError, UnicodeDecodeError):
+                failure = {}
+            code = failure.get('error') if isinstance(failure, dict) else None
+            if code in {'binding_endpoint_refused', 'binding_endpoint_drift', 'binding_host_refused',
+                        'binding_host_drift', 'binding_storage_refused', 'binding_storage_drift',
+                        'binding_invalid_input', 'binding_timeout', 'binding_anonymous_connection_refused',
+                        'binding_anonymous_host_or_storage_refused'}:
+                raise ValueError(code)
+            raise ValueError('binding_host_or_storage_refused')
+        if _binding_endpoint(home) != (url, endpoint_digest):
+            raise ValueError('binding_endpoint_drift')
+        result = json.loads(output)
+        result['endpoint_sha256'] = endpoint_digest
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    except Exception as error:
+        if process is not None:
+            _terminate_process_group(process, timeout=1)
+        code = str(error) if isinstance(error, ValueError) and str(error).startswith('binding_') else 'binding_refused'
+        print(json.dumps({'available': False, 'error': code}))
+        return 1
 
 
 if __name__ == "__main__":

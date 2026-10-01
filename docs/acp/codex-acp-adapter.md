@@ -70,7 +70,8 @@ unsupported until their compatibility is verified.
 2.0.1 changes the agent mode label to `Auto review` and replaces the 1.x
 response-item and history helpers with typed reporters. Its separate,
 exact-source-checked patch preserves the manual reviewer, developer
-instructions, native-agent restrictions, explicit MCP configuration,
+instructions, native-agent restrictions, explicit MCP configuration (plus
+whole tool schemas; see [MCP bridge](#mcp-bridge)),
 per-turn permissions and custom-tool lifecycle. The renderer restores
 `_meta.contextCompaction` for ordinary ACP clients as well as AIR clients.
 The installed CLI's offline `debug models` catalog lists `gpt-6.1-sol`;
@@ -466,7 +467,41 @@ and unadvertised fields together with the complete required/optional field
 list, so one corrected retry succeeds. A failed `project_read`/`read_skill`
 keeps that value-free reason (`error`, `field`, `expected`, `correction`, never
 `received` or the body) in the worker's display history. Whether a live worker
-now reads descriptions first has not been observed yet. As additional MCP servers are configured, keep the Codex-visible
+now reads descriptions first has not been observed yet.
+
+What code mode shows of a nested tool is a TypeScript declaration Codex derives
+from the MCP `inputSchema` (Codex 0.159.1 `code-mode-protocol`
+`json_schema_types.rs`), and it loses contract text in two ways; both exist in
+0.155.1 as well. First, Codex keeps only `type`, `description`, `enum`,
+`items`, `properties`, `required`, `additionalProperties`, the combinators and
+`$ref`/`$defs`; bounds, `pattern`, `not` and `if`/`then`/`else` never reach the
+model, and a schema whose normalized JSON exceeds the server's
+`tool_input_schema_max_bytes` (default 5,000) is compacted, the first pass
+stripping every description. Live 2026-09-30 sessions received `plan_submit`
+and `result_submit` with no property descriptions, so the coordinator sent an
+explorer task `scope: []`. For codex-acp 2.0.1 the private patch sets
+`tool_input_schema_max_bytes` to 32,768 (`CODEX_MCP_TOOL_SCHEMA_MAX_BYTES`)
+on every forwarded MCP server; codex-acp 1.x has no such key, so its large
+schemas stay stripped. Second, a combinator is rendered instead of the
+object's own properties: the root `oneOf` of `result_submit` produced
+`{ [key: string]: unknown; } | { [key: string]: unknown; }` and the `allOf`
+on each `checks` item produced `Array<unknown>`. Cortex therefore expresses
+those presence rules as `if`/`then`/`else`, which Codex drops while JSON
+Schema validators and the runtime still enforce them. `tests/codex_code_mode.py`
+ports the 0.159.1 normalization, compaction and rendering;
+`tests/test_codex_code_mode_visibility.py` requires every advertised Cortex
+field and description to survive it. The port matched the installed 0.159.1
+binary's declarations exactly in a no-paid loopback-provider trace through the
+patched 2.0.1 adapter. A forwarded server's schema passes through the external
+gateway unchanged except for arguments it leaves undescribed and Cortex knows
+(`engine.mcp_bridge.EXTERNAL_ARGUMENT_DESCRIPTIONS`): codebase-memory-mcp
+0.10.8 describes none of `search_graph`'s `file_pattern` (a glob on the
+project-relative path, converted to SQL `LIKE`), `name_pattern` or
+`qn_pattern` (case-insensitive regular expressions), and a model sent a regex
+`file_pattern` that silently matched nothing. The gateway adds those three
+descriptions; a description the server supplies itself is never replaced.
+
+As additional MCP servers are configured, keep the Codex-visible
 set bounded to those required for the assignment. Cortex filters whole servers
 by role and engine, but neither filters tools within a server nor observes the
 aggregate `tools/list` count. The inventory's 64-name bound truncates only

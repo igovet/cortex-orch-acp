@@ -1515,7 +1515,23 @@ class EngineSessionManagerAdapter:
             worker_parameters[key] = effort
         revision = dict(revision, parameters=worker_parameters)
         try:
-            adapter.configure(session_id, revision)
+            confirmation = adapter.configure(session_id, revision)
+            if confirmation:
+                # Dispatch audit is intent, not proof of the native settings
+                # the engine confirmed (effort may be narrowed after opening).
+                from .events import append_event
+
+                append_event(
+                    self._store, task_id, "progress",
+                    f"worker-config:{launch['attempt_id']}:{session_id}:{confirmation}",
+                    dict(kind="worker_configuration_confirmed", attempt_id=launch["attempt_id"],
+                         engine_session_ref=session_id, config_revision_id=launch.get("config_revision"),
+                         engine=record.engine, connection_id=record.id, model=target_model,
+                         parameters={key: value for key, value in worker_parameters.items()
+                                     if key in {"thought_level", "effort", "mode"}},
+                         confirmation_evidence_ref=confirmation),
+                    "engine_configuration", assignment_ref=launch.get("assignment_ref"),
+                )
         except Exception as rejected:  # noqa: BLE001 - ConfigurationRejected,
             # EngineConfigurationPartiallyApplied, EngineConfigurationOutcomeUnknown
             # (a genuinely indeterminate wire outcome), and any other
@@ -1693,12 +1709,21 @@ class EngineSessionManagerAdapter:
 
     def _record_route_failure(self, failure, record, model, task_id, attempt_id) -> None:
         from ..connections import quota
-        from ..routing import availability
+        from ..routing import availability, auto_route
 
         reason, scope, evidence = failure
         try:
-            resets = (quota.resets_at(record, model, self._environ)
-                      if reason in (availability.QUOTA_EXHAUSTED, availability.RATE_LIMITED) else None)
+            resets = None
+            if reason in (availability.QUOTA_EXHAUSTED, availability.RATE_LIMITED):
+                try:
+                    root = (self._project_root_factory(task_id) if self._project_root_factory is not None
+                            else self._workspace_root_factory(task_id))
+                    rules = auto_route.load_overrides(root, self._environ)
+                    resets = quota.resets_at(record, model, self._environ, routing=rules)
+                except Exception:
+                    # Invalid settings cannot erase a real engine refusal.
+                    # Retain it with availability's bounded default expiry.
+                    pass
             availability.record(
                 self._store, task_id, engine=record.engine, connection_id=record.id, model=model,
                 reason=reason, scope=scope, evidence=evidence, attempt_id=attempt_id, resets_at=resets,
@@ -1718,6 +1743,27 @@ class EngineSessionManagerAdapter:
         if not role:
             return
         from ..routing import auto_route
+
+        configuration = self._dispatch_configuration(launch)
+        eligible_ids = None
+        if configuration is not None:
+            revision, profile = configuration
+            if profile.role_routes is not None:
+                role_routes = profile.allowed_routes_for(role, revision["route_id"])
+                if not role_routes:
+                    raise self._route_authorization_error("role_route_not_authorized")
+                if role_routes == {revision["route_id"]}:
+                    # An explicit coordinator-only role is ordinary profile
+                    # inheritance, not an automatic alternate selection.
+                    from ..routing import store as routing_store
+                    extras = routing_store.get_route_extras(self._store, revision["id"])
+                    launch["resolved_route_id"] = revision["route_id"]
+                    launch["resolved_connection_id"] = revision["route_connection_id"]
+                    launch["resolved_model"] = extras["route_model"]
+                    launch["route_basis"] = "profile"
+                    return
+            eligible_ids = frozenset(entry.route.id for entry in
+                                     self._automatic_route_entries(revision, profile, role))
 
         from ..orchestration.state import attempt_routing, review_provider_preference
 
@@ -1741,13 +1787,17 @@ class EngineSessionManagerAdapter:
             role, project_root, self._environ, escalate=escalate, complexity=complexity,
             unavailable=unavailable, preference=provider, model_hint=model_hint,
             model_reason=model_reason, previous_engine=previous_engine, user_request=user_request,
+            eligible_route_ids=eligible_ids,
         )
         if choice is None:
+            if configuration is not None:
+                raise self._route_authorization_error("automatic_route_identity_unavailable")
             return
         if review_reason and choice.decision is not None:
             choice.decision["cross_provider_review"] = review_reason
         launch["resolved_connection_id"] = choice.connection_id
         launch["resolved_model"] = choice.model
+        launch["resolved_route_id"] = choice.route_id
         # What authorized this route, recorded with the attempt. The task's
         # own route profile did not: absent an explicit mixed-team profile
         # it authorizes only the coordinator's route.
@@ -1757,6 +1807,43 @@ class EngineSessionManagerAdapter:
         if choice.effort:
             launch["parameters"] = dict(launch.get("parameters") or {}, effort=choice.effort)
             launch["effort_source"] = "auto_route"
+
+    @staticmethod
+    def _route_authorization_error(code):
+        from ..portable.errors import PortableError, PortableErrorCategory
+        return PortableError(category=PortableErrorCategory.AUTHORIZATION, code=code,
+                             remediation="The actual dispatch route must match one current observed identity within this task's profile/ceiling.",
+                             retry_eligible=False)
+
+    def _dispatch_configuration(self, launch, task_id=None):
+        from ..configuration import store as configuration_store
+        from ..configuration.policy import RouteProfile
+        from ..routing import store as routing_store
+        revision_id = launch.get("config_revision")
+        if not revision_id:
+            return None
+        with self._store.connection() as db:
+            row = db.execute("SELECT * FROM configuration_revisions WHERE id=?", (revision_id,)).fetchone()
+        if row is None or row["task_id"] != (task_id if task_id is not None else launch.get("task_id")):
+            raise self._route_authorization_error("dispatch_configuration_unavailable")
+        extras = routing_store.get_route_extras(self._store, revision_id)
+        return configuration_store._row_dict(row), extras["route_profile"] if extras else RouteProfile()
+
+    def _automatic_route_entries(self, revision, profile, role):
+        from ..connections import registry as connection_registry
+        from ..routing import auto_route, authorization
+        connections = connection_registry.read_registry(self._environ).connections
+        ceiling = revision["ceiling_snapshot"]
+        # Only automatic routing may use the owner settings' mixed-engine
+        # candidates when no explicit task profile was supplied.
+        allowed = (authorization.allowed_routes_for_role(profile, ceiling, role, revision["route_id"])
+                   if profile.role_routes is not None else ceiling.allowed_routes)
+        return [entry for entry in auto_route._entries({}, connections, self._environ)
+                if not auto_route._is_seed(entry)
+                and (allowed is None or entry.route.id in allowed)
+                and (ceiling.allowed_connections is None or entry.connection_id in ceiling.allowed_connections)
+                and (ceiling.allowed_data_recipients is None or
+                     connections[entry.connection_id].provider in ceiling.allowed_data_recipients)]
 
     def _authorize_dispatch(self, record, task_id, launch, project_root=None) -> None:
         """T027: refuse *before* any capacity reservation/process launch
@@ -1777,18 +1864,12 @@ class EngineSessionManagerAdapter:
         config_revision = launch.get("config_revision")
         if not config_revision:
             return
-        from ..configuration import store as configuration_store
         from ..configuration.policy import RouteProfile
         from ..routing import authorization as routing_authorization
         from ..routing import store as routing_store
 
-        with self._store.connection() as db:
-            row = db.execute("SELECT * FROM configuration_revisions WHERE id=?", (config_revision,)).fetchone()
-        if row is None:
-            return
-        revision = configuration_store._row_dict(row)
+        revision, route_profile = self._dispatch_configuration(launch, task_id)
         extras = routing_store.get_route_extras(self._store, config_revision)
-        route_profile = extras["route_profile"] if extras is not None else RouteProfile(role_routes=None)
         # T027 review fix (HIGH): the real, resolved role id (e.g.
         # "reviewer") when the caller threaded one through
         # (``delegation.provisioning``'s launch, or a fallback launch --
@@ -1804,8 +1885,20 @@ class EngineSessionManagerAdapter:
         # the *original* route's profile, which would incorrectly forbid
         # the very route change fallback just authorized.
         route_override = launch.get("route_override")
+        ceiling = revision["ceiling_snapshot"]
+        if ((ceiling.allowed_connections is not None and record.id not in ceiling.allowed_connections) or
+                (ceiling.allowed_data_recipients is not None and record.provider not in ceiling.allowed_data_recipients)):
+            raise self._route_authorization_error("role_route_not_authorized")
         if route_override is None:
             candidate_route_id = launch.get("resolved_route_id") or revision["route_id"]
+            if launch.get("route_basis") in ("auto", "auto:pin", "auto:user_request"):
+                entries = self._automatic_route_entries(revision, route_profile, role)
+                matches = [entry for entry in entries if entry.connection_id == record.id
+                           and entry.route.engine == record.engine and entry.route.model == launch.get("resolved_model")]
+                if len(matches) != 1 or matches[0].route.id != launch.get("resolved_route_id"):
+                    raise self._route_authorization_error("automatic_route_identity_unavailable")
+                if route_profile.role_routes is None:
+                    route_profile = RouteProfile(role_routes={role: {matches[0].route.id}})
             routing_authorization.authorize_dispatch(
                 self._store, task_id=task_id, role=role, route_profile=route_profile,
                 coordinator_route_id=revision["route_id"], candidate_route_id=candidate_route_id,
@@ -1821,6 +1914,14 @@ class EngineSessionManagerAdapter:
         from ..routing import auto_route
 
         auto_route.refuse_if_denied(record.engine, model, project_root, self._environ)
+        if launch.get("assignment_id"):
+            from ..portable.errors import PortableError, PortableErrorCategory
+
+            rules = auto_route.load_overrides(project_root, self._environ)
+            if rules.get("providers") is not None and record.engine not in rules["providers"]:
+                raise PortableError(category=PortableErrorCategory.VALIDATION, code="route_provider_excluded",
+                                    remediation="The selected worker/reviewer engine is excluded by current settings.",
+                                    retry_eligible=False)
         # The tier effort rule is for automatic worker routing; the
         # coordinator runs at the effort chosen in the editor.
         allowed = (auto_route.allowed_efforts(record.engine, model, project_root, self._environ)
@@ -2613,6 +2714,12 @@ class EngineSessionManagerAdapter:
 
         with self._lock:
             meta = self._session_meta.get(session_ref)
+            if meta is not None and event.tool_call_ref is not None and meta.get("compaction_evidence") != event.tool_call_ref:
+                # The first signal of this compaction: the context fill the
+                # engine last reported is its pre-compaction size. Cleared
+                # so a later compaction never reuses this stale figure.
+                meta["compaction_evidence"] = event.tool_call_ref
+                meta["pre_compaction_used"] = meta.pop("context_used", None)
         if meta is None or event.tool_call_ref is None:
             return
         phase = "completed" if event.compaction_reason == "completed" else (
@@ -2646,6 +2753,34 @@ class EngineSessionManagerAdapter:
                 return
             meta["context_window"] = size
         context_window.observe(meta["connection_id"], meta.get("model"), size, self._environ)
+
+    def _observe_context_used(self, session_ref: str, used: object) -> None:
+        """Keep the context fill the engine just reported (``usage_update
+        .used``) for this session, in memory only."""
+        if not isinstance(used, int) or isinstance(used, bool) or used < 0:
+            return
+        sessions = getattr(self, "_session_meta", None)
+        if sessions is None:
+            return
+        with self._lock:
+            meta = sessions.get(session_ref)
+            if meta is not None:
+                meta["context_used"] = used
+
+    def last_usage(self, session_ref: str) -> dict | None:
+        """The context fill the engine reported for ``session_ref`` right
+        before its most recent observed compaction, or ``None`` when none
+        was reported in this process (see ``recovery.compaction_guard``)."""
+        from ..recovery import token_budget
+
+        sessions = getattr(self, "_session_meta", None)
+        if sessions is None:
+            return None
+        with self._lock:
+            used = (sessions.get(session_ref) or {}).get("pre_compaction_used")
+        if used is None:
+            return None
+        return {"tokens": used, "basis": token_budget.ENGINE_REPORTED_BASIS}
 
     def context_window(self, session_ref: str) -> int | None:
         """The real context window for ``session_ref``: what this session's
@@ -2984,6 +3119,7 @@ class EngineSessionManagerAdapter:
                             usage_values = dict(event.usage_values or {})
                         if event.display_update:
                             self._observe_context_window(session_ref, event.display_update.get("size"))
+                            self._observe_context_used(session_ref, event.display_update.get("used"))
                         # The context fill is shown like any display update.
                         if on_display_update is not None and event.display_update:
                             try:

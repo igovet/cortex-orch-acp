@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "routing": {
+    "deny": [
+      "gpt-5.5",
+      "haiku",
+      "claude-agent-acp/claude-sonnet-4-6",
+      "claude-agent-acp/claude-opus-4-6",
+      "claude-agent-acp/claude-opus-4-7",
+      "claude-agent-acp/claude-opus-4-8",
+      "claude-agent-acp/claude-opus-5[1m]",
+      "claude-agent-acp/claude-fable-5",
+      "codex-acp/gpt-5.6-luna",
+      "codex-acp/gpt-5.6-sol",
+      "codex-acp/gpt-5.6-terra",
+      "codex-acp/gpt-6-sol"
+    ],
+    "enabled": {
+      "opencode": [],
+      "claude-agent-acp": [
+        "default",
+        "opus[1m]",
+        "claude-fable-5-1[1m]",
+        "claude-sonnet-5"
+      ],
+      "codex-acp": [
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-luna"
+      ]
+    },
+    "auto_allow": [
+      "opencode/byteplus-plan/glm-5.3-flash"
+    ],
+    "providers": [
+      "claude-agent-acp",
+      "codex-acp"
+    ],
+    "models": {
+      "claude-agent-acp": {
+        "policy": {
+          "claude-fable-5-1[1m]": {
+            "preferred_for": [
+              "design"
+            ],
+            "effort_floor": null,
+            "max_effort": "high",
+            "effort_ladder": null,
+            "also_standard_for": null,
+            "request_names": [
+              "fable",
+              "фейбл",
+              "фэйбл"
+            ]
+          },
+          "claude-sonnet-5": {
+            "preferred_for": [
+              "implementation",
+              "debugging",
+              "testing",
+              "investigation",
+              "review",
+              "writing",
+              "analysis",
+              "operations"
+            ],
+            "effort_floor": null,
+            "max_effort": null,
+            "effort_ladder": null,
+            "also_standard_for": null,
+            "request_names": null
+          },
+          "opus[1m]": {
+            "preferred_for": [
+              "design",
+              "planning",
+              "implementation",
+              "debugging",
+              "review"
+            ],
+            "effort_floor": null,
+            "max_effort": null,
+            "effort_ladder": null,
+            "also_standard_for": null,
+            "request_names": null
+          },
+          "default": {
+            "effort_floor": null,
+            "max_effort": null,
+            "effort_ladder": null,
+            "also_standard_for": null,
+            "preferred_for": null,
+            "request_names": null
+          }
+        },
+        "auto": [
+          "default",
+          "opus[1m]",
+          "claude-fable-5-1[1m]",
+          "claude-sonnet-5"
+        ],
+        "tiers": {
+          "default": [
+            "deep"
+          ],
+          "opus[1m]": [
+            "deep"
+          ],
+          "claude-fable-5-1[1m]": [
+            "flagship"
+          ],
+          "claude-sonnet-5": [
+            "standard"
+          ]
+        }
+      },
+      "codex-acp": {
+        "tiers": {
+          "gpt-6.1-sol": [
+            "standard",
+            "deep"
+          ],
+          "gpt-6-astra": [
+            "flagship"
+          ],
+          "gpt-6-luna": [
+            "light"
+          ]
+        },
+        "policy": {
+          "gpt-6-astra": {
+            "preferred_for": [
+              "design"
+            ],
+            "effort_floor": null,
+            "max_effort": "high",
+            "effort_ladder": null,
+            "also_standard_for": null,
+            "request_names": [
+              "astra",
+              "астр"
+            ]
+          },
+          "gpt-6-luna": {
+            "preferred_for": [
+              "analysis",
+              "writing",
+              "implementation",
+              "testing",
+              "debugging",
+              "investigation",
+              "operations"
+            ],
+            "effort_floor": "high",
+            "max_effort": null,
+            "effort_ladder": [
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "also_standard_for": [
+              "testing"
+            ],
+            "request_names": null
+          },
+          "gpt-6.1-sol": {
+            "preferred_for": [
+              "implementation",
+              "planning",
+              "design",
+              "review",
+              "debugging",
+              "operations"
+            ],
+            "effort_floor": null,
+            "max_effort": null,
+            "effort_ladder": null,
+            "also_standard_for": null,
+            "request_names": null
+          }
+        },
+        "auto": [
+          "gpt-6.1-sol",
+          "gpt-6-astra",
+          "gpt-6-luna"
+        ]
+      },
+      "opencode": {
+        "auto": [
+          "byteplus-plan/glm-5.3-flash"
+        ],
+        "tiers": {
+          "byteplus-plan/glm-5.2": "deep",
+          "byteplus-plan/glm-5.3-flash": [
+            "light",
+            "standard"
+          ]
+        },
+        "policy": {
+          "byteplus-plan/glm-5.2": {
+            "preferred_for": []
+          },
+          "byteplus-plan/glm-5.3-flash": {
+            "preferred_for": [
+              "implementation",
+              "debugging",
+              "testing",
+              "investigation",
+              "analysis",
+              "writing"
+            ]
+          }
+        }
+      }
+    },
+    "model_policy_version": 2,
+    "quota_windows": {
+      "claude-agent-acp": [
+        {
+          "window": "seven_day_opus",
+          "models": [
+            "opus[1m]"
+          ]
+        },
+        {
+          "window": "seven_day_sonnet",
+          "models": [
+            "claude-sonnet-5"
+          ]
+        },
+        {
+          "window": "seven_day_fable",
+          "models": [
+            "claude-fable-5-1[1m]"
+          ]
+        },
+        {
+          "window": "seven_day_haiku",
+          "models": []
+        }
+      ]
+    }
+  },
+  "coordinator": {
+    "engine": "codex-acp",
+    "model": "gpt-6.1-sol",
+    "parameters": {
+      "thought_level": "high",
+      "mode": "agent"
+    }
+  }
+}

@@ -150,3 +150,20 @@ def test_route_summary_omits_unrecorded_decision_fields():
         "codex · gpt-5.6-luna (alias)"
     )
     assert route_decision_summary(None, "gpt-5.6-luna", {}) is None
+
+
+@pytest.mark.parametrize("audit_key,effort_basis", [("luna", "luna:light"), ("stretch", "stretch:light")])
+def test_old_and_neutral_policy_audits_render_without_rewriting(tmp_path, audit_key, effort_basis):
+    from copy import deepcopy
+    from cortex_runtime.routing.decision_display import route_decision_summary
+    detail = deepcopy(NEW_ROW)
+    detail["route_decision"][audit_key] = dict(status="light_tier", chosen=True)
+    detail["route_decision"]["effort_basis"] = effort_basis
+    original = deepcopy(detail)
+    store, task_id, runtime = _audited_worker(tmp_path, detail)
+    assert pipeline._recorded_route_summary(store, task_id, "assignment") == (
+        "claude · Opus 5.5 (1M) · high · deep · hint ignored:near_quota_limit · by usage · usage 42%")
+    assert route_decision_summary("claude-agent-acp", "opus[1m]", detail)
+    assert detail == original
+    audit = routing_store.list_audit_for_attempt(store, "attempt")[-1]
+    assert audit["decision_detail"] == original

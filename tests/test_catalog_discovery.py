@@ -76,11 +76,11 @@ def test_discovery_failure_for_one_connection_does_not_affect_another():
     assert any(entry.connection_id == good.id for entry in snapshot.entries)
 
 
-def test_empty_observation_yields_zero_routes_without_marking_unavailable():
+def test_empty_observation_yields_zero_routes_and_retains_unavailability():
     connection = _connection("cn_" + "a" * 12, "codex-acp", "Empty")
     observations = {connection.id: parse_observation(_load_options("empty_config_options.json"))}
     snapshot = build_catalog({connection.id: connection}, observations)
-    assert connection.id not in snapshot.unavailable
+    assert snapshot.unavailable[connection.id] == "no_models_observed"
     assert snapshot.entries == ()
 
 
@@ -202,8 +202,8 @@ def test_seeded_connection_promotes_seed_provenance_not_discovery():
     from cortex_runtime.catalog.evidence import ProvenanceSource
 
     record = _connection("cn_" + "a" * 12, "codex-acp", "Work")
-    observation = discovery.seed_observation("codex-acp")
-    assert observation is not None
+    assert discovery.seed_observation("codex-acp") is None
+    observation = parse_observation(_load_options("codex_acp_config_options.json"))
     snapshot = build_catalog(
         {record.id: record}, {record.id: observation}, seeded_connection_ids=frozenset({record.id}))
     assert snapshot.entries

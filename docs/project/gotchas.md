@@ -1,5 +1,7 @@
 # Gotchas
 
+Quota window labels are exact evidence, not model-family names. An unmapped exhausted window conservatively blocks all models until an explicit association distinguishes it. A scoped `models: []` is an intentional exclusion, not unknown usage. Older profiles without mappings remain untouched and use conservative semantics when activated; never fill them silently from current settings. See [quota fields and migration](../configuration.md#exact-quota-window-associations).
+
 Owner model preferences are rank inputs, not route grants. They only decide
 among routes already eligible for the role's tier; optional OpenCode models
 need explicit automatic-selection opt-in, and pins, deny rules, provider
@@ -25,6 +27,12 @@ Never interpret an unknown command outcome, missing publication or unknown
 engine liveness as success. Retain receipts and reservations until the exact
 outcome is observed; revocation alone does not prove process exit.
 
+Write every Cortex MCP stdio reply inside the per-request error handling, as
+strict UTF-8. One unencodable reply (a lone surrogate from a non-UTF-8 file
+name) used to end the whole server, and the engine then answered `Transport
+closed` to every later Cortex call of that session. See
+[failures and cancellation](../acp/failures-and-cancellation.md).
+
 Instruction compression may replace large evidence bodies with bounded links,
 but it must keep complete mandatory rules and record packet hashes. Executor
 reports are data, not user instructions or new system rules.
@@ -39,6 +47,15 @@ newest version is 2.0.1 (Codex CLI 0.159.1, including `gpt-6.1-sol` in its
 offline catalog). New sessions discover it; an existing session keeps its
 already running engine. claude-agent-acp 0.84.0 is already installed and
 selected. See [Codex compatibility](../acp/codex-acp-adapter.md#one-time-adapter-update-2026-09-30).
+
+Codex code mode does not show a model the MCP JSON Schema: it renders a
+TypeScript declaration from a reduced schema. Bounds, `pattern`, `not` and
+`if`/`then`/`else` vanish; a root or item-level `oneOf`/`anyOf`/`allOf` replaces
+the object's fields; and a schema over `tool_input_schema_max_bytes` (5,000 by
+default) loses every description. Put a constraint in the property
+description, express presence rules as `if`/`then`/`else`, and run
+`tests/test_codex_code_mode_visibility.py` after changing an advertised
+schema. See [MCP bridge](../acp/codex-acp-adapter.md#mcp-bridge).
 
 In `integrations/paseo`, a local sibling import must use its real `.ts`
 extension. `tsc`/esbuild remap a `.js` specifier to the sibling `.ts` file, so
@@ -188,3 +205,28 @@ guard (`opencode_cortex_mode_not_advertised`) still rejects a catalog without
 `cortex`. OpenCode 2.x keeps logins in `opencode.db` (`credential` table), not
 `auth.json`. See
 [the OpenCode adapter](../acp/opencode-adapter.md#evidence-and-limits).
+
+Model identities and policy are not inferred from names, versions, family labels or catalog order. A valid version-2 owner routing document must explicitly place every automatic identity; missing policy is a visible error. The packaged production-derived template is installation-only and never a runtime fallback. Existing owner/profile state is not overwritten; migration requires preview, explicit consent and digest-bound apply. Portable coordinator binding can be ambiguous across connections and must remain an error until the owner resolves it. See [settings-only model policy](../configuration.md#settings-only-model-policy).
+
+Deleting a selected saved profile clears only its linkage; it does not reset materialized settings. The last profile may be deleted, and stale/error results must not be retried invisibly.
+
+
+Paseo's native pre-delivery queue is not Cortex's captured steering ledger.
+With the inspected 0.10.2 host, keep default `steer`, use Ctrl/Cmd+Enter, native
+Edit, and Edit then clear text/attachments to cancel. Edit overwrites an existing
+draft, enqueue trims surrounding whitespace, exact attachment filtering remains
+unverified, and reload persistence is only inferred. `queue` send behavior
+can turn Send now/question-card input into explicit Stop-like interruption.
+Normal native drain during a Cortex background continuation now waits for
+session ownership rather than cancelling the controller. No Cortex Withdraw or
+separate editor was added; CLI cannot prove the rendered native interaction.
+See [the native queue contract](../acp/steering-and-questions.md#native-composer-queue-versus-captured-steering).
+
+The compaction guard's recovery ratio needs a real pre-compaction size. The
+capsule size is part of the mandatory post-compaction content, so using it as
+"before" made every ratio 0 and blocked the third compaction of any session
+with `consecutive_low_recovery`. Without an engine-reported `usage_update.used`
+from before the compaction, the attempt is `unmeasured` and only the frequency
+and immediate-refill checks apply. A task already blocked this way stays
+blocked; the fix applies to later compactions. See
+[the compaction-loop guard](../acp/summaries-and-budgets.md#5-compaction-loop-guard).

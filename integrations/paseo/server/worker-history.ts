@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { readWorkerHistory } from "../shared/worker-history.js";
-import { runPython } from "./python-runner.js";
+import { readWorkerHistory } from "../shared/worker-history.ts";
+import { runPython } from "./python-runner.ts";
 
 /** Helpers shared by every Python store reader: the display scrubber (credentials
  * and private absolute paths never reach the client) and token totals.

@@ -110,7 +110,7 @@ completes again. If it asks for changes, the coordinator submits a plan, and
 that new revision gets its own review and verification. See
 [orchestration](orchestration.md) for the exact eligibility rule.
 
-The installed Paseo 0.9.2 ACP bridge has no native `prompt.steer` (observed in the live implementation checks). The Cortex provider sends a message (text, and any inline
+The previously inspected Paseo 0.9.2 ACP bridge had no native `prompt.steer` (observed in the live implementation checks). The Cortex provider sends a message (text, and any inline
 image or uploaded-file content) through the bridge's concurrent configuration
 channel as `cortex_queued_message` -- an ordinary queue item, not steering --
 waits for durable capture, then acknowledges Paseo's own `steer` result for
@@ -158,3 +158,62 @@ rule in their shared generated protocol and in every ordinary, recovery and
 fallback turn. Exact quotes and explicitly requested project-artifact languages
 are preserved. This is model instruction, not automatic translation or a claim
 that arbitrary model output can be deterministically language-validated.
+
+## Native composer queue versus captured steering
+
+Read-only inspection of the installed Paseo 0.10.2 client on 2026-09-30 found a separate native composer queue with Edit and Send now, but no Cancel/Remove action. Its plugin runtime exposes no composer-write or native-queue mutation API. These are static capability observations, not rendered GUI qualification; attachment filtering during native Edit remains unverified.
+
+This native queue is not Cortex's durably captured steering ledger described above. Once Cortex acknowledges steering, its immutable source history and requirement revision already include that input, and recovery capsules include it even before reconciliation. A plugin cannot safely implement Cancel by deleting captured history or Edit by pretending that history was never received. Full per-message Cancel/Edit restoring all content to the existing host composer is not implemented. The owner-selected alternative uses native Edit and the two-step cancellation workaround below; Cortex adds no Withdraw action, separate editor or simulated native controls. CLI checks cannot qualify that rendered interaction.
+
+### Owner-selected native Edit workaround
+
+Keep Paseo's default `sendBehavior: "steer"`; this guidance does not change the
+owner's settings or drafts. While Cortex works:
+
+- **Ctrl/Cmd+Enter** puts the message in Paseo's native, pre-delivery composer
+  queue. Plain **Enter** sends durable Cortex steering immediately instead.
+- On a still-queued native item, **Edit** removes it from that queue and restores
+  it to the existing composer without sending. Edit the content and send again.
+- To cancel a still-queued native item, use **Edit**, then clear the composer
+  text **and all restored attachments**. There is no native Cancel/Remove button.
+- Save an existing draft before Edit: native Edit overwrites the draft's text
+  and attachments without confirmation. Native enqueue trims surrounding text
+  whitespace. Edit restores user attachments only as the host supports; the
+  exact `userAttachmentsOnly` filter is not verified, so do not promise all
+  attachment kinds or byte-for-byte restoration.
+- The native queue appears to be in-memory; loss on reload/restart is inferred,
+  not qualified. Do not rely on it as durable storage.
+
+Do **not** switch to `sendBehavior: "queue"` for this workflow. In inspected
+Paseo 0.10.2 code, **Send now** in that mode, and sending while a question card
+is pending, select an explicit interrupt. The host sends `session/cancel`;
+Cortex must honor it like Stop, pausing the task and cancelling unfinished
+workers. In default `steer` mode, Send now uses the durable steering path.
+
+### Continuation delivery ownership
+
+A normal new prompt/native queue drain arriving while Cortex runs a background
+continuation waits for that continuation's natural completion; it no longer sets
+the continuation's cancellation event. Waiting prompts are session-local FIFO
+requests (bounded at 64), with their original text, content blocks and metadata.
+Ownership is reserved under the session lock before the next prompt starts,
+so two controllers cannot run for that session. Ordinary foreground-in-flight
+prompts remain refused, and an existing live question waiter still receives its
+answer rather than a second turn.
+
+A waiting normal prompt has **not** yet been durably captured or acknowledged.
+When admitted it uses the unchanged normal capture/provenance path. Stop cancels
+waiting requests with a cancelled response before capture; disconnect discards
+unacknowledged requests and never starts them. Captured steering history is
+never erased. Config-channel acknowledgements still follow durable capture, and
+replaying their message identity adds no source, steering revision or turn.
+Explicit `session/cancel`, `/cortex-stop` and `/cortex-finish` retain their
+documented interruption/terminal semantics; normal queue draining cannot
+masquerade as those actions.
+
+Deterministic no-paid fixtures reproduced the former drain hazard: a normal
+prompt set the background token, moved the task to RECOVERING and cancelled its
+active worker. Regression fixtures now cover non-interrupting delivery, ordered
+handoff, captured content/provenance, pending questions and explicit Stop races.
+They establish runtime/protocol behavior, not rendered native Edit or host
+queue persistence.

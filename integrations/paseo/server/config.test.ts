@@ -149,8 +149,8 @@ try {
     await rejects(readConfig, { surface: "all", project: "/etc" });
     await rejects(readConfig, { surface: "defaults.json" });
     await rejects(updateConfig, { surface: "user_defaults", expected_revision: "absent", path: "/tmp/x.json" });
-    await rejects(updateConfig, { surface: "routing", target: "env", expected_revision: "absent", rules: {} });
-    await rejects(updateConfig, { surface: "routing", target: "user", expected_revision: "absent", rules: { unknown: 1 } });
+    await rejects(updateConfig, { surface: "routing", target: "env", expected_revision: "absent", rules: { model_policy_version: 2,} });
+    await rejects(updateConfig, { surface: "routing", target: "user", expected_revision: "absent", rules: { model_policy_version: 2, unknown: 1 } });
     await rejects(updateConfig, { surface: "user_defaults", expected_revision: "latest" });
     await rejects(updateConfig, { surface: "project_ceiling", expected_revision: "absent", ceiling: null });
     await rejects(discoverOpenCode, { binary: "/bin/sh" });
@@ -169,7 +169,7 @@ try {
     assert.equal(result.user_defaults.ok, true);
     assert.equal(result.user_defaults.result.revision, "absent");
     assert.equal(result.user_defaults.result.path, "~/.config/cortex/defaults.json");
-    assert.equal(result.routing.result.effective_source, "builtin");
+    assert.equal(result.routing.result.effective_source, "missing");
     assert.deepEqual(result.routing.result.precedence, ["user"]);
     assert.equal(result.mcp_servers.result.revision, "absent");
     assert.equal(result.connections.result.revision, "absent");
@@ -265,12 +265,12 @@ try {
   // Routing: the project file needs a workspace; writing it makes it the
   // effective source and shadows the user file; OpenCode routes must be exact.
   {
-    const noWorkspace = await call(updateConfig, { surface: "routing", target: "project", expected_revision: "absent", rules: {} }, ctx);
+    const noWorkspace = await call(updateConfig, { surface: "routing", target: "project", expected_revision: "absent", rules: { model_policy_version: 2,} }, ctx);
     assert.equal(noWorkspace.error.code, "workspace_required");
 
     const projectWrite = await call(updateConfig, {
       surface: "routing", target: "project", workspaceId: WORKSPACE, expected_revision: "absent",
-      rules: { deny: ["codex-acp/gpt-5.1"], auto_allow: ["opencode/anthropic/claude-sonnet-4-5"] },
+      rules: { model_policy_version: 2, deny: ["codex-acp/gpt-5.1"], auto_allow: ["opencode/anthropic/claude-sonnet-4-5"] },
     }, ctx);
     assert.equal(projectWrite.ok, true, JSON.stringify(projectWrite));
     assert.equal(projectWrite.result.effective_source, "project");
@@ -279,14 +279,14 @@ try {
     noLeak(projectWrite);
 
     const userWrite = await call(updateConfig, {
-      surface: "routing", target: "user", workspaceId: WORKSPACE, expected_revision: "absent", rules: { providers: ["codex-acp"] },
+      surface: "routing", target: "user", workspaceId: WORKSPACE, expected_revision: "absent", rules: { model_policy_version: 2, providers: ["codex-acp"] },
     }, ctx);
     assert.equal(userWrite.ok, true, JSON.stringify(userWrite));
     assert.equal(userWrite.result.shadowed_by, "project");
 
     const family = await call(updateConfig, {
       surface: "routing", target: "user", expected_revision: userWrite.result.sources.find((s: any) => s.source === "user").revision,
-      rules: { pin: { "*": "opencode/sonnet" } },
+      rules: { model_policy_version: 2, pin: { "*": "opencode/sonnet" } },
     }, ctx);
     assert.equal(family.ok, false);
     assert.equal(family.error.code, "invalid_configuration");
@@ -305,7 +305,7 @@ try {
     const revisions = initial.result.current_revisions;
     await rejects(updateConfig, { surface: "routing_profiles", action: "create", expected_revision: initial.result.revision, expected_revisions: revisions, name: "mix", from_current: true });
     await rejects(updateConfig, { surface: "routing_profiles", action: "create", expected_revision: initial.result.revision, name: "mix" });
-    await rejects(updateConfig, { surface: "routing_profiles", action: "update", expected_revision: initial.result.revision, name: "mix", rules: {} });
+    await rejects(updateConfig, { surface: "routing_profiles", action: "update", expected_revision: initial.result.revision, name: "mix", rules: { model_policy_version: 2,} });
     await rejects(updateConfig, { surface: "routing_profiles", action: "activate", expected_revision: initial.result.revision, expected_revisions: revisions, name: "mix", discard_modifications: false });
     const created = await call(updateConfig, { surface: "routing_profiles", action: "create", workspaceId: WORKSPACE,
       expected_revision: initial.result.revision, expected_revisions: revisions, name: "mix", description: "All configured engines" }, ctx);
@@ -361,12 +361,22 @@ try {
       expected_revision: switched.result.revision, name: "other", rename_to: "spare", description: "Spare" }, ctx);
     assert.equal(renamed.ok, true, JSON.stringify(renamed));
     assert.deepEqual(renamed.result.profiles.map((item: any) => item.name), ["mix", "spare"]);
+    const workingBeforeDelete = readFileSync(join(configHome, "cortex", "defaults.json"), "utf8");
+    const staleDelete = await call(updateConfig, { surface: "routing_profiles", action: "delete", expected_revision: initial.result.revision, name: "mix" }, ctx);
+    assert.equal(staleDelete.error.code, "revision_conflict");
+    const selectedDelete = await call(updateConfig, { surface: "routing_profiles", action: "delete", expected_revision: renamed.result.revision, name: "mix" }, ctx);
+    assert.equal(selectedDelete.ok, true, JSON.stringify(selectedDelete));
+    assert.equal(selectedDelete.result.active, null);
+    assert.equal(selectedDelete.result.applied, null);
+    assert.equal(selectedDelete.result.state, "none");
+    assert.deepEqual(selectedDelete.result.profiles.map((profile: any) => profile.name), ["spare"]);
+    assert.equal(readFileSync(join(configHome, "cortex", "defaults.json"), "utf8"), workingBeforeDelete);
     const detached = await call(updateConfig, { surface: "routing_profiles", action: "deactivate",
-      expected_revision: renamed.result.revision }, ctx);
+      expected_revision: selectedDelete.result.revision }, ctx);
     assert.equal(detached.ok, true, JSON.stringify(detached));
     assert.equal(detached.result.state, "none");
     let revision = detached.result.revision;
-    for (const name of ["mix", "spare"]) {
+    for (const name of ["spare"]) {
       const deleted = await call(updateConfig, { surface: "routing_profiles", action: "delete", expected_revision: revision, name }, ctx);
       assert.equal(deleted.ok, true, JSON.stringify(deleted));
       revision = deleted.result.revision;
@@ -380,14 +390,37 @@ try {
     const user = before.result.sources.find((source: any) => source.source === "user");
     const updated = await call(updateConfig, {
       surface: "routing", target: "user", expected_revision: user.revision,
-      rules: { models: { opencode: {
-        auto: ["zai-coding-plan/glm-5"], tiers: { "zai-coding-plan/glm-5": "standard" },
-        policy: { "zai-coding-plan/glm-5": { preferred_for: ["review"] } },
+      rules: { model_policy_version: 2, quota_windows: { opencode: [{ window: "owner EXACT@7", models: ["provider/ARBITRARY@9"] }, { window: "shared", models: null }] }, models: { opencode: {
+        auto: ["provider/ARBITRARY@9"], tiers: { "provider/ARBITRARY@9": ["light", "standard"] },
+        policy: { "provider/ARBITRARY@9": { preferred_for: ["review"], effort_floor: "medium", max_effort: "high", effort_ladder: ["medium", "high"], also_standard_for: ["testing"], request_names: ["owner-choice"] } },
       } } },
     }, ctx);
     assert.equal(updated.ok, true, JSON.stringify(updated));
     const source = updated.result.sources.find((item: any) => item.source === "user");
-    assert.deepEqual(source.rules.models.opencode.policy["zai-coding-plan/glm-5"].preferred_for, ["review"]);
+    assert.deepEqual(source.rules.models.opencode, updated.result.sources.find((item: any) => item.source === "user").rules.models.opencode);
+    assert.deepEqual(source.rules.models.opencode.policy["provider/ARBITRARY@9"], { preferred_for: ["review"], effort_floor: "medium", max_effort: "high", effort_ladder: ["medium", "high"], also_standard_for: ["testing"], request_names: ["owner-choice"] });
+    assert.equal(source.rules.model_policy_version, 2);
+    assert.deepEqual(source.rules.quota_windows, { opencode: [{ window: "owner EXACT@7", models: ["provider/ARBITRARY@9"] }, { window: "shared", models: null }] });
+    const invalidQuota = await call(updateConfig, { surface: "routing", target: "user", expected_revision: source.revision,
+      rules: { model_policy_version: 2, quota_windows: { opencode: [{ window: "duplicate", models: null }, { window: "duplicate", models: [] }] } } }, ctx);
+    assert.equal(invalidQuota.ok, false);
+    const unchangedQuota = await call(readConfig, { surface: "routing" }, ctx);
+    assert.equal(unchangedQuota.result.sources.find((item: any) => item.source === "user").revision, source.revision);
+    const invalidPolicy = await call(updateConfig, { surface: "routing", target: "user", expected_revision: source.revision,
+      rules: { model_policy_version: 2, models: { "codex-acp": { auto: ["unplaced"] } } } }, ctx);
+    assert.equal(invalidPolicy.ok, false);
+    assert.equal(invalidPolicy.error.code, "policy_missing", JSON.stringify(invalidPolicy));
+    const duplicateLabel = await call(updateConfig, { surface: "routing", target: "user", expected_revision: source.revision,
+      rules: { model_policy_version: 2, models: { "codex-acp": { auto: ["ONE", "TWO"], tiers: { ONE: "flagship", TWO: "flagship" }, policy: { ONE: { request_names: ["choice"] }, TWO: { request_names: ["choice"] } } } } } }, ctx);
+    assert.equal(duplicateLabel.ok, false);
+    assert.equal(duplicateLabel.error.code, "model_request_label_ambiguous", JSON.stringify(duplicateLabel));
+    const defaults = await call(readConfig, { surface: "user_defaults" }, ctx);
+    const portable = await call(updateConfig, { surface: "user_defaults", expected_revision: defaults.result.revision,
+      defaults: { coordinator: { engine: "codex-acp", model: "ARBITRARY@9", parameters: { mode: "agent" } } } }, ctx);
+    assert.equal(portable.ok, true, JSON.stringify(portable));
+    assert.equal(portable.result.defaults.coordinator.model, "ARBITRARY@9");
+    const portableRead = await call(readConfig, { surface: "user_defaults" }, ctx);
+    assert.equal(portableRead.result.coordinator_resolution.error.code, "portable_coordinator_unavailable");
   }
 
   // Engines & models: the read-only route catalog is bound to the workspace,
@@ -413,7 +446,7 @@ try {
     const projectSource = routing.result.sources.find((source: any) => source.source === "project");
     const switched = await call(updateConfig, {
       surface: "routing", target: "project", workspaceId: WORKSPACE, expected_revision: projectSource.revision,
-      rules: { ...projectSource.rules, deny: [...projectSource.rules.deny, "claude-agent-acp/*"] },
+      rules: { model_policy_version: 2, ...projectSource.rules, deny: [...projectSource.rules.deny, "claude-agent-acp/*"] },
     }, ctx);
     assert.equal(switched.ok, true, JSON.stringify(switched));
     const after = await call(readConfig, { workspaceId: WORKSPACE, surface: "route_catalog" }, ctx);
@@ -422,7 +455,7 @@ try {
     assert.deepEqual(claude.matches.project, { disabled: true, automatic: true });
     const wildcard = await call(updateConfig, {
       surface: "routing", target: "project", workspaceId: WORKSPACE, expected_revision: switched.result.written_revision,
-      rules: { deny: ["gemini/*"] },
+      rules: { model_policy_version: 2, deny: ["gemini/*"] },
     }, ctx);
     assert.equal(wildcard.ok, false);
     assert.ok(wildcard.error.errors.some((item: any) => item.code === "unsupported_wildcard"));
@@ -602,6 +635,16 @@ try {
     restoreEnv();
     rmSync(isolated, { recursive: true, force: true });
   }
+}
+
+// Portable diagnostics use the same safe public error projection as refused writes.
+{
+  const result = server.sanitizeSurface("user_defaults", { coordinator_resolution: { state: "unavailable", error: {
+    code: "portable_coordinator_ambiguous", message: "/home/owner/work/app: multiple matches", field: "defaults.coordinator", details: { secret: "never return this" },
+  } } }, { home: "/home/owner", projectRoot: "/home/owner/work/app" });
+  assert.equal((result.coordinator_resolution as any).error.code, "portable_coordinator_ambiguous");
+  assert.ok(!(JSON.stringify(result).includes("never return this")));
+  assert.ok(!(JSON.stringify(result).includes("/home/owner")));
 }
 
 // Redaction and display helpers.

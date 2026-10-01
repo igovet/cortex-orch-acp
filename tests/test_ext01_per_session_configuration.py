@@ -47,6 +47,7 @@ from cortex_runtime.portable.errors import PortableError
 from cortex_runtime.portable.identity import ExecutionRoute, SourceEvent
 from cortex_runtime.store import Store
 
+from model_policy_fixtures import write_policy
 from engine_fakes import fake_launch_command, isolated_environ, make_connection_record, new_connection_id, write_scenario
 from orchestration_fakes import FakeWorkspace
 
@@ -121,6 +122,7 @@ def test_mid_task_selection_reaches_an_already_cached_coordinator_session(tmp_pa
     engine_dir = tmp_path / "engine"
     engine_dir.mkdir()
     environ = isolated_environ(engine_dir)
+    write_policy(environ, {_ENGINE: {"model-a": "standard", "model-b": "standard"}})
     request_log = tmp_path / "requests.jsonl"
     scenario_path = _scenario_with_two_models(engine_dir, request_log)
     connection_id = new_connection_id()
@@ -173,6 +175,7 @@ def test_fresh_session_after_restart_reconfirms_an_already_active_revision(tmp_p
     engine_dir = tmp_path / "engine"
     engine_dir.mkdir()
     environ = isolated_environ(engine_dir)
+    write_policy(environ, {_ENGINE: {"model-a": "standard", "model-b": "standard"}})
     request_log = tmp_path / "requests.jsonl"
     scenario_path = _scenario_with_two_models(engine_dir, request_log)
     connection_id = new_connection_id()
@@ -233,6 +236,7 @@ def test_partial_confirmation_on_a_fresh_session_blocks_the_turn(tmp_path):
     engine_dir = tmp_path / "engine"
     engine_dir.mkdir()
     environ = isolated_environ(engine_dir)
+    write_policy(environ, {_ENGINE: {"model-a": "standard", "model-b": "standard"}})
     request_log = tmp_path / "requests.jsonl"
     scenario_path = _scenario_with_two_models(engine_dir, request_log)
     connection_id = new_connection_id()

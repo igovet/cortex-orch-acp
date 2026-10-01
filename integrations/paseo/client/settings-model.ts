@@ -348,6 +348,9 @@ export function buildCeiling(form: CeilingForm, prefix = "ceiling"): Built<Ceili
 // --- user defaults ------------------------------------------------------------
 
 export type UserDefaultsForm = {
+  coordinator_engine: string;
+  coordinator_model: string;
+  coordinator_parameters: KeyValueRow[];
   route_id: string;
   route_connection_id: string;
   route_model: string;
@@ -365,6 +368,9 @@ export function userDefaultsToForm(view: UserDefaultsView): UserDefaultsForm {
     ? Object.entries(view.defaults.parameters).map(([key, value]) => ({ key, value: typeof value === "string" ? value : String(value) }))
     : [];
   return {
+    coordinator_engine: stringValue((view.defaults.coordinator as Record<string, unknown> | undefined)?.engine),
+    coordinator_model: stringValue((view.defaults.coordinator as Record<string, unknown> | undefined)?.model),
+    coordinator_parameters: Object.entries((view.defaults.coordinator as { parameters?: Record<string, string> } | undefined)?.parameters ?? {}).map(([key, value]) => ({ key, value })),
     route_id: stringValue(view.defaults.route_id),
     route_connection_id: stringValue(view.defaults.route_connection_id),
     route_model: stringValue(view.defaults.route_model),
@@ -395,6 +401,22 @@ export function buildUserDefaultsUpdate(view: UserDefaultsView, form: UserDefaul
   const route = { route_id: form.route_id.trim(), route_connection_id: form.route_connection_id.trim(), route_model: form.route_model.trim() };
   const routeChanged = route.route_id !== initial.route_id.trim() || route.route_connection_id !== initial.route_connection_id.trim()
     || route.route_model !== initial.route_model.trim();
+  const portableChanged = form.coordinator_engine !== initial.coordinator_engine || form.coordinator_model !== initial.coordinator_model || !sameJson(form.coordinator_parameters, initial.coordinator_parameters);
+  if (portableChanged) {
+    if (isPlainObject(view.defaults.coordinator) && Object.keys(view.defaults.coordinator).some((key) => !["engine", "model", "parameters"].includes(key))) addError(errors, "defaults.coordinator", "This portable coordinator contains unsupported fields; it is read-only here. Repair it explicitly, then reload.");
+    if (!form.coordinator_engine && !form.coordinator_model) defaults.coordinator = null;
+    else {
+      const engine = cleanText(form.coordinator_engine, "defaults.coordinator.engine", errors, "an exact engine id", 64);
+      const model = cleanText(form.coordinator_model, "defaults.coordinator.model", errors, "an exact model id");
+      const parameters: Record<string, string> = {};
+      for (const row of form.coordinator_parameters) {
+        if (!PARAMETER_NAME.test(row.key) || row.key in parameters || !row.value || row.value.length > 128 || CONTROL.test(row.value)) addError(errors, "defaults.coordinator.parameters", "Use unique parameter names and printable values.");
+        parameters[row.key] = row.value;
+      }
+      defaults.coordinator = { engine, model, parameters };
+    }
+  }
+  if ((form.coordinator_engine || form.coordinator_model) && Object.values(route).some(Boolean) && (routeChanged || portableChanged)) addError(errors, "defaults.coordinator", "Clear the bound route before setting a portable coordinator, or clear the portable coordinator first.");
   if (routeChanged) {
     const filled = Object.values(route).filter(Boolean).length;
     if (filled === 0) {
@@ -479,7 +501,7 @@ export function projectCeilingRemoval(view: ProjectCeilingView, workspaceId: str
 
 // --- routing ------------------------------------------------------------------
 
-export const ROUTING_KEYS = ["pin", "deny", "enabled", "auto_allow", "tiers", "providers", "engine_affinity", "models"] as const;
+export const ROUTING_KEYS = ["model_policy_version", "pin", "deny", "enabled", "auto_allow", "tiers", "providers", "engine_affinity", "models", "quota_windows"] as const;
 export type RoutingKey = typeof ROUTING_KEYS[number];
 
 /** One `pin` entry: a role (or `*`) pinned to `engine/model[:effort]`. The
@@ -492,9 +514,12 @@ export type AffinityRow = { kind: string; engine: string };
 export type ModelTierValue = string | string[];
 export type ModelRulesForm = Record<string, { auto: string[] | null; tiers: Record<string, ModelTierValue>; policy: Record<string, Record<string, unknown>> }>;
 
-/** Each key is `null` while it is absent from the file (the built-in policy
- * applies); a present key keeps its exact order. */
+/** Each key is `null` while it is absent from the file; no model policy
+ * is inferred. a present key keeps its exact order. */
+export type QuotaWindowRow = { window: string; models: string[] | null };
 export type RoutingForm = {
+  quota_windows?: Record<string, QuotaWindowRow[]> | null;
+  model_policy_version?: number;
   pin: PinRow[] | null;
   deny: string[] | null;
   auto_allow: string[] | null;
@@ -523,13 +548,14 @@ export function composePin(row: Pick<PinRow, "engine" | "model" | "effort">): st
   return row.effort ? `${route}:${row.effort}` : route;
 }
 
-export type RoutingVocabulary = { engines: string[]; optionalEngines: string[]; efforts: string[]; tiers: string[]; workKinds: string[] };
+export type RoutingVocabulary = { engines: string[]; optionalEngines: string[]; efforts: string[]; tiers: string[]; workKinds: string[]; policyEfforts?: string[] };
 
 export function routingVocabulary(view: RoutingView): RoutingVocabulary {
   return {
     engines: [...new Set([...view.builtin.supported_engines, ...view.builtin.optional_engines])],
     optionalEngines: [...view.builtin.optional_engines],
     efforts: [...view.builtin.efforts],
+    policyEfforts: [...(view.builtin.policy_efforts ?? view.builtin.efforts)],
     tiers: [...view.builtin.tiers],
     workKinds: [...view.builtin.work_kinds, "*"],
   };
@@ -542,10 +568,25 @@ export type RoutingFormResult = { ok: true; form: RoutingForm } | { ok: false; r
 export function routingRulesToForm(rules: Record<string, unknown> | undefined): RoutingFormResult {
   const form = emptyRoutingForm();
   if (!rules) return { ok: true, form };
+  if (rules.model_policy_version !== undefined) {
+    if (typeof rules.model_policy_version !== "number") return { ok: false, reason: "Unsupported model policy version; repair or migrate explicitly, then reload." };
+    form.model_policy_version = rules.model_policy_version;
+  }
   const unrepresentable = (key: string): RoutingFormResult => ({
     ok: false,
     reason: `The stored "${key}" setting has a shape these fields cannot show without changing it; edit the file by hand, then reload.`,
   });
+  if (rules.quota_windows !== undefined) {
+    if (!isPlainObject(rules.quota_windows)) return unrepresentable("quota_windows");
+    const windows: Record<string, QuotaWindowRow[]> = {};
+    for (const [engine, rows] of Object.entries(rules.quota_windows)) {
+      if (!Array.isArray(rows) || !rows.every((row) => isPlainObject(row)
+        && Object.keys(row).length === 2 && typeof row.window === "string"
+        && (row.models === null || isStringArray(row.models)))) return unrepresentable("quota_windows");
+      windows[engine] = rows.map((row) => ({ window: row.window as string, models: row.models === null ? null : [...row.models as string[]] }));
+    }
+    form.quota_windows = windows;
+  }
   if (rules.pin !== undefined) {
     if (!isStringRecord(rules.pin)) return unrepresentable("pin");
     form.pin = Object.entries(rules.pin).map(([role, value]) => parsePin(role, value as string));
@@ -569,7 +610,7 @@ export function routingRulesToForm(rules: Record<string, unknown> | undefined): 
         || (raw.policy !== undefined && !isPlainObject(raw.policy))) return unrepresentable("models");
       const policy: Record<string, Record<string, unknown>> = {};
       for (const [model, value] of Object.entries(raw.policy ?? {})) {
-        if (!isPlainObject(value) || (value.preferred_for !== undefined && !isStringArray(value.preferred_for))) return unrepresentable("models.policy");
+        if (!isPlainObject(value) || (value.preferred_for != null && !isStringArray(value.preferred_for))) return unrepresentable("models.policy");
         policy[model] = { ...value };
       }
       models[engine] = { auto: raw.auto === undefined ? null : [...raw.auto as string[]], tiers: raw.tiers === undefined ? {} : Object.fromEntries(Object.entries(raw.tiers as Record<string, ModelTierValue>)
@@ -628,10 +669,10 @@ function checkRouteToken(token: string, key: "deny" | "auto_allow", engines: rea
   const prefix = slash === -1 ? "" : token.slice(0, slash);
   const rest = slash === -1 ? token : token.slice(slash + 1);
   if (token.includes("*")) {
-    if (key === "deny" && slash > 0 && engines.includes(prefix) && rest === ENGINE_WILDCARD) return null;
+    if (slash > 0 && engines.includes(prefix) && rest === ENGINE_WILDCARD) return null;
     return key === "deny"
       ? "The only wildcard is <engine>/*, which switches off that whole engine."
-      : "Auto-allow names an exact model or family, never a wildcard.";
+      : "Use an exact model identity or engine/*.";
   }
   if (slash === -1) return null;
   if (!engines.includes(prefix) || !rest) return `The part before "/" must be an engine (${engines.join(", ")}); write an OpenCode model with its engine, e.g. opencode/${token}.`;
@@ -643,8 +684,27 @@ function checkRouteToken(token: string, key: "deny" | "auto_allow", engines: rea
 
 export function buildRoutingRules(form: RoutingForm, vocabulary: RoutingVocabulary): Built<RoutingRules> {
   const errors: FieldErrors = {};
-  const rules: RoutingRules = {};
+  const rules: RoutingRules = { ...(form.model_policy_version === undefined ? {} : { model_policy_version: form.model_policy_version }) };
   const { engines } = vocabulary;
+  if (form.quota_windows != null) {
+    const windows: Record<string, QuotaWindowRow[]> = {};
+    for (const [engine, rows] of Object.entries(form.quota_windows)) {
+      const key = `rules.quota_windows.${engine}`;
+      if (!engines.includes(engine)) addError(errors, key, "Choose a supported engine.");
+      if (rows.length > 1000) addError(errors, key, "At most 1000 window rules per engine.");
+      const seen = new Set<string>();
+      windows[engine] = rows.map((row, index) => {
+        const field = `${key}[${index}]`;
+        // Window labels are exact: never trim, case-fold or infer a family.
+        if (!row.window || row.window.length > 256 || /[\x00-\x1f\x7f]/.test(row.window)) addError(errors, field, "Enter the exact reported window label (no controls).");
+        if (seen.has(row.window)) addError(errors, field, "Ambiguous window: each exact label appears once per engine.");
+        seen.add(row.window);
+        const models = row.models === null ? null : checkList(row.models, field, errors, { noSpaces: true, maxItems: 1000, check: (model) => engine === "opencode" && !isOpenCodeExact(model) ? "An OpenCode model is its exact provider/model id." : null });
+        return { window: row.window, models };
+      });
+    }
+    rules.quota_windows = windows;
+  }
   if (form.pin !== null) {
     const pin: Record<string, string> = {};
     form.pin.forEach((row, index) => {
@@ -657,7 +717,7 @@ export function buildRoutingRules(form: RoutingForm, vocabulary: RoutingVocabula
       if (!model) addError(errors, key, "Enter the full model id.");
       else if (SPACE_OR_CONTROL.test(model) || model.includes(":")) addError(errors, key, "The model id has no spaces or \":\" (choose the effort separately).");
       else if (row.engine === "opencode" && !isOpenCodeExact(model)) {
-        addError(errors, key, "An OpenCode pin names the exact provider/model id, e.g. anthropic/claude-sonnet-4-5.");
+        addError(errors, key, "An OpenCode pin names the exact provider/model id, e.g. provider/model.");
       }
       if (row.effort && !vocabulary.efforts.includes(row.effort)) addError(errors, key, `Effort must be one of ${vocabulary.efforts.join(", ")}.`);
       const value = composePin({ engine: row.engine, model, effort: row.effort });
@@ -704,7 +764,7 @@ export function buildRoutingRules(form: RoutingForm, vocabulary: RoutingVocabula
       }
       for (const [model, policy] of Object.entries(value.policy)) {
         const preferred = policy.preferred_for;
-        if (preferred !== undefined) {
+        if (preferred != null) {
           if (!isStringArray(preferred) || preferred.some((kind) => !vocabulary.workKinds.includes(kind)))
             addError(errors, `rules.models.${engine}.policy.${model}.preferred_for`, "Choose known work kinds.");
           if (Array.isArray(preferred) && preferred.length > 0 && auto !== null && !auto.includes(model))
@@ -763,9 +823,8 @@ export function buildRoutingUpdate(
 // - a model switched off is the exact deny token `<engine>/<model>`;
 // - "automatic routing may use" an engine is its membership in `providers`
 //   (still selectable by hand);
-// - a model excluded from automatic routing by default (OpenCode v2 routes,
-//   Claude Haiku) is opted in by the exact auto_allow token `<engine>/<model>`.
-// A broader token that also covers a model (a family, a bare model id, the
+// - automatic membership and placement come only from explicit per-engine lists.
+// A broader token that also covers a model (a bare exact model id, the
 // engine switch) is never removed by a model switch; it is named instead.
 
 export const ENGINE_WILDCARD = "*";
@@ -825,7 +884,7 @@ function tokenState(values: readonly string[] | null, exact: string, alsoCoverin
 
 /** Whether `form` switches `route` off. Covering tokens are the exact one,
  * the engine switch, the bare model id and whatever the server matched in
- * the stored `target` file (family and versioned ids). */
+ * the stored `target` file (exact ids and engine wildcards). */
 export function modelDenyState(route: CatalogRoute, form: RoutingForm, target: "user" | "project"): TokenState {
   return tokenState(form.deny, routeToken(route.engine, route.model),
     [engineToken(route.engine), route.model, ...(route.matches[target]?.deny ?? [])]);
@@ -874,10 +933,10 @@ export function unmatchedTokens(form: RoutingForm, key: "deny" | "auto_allow", c
 
 export function modelAutoSelected(form: RoutingForm, engine: string, model: string, builtinSelected: boolean): boolean {
   const auto = form.models?.[engine]?.auto;
-  return auto === null || auto === undefined ? builtinSelected : auto.includes(model);
+  return auto === null || auto === undefined ? false : auto.includes(model);
 }
 export function setModelAutoSelected(form: RoutingForm, engine: string, model: string, selected: boolean, defaultSelected: readonly string[]): RoutingForm {
-  const models = { ...(form.models ?? {}) }; const current = models[engine] ?? { auto: null, tiers: {}, policy: {} }; const auto = current.auto ?? [...defaultSelected];
+  const models = { ...(form.models ?? {}) }; const current = models[engine] ?? { auto: null, tiers: {}, policy: {} }; const auto = current.auto ?? [];
   const policy = { ...current.policy };
   if (!selected && policy[model]) policy[model] = { ...policy[model], preferred_for: [] };
   models[engine] = { ...current, policy, auto: selected ? (auto.includes(model) ? auto : [...auto, model]) : auto.filter((item) => item !== model) };
@@ -896,7 +955,7 @@ export function modelTierValues(form: RoutingForm, route: Pick<CatalogRoute, "en
 
 /** Configure `model` for `tiers` (strongest first, as `vocabulary` orders
  * them): one tier is written as a string, several as a list, none removes
- * the setting so the built-in tier applies again. */
+ * the setting so the model has no placement. */
 export function setModelTiers(form: RoutingForm, engine: string, model: string, tiers: readonly string[], order: readonly string[] = []): RoutingForm {
   const models = { ...(form.models ?? {}) }; const current = models[engine] ?? { auto: null, tiers: {}, policy: {} };
   const unique = [...new Set(tiers)];
@@ -977,7 +1036,7 @@ export function selectorText(route: CatalogRoute): string {
 
 export function modelListed(form: RoutingForm, engine: string, model: string, engineDefault: boolean): boolean {
   const list = form.enabled?.[engine];
-  return list === undefined ? engineDefault : list.includes(model);
+  return list === undefined ? false : list.includes(model);
 }
 
 export function modelInCortex(route: CatalogRoute, form: RoutingForm, target: "user" | "project", engineDefault: boolean): boolean {
@@ -988,11 +1047,11 @@ export function setModelInCortex(form: RoutingForm, route: RouteRef, on: boolean
   const list = form.enabled?.[route.engine];
   if (on) {
     const next = setModelEnabled(form, route, true);
-    if (list === undefined ? engineDefault : list.includes(route.model)) return next;
+    if (list?.includes(route.model)) return next;
     return { ...next, enabled: { ...(next.enabled ?? {}), [route.engine]: [...(list ?? []), route.model] } };
   }
   if (list !== undefined) return { ...form, enabled: { ...form.enabled, [route.engine]: list.filter((model) => model !== route.model) } };
-  return engineDefault ? setModelEnabled(form, route, false) : form;
+  return form;
 }
 
 export function removeEnabledModel(form: RoutingForm, engine: string, model: string): RoutingForm {
@@ -1012,7 +1071,7 @@ export function filterModelGroups(groups: readonly ModelGroup[], query: string):
 
 /** When an engine's model list was last read from the engine, for display. */
 export function catalogObservedText(observedAt: string | null): string {
-  if (!observedAt) return "never read from the engine (built-in list, or none)";
+  if (!observedAt) return "never read from the engine (no confirmed models)";
   const date = new Date(observedAt);
   return Number.isNaN(date.getTime()) ? observedAt : `read ${date.toLocaleString()}`;
 }
@@ -1407,4 +1466,11 @@ export function profileSwitchDecision(
 ): "direct" | "confirm" {
   if (!target) return "direct";
   return view.state === "modified" || view.state === "unavailable" ? "confirm" : "direct";
+}
+
+/** Deletion affects only the named saved snapshot, never current settings. */
+export function buildProfileDelete(view: ProfilesView, name: string): Built<Extract<ConfigUpdateInput, { surface: "routing_profiles" }>> {
+  if (!view.profiles.some((profile) => profile.name === name)) return { ok: false, errors: { name: "Profile no longer exists; reload profile state." } };
+  if (view.pending) return { ok: false, errors: { name: "An activation is pending; resolve it and reload before deleting." } };
+  return { ok: true, value: { surface: "routing_profiles", action: "delete", name, expected_revision: view.revision } };
 }

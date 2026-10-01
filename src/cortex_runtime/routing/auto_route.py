@@ -1,164 +1,9 @@
-"""Choose a worker's connection, model and effort from what is actually
-available -- replaces the hand-maintained per-role ``route-policy.json``.
+"""Settings-only automatic routing from exact observed catalog identities.
 
-1. Each role has a tier (:data:`ROLE_TIERS`, ``standard`` when unlisted).
-2. Each model's tier: a Claude family name decides it (:data:`FAMILY_TIERS`),
-   a known Codex model its entry in :data:`KNOWN_MODEL_TIERS`; only a model
-   neither names is placed by its position in its own engine's list
-   (strongest first), split into thirds, so a new model still lands in a
-   tier without configuration. Claude Haiku remains available for an explicit
-   pin, but is excluded from automatic worker selection by default.
-   Only the newest version of each model family on an engine is routed
-   automatically (:func:`superseded_routes`): family and version are parsed
-   from the engine-confirmed model id (or, for an alias such as
-   ``opus[1m]``, from the engine's own display name "Opus 5.5"), so a new
-   release such as ``gpt-6-luna`` supersedes ``gpt-5.6-luna`` with no
-   configuration. ``deny`` is applied first, so the newest *non-denied*
-   version is the one routed. A model whose version cannot be parsed is
-   never treated as older.
-3. Among models of the role's tier (nearest other tier when none is usable),
-   rank by honoured provider preference, the owner's preferred model for
-   the role's kind of work (routing.json ``models`` policy
-   ``preferred_for``), honoured model hint, subscription plan usage (a plan
-   more than :data:`USAGE_MARGIN` points more used than the least-used candidate's
-   ranks behind it; compared only when every candidate's usage is known),
-   a different engine on escalation, engine affinity, the quota band as a late
-   tie breaker (an account at or above :data:`HOT_PERCENT` ranks behind one below it only once plan usage
-   and affinity left the candidates tied -- crossing the band alone no
-   longer overrides them), exact used percent, and engine order
-   (:func:`rank`). A preference, owner-preferred model or model hint is
-   ignored for quota only when its usage is both at or above
-   :data:`HOT_PERCENT` and meaningfully worse
-   (by more than :data:`USAGE_MARGIN`) than an available alternative's, not
-   merely for crossing the band. How often an engine was chosen recently
-   never counts: frequency is not evidence of fit. A model of a stronger
-   tier never stands in for the role's tier because one engine lacks a model
-   there: with Haiku excluded the light tier is Codex-only, and light work
-   stays on it (``auto_allow`` Haiku to let Claude take light work). Only
-   when no engine has a usable model in the tier does the rank fall back to
-   the nearest other tier (:data:`_FALLBACK_ORDER`). Haiku is excluded by
-   default unless routing.json opts it in with ``auto_allow``. Exhausted
-   (100%) and recorded-unavailable routes never enter the rank. The decision records rank inputs, exclusions and
-   ``decided_by`` (the first key that separated the choice from the
-   runner-up) for later comparison.
-   Engine affinity (:data:`WORK_KIND_ENGINES`) by default leans only
-   implementation and operations to Codex; investigation, review, design,
-   writing, planning and analysis to Claude; debugging and testing are
-   neutral. routing.json ``engine_affinity`` overrides it per kind.
-4. Effort follows the role's tier, clamped to what that model supports.
-   ``ultra`` is never used; ``max`` only on a ``light`` or Luna model (the
-   cheapest model is the one worth running at its maximum); flagship
-   models (:data:`FLAGSHIP_FAMILIES`) never above ``high``. This rule is
-   for automatic worker routing only: the editor's own effort selector
-   offers every effort the engine reports, and the coordinator runs at the
-   effort chosen there.
-   The Codex Luna line (:data:`LUNA_LINES`) is cheap but strong, so it has
-   its own rule: never below ``high`` (:data:`LUNA_EFFORT_FLOOR`, also for
-   a pin or a worker's requested effort), and its effort follows how hard
-   the work is (:data:`LUNA_EFFORTS`): ``high`` for light work, ``xhigh``
-   for ordinary standard-tier testing, ``max`` for work above that --
-   standard-tier testing that is a retry or a fix after review requested
-   changes (``escalate``) -- which still does not justify a deep model.
-   Besides the light tier, Luna is a candidate only for standard-tier
-   testing work (:data:`LUNA_WORK_KINDS`) next to the tier's own models,
-   and the rank decides between them (:func:`luna_status`). Every other
-   standard-tier kind of work stays on the tier's own models. It is
-   never used for ``complexity`` ``high`` work, deep or flagship work, or a
-   deep role, not even as a fallback; a ``tiers`` override that moves a
-   Luna model out of the light tier removes it from this rule except for
-   its effort floor. These are only the built-in defaults
-   (:mod:`routing.model_policy`): routing.json ``models`` gives any light
-   model the same rule (a *stretch* model: ``effort_floor``,
-   ``effort_ladder``, ``also_standard_for``) or takes it away from Luna.
-5. The work moves the role's tier: the coordinator's planned
-   ``complexity`` (``low``/``high``) shifts it one step cheaper/stronger,
-   and a retried attempt or a fix after review requested changes runs one
-   more step up (``escalate``). Standard testing instead stays in the
-   standard candidate pool: Luna targets max, other models raise effort
-   one step. Other standard work, explicit high complexity and deep roles
-   still move up. If a
-   tier cannot rise (explorer), effort rises one supported step.
-6. Flagship is otherwise reached only by escalation. The one exception is
-   the user's explicit request in the task: an exact flagship
-   ``model_hint`` whose family the user explicitly asked for, not merely
-   mentioned (:func:`user_model_request`, :func:`requests_family`)
-   runs on that route at the flagship tier, still subject to pin, deny,
-   providers, availability and quota (basis ``auto:user_request``).
-
-Only engine-confirmed catalogs are used -- a connection whose models were
-never observed (seed catalog) is not routed to automatically; the worker
-then stays on the coordinator's route, as before.
-
-Optional overrides, first existing file wins (never merged):
-``<project>/.cortex/routing.json``, ``$CORTEX_ROUTING``,
-``$XDG_CONFIG_HOME/cortex/routing.json`` (``~/.config/...``)::
-
-    {
-      "pin":       {"security-auditor": "claude-agent-acp/opus:high", "*": "codex-acp/gpt-5.6-luna"},
-      "deny":      ["gpt-5.5", "haiku"],
-      "auto_allow": ["claude-agent-acp/haiku"],
-      "tiers":     {"gpt-5.6-luna": "light"},
-      "providers": ["claude-agent-acp", "codex-acp"],
-      "engine_affinity": {"implementation": "claude-agent-acp", "testing": null, "*": "codex-acp"},
-      "models":    {"opencode": {"auto": ["anthropic/claude-sonnet-4-5"],
-                               "tiers": {"anthropic/claude-sonnet-4-5": "standard"}}}
-    }
-
-``pin`` is strict: a pinned route that is not available (not offered, or
-recorded unavailable) refuses the delegation rather than substituting
-another one; a pin may name an older, superseded version on purpose.
-``deny`` also applies to explicitly selected routes and to the model
-selector. A ``deny``/``auto_allow`` token is an exact model id, a versioned
-id that also covers its variants (``gpt-5.5`` covers ``gpt-5.5[1m]``), or a
-bare family name that covers every version and alias of that family
-(``haiku`` covers ``haiku`` and ``claude-haiku-4-5-20251001``); an
-``engine/`` prefix restricts it to that engine. In ``deny`` only,
-``<engine>/*`` (:data:`ENGINE_WILDCARD`) names every route of that engine:
-the engine is disabled for Cortex as a whole -- hidden from the selector,
-refused when chosen or pinned, and never routed automatically -- while its
-connections and credentials stay untouched. Setup writes the default
-global file (:mod:`routing.defaults`).
-The built-in Haiku exclusion applies only to automatic worker selection;
-a matching ``pin`` or ``auto_allow`` can opt into Haiku, while ``deny`` still wins.
-Every ``opencode`` route is excluded from automatic
-selection by default (it is an optional engine): an exact ``auto_allow``
-entry such as ``"opencode/anthropic/claude-sonnet-4-5"`` or a ``pin`` opts
-one in.
-
-``engine_affinity`` maps a work kind (a key of :data:`WORK_KIND_ENGINES`)
-or ``"*"`` to an engine id, or ``null`` for no lean; a named kind wins,
-then ``"*"``, then the built-in default. It only breaks ties after quota
-and plan usage and never overrides a pin, deny, providers or availability.
-Unknown kinds or engines are refused.
-
-``providers`` restricts automatic routing and failover to connections whose
-engine is in the list (each id must be one of
-:data:`connections.model.SUPPORTED_ENGINES`); when absent, every configured
-engine is still considered. A ``deny``'d route is also hidden from the
-editor's selector; ``providers`` is not -- an engine outside it stays
-selectable by hand (a restriction of automatic routing, failover and pins
-only, not a way to disable the engine). A ``pin`` naming an engine
-outside ``providers`` is refused (``pinned_route_unavailable``) rather than
-silently ignored, and if no allowed provider has a usable route the existing
-``no_available_route`` refusal applies, naming the excluded providers too.
-
-``enabled`` maps an engine id to the exact model ids that engine may use in
-Cortex at all (Settings > Models). An engine it lists offers only those
-models -- every other one is treated exactly like a ``deny``'d route; an
-engine it does not list keeps the built-in default: every model on, except
-the optional OpenCode engine (:data:`DEFAULT_DISABLED_ENGINES`), whose models
-stay off until enabled. ``deny`` still wins over ``enabled``.
-
-``models`` (:mod:`routing.model_policy`) configures each engine's models by
-exact id: ``auto`` lists the only models automatic routing may use on that
-engine (LISTED mode: the built-in Haiku and optional-engine exclusions,
-``auto_allow`` and supersede no longer apply there, and ``[]`` means none;
-a ``pin`` or the model selector still reaches every offered model),
-``tiers`` places a model in a tier (before the legacy top-level ``tiers``),
-and ``policy`` sets its effort floor and ceiling, effort ladder, extra
-standard work kinds, preferred work kinds and extra request names. Every
-name-keyed rule described above is only the built-in default for a model
-the file says nothing about.
+First-existing-file precedence: project .cortex/routing.json, CORTEX_ROUTING,
+then user routing.json. model_policy_version=2 is required; installation
+assets are never runtime fallbacks. Generic tier, economy, quota, affinity,
+retry, availability and authorization rules do not infer model capabilities.
 """
 from __future__ import annotations
 
@@ -172,7 +17,6 @@ from typing import Iterator, Mapping, Sequence
 from ..catalog.evidence import ProvenanceSource
 from ..portable.errors import PortableError, PortableErrorCategory
 from . import model_policy
-from .model_policy import _BUILD_DATE, _NUMBER, _VARIANT, _VENDOR_PREFIXES, _parse_tokens, model_line  # noqa: F401
 
 ENV_VAR = "CORTEX_ROUTING"
 HOT_PERCENT = 85.0
@@ -184,30 +28,10 @@ _FALLBACK_ORDER = {
     "light": ("light", "standard", "deep"),
 }
 EFFORT_BY_TIER = {"flagship": "high", "deep": "high", "standard": "medium", "light": "low"}
-# Built-in defaults (routing.model_policy), used only where routing.json
-# ``models`` says nothing about a model; kept here under their old names.
-FAMILY_TIERS = model_policy.BUILTIN_FAMILY_TIERS
-KNOWN_MODEL_TIERS = model_policy.BUILTIN_MODEL_TIERS
-LINE_TIERS = model_policy.BUILTIN_LINE_TIERS
 EFFORT_ORDER = model_policy.EFFORT_ORDER
 _NEVER_EFFORTS = frozenset({"ultra"})
 _LIGHT_ONLY_EFFORTS = frozenset({"max"})
-# The strongest models are already strong enough at high: a model whose
-# policy names no max_effort stops there when its effective tier is
-# flagship; these built-in families carry max_effort high whatever the tier.
-FLAGSHIP_FAMILIES = model_policy.BUILTIN_FLAGSHIP_FAMILIES
 _FLAGSHIP_CEILING = "high"
-# The built-in stretch rule (the Codex Luna line): very cheap and very
-# effective, never below high, its effort steps with the work (light work,
-# standard-tier testing, standard-tier testing that fell short once), and
-# testing is the only standard-tier work it takes.
-LUNA_LINES = model_policy.BUILTIN_STRETCH_LINES
-LUNA_EFFORT_FLOOR = model_policy.BUILTIN_STRETCH_POLICY["effort_floor"]
-LUNA_EFFORTS = model_policy.BUILTIN_STRETCH_POLICY["effort_ladder"]
-LUNA_WORK_KINDS = model_policy.BUILTIN_STRETCH_POLICY["also_standard_for"]
-# Claude Haiku: available for an explicit pin, excluded from automatic
-# worker selection unless selected or auto_allow-ed.
-DEFAULT_AUTO_DENY_FAMILIES = model_policy.BUILTIN_AUTO_DENY_FAMILIES
 
 # What a mistake costs: design/security get the strongest models,
 # exploration/planning/writing the cheapest. Debugging and performance work
@@ -279,25 +103,15 @@ class Choice:
     # What decided it (tier, ranked candidates, the provider preference and
     # whether it was honoured) -- recorded in the attempt's route audit.
     decision: Mapping | None = None
+    route_id: str | None = None
 
 
 def work_kind(role: str | None) -> str | None:
     return None if role is None else ROLE_WORK_KINDS.get(role, "implementation")
 
 
-def is_luna(model: str) -> bool:
-    """Whether ``model`` is of the Codex Luna line (any generation), the
-    built-in stretch line (:data:`LUNA_LINES`)."""
-    return model_line(model)[0] in LUNA_LINES
-
-
-def luna_status(role: str | None, role_tier: str, complexity: str = "normal", kinds=None) -> str:
-    """Whether a light-tier stretch model (built in: Luna) may take this
-    work, and why: ``light_tier`` (its own tier), ``standard_candidate``
-    (standard-tier work of one of ``kinds`` -- its policy's
-    ``also_standard_for``, built in :data:`LUNA_WORK_KINDS` -- ranked with
-    the tier's own models), or ``excluded:<reason>``. ``excluded`` is
-    absolute -- not even a fallback."""
+def stretch_status(role: str | None, role_tier: str, complexity: str = "normal", kinds=None) -> str:
+    """Whether configured light stretch policy may serve this work."""
     if role_tier == "light":
         return "light_tier"
     if complexity == "high":
@@ -307,33 +121,27 @@ def luna_status(role: str | None, role_tier: str, complexity: str = "normal", ki
     if ROLE_TIERS.get(role or "", "standard") in ("deep", "flagship"):
         return "excluded:deep_role"
     kind = work_kind(role)
-    if kind not in (LUNA_WORK_KINDS if kinds is None else kinds):
+    if kind not in (() if kinds is None else kinds):
         return f"not_candidate:work_kind_{kind}"
     return "standard_candidate"
 
 
 def hint_serves_tier(model: str, model_tier: str | None, role: str | None, role_tier: str,
                      complexity: str = "normal", *, also_standard_for=None) -> bool:
-    """Whether a model of ``model_tier`` can take ``role_tier`` work: its own
-    tier, or a light stretch model on standard-tier work of one of its
-    ``also_standard_for`` kinds (``None``: the model's built-in policy; the
-    plan preview passes the value ``list_route_options`` reports)."""
-    kinds = (frozenset(model_policy.builtin_attributes(model).get("also_standard_for") or ())
-             if also_standard_for is None else frozenset(also_standard_for))
+    """Whether explicit tiers or configured standard allowances serve this work."""
+    kinds = frozenset(also_standard_for or ())
     return model_tier == role_tier or (
         model_tier == "light" and bool(kinds)
-        and luna_status(role, role_tier, complexity, kinds) == "standard_candidate")
+        and stretch_status(role, role_tier, complexity, kinds) == "standard_candidate")
 
 
-def luna_effort(role_tier: str, escalate: bool = False, ladder: Sequence[str] | None = None) -> str | None:
-    """A stretch model's target effort on its ``ladder`` (built in:
-    :data:`LUNA_EFFORTS`): one step per tier above light, and one more for a
-    retry or a fix after requested changes."""
-    return model_policy.stretch_effort(LUNA_EFFORTS if ladder is None else ladder, role_tier, escalate)
+def stretch_effort(role_tier: str, escalate: bool = False, ladder: Sequence[str] | None = None) -> str | None:
+    """Target a configured stretch effort ladder step."""
+    return model_policy.stretch_effort(ladder or (), role_tier, escalate)
 
 
 def _stretch_summary(statuses: Mapping[str, str]) -> str:
-    """One ``luna`` audit status for every offered stretch model: a
+    """One historical stretch audit status for every offered stretch model: a
     ``standard_candidate`` when any is one, else their common status."""
     values = set(statuses.values())
     if not values:
@@ -382,16 +190,7 @@ USAGE_MARGIN = 10.0
 
 
 def route_menu(project_root=None, environ=None, unavailable=()):
-    """Current engine-confirmed routes; dispatch revalidates every entry.
-
-    This is the coordinator's only source of model names, tiers and policy:
-    each route's tier and policy come from routing.json ``models`` first,
-    then the built-in defaults (:mod:`routing.model_policy`), and the
-    ``flagship``, ``stretch``, ``preferred`` and ``affinity`` summaries are
-    derived from them. ``affinity`` names only engines with an automatically
-    eligible route (``affinity_not_eligible`` lists the rest); ``preferred``
-    lists the owner's preferred models per kind of work, which the rank
-    puts ahead of any hint. Prompts and tool schemas name no model."""
+    """Current policy and engine-confirmed identities; dispatch revalidates."""
     from ..connections import quota
     from ..connections import registry as connection_registry
     from . import availability
@@ -399,7 +198,7 @@ def route_menu(project_root=None, environ=None, unavailable=()):
     overrides = load_overrides(project_root, environ)
     connections = connection_registry.read_registry(environ).connections
     entries = [e for e in _allowed(overrides, _entries(overrides, connections, environ))
-               if not _is_seed(e)]
+               if not _is_seed(e) and not _denied(overrides, e.route.engine, e.route.model)]
     policies = model_policy.resolve_policies(entries, overrides)
     superseded = superseded_routes(entries)
     applied = _applied_superseded(overrides, entries, superseded)
@@ -413,7 +212,7 @@ def route_menu(project_root=None, environ=None, unavailable=()):
         engine, model = entry.route.engine, entry.route.model
         policy = policies[entry.route.id]
         label = _route_label(entry)
-        used = quota.used_percent(connections[entry.connection_id], model, environ)
+        used = quota.used_percent(connections[entry.connection_id], model, environ, routing=overrides)
         blocked = availability.blocking(unavailable, entry.connection_id, model)
         reason = _auto_exclusion(overrides, entry) or ("superseded" if entry.route.id in applied else None)
         # A model the owner placed in several tiers is listed under each.
@@ -436,18 +235,20 @@ def route_menu(project_root=None, environ=None, unavailable=()):
             ladder = policy.effort_ladder
             stretch.append(dict(
                 route=label, auto_eligible=reason is None, effort_floor=policy.effort_floor,
-                efforts=(dict(light=luna_effort("light", ladder=ladder),
-                              standard=luna_effort("standard", ladder=ladder),
-                              standard_escalated=luna_effort("standard", True, ladder)) if ladder else None),
+                efforts=(dict(light=stretch_effort("light", ladder=ladder),
+                              standard=stretch_effort("standard", ladder=ladder),
+                              standard_escalated=stretch_effort("standard", True, ladder)) if ladder else None),
                 standard_work_kinds=sorted(policy.also_standard_for),
-                standard_candidate_roles=[role for role in roles if luna_status(
+                standard_candidate_roles=[role for role in roles if stretch_status(
                     role, "standard", kinds=policy.also_standard_for) == "standard_candidate"],
                 never="complexity high, deep or flagship work, deep roles"))
         if reason is None:
             eligible_engines.add(engine)
             for kind in sorted(policy.preferred_for):
                 preferred.setdefault(kind, []).append(label)
-    return dict(tiers=result, roles={role: {complexity: tier_for(role, complexity=complexity)
+    return dict(tiers=result, quota_window_policy=dict(unmapped="conservative_shared",
+                                                      rules=overrides.get("quota_windows", {})),
+                roles={role: {complexity: tier_for(role, complexity=complexity)
                                           for complexity in ("low", "normal", "high")}
                                      for role in roles},
                 role_work_kinds={role: work_kind(role) for role in roles},
@@ -486,7 +287,8 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
            escalate: bool = False, complexity: str = "normal", unavailable: Sequence[Mapping] = (),
            preference: str | None = None, model_hint: str = "auto",
            model_reason: str | None = None, previous_engine: str | None = None,
-           user_request: Mapping | None = None) -> Choice | None:
+           user_request: Mapping | None = None,
+           eligible_route_ids: frozenset[str] | None = None) -> Choice | None:
     """The route this worker role should open on, or ``None`` when nothing
     engine-confirmed is configured (keep the coordinator's route).
     See :func:`tier_for` for ``escalate`` and ``complexity``, and
@@ -500,16 +302,19 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     unavailable route named -- never the coordinator's route instead.
 
     ``user_request`` (:func:`user_model_request`) is the
-    user's own request, in this task, for the family of an exact
+    user's own request, in this task, for an exact
     ``model_hint``. When that hinted route is a flagship model it runs at
     the flagship tier even without escalation (basis ``auto:user_request``);
-    a pin still wins, and a denied, excluded, superseded, unavailable or
+    a pin still wins, and a denied, excluded, unavailable or
     exhausted requested route is refused with its reason in
     ``decision["user_model_request"]`` while the node is routed as usual.
     Without a user request a flagship hint stays escalation-only.
 
     Tiers, automatic eligibility and per-model policy come from routing.json
-    ``models`` before the built-in defaults (:mod:`routing.model_policy`)."""
+    ``models`` only (:mod:`routing.model_policy`). ``eligible_route_ids`` is
+    the task profile/ceiling intersection, applied before ranking. An empty
+    set grants nothing; a pin outside it is refused, never substituted.
+    """
     from ..connections import quota
     from ..connections import registry as connection_registry
     from . import availability
@@ -518,7 +323,11 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     profile_label = _effective_profile_label(project_root, environ)
     connections = connection_registry.read_registry(environ).connections
     entries = [entry for entry in _entries(overrides, connections, environ) if not _is_seed(entry)]
-    allowed = _allowed(overrides, entries)
+    allowed = [e for e in _allowed(overrides, entries)
+               if not _denied(overrides, e.route.engine, e.route.model)]
+    settings_allowed = allowed
+    if eligible_route_ids is not None:
+        allowed = [e for e in allowed if e.route.id in eligible_route_ids]
     policies = model_policy.resolve_policies(allowed, overrides)
     tiers = {route_id: policy.tier for route_id, policy in policies.items()}
     tier_sets = {route_id: policy.tiers for route_id, policy in policies.items()}
@@ -528,7 +337,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     def usage(entry):
         key = (entry.connection_id, entry.route.model)
         if key not in usage_cache:
-            usage_cache[key] = quota.used_percent(connections[entry.connection_id], entry.route.model, environ)
+            usage_cache[key] = quota.used_percent(connections[entry.connection_id], entry.route.model, environ, routing=overrides)
         return usage_cache[key]
 
     blocked = {}
@@ -538,21 +347,21 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             blocked[entry.route.id] = record
     base_role_tier = tier_for(role, False, complexity)
     role_tier = tier_for(role, escalate, complexity)
-    # A retry of standard work of a stretch work kind (built in: testing) is
+    # A retry of standard work of a configured stretch work kind is
     # the intermediate stretch-max band. Decide from the original work
     # before generic escalation labels it deep. Explicit high complexity and
-    # deep roles still fail luna_status here.
-    hold_kinds = frozenset(LUNA_WORK_KINDS).union(
-        *(policy.also_standard_for for policy in policies.values() if policy.stretch))
-    if escalate and luna_status(role, base_role_tier, complexity, hold_kinds) == "standard_candidate":
+    # deep roles still fail stretch_status here.
+    hold_kinds = frozenset().union(
+        *(policy.also_standard_for for policy in policies.values() if policy.stretch and policy.selected))
+    if escalate and stretch_status(role, base_role_tier, complexity, hold_kinds) == "standard_candidate":
         role_tier = base_role_tier
     affinity = overrides.get("engine_affinity") or {}
-    # Light-tier stretch models follow their own rule (see luna_status); a
+    # Light-tier stretch models follow their own rule (see stretch_status); a
     # tier override that moves one elsewhere routes it like any model.
-    stretch_status = {route_id: luna_status(role, role_tier, complexity, policy.also_standard_for)
+    stretch_states = {route_id: stretch_status(role, role_tier, complexity, policy.also_standard_for)
                       for route_id, policy in policies.items() if policy.stretch}
-    luna_ids = frozenset(stretch_status)
-    luna = _stretch_summary(stretch_status)
+    stretch_ids = frozenset(stretch_states)
+    stretch_summary = _stretch_summary(stretch_states)
     pin = _pin_for(overrides, role)
     if pin is not None:
         engine, model, effort = pin
@@ -565,7 +374,7 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                              "'providers' or change or remove the pin."),
                 retry_eligible=False, field="pin",
             )
-        matches = [e for e in entries if e.route.engine == engine and e.route.model == model]
+        matches = [e for e in settings_allowed if e.route.engine == engine and e.route.model == model]
         if not matches:
             raise PortableError(
                 category=PortableErrorCategory.VALIDATION, code="pinned_route_unavailable",
@@ -573,6 +382,10 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                              "connection currently offers; connect it or change the pin."),
                 retry_eligible=False, field="pin",
             )
+        if eligible_route_ids is not None:
+            matches = [e for e in matches if e.route.id in eligible_route_ids]
+            if not matches:
+                raise _policy_error("role_route_not_authorized", "The pinned route is outside this task's profile/ceiling; no substitution is permitted.")
         open_matches = [e for e in matches if e.route.id not in blocked]
         if not open_matches:
             # Strict: a pin is never substituted, even by an available route.
@@ -586,6 +399,8 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         ranked = sorted(open_matches, key=lambda e: _order_key(usage(e)))
         best = ranked[0]
         best_policy = policies[best.route.id]
+        if not best_policy.tiers:
+            raise _policy_error("policy_missing", "A pinned automatic route needs explicit per-engine tiers.")
         decision = dict(
             role=role, base_role_tier=base_role_tier, role_tier=role_tier,
             tier=tiers.get(best.route.id), basis="pin",
@@ -597,20 +412,22 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
         decision.update(model_hint=model_hint, model_hint_status=(
             "auto" if model_hint == "auto" else "ignored:escalated" if escalate else "ignored:pinned"),
             model_hint_reason=model_reason, diversify_from=previous_engine if escalate else None,
-            luna=dict(status="pinned" if best.route.id in luna_ids else luna, chosen=best.route.id in luna_ids))
+            stretch=dict(status="pinned" if best.route.id in stretch_ids else stretch_summary, chosen=best.route.id in stretch_ids))
         if user_request is not None:
             decision["user_model_request"] = dict(user_request, status="ignored:pinned")
         if profile_label is not None:
             decision["routing_profile"] = profile_label
-        default_effort = (luna_effort(role_tier, escalate, best_policy.effort_ladder)
-                          if best.route.id in luna_ids and best_policy.effort_ladder
+        default_effort = (stretch_effort(role_tier, escalate, best_policy.effort_ladder)
+                          if best.route.id in stretch_ids and best_policy.effort_ladder
                           else EFFORT_BY_TIER[tier_for(role, escalate, complexity)])
-        return Choice(best.connection_id, model,
-                      nearest(effort or default_effort, efforts_in_any_tier(best, best_policy)),
-                      "auto:pin", decision)
+        permitted = efforts_in_any_tier(best, best_policy)
+        if best_policy.effort_ladder and default_effort not in permitted:
+            raise _policy_error("model_effort_policy_unsupported", "Pinned effort_ladder step is not permitted.")
+        return Choice(best.connection_id, model, nearest(effort or default_effort, permitted),
+                      "auto:pin", decision, best.route.id)
     default_denied = {entry.route.id for entry in allowed if _default_auto_denied(overrides, entry)}
-    luna_denied = frozenset(route_id for route_id, status in stretch_status.items() if status.startswith("excluded:"))
-    luna_standard = frozenset(route_id for route_id, status in stretch_status.items()
+    stretch_denied = frozenset(route_id for route_id, status in stretch_states.items() if status.startswith("excluded:"))
+    stretch_standard = frozenset(route_id for route_id, status in stretch_states.items()
                               if status == "standard_candidate")
     superseded = _applied_superseded(overrides, allowed, superseded_routes(allowed))
     providers = overrides.get("providers")
@@ -631,18 +448,18 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             decision["routing_profile"] = profile_label
         effort = nearest(EFFORT_BY_TIER["flagship"],
                          permitted_efforts(picked, "flagship", policies[picked.route.id]))
-        return Choice(picked.connection_id, picked.route.model, effort, "auto:user_request", decision)
+        return Choice(picked.connection_id, picked.route.model, effort, "auto:user_request", decision, picked.route.id)
     status = None
     if preference is not None and providers is not None and preference not in providers:
         status = "ignored:provider_not_allowed"
     elif preference is not None and not any(e.route.engine == preference for e in entries):
         status = "ignored:provider_not_configured"
     picked, decision = rank(role_tier, allowed, usage, overrides.get("tiers") or {},
-                            excluded=frozenset(blocked) | default_denied | frozenset(superseded) | luna_denied,
-                            policy_excluded=frozenset(default_denied) | frozenset(superseded) | luna_denied,
+                            excluded=frozenset(blocked) | default_denied | frozenset(superseded) | stretch_denied,
+                            policy_excluded=frozenset(default_denied) | frozenset(superseded) | stretch_denied,
                             superseded=superseded,
-                            luna_standard=luna_standard,
-                            luna_status=luna,
+                            stretch_standard=stretch_standard,
+                            stretch_status=stretch_summary,
                             role=role, preference=None if status else preference,
                             model_hint=model_hint, model_reason=model_reason,
                             escalated=escalate, previous_engine=previous_engine,
@@ -658,13 +475,15 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
             # Nothing engine-confirmed at all -- unrelated to 'providers'.
             return None
         if not allowed:
+            if settings_allowed and eligible_route_ids is not None:
+                raise _policy_error("role_route_not_authorized", "No settings-eligible route is within this task's profile/ceiling.")
             # 'providers' excluded every engine-confirmed route: fail closed
             # rather than silently falling back to the coordinator's route,
             # which could be on an excluded provider.
             raise PortableError(
                 category=PortableErrorCategory.VALIDATION, code="no_available_route",
-                remediation=(f"'providers' in routing.json restricts routing to {sorted(overrides.get('providers'))}, "
-                             "but no configured connection offers any of them. Connect one of those providers, "
+                remediation=(f"'providers' in routing.json restricts routing to {sorted(overrides.get('providers') or ())}, "
+                             "but no confirmed route is policy-eligible (deny/enabled/providers). Enable an exact identity, "
                              "or widen 'providers' in routing.json."),
                 retry_eligible=False,
             )
@@ -674,28 +493,23 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
                          + "; ".join(_unavailable_reasons(allowed, blocked, usage)
                                      + ([", ".join(sorted(_route_label(e) for e in allowed
                                                           if e.route.id in default_denied))
-                                         + " excluded from automatic routing (a built-in default, or not "
+                                         + " excluded from automatic routing (not "
                                          "selected under 'models' in routing.json); pin one or select it "
                                          "there to use it"] if default_denied else [])
-                                     + (["older versions superseded by a newer model are not routed "
-                                         "automatically (" + ", ".join(sorted(
-                                             f"{_route_label(e)} -> {superseded[e.route.id]}"
-                                             for e in allowed if e.route.id in superseded))
-                                         + "); pin one in routing.json to use it"] if superseded else [])
                                      + (["light stretch models (" + ", ".join(sorted(
-                                         _route_label(e) for e in allowed if e.route.id in luna_denied))
-                                         + f") are not used for this work ({luna.partition(':')[2]})"]
-                                        if luna_denied else []))
+                                         _route_label(e) for e in allowed if e.route.id in stretch_denied))
+                                         + f") are not used for this work ({stretch_summary.partition(':')[2]})"]
+                                        if stretch_denied else []))
                          + ". Wait for a limit to reset, connect another account, or change routing.json."),
             retry_eligible=False,
         )
     policy = policies[picked.route.id]
     effort_target = EFFORT_BY_TIER[role_tier]
     effort_basis = f"role_tier:{role_tier}"
-    if picked.route.id in luna_ids and policy.effort_ladder:
-        # Recorded under the stretch rule's historic audit name.
-        effort_target = luna_effort(role_tier, escalate, policy.effort_ladder)
-        effort_basis = f"luna:{role_tier}" + (":escalated" if escalate else "")
+    if picked.route.id in stretch_ids and policy.effort_ladder:
+        # Record the generic policy, independent of the configured model name.
+        effort_target = stretch_effort(role_tier, escalate, policy.effort_ladder)
+        effort_basis = f"stretch:{role_tier}" + (":escalated" if escalate else "")
     elif escalate and tier_for(role, False, complexity) == role_tier:
         effort_target = EFFORT_ORDER[min(EFFORT_ORDER.index(effort_target) + 1,
                                          EFFORT_ORDER.index("high"))]
@@ -703,10 +517,13 @@ def choose(role: str, project_root=None, environ: Mapping[str, str] | None = Non
     # Efforts follow the tier the model was chosen for (one of its tiers; a
     # light stretch model taking standard work keeps its light-tier efforts).
     served = decision.get("tier") if decision.get("tier") in policy.tiers else policy.tier
-    effort = nearest(effort_target, permitted_efforts(picked, served, policy))
+    permitted = permitted_efforts(picked, served, policy)
+    if policy.effort_ladder and picked.route.id in stretch_ids and effort_target not in permitted:
+        raise _policy_error("model_effort_policy_unsupported", "Required effort_ladder step is not permitted.")
+    effort = nearest(effort_target, permitted)
     decision["base_role_tier"] = base_role_tier
     decision["effort_basis"] = effort_basis
-    return Choice(picked.connection_id, picked.route.model, effort, "auto", decision)
+    return Choice(picked.connection_id, picked.route.model, effort, "auto", decision, picked.route.id)
 
 
 _COMPLEXITY_SHIFT = {"low": 1, "normal": 0, "high": -1}
@@ -739,39 +556,7 @@ def pick(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                 affinity=affinity, models=models)[0]
 
 
-# 2: quota band, recent-count balance (tolerance 4), suitability.
-# 3: plus plan usage, engine affinity and cross-tier stand-ins (tolerance 2).
-# 4: no attempt counts and no cross-tier stand-ins -- the task and plan usage
-# alone decide.
-# 5: a light-tier Luna model also ranks among standard-tier development
-# candidates (``luna_standard``); the decision records ``luna``.
-# 6: the quota (hot) band is demoted from an early hard cut (right after
-# hint) to a late tie breaker (right before used_percent), behind plan usage
-# (the usage-gap signal, unchanged), retry diversification and engine
-# affinity: crossing HOT_PERCENT alone no longer overrides task/model fit,
-# no longer sends a diversified retry to a meaningfully-more-used plan, and
-# no longer causes a near-boundary cliff. A preference or model hint at or
-# above HOT_PERCENT is now ignored only when it is also meaningfully worse
-# (more than USAGE_MARGIN points) than an available alternative's usage,
-# rather than solely for crossing the band. The 100% exhaustion exclusion is
-# unchanged.
-# 7: Luna is a standard-tier candidate only for testing work; other
-# standard-tier development (implementation, operations, debugging) no
-# longer ranks Luna and, on a retry or review fix, escalates as before 5.
-# 8: tiers, automatic selection and per-model policy come from routing.json
-# ``models`` before the built-in defaults (routing.model_policy): an engine
-# with a selection list skips the built-in exclusions and supersede, any
-# light model may carry the stretch (Luna) rule, and a ``purpose`` key (the
-# model's ``preferred_for`` work kinds) ranks between retry diversification
-# and engine affinity. Without ``models`` every decision is unchanged.
-# 9: ``purpose`` (the owner's ``preferred_for`` choice) moves up to right
-# after ``preference``, ahead of a coordinator hint, plan usage and retry
-# diversification: an owner configuration preferring one engine's model for
-# a kind of work was overridden by any honoured engine hint (the coordinator
-# was told to hint the built-in affinity engine) or by a retry. It is passed
-# over only when its plan is hot and meaningfully worse, like a hint; a hint
-# that names no preferred route then records ``ignored:owner_preferred``.
-# Without ``preferred_for`` every decision is unchanged.
+# Generic rank ordering; historical decision keys remain readable by clients.
 RANK_VERSION = 9
 # The rank key's parts in order, named for the decision's ``decided_by``.
 # ``quota`` moved from right after ``hint`` to right before ``used_percent``
@@ -789,7 +574,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
          escalated: bool = False, previous_engine: str | None = None,
          all_entries: Sequence | None = None, providers: Sequence[str] | None = None,
          affinity: Mapping[str, str | None] | None = None,
-         luna_standard: frozenset = frozenset(), luna_status: str | None = None,
+         stretch_standard: frozenset = frozenset(), stretch_status: str | None = None,
          models: Mapping | None = None):
     """``(best entry, decision)`` for ``role_tier``, or ``(None, None)``.
 
@@ -839,9 +624,9 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     the runner-up (``only_candidate`` when there was none).
     ``superseded`` maps an older route id to the newer route that replaces
     it (see :func:`superseded_routes`); those ids should also be in
-    ``excluded`` and ``policy_excluded``. ``luna_standard`` route ids (light
-    stretch models, see :func:`luna_status`) are also candidates of the
-    standard tier; ``decision["luna"]`` records ``luna_status`` and, when a
+    ``excluded`` and ``policy_excluded``. ``stretch_standard`` route ids (light
+    stretch models, see :func:`stretch_status`) are also candidates of the
+    standard tier; ``decision["stretch"]`` records ``stretch_status`` and, when a
     stretch model was ranked but not chosen, the key that ranked it behind.
     ``models`` is routing.json ``models`` (tiers and policy per engine)."""
     superseded = superseded or {}
@@ -854,7 +639,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
     order = {e.route.id: index for index, e in enumerate(entries)}
 
     def serves(e, tier):
-        return tier in policies[e.route.id].tiers or (tier == "standard" and e.route.id in luna_standard)
+        return tier in policies[e.route.id].tiers or (tier == "standard" and e.route.id in stretch_standard)
 
     for tier in _FALLBACK_ORDER[role_tier]:
         candidates = [e for e in usable if serves(e, tier)]
@@ -939,7 +724,7 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
         else:
             first, second = key(best), key(ranked[1])
             decided_by = next(name for name, a, b in zip(RANK_KEYS, first, second) if a != b)
-        best_luna = next((e for e in ranked if policies[e.route.id].stretch), None)
+        best_stretch = next((e for e in ranked if policies[e.route.id].stretch), None)
         affinity_kind = kind
         reported_hint_status = hint_status
         if (hint_status == "honoured" and purpose_status == "honoured" and purpose(best)
@@ -969,9 +754,9 @@ def rank(role_tier: str, entries: Sequence, usage, tier_overrides: Mapping[str, 
                                       and e.route.id not in superseded),
             superseded={_route_label(e): superseded[e.route.id] for e in entries if e.route.id in superseded},
             decided_by=decided_by,
-            luna=dict(status=luna_status, candidate=best_luna is not None, chosen=best_luna is best,
-                      outranked_by=(None if best_luna is None or best_luna is best else
-                                    next(name for name, a, b in zip(RANK_KEYS, key(best), key(best_luna))
+            stretch=dict(status=stretch_status, candidate=best_stretch is not None, chosen=best_stretch is best,
+                      outranked_by=(None if best_stretch is None or best_stretch is best else
+                                    next(name for name, a, b in zip(RANK_KEYS, key(best), key(best_stretch))
                                          if a != b))),
             chosen=_route_label(best), chosen_connection_id=best.connection_id,
         )
@@ -1001,7 +786,9 @@ def _user_flagship(model_hint: str, user_request: Mapping | None, overrides: Map
         return (), "refused:not_offered"
     if not flagship:
         return (), "not_flagship"
-    current = [e for e in offered if e.route.id not in superseded]
+    if all(_auto_exclusion(overrides, e) for e in offered):
+        return (), "refused:not_selected"
+    current = offered
     if not current:
         return (), "refused:superseded"
     open_routes = [e for e in current if e.route.id not in blocked]
@@ -1048,9 +835,7 @@ def _candidate(entry, usage, role, preferred: bool, usage_band: int | None = Non
 
 
 def model_tiers(entries: Sequence, tier_overrides: Mapping[str, str], models: Mapping | None = None) -> dict[str, str]:
-    """Route id -> tier (:func:`model_policy.resolve_policies`): routing.json
-    ``models`` tiers, then the legacy ``tiers``, then the built-in tables,
-    then list position."""
+    """Exact per-engine configured tiers; missing identities remain unplaced."""
     policies = model_policy.resolve_policies(entries, dict(tiers=tier_overrides or {}, models=models or {}))
     return {route_id: policy.tier for route_id, policy in policies.items()}
 
@@ -1083,20 +868,14 @@ def _order_key(used: float | None):
 
 
 def permitted_efforts(entry, tier: str, policy: model_policy.RoutePolicy | None = None) -> tuple[str, ...]:
-    """What ``entry``'s model offers, weakest first, minus ``ultra``; minus
-    ``max`` unless the model is ``light`` or its effort ladder holds it;
-    nothing above its policy's ``max_effort`` (without one, nothing above
-    ``high`` on a ``flagship``-tier model); and nothing below its
-    ``effort_floor`` when it offers the floor or more. ``policy`` defaults
-    to the model's built-in policy (the flagship families stop at ``high``,
-    Luna never runs below ``high``)."""
-    if policy is None:
-        attributes = model_policy.builtin_attributes(entry.route.model)
-        floor, most = attributes.get("effort_floor"), attributes.get("max_effort")
-        ladder = tuple(attributes.get("effort_ladder") or ())
-    else:
-        floor, most, ladder = policy.effort_floor, policy.max_effort, policy.effort_ladder
+    """Observed efforts narrowed by generic economy and explicit policy; unsupported requirements refuse."""
+    policy = policy or model_policy.policy_for(entry.route.engine, entry.route.model)
+    floor, most, ladder = policy.effort_floor, policy.max_effort, policy.effort_ladder
     offered = {value for name, value in entry.route.supported_parameters if name == "thought_level"}
+    if floor is not None and floor not in offered:
+        raise _policy_error("model_effort_policy_unsupported", f"{_route_label(entry)} does not offer effort_floor {floor!r}.")
+    if any(value not in offered for value in ladder):
+        raise _policy_error("model_effort_policy_unsupported", f"{_route_label(entry)} does not offer the required effort_ladder.")
     if most is not None:
         ceiling = EFFORT_ORDER.index(most)
     elif tier == "flagship":
@@ -1110,7 +889,9 @@ def permitted_efforts(entry, tier: str, policy: model_policy.RoutePolicy | None 
     )
     if floor is not None:
         lowest = EFFORT_ORDER.index(floor)
-        return tuple(value for value in permitted if EFFORT_ORDER.index(value) >= lowest) or permitted
+        permitted = tuple(value for value in permitted if EFFORT_ORDER.index(value) >= lowest)
+    if not permitted and (floor is not None or most is not None or ladder):
+        raise _policy_error("model_effort_policy_unsupported", f"{_route_label(entry)} has no permitted effort under its policy.")
     return permitted
 
 
@@ -1138,10 +919,7 @@ def allowed_efforts(engine: str, model: str | None, project_root=None, environ=N
     model is not in any catalog (nothing to judge by)."""
     from ..connections import registry as connection_registry
 
-    try:
-        overrides = load_overrides(project_root, environ)
-    except PortableError:
-        overrides = {}
+    overrides = load_overrides(project_root, environ)
     entries = _entries(overrides, connection_registry.read_registry(environ).connections, environ)
     policies = model_policy.resolve_policies(entries, overrides)
     match = next((e for e in entries if e.route.engine == engine and e.route.model == model), None)
@@ -1151,16 +929,16 @@ def allowed_efforts(engine: str, model: str | None, project_root=None, environ=N
 
 
 def _entries(overrides, connections, environ) -> list:
-    """Launchable, non-denied catalog entries, in each engine's own order.
-    ``providers`` is deliberately not applied here (see :func:`_allowed`):
-    it is a stricter, fail-closed restriction, not a silent narrowing like
-    ``deny``."""
+    """Launchable observed entries before deny/enabled/provider filtering.
+
+    Retain the raw confirmed catalogue so an empty policy-eligible set can
+    never be mistaken for no observed catalogue and inherit the coordinator.
+    """
     from ..acp.config_options import presented_entries, selectable_entries_from_snapshots
 
     return [
         entry for entry in presented_entries(selectable_entries_from_snapshots(connections, environ))
         if getattr(connections.get(entry.connection_id), "launch_command", None) is not None
-        and not _denied(overrides, entry.route.engine, entry.route.model)
     ]
 
 
@@ -1192,59 +970,22 @@ def is_denied(engine: str, model: str, project_root=None, environ=None) -> bool:
     try:
         return _denied(load_overrides(project_root, environ), engine, model)
     except PortableError:
-        return False
+        return True
 
 
 def _listed(values: Sequence[str], engine: str, model: str) -> bool:
-    """Whether a ``deny``/``auto_allow`` token names ``engine``/``model``:
-    an exact id, a versioned id covering its variants (``gpt-5.5`` covers
-    ``gpt-5.5[1m]``), or a bare family name covering every version and
-    alias (``haiku`` covers ``claude-haiku-4-5-20251001``). ``engine/``
-    restricts a token to that engine."""
-    if model in values or f"{engine}/{model}" in values:
-        return True
-    family, version = model_line(model)
-    for value in values:
-        token_engine, slash, token = value.partition("/")
-        if not slash:
-            token_engine, token = None, value
-        if token_engine is not None and token_engine != engine:
-            continue
-        token = token.casefold()
-        if re.fullmatch(r"[a-z]+", token):
-            if token == family:
-                return True
-        elif "[" not in token and version is not None and model_line(token) == (family, version):
-            return True
-    return False
-
-
-#: Engines whose routes automatic selection never picks on its own unless
-#: routing.json ``models`` selects them: OpenCode is optional, so
-#: their routes otherwise run only when chosen explicitly (the model
-#: selector, a ``pin``) or opted in through ``auto_allow``.
-DEFAULT_AUTO_DENY_ENGINES = model_policy.BUILTIN_AUTO_DENY_ENGINES
-
-
-def _builtin_auto_denied(engine: str, model: str) -> bool:
-    return (engine in DEFAULT_AUTO_DENY_ENGINES
-            or (engine == model_policy.BUILTIN_AUTO_DENY_FAMILY_ENGINE
-                and any(family in model.casefold() for family in DEFAULT_AUTO_DENY_FAMILIES)))
+    """Exact id, exact engine/id, or engine/*; no family/version matching."""
+    return model in values or f"{engine}/{model}" in values or engine_wildcard(engine) in values
 
 
 def _auto_exclusion(overrides: Mapping, entry) -> str | None:
-    """Why automatic selection skips ``entry`` by policy, or ``None``:
-    ``not_selected`` when routing.json ``models`` lists its engine's
-    automatic models without it (LISTED mode), ``excluded_by_default`` for
-    the built-in Haiku and optional-engine exclusions (BUILTIN mode, where
-    ``auto_allow`` lifts them). ``deny`` applies before this."""
+    """Exact automatic membership and placement diagnostic."""
     engine, model = entry.route.engine, entry.route.model
-    selected = model_policy.is_selected(overrides, engine, model)
-    if selected is not None:
-        return None if selected else "not_selected"
-    if _listed(overrides.get("auto_allow") or (), engine, model):
-        return None
-    return "excluded_by_default" if _builtin_auto_denied(engine, model) else None
+    if not model_policy.is_selected(overrides, engine, model):
+        return "not_selected"
+    if not model_policy.policy_for(engine, model, overrides).tiers:
+        return "policy_missing"
+    return None
 
 
 def _default_auto_denied(overrides: Mapping, entry) -> bool:
@@ -1254,38 +995,13 @@ def _default_auto_denied(overrides: Mapping, entry) -> bool:
 
 
 def _applied_superseded(overrides: Mapping, entries: Sequence, superseded: Mapping[str, str]) -> dict[str, str]:
-    """``superseded`` without the routes of engines in LISTED mode: the
-    owner's list is authoritative there, so a selected older version still
-    runs (its ``superseded_by`` stays informational)."""
-    listed = {e.route.id for e in entries if model_policy.selection_mode(overrides, e.route.engine) == "listed"}
-    return {route_id: newer for route_id, newer in superseded.items() if route_id not in listed}
-
-
-# --- model versions ----------------------------------------------------------
-
-# model_line and its token parsing live in routing.model_policy.
+    """Historical audit compatibility; exact owner lists have no supersession."""
+    return {}
 
 
 def superseded_routes(entries: Sequence) -> dict[str, str]:
-    """Route id -> the newer route that supersedes it: among one engine's
-    entries of the same family (:func:`model_line`), every version below the
-    newest one. Callers pass entries with ``deny`` already applied, so the
-    newest non-denied version wins; a model with no parseable version is
-    never superseded and never supersedes."""
-    lines: dict[tuple[str, str], list] = {}
-    for entry in entries:
-        family, version = model_line(entry.route.model, getattr(entry, "model_name", None))
-        if family and version is not None:
-            lines.setdefault((entry.route.engine, family), []).append((version, entry))
-    result = {}
-    for group in lines.values():
-        newest = max(version for version, _ in group)
-        for version, entry in group:
-            if version < newest:
-                successor = next((e for v, e in group if v == newest and e.connection_id == entry.connection_id),
-                                 next(e for v, e in group if v == newest))
-                result[entry.route.id] = _route_label(successor)
-    return result
+    """Historical audit compatibility; no replacement is inferred."""
+    return {}
 
 
 #: The ``deny`` token suffix that names every model of one engine
@@ -1298,26 +1014,14 @@ def engine_wildcard(engine: str) -> str:
     return f"{engine}/{ENGINE_WILDCARD}"
 
 
-#: Engines whose models are all off until routing.json ``enabled`` lists
-#: them: an optional engine (OpenCode) offers hundreds of provider models,
-#: and none of them should reach the selector without the owner's choice.
-DEFAULT_DISABLED_ENGINES = model_policy.BUILTIN_AUTO_DENY_ENGINES
-
-
-def enabled_models(overrides: Mapping, engine: str) -> tuple[str, ...] | None:
-    """``engine``'s exact enabled model ids from routing.json ``enabled``, or
-    ``None`` when the file does not list the engine (the built-in default
-    then applies: every model on, except :data:`DEFAULT_DISABLED_ENGINES`)."""
-    enabled = overrides.get("enabled")
-    listed = enabled.get(engine) if isinstance(enabled, Mapping) else None
-    return None if listed is None else tuple(listed)
+def enabled_models(overrides: Mapping, engine: str) -> tuple[str, ...]:
+    """Exact enabled identities; an omitted engine is disabled."""
+    enabled = overrides.get("enabled") or {}
+    return tuple(enabled.get(engine) or ())
 
 
 def model_enabled(overrides: Mapping, engine: str, model: str) -> bool:
-    """Whether ``enabled`` (or its built-in default) lets ``engine``/``model``
-    into Cortex at all; ``deny`` is checked separately and still wins."""
-    listed = enabled_models(overrides, engine)
-    return engine not in DEFAULT_DISABLED_ENGINES if listed is None else model in listed
+    return model in enabled_models(overrides, engine)
 
 
 def _denied(overrides: Mapping, engine: str, model: str) -> bool:
@@ -1339,29 +1043,46 @@ def _pin_for(overrides: Mapping, role: str):
     return engine, model, effort or None
 
 
+def _policy_error(code: str, remediation: str) -> PortableError:
+    return PortableError(category=PortableErrorCategory.VALIDATION, code=code,
+                         remediation=remediation, retry_eligible=False, field="model_policy_version")
+
+
+def require_model_policy(data: Mapping) -> None:
+    version = data.get("model_policy_version")
+    if version is None:
+        raise _policy_error("model_policy_migration_required",
+                            "Explicitly migrate routing.json to model_policy_version=2 with exact enabled/auto identities and per-engine tiers.")
+    if type(version) is not int or version != 2:
+        raise _policy_error("model_policy_version_unsupported", "Only model_policy_version=2 is supported.")
+
+
 def load_overrides(project_root=None, environ: Mapping[str, str] | None = None) -> dict:
-    """The first existing ``routing.json``, validated, or ``{}``. A
-    malformed file refuses routing -- it never silently means "none"."""
+    """First existing validated owner policy; absence/legacy/malformed fails closed."""
     for path in _candidate_paths(project_root, environ):
         if not path.is_file():
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            _validate(data)
+            _validate(data, require_policy=False)
+            require_model_policy(data)
         except (OSError, ValueError) as error:
             raise PortableError(
                 category=PortableErrorCategory.VALIDATION, code="invalid_routing_overrides",
                 remediation=f"Repair {path}: {error}", retry_eligible=False,
             ) from error
         return data
+    require_model_policy({})
     return {}
 
 
-def _validate(data) -> None:
+def _validate(data, *, require_policy=True) -> None:
     from ..connections.model import SUPPORTED_ENGINES
 
     if not isinstance(data, dict):
         raise ValueError("must contain a JSON object")
+    if require_policy:
+        require_model_policy(data)
     pins, deny, tiers = data.get("pin", {}), data.get("deny", []), data.get("tiers", {})
     auto_allow = data.get("auto_allow", [])
     if not isinstance(pins, dict) or not all(isinstance(v, str) and "/" in v for v in pins.values()):
@@ -1390,11 +1111,17 @@ def _validate(data) -> None:
             if engine is not None and engine not in SUPPORTED_ENGINES:
                 raise ValueError(f"'engine_affinity' maps {kind!r} to unknown engine {engine!r}; "
                                  f"use one of {', '.join(SUPPORTED_ENGINES)} or null")
+    if data.get("model_policy_version") == 2 and data.get("tiers"):
+        raise ValueError("legacy top-level tiers require explicit per-engine migration")
+    if "quota_windows" in data:
+        from ..connections import quota
+        quota.validate_quota_windows(data["quota_windows"])
     if "enabled" in data:
         enabled = data["enabled"]
         if not isinstance(enabled, dict) or not all(
                 engine in SUPPORTED_ENGINES and isinstance(models, list)
-                and all(isinstance(v, str) and v for v in models) for engine, models in enabled.items()):
+                and len(models) == len(set(map(str, models)))
+                and all(model_policy._model_id(v) for v in models) for engine, models in enabled.items()):
             raise ValueError("'enabled' must map an engine id to a list of exact model ids")
     if "models" in data:
         problems = model_policy.validate_models(
@@ -1402,6 +1129,32 @@ def _validate(data) -> None:
             reserved_word=_reserved_request_word)
         if problems:
             raise ValueError("; ".join(f"'{where}' {message}" for where, _code, message in problems[:5]))
+
+    if data.get("model_policy_version") == 2:
+        labels = {}
+        for engine, config in (data.get("models") or {}).items():
+            tiers = config.get("tiers") or {}
+            for model in config.get("auto") or ():
+                if not model_policy.tier_list(tiers.get(model)):
+                    raise _policy_error("policy_missing", f"models.{engine}.tiers.{model} needs nonempty explicit tiers.")
+            for model, policy in (config.get("policy") or {}).items():
+                for label in policy.get("request_names") or ():
+                    identity = f"{engine}/{model}"
+                    if label in labels and labels[label] != identity:
+                        raise _policy_error("model_request_label_ambiguous", f"Request label {label!r} names more than one exact identity.")
+                    labels[label] = identity
+
+
+def validate_routing(data: Mapping) -> None:
+    """Validate v2 owner settings without consulting catalogs or template data.
+
+    Named PortableErrors: model_policy_migration_required,
+    model_policy_version_unsupported, policy_missing,
+    model_request_label_ambiguous. Structural errors remain ValueError.
+    Enabled engines and automatic lists may be empty/omitted (disabled).
+    Every automatic model needs nonempty per-engine tiers, even when dormant.
+    """
+    _validate(data)
 
 
 def _candidate_paths(project_root, environ) -> list[Path]:
@@ -1415,70 +1168,15 @@ def _candidate_paths(project_root, environ) -> list[Path]:
     return paths
 
 
-# --- a model family the user asked for ---------------------------------------
-#
-# A flagship model is otherwise reserved for escalation. The coordinator may
-# still route one node to an exact flagship route when the *user* explicitly
-# asked for that family in the same task. The plan hint only names the route;
-# the grant (``user_model_request``) comes from user-authored text the runtime
-# recorded, never from coordinator prose, ``model_reason``, a question the
-# model wrote, a report or worker output:
-#
-# * every ``source_revisions`` body of the task (the initial request and each
-#   later user message or steer the host delivered), and
-# * the verbatim ``answer_text`` of every question a real user answer resolved
-#   (``acp.questions_store.answered_questions``) -- never the question text,
-#   which the asking model wrote.
-#
-# A source *requests* the family (not merely mentions it) when it names the
-# hinted model's family (:func:`model_line`: ``astra`` for ``gpt-6-astra``,
-# ``fable`` for ``claude-fable-5-1[1m]``) as a word, case-insensitively, or
-# by one of its extra spellings (its ``request_names`` policy; built in, the
-# Russian spellings of :data:`CYRILLIC_FAMILY_NAMES`), and in the
-# same sentence, within :data:`REQUEST_WINDOW` words before it, either
-#
-# * an explicit request word stands (:data:`REQUEST_WORDS`: "use Astra",
-#   "switch the review to Fable", "используй астру", "требование
-#   использования астры"), or
-# * a work verb (:data:`WORK_VERBS`) governs a preposition of means
-#   (:data:`MEANS_WORDS`) that stands directly before the family, at most one
-#   article or "model" word between (:data:`MEANS_FILLERS`): "implement it on
-#   Astra", "сделай на Астре", "проверь через Фейбл".
-#
-# A preposition alone never requests: "it failed on Astra", "посмотри на
-# Астру", "sent via Fable", "ревью через Фейбл" grant nothing. A request or
-# work word counts only in a request form (:func:`_request_form`): an English
-# verb must open its clause or follow a request-mood word (:data:`_REQUEST_LEAD`:
-# "please", "to", "could you", "let's", ...), so a noun or a report ("the last
-# run on Astra", "the tests run on Astra", "we tried to run it on Astra") is
-# not a request; Russian verbs are listed only in their imperative, infinitive
-# and first-person-plural forms, so past tenses, participles and verbal nouns
-# ("запустили на Астре", "сделано на Астре", "использование Астры") are not
-# requests either, nor is a verb right after a past tense ("пытались
-# запустить на Астре"). A negation, comparison or substitution word
-# (:data:`NEGATION_WORDS`) within the wider :data:`NEGATION_WINDOW` refuses the
-# mention ("не используй астру", "don't use Astra", "compare Astra with
-# Fable", "instead of Astra"). A bare mention -- a comparison, an availability
-# remark ("Astra is unavailable; use the default route"), a quotation or
-# report ("the last report said Astra ...") or a preference for the default
-# route -- grants nothing. This is a deterministic word match, not an
-# interpretation, and it errs towards refusing: a missed request only leaves
-# the node on its ordinary tier, with the reason in the receipt. The
-# coordinator must still choose to hint the exact route, and pin, deny,
-# providers, availability and quota still apply (see :func:`choose`).
+# --- source-bound explicit model requests ------------------------------------
 
-# Built-in Russian spellings of family names the engines list in Latin
-# (routing.model_policy); a routing.json ``models`` policy's
-# ``request_names`` replaces them for its model. A family with neither is
-# still recognised by its Latin name.
-CYRILLIC_FAMILY_NAMES = model_policy.BUILTIN_REQUEST_NAMES
 _RU_ENDING = r"(?:а|ы|е|у|ой|ою|и|ом|ам|ами|ах|ов)?"
 # Words that request the family by themselves: verbs whose object is the model
 # and nouns of requirement. Deliberately narrow: prepositions ("on", "via",
 # "through", "на", "через"; see WORK_VERBS), "with"/"с", "by", "about", "let"
 # and wishing or modal verbs ("want", "should", "хочу", "нужно") also
 # introduce remarks, comparisons, authorship and questions, so a request
-# phrased with them alone ("I want Astra") is not recognised -- the node then
+# phrased with them alone ("I want the named model") is not recognised -- the node then
 # stays on its ordinary tier and the receipt says ``not_requested_by_user``.
 # Russian verbs are listed only in the forms that ask (imperative, infinitive,
 # first person plural), never a past tense, participle or verbal noun.
@@ -1495,10 +1193,10 @@ REQUEST_WORDS = re.compile(
 )
 # Verbs of the work itself. They request the family only through a
 # preposition of means (MEANS_WORDS) directly before it ("implement it on
-# Astra", "сделай на Астре"): with the family as their object they name what
-# the work is about ("review Astra's output", "проверь Астру"), and a
-# preposition with no such verb is a remark ("it failed on Astra", "посмотри
-# на Астру"). Russian forms as in REQUEST_WORDS.
+# the named model", "сделай на модели"): with the family as their object they name what
+# the work is about ("review the named model's output", "проверь модель"), and a
+# preposition with no such verb is a remark ("it failed on the named model", "посмотри
+# на модель"). Russian forms as in REQUEST_WORDS.
 WORK_VERBS = re.compile(
     r"implement|build|fix|write|test|review|perform|handle|redo|rerun|retry|debug|refactor"
     r"|investigate|analy[sz]e|do"
@@ -1511,30 +1209,30 @@ WORK_VERBS = re.compile(
 )
 MEANS_WORDS = re.compile(r"on|via|through|using|на|через|посредством|силами|помощью", re.IGNORECASE)
 # At most one of these may stand between the preposition and the family
-# ("on the Astra route", "на модели Астра").
+# ("on the the named model route", "на модели модель").
 MEANS_FILLERS = frozenset({"the", "a", "an", "model", "модели", "моделью"})
 # An English request or work verb is in a request form when it opens its
 # clause or directly follows one of these words (or an "'ll"/"'d"
 # contraction). Anything else before it -- an article, a possessive, a noun,
-# an auxiliary -- makes it a noun or a report: "the last run on Astra", "the
-# tests run on Astra", "was run on Astra", "I use Astra daily".
+# an auxiliary -- makes it a noun or a report: "the last run on the named model", "the
+# tests run on the named model", "was run on the named model", "I use the named model daily".
 _REQUEST_LEAD = frozenset({
     "please", "pls", "plz", "kindly", "just", "simply", "only", "always", "also", "then",
     "and", "now", "so", "ok", "okay", "yes", "no", "to", "can", "could", "would", "will",
     "should", "must", "may", "let's", "lets", "better",
 })
-# "could you run it on Astra": "you" leads only after one of these.
+# "could you run it on the named model": "you" leads only after one of these.
 _ASKING_MODALS = frozenset({"can", "could", "would", "will", "please"})
-# "I prefer Astra": a first-person subject leads only a verb of choice.
+# "I prefer the named model": a first-person subject leads only a verb of choice.
 _CHOOSERS = frozenset({"i", "we"})
 _CHOICE_WORDS = frozenset({"prefer", "pick", "choose", "select", "request", "require"})
 # "to" after one of these reports an attempt or a habit, not a request
-# ("we tried to run it on Astra").
+# ("we tried to run it on the named model").
 _REPORTED_BEFORE_TO = frozenset({
     "tried", "wanted", "used", "failed", "managed", "attempted", "meant", "supposed",
     "was", "were", "had", "did", "went", "planned", "started", "began", "continued", "seemed",
 })
-# Nouns and statements of requirement need no lead ("the task requires Astra").
+# Nouns and statements of requirement need no lead ("the task requires the named model").
 _UNGUARDED = frozenset({"requirement", "requires"})
 _CYRILLIC = re.compile(r"[а-яё]")
 # A Russian past tense ("пытались", "хотел") right before a verb makes it a report.
@@ -1544,7 +1242,7 @@ _RU_PAST = re.compile(r"[а-яё]+(?:л|ла|ло|ли|лся|лась|лось|
 # than a request. Deliberately broad, and read from a wider window than
 # REQUEST_WORDS: a missed refusal would run a flagship model, a missed request
 # only leaves the node on its ordinary tier. "no"/"нет" are not here: "No,
-# use Astra" is a request, and a bare "нет Астры" has no request word anyway.
+# use the named model" is a request, and a bare "нет модели" has no request word anyway.
 NEGATION_WORDS = re.compile(
     r"not|never|without|avoid|except|cannot|unable"
     r"|(?:do|does|did|is|are|was|were|has|have|had|ca|could|would|should|must|wo|shall|need)n'?t"
@@ -1554,36 +1252,35 @@ NEGATION_WORDS = re.compile(
 )
 _WORD = re.compile(r"[\w']+", re.UNICODE)
 _SENTENCE_END = re.compile(r"[.!?;\n]")
-# A request verb's lead is read within its own clause ("No, use Astra").
+# A request verb's lead is read within its own clause ("No, use the named model").
 _CLAUSE_BREAK = re.compile(r"[,:()\"«»“”„—–]")
-# The token the family name is attached to ("codex-acp/gpt-6-" before "astra"
-# in an exact route id, an opening quote) is not a word before it.
+# An opening quote attached to a request label is not a preceding word.
 _ATTACHED = re.compile(r"\S*\Z")
 REQUEST_WINDOW = 4
 NEGATION_WINDOW = 5
 
 
 def family_of(model_hint: str) -> str | None:
-    """The model family an exact ``engine/model`` hint names, or ``None``."""
-    _engine, slash, model = model_hint.partition("/")
-    if not slash or not model:
-        return None
-    family = model_line(model)[0]
-    return family or None
+    """Historical API name: now the full exact engine/model identity."""
+    engine, slash, model = model_hint.partition("/")
+    return model_hint if engine and slash and model else None
 
 
 def family_pattern(family: str, names: Sequence[str] | None = None) -> re.Pattern:
-    """A case-insensitive whole-word pattern for ``family``'s Latin name and
-    its extra spellings: ``names`` (a ``request_names`` policy) or, when
-    ``None``, its built-in Russian spellings. A Cyrillic stem takes Russian
-    endings; any other name an optional plural ``s``."""
-    latin = r"[-\s]?".join(re.escape(part) for part in family.split("-"))
-    patterns = [rf"(?<![a-z0-9]){latin}s?(?![a-z0-9])"]
-    for name in (CYRILLIC_FAMILY_NAMES.get(family, ()) if names is None else names):
-        if _CYRILLIC.search(name):
-            patterns.append(rf"(?<![а-яё]){re.escape(name)}{_RU_ENDING}(?![а-яё])")
-        else:
-            patterns.append(rf"(?<!\w){re.escape(name)}s?(?!\w)")
+    """Match an exact identity or owner-configured labels, never guessed words."""
+    identity = rf"(?-i:{re.escape(family)})"
+    # IDs are opaque: punctuation, including a terminal dot, can be ID data.
+    # Unquoted identities must occupy the whole whitespace-delimited token.
+    patterns = [rf"(?<!\S){identity}(?!\S)"]
+    # Explicit paired quotes disambiguate surrounding prose punctuation. Both
+    # ends of the quoted token must be isolated; quoted prefixes/variants do
+    # not authorize the shorter identity. Keep quotes out of the retained match.
+    for opening, closing in (("\"", "\""), ("'", "'"), ("`", "`"), ("«", "»"), ("“", "”")):
+        left, right = re.escape(opening), re.escape(closing)
+        patterns.append(rf"(?<={left})(?<!\S{left}){identity}(?={right}[.,!?;:]?(?!\S))")
+    for name in names or ():
+        ending = _RU_ENDING if _CYRILLIC.search(name) else "s?"
+        patterns.append(rf"(?<!\w){re.escape(name)}{ending}(?!\w)")
     return re.compile("|".join(patterns), re.IGNORECASE)
 
 
@@ -1680,33 +1377,31 @@ def _reserved_request_word(word: str) -> bool:
 
 
 def request_names(model_hint: str, project_root=None, environ: Mapping[str, str] | None = None) -> tuple[str, ...]:
-    """The extra spellings of an exact ``engine/model`` hint's family: its
-    routing.json ``models`` policy's ``request_names``, else the built-in
-    ones. An unreadable routing.json counts as none configured."""
+    """Only owner-configured request labels for an exact identity."""
     engine, _slash, model = (model_hint or "").partition("/")
-    try:
-        overrides = load_overrides(project_root, environ)
-    except PortableError:
-        overrides = {}
+    overrides = load_overrides(project_root, environ)
     return model_policy.policy_for(engine, model, overrides).request_names
 
 
 def user_model_request(store, task_id: str, model_hint: str, *, names: Sequence[str] | None = None) -> dict | None:
-    """The user's request for ``model_hint``'s family in ``task_id``:
-    ``{"source_ref", "family", "matched"}`` for the newest user source that
-    requests it (``source_ref`` is readable with ``read_source``), or ``None``
-    when no source does, including when the family is only mentioned.
-    Only an exact ``engine/model`` hint can be requested. A missing or
-    unreadable source grants nothing. ``names`` are the family's extra
-    spellings; by default :func:`request_names` for the task's project."""
+    """Match only retained user source text, never coordinator/report text."""
     family = family_of(model_hint or "")
     if family is None:
         return None
-    if names is None:
-        names = request_names(model_hint, getattr(store, "project_root", None))
+    overrides = load_overrides(getattr(store, "project_root", None))
+    engine, _, model = model_hint.partition("/")
+    configured_names = model_policy.policy_for(engine, model, overrides).request_names
+    if names is not None and tuple(names) != configured_names:
+        raise _policy_error("model_request_labels_changed", "Request labels must match current owner settings; reread routing.json.")
+    names = configured_names
     with store.connection() as db:
         for source_ref, text in _user_texts(store, db, task_id):
             matched = requests_family(text, family, names)
             if matched is not None:
+                for engine, config in (overrides.get("models") or {}).items():
+                    for model, policy in (config.get("policy") or {}).items():
+                        identity = f"{engine}/{model}"
+                        if identity != model_hint and family_pattern(identity, policy.get("request_names")).search(matched):
+                            raise _policy_error("model_request_label_ambiguous", "The requested label matches multiple configured identities.")
                 return dict(source_ref=source_ref, family=family, matched=matched)
     return None

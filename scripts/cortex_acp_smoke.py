@@ -186,6 +186,22 @@ def _build_fixture_connection(environ):
     observation = discovery.parse_observation(options)
     snapshot = discovery.build_catalog({record.id: record}, {record.id: observation})
     catalog_store.save_snapshot(snapshot, environ)
+    # Version-2 routing has no model-name or catalog-seed defaults. Give this
+    # isolated fixture one exact, explicitly eligible fake identity so the
+    # ACP model/thought-level selector path is exercised.
+    routing_path = Path(environ["XDG_CONFIG_HOME"]) / "cortex" / "routing.json"
+    routing = {
+        "model_policy_version": 2,
+        "enabled": {"codex-acp": ["smoke-placeholder-model"]},
+        "models": {"codex-acp": {
+            "auto": ["smoke-placeholder-model"],
+            "tiers": {"smoke-placeholder-model": "light"},
+            "policy": {"smoke-placeholder-model": {}},
+        }},
+    }
+    with routing_path.open("x", encoding="utf-8") as handle:
+        handle.write(json.dumps(routing, indent=2) + "\n")
+    routing_path.chmod(0o600)
     return record
 
 

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from model_policy_fixtures import write_policy
 from cortex_runtime.acp import commands as acp_commands
 from cortex_runtime.acp import config_options
 from cortex_runtime.acp.agent import Agent
@@ -50,6 +51,7 @@ def _save_snapshot(record, *, environ, model_id="model-a", thought_level="high")
     observation = discovery.parse_observation(options)
     snapshot = discovery.build_catalog({record.id: record}, {record.id: observation})
     catalog_store.save_snapshot(snapshot, environ)
+    write_policy(environ, {record.engine: {model_id: "standard"}})
     return snapshot
 
 

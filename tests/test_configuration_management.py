@@ -22,6 +22,7 @@ from cortex_runtime.connections import onboarding, registry
 from cortex_runtime.connections.model import AuthMode
 from cortex_runtime.portable.errors import PortableError
 from cortex_runtime.routing import auto_route
+from model_policy_fixtures import routing_fixture
 from cortex_runtime.store import Store
 
 OPENCODE_ROUTE = "opencode/anthropic/claude-sonnet-4-5"
@@ -200,20 +201,20 @@ def test_project_ceiling_reports_a_user_ceiling_that_tightened_later(home, tmp_p
 def test_routing_read_reports_precedence_and_the_effective_source(home, tmp_path, monkeypatch):
     project = tmp_path / "project"
     (project / ".cortex").mkdir(parents=True)
-    _write_json(home.config / "routing.json", {"deny": ["haiku"], "future_key": 1})
+    _write_json(home.config / "routing.json", routing_fixture({"deny": ["haiku"], "future_key": 1}))
     view = management.read_routing(str(project))
     assert view["precedence"] == ["project", "user"]
-    assert view["effective_source"] == "user" and view["effective_rules"] == {"deny": ["haiku"]}
+    assert view["effective_source"] == "user" and view["effective_rules"] == routing_fixture({"deny": ["haiku"]})
     assert view["sources"][1]["ignored_keys"] == ["future_key"] and view["sources"][0]["exists"] is False
-    assert view["builtin"]["default_auto_deny_engines"] == ["opencode"]
+    assert view["builtin"]["default_auto_deny_engines"] == []
     assert view["builtin"]["optional_engines"] == ["opencode"]
     env_file = tmp_path / "env-routing.json"
-    _write_json(env_file, {"providers": ["codex-acp"]})
+    _write_json(env_file, routing_fixture({"providers": ["codex-acp"]}))
     monkeypatch.setenv("CORTEX_ROUTING", str(env_file))
     view = management.read_routing(str(project))
     assert view["precedence"] == ["project", "env", "user"] and view["effective_source"] == "env"
     assert view["sources"][1]["writable"] is False
-    _write_json(project / ".cortex" / "routing.json", {"pin": {"*": "codex-acp/gpt-6-luna"}})
+    _write_json(project / ".cortex" / "routing.json", routing_fixture({"pin": {"*": "codex-acp/gpt-6-luna"}}))
     view = management.read_routing(str(project))
     assert view["effective_source"] == "project"
     assert auto_route.load_overrides(str(project)) == view["effective_rules"]
@@ -232,8 +233,8 @@ def test_routing_update_validates_like_the_loader_and_keeps_unknown_keys(home):
         ("rules.tiers.m", "invalid_value"), ("rules.providers", "invalid_value"),
         ("rules.engine_affinity.cooking", "invalid_value"), ("rules.pins", "unsupported_setting"),
     } <= _codes(caught.value)
-    rules = {"deny": ["gpt-5.5", "haiku"], "pin": {"worker-security-auditor": "claude-agent-acp/opus:high"},
-             "engine_affinity": {"testing": None}}
+    rules = routing_fixture({"deny": ["gpt-5.5", "haiku"], "pin": {"worker-security-auditor": "claude-agent-acp/opus:high"},
+             "engine_affinity": {"testing": None}})
     written = management.update_routing("user", user["revision"], rules)
     assert written["effective_source"] == "user" and written["shadowed_by"] is None and written["changed"]
     on_disk = json.loads(path.read_text())
@@ -247,19 +248,19 @@ def test_routing_update_validates_like_the_loader_and_keeps_unknown_keys(home):
 def test_routing_user_write_reports_a_shadowing_project_file_and_env_is_read_only(home, tmp_path):
     project = tmp_path / "project"
     (project / ".cortex").mkdir(parents=True)
-    _write_json(project / ".cortex" / "routing.json", {"deny": ["haiku"]})
-    written = management.update_routing("user", "absent", {"deny": ["gpt-5.5"]}, project_root=str(project))
-    assert written["shadowed_by"] == "project" and written["effective_rules"] == {"deny": ["haiku"]}
+    _write_json(project / ".cortex" / "routing.json", routing_fixture({"deny": ["haiku"]}))
+    written = management.update_routing("user", "absent", routing_fixture({"deny": ["gpt-5.5"]}), project_root=str(project))
+    assert written["shadowed_by"] == "project" and written["effective_rules"] == routing_fixture({"deny": ["haiku"]})
     updated = management.update_routing("project", written["sources"][0]["revision"],
-                                         {"deny": ["haiku"], "providers": ["claude-agent-acp"]}, project_root=str(project))
+                                         routing_fixture({"deny": ["haiku"], "providers": ["claude-agent-acp"]}), project_root=str(project))
     assert updated["effective_source"] == "project" and updated["effective_rules"]["providers"] == ["claude-agent-acp"]
     with pytest.raises(PortableError) as caught:
-        management.update_routing("env", "absent", {})
+        management.update_routing("env", "absent", routing_fixture({}))
     assert caught.value.code == "routing_source_read_only"
     empty = tmp_path / "empty"
     empty.mkdir()
     with pytest.raises(PortableError) as caught:
-        management.update_routing("project", "absent", {}, project_root=str(empty))
+        management.update_routing("project", "absent", routing_fixture({}), project_root=str(empty))
     assert caught.value.code == "project_store_missing"
 
 
@@ -270,7 +271,7 @@ def test_routing_malformed_or_symlinked_file_is_reported_and_never_overwritten(h
     view = management.read_routing()
     assert view["effective_source"] == "user" and view["effective_valid"] is False and view["effective_rules"] is None
     with pytest.raises(PortableError) as caught:
-        management.update_routing("user", view["sources"][-1]["revision"], {"deny": ["haiku"]})
+        management.update_routing("user", view["sources"][-1]["revision"], routing_fixture({"deny": ["haiku"]}))
     assert caught.value.code == "invalid_routing_overrides" and path.read_text() == "[1, 2"
     path.unlink()
     target = home.tmp / "elsewhere.json"
@@ -278,7 +279,7 @@ def test_routing_malformed_or_symlinked_file_is_reported_and_never_overwritten(h
     path.symlink_to(target)
     assert management.read_routing()["sources"][-1]["error"]["code"] == "unsafe_storage"
     with pytest.raises(PortableError) as caught:
-        management.update_routing("user", "absent", {"deny": ["haiku"]})
+        management.update_routing("user", "absent", routing_fixture({"deny": ["haiku"]}))
     assert caught.value.code == "unsafe_storage" and target.read_text() == "{}"
 
 
@@ -295,10 +296,11 @@ def test_routing_opencode_routes_need_exact_provider_model_ids(home):
         ("rules.pin.worker-qa-engineer", "invalid_effort"),
     } <= _codes(caught.value)
     assert not (home.config / "routing.json").exists()
-    management.update_routing("user", "absent", {
+    management.update_routing("user", "absent", routing_fixture({
         "auto_allow": [OPENCODE_ROUTE], "pin": {"worker-qa-engineer": OPENCODE_ROUTE + ":high"},
+        "models": {"opencode": {"auto": ["anthropic/claude-sonnet-4-5"], "tiers": {"anthropic/claude-sonnet-4-5": "standard"}}},
         "providers": ["codex-acp", "opencode"],
-    })
+    }))
     overrides = auto_route.load_overrides()
     assert overrides["auto_allow"] == [OPENCODE_ROUTE]
     assert auto_route._pin_for(overrides, "worker-qa-engineer") == ("opencode", "anthropic/claude-sonnet-4-5", "high")
@@ -460,7 +462,7 @@ def test_opencode_is_onboarded_only_on_explicit_opt_in_and_never_activated(home,
                                   "automatic_routing": "excluded_until_routing_opts_in"}
     assert calls == [str(binary)]
     assert not (home.config / "routing.json").exists()
-    assert management.read_routing()["effective_source"] == "builtin"
+    assert management.read_routing()["effective_source"] == "missing"
     again = management.onboard_opencode(result["revision"], explicit_opt_in=True, binary=str(binary))
     assert [item["id"] for item in again["connections"]] == [result["connection"]["id"]]
     found = management.execute({"action": "discover_opencode", "surface": "connections"})["result"]
@@ -532,25 +534,15 @@ def test_route_catalog_reports_every_route_with_its_effective_state_and_writes_n
     catalog_dir = registry.state_root(None) / "catalog"
     catalog_before = sorted(str(path) for path in catalog_dir.rglob("*"))
     view = management.read_route_catalog()
-    assert view["effective_source"] == "builtin" and view["effective_valid"] is True and view["catalog_problems"] == []
+    assert view["effective_source"] == "missing" and view["effective_valid"] is False and view["catalog_problems"] == []
     routes = _routes(view)
+    assert all(not r["in_selector"] and not r["enabled"] and r["disabled"] and r["automatic"] == "routing_invalid"
+               and r["superseded_by"] is None and r["default_auto_excluded"] is None for r in routes.values())
     luna = routes["codex-acp/gpt-6-luna"]
-    assert (luna["in_selector"], luna["disabled"], luna["automatic"], luna["observed"]) == (True, False, "eligible", True)
     assert luna["route_id"].startswith("xr_") and luna["connection_id"] == codex.id and luna["model_name"] == "GPT-6 Luna"
-    older = routes["codex-acp/gpt-5.6-luna"]
-    assert (older["automatic"], older["superseded_by"], older["in_selector"]) == ("superseded", "codex-acp/gpt-6-luna", True)
-    haiku = routes["claude-agent-acp/claude-haiku-4-5-20251001"]
-    assert (haiku["in_selector"], haiku["default_auto_excluded"], haiku["automatic"]) == (True, "family", "excluded_by_default")
-    # OpenCode models stay off until the owner enables them (Settings > Models).
-    optional = routes[OPENCODE_ROUTE]
-    assert (optional["in_selector"], optional["enabled"], optional["disabled"], optional["deny_tokens"],
-            optional["default_auto_excluded"], optional["automatic"]) \
-        == (False, False, True, [], "optional_engine", "disabled")
-    assert (luna["enabled"], haiku["enabled"]) == (True, True)
     engines = _engines(view)
     assert set(engines) == {"codex-acp", "claude-agent-acp", "opencode"}
-    assert (engines["opencode"]["enabled_models"], engines["opencode"]["enabled_default"]) == (None, False)
-    assert (engines["codex-acp"]["enabled_models"], engines["codex-acp"]["enabled_default"]) == (None, True)
+    assert all(e["enabled_models"] == [] and e["enabled_default"] is False for e in engines.values())
     assert all(item["catalog_observed_at"] for engine in engines.values() for item in engine["connections"])
     assert engines["opencode"]["optional"] is True and [item["id"] for item in engines["opencode"]["connections"]] == [opencode.id]
     assert all(item["disabled"] is False and item["automatic"] is True for item in engines.values())
@@ -564,11 +556,12 @@ def test_engine_and_model_toggles_are_routing_rules_the_runtime_honours(home, mo
     with pytest.raises(management.ConfigValidationError) as caught:
         management.update_routing("user", "absent", {"deny": ["*", "gpt-*", "gemini/*"],
                                                    "auto_allow": ["opencode/*", "claude-agent-acp/*"]})
-    assert sum(1 for item in caught.value.errors if item["code"] == "unsupported_wildcard") == 5
+    assert sum(1 for item in caught.value.errors if item["code"] == "unsupported_wildcard") == 3
     assert not (home.config / "routing.json").exists()
-    rules = {"deny": ["codex-acp/*", "claude-agent-acp/claude-sonnet-5"], "auto_allow": [OPENCODE_ROUTE],
+    rules = routing_fixture({"deny": ["codex-acp/*", "claude-agent-acp/claude-sonnet-5"], "auto_allow": [OPENCODE_ROUTE],
              "enabled": {"opencode": [OPENCODE_ROUTE.removeprefix("opencode/"), "openai/gpt-5.1"]},
-             "providers": ["claude-agent-acp", "opencode"]}
+             "providers": ["claude-agent-acp", "opencode"],
+             "models": {"opencode": {"auto": ["anthropic/claude-sonnet-4-5"], "tiers": {"anthropic/claude-sonnet-4-5": "standard"}}}})
     written = management.update_routing("user", "absent", rules)
     assert auto_route.load_overrides() == rules
     # The runtime honours what the settings wrote: selector, dispatch, automatic routing.
@@ -586,15 +579,15 @@ def test_engine_and_model_toggles_are_routing_rules_the_runtime_honours(home, mo
     sonnet = routes["claude-agent-acp/claude-sonnet-5"]
     assert (sonnet["disabled"], sonnet["engine_disabled"], sonnet["deny_tokens"]) \
         == (True, False, ["claude-agent-acp/claude-sonnet-5"])
-    assert routes["claude-agent-acp/claude-haiku-4-5-20251001"]["automatic"] == "excluded_by_default"
+    assert routes["claude-agent-acp/claude-haiku-4-5-20251001"]["automatic"] == "not_selected"
     allowed = routes[OPENCODE_ROUTE]
     assert (allowed["automatic"], allowed["auto_allow_tokens"], allowed["in_selector"]) == ("eligible", [OPENCODE_ROUTE], True)
-    assert routes["opencode/openai/gpt-5.1"]["automatic"] == "excluded_by_default"
+    assert routes["opencode/openai/gpt-5.1"]["automatic"] == "not_selected"
 
     # Automatic routing is not disabling: an engine outside providers stays selectable.
     management.update_routing("user", written["sources"][-1]["revision"],
-                              {"providers": ["opencode"], "auto_allow": [OPENCODE_ROUTE],
-                               "enabled": {"opencode": [OPENCODE_ROUTE.removeprefix("opencode/")]}})
+                              routing_fixture({"providers": ["opencode"], "auto_allow": [OPENCODE_ROUTE],
+                               "enabled": {"opencode": [OPENCODE_ROUTE.removeprefix("opencode/")]}}))
     view = management.read_route_catalog()
     luna = _routes(view)["codex-acp/gpt-6-luna"]
     assert (luna["disabled"], luna["in_selector"], luna["automatic"]) == (False, True, "engine_excluded_from_automatic_routing")
@@ -618,8 +611,8 @@ def test_enabled_lists_only_the_models_an_engine_may_use(home, monkeypatch):
             "codex-acp": ["gpt-6-luna", "gpt-6-luna"], "opencode": ["claude-sonnet-4-5"], "gemini-acp": []}})
     assert {("rules.enabled.codex-acp", "invalid_type"), ("rules.enabled.opencode", "opencode_model_not_exact"),
             ("rules.enabled.gemini-acp", "invalid_value")} <= _codes(caught.value)
-    written = management.update_routing("user", "absent", {"enabled": {"codex-acp": ["gpt-6-sol", "gpt-9-missing"]}})
-    assert written["effective_rules"] == {"enabled": {"codex-acp": ["gpt-6-sol", "gpt-9-missing"]}}
+    written = management.update_routing("user", "absent", routing_fixture({"enabled": {"codex-acp": ["gpt-6-sol", "gpt-9-missing"]}}))
+    assert written["effective_rules"] == routing_fixture({"enabled": {"codex-acp": ["gpt-6-sol", "gpt-9-missing"]}})
     view = management.read_route_catalog()
     routes, engines = _routes(view), _engines(view)
     assert (routes["codex-acp/gpt-6-sol"]["enabled"], routes["codex-acp/gpt-6-sol"]["in_selector"]) == (True, True)
@@ -630,7 +623,7 @@ def test_enabled_lists_only_the_models_an_engine_may_use(home, monkeypatch):
     assert routes["claude-agent-acp/claude-sonnet-5"]["enabled"] is True
     assert auto_route.is_denied("codex-acp", "gpt-6-luna") and not auto_route.is_denied("codex-acp", "gpt-6-sol")
     # An empty list switches every model of the engine off.
-    management.update_routing("user", written["written_revision"], {"enabled": {"codex-acp": []}})
+    management.update_routing("user", written["written_revision"], routing_fixture({"enabled": {"codex-acp": []}}))
     assert auto_route.is_denied("codex-acp", "gpt-6-sol")
 
 
@@ -664,8 +657,8 @@ def test_route_catalog_follows_routing_precedence_and_fails_closed(home, monkeyp
     _catalog_fixture(home, monkeypatch)
     project = tmp_path / "project"
     (project / ".cortex").mkdir(parents=True)
-    management.update_routing("user", "absent", {"deny": ["claude-agent-acp/*"]})
-    management.update_routing("project", "absent", {"providers": ["claude-agent-acp"]}, project_root=str(project))
+    management.update_routing("user", "absent", routing_fixture({"deny": ["claude-agent-acp/*"]}))
+    management.update_routing("project", "absent", routing_fixture({"providers": ["claude-agent-acp"]}), project_root=str(project))
     view = management.read_route_catalog(str(project))
     assert view["effective_source"] == "project" and view["precedence"] == ["project", "user"]
     routes = _routes(view)
@@ -754,39 +747,39 @@ def test_routing_models_are_validated_with_field_paths_and_round_trip(home):
         ("rules.models.gemini-acp", "unknown_engine"),
     } <= _codes(caught.value)
     assert not (home.config / "routing.json").exists()
-    rules = {"deny": ["haiku"], "enabled": {"opencode": [OPENCODE_MODEL]}, "models": {
+    rules = routing_fixture({"deny": ["haiku"], "enabled": {"opencode": [OPENCODE_MODEL]}, "models": {
         "opencode": {"auto": [OPENCODE_MODEL], "tiers": {OPENCODE_MODEL: "standard"}},
-        "codex-acp": {"policy": {"gpt-6-sol": {"preferred_for": ["review"], "max_effort": None}}}}}
+        "codex-acp": {"policy": {"gpt-6-sol": {"preferred_for": ["review"], "max_effort": None}}}}})
     written = management.update_routing("user", "absent", rules)
     assert written["effective_rules"] == rules and auto_route.load_overrides() == rules
-    assert "models" in management.ROUTING_KEYS and len(management.ROUTING_KEYS) == 8
+    assert "models" in management.ROUTING_KEYS and len(management.ROUTING_KEYS) == 10
     builtin = written["builtin"]
     assert builtin["policy_attributes"] == ["effort_floor", "max_effort", "effort_ladder", "also_standard_for",
                                             "preferred_for", "request_names"]
-    assert builtin["selection_modes"] == ["builtin", "listed"] and "ultra" not in builtin["policy_efforts"]
-    assert builtin["tier_sources"] == ["configured", "legacy_tiers", "builtin", "position"]
+    assert builtin["selection_modes"] == ["listed"] and "ultra" not in builtin["policy_efforts"]
+    assert builtin["tier_sources"] == ["configured"]
     assert builtin["work_kind_labels"]["design"] == "Design and architecture"
     assert "worker-architect" in builtin["work_kind_roles"]["design"]
     assert builtin["builtin_affinity"]["design"] == "claude-agent-acp"
     # The whole managed rule set is replaced: omitting models removes it.
-    management.update_routing("user", written["written_revision"], {"deny": ["haiku"]})
-    assert json.loads((home.config / "routing.json").read_text()) == {"deny": ["haiku"]}
+    management.update_routing("user", written["written_revision"], routing_fixture({"deny": ["haiku"]}))
+    assert json.loads((home.config / "routing.json").read_text()) == routing_fixture({"deny": ["haiku"]})
 
 
 def test_route_catalog_reports_selection_tier_source_and_policy(home, monkeypatch):
     _catalog_fixture(home, monkeypatch)
-    management.update_routing("user", "absent", {"enabled": {"opencode": ["anthropic/claude-sonnet-4-5", "openai/gpt-5.1"]}, "models": {
-        "codex-acp": {"auto": ["gpt-5.6-luna", "gpt-9-missing"], "tiers": {"gpt-6-sol": "flagship"}},
+    management.update_routing("user", "absent", routing_fixture({"enabled": {"opencode": ["anthropic/claude-sonnet-4-5", "openai/gpt-5.1"]}, "models": {
+        "codex-acp": {"auto": ["gpt-5.6-luna", "gpt-9-missing"], "tiers": {"gpt-6-sol": "flagship", "gpt-9-missing": "deep"}},
         "opencode": {"auto": ["anthropic/claude-sonnet-4-5"], "tiers": {"anthropic/claude-sonnet-4-5": "standard"},
-                     "policy": {"anthropic/claude-sonnet-4-5": {"preferred_for": ["writing"]}}}}})
+                     "policy": {"anthropic/claude-sonnet-4-5": {"preferred_for": ["writing"]}}}}}))
     view = management.read_route_catalog()
     routes, engines = _routes(view), _engines(view)
     older = routes["codex-acp/gpt-5.6-luna"]
     assert (older["automatic"], older["auto_selected"], older["selection"], older["superseded_by"]) == (
-        "eligible", True, "listed", "codex-acp/gpt-6-luna")
+        "eligible", True, "listed", None)
     assert routes["codex-acp/gpt-6-luna"]["automatic"] == "not_selected"
     luna_policy = routes["codex-acp/gpt-6-luna"]["policy"]
-    assert luna_policy["effort_floor"] == "high" and luna_policy["attribute_sources"]["effort_floor"] == "builtin"
+    assert luna_policy["effort_floor"] == "high" and luna_policy["attribute_sources"]["effort_floor"] == "configured"
     sol = routes["codex-acp/gpt-6-sol"]
     assert (sol["tier"], sol["tier_source"], sol["configured_tier"], sol["automatic"]) == (
         "flagship", "configured", "flagship", "not_selected")
@@ -797,17 +790,17 @@ def test_route_catalog_reports_selection_tier_source_and_policy(home, monkeypatc
     assert optional["policy"]["attribute_sources"] == {"preferred_for": "configured"}
     assert routes["opencode/openai/gpt-5.1"]["automatic"] == "not_selected"
     haiku = routes["claude-agent-acp/claude-haiku-4-5-20251001"]
-    assert (haiku["selection"], haiku["auto_selected"], haiku["automatic"]) == ("builtin", None, "excluded_by_default")
+    assert (haiku["selection"], haiku["auto_selected"], haiku["automatic"]) == ("listed", False, "not_selected")
     assert (engines["codex-acp"]["selection"], engines["codex-acp"]["selected_models"],
             engines["codex-acp"]["unmatched_selected"]) == ("listed", ["gpt-5.6-luna", "gpt-9-missing"], ["gpt-9-missing"])
     assert (engines["claude-agent-acp"]["selection"], engines["claude-agent-acp"]["selected_models"],
-            engines["claude-agent-acp"]["unmatched_selected"]) == ("builtin", None, [])
+            engines["claude-agent-acp"]["unmatched_selected"]) == ("listed", routing_fixture()["models"]["claude-agent-acp"]["auto"], [m for m in routing_fixture()["models"]["claude-agent-acp"]["auto"] if m not in ("claude-sonnet-5", "claude-haiku-4-5-20251001")])
 
 
 def test_opencode_acp_observation_exposes_byteplus_only_when_offered(home, monkeypatch):
     _codex, _claude, opencode = _catalog_fixture(home, monkeypatch)
     target = "byteplus-plan/glm-5.3-flash"
-    management.update_routing("user", "absent", {"enabled": {"opencode": [target]}, "models": {"opencode": {"auto": [target]}}})
+    management.update_routing("user", "absent", routing_fixture({"enabled": {"opencode": [target]}, "models": {"opencode": {"auto": [target], "tiers": {target: "standard"}}}}))
     before = management.read_route_catalog()
     assert "opencode/" + target not in _routes(before)
     assert _engines(before)["opencode"]["unmatched_selected"] == [target]
@@ -822,9 +815,9 @@ def test_opencode_acp_observation_exposes_byteplus_only_when_offered(home, monke
 def test_a_model_may_be_placed_in_several_tiers(home, monkeypatch):
     _catalog_fixture(home, monkeypatch)
     with pytest.raises(management.ConfigValidationError) as caught:
-        management.update_routing("user", "absent", {"models": {"codex-acp": {"tiers": {"gpt-6-sol": ["deep", "deep"]}}}})
+        management.update_routing("user", "absent", routing_fixture({"models": {"codex-acp": {"tiers": {"gpt-6-sol": ["deep", "deep"]}}}}))
     assert ("rules.models.codex-acp.tiers.gpt-6-sol", "invalid_value") in _codes(caught.value)
-    rules = {"models": {"codex-acp": {"tiers": {"gpt-6-sol": ["standard", "deep"]}}}}
+    rules = routing_fixture({"models": {"codex-acp": {"tiers": {"gpt-6-sol": ["standard", "deep"]}}}})
     written = management.update_routing("user", "absent", rules)
     assert written["effective_rules"] == rules and auto_route.load_overrides() == rules
     sol = _routes(management.read_route_catalog())["codex-acp/gpt-6-sol"]
@@ -865,3 +858,25 @@ def test_routing_profiles_dispatch_fields_and_read_all_shape(home):
     assert everything["ok"] and everything["result"]["active"] == "work"
     assert everything["result"]["profiles"][0]["sections"] == ["routing", "user_defaults", "mcp_servers", "connections"]
     assert "rules" not in everything["result"]["profiles"][0]
+
+
+@pytest.mark.parametrize("setting, field, message", [
+    ({"pin": {"*": "opencode/not-qualified"}}, "rules.pin.*",
+     "an OpenCode pin names the exact provider/model id, e.g. opencode/provider/model"),
+    ({"enabled": {"opencode": ["not-qualified"]}}, "rules.enabled.opencode",
+     "an OpenCode model is its exact provider/model id, e.g. provider/model"),
+])
+def test_invalid_opencode_diagnostics_are_generic_and_nonmutating(home, monkeypatch, setting, field, message):
+    before = json.loads(json.dumps(setting))
+    calls = []
+    monkeypatch.setattr(auto_route, "_validate", lambda *a, **kw: calls.append((a, kw)))
+    with pytest.raises(management.ConfigValidationError) as caught:
+        management.validate_routing_rules({"model_policy_version": 2, **setting})
+    assert list(caught.value.errors) == [dict(field=field, code="opencode_model_not_exact", message=message)]
+    assert setting == before
+    assert calls == []  # Rejected before loader/dispatch; no IO or installation.
+    assert not (home.config / "routing.json").exists()
+    response = management.execute(dict(action="update", surface="routing", target="user",
+                                       expected_revision="absent", rules={"model_policy_version": 2, **setting}))
+    assert response["ok"] is False
+    assert not (home.config / "routing.json").exists()

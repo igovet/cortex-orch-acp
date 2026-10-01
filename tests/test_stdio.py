@@ -270,6 +270,7 @@ def test_list_route_options_is_advertised_and_dispatches_through_the_real_channe
     from cortex_runtime.server import Server
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path_factory.mktemp('xdg-config')))
     store, coordinator = bootstrap(tmp_path)
+    (tmp_path / '.cortex' / 'routing.json').write_text(json.dumps({'model_policy_version': 2}))
     server = Server(channel_credentials=(coordinator.channel_id, coordinator.secret, str(tmp_path)))
     catalogue = server.dispatch('tools/list', {})['tools']
     by_name = {t['name']: t for t in catalogue}
@@ -296,3 +297,42 @@ def test_list_route_options_is_advertised_and_dispatches_through_the_real_channe
     from cortex_runtime.server import ProtocolError
     with pytest.raises(ProtocolError):
         worker_server.dispatch('tools/call', dict(name='list_route_options', arguments={}))
+
+
+@pytest.mark.parametrize("policy,code", [
+    (None, "model_policy_migration_required"),
+    ("{}", "model_policy_migration_required"),
+    ('{"model_policy_version": 3}', "model_policy_version_unsupported"),
+    ('{"model_policy_version": 2, "enabled": []}', "invalid_routing_overrides"),
+    ("{", "invalid_routing_overrides"),
+])
+def test_route_menu_policy_diagnostic_survives_tools_call(tmp_path, monkeypatch, policy, code):
+    from cortex_runtime.server import Server
+    from cortex_runtime.routing import auto_route
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("CORTEX_ROUTING", raising=False)
+    store, coordinator = bootstrap(tmp_path)
+    path = tmp_path / ".cortex" / "routing.json"
+    if policy is not None:
+        path.write_text(policy)
+    monkeypatch.setattr(auto_route, "_entries", lambda *_: pytest.fail("invalid policy reached catalogue"))
+    server = Server(channel_credentials=(coordinator.channel_id, coordinator.secret, str(tmp_path)))
+    result = server.dispatch("tools/call", dict(name="list_route_options", arguments={}))
+    assert result["isError"]
+    data = json.loads(result["content"][0]["text"])
+    assert data["error"] == code
+    assert data["correction"]
+    assert data["field"] == ("routing" if code == "invalid_routing_overrides" else "model_policy_version")
+    assert data["write_state"] == "rejected" and "storage_error" not in result["content"][0]["text"]
+    wire = exchange(tmp_path, [dict(jsonrpc="2.0", id="policy-read", method="tools/call",
+                                   params=dict(name="list_route_options", arguments={}))],
+                    channel=coordinator)[0]["result"]
+    assert wire == result  # The real stdio child preserves the same public diagnostic.
+    with store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM configuration_revisions").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM attempt_route_audit").fetchone()[0] == 0
+    assert path.exists() == (policy is not None)
+    if policy is not None:
+        assert path.read_text() == policy

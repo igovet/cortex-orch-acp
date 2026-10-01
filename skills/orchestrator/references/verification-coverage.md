@@ -14,8 +14,7 @@ and make it real, not only unit tests:
   the owner's request explicitly asks for one and names the mode, `cli` or
   `desktop`; run it in isolated dev Paseo under `~/.paseo-dev`, with a
   disposable project and the Cortex runtime loaded by that dev daemon from the
-  explicit absolute checkout plugin path. Use `gpt-5.6-luna` at medium/high
-  effort; heavy models are prohibited in routine live qualification. Keep the
+  explicit absolute checkout plugin path. Use only the exact route explicitly selected by the owner for this requested check, and verify it is supported by current settings and the installed host/catalog; do not automatically substitute or escalate to the deep coordinator. Heavy models remain prohibited in routine live qualification. Keep the
   default automated pytest suite no-paid.
 - Documentation: commands and links checked against the source.
 

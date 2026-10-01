@@ -408,6 +408,35 @@ def test_private_codex_2_adapter_rejects_changed_reporter_sites(tmp_path, site, 
     assert excinfo.value.code == "codex_manual_review_adapter_unsupported"
 
 
+def test_private_codex_2_adapter_keeps_whole_mcp_tool_schemas(tmp_path):
+    """Only the 2.0.1 bundle (Codex 0.159.1) gets tool_input_schema_max_bytes:
+    below it Codex strips every description from a large tool schema."""
+    from types import SimpleNamespace
+    from cortex_runtime.engine.process import (
+        _CODEX_AGENT_REVIEWER_2_SOURCE, _CODEX_SEND_PROMPT_BY_VERSION, _CODEX_MCP_ENTRY_2_PATCHED,
+        _CODEX_HISTORY_2_SOURCE, _CODEX_COMPACTION_2_SOURCE, _CODEX_HELPERS_2_SOURCE,
+        CODEX_MCP_TOOL_SCHEMA_MAX_BYTES,
+    )
+
+    source = _pinned_bundle().replace(_CODEX_AGENT_REVIEWER_SOURCE, _CODEX_AGENT_REVIEWER_2_SOURCE)
+    source = source.replace(_CODEX_SEND_PROMPT_SOURCE, _CODEX_SEND_PROMPT_BY_VERSION["2.0.1"][0])
+    source += b"\n" + b"\n".join((_CODEX_HISTORY_2_SOURCE, _CODEX_COMPACTION_2_SOURCE, _CODEX_HELPERS_2_SOURCE))
+    package = tmp_path / "install/node_modules/@agentclientprotocol/codex-acp"
+    (package / "dist").mkdir(parents=True)
+    original = package / "dist/index.js"
+    original.write_bytes(source)
+    package_json = package / "package.json"
+    package_json.write_text('{"version":"2.0.1","type":"module"}')
+    install = SimpleNamespace(package_version="2.0.1", adapter_entry=str(original),
+                              adapter_entry_sha256=hashlib.sha256(source).hexdigest(),
+                              package_json=str(package_json))
+    copied = Path(_prepare_codex_manual_review_adapter(install, new_connection_id(), isolated_environ(tmp_path)))
+    patched = copied.read_bytes()
+    assert patched.count(_CODEX_MCP_ENTRY_2_PATCHED) == 1 and _CODEX_MCP_ENTRY_SOURCE not in patched
+    assert f"tool_input_schema_max_bytes: {CODEX_MCP_TOOL_SCHEMA_MAX_BYTES} }}".encode() in patched
+    assert _CODEX_MCP_ENTRY_PATCHED not in patched
+
+
 def test_build_codex_launch_rejects_non_codex_engine(tmp_path):
     scenario = dict(agent_capabilities={}, session_id="sess-1", config_options=[])
     install = _make_install(tmp_path, scenario)

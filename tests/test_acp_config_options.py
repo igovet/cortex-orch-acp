@@ -47,6 +47,17 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
     monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
     monkeypatch.setenv("HOME", str(home))
+    from cortex_runtime.routing import defaults
+    from model_policy_fixtures import routing_fixture
+    root = config_home / "cortex"
+    root.mkdir(mode=0o700)
+    rules = routing_fixture()
+    test_models = ["model-placeholder-1", "model-placeholder-2", "model-a", "model-b", "shared-model",
+                   "claude-model", "codex-model", "fresh-model", "known-good", "sonnet", "gpt-5.6-luna"]
+    for engine in ("codex-acp", "claude-agent-acp"):
+        rules["enabled"][engine].extend(m for m in test_models if m not in rules["enabled"][engine])
+    (root / "routing.json").write_text(json.dumps(rules))
+    (root / "routing.json").chmod(0o600)
     return dict(XDG_CONFIG_HOME=str(config_home), XDG_STATE_HOME=str(state_home), HOME=str(home))
 
 
@@ -89,7 +100,7 @@ def test_denied_models_are_not_offered_by_the_selector(tmp_path, monkeypatch):
     (project / ".cortex").mkdir(parents=True)
     entries = config_options.selectable_entries_from_snapshots({record.id: record}, environ)
     assert config_options.filter_denied_entries(entries, str(project), environ) == entries
-    (project / ".cortex" / "routing.json").write_text(json.dumps({"deny": ["gpt-5.6-luna"]}))
+    (project / ".cortex" / "routing.json").write_text(json.dumps({"model_policy_version": 2, "deny": ["gpt-5.6-luna"]}))
     assert config_options.filter_denied_entries(entries, str(project), environ) == ()
 
 
@@ -155,20 +166,14 @@ def test_engine_default_alias_shows_the_model_it_alone_reaches(tmp_path, monkeyp
 
 # --- T035: seeded model list, superseded by a real observation ------------
 
-def test_never_observed_connection_falls_back_to_seed_with_seed_provenance(tmp_path, monkeypatch):
+def test_never_observed_connection_has_no_bundled_models(tmp_path, monkeypatch):
     environ = _isolate(tmp_path, monkeypatch)
     record = _configured_connection(engine="codex-acp", environ=environ)
     # No _build_and_save_snapshot call -- this connection has never been
     # observed live yet.
     entries = config_options.selectable_entries_from_snapshots({record.id: record}, environ)
-    assert entries  # the seed, not an empty result
-    assert {entry.route.model for entry in entries} == {
-        value for value, _name in __import__(
-            "cortex_runtime.catalog.model_seed", fromlist=["SEED_MODELS"]).SEED_MODELS["codex-acp"]}
-    model_option = config_options.build_model_option(entries, None, None, None)
-    for option in model_option["options"]:
-        assert option["description"] == "codex"
-    assert all(entry.evidence.get(Fact.CATALOG_OBTAINED).source == ProvenanceSource.SEED for entry in entries)
+    assert entries == ()
+    assert config_options.build_model_option(entries, None, None, None) is None
 
 
 def test_real_observation_supersedes_the_seed(tmp_path, monkeypatch):
@@ -277,7 +282,7 @@ def test_pin_route_style_placeholder_in_sibling_directory_never_hides_it(tmp_pat
     assert claude_models == {"claude-model"}  # claude's real catalog, not wiped out
 
 
-def test_connection_whose_only_cached_files_are_placeholders_falls_back_to_seed(tmp_path, monkeypatch):
+def test_connection_whose_only_cached_files_are_placeholders_has_no_models(tmp_path, monkeypatch):
     """A connection that was never itself observed, but only ever received
     placeholder files as a side effect of some other connection's
     build_catalog call, must be treated exactly like one with no cached
@@ -299,7 +304,7 @@ def test_connection_whose_only_cached_files_are_placeholders_falls_back_to_seed(
     entries = config_options.selectable_entries_from_snapshots(connections, environ)
     claude_models = {entry.route.model for entry in entries if entry.connection_id == claude.id}
     from cortex_runtime.catalog import model_seed
-    assert claude_models == {value for value, _name in model_seed.SEED_MODELS["claude-agent-acp"]}
+    assert claude_models == set()
 
 
 def _write_raw_snapshot_file(connection_id, snapshot_id, *, entries_payload, unavailable_reason, environ):
@@ -917,13 +922,14 @@ def test_paseo_session_new_waits_for_seed_catalog_to_observe_effort(tmp_path, mo
     monkeypatch.setattr("cortex_runtime.acp.agent.catalog_refresh.perform_refresh", live_refresh)
     result = agent._session_new(dict(cwd=str(project), mcpServers=[]))
     options = {option["id"]: option for option in result["configOptions"]}
-    assert calls == [record.id]
-    assert [item["value"] for item in options["thought_level"]["options"]] == ["low", "high"]
-    assert record.id in agent.sessions[result["sessionId"]]["catalog_refresh_started"]
-
-    # The already-observed connection is not probed a second time by the
-    # normal post-session refresh path.
+    assert calls == []
+    assert "model" not in options and "thought_level" not in options
+    # Discovery remains an asynchronous, observed-only path, not synthetic picker data.
     agent._post_session_new_notifications(result["sessionId"])
+    for _ in range(200):
+        if calls:
+            break
+        time.sleep(0.01)
     assert calls == [record.id]
 
 

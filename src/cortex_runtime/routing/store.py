@@ -137,9 +137,13 @@ def insert_route_extras_tx(
 
 def get_route_extras(store, revision_id: str) -> dict | None:
     with store.connection() as db:
-        row = db.execute(
-            "SELECT * FROM configuration_route_extras WHERE revision_id=?", (revision_id,)
-        ).fetchone()
+        return get_route_extras_tx(db, revision_id)
+
+
+def get_route_extras_tx(db, revision_id: str) -> dict | None:
+    row = db.execute(
+        "SELECT * FROM configuration_route_extras WHERE revision_id=?", (revision_id,)
+    ).fetchone()
     if row is None:
         return None
     return dict(

@@ -28,6 +28,7 @@ from cortex_runtime.delegation.live_adapters import (
 from cortex_runtime.delegation.provisioning import ProvisioningService
 from cortex_runtime.portable.errors import PortableError
 from cortex_runtime.routing import store as routing_store
+from model_policy_fixtures import routing_fixture
 
 from engine_fakes import default_scenario, fake_launch_command, isolated_environ, make_connection_record, new_connection_id, write_scenario
 from test_mixed_team_ordinary_delegation import _bootstrap, _FakeConfigAdapter, _MODE_BY_ENGINE, _read_log
@@ -103,7 +104,9 @@ def _setup(tmp_path, *, observed=True, a=None, b=None, model_a="coordinator-mode
     row = service.propose(
         task_id, entry_a, ConfigurationInputs(route=entry_a.route, parameters={}),
         expected_revision=0, current_epoch=epoch,
-        user_layer=dict(defaults={}, ceiling=PolicyCeiling(allowed_routes={entry_a.route.id})),
+        # These mixed-engine controls intentionally permit both observed
+        # routes. A coordinator-only ceiling used to escape enforcement.
+        user_layer=dict(defaults={}, ceiling=PolicyCeiling()),
     )
     service.apply(task_id, row["id"], _FakeConfigAdapter(), "es_" + "a" * 12, epoch)
 
@@ -113,6 +116,13 @@ def _setup(tmp_path, *, observed=True, a=None, b=None, model_a="coordinator-mode
     provisioning = ProvisioningService(
         store, SharedProjectRootWorkspaceProvisioner(), adapter, ConfigurationServiceSnapshotSource(service),
     )
+    config = routing_fixture()
+    # These fake catalog routes are intentionally automatic, even when they
+    # are historical IDs: executable code must never supersede owner choices.
+    for engine, model in (("codex-acp", model_a), ("claude-agent-acp", model_b)):
+        if model != "claude-haiku-4-5-20251001":
+            config["models"][engine]["auto"] = [model]
+    _routing(project, config)
     return store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ
 
 
@@ -130,7 +140,7 @@ def _claude_used(connection, percent, environ):
 
 def _routing(project, overrides):
     (project / ".cortex").mkdir(exist_ok=True)
-    (project / ".cortex" / "routing.json").write_text(json.dumps(overrides), encoding="utf-8")
+    (project / ".cortex" / "routing.json").write_text(json.dumps(routing_fixture(overrides)), encoding="utf-8")
 
 
 def _effort_calls(log_path):
@@ -151,6 +161,14 @@ def test_deep_work_moves_off_the_account_above_the_threshold(tmp_path):
     calls = _effort_calls(log_b)
     assert calls and all(call["params"].get("value") == "high" for call in calls)
     detail = routing_store.list_audit_for_attempt(store, result.attempt_id)[0]
+    from cortex_runtime.delegation.events import list_since
+    confirmed = [e.payload for e in list_since(store, channel.task_id)
+                 if e.payload.get('kind') == 'worker_configuration_confirmed']
+    assert len(confirmed) == 1
+    assert confirmed[0]['attempt_id'] == result.attempt_id
+    assert confirmed[0]['connection_id'] == connection_b.id
+    assert confirmed[0]['parameters']['effort'] == 'high'
+    assert confirmed[0]['confirmation_evidence_ref']
     assert detail["connection_id"] == connection_b.id
     assert detail["decision_detail"]["route_basis"] == "auto"
     assert detail["decision_detail"]["effort"] == "high"
@@ -249,20 +267,19 @@ def test_claude_usage_reported_by_the_engine_steers_the_choice(tmp_path):
     adapter.terminate_owned(result.attempt_id)
 
 
-def test_unobserved_catalogs_keep_the_coordinators_route(tmp_path):
+def test_unobserved_catalogs_refuse_automatic_dispatch(tmp_path):
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
         tmp_path, observed=False)
-    result = provisioning.delegate(channel, "Do it", "Do the work.", "backend-dev", "Passes.", "req-1")
-    assert result.status == "ready"
-    assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
-    assert _read_log(log_b) == []
-    adapter.terminate_owned(result.attempt_id)
+    with pytest.raises(PortableError) as refused:
+        provisioning.delegate(channel, "Do it", "Do the work.", "backend-dev", "Passes.", "req-1")
+    assert refused.value.code == "automatic_route_identity_unavailable"
+    assert _read_log(log_a) == [] and _read_log(log_b) == []
 
 
-def test_default_haiku_exclusion_dispatches_light_writing_to_luna(tmp_path):
+def test_default_haiku_exclusion_dispatches_light_writing_to_stretch(tmp_path):
     """A real delegated light writing role reaches Luna even when Claude offers Haiku."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
-        tmp_path, model_a="gpt-5.6-luna", model_b="claude-haiku-4-5-20251001")
+        tmp_path, model_a="gpt-5.6-luna", model_b="claude-haiku-4-5-20251001", efforts=("low", "medium", "high", "xhigh", "max"))
     result = provisioning.delegate(channel, "Write", "Write it.", "technical-writer", "Written.", "req-1")
     assert result.status == "ready"
     assert "session/new" in [entry["method"] for entry in _read_log(log_a)]
@@ -568,14 +585,14 @@ def test_an_unavailable_pin_is_never_substituted(tmp_path):
 
 
 def test_the_coordinators_route_is_refused_when_it_is_unavailable(tmp_path):
-    """No engine-confirmed catalog: the worker would inherit the
-    coordinator's route, which is recorded exhausted -- refused, not opened."""
+    """Without a catalog, even an exhausted inherited route cannot be
+    mistaken for a confirmed automatic identity: refused before opening."""
     store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(
         tmp_path, observed=False)
     _unavailable(store, channel, connection_a)
     with pytest.raises(PortableError) as refused:
         provisioning.delegate(channel, "Do it", "Do the work.", "backend-dev", "Passes.", "req-1")
-    assert refused.value.code == "no_available_route"
+    assert refused.value.code == "automatic_route_identity_unavailable"
     assert _read_log(log_a) == []
 
 
@@ -699,7 +716,7 @@ def test_a_user_requested_flagship_is_dispatched_and_audited(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("trigger", ["retry", "review_fix"])
-def test_normal_testing_retry_and_review_fix_dispatch_luna_max(tmp_path, trigger):
+def test_normal_testing_retry_and_review_fix_dispatch_stretch_max(tmp_path, trigger):
     from cortex_runtime.orchestration.state import TaskMachine, event
     from test_runtime_task_machine import plan
 
@@ -709,7 +726,7 @@ def test_normal_testing_retry_and_review_fix_dispatch_luna_max(tmp_path, trigger
     # Testing has no default engine lean; name one so the engine-order
     # tie between the two connections cannot decide.
     (project / ".cortex").mkdir(exist_ok=True)
-    (project / ".cortex" / "routing.json").write_text(json.dumps({"engine_affinity": {"testing": "codex-acp"}}))
+    (project / ".cortex" / "routing.json").write_text(json.dumps(routing_fixture({"engine_affinity": {"testing": "codex-acp"}})))
     machine = TaskMachine(store)
     machine.create(channel.task_id, "Test ordinary backend work")
     testing_plan = plan()
@@ -736,14 +753,14 @@ def test_normal_testing_retry_and_review_fix_dispatch_luna_max(tmp_path, trigger
         assert audit["model"] == "gpt-6-luna"
         decision = audit["decision_detail"]["route_decision"]
         assert decision["base_role_tier"] == decision["role_tier"] == "standard"
-        assert decision["luna"]["status"] == "standard_candidate"
-        assert decision["luna"]["chosen"] is True
-        assert decision["effort_basis"] == "luna:standard:escalated"
+        assert decision["stretch"]["status"] == "standard_candidate"
+        assert decision["stretch"]["chosen"] is True
+        assert decision["effort_basis"] == "stretch:standard:escalated"
     finally:
         adapter.terminate_owned(result.attempt_id)
 
 
-def test_normal_development_retry_never_dispatches_luna(tmp_path):
+def test_normal_development_retry_never_dispatches_stretch(tmp_path):
     from cortex_runtime.orchestration.state import TaskMachine, event
     from test_runtime_task_machine import plan
 
@@ -769,6 +786,36 @@ def test_normal_development_retry_never_dispatches_luna(tmp_path):
         assert audit["model"] == "claude-sonnet-5"
         decision = audit["decision_detail"]["route_decision"]
         assert decision["base_role_tier"] == "standard" and decision["role_tier"] == "deep"
-        assert decision["luna"]["status"] == "excluded:deep_work"
+        assert decision["stretch"]["status"] == "excluded:deep_work"
     finally:
         adapter.terminate_owned(result.attempt_id)
+
+
+@pytest.mark.parametrize("role", ["worker-backend-dev", "worker-code-reviewer"])
+@pytest.mark.parametrize("manual_fallback", [False, True])
+def test_saved_manual_worker_and_reviewer_routes_cannot_bypass_current_provider_policy(tmp_path, role, manual_fallback):
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    with store.connection() as db:
+        row = db.execute("SELECT id,task_id,route_id FROM configuration_revisions").fetchone()
+    _routing(project, {"providers": ["claude-agent-acp"]})
+    launch = dict(config_revision=row["id"], assignment_id="saved-assignment", role_id=role,
+                  resolved_route_id=row["route_id"], resolved_model="coordinator-model")
+    if manual_fallback: launch["route_override"] = dict(model="coordinator-model")
+    with pytest.raises(PortableError) as error:
+        adapter._authorize_dispatch(connection_a, row["task_id"], launch, str(project))
+    assert error.value.code == "route_provider_excluded"
+    assert _read_log(log_a) == [] and _read_log(log_b) == []
+
+
+@pytest.mark.parametrize("launch_kind", ["coordinator-recovery", "worker-manual", "reviewer"])
+def test_legacy_settings_diagnostic_is_not_replaced_by_saved_route_selection(tmp_path, launch_kind):
+    store, channel, provisioning, adapter, connection_a, connection_b, log_a, log_b, project, environ = _setup(tmp_path)
+    with store.connection() as db:
+        row = db.execute("SELECT id,task_id,route_id FROM configuration_revisions").fetchone()
+    (project / ".cortex" / "routing.json").write_text('{}')
+    launch = dict(config_revision=row["id"], resolved_route_id=row["route_id"], resolved_model="coordinator-model")
+    if launch_kind != "coordinator-recovery": launch.update(assignment_id="saved-assignment", role_id="worker-code-reviewer" if launch_kind == "reviewer" else "worker-backend-dev")
+    with pytest.raises(PortableError) as error:
+        adapter._authorize_dispatch(connection_a, row["task_id"], launch, str(project))
+    assert error.value.code == "model_policy_migration_required"
+    assert _read_log(log_a) == [] and _read_log(log_b) == []

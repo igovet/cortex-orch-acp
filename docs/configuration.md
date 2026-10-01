@@ -1,5 +1,7 @@
 # Cortex configuration
 
+> **Current contract:** automatic model identity, tier, effort, request labels and eligibility are owner data in routing version 2. Every model name and routing JSON example in the older material below is a legacy illustration, not a current setup default; its built-in/family inference rules are removed. See [settings-only model policy](#settings-only-model-policy).
+
 This reference describes configuration the current ACP runtime actually reads. The source of truth is the loaders named in each section. Private files are local operator state; do not commit credentials or real connection registries.
 
 ## Where configuration lives
@@ -9,7 +11,7 @@ This reference describes configuration the current ACP runtime actually reads. T
 | Connection registry | `$XDG_CONFIG_HOME/cortex/connections.json` or `~/.config/cortex/connections.json` | User-wide. Managed by `cortex_acp_setup.py`; it has no project override. |
 | Connection secrets | `$XDG_CONFIG_HOME/cortex/secrets/<connection-id>` | User-wide private files, written by setup. Native-account credentials can instead be referenced from the existing user engine directory. |
 | User defaults and policy ceiling | `$XDG_CONFIG_HOME/cortex/defaults.json` | User-wide base configuration. |
-| Routing rules | `<project>/.cortex/routing.json`, then `$CORTEX_ROUTING`, then `$XDG_CONFIG_HOME/cortex/routing.json` (or `~/.config/cortex/routing.json`) | First existing file wins; files are not merged. Setup writes the user file's default `{"deny": ["gpt-5.5", "haiku"]}`. |
+| Routing rules | `<project>/.cortex/routing.json`, then `$CORTEX_ROUTING`, then `$XDG_CONFIG_HOME/cortex/routing.json` (or `~/.config/cortex/routing.json`) | First existing file wins; files are not merged. Setup installs the validated public version-2 settings template only when the file is absent; it never overwrites existing owner files. |
 | User routing profiles | `$XDG_CONFIG_HOME/cortex/routing-profiles.json` | Saved owner settings: routing, defaults/ceiling, MCP usage policy and connection limits. Activation materializes these user files; project settings are not captured. |
 | Cortex-owned external MCP servers | `$XDG_CONFIG_HOME/cortex/mcp-servers.json` | User-wide only. Project-local MCP registries are intentionally ignored. |
 | Engine-native state and catalog snapshots | `$XDG_STATE_HOME/cortex/connections/<id>/...` or `~/.local/state/cortex/...` | User-wide mutable state, separate from configuration. |
@@ -122,6 +124,29 @@ The accepted ceiling model is `configuration.policy.PolicyCeiling`; serializatio
 
 Access mode is a separate task-scoped user choice, not a JSON option: new tasks default to Guarded, and the user may select Guarded or Auto in the client. It is stored as task events in the project database (`configuration.access_mode`).
 
+ACP's first pending/saved-default selection and later route/effort selections
+read the owner defaults/ceiling and project SQLite layer. Only parameter maps
+enter engine configuration; saved route identity, coordinator preference,
+language and ceiling envelopes are not native parameters. The effective ceiling
+is retained through selected-to-active application. A subsequent selection
+intersects supplied layers with the prior task ceiling and retains an omitted
+role profile, so omission or a route change cannot widen task grants.
+
+Before a task starts, echoing the already selected exact model/provider is
+idempotent: absent native parameters are not a request to clear them. It keeps
+the saved portable coordinator and configured effort/mode unchanged. An actual
+route change still resets dependent parameters; an explicit effort selection
+still changes that field. No ACP reset signal or catalog-order inference is
+introduced. See [bound inspection](acp/observability.md#bound-task-inspection)
+for configuration states and engine confirmation references, not just UI values.
+
+For automatic worker/reviewer routing, `allowed_routes`, `allowed_connections`
+and `allowed_data_recipients` (connection provider IDs) filter the observed
+candidates before ranking. Null/absent sets are unrestricted at that layer;
+empty arrays permit nothing. A pin outside the intersection refuses without
+substitution. Dispatch rechecks the chosen current route identity, not the
+coordinator's route; an unavailable or ambiguous identity fails closed.
+
 ## Routing rules
 
 The routing loader reads eight keys: `pin`, `deny`, `enabled`, `auto_allow`, `tiers`, `providers`, `engine_affinity` and `models`; additional JSON keys are currently ignored. Its validation and selection logic are in `routing.auto_route` and `routing.model_policy`. These are the eight supported routing keys (unknown keys are ignored):
@@ -157,6 +182,11 @@ The routing loader reads eight keys: `pin`, `deny`, `enabled`, `auto_allow`, `ti
   }
 }
 ```
+
+Routing validation diagnostics use generic `opencode/provider/model` (pin) and
+`provider/model` (enabled model) syntax, not a fixed model recommendation. They
+still require exact provider-qualified IDs and reject invalid settings before
+writing configuration or dispatching work.
 
 - `pin`: object mapping worker role names or `*` to `engine/model` or `engine/model:effort`. A pin is strict: unavailable or disallowed pins fail instead of silently switching routes.
 - `deny`: array of model tokens, each optionally prefixed `engine/`. A token is an exact model id; a versioned id, which also covers that version's variants (`gpt-5.5` covers `gpt-5.5[1m]`, not `gpt-5.6-luna`); or a bare family name, which covers every version and alias of that family (`haiku` covers `haiku`, `claude-haiku-4-5` and `claude-haiku-4-5-20251001`). A token with a `[...]` variant is exact only. The special `<supported-engine>/*` token disables every model for that engine, including future models. Explicit deny applies to automatic routing, pins, dispatch, and the model selector, and always wins; it does not unregister the connection.
@@ -324,7 +354,7 @@ Fields:
 - `roles`: optional non-empty unique subset of `coordinator`, `worker`.
 - `engines`: optional non-empty unique subset of `codex-acp`, `claude-agent-acp`.
 
-Cortex-owned entries take precedence over client-supplied MCP entries with the same name; other client entries pass through for that session. MCP server values are loaded into memory for engine sessions, not copied into task reports. External tools still pass the gateway's channel, role, tool, path and network checks. Claude defers MCP tool schemas behind its native `ToolSearch`. Cortex marks every tool of its own `cortex` server channel catalogue as always loaded, and external tools only when listed in `always_load_tools`. Every engine session that receives external servers also gets an "Attached MCP servers" section after its role instructions naming them (see [unified system prompt](acp/unified-system-prompt.md)). The full `codebase-memory-mcp` procedure appears only when that role is granted `list_projects`, `search_graph`, `trace_path` and `get_code_snippet`; a partial grant yields a limited-capability note instead. For coordinators, include those tools and `index_status`/`check_index_coverage` in `coordinator_tools` if the full lookup procedure is intended; keep `index_repository` worker-only. List read-only index tools in `always_load_tools` so Claude need not discover their schemas through `ToolSearch`. Read [permissions and containment](acp/permissions-and-containment.md) for the enforcement boundary.
+Cortex-owned entries take precedence over client-supplied MCP entries with the same name; other client entries pass through for that session. MCP server values are loaded into memory for engine sessions, not copied into task reports. External tools still pass the gateway's channel, role, tool, path and network checks. The gateway forwards each external `tools/list` schema unchanged except that it adds a description to an argument the server leaves undescribed when Cortex knows its semantics (currently `codebase-memory-mcp` `search_graph` `file_pattern`, `name_pattern` and `qn_pattern`; see [Codex adapter](acp/codex-acp-adapter.md#mcp-bridge)); it never replaces a description the server supplies. Claude defers MCP tool schemas behind its native `ToolSearch`. Cortex marks every tool of its own `cortex` server channel catalogue as always loaded, and external tools only when listed in `always_load_tools`. Every engine session that receives external servers also gets an "Attached MCP servers" section after its role instructions naming them (see [unified system prompt](acp/unified-system-prompt.md)). The full `codebase-memory-mcp` procedure appears only when that role is granted `list_projects`, `search_graph`, `trace_path` and `get_code_snippet`; a partial grant yields a limited-capability note instead. For coordinators, include those tools and `index_status`/`check_index_coverage` in `coordinator_tools` if the full lookup procedure is intended; keep `index_repository` worker-only. List read-only index tools in `always_load_tools` so Claude need not discover their schemas through `ToolSearch`. Read [permissions and containment](acp/permissions-and-containment.md) for the enforcement boundary.
 
 ## ssh from workers
 
@@ -356,3 +386,56 @@ env PYTHONPATH=src HOME=/tmp/cortex-config-check/home XDG_CONFIG_HOME=/tmp/corte
 Create owner-only JSON files under `$XDG_CONFIG_HOME/cortex` before running that command. For routing, set `CORTEX_ROUTING` to a JSON file containing the documented routing shape and call `routing.auto_route.load_overrides(project_root)`. The loader creates neither example registry files nor the project directory. Invalid existing registries fail closed; routing rejects malformed values in supported keys and ignores unknown routing keys.
 
 Relevant source: `connections.registry`, `connections.model`, `connections.onboarding`, `configuration.store`, `configuration.resolution`, `configuration.policy`, `configuration.mcp_servers`, and `routing.auto_route`.
+
+## Settings-only model policy
+
+Explicit model requests match the complete, case-sensitive configured
+`engine/model` identity, not a family, substring or normalized variant. Keep
+the identity whitespace-delimited, or quote it with paired `"…"`, `'…'`,
+backticks, `«…»` or `“…”`. A closing quote may be followed by one prose
+punctuation character (`. , ! ? ; :`) before whitespace/end. Without quotes,
+attached punctuation is opaque identity data, even a terminal dot; use
+`Use "engine/unit".` rather than ambiguous `Use engine/unit.`. Longer/shorter
+variants, punctuated prefixes and different provider paths do not authorize
+each other. Optional owner-configured `request_names` remain separate labels
+with the existing case-insensitive ending rules and ambiguity checks. Retained
+user-source provenance and request/negation grammar still govern authorization;
+a plan hint alone never promotes a flagship or overrides routing eligibility.
+See [exact user-request boundaries](acp/routing-and-fallback.md#settings-only-routing).
+
+The runtime and coordinator use only the effective first-existing routing file (project, then $CORTEX_ROUTING, then user); these files are not merged. Routing must declare model_policy_version: 2. The read-only `list_route_options` tool preserves `model_policy_migration_required`, `model_policy_version_unsupported` and `invalid_routing_overrides`, with the policy field and corrective action; it does not misclassify these refusals as `storage_error`. Missing, invalid, unsupported or legacy settings produce visible diagnostics; runtime does not overlay, infer or repair them from install data. The effective policy explicitly supplies exact enabled identities, per-engine automatic membership, tier placement and any non-neutral per-model effort/preference/request-label attributes. Omitted membership means none; new, renamed, unmatched and withdrawn identities do not inherit policy from spelling, family, catalog position or neighboring versions. Required fields/tiers and supported effort constraints are validated; unsupported policy refuses rather than silently weakening it. Coordinator route choice is a portable exact engine/model/parameter preference resolved only against one unique current selectable catalog match; automatic-worker `providers` does not restrict that binding, while enabled identities and deny rules still do; ambiguous/unavailable matches remain diagnostics, not substitutions.
+
+The validated public asset policy/model-settings-default.json is installation/migration input only, not a runtime fallback or overlay. It contains a production-derived baseline candidate and portable coordinator preference, but no account/connection identity or credentials. Setup validates it completely and creates missing owner settings privately without replacement; existing, partial, invalid and legacy owner files and saved profiles are not silently changed. The asset cannot prove installed deployment or a live route. Migration is an explicit two-step operation: preview a candidate (non-mutating), then apply only with explicit consent, the exact preview source revision and candidate digest. Apply verifies a private backup and written bytes and rolls back on failure. Migrate each saved profile from a candidate derived from that profile itself; never fill an inactive profile from current settings or the install template. Retain backups and preview/apply evidence. See [model-policy migration](acp/packaging-and-onboarding.md#model-policy-installation-and-explicit-migration).
+
+
+### Exact quota-window associations
+
+Version-2 routing also accepts optional `quota_windows`: an engine id to an ordered list of `{ "window": <exact reported label>, "models": <null or list of exact model ids> }` rules. Configuration API version 1 accepts the same field under `routing.rules`; the public installation envelope stays schema version 1. For example (this policy fragment does not enable any models):
+
+```json
+{
+  "model_policy_version": 2,
+  "quota_windows": {
+    "codex-acp": [
+      { "window": "owner_scope", "models": ["EXACT@9"] },
+      { "window": "primary", "models": null }
+    ]
+  }
+}
+```
+
+- `window` is case-sensitive, not trimmed or interpreted as a model family. SDK window labels are used exactly as reported. The Claude local usage parser still normalizes printed scope labels to lowercase `seven_day_` labels with whitespace replaced by underscores; this parses evidence, not model membership.
+- `models: null` explicitly marks a shared/account window. A nonempty list associates that label with those exact models on that engine; `[]` explicitly excludes the window for every model. Multiple different applicable windows contribute their maximum open reported percentage, not a sum. Duplicate exact window labels on one engine are ambiguous and refused; duplicate model ids, unsupported engines, unknown rule fields or malformed values are also refused before quota IO. Limits are 1000 rules per engine, 1000 unique model ids per rule, and 256 characters per nonempty window label (no controls). OpenCode ids must include the exact provider/model.
+- Missing `quota_windows`, `{}`, an omitted engine, an empty engine list and any **unmapped** reported label all use conservative shared applicability. This can over-refuse an unrelated model when a newly observed scoped label is exhausted; it cannot hide that exhaustion as unknown/zero. Add an explicit association to distinguish such a label. An unavailable/unreported numeric value remains `None`/unknown, never confirmed zero. Expired windows no longer count; the existing latest-observation, CLI TTL/negative-cache and reset-time algorithms are unchanged. Paid overage windows remain ignored as before.
+- These associations grant no eligibility: enabled/deny/providers/automatic-membership, consent and observed-catalog restrictions still apply. Withdrawn or renamed models do not inherit a scoped rule. The route menu exposes effective rules and `unmapped: conservative_shared` in `quota_window_policy`; automatic selection and failure-reset recording use the same winning first-existing project → environment → user settings. Raw status windows remain engine evidence, not a fabricated model-specific quota.
+- Invalid mappings produce `invalid_routing_overrides` in runtime reads and `invalid_quota_windows` with a rule field in configuration updates, without a write or engine execution. An already reported engine refusal is still recorded with the existing bounded default expiry if invalid settings prevent resolving its reset.
+
+**Editing and migration:** Routing → Quota window associations provides typed exact-label, shared/exact-model and model-list controls. Unknown/unrepresentable rule data makes the form read-only; it is not dropped on save. Revision conflicts require reload and explicit resubmission. CLI access remains independent of Paseo screen reachability: send configuration API v1 routing updates or use the explicit candidate migration script. For a file without mappings, copy its complete current settings to an owner candidate, add reviewed associations, preview, then apply against the preview's `expected_revision` and `candidate_sha256` with `--i-consent`. Existing decisions are preserved; the migration refuses changes to an existing association list, which instead requires a deliberate configuration update. Example preview:
+
+```sh
+python3 -B scripts/cortex_model_policy_migrate.py preview --candidate /absolute/owner-candidate.json
+```
+
+Saved profiles capture this field on explicit save/create and restore it on activation; older snapshots are not silently rewritten or filled from working settings/template data. Migrate a saved snapshot from its own candidate with `--profile`, or save the intended current working settings explicitly. Deleting a selected profile still only unlinks it, without resetting materialized settings.
+
+The public install-only asset retains the previous seven-route tiers, efforts, preferences and denies, disabled OpenCode, and explicit canonical scoped-label associations preserving the former quota predicate for the configured identities. No runtime template overlay exists. Unknown/new provider labels remain conservative until configured; this is not evidence those labels are currently emitted or that production has adopted the candidate. Production application requires separate reviewed/verified adoption.

@@ -328,6 +328,36 @@ def test_prompt_classifies_observed_broker_close_before_tools(tmp_path):
         manager.shutdown(grace=2.0)
 
 
+def test_prompt_fails_named_when_a_ready_cortex_server_is_lost_mid_turn(tmp_path):
+    """A Cortex MCP server lost after tools/list (the broker reports
+    ``mcp_server_crashed``) cancels the running turn and names the loss. The
+    turn must not end as a normal end_turn: the worker's result/question
+    tools are gone, so a clean end would only become a same-session
+    follow-up through dead tools and then ``worker_ended_without_result``."""
+    scenario = default_scenario(prompt_updates=[
+        dict(delay=0.1, sessionUpdate="agent_message_chunk", content=dict(type="text", text="working")),
+        dict(delay=2.0, sessionUpdate="agent_message_chunk", content=dict(type="text", text="late")),
+    ])
+    manager = _make_manager(tmp_path, scenario)
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        lost_after = time.monotonic() + 0.4
+
+        class LosingBroker:
+            def readiness(self, timeout):
+                return "mcp_server_crashed" if time.monotonic() >= lost_after else "ready"
+            def close(self):
+                pass
+        manager._process.mcp_broker = LosingBroker()
+        events = list(manager.prompt_turn(session_id, "hi"))
+        assert events[-1].kind == EngineEventKind.ERROR
+        assert events[-1].error_message == "cortex_mcp_connection_failed:mcp_server_crashed"
+        assert not any(event.kind == EngineEventKind.TURN_END for event in events)
+    finally:
+        manager.shutdown(grace=2.0)
+
+
 def test_prompt_turn_is_never_bound_by_call_timeout_while_streaming(tmp_path):
     """T035 FINDING-06: ``session/prompt`` carries no wall-clock timeout at
     all -- a turn whose own total duration comfortably exceeds the old
@@ -683,3 +713,60 @@ def test_observed_tool_title_is_not_silently_truncated(tmp_path):
                                               'rawInput': {'path': 'calc.py'}, 'kind': 'read'})
     assert event.tool_call_title == title
     assert event.tool_call_raw_input == {'path': 'calc.py'}
+
+
+@pytest.mark.parametrize("replacement", ["unresolved", "incomplete", "complete"])
+def test_cancel_time_replacement_requires_fresh_broker_proof(tmp_path, replacement):
+    # Real manager/watch/cancel wiring with a fake ACP process, and the actual
+    # broker state machine without socket IO. No installed engine/model runs.
+    import threading
+    from cortex_runtime.engine.broker import McpBroker
+    broker = object.__new__(McpBroker)
+    broker._state_lock = threading.RLock()
+    broker._generation = 0
+    broker._ready = threading.Event()
+    broker._closed = threading.Event()
+    broker._stop = threading.Event()
+    broker._failure = None
+    broker._tools_receipt = None
+    broker._observe = None
+    broker.close = lambda: None
+    tools = dict(result=dict(tools=[
+        dict(name=name, inputSchema=dict(type="object"))
+        for name in ("create_draft", "write_report")]))
+    old = broker._begin_generation()
+    broker._observe_tools_list(tools, 1, old)
+    broker._server_exited(old, 1, 7)
+
+    manager = _make_manager(tmp_path, default_scenario(prompt_updates=[
+        dict(delay=1.0, sessionUpdate="agent_message_chunk", content=dict(type="text", text="working")),
+    ]))
+    try:
+        manager.negotiate(REQUESTED_CAPABILITIES)
+        session_id = manager.create_session("t_aaaaaaaaaaaa", "xr_" + "0" * 24)
+        manager._process.mcp_broker = broker
+        real_cancel = manager.cancel_wire
+        cancellations = []
+        def replace_during_cancel(wire):
+            cancellations.append(wire)
+            generation = broker._begin_generation()
+            if replacement != "unresolved":
+                broker._observe_tools_list(tools if replacement == "complete" else dict(result=dict(tools=[])),
+                                           2, generation)
+            # Old buffered replies arriving here must never heal the new state.
+            broker._observe_tools_list(tools, 1, old)
+            broker._server_exited(old, 1, 0)
+            return real_cancel(wire)
+        manager.cancel_wire = replace_during_cancel
+        events = list(manager.prompt_turn(session_id, "hi"))
+        assert len(cancellations) == 1
+        if replacement == "complete":
+            assert events[-1].kind == EngineEventKind.TURN_END
+            assert broker.readiness(0) == "ready"
+        else:
+            assert events[-1].kind == EngineEventKind.ERROR
+            assert events[-1].error_message == "cortex_mcp_connection_failed:mcp_server_crashed"
+            assert not any(event.kind == EngineEventKind.TURN_END for event in events)
+            assert broker.readiness(0) != "ready"
+    finally:
+        manager.shutdown(grace=2.0)

@@ -26,8 +26,9 @@ CHILD_TEMPLATE = textwrap.dedent(
     sys.path.insert(0, {tests_root!r})
     from cortex_runtime.store import Store
     from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime
-    from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter
-    from orchestration_fakes import FakeConfigSnapshotSource, FakeWorkspace
+    from cortex_runtime.delegation.live_adapters import EngineSessionManagerAdapter, ConfigurationServiceSnapshotSource
+    from cortex_runtime.configuration.service import ConfigurationService
+    from orchestration_fakes import FakeWorkspace
     from engine_fakes import fake_launch_command, make_connection_record
 
     store = Store({store_dir!r}, initialize=False)
@@ -40,7 +41,7 @@ CHILD_TEMPLATE = textwrap.dedent(
         store=store, capacity_limit=4,
     )
     runtime = OrchestratingRuntime(
-        store, adapter, FakeWorkspace(), FakeConfigSnapshotSource(),
+        store, adapter, FakeWorkspace(), ConfigurationServiceSnapshotSource(ConfigurationService(store)),
         allow_unqualified_delivery=True, wait_timeout_seconds=10.0,
     )
     updates = []

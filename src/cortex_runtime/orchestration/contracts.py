@@ -153,15 +153,19 @@ RESULT = obj(dict(
 ), required=['summary','checks','request_key'])
 RESULT['properties']['report_ref']['pattern'] = r'^r_[0-9a-f]{12}$'
 RESULT['properties']['checks']['items']['properties']['blocker']['pattern'] = r'[\s\S]*\S[\s\S]*'
-RESULT['oneOf'] = [
-    {'required': ['report_ref'], 'not': {'required': ['report']}},
-    {'required': ['report'], 'not': {'required': ['report_ref']}},
-]
-RESULT['properties']['checks']['items']['allOf'] = [{
+# Presence rules are if/then/else, never oneOf/allOf: Codex code mode
+# (0.159.1 json_schema_types.rs) renders a combinator instead of the object's
+# own properties, so a root oneOf hid every result_submit field and an allOf
+# made each checks item `unknown`. Codex drops if/then/else and shows the
+# properties; clients that validate JSON Schema still enforce the rule.
+RESULT['if'] = {'required': ['report_ref']}
+RESULT['then'] = {'not': {'required': ['report']}}
+RESULT['else'] = {'required': ['report']}
+RESULT['properties']['checks']['items'].update({
     'if': {'properties': {'outcome': {'enum': ['not_run', 'unverified']}}, 'required': ['outcome']},
     'then': {'required': ['blocker']},
     'else': {'not': {'required': ['blocker']}},
-}]
+})
 REQUESTS = {
     'replan_request': obj(dict(reason=text('Evidence requiring a new decomposition or additional investigation.'),request_key=text('Unique proposal identity.',128))),
     'scope_request': obj(dict(reason=text('Why the current scope prevents completion.'),
@@ -243,7 +247,12 @@ def _collect(schema, value, field, violations):
             _collect(schema['properties'][name], child, f'{field}.{name}', violations)
             if len(violations) >= MAX_VIOLATIONS:
                 return
-        if 'oneOf' in schema and sum(_matches_presence_rule(part, value) for part in schema['oneOf']) != 1:
+        conditional = schema.get('if')
+        branch = None if conditional is None else (
+            schema['then'] if _matches_presence_rule(conditional, value) else schema['else'])
+        if branch is None or _matches_presence_rule(branch, value):
+            pass
+        elif 'report_ref' in conditional.get('required', ()):  # exactly one of report_ref or report
             present = [name for name in ('report_ref', 'report') if name in value]
             violations.append(dict(
                 field=f'{field}.report_ref, {field}.report',
@@ -251,10 +260,7 @@ def _collect(schema, value, field, violations):
                 expected='exactly one of report_ref or report',
                 correction='Send report={title, markdown} inline, or copy report_id from this worker\'s write_report into report_ref; omit the other field.',
             ))
-        for conditional in schema.get('allOf', ()):  # checks[].blocker/command combinations
-            branch = conditional['then'] if _matches_presence_rule(conditional['if'], value) else conditional['else']
-            if _matches_presence_rule(branch, value):
-                continue
+        else:  # checks[].blocker/command combinations
             if 'required' in branch:
                 violations.append(dict(field=f'{field}.blocker', received='missing',
                                        expected='non-whitespace blocker for not_run or unverified',

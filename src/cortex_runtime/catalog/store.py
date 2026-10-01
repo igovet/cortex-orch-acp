@@ -254,7 +254,7 @@ def latest_connection_snapshot(
         view = load_connection_snapshot(connection_id, path.stem, environ)
         if view is None:
             continue
-        if not view.entries and view.unavailable_reason is not None:
+        if not view.entries and view.unavailable_reason not in (None, "no_models_observed"):
             continue
         return view
     return None

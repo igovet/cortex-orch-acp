@@ -14,7 +14,7 @@ Cortex is an incoming ACP v1 stdio agent at `src/cortex_acp.py`. It runs its own
 - [Automated test matrix and CI](test-matrix-and-ci.md)
 - [Registry metadata draft](registry-metadata-draft.md) — not submitted
 
-The no-paid startup smoke in `scripts/cortex_acp_smoke.py` launches the production entry point in an isolated temporary project and host configuration. It checks ACP framing and schema without an engine call. The Zed setup helper in `scripts/cortex_acp_client_config.py` defaults to a dry run and requires explicit consent for a write.
+The no-paid startup smoke in `scripts/cortex_acp_smoke.py` launches the production entry point in an isolated temporary project and host configuration. It checks ACP framing and schema without an engine call. Its optional `--fixture-connection` mode installs one isolated fake connection and an explicit version-2 routing entry for a placeholder identity; it does not exercise a paid engine or real configuration. The Zed setup helper in `scripts/cortex_acp_client_config.py` defaults to a dry run and requires explicit consent for a write.
 
 ## Orchestration and state
 

@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from model_policy_fixtures import exact_policy
 from cortex_runtime.bootstrap import bootstrap_task
 from cortex_runtime.contracts import StoreError
 from cortex_runtime.portable.identity import SourceEvent
@@ -453,6 +454,25 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
         runtime.shutdown()
     assert result == StopReason.END_TURN
     context = TaskMachine(store).context(task.task_id)
+    if scenario == 'success':
+        # Public task inspection must expose the real scripted controller
+        # cycle, not a fabricated set of review/verification/terminal rows.
+        from cortex_runtime.acp import sessions as acp_sessions
+        from cortex_runtime.storage.inspection import read_binding_page
+        sid = 'acps_' + 'f' * 12
+        acp_sessions.create_session(store, sid, str(tmp_path), {'name': 'fake-host'}, {}, [])
+        acp_sessions.bind_task(store, sid, task.task_id)
+        page = read_binding_page(str(tmp_path), sid, task.task_id, task.owner_epoch.epoch, limit=200)
+        retained = page['rows'][:]
+        while page['next_cursor']:
+            page = read_binding_page(str(tmp_path), sid, task.task_id, task.owner_epoch.epoch,
+                                     cursor=page['next_cursor'], limit=200)
+            retained.extend(page['rows'])
+        assert any(r['section'] == 'runtime' and r['state'] == 'COMPLETED' for r in retained)
+        assert any(r['section'] == 'nodes' and r['stage'] == 'review' for r in retained)
+        assert any(r.get('verification') == 'VERIFICATION_PASSED' for r in retained)
+        assert any(r['section'] == 'synthesis' for r in retained)
+        assert any(r['section'] == 'reports' for r in retained)
     if scenario == 'advice':
         # Nothing in the project changed: no reviewer, and the runtime says why.
         assert context['state'] == 'COMPLETED', context
@@ -1108,9 +1128,25 @@ def test_retry_uses_prior_audit_even_after_assignment_ref_changes(machine):
 
 
 
+def _hint_policy(store):
+    policy = exact_policy({
+        'codex-acp': {'gpt-6-astra': 'flagship', 'gpt-6-luna': 'light'},
+        'claude-agent-acp': {'claude-fable-5-1[1m]': 'flagship'},
+    })
+    policy['models']['codex-acp']['policy'] = {
+        'gpt-6-astra': {'request_names': ['astra', 'астр']},
+        'gpt-6-luna': {'also_standard_for': ['testing']},
+    }
+    policy['models']['claude-agent-acp']['policy'] = {
+        'claude-fable-5-1[1m]': {'request_names': ['fable', 'фейбл', 'фэйбл']},
+    }
+    (store.directory / 'routing.json').write_text(json.dumps(policy))
+
+
 def test_exact_model_hint_requires_live_menu_and_reports_tier_mismatch(machine, monkeypatch):
     from cortex_runtime.routing import auto_route
     state, channel = machine
+    _hint_policy(state.store)
     proposal = plan()
     proposal['tasks'][0].update(model='codex-acp/gpt-6-astra',
                                 model_reason='The coordinator suspects a hard implementation.')
@@ -1138,6 +1174,7 @@ def test_a_flagship_hint_is_granted_only_by_the_users_own_words(machine, monkeyp
     from cortex_runtime.orchestration.state import attempt_routing
     from cortex_runtime.routing import auto_route
     state, channel = machine
+    _hint_policy(state.store)
     monkeypatch.setattr(auto_route, 'route_menu', lambda *_: {
         'tiers': {'flagship': [{'route': 'codex-acp/gpt-6-astra'}],
                   'deep': [], 'standard': [], 'light': []}})
@@ -1155,13 +1192,70 @@ def test_a_flagship_hint_is_granted_only_by_the_users_own_words(machine, monkeyp
     _provision(state, channel, 'N0', 'xa_astra')
     _provision(state, channel, 'N1', 'xa_other')
     assert attempt_routing(state.store, channel.task_id, 'xa_astra').user_request is None
-    # The user's own later message names the family: only the hinted node gets it.
+    # The user's own later message names a configured label: only the hinted node gets it.
     added = append_source_event(state.store, SourceEvent(origin='test', event_id='astra'),
                                 'Please run the implementation on Astra.', channel.task_id)
     routed = attempt_routing(state.store, channel.task_id, 'xa_astra')
     assert routed.model_hint == 'codex-acp/gpt-6-astra'
-    assert routed.user_request == dict(source_ref=f'{added.report_id}:-1', family='astra', matched='Astra')
+    assert routed.user_request == dict(source_ref=f'{added.report_id}:-1', family='codex-acp/gpt-6-astra', matched='Astra')
     assert attempt_routing(state.store, channel.task_id, 'xa_other').user_request is None
+
+
+@pytest.mark.parametrize('text,requested', [
+    ('Use codex-acp/Unit-7-extended', False), ('Use codex-acp/Unit-7.v2', False),
+    ('Use codex-acp/Unit-7[1m]', False), ('Use .codex-acp/Unit-7', False),
+    ('Use -codex-acp/Unit-7', False), ('Use provider/codex-acp/Unit-7', False),
+    ('Use codex-acp/Unit-7/nested', False), ('Use codex-acp/Unit-7,thinking', False),
+    ('Use codex-acp/unit-7', False), ('Use codex-acp/Unit-7.', False),
+    ('Do not use codex-acp/Unit-7', False), ('Cancel the request for codex-acp/Unit-7', False),
+    ('The tests run on codex-acp/Unit-7', False), ('Implement ordinary work', False),
+    ('Use codex-acp/Unit-7', True), ('Use "codex-acp/Unit-7".', True),
+    ('Use Beacon', True),
+])
+def test_retained_exact_request_to_choice_never_promotes_a_different_id(machine, monkeypatch, text, requested):
+    from pathlib import Path
+    from cortex_runtime.bootstrap import append_source_event
+    from cortex_runtime.orchestration.state import attempt_routing
+    from cortex_runtime.routing import auto_route
+    from test_settings_only_routing import fake_catalog, install
+    from test_model_settings_template import entry
+
+    state, channel = machine
+    root = Path(state.store.project_root)
+    data = {'model_policy_version': 2, 'enabled': {'codex-acp': ['Unit-7', 'ordinary-id']},
+            'models': {'codex-acp': {'auto': ['Unit-7', 'ordinary-id'],
+                       'tiers': {'Unit-7': 'flagship', 'ordinary-id': 'standard'},
+                       'policy': {'Unit-7': {'request_names': ['beacon']}}}}}
+    env = install(root, data)
+    fake_catalog(monkeypatch, [entry('codex-acp', 'Unit-7'), entry('codex-acp', 'ordinary-id')])
+    proposal = plan()
+    proposal['tasks'][0].update(model='codex-acp/Unit-7', model_reason='Use codex-acp/Unit-7')
+    state.submit_plan(channel, proposal, 'exact-plan')
+    state.move(channel.task_id, 'EXECUTING')
+    state.claim_ready(channel.task_id, channel.channel_id)
+    _provision(state, channel, 'N0', 'xa_exact')
+    added = append_source_event(state.store, SourceEvent(origin='test', event_id='exact-request'),
+                                text, channel.task_id)
+    settings_before = (root / '.cortex' / 'routing.json').read_bytes()
+    with state.store.connection() as db:
+        sources_before = list(auto_route._user_texts(state.store, db, channel.task_id))
+        rows_before = list(db.execute('SELECT * FROM source_revisions WHERE task_id=?', (channel.task_id,)))
+    routed = attempt_routing(state.store, channel.task_id, 'xa_exact')
+    choice = auto_route.choose('worker-backend-dev', root, env, escalate=routed.escalate,
+                              complexity=routed.complexity, model_hint=routed.model_hint,
+                              model_reason=routed.model_reason, user_request=routed.user_request)
+    assert choice.model == ('Unit-7' if requested else 'ordinary-id'), choice.decision
+    assert choice.decision['user_model_request']['status'] == ('honoured' if requested else 'not_requested_by_user')
+    assert (routed.user_request is not None) == requested
+    if requested:
+        assert routed.user_request == dict(source_ref=f'{added.report_id}:-1', family='codex-acp/Unit-7',
+                                           matched='Beacon' if text == 'Use Beacon' else 'codex-acp/Unit-7')
+        assert choice.decision['tier'] == 'flagship'
+        assert choice.decision['decided_by'] == 'user_request'
+    assert (root / '.cortex' / 'routing.json').read_bytes() == settings_before
+    with state.store.connection() as db:
+        assert list(auto_route._user_texts(state.store, db, channel.task_id)) == sources_before
+        assert list(db.execute('SELECT * FROM source_revisions WHERE task_id=?', (channel.task_id,))) == rows_before
 
 
 def test_plan_preview_names_the_user_request_for_a_flagship_hint(tmp_path, monkeypatch):
@@ -1170,6 +1264,7 @@ def test_plan_preview_names_the_user_request_for_a_flagship_hint(tmp_path, monke
     task = bootstrap_task(store, SourceEvent(origin='test', event_id='fable'), 'Ревью сделай на фейбле', 'owner')
     state = TaskMachine(store)
     state.create(task.task_id, 'Review')
+    _hint_policy(store)
     channel = SimpleNamespace(task_id=task.task_id, channel_id='coordinator', role='coordinator')
     monkeypatch.setattr(auto_route, 'route_menu', lambda *_: {
         'tiers': {'flagship': [{'route': 'claude-agent-acp/claude-fable-5-1[1m]'},
@@ -1187,6 +1282,7 @@ def test_plan_preview_names_the_user_request_for_a_flagship_hint(tmp_path, monke
 def test_a_luna_hint_serves_only_standard_testing_work(machine, monkeypatch):
     from cortex_runtime.routing import auto_route
     state, channel = machine
+    _hint_policy(state.store)
     proposal = plan(3)
     for node in proposal['tasks']:
         node.update(model='codex-acp/gpt-6-luna', model_reason='Cheap and strong enough.')
@@ -1194,7 +1290,7 @@ def test_a_luna_hint_serves_only_standard_testing_work(machine, monkeypatch):
     proposal['tasks'][2].update(role='qa-engineer', complexity='high')
     monkeypatch.setattr(auto_route, 'route_menu', lambda *_: {
         'tiers': {'flagship': [], 'deep': [], 'standard': [],
-                  'light': [{'route': 'codex-acp/gpt-6-luna'}]}})
+                  'light': [{'route': 'codex-acp/gpt-6-luna', 'policy': {'also_standard_for': ['testing']}}]}})
     receipt = state.submit_plan(channel, proposal, 'luna-preview')
     assert [(hint['tier_now'], hint['preview_status']) for hint in receipt['model_hints']] == [
         ('standard', 'pending_dispatch'), ('standard', 'ignored:tier_mismatch'),
@@ -1450,3 +1546,26 @@ def test_scheduler_runs_at_most_four_workers_per_session_and_the_rest_wait(machi
     fifth = state.claim_ready(ch.task_id, ch.channel_id)
     assert len(fifth) == 1
     assert state.claim_ready(ch.task_id, ch.channel_id) == []
+
+
+@pytest.mark.parametrize("engine,model", [("codex-acp", "opaque-choice-47"), ("claude-agent-acp", "vendor/renamed-choice")])
+@pytest.mark.parametrize("text,granted", [("Use beacon for this work.", True), ("Don't use beacon for this work.", False)])
+def test_renamed_flagship_preview_uses_only_configured_labels(tmp_path, monkeypatch, engine, model, text, granted):
+    from cortex_runtime.routing import auto_route
+
+    store = Store(tmp_path / ".cortex", project_root=tmp_path)
+    policy = exact_policy({engine: {model: "flagship"}})
+    policy["models"][engine]["policy"] = {model: {"request_names": ["beacon"]}}
+    (store.directory / "routing.json").write_text(json.dumps(policy))
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id="renamed"), text, "owner")
+    state = TaskMachine(store)
+    state.create(task.task_id, text)
+    channel = SimpleNamespace(task_id=task.task_id, channel_id="coordinator", role="coordinator")
+    hint = f"{engine}/{model}"
+    monkeypatch.setattr(auto_route, "route_menu", lambda *_: {
+        "tiers": {"flagship": [{"route": hint}], "deep": [], "standard": [], "light": []}})
+    proposal = plan()
+    proposal["tasks"][0].update(model=hint, model_reason="Use beacon even if the user did not.")
+    preview = state.submit_plan(channel, proposal, "renamed-preview")["model_hints"][0]
+    assert preview["preview_status"] == ("pending_dispatch:user_request" if granted else "ignored:tier_mismatch")
+    assert ("user_request" in preview) == granted

@@ -21,7 +21,7 @@ import pytest
 from cortex_runtime.engine.process import (
     _CODEX_AGENT_REVIEWER_MANUAL, _CODEX_AGENT_REVIEWER_2_MANUAL,
     _CODEX_NEW_SESSION_PATCHED, _CODEX_SESSION_CONFIG_PATCHED,
-    _CODEX_SEND_PROMPT_BY_VERSION,
+    _CODEX_SEND_PROMPT_BY_VERSION, CODEX_MCP_TOOL_SCHEMA_MAX_BYTES,
     _prepare_codex_manual_review_adapter,
 )
 from cortex_runtime.connections.discovery import QUALIFIED_ADAPTER_VERSIONS
@@ -231,6 +231,7 @@ def test_installed_adapter_keeps_explicit_mcp_on_disabled_native_name(tmp_path):
         assert config["mcp_servers"]["native"] == {
             "command": "/bin/true", "args": [], "env": {}, "enabled": True, "default_tools_approval_mode": "approve",
             "tool_timeout_sec": 31536000,
+            **({"tool_input_schema_max_bytes": CODEX_MCP_TOOL_SCHEMA_MAX_BYTES} if version == "2.0.1" else {}),
         }
     finally:
         proc.terminate()

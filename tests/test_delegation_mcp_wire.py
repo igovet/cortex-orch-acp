@@ -119,7 +119,7 @@ def test_result_submit_wire_advertises_and_rejects_missing_report(tmp_path):
     worker, worker_secret, _ = _worker_channel(store, task, coordinator)
     tools = _call(project, worker, worker_secret, _init_and('tools/list', {}), tmp_path)[-1]['result']['tools']
     schema = next(tool['inputSchema'] for tool in tools if tool['name'] == 'result_submit')
-    assert len(schema['oneOf']) == 2
+    assert 'oneOf' not in schema and schema['else'] == {'required': ['report']}
     assert schema['properties']['report_ref']['pattern'] == r'^r_[0-9a-f]{12}$'
     args = dict(summary='Observed', checks=[], request_key='missing-report')
     refused = _call(project, worker, worker_secret, _init_and('tools/call',

@@ -20,6 +20,7 @@ fails closed on every prompt. Tests that need
 from __future__ import annotations
 
 import collections
+import copy
 import inspect
 import json
 import sqlite3
@@ -630,10 +631,7 @@ class Agent:
         except Exception:
             observe(self.environ, "session/request_permission", "late_answer_failed")
         finally:
-            with session["lock"]:
-                if session["active"] is cancel_event:
-                    session["active"] = None
-                    session["background"] = False
+            self._finish_prompt(session_id, session, cancel_event)
 
     def _track_request_id(self, request_id):
         """Record ``request_id`` as used on this connection; return whether
@@ -1001,6 +999,18 @@ class Agent:
         ``_propose_pending_selection_for_new_task`` recovers one-time via
         ``catalog.store.find_route_identity`` and then persists forward."""
         defaults = configuration_store.read_user_defaults(self.environ)["defaults"]
+        if isinstance(defaults, dict) and defaults.get("coordinator") is not None and not defaults.get("route_id"):
+            from ..configuration.resolution import resolve_owner_coordinator
+            from ..configuration.resolution import portable_from_defaults
+            value = portable_from_defaults(defaults)
+            try:
+                entry = resolve_owner_coordinator(value, self.environ)
+            except PortableError as error:
+                return dict(route_id=None, connection_id=None, model=value.get("model"),
+                            parameters=value.get("parameters", {}), coordinator=value,
+                            resolution_error=error.code)
+            return dict(route_id=entry.route.id, connection_id=entry.connection_id, model=entry.route.model,
+                        parameters=value["parameters"], coordinator=value)
         route_id = defaults.get("route_id") if isinstance(defaults, dict) else None
         if not isinstance(route_id, str) or not route_id:
             return None
@@ -1034,7 +1044,8 @@ class Agent:
             # as this session's plain default, never "pending" -- nothing in
             # *this* session has changed it yet.
             return dict(route_id=default["route_id"], state="default",
-                        revision=None, parameters=default.get("parameters") or {})
+                        revision=None, parameters=default.get("parameters") or {},
+                        coordinator=default.get("coordinator"), resolution_error=default.get("resolution_error"))
         return None
 
     def _default_language_from_user_defaults(self):
@@ -1398,6 +1409,8 @@ class Agent:
         cancel_event = threading.Event()
         background = None
         with session["lock"]:
+            if session.get("cancelling"):
+                raise RpcError(-32602, "This session is being cancelled.")
             if session["active"] is not None:
                 # The running turn is waiting on a question card: a message
                 # typed into this session is that question's answer, and the
@@ -1409,10 +1422,21 @@ class Agent:
                 background = session["active"] if session.get("background") else None
                 if background is None:
                     raise RpcError(-32602, "A prompt is already in flight for this session.")
+                if recognized is None or recognized[0] not in (
+                        acp_commands.CORTEX_STOP, acp_commands.CORTEX_FINISH):
+                    # Host idle/queue draining is not a Stop. Keep this
+                    # request unanswered until the continuation releases
+                    # ownership; never pass its cancellation token to a
+                    # second controller or roll back captured steering.
+                    pending = session.setdefault("pending_prompts", [])
+                    if len(pending) >= 64:
+                        raise RpcError(-32602, "Too many prompts waiting for this session.")
+                    pending.append((request_id, session_id, session, text, cancel_event,
+                                    recognized, copy.deepcopy(raw_blocks), copy.deepcopy(meta)))
+                    return
         if background is not None:
-            # A continuation Cortex started on its own (a late card answer)
-            # yields to the user: interrupt it, then take the session.
-            background.set()
+            # Explicit terminal commands retain their urgent interruption.
+            self._session_cancel(dict(sessionId=session_id))
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 with session["lock"]:
@@ -1423,15 +1447,47 @@ class Agent:
             if session["active"] is not None:
                 raise RpcError(-32602, "A prompt is already in flight for this session.")
             session["active"] = cancel_event
+        self._launch_prompt((request_id, session_id, session, text, cancel_event,
+                             recognized, raw_blocks, meta))
+
+    def _launch_prompt(self, args):
         worker = threading.Thread(
-            target=self._run_prompt, name="acp-prompt",
-            args=(request_id, session_id, session, text, cancel_event, recognized, raw_blocks, meta), daemon=True)
+            target=self._run_prompt, name="acp-prompt", args=args, daemon=True)
         with self._workers_lock:
             self._workers.append(worker)
         worker.start()
 
+    def _finish_prompt(self, session_id, session, cancel_event):
+        next_prompt = None
+        cancelled = []
+        with session["lock"]:
+            if session["active"] is not cancel_event:
+                return
+            session["active"] = None
+            session["background"] = False
+            pending = session.get("pending_prompts")
+            if pending and cancel_event.is_set():
+                cancelled = session.pop("pending_prompts")
+            elif pending:
+                next_prompt = pending.pop(0)
+                # Reserve under the same lock as release: an arriving
+                # prompt/continuation cannot overtake a waiting request.
+                session["active"] = next_prompt[4]
+        for prompt in cancelled:
+            prompt[4].set()
+            self.transport.send_response(protocol.result_response(
+                prompt[0], protocol.prompt_result("cancelled")))
+        if next_prompt is not None:
+            self._launch_prompt(next_prompt)
+        elif not cancel_event.is_set():
+            self._start_queued_message_continuation(session_id, session)
+
     def _run_prompt(self, request_id, session_id, session, text, cancel_event, recognized=None, raw_blocks=None, meta=None):
         try:
+            if cancel_event.is_set():
+                self.transport.send_response(protocol.result_response(
+                    request_id, protocol.prompt_result("cancelled")))
+                return
             if recognized is not None:
                 try:
                     with self._history_lock(session_id):
@@ -1454,11 +1510,7 @@ class Agent:
             self._reply_error(request_id, -32603, "Internal error while processing this prompt.")
             observe(self.environ, "session/prompt", "internal_error")
         finally:
-            with session["lock"]:
-                if session["active"] is cancel_event:
-                    session["active"] = None
-            if not cancel_event.is_set():
-                self._start_queued_message_continuation(session_id, session)
+            self._finish_prompt(session_id, session, cancel_event)
 
     def _run_prompt_body(self, request_id, session_id, session, text, cancel_event, raw_blocks=None, meta=None):
         """The actual prompt turn; wrapped by ``_run_prompt`` for the
@@ -1776,7 +1828,7 @@ class Agent:
         # current ACP option while the pending/default selection is still
         # present, before consuming it below.
         parameters = dict(pending.get("parameters") or {})
-        if "thought_level" not in parameters:
+        if "thought_level" not in parameters and not pending.get("coordinator"):
             options = self._config_options_for_session(session, store)
             thought_option = next(
                 (option for option in options if option.get("id") == acp_config_options.THOUGHT_LEVEL_OPTION_ID),
@@ -1795,13 +1847,15 @@ class Agent:
             else:
                 observe(self.environ, "session/prompt", "pending_selection_route_unavailable")
             return False
-        if catalog_entry.route.id != pending.get("route_id"):
+        if not pending.get("coordinator") and catalog_entry.route.id != pending.get("route_id"):
             self._persist_migrated_default(catalog_entry, parameters)
             observe(self.environ, "session/prompt", "pending_selection_route_migrated")
         service = ConfigurationService(store)
         inputs = ConfigurationInputs(route=catalog_entry.route, parameters=parameters)
         try:
-            service.ui_select(task_id, catalog_entry, inputs, 0, session["owner_epoch"])
+            service.ui_select(task_id, catalog_entry, inputs, 0, session["owner_epoch"],
+                              user_layer=configuration_store.read_user_defaults(self.environ),
+                              project_layer=configuration_store.read_project_defaults(store, session["project"]))
         except PortableError:
             observe(self.environ, "session/prompt", "pending_selection_apply_failed")
             return False
@@ -1828,6 +1882,10 @@ class Agent:
         exactly what makes a different model or a different connection
         impossible to land on here by construction.
         """
+        if pending.get("coordinator") is not None:
+            from ..configuration.resolution import resolve_portable_coordinator
+            entry = resolve_portable_coordinator(entries, pending["coordinator"])
+            return entry, None
         connection_id, model = pending.get("connection_id"), pending.get("model")
         if not connection_id or not model:
             # Legacy defaults.json (written before this fix): try the
@@ -1866,6 +1924,7 @@ class Agent:
             if current != observed:
                 return
             defaults = dict(current["defaults"])
+            defaults.pop("coordinator", None)
             defaults["route_id"] = catalog_entry.route.id
             defaults["route_connection_id"] = catalog_entry.connection_id
             defaults["route_model"] = catalog_entry.route.model
@@ -2364,14 +2423,24 @@ class Agent:
         session (in-memory only) as its own pending selection, shown with
         state "pending_next_use" until the first prompt consumes it (see
         ``_propose_pending_selection_for_new_task``)."""
+        previous = session.get("pending_selection") or session.get("default_selection")
+        if previous and config_id in (acp_config_options.PROVIDER_OPTION_ID, acp_config_options.MODEL_OPTION_ID):
+            entries, connections = self._selectable_entries_and_connections(session["project"])
+            current_entry, _withdrawn = self._resolve_pending_route(entries, connections, previous)
+            if current_entry is not None and current_entry.route.id == catalog_entry.route.id:
+                # Hosts can echo the initial model/provider without supplying
+                # native parameters. This is not a route change or a reset.
+                # Keep the configured values and their portable provenance.
+                return True, self._config_options_for_session(session, store), None
         current = configuration_store.read_user_defaults(self.environ)
         defaults = dict(current["defaults"])
         if config_id in (acp_config_options.PROVIDER_OPTION_ID, acp_config_options.MODEL_OPTION_ID):
             merged_parameters: dict = {}
         else:
-            previous = session.get("pending_selection") or session.get("default_selection") or {}
+            previous = previous or {}
             merged_parameters = dict(previous.get("parameters") or {})
             merged_parameters.update(parameters_override)
+        defaults.pop("coordinator", None)
         defaults["route_id"] = catalog_entry.route.id
         # T035 FINDING-05: the stable identity alongside the fingerprint id
         # -- see resolve_saved_route/_resolve_pending_route.
@@ -2404,7 +2473,9 @@ class Agent:
         expected_revision = history[-1]["revision"] if history else 0
         inputs = ConfigurationInputs(route=catalog_entry.route, parameters=parameters_override)
         try:
-            service.ui_select(task_id, catalog_entry, inputs, expected_revision, session["owner_epoch"])
+            service.ui_select(task_id, catalog_entry, inputs, expected_revision, session["owner_epoch"],
+                              user_layer=configuration_store.read_user_defaults(self.environ),
+                              project_layer=configuration_store.read_project_defaults(store, session["project"]))
         except PortableError as violation:
             previous_options = self._config_options_for_session(session, store)
             if violation.code == "stale_configuration_revision":
@@ -2463,7 +2534,7 @@ class Agent:
 
         with session["lock"]:
             queued = session.get("queued_messages") or []
-            if session["active"] is not None or not queued:
+            if session["active"] is not None or session.get("cancelling") or not queued:
                 return
             store = self._store_for(session["project"])
             if (acp_steering.is_stopped(store, session["task_id"])
@@ -2518,12 +2589,7 @@ class Agent:
         except Exception:
             observe(self.environ, "session/prompt", "queued_message_continuation_failed")
         finally:
-            with session["lock"]:
-                if session["active"] is cancel_event:
-                    session["active"] = None
-                    session["background"] = False
-            if not cancel_event.is_set():
-                self._start_queued_message_continuation(session_id, session)
+            self._finish_prompt(session_id, session, cancel_event)
 
     def _queue_paseo_message(self, request_id, session_id, session, value):
         """Capture a Paseo message (text, and any image/uploaded-file
@@ -2873,6 +2939,18 @@ class Agent:
         session = self.sessions.get(session_id)
         if session is None:
             return
+        with session["lock"]:
+            session["cancelling"] = True
+            active = session["active"]
+            pending = session.pop("pending_prompts", [])
+            if active is not None:
+                active.set()
+        # Waiting requests have not been captured or acknowledged. Stop
+        # cancels them too; none may auto-resume work after interruption.
+        for prompt in pending:
+            prompt[4].set()
+            self.transport.send_response(protocol.result_response(
+                prompt[0], protocol.prompt_result("cancelled")))
         try:
             # Paseo also sends session/cancel before an in-flight follow-up
             # prompt. ACP carries no signal distinguishing that steering from
@@ -2881,10 +2959,9 @@ class Agent:
             self.runtime.cancel(session_id)
         except Exception:
             pass
-        with session["lock"]:
-            active = session["active"]
-        if active is not None:
-            active.set()
+        finally:
+            with session["lock"]:
+                session["cancelling"] = False
 
     # -- shutdown ----------------------------------------------------
 
@@ -2908,8 +2985,10 @@ class Agent:
         for session in list(self.sessions.values()):
             with session["lock"]:
                 active = session["active"]
-            if active is not None:
-                active.set()
+                for prompt in session.pop("pending_prompts", []):
+                    prompt[4].set()
+                if active is not None:
+                    active.set()
         # T028: stop this connection's tasks from starting any new paid
         # work and run the bounded owned-resource reaper -- see
         # acp.production_runtime.ProductionOrchestratingRuntime.disconnect/
