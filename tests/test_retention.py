@@ -276,6 +276,11 @@ def test_clear_tasks_end_to_end_removes_every_group_row_with_integrity_ok(tmp_pa
                 "INSERT INTO capsule_deliveries (id,recipient,context_generation_id,capsule_revision,task_id,assignment_ref,engine_session_ref,state,evidence_source,uncertainty,reason,retry_count,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 ('cd_1', 'coordinator', 'cg_1', 'rev_1', task, None, 'es_1', 'built', 'test', None, None, 0, now, now))
+            # compaction_recovery_events references context_generations(id).
+            db.execute(
+                "INSERT INTO compaction_recovery_events (id,task_id,engine_session_ref,generation_id,before_tokens,before_basis,after_tokens,after_basis,recovered_tokens,recovered_ratio,status,created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                ('cre_1', task, 'es_1', 'cg_1', 100, 'test', 50, 'test', 50, 0.5, 'ok', now))
             db.commit()
         except BaseException:
             db.rollback(); raise
@@ -316,6 +321,7 @@ def test_clear_tasks_end_to_end_removes_every_group_row_with_integrity_ok(tmp_pa
         ('compaction_owners', 'task_id=?', (task,)),
         ('compaction_events_seen', 'task_id=?', (task,)),
         ('capsule_deliveries', 'task_id=?', (task,)),
+        ('compaction_recovery_events', 'generation_id=?', ('cg_1',)),
     ]
     with store.connection() as db:
         populated = {t for t, where, params in _lookups if db.execute(f"SELECT 1 FROM {t} WHERE {where}", params).fetchone()}

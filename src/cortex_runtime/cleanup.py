@@ -73,6 +73,9 @@ def finish_deletions(store,db,task):
         # compaction_events_seen: capsule_deliveries references
         # context_generations(id), so it must go first.
         _delete_if_present("capsule_deliveries","task_id=?",(task,))
+        # compaction_recovery_events.generation_id also references
+        # context_generations(id); remove it before its generation rows.
+        _delete_if_present("compaction_recovery_events","task_id=?",(task,))
         _delete_if_present("context_generations","task_id=?",(task,))
         _delete_if_present("compaction_owners","task_id=?",(task,))
         _delete_if_present("compaction_events_seen","task_id=?",(task,))
@@ -88,14 +91,13 @@ def finish_deletions(store,db,task):
         # either by id, so plain task_id deletes suffice.
         _delete_if_present("observability_events","task_id=?",(task,))
         _delete_if_present("usage_records","task_id=?",(task,))
-        # T024 large_outputs/compaction_recovery_events: no other table
-        # references either by id, so plain task_id deletes suffice.
+        # T024 large_outputs (compaction_recovery_events is removed above,
+        # before context_generations). No other table references it by id.
         # large_outputs also owns files under this task's storage directory
         # (see recovery.large_output_store) -- the caller deletes those
         # files as part of the same task-directory teardown this cleanup
         # already performs; this only removes the metadata rows.
         _delete_if_present("large_outputs","task_id=?",(task,))
-        _delete_if_present("compaction_recovery_events","task_id=?",(task,))
         # T025 workspace_snapshots/workspace_integrations: the actual
         # snapshot/base directories on disk (Cortex-owned, under this
         # project's own .cortex/workspaces/<attempt_id>/) are removed
