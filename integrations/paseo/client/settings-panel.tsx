@@ -112,7 +112,7 @@ import {
   type UserDefaultsForm,
   type UserDefaultsView,
 } from "./settings-model.ts";
-import { HELP, HELP_LANGUAGES, type HelpLanguage, type HelpText } from "./settings-help.ts";
+import { HELP, HELP_LANGUAGES, PREFERRED_WORK_HELP, workKindHelp, type HelpLanguage, type HelpText } from "./settings-help.ts";
 
 /**
  * The Cortex Settings screen. Every editable setting is a typed control
@@ -1088,9 +1088,9 @@ function SwitchLegend({ theme }: { theme: Theme }) {
   return <Group title="What these switches change" theme={theme} hint={HELP.switchesLegend}>{null}</Group>;
 }
 
-function ModelRow({ group, form, onChange, target, tiers, availableModels, workKinds, workKindLabels, theme }: {
+function ModelRow({ group, form, onChange, target, tiers, availableModels, workKinds, workKindLabels, workKindRoles, theme }: {
   group: ModelGroup; form: RoutingForm; onChange: (form: RoutingForm) => void; target: "user" | "project"; tiers: readonly string[]; availableModels: readonly string[];
-  workKinds: readonly string[]; workKindLabels: Record<string, string>; theme: Theme;
+  workKinds: readonly string[]; workKindLabels: Record<string, string>; workKindRoles: Record<string, string[]>; theme: Theme;
 }) {
   const route = group.routes[0];
   const title = group.key;
@@ -1107,13 +1107,13 @@ function ModelRow({ group, form, onChange, target, tiers, availableModels, workK
     <MultiChoiceField label={`Automatic tiers for ${title}`} values={modelTierValues(form, route)}
       options={tiers.map((tier) => ({ value: tier, label: tier }))} theme={theme} disabled={deny.on}
       onChange={(next) => onChange(setModelTiers(form, route.engine, route.model, next, tiers))} />
-    <Group title={`Preferred work for ${title}`} theme={theme}>
+    <Group title={`Preferred work for ${title}`} theme={theme} hint={PREFERRED_WORK_HELP}>
       {workKinds.map((kind) => <ToggleField key={kind} label={`${workKindLabels[kind] ?? kind} — ${title}`}
         value={(form.models?.[route.engine]?.policy?.[route.model]?.preferred_for as string[] | undefined)?.includes(kind) ?? false}
         disabled={deny.on || (form.models?.[route.engine]?.auto == null
           ? route.automatic !== "eligible" : !form.models[route.engine].auto?.includes(route.model))}
         theme={theme} onValueChange={(on) => onChange(setModelPreferredFor(form, route.engine, route.model, kind, on,
-          route.automatic === "eligible"))} />)}
+          route.automatic === "eligible"))} help={workKindHelp(kind, workKindRoles[kind] ?? [])} />)}
     </Group>
     {route.default_auto_excluded !== null && (canAutoAllow(route)
       ? <>
@@ -1130,9 +1130,9 @@ function ModelRow({ group, form, onChange, target, tiers, availableModels, workK
   </View>;
 }
 
-function EngineBlock({ engine, catalog, form, onChange, target, engines, workKinds, workKindLabels, theme }: {
+function EngineBlock({ engine, catalog, form, onChange, target, engines, workKinds, workKindLabels, workKindRoles, theme }: {
   engine: CatalogEngine; catalog: RouteCatalogView; form: RoutingForm; onChange: (form: RoutingForm) => void; target: "user" | "project";
-  engines: readonly string[]; workKinds: readonly string[]; workKindLabels: Record<string, string>; theme: Theme;
+  engines: readonly string[]; workKinds: readonly string[]; workKindLabels: Record<string, string>; workKindRoles: Record<string, string[]>; theme: Theme;
 }) {
   const name = engineLabel(engine.engine);
   const disabled = engineDisabledIn(form, engine.engine);
@@ -1166,7 +1166,7 @@ function EngineBlock({ engine, catalog, form, onChange, target, engines, workKin
       </Text>
       : groups.map((group) => <ModelRow key={group.key} group={group} form={form} onChange={onChange} target={target} tiers={["light", "standard", "deep", "flagship"]}
         availableModels={groups.filter((item) => item.routes.some((route) => route.auto_selected ?? route.automatic === "eligible")).map((item) => item.model)}
-        workKinds={workKinds} workKindLabels={workKindLabels} theme={theme} />)}
+        workKinds={workKinds} workKindLabels={workKindLabels} workKindRoles={workKindRoles} theme={theme} />)}
   </View>;
 }
 
@@ -1279,7 +1279,7 @@ function EnginesModelsSection({ theme, workspaceId, onWritten }: { theme: Theme;
   return <RoutingSwitchesCard title="Engines & models" saveLabel="engine and model switches" onWritten={onWritten} theme={theme} workspaceId={workspaceId} legend={<SwitchLegend theme={theme} />}>
     {({ cat, form, setForm, target, view }) => <>
       {cat.engines.map((engine) => <EngineBlock key={engine.engine} engine={engine} catalog={cat} form={form} onChange={setForm}
-        target={target} engines={routingVocabulary(view).engines} workKinds={view.builtin.work_kinds} workKindLabels={view.builtin.work_kind_labels} theme={theme} />)}
+        target={target} engines={routingVocabulary(view).engines} workKinds={view.builtin.work_kinds} workKindLabels={view.builtin.work_kind_labels} workKindRoles={view.builtin.work_kind_roles} theme={theme} />)}
       <OtherRules catalog={cat} form={form} onChange={setForm} target={target} theme={theme} />
     </>}
   </RoutingSwitchesCard>;

@@ -425,3 +425,88 @@ export const HELP = {
     "Необязательный движок, только по явному согласию. Регистрация не меняет маршрутизацию: маршруты OpenCode не участвуют в автоматике, пока вы не включите модели в Models и не добавите их в автоматический выбор. Рекомендация: включайте, только если нужны модели, доступные лишь через OpenCode.",
   ),
 } as const satisfies Record<string, HelpText>;
+
+/** What each work kind covers (keys are the runtime's work kinds). */
+export const WORK_KIND_HELP: Record<string, HelpText> = {
+  implementation: h(
+    "Writing and changing product code: features, fixes, refactoring, data pipelines, accessibility fixes. Also every role the runtime does not list elsewhere.",
+    "Написание и изменение кода продукта: функции, исправления, рефакторинг, обработка данных, исправления доступности. Сюда же попадают роли, не отнесённые к другим видам.",
+  ),
+  operations: h(
+    "Infrastructure work: CI/CD, containers, deployment, operational diagnostics.",
+    "Инфраструктура: CI/CD, контейнеры, развёртывание, эксплуатационная диагностика.",
+  ),
+  debugging: h(
+    "Finding and fixing the cause of failures and slowness: reproduce, prove the root cause, fix, verify.",
+    "Поиск и устранение причин сбоев и медленной работы: воспроизвести, доказать причину, исправить, проверить.",
+  ),
+  testing: h(
+    "Writing and running tests, checking builds and acceptance criteria.",
+    "Написание и запуск тестов, проверка сборки и критериев приёмки.",
+  ),
+  investigation: h(
+    "Read-only exploration of the codebase: where things are, how they are called, what depends on what.",
+    "Исследование кода без изменений: где что находится, как вызывается, что от чего зависит.",
+  ),
+  review: h(
+    "Independent checking of finished work, including the mandatory review of every task, security and accessibility audits.",
+    "Независимая проверка готовой работы, включая обязательное ревью каждой задачи, аудит безопасности и доступности.",
+  ),
+  design: h(
+    "Architecture and design decisions: system structure, database schemas, UX, senior consultation.",
+    "Архитектурные и проектные решения: структура системы, схемы баз данных, UX, консультации старшего уровня.",
+  ),
+  writing: h(
+    "Documentation: project knowledge, feature docs, decision records.",
+    "Документация: знания о проекте, описания функций, записи решений.",
+  ),
+  planning: h(
+    "Breaking a task into steps with dependencies, risks and checks.",
+    "Разбиение задачи на шаги с зависимостями, рисками и проверками.",
+  ),
+  analysis: h(
+    "Bounded research or analysis when no specialist fits.",
+    "Ограниченное исследование или анализ, когда не подходит ни один специалист.",
+  ),
+};
+
+/** What each worker role does (keys are the runtime's role ids). */
+export const ROLE_HELP: Record<string, HelpText> = {
+  "worker-accessibility-auditor": h("audits WCAG conformance, keyboard navigation and screen-reader risks", "проверяет соответствие WCAG, работу с клавиатуры и экранными дикторами"),
+  "worker-accessibility-fixer": h("fixes accessibility: semantics, keyboard, focus, contrast", "исправляет доступность: семантика, клавиатура, фокус, контраст"),
+  "worker-architect": h("designs component boundaries, data flow and API contracts", "проектирует границы компонентов, потоки данных и контракты API"),
+  "worker-backend-dev": h("implements APIs, business logic, persistence and server tests", "реализует API, бизнес-логику, хранение данных и серверные тесты"),
+  "worker-build-verification": h("runs builds and tests and proves their exact results", "запускает сборку и тесты и подтверждает их точные результаты"),
+  "worker-code-reviewer": h("reviews changes for bugs, regressions, security and missing tests; does the mandatory task review", "проверяет изменения на ошибки, регрессии, безопасность и нехватку тестов; выполняет обязательное ревью задач"),
+  "worker-data-engineer": h("builds ETL, data migrations and integrity checks", "делает ETL, миграции данных и проверки их целостности"),
+  "worker-database-architect": h("designs schemas, indexes, migrations and query plans", "проектирует схемы, индексы, миграции и планы запросов"),
+  "worker-debugger": h("reproduces failures, proves the root cause, fixes and verifies", "воспроизводит сбои, доказывает причину, исправляет и проверяет"),
+  "worker-devops-engineer": h("works on CI/CD, containers and deployment safety", "работает с CI/CD, контейнерами и безопасностью развёртывания"),
+  "worker-explorer": h("maps execution paths, dependencies and relevant files without changing them", "изучает пути выполнения, зависимости и нужные файлы, ничего не меняя"),
+  "worker-frontend-dev": h("implements UI components, state, styling and UI tests", "реализует компоненты интерфейса, состояние, стили и UI-тесты"),
+  "worker-fullstack-dev": h("makes coordinated backend and frontend changes", "делает согласованные изменения бэкенда и фронтенда"),
+  "worker-general": h("general agent for research, analysis or small implementation", "универсальный агент для исследования, анализа или небольших правок"),
+  "worker-mobile-dev": h("implements iOS, Android, React Native or Flutter changes", "реализует изменения для iOS, Android, React Native или Flutter"),
+  "worker-performance-engineer": h("finds bottlenecks and makes safe optimizations", "находит узкие места и делает безопасные оптимизации"),
+  "worker-planner": h("breaks work into steps, dependencies, risks and checks", "разбивает работу на шаги, зависимости, риски и проверки"),
+  "worker-qa-engineer": h("writes automated tests and reproduction scenarios", "пишет автотесты и сценарии воспроизведения"),
+  "worker-refactorer": h("restructures code without changing behavior", "перестраивает код без изменения поведения"),
+  "worker-security-auditor": h("audits auth, secrets, cryptography, dependencies and data protection", "проверяет авторизацию, секреты, криптографию, зависимости и защиту данных"),
+  "worker-senior-consultant": h("gives senior decisions on the coordinator's request from published reports", "даёт решения старшего уровня по запросу координатора на основе опубликованных отчётов"),
+  "worker-technical-writer": h("writes project and feature documentation", "пишет документацию проекта и функций"),
+  "worker-ux-designer": h("designs layouts, interaction flows and responsive behavior", "проектирует макеты, сценарии взаимодействия и адаптивность"),
+};
+
+/** Help under one "Preferred work" switch: what the kind is and which agents it covers. */
+export function workKindHelp(kind: string, roles: readonly string[]): HelpText {
+  const base = WORK_KIND_HELP[kind] ?? h(`Work of kind ${kind}.`, `Работа вида ${kind}.`);
+  const agents = (lang: "en" | "ru") => roles.length === 0
+    ? (lang === "en" ? "No worker role uses this kind directly." : "Ни одна роль исполнителя не использует этот вид напрямую.")
+    : `${lang === "en" ? "Agents" : "Агенты"}:\n${roles.map((role) => `  • ${role}${ROLE_HELP[role] ? ` — ${ROLE_HELP[role][lang]}` : ""}`).join("\n")}`;
+  return { en: `${base.en}\n${agents("en")}`, ru: `${base.ru}\n${agents("ru")}` };
+}
+
+export const PREFERRED_WORK_HELP = h(
+  "Turn a work kind on to rank this model first, within its tier, when Cortex picks a worker for that kind. It affects only automatic worker selection (not the coordinator or models you pick by hand), never overrides availability, policy or plan usage, and needs the model selected for automatic ranking. Recommended: mark only the kinds where this model is clearly strongest; leave the rest off.",
+  "Включите вид работы, чтобы эта модель ставилась первой внутри своего уровня, когда Cortex выбирает исполнителя для такой работы. Влияет только на автоматический выбор исполнителей (не на координатора и не на ручной выбор), не отменяет доступность, правила и расход тарифа и требует включённого Use … for automatic ranking. Рекомендация: отмечайте только виды, где модель явно сильнее; остальные оставьте выключенными.",
+);

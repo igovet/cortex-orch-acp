@@ -1079,3 +1079,16 @@ test("help language switch shows field help in English, Russian or both", async 
   await screen.press("Help language / Язык подсказок: RU");
   assert.ok(!has("• Recommended —") && has("• Рекомендация —"), "Russian only");
 });
+
+test("each preferred-work switch explains the work kind and the agents it covers, from the runtime's role map", async () => {
+  const data = fixtures();
+  (data.routing.builtin as any).work_kind_roles = { code: [], review: ["worker-code-reviewer", "worker-security-auditor"] };
+  const screen = await openScreen(data);
+  await screen.section("Engines & models");
+  const texts = screen.texts();
+  assert.ok(texts.some((text) => text.startsWith("Independent checking of finished work")
+    && text.includes("• worker-code-reviewer — reviews changes") && text.includes("• worker-security-auditor — audits auth")));
+  assert.ok(texts.some((text) => text.startsWith("Независимая проверка готовой работы") && text.includes("Агенты:")));
+  assert.ok(texts.some((text) => text.includes("No worker role uses this kind directly.")), "a kind without roles says so");
+  assert.ok(texts.some((text) => text.startsWith("Turn a work kind on to rank this model first")));
+});
