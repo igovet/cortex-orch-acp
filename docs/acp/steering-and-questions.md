@@ -5,6 +5,11 @@ worker reports. User sources continue to be captured with exact source/session
 identity before they are delivered. Replayed user text does not become a new
 source event merely because it is read again.
 
+`/cortex-clear` is runtime-owned retention, not a question answer or steering
+message. It is refused while a prompt is in flight, including a background
+continuation or open question waiter. Retry in an idle session; the current
+bound task stays protected. See [retention maintenance](packaging-and-onboarding.md#retention-maintenance).
+
 The coordinator requests a user question through the advertised
 `user_question_request` schema. The runtime atomically records its delivery
 receipt, pending question, resume phase and `WAITING_USER` transition before

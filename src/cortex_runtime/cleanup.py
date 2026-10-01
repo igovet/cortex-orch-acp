@@ -1,4 +1,4 @@
-"""Explicit host-side retention maintenance; not an MCP operation."""
+"""Explicit owner retention maintenance; not a model-callable MCP operation."""
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
@@ -206,25 +206,66 @@ def finish_deletions(store,db,task):
         db.execute("DELETE FROM tasks WHERE id=?",(task,))
 
 
-def clear_tasks(store,project_root,days,keep_threads=(),now=None):
-    if type(days) is not int or not 0<=days<=36500:
-        raise StoreError("invalid_retention","days",days,"integer from 0 through 36500","Use clear N days with a nonnegative integer N.")
+def protected_active_tasks(db):
+    """Fail closed for non-terminal, live or ambiguously live task activity."""
+    from .orchestration.state import TERMINAL
+
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    keep = set()
+    if "runtime_tasks" in tables:
+        keep.update(row["task_id"] for row in db.execute("SELECT task_id,state FROM runtime_tasks")
+                    if row["state"] not in TERMINAL)
+    if "capacity_reservations" in tables:
+        keep.update(row[0] for row in db.execute(
+            "SELECT task_id FROM capacity_reservations WHERE state!='released'"))
+    if "attempt_process_registry" in tables:
+        keep.update(row[0] for row in db.execute(
+            "SELECT task_id FROM attempt_process_registry WHERE terminated_at IS NULL"))
+    return keep
+
+
+def clear_tasks(store,project_root,days=None,keep_threads=(),now=None,*,
+                cutoff=None,dry_run=False,protected_task_ids=(),protect_active=False):
+    """Select and journal retention under an exclusive, nonblocking store lock.
+
+    Chat callers require active protection; the manual CLI retains its existing
+    retention/keep-thread contract. Dry runs never replay pending deletions.
+    """
+    current = now or datetime.now(timezone.utc)
+    if cutoff is None:
+        if type(days) is not int or not 0<=days<=36500:
+            raise StoreError("invalid_retention","days",days,"integer from 0 through 36500")
+        cutoff = current - timedelta(days=days)
+    elif days is not None or not isinstance(cutoff, datetime) or cutoff.tzinfo is None or cutoff > current:
+        raise StoreError("invalid_retention","cutoff",None,"a non-future timezone-aware cutoff, without days")
+    cutoff_text = cutoff.astimezone(timezone.utc).isoformat(timespec="microseconds")
     project=Path(project_root)
     if not project.is_absolute() or not project.is_dir() or str(project.resolve())!=str(project_root):
         raise StoreError("invalid_project","project_root",str(project_root),"absolute existing canonical directory")
-    cutoff=((now or datetime.now(timezone.utc))-timedelta(days=days)).isoformat(timespec="microseconds")
-    with store.connection() as db:
+    # Keep the lock through every intent commit and filesystem teardown: a
+    # concurrently resumed task cannot cross the selection/deletion boundary.
+    with store.connection(exclusive=True) as db:
         db.execute("BEGIN IMMEDIATE")
         rows=db.execute('''SELECT id,activity FROM (
             SELECT t.id,t.project_root,MAX(t.created_at,
                 COALESCE((SELECT MAX(e.updated_at) FROM reports r JOIN editions e ON e.report_id=r.id WHERE r.task_id=t.id),t.created_at)) AS activity
-            FROM tasks t) WHERE project_root=? AND activity<?''',(str(project),cutoff)).fetchall()
+            FROM tasks t) WHERE project_root=? AND activity<?''',(str(project),cutoff_text)).fetchall()
         keep={entry["task_id"] for thread in keep_threads for entry in db.execute("SELECT task_id FROM thread_bindings WHERE thread_id=?",(thread,))}
+        keep.update(protected_task_ids)
+        if protect_active:
+            keep.update(protected_active_tasks(db))
         selected=[row["id"] for row in rows if row["id"] not in keep]
+        pending=[row[0] for row in db.execute("SELECT d.task_id FROM pending_deletions d JOIN tasks t ON t.id=d.task_id WHERE t.project_root=?",(str(project),))]
+        if set(pending) & keep:
+            raise StoreError("retention_active_conflict")
+        result = dict(deleted_tasks=0 if dry_run else len(set(pending) | set(selected)),retention_days=days,
+                      skipped_protected=sum(row["id"] in keep for row in rows),cutoff=cutoff_text)
+        if dry_run:
+            result["would_delete_tasks"] = len(set(pending) | set(selected))
+            db.rollback()
+            return result
         for task in selected: db.execute("INSERT OR IGNORE INTO pending_deletions VALUES (?)",(task,))
         db.commit()
-        pending=[row[0] for row in db.execute("SELECT d.task_id FROM pending_deletions d JOIN tasks t ON t.id=d.task_id WHERE t.project_root=?",(str(project),))]
-        for task in pending:
+        for task in set(pending) | set(selected):
             db.execute("BEGIN IMMEDIATE"); finish_deletions(store,db,task); db.commit()
-    return dict(deleted_tasks=len(selected),retention_days=days,
-                skipped_protected=sum(row["id"] in keep for row in rows))
+    return result

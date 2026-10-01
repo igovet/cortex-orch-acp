@@ -949,7 +949,9 @@ def test_available_commands_update_sent_after_session_new(tmp_path, monkeypatch)
     # nothing to express it -- a model had to infer from prose whether the
     # user had really asked, which is the inference the rule exists to
     # prevent. Named as the user types it, not `cortex-`-prefixed.
-    assert names == {acp_commands.CORTEX_STATUS, acp_commands.CORTEX_MODEL,
+    # Retention cleanup is also a runtime-owned slash command.
+    assert names == {acp_commands.CORTEX_CLEAR,
+                      acp_commands.CORTEX_STATUS, acp_commands.CORTEX_MODEL,
                       acp_commands.CORTEX_EFFORT, acp_commands.CORTEX_SETUP,
                       acp_commands.CORTEX_NEW_TASK, acp_commands.CORTEX_STOP,
                       acp_commands.CORTEX_FINISH,

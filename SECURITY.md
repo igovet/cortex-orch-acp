@@ -272,6 +272,31 @@ commands and external servers are terminated on observed revocation. This does n
 claim protection against a separate hostile process running as the same OS user and
 racing filesystem changes.
 
+### Destructive local retention maintenance
+
+`/cortex-clear` is an explicit owner ACP chat command, not a model tool.
+The runtime previews counts/cutoff unless the owner supplies trailing `confirm`;
+confirmation authorizes deletion of matching tasks/artifacts only in the current
+project's `.cortex` store and unambiguously task-linked drafts. The command
+starts no coordinator/model turn. It never returns task contents or reports.
+`/clear` is not registered because hosts reserve that name.
+
+Chat retention protects tasks bound to this agent's sessions, every non-terminal
+runtime task and unreleased/ambiguous capacity or unterminated process records.
+Selection and cleanup hold a nonblocking exclusive store access lock: competing
+store access and protected pending deletion conflicts fail closed. In-flight
+chat prompts cannot interpret this command as an answer or model work. Journaled
+`pending_deletions` still permit recovery of committed deletions after partial
+filesystem failure; an error does not claim successful cleanup or rollback of
+already removed files. Dry runs do not replay intents. Preview counts include
+already committed pending deletions; relative days recalculate on confirmation.
+
+The owner-run `src/cortex_clear.py --project-root PATH --days N` alternative
+retains its direct manual semantics and repeatable `--keep-thread` protection;
+it is not automatically active-task-aware. Run it only with the runtime idle.
+Models/coordinators/workers must never run either deletion route on behalf of
+the owner. See [retention maintenance](docs/acp/packaging-and-onboarding.md#retention-maintenance).
+
 ### Access mode (Guarded and Auto)
 
 Each task has an access mode (`configuration.access_mode`). **Guarded** is the

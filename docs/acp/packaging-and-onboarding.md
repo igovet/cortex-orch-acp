@@ -207,23 +207,48 @@ and dynamic (no-subprocess) guards.
 
 ## Retention maintenance
 
-`src/cortex_clear.py` is a user-run maintenance tool, not part of the ACP
-agent runtime and not something the coordinator or a worker ever executes
-for you. When the coordinator's `cortex-control` skill is loaded for a
-taskless `clear N days` request, it only tells you the exact command to run
-yourself:
+Use `/cortex-clear` in an idle ACP session to preview old task deletion from
+this project. It is advertised in the ACP command picker and handled by the
+runtime without a coordinator turn or engine/model call; `/clear` is not an
+alias because hosts reserve it.
 
 ```
-python3 src/cortex_clear.py --project-root <path> --days N [--keep-thread <id>]
+/cortex-clear before 2026-10-01
+/cortex-clear before 2026-10-01 confirm
 ```
 
-`--project-root` is the canonical project directory, `--days` a nonnegative
-retention window (tasks with no activity inside it are deleted, along with
-their project task directories and unambiguously-associated draft files),
-and the repeatable `--keep-thread <id>` protects any task bound to that
-exact thread ID. It prints only a JSON summary
-(`deleted_tasks`/`retention_days`/`skipped_protected`) and never a model
-call.
+The date means strictly earlier than 00:00 UTC; a bare `YYYY-MM-DD` also works.
+For retention relative to now, use `7`, `7d` or `days 7` (integer 0..36500).
+Invalid or future dates and malformed arguments return usage with no deletion.
+Without trailing `confirm`, output gives `would_delete_tasks`,
+`skipped_protected`, the UTC cutoff and the exact confirm command. With
+`confirm`, output gives `deleted_tasks`, `skipped_protected` and the cutoff.
+Relative days are recalculated when confirming; use an absolute date for a
+fixed boundary. Neither output exposes task text or private reports.
+
+Chat cleanup protects all tasks bound to this agent's sessions (including the
+current terminal task), every non-terminal runtime task, unreleased capacity
+reservations and unterminated process records. Unknown task states and ambiguous
+activity remain protected. A nonblocking exclusive store lock fences concurrent
+access through selection, committed deletion intents and filesystem cleanup;
+busy access or a protected pending intent is refused. An in-flight prompt cannot
+consume this command as a question answer or queue it as model work.
+
+The existing CLI is still owner-run, never coordinator/worker-run:
+
+```
+python3 -B src/cortex_clear.py --project-root <path> --days N [--keep-thread <id>]
+```
+
+Its canonical `--project-root`, `--days` (0..36500), and repeatable
+`--keep-thread` flags retain their manual retention semantics. Unlike chat,
+it deletes directly and only protects explicitly named threads, so run it only
+when the project runtime is idle. Activity selection remains the existing
+maximum of task creation and published report/pipeline edition update times.
+Cleanup removes project task directories and unambiguously associated drafts;
+it retains transactional `pending_deletions` intents for crash recovery. Pending
+committed deletions are included in preview/deletion counts without being
+replayed during a dry run. CLI output is a counts-only JSON summary with cutoff.
 
 ## Uninstall
 

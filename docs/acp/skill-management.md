@@ -2,6 +2,14 @@
 
 Cortex advertises `/skill-management <request>` as an ACP session command. It accepts one text block beginning with the exact command name. A request such as `/skill-management create a release-notes skill`, `/skill-management revise .agents/skills/release-notes`, or `/skill-management import https://example.com/skills/review` enters the skill-management workflow. Ordinary prose, a command with a longer prefix, or a multi-block prompt does not activate it. Clients that display ACP commands can expose it in their command picker; typing the exact command is also recognized by Cortex.
 
+## Runtime retention command
+
+`/cortex-clear <N|Nd|days N|before YYYY-MM-DD|YYYY-MM-DD> [confirm]` is also
+advertised. It previews deletion by default; trailing `confirm` authorizes
+runtime-owned cleanup of old unprotected tasks in this project, not a model
+workflow. `/clear` is not an alias. See [retention maintenance](packaging-and-onboarding.md#retention-maintenance)
+for cutoff semantics, protection, counts and the manual CLI alternative.
+
 ## What the workflow does
 
 The coordinator reads the coordinator-only `skill-management` guidance, then proposes bounded work through Cortex's current planning path. The runtime owns assignments, scopes, permissions, user confirmation, independent review, verification, and completion. The skill describes work; it does not grant tools or permissions.

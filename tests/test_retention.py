@@ -287,3 +287,147 @@ def test_clear_tasks_end_to_end_removes_every_group_row_with_integrity_ok(tmp_pa
         assert not db.execute("SELECT 1 FROM attempt_revisions WHERE attempt_id=?", ('at_1',)).fetchone()
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_clear_absolute_dry_run_and_protected_ids(tmp_path):
+    store = Store(tmp_path / 'private')
+    cutoff = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    now = cutoff + timedelta(hours=1)
+    def create(label, at):
+        with patch.object(Store, '_now', return_value=at.isoformat(timespec='microseconds')):
+            return call_store(store, 'create_task', dict(project_root=str(tmp_path), request=label, request_key=label))['task_id']
+    old = create('private-old-content', cutoff - timedelta(days=1))
+    kept = create('private-kept-content', cutoff - timedelta(days=1))
+    boundary = create('boundary', cutoff)
+    artifacts = {p: p.read_bytes() for task in (old, kept, boundary)
+                 for p in (tmp_path / '.cortex' / task).rglob('*') if p.is_file()}
+    result = clear_tasks(store, str(tmp_path), cutoff=cutoff, now=now,
+                         dry_run=True, protected_task_ids={kept}, protect_active=True)
+    assert result['deleted_tasks'] == 0
+    assert result['would_delete_tasks'] == 1
+    assert result['skipped_protected'] == 1
+    assert all(p.read_bytes() == content for p, content in artifacts.items())
+    with store.connection() as db:
+        assert db.execute('SELECT COUNT(*) FROM pending_deletions').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 3
+    result = clear_tasks(store, str(tmp_path), cutoff=cutoff, now=now,
+                         protected_task_ids={kept}, protect_active=True)
+    assert result['deleted_tasks'] == 1 and result['skipped_protected'] == 1
+    with store.connection() as db:
+        assert {r[0] for r in db.execute('SELECT id FROM tasks')} == {kept, boundary}
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+@pytest.mark.parametrize('state', ['CREATED', 'PLANNING', 'PLAN_READY', 'ANSWER_READY', 'EXECUTING',
+                                  'REVIEWING', 'VERIFYING', 'RECONCILING', 'WAITING_USER',
+                                  'RECOVERING', 'BLOCKED', 'UNKNOWN'])
+def test_chat_retention_protects_every_nonterminal_state(tmp_path, state):
+    from cortex_runtime.orchestration.state import SCHEMA
+    store = Store(tmp_path / 'private')
+    task = call_store(store, 'create_task', dict(project_root=str(tmp_path), request='private', request_key='k'))['task_id']
+    with store.connection() as db:
+        db.executescript(SCHEMA)
+        db.execute('INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES(?,?,?,?,?)',
+                   (task, state, 'private', store._now(), store._now()))
+    result = clear_tasks(store, str(tmp_path), 0, protect_active=True)
+    assert result['deleted_tasks'] == 0 and result['skipped_protected'] == 1
+    assert (tmp_path / '.cortex' / task).exists()
+
+
+@pytest.mark.parametrize('kind', ['worker', 'coordinator'])
+@pytest.mark.parametrize('state', ['reserved', 'ambiguous'])
+def test_chat_retention_protects_terminal_task_with_live_capacity(tmp_path, kind, state):
+    from cortex_runtime.orchestration.state import SCHEMA
+    store = Store(tmp_path / 'private')
+    task = call_store(store, 'create_task', dict(project_root=str(tmp_path), request='private', request_key='k'))['task_id']
+    with store.connection() as db:
+        db.executescript(SCHEMA)
+        db.execute('INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES(?,?,?,?,?)',
+                   (task, 'CANCELLED', 'private', store._now(), store._now()))
+        db.execute('INSERT INTO capacity_reservations(reservation_id,connection_id,task_id,attempt_id,kind,state,reserved_at,updated_at) VALUES(?,?,?,?,?,?,?,?)',
+                   ('r1', 'cn1', task, 'a1', kind, state, store._now(), store._now()))
+    assert clear_tasks(store, str(tmp_path), 0, protect_active=True)['skipped_protected'] == 1
+    with store.connection() as db:
+        db.execute("UPDATE capacity_reservations SET state='released'")
+    assert clear_tasks(store, str(tmp_path), 0, protect_active=True)['deleted_tasks'] == 1
+
+
+def test_chat_retention_protects_unterminated_process(tmp_path):
+    store = Store(tmp_path / 'private')
+    task = call_store(store, 'create_task', dict(project_root=str(tmp_path), request='private', request_key='k'))['task_id']
+    with store.connection() as db:
+        db.execute('INSERT INTO attempt_process_registry(attempt_id,task_id,role,pid,pgid,start_ticks,boot_id,launch_command_digest,recorded_at) VALUES(?,?,?,?,?,?,?,?,?)',
+                   ('a1', task, 'orchestrator', 1, 1, '0', 'fake', 'fake', store._now()))
+    assert clear_tasks(store, str(tmp_path), 0, protect_active=True)['skipped_protected'] == 1
+    with store.connection() as db:
+        db.execute('UPDATE attempt_process_registry SET terminated_at=?', (store._now(),))
+    assert clear_tasks(store, str(tmp_path), 0, protect_active=True)['deleted_tasks'] == 1
+
+
+def test_retention_refuses_concurrent_store_access_and_protected_pending_intent(tmp_path):
+    store = Store(tmp_path / 'private')
+    task = call_store(store, 'create_task', dict(project_root=str(tmp_path), request='private', request_key='k'))['task_id']
+    with store.connection():
+        with pytest.raises(StoreError, match='storage_busy'):
+            clear_tasks(store, str(tmp_path), 0)
+    with store.connection() as db:
+        db.execute('INSERT INTO pending_deletions VALUES (?)', (task,))
+    for dry_run in (True, False):
+        with pytest.raises(StoreError, match='retention_active_conflict'):
+            clear_tasks(store, str(tmp_path), 0, dry_run=dry_run, protected_task_ids={task})
+    assert (tmp_path / '.cortex' / task).exists()
+
+
+def test_dry_run_does_not_replay_committed_intents(tmp_path):
+    store = Store(tmp_path / 'private')
+    task = call_store(store, 'create_task', dict(project_root=str(tmp_path), request='private', request_key='k'))['task_id']
+    with store.connection() as db:
+        db.execute('INSERT INTO pending_deletions VALUES (?)', (task,))
+    result = clear_tasks(store, str(tmp_path), 7, dry_run=True)
+    assert result['would_delete_tasks'] == 1 and result['deleted_tasks'] == 0
+    assert (tmp_path / '.cortex' / task).exists()
+    assert clear_tasks(store, str(tmp_path), 7)['deleted_tasks'] == 1
+
+
+@pytest.mark.parametrize('kwargs', [dict(days=-1), dict(days=36501), dict(days=True),
+                                    dict(cutoff=datetime(2999, 1, 1, tzinfo=timezone.utc)),
+                                    dict(cutoff=datetime(2026, 1, 1)),
+                                    dict(days=1, cutoff=datetime(2026, 1, 1, tzinfo=timezone.utc))])
+def test_invalid_retention_does_not_delete(tmp_path, kwargs):
+    store = Store(tmp_path / 'private')
+    task = call_store(store, 'create_task', dict(project_root=str(tmp_path), request='private', request_key='k'))['task_id']
+    with pytest.raises(StoreError, match='invalid_retention'):
+        clear_tasks(store, str(tmp_path), **kwargs)
+    assert (tmp_path / '.cortex' / task).exists()
+
+
+def test_retention_holds_exclusive_lock_through_filesystem_teardown(tmp_path, monkeypatch):
+    from cortex_runtime import cleanup
+    store = Store(tmp_path / 'private')
+    task = call_store(store, 'create_task', dict(project_root=str(tmp_path), request='private', request_key='k'))['task_id']
+    original = cleanup.finish_deletions
+    seen = []
+    def fenced_finish(store, db, selected):
+        with pytest.raises(StoreError, match='storage_busy'):
+            with store.connection():
+                pytest.fail('resuming store access must be fenced during teardown')
+        seen.append(selected)
+        original(store, db, selected)
+    monkeypatch.setattr(cleanup, 'finish_deletions', fenced_finish)
+    assert clear_tasks(store, str(tmp_path), 0)['deleted_tasks'] == 1
+    assert seen == [task]
+
+
+def test_retention_failure_keeps_recoverable_intent(tmp_path, monkeypatch):
+    from cortex_runtime import cleanup
+    store = Store(tmp_path / 'private')
+    task = call_store(store, 'create_task', dict(project_root=str(tmp_path), request='private', request_key='k'))['task_id']
+    def fail(*args):
+        raise OSError('simulated teardown failure')
+    with monkeypatch.context() as m:
+        m.setattr(cleanup, 'finish_deletions', fail)
+        with pytest.raises(OSError, match='simulated'):
+            clear_tasks(store, str(tmp_path), 0, protect_active=True)
+    with store.connection() as db:
+        assert {r[0] for r in db.execute('SELECT task_id FROM pending_deletions')} == {task}
+    assert clear_tasks(store, str(tmp_path), 0, protect_active=True)['deleted_tasks'] == 1

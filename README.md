@@ -30,6 +30,17 @@ delivered only after the commit can also be omitted; see the
 [question display boundary](docs/acp/orchestration.md#plan-submission-and-coordinator-polling).
 
 
+## Clear old project tasks from chat
+
+Preview `/cortex-clear before 2026-10-01`, then use the displayed command ending
+in `confirm` to delete old unprotected tasks. Dates mean strictly before
+00:00 UTC; `7`, `7d` or `days 7` instead select retention days (0..36500).
+The runtime handles this without a model call, protects current/session-bound
+and active tasks, and prints only counts/cutoff. Invalid input and busy-store
+races are refused. `/clear` is host-reserved, not a Cortex alias.
+See [retention maintenance](docs/acp/packaging-and-onboarding.md#retention-maintenance)
+for safety details and the owner-run CLI alternative.
+
 ## What Cortex is
 
 ACP route/effort selection retains the owner and project ceilings and any

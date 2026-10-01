@@ -549,3 +549,136 @@ def test_pre_task_commands_never_create_a_task(tmp_path, monkeypatch):
                              recognized=("cortex-model", route_id), cancel_event=cancel_event)
     assert session["task_id"] is None  # a pre-task command never bootstraps a task
     assert session["pending_selection"]["route_id"] == route_id
+
+
+@pytest.mark.parametrize('text,days', [('0', 0), ('36500d', 36500), ('days 7', 7), ('0007', 7)])
+@pytest.mark.parametrize('suffix', ['', ' confirm'])
+def test_clear_days_grammar(text, days, suffix):
+    parsed = acp_commands.parse_clear_argument(text + suffix)
+    assert parsed['days'] == days and parsed['cutoff'] is None
+    assert parsed['confirm'] == bool(suffix)
+    assert parsed['confirm_command'] == f'/cortex-clear days {days} confirm'
+
+
+@pytest.mark.parametrize('text', ['before 2026-10-01', '2026-10-01', '2026-10-01 confirm'])
+def test_clear_absolute_grammar(text):
+    from datetime import datetime, timezone
+    cutoff = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    parsed = acp_commands.parse_clear_argument(text, now=cutoff)
+    assert parsed['cutoff'] == cutoff and parsed['days'] is None
+    assert parsed['confirm_command'] == '/cortex-clear before 2026-10-01 confirm'
+
+
+@pytest.mark.parametrize('text', ['', 'confirm', '-1', '+1', '1.5', '36501', '9999999999999999',
+                                  'days 7d', 'before 2999-01-01', '2026-02-30', '2026-1-01',
+                                  'days', '7 extra', '7 confirm extra', 'confirm 7', '7 confirm confirm'])
+def test_clear_invalid_grammar(text):
+    assert acp_commands.parse_clear_argument(text) is None
+
+
+def test_clear_command_recognition_and_advertisement():
+    assert acp_commands.recognize([dict(type='text', text='/cortex-clear before 2026-10-01')]) == ('cortex-clear', 'before 2026-10-01')
+    for text in ['/clear 7', '/cortex-clearer 7']:
+        assert acp_commands.recognize([dict(type='text', text=text)]) is None
+    assert acp_commands.recognize([dict(type='text', text='/cortex-clear 7'), dict(type='text', text='confirm')]) is None
+    assert 'cortex-clear' in {item['name'] for item in acp_commands.AVAILABLE_COMMANDS}
+
+
+def test_clear_chat_preview_confirm_current_task_and_no_model(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+    from storage_fixture import call_store
+    from cortex_runtime.store import Store
+    from cortex_runtime.orchestration.state import SCHEMA
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / 'project'; project.mkdir()
+    agent, transport = _new_agent(environ)
+    sid = agent._session_new(dict(cwd=str(project), mcpServers=[]))['sessionId']
+    session = agent.sessions[sid]
+    store = agent._store_for(str(project))
+    ids = []
+    with patch.object(Store, '_now', return_value=datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat(timespec='microseconds')):
+        for label in ['old-private-secret', 'current-private-secret', 'active-private-secret']:
+            ids.append(call_store(store, 'create_task', dict(project_root=str(project), request=label, request_key=label))['task_id'])
+    old, current, active = ids
+    session['task_id'] = current
+    acp_sessions.bind_task(store, sid, current)
+    with store.connection() as db:
+        db.executescript(SCHEMA)
+        for task, state in [(current, 'COMPLETED'), (old, 'FAILED'), (active, 'EXECUTING')]:
+            db.execute('INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES(?,?,?,?,?)',
+                       (task, state, 'private-secret', store._now(), store._now()))
+    for rid, argument in [(711, 'before 2026-10-01'), (712, 'before 2026-10-01 confirm')]:
+        text = '/cortex-clear ' + argument
+        # Full ACP prompt path, including recognition, command capture and dispatch.
+        agent._session_prompt(rid, dict(sessionId=sid, prompt=[dict(type='text', text=text)]))
+        for worker in tuple(agent._workers):
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+        with store.connection() as db:
+            remaining = {r[0] for r in db.execute('SELECT id FROM tasks')}
+        assert remaining == (set(ids) if rid == 711 else {current, active})
+    output = json.dumps(transport.notifications)
+    assert 'would_delete_tasks=1' in output and 'deleted_tasks=1' in output
+    assert 'skipped_protected=2' in output
+    assert '/cortex-clear before 2026-10-01 confirm' in output
+    assert 'private-secret' not in output
+    assert len(transport.responses) == 2
+
+
+def test_clear_invalid_prompt_is_usage_only_and_taskless(tmp_path, monkeypatch):
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / 'project'; project.mkdir()
+    agent, transport = _new_agent(environ)
+    sid = agent._session_new(dict(cwd=str(project), mcpServers=[]))['sessionId']
+    agent._run_prompt(713, sid, agent.sessions[sid], '/cortex-clear before 2999-01-01 confirm',
+                      threading.Event(), recognized=('cortex-clear', 'before 2999-01-01 confirm'))
+    assert agent.sessions[sid]['task_id'] is None
+    assert 'Usage: /cortex-clear' in json.dumps(transport.notifications)
+    with agent._store_for(str(project)).connection() as db:
+        assert db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0] == 0
+
+
+def test_clear_never_becomes_an_answer_or_queued_model_prompt(tmp_path, monkeypatch):
+    from cortex_runtime.acp.protocol import RpcError
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / 'project'; project.mkdir()
+    agent, _ = _new_agent(environ)
+    sid = agent._session_new(dict(cwd=str(project), mcpServers=[]))['sessionId']
+    session = agent.sessions[sid]
+    session['active'] = threading.Event()
+    session['background'] = True
+    session['question_waiter'] = ('q', lambda _: pytest.fail('clear must not answer a question'))
+    with pytest.raises(RpcError, match='idle session'):
+        agent._session_prompt(714, dict(sessionId=sid, prompt=[dict(type='text', text='/cortex-clear 0 confirm')]))
+    assert not session.get('pending_prompts')
+
+
+@pytest.mark.parametrize('argument', ['before 2999-01-01 confirm', '36501 confirm', '2026-02-30 confirm'])
+def test_invalid_clear_preserves_existing_tasks(tmp_path, monkeypatch, argument):
+    from storage_fixture import call_store
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / 'project'; project.mkdir()
+    agent, transport = _new_agent(environ)
+    sid = agent._session_new(dict(cwd=str(project), mcpServers=[]))['sessionId']
+    store = agent._store_for(str(project))
+    task = call_store(store, 'create_task', dict(project_root=str(project), request='private', request_key='k'))['task_id']
+    agent._run_command_body(715, sid, agent.sessions[sid], ('cortex-clear', argument), threading.Event())
+    assert 'Usage: /cortex-clear' in json.dumps(transport.notifications)
+    assert (project / '.cortex' / task).exists()
+
+
+def test_clear_reports_failure_without_success_or_private_content(tmp_path, monkeypatch):
+    from cortex_runtime import cleanup
+    from cortex_runtime.contracts import StoreError
+    environ = _isolate(tmp_path, monkeypatch)
+    project = tmp_path / 'project'; project.mkdir()
+    agent, transport = _new_agent(environ)
+    sid = agent._session_new(dict(cwd=str(project), mcpServers=[]))['sessionId']
+    def fail(*args, **kwargs):
+        raise StoreError('retention_active_conflict', 'private-secret')
+    monkeypatch.setattr(cleanup, 'clear_tasks', fail)
+    agent._run_command_body(716, sid, agent.sessions[sid], ('cortex-clear', '0 confirm'), threading.Event())
+    output = json.dumps(transport.notifications)
+    assert 'refused or incomplete' in output
+    assert 'deleted_tasks=' not in output and 'private-secret' not in output

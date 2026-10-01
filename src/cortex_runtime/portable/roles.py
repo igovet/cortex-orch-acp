@@ -396,7 +396,7 @@ _SKILL_TRIGGERS = {
     "documentation-sync": "before assessing documentation impact for a plan or updating docs affected by a behavior or contract change",
     "knowledge-harvest": "before collecting what a codebase already knows into project knowledge",
     "skill-management": "the user invoked /skill-management or approved a skill proposal, or retained reports repeat a procedure",
-    "cortex-control": "the user asked for the `clear N days` retention command",
+    "cortex-control": "the user asks about /cortex-clear chat retention or the manual retention CLI",
     "report-publication": "you draft and publish your report and result",
     "code-and-evidence": "you locate code (code index first) or need saved report detail",
     "interactive-resources": "before starting or using a browser, device, port or server session",

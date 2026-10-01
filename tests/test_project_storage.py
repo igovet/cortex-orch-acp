@@ -7,6 +7,7 @@ transfer, the ``project_storage_mismatch`` guard, and (moved in from the
 deleted ``test_no_alternate_storage_root.py``) the single-store-root
 invariant and the rejected-database byte/journal-mode guard.
 """
+from datetime import datetime, timedelta
 from pathlib import Path
 import subprocess
 import sqlite3
@@ -271,7 +272,12 @@ def test_keep_thread_flag_protects_a_bound_task_but_codex_env_no_longer_does(tmp
     with contextlib.redirect_stdout(out):
         _run_cortex_clear(['--project-root', str(project), '--days', '0'])
     unprotected = _json.loads(out.getvalue())
-    assert unprotected == dict(deleted_tasks=1, retention_days=0, skipped_protected=0)
+    assert {key: unprotected[key] for key in
+            ("deleted_tasks", "retention_days", "skipped_protected")} == dict(
+                deleted_tasks=1, retention_days=0, skipped_protected=0)
+    assert set(unprotected) == {"deleted_tasks", "retention_days", "skipped_protected", "cutoff"}
+    cutoff = datetime.fromisoformat(unprotected["cutoff"].replace("Z", "+00:00"))
+    assert cutoff.tzinfo is not None and cutoff.utcoffset() == timedelta(0)
     with store.connection() as db:
         assert db.execute('SELECT id FROM tasks').fetchall() == []
 
@@ -288,7 +294,12 @@ def test_keep_thread_flag_protects_a_bound_task_but_codex_env_no_longer_does(tmp
         _run_cortex_clear(['--project-root', str(project), '--days', '0',
                             '--keep-thread', thread_id2])
     protected = _json.loads(out2.getvalue())
-    assert protected == dict(deleted_tasks=0, retention_days=0, skipped_protected=1)
+    assert {key: protected[key] for key in
+            ("deleted_tasks", "retention_days", "skipped_protected")} == dict(
+                deleted_tasks=0, retention_days=0, skipped_protected=1)
+    assert set(protected) == {"deleted_tasks", "retention_days", "skipped_protected", "cutoff"}
+    cutoff = datetime.fromisoformat(protected["cutoff"].replace("Z", "+00:00"))
+    assert cutoff.tzinfo is not None and cutoff.utcoffset() == timedelta(0)
     with store2.connection() as db:
         assert [row[0] for row in db.execute('SELECT id FROM tasks')] == [task_id2]
 

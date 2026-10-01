@@ -1412,6 +1412,8 @@ class Agent:
             if session.get("cancelling"):
                 raise RpcError(-32602, "This session is being cancelled.")
             if session["active"] is not None:
+                if recognized is not None and recognized[0] == acp_commands.CORTEX_CLEAR:
+                    raise RpcError(-32602, "Cortex cleanup requires an idle session; no deletion started.")
                 # The running turn is waiting on a question card: a message
                 # typed into this session is that question's answer, and the
                 # running turn carries on with it.
@@ -1967,6 +1969,36 @@ class Agent:
             self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result(reason)))
             observe(self.environ, "session/prompt", "command:" + command_id)
 
+        if command_id == acp_commands.CORTEX_CLEAR:
+            parsed = acp_commands.parse_clear_argument(argument)
+            if parsed is None:
+                _reply(acp_commands.CLEAR_USAGE)
+                return
+            if cancel_event.is_set():
+                _reply("Cortex cleanup cancelled; no deletion started.")
+                return
+            from ..cleanup import clear_tasks
+            # Protect every session bound in this agent, including the invoking
+            # session even when its task is terminal. Durable active protection
+            # covers workers/coordinators and other runtime instances.
+            protected = {item.get("task_id") for item in tuple(self.sessions.values())
+                         if item.get("project") == session["project"] and item.get("task_id")}
+            if session.get("task_id"):
+                protected.add(session["task_id"])
+            try:
+                result = clear_tasks(
+                    store, session["project"], parsed["days"], keep_threads=(session_id,),
+                    cutoff=parsed["cutoff"], dry_run=not parsed["confirm"],
+                    protected_task_ids=protected, protect_active=True,
+                )
+            except (StoreError, OSError, ValueError, sqlite3.Error):
+                _reply("Cortex cleanup refused or incomplete: store busy, active-task conflict, or storage failure. No success is claimed; retry only after activity is idle and storage is healthy.")
+                return
+            if parsed["confirm"]:
+                _reply(f"cutoff={result['cutoff']}; deleted_tasks={result['deleted_tasks']}; skipped_protected={result['skipped_protected']}")
+            else:
+                _reply(f"Dry run: cutoff={result['cutoff']}; would_delete_tasks={result['would_delete_tasks']}; skipped_protected={result['skipped_protected']}\nConfirm: {parsed['confirm_command']}")
+            return
         if command_id == acp_commands.CORTEX_STATUS:
             entries, connections = self._selectable_entries_and_connections(session["project"])
             options = self._config_options_for_session(session, store)

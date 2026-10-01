@@ -591,7 +591,8 @@ class Store:
         if any(row[0]!=self.project_root for row in rows):raise StoreError('project_storage_mismatch')
 
     @contextmanager
-    def connection(self):
+    def connection(self, *, exclusive=False):
+        """Use exclusive access only for maintenance that fences other connections."""
         for suffix in ("","-wal","-shm"):
             try: regular(Path(str(self.path)+suffix))
             except FileNotFoundError:
@@ -599,7 +600,7 @@ class Store:
         lock_path=self.directory/".access.lock"
         lock_fd=os.open(lock_path,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
         try:
-            regular(lock_path); fcntl.flock(lock_fd,fcntl.LOCK_SH|fcntl.LOCK_NB)
+            regular(lock_path); fcntl.flock(lock_fd,(fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)|fcntl.LOCK_NB)
         except BaseException:
             os.close(lock_fd); raise StoreError("storage_busy") from None
         db=None

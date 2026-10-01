@@ -100,12 +100,17 @@ anything.
   **Auto mode** — see
   [permissions](permissions-and-containment.md#access-mode-guarded-and-auto).
   Its rendering in Zed has not been observed live yet.
-- `/cortex-status`, `/cortex-model`, `/cortex-effort`, `/cortex-setup` are
+- `/cortex-status`, `/cortex-model`, `/cortex-effort`, `/cortex-setup`,
+  `/cortex-clear` are
   available as slash commands (Zed's `available_commands_update`
   fallback path) regardless of whether Zed's own config-option UI renders.
   `/cortex-status` reports direct native engine execution without making a
   model call. No host-policy repair
   is required for normal operation.
+- `/cortex-clear` previews project task retention without a model call; trailing
+  `confirm` deletes only unprotected tasks. Use this name, not host-reserved
+  `/clear`; see [retention](packaging-and-onboarding.md#retention-maintenance).
+  This implementation has no new live Zed rendering evidence.
 - Sending any ordinary prompt before a connection is configured returns
   the agent's real current state: `orchestration_unavailable`
   (`-32001`, `retryable: false`) — Cortex reports this truthfully rather

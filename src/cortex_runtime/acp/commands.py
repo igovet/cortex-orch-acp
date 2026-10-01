@@ -4,6 +4,8 @@ support (see ``config_options.py``).
 
 Configuration selectors share their existing implementation; explicit workflow commands use the same prompt path:
 
+- ``/cortex-clear <retention or date> [confirm]`` -- runtime-owned task
+  retention; preview by default, no model turn.
 - ``/cortex-status`` -- report the current/pending model + thought_level,
   connection setup state, and the engine execution mode; no input,
   never mutates anything.
@@ -32,9 +34,12 @@ a command and falls through to normal prompt handling.
 from __future__ import annotations
 
 from typing import Mapping, Sequence
+from datetime import datetime, timezone
+import re
 
 from ..catalog.model import CatalogEntry
 
+CORTEX_CLEAR = "cortex-clear"
 CORTEX_STATUS = "cortex-status"
 CORTEX_MODEL = "cortex-model"
 CORTEX_EFFORT = "cortex-effort"
@@ -60,6 +65,7 @@ SKILL_MANAGEMENT = "skill-management"
 
 # Trigger text as typed by a user, in recognition priority order (longest first to avoid prefix overlaps).
 _TRIGGERS: tuple[tuple[str, str], ...] = (
+    ("/cortex-clear", CORTEX_CLEAR),
     ("/cortex-status", CORTEX_STATUS),
     ("/cortex-new-task", CORTEX_NEW_TASK),
     ("/cortex-language", CORTEX_LANGUAGE),
@@ -75,6 +81,7 @@ _TRIGGERS: tuple[tuple[str, str], ...] = (
 )
 
 AVAILABLE_COMMANDS: tuple[dict, ...] = (
+    dict(name=CORTEX_CLEAR, description="Preview old project task deletion; trailing confirm deletes unprotected tasks. No model call.", input=dict(hint="<N|Nd|days N|before YYYY-MM-DD|YYYY-MM-DD> [confirm]")),
     dict(name=CORTEX_STATUS, description="Show model/thought-level, connection state, and engine execution mode. Never changes anything.", input=None),
     dict(name=CORTEX_MODEL, description="Select the model by its route label or route id.", input=dict(hint="<route label or route id>")),
     dict(name=CORTEX_EFFORT, description="Select the thought_level (reasoning effort) value for the current model.", input=dict(hint="<value>")),
@@ -88,6 +95,34 @@ AVAILABLE_COMMANDS: tuple[dict, ...] = (
     dict(name=HARVEST_REFRESH, description="Explicitly refresh project documentation from current source. Text is an optional scope.", input=dict(hint="<optional scope>")),
     dict(name=SKILL_MANAGEMENT, description="Create, revise, or import a project skill. Use only when the user explicitly invokes this command.", input=dict(hint="<request>")),
 )
+
+
+CLEAR_USAGE = "Usage: /cortex-clear <N|Nd|days N|before YYYY-MM-DD|YYYY-MM-DD> [confirm] (N: 0..36500; date: non-future, 00:00 UTC). Omit confirm to preview."
+
+
+def parse_clear_argument(argument: str, *, now=None) -> dict | None:
+    """Strict owner command grammar; no user text is echoed on failure."""
+    words = argument.split()
+    confirm = bool(words and words[-1] == "confirm")
+    if confirm:
+        words.pop()
+    value = " ".join(words)
+    match = re.fullmatch(r"(?:days )?([0-9]{1,5})(d)?", value)
+    if match and not (value.startswith("days ") and match[2]):
+        days = int(match[1])
+        if days <= 36500:
+            return dict(days=days, cutoff=None, confirm=confirm,
+                        confirm_command=f"/cortex-clear days {days} confirm")
+    match = re.fullmatch(r"(?:before )?([0-9]{4}-[0-9]{2}-[0-9]{2})", value)
+    if match:
+        try:
+            cutoff = datetime.strptime(match[1], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        if cutoff <= (now or datetime.now(timezone.utc)):
+            return dict(days=None, cutoff=cutoff, confirm=confirm,
+                        confirm_command=f"/cortex-clear before {match[1]} confirm")
+    return None
 
 
 def resolve_language_argument(argument: str) -> str | None:
