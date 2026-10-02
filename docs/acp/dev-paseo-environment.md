@@ -120,6 +120,33 @@ python3 -B scripts/cortex_paseo_dev.py -- \
 python3 -B scripts/cortex_paseo_dev.py -- daemon config set pluginsEnabled true
 ~~~
 
+## Cortex settings preflight
+
+The wrapper isolates Cortex configuration as well as Paseo. Cloning the Paseo
+home does not import the owner's normal Cortex XDG settings. Before starting a
+fresh or older dev home, explicitly install missing model settings in **that dev
+profile only**:
+
+~~~bash
+XDG_CONFIG_HOME="$HOME/.paseo-dev/cortex-xdg/config" \
+XDG_STATE_HOME="$HOME/.paseo-dev/cortex-xdg/state" \
+python3 -B scripts/cortex_acp_setup.py apply-routing-defaults
+~~~
+
+This validated install-only command creates absent routing/default files and
+preserves existing settings. It does not repair an existing malformed or legacy
+policy; diagnose that policy explicitly instead. Check the dev profile's saved
+coordinator model against its enabled models and current connection catalogue
+before a paid prompt; do not substitute a different route.
+
+A dev profile can have valid connections and a saved default but no
+`routing.json`. Runtime policy loading then fails closed with
+`model_policy_migration_required`, the selector offers no routes, and the first
+prompt cannot acquire a configuration revision. Paseo may render only the ACP
+envelope `[System Error] orchestration_unavailable`; plugin registration and
+captured source inputs do not prove coordinator startup. Do not work around this
+by using production configuration/state directories.
+
 ## Dev instance setup and verification
 
 Before testing, install plugin dev dependencies and pass type-check:

@@ -56,7 +56,14 @@ A well-shaped `tool_call_ref` alone never verifies a check.
 
 Cortex's read-only `read_skill` route can read shared skill/reference IDs and
 exact `SKILL.md` paths listed in that engine session's sent prompt, bound to the
-session and worker attempt. It accepts no glob or arbitrary path, and does not
+session and attempt for both coordinator and worker channels. Binding occurs
+after the engine session opens, and reads consult the current persisted channel
+binding rather than a cached pre-launch context. Compaction advances only that
+same session's generation; older persisted generations, revoked/expired channels
+and terminated session snapshots cannot authorize reads. A channel cannot move
+to another engine session: fallback and recovery require a fresh channel.
+Only observed sent metadata (or OpenCode's observed launch prompt), not a
+reconstructed payload, can grant paths. It accepts no glob or arbitrary path, and does not
 grant general file access. Listed paths are read from their original canonical
 files with bounded UTF-8 regular-file checks and symlink-safe traversal; changed
 targets and unlisted paths fail closed. The route is not available as a
@@ -543,6 +550,13 @@ pins.
 Quota-window associations are exact owner settings, not model-family inference. Unmapped windows conservatively retain account-wide applicability, including exhaustion; missing numeric evidence is not zero. Settings validation precedes quota IO, and invalid reset policy cannot erase an engine-reported refusal. Associations cannot expand enabled/deny/provider/consent eligibility. See [the quota settings contract](docs/configuration.md#exact-quota-window-associations); install data is not a runtime overlay and existing profiles/configuration require explicit adoption.
 
 Brokered Cortex MCP channel loss is indeterminate and does not grant route fallback or permission to replay an uncertain mutation. The existing bounded recovery path requires a fresh attempt after confirming the old one is absent. Replacement MCP servers must supply fresh, request-matched tool/schema evidence before readiness; old-generation replies/exits cannot clear current failures. Incomplete or malformed tool lists fail closed. Serialization failure is contained to the request; none of these protections establish the cause of a historical production disconnect. See [failures](docs/acp/failures-and-cancellation.md). Captured steering remains immutable; native host composer queue manipulation is not a grant to erase source history. Normal queue draining waits for background continuation ownership instead of cancelling it. Explicit Stop/cancel still fences waiting prompts and unfinished work; pending, unacknowledged prompts cannot authorize dispatch after interruption. See [delivery ownership](docs/acp/steering-and-questions.md#continuation-delivery-ownership).
+
+The Paseo queued-message config channel now retains a runtime-owned canonical
+content checksum with each source capture. A reused message identity with changed
+content, or unverifiable legacy capture metadata, is refused rather than silently
+acknowledged as an edit. This is a replay-content guard, not client authentication
+or permission to mutate captured history. Native Edit remains pre-delivery only;
+the plugin notice describes that supported workflow without changing host settings.
 
 ## Dev qualification binding boundary
 

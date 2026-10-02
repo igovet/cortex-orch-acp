@@ -117,7 +117,8 @@ that new revision gets its own review and verification. See
 
 The previously inspected Paseo 0.9.2 ACP bridge had no native `prompt.steer` (observed in the live implementation checks). The Cortex provider sends a message (text, and any inline
 image or uploaded-file content) through the bridge's concurrent configuration
-channel as `cortex_queued_message` -- an ordinary queue item, not steering --
+channel as `cortex_queued_message` -- durably captured pending steering, not a
+Paseo composer draft --
 waits for durable capture, then acknowledges Paseo's own `steer` result for
 the still-active turn (Paseo's own ACP contract, unrelated to Cortex's
 terminology for the item). If capture races with the end of that turn, the
@@ -166,7 +167,25 @@ that arbitrary model output can be deterministically language-validated.
 
 ## Native composer queue versus captured steering
 
-Read-only inspection of the installed Paseo 0.10.2 client on 2026-09-30 found a separate native composer queue with Edit and Send now, but no Cancel/Remove action. Its plugin runtime exposes no composer-write or native-queue mutation API. These are static capability observations, not rendered GUI qualification; attachment filtering during native Edit remains unverified.
+Read-only inspection of the installed Paseo 0.10.2 client on 2026-10-02 confirmed a separate native composer queue with Edit and Send now, but no Cancel/Remove action. Its plugin runtime exposes no composer-write or native-queue mutation API. Installed-helper tests exercise native queue/edit/send behavior without launching Paseo; they are not rendered GUI qualification.
+
+### Why sent messages have no Edit icon
+
+Paseo renders the pencil only for items in its **client-side composer queue**,
+as chips above the composer, not for sent timeline bubbles. In default Steer
+mode, Enter sends the message to Cortex immediately. Cortex acknowledges durable
+capture and emits a normal `user_message` plus a `steer` result; waiting for the
+workers to finish does not turn that captured source into a native composer
+queue item. No provider capability, pending-message status or edit handler in
+the installed API makes a sent bubble editable. The earlier change implemented
+safe native queue draining and documented native Edit, not editing delivered
+Cortex steering. Those are different queues.
+
+After the first successful busy-turn send per provider session, Cortex now
+shows an informational notice explaining this distinction and the actual
+Ctrl/Cmd+Enter/pencil workflow. It does not change settings, resurrect a draft,
+or claim the delivered message can be edited. Capture refusals still use only
+Paseo's host error, without a duplicate notice.
 
 This native queue is not Cortex's durably captured steering ledger described above. Once Cortex acknowledges steering, its immutable source history and requirement revision already include that input, and recovery capsules include it even before reconciliation. A plugin cannot safely implement Cancel by deleting captured history or Edit by pretending that history was never received. Full per-message Cancel/Edit restoring all content to the existing host composer is not implemented. The owner-selected alternative uses native Edit and the two-step cancellation workaround below; Cortex adds no Withdraw action, separate editor or simulated native controls. CLI checks cannot qualify that rendered interaction.
 
@@ -177,15 +196,20 @@ owner's settings or drafts. While Cortex works:
 
 - **Ctrl/Cmd+Enter** puts the message in Paseo's native, pre-delivery composer
   queue. Plain **Enter** sends durable Cortex steering immediately instead.
-- On a still-queued native item, **Edit** removes it from that queue and restores
-  it to the existing composer without sending. Edit the content and send again.
+- The **pencil on the chip above the composer** is Edit; it is not an icon on
+  a sent chat bubble. On a still-queued native item, **Edit** removes it from
+  that queue and restores it to the existing composer without sending. Edit
+  the content and send again.
 - To cancel a still-queued native item, use **Edit**, then clear the composer
   text **and all restored attachments**. There is no native Cancel/Remove button.
 - Save an existing draft before Edit: native Edit overwrites the draft's text
   and attachments without confirmation. Native enqueue trims surrounding text
   whitespace. Edit restores user attachments only as the host supports; the
-  exact `userAttachmentsOnly` filter is not verified, so do not promise all
-  attachment kinds or byte-for-byte restoration.
+  installed `userAttachmentsOnly` helper filters out review, browser-element,
+  chat-history and pull-request-context attachments. Helper tests verify that
+  files are retained and review context is filtered; full rendered restoration
+  remains unqualified. Do not promise all attachment kinds or byte-for-byte
+  restoration.
 - The native queue appears to be in-memory; loss on reload/restart is inferred,
   not qualified. Do not rely on it as durable storage.
 
@@ -194,6 +218,27 @@ Paseo 0.10.2 code, **Send now** in that mode, and sending while a question card
 is pending, select an explicit interrupt. The host sends `session/cancel`;
 Cortex must honor it like Stop, pausing the task and cancelling unfinished
 workers. In default `steer` mode, Send now uses the durable steering path.
+
+Native Edit happens **before Cortex receives anything**: only the replacement
+text is sent/captured when resubmitted; the original native item is gone.
+Once the host starts sending/draining an item, Edit returns no draft for that
+removed identity. After delivery, send a correction as a new message rather
+than trying to rewrite history. Cortex binds each new config-channel capture
+to a canonical content-block checksum in runtime-owned source metadata. An
+identical retry is idempotent; a changed text/image/attachment payload reusing
+the captured message id is refused, whether pending or consumed, with guidance
+to send a new correction. A legacy capture lacking this checksum (or damaged
+metadata) also fails closed on retry because exact content cannot be established.
+No source history, requirement revision or pending steering is replaced by a
+refused edit. This adds no schema migration or new client edit API.
+
+The explicit no-paid installed-helper check is
+`npm --prefix integrations/paseo run test:native-queue -- "$PASEO_CLIENT_BUNDLE"`,
+where `PASEO_CLIENT_BUNDLE` is the inspected installed Metro JavaScript bundle
+under `/opt/Paseo/resources/app-dist/`. It executes only selected queue helpers
+with stand-in dependencies and the real Cortex provider wrapper: edited content
+only, consumed-id refusal, and send-failure restoration. It does not start a
+daemon, call an engine, or qualify rendered controls or reload persistence.
 
 ### Continuation delivery ownership
 

@@ -904,6 +904,7 @@ export function wrapCortexConnection(
   const queueRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
   const activeTurns = new Map<string, string>();
   const lastTurns = new Map<string, string>();
+  const explainedNativeQueue = new Set<string>();
   connection.onEvent((event) => {
     if (event.type === "session.turn") {
       if (event.state === "started") {
@@ -994,6 +995,24 @@ export function wrapCortexConnection(
       clientMessageId: input.prompt.clientMessageId,
       result: turnId ? { type: "steer", turnId } : { type: "completed" },
     }));
+    // A captured steer is not an editable native composer-queue item.
+    // The installed host has no provider API to turn it into one. Explain
+    // the real pre-delivery Edit path, without inventing controls or
+    // changing the owner's send behavior. Refusals still emit no notice.
+    if (!explainedNativeQueue.has(input.sessionId)) {
+      explainedNativeQueue.add(input.sessionId);
+      listeners.forEach((listener) => listener({
+        type: "session.notice", sessionId: input.sessionId,
+        notice: {
+          id: "cortex-native-queue-help", severity: "info",
+          title: "Delivered to Cortex — not an editable draft",
+          description: "This message is already captured. To keep a future message editable while Cortex works, "
+            + "use Ctrl/Cmd+Enter in Paseo's default Steer mode. The pencil on the queued chip above the composer "
+            + "restores it for editing before delivery (save any existing draft first). "
+            + "To correct this delivered message, send a follow-up; its history cannot be erased.",
+        },
+      }));
+    }
   }
   const openedSessions = new Set<string>();
   const bufferedTimeline = new Map<string, ReplaySpool>();
@@ -1064,6 +1083,7 @@ export function wrapCortexConnection(
       queueRequests.clear();
       activeTurns.clear();
       lastTurns.clear();
+      explainedNativeQueue.clear();
       openedSessions.clear();
       for (const spool of bufferedTimeline.values()) spool.close();
       bufferedTimeline.clear();
@@ -1108,6 +1128,7 @@ export function wrapCortexConnection(
         }
         if (event.type === "session.closed" || event.type === "session.runtime_failed") {
           openedSessions.delete(event.sessionId);
+          explainedNativeQueue.delete(event.sessionId);
           bufferedTimeline.get(event.sessionId)?.close();
           bufferedTimeline.delete(event.sessionId);
           listener(event);

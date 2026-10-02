@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import collections
 import copy
+import hashlib
 import inspect
 import json
 import sqlite3
@@ -2714,11 +2715,34 @@ class Agent:
                            data={"reason": reason, "retryable": False})
         origin = f"paseo-steer:{session_id}"
         source_event = SimpleNamespace(origin=origin, event_id=message_id)
+        # Runtime-owned checksum, not client _meta or a source identity.
+        # Dedup must not acknowledge changed content as an "edit" after
+        # capture, even if the old item has not reached reconciliation yet.
+        content_digest = hashlib.sha256(json.dumps(
+            content, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        ).encode("ascii")).hexdigest()
         try:
-            result = append_source_event(store, source_event, text, task_id, blocks=staged_blocks)
+            result = append_source_event(
+                store, source_event, text, task_id, blocks=staged_blocks,
+                meta={"cortex_queue_content_sha256": content_digest},
+            )
         except StoreError:
             acp_replay_store.cleanup_staged(staged_blocks)
             raise RpcError(-32603, "Durable capture failed; nothing was forwarded to orchestration.") from None
+        if result.replayed:
+            with store.connection() as db:
+                captured = db.execute(
+                    "SELECT meta_json FROM source_events WHERE origin=? AND event_id=? AND task_id=?",
+                    (origin, message_id, task_id),
+                ).fetchone()
+            try:
+                captured_meta = json.loads(captured["meta_json"]) if captured else None
+            except (ValueError, TypeError):
+                captured_meta = None
+            if (not isinstance(captured_meta, dict)
+                    or captured_meta.get("cortex_queue_content_sha256") != content_digest):
+                raise RpcError(-32602, "This message was already captured and cannot be edited. "
+                               "Send a correction as a new message.")
         if acp_commands.recognize(content) == (acp_commands.CORTEX_FINISH, ""):
             method, kwargs = self._runtime_call_kwargs("stop_task", project_root=session["project"])
             if method is None:

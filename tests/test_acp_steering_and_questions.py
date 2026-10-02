@@ -1230,6 +1230,13 @@ def test_paseo_steer_config_is_durable_and_idempotent(tmp_path, monkeypatch):
     assert source_count == message_count == steer_count == 1
     assert TaskMachine(store).context(result.task_id)["state"] == "PLANNING"
     from cortex_runtime.acp.protocol import RpcError
+    with pytest.raises(RpcError, match="already captured and cannot be edited"):
+        agent._session_set_config_option(104, dict(
+            sessionId=session_id, configId="cortex_queued_message",
+            value=json.dumps(dict(clientMessageId="msg-1",
+                                  content=[dict(type="text", text="Changed after consumption")])),
+        ))
+    assert continuation_calls == [(result.task_id, session_id, "Also inspect title")]
     agent.sessions[session_id]["owner_epoch"] = None
     with pytest.raises(RpcError, match="no longer owns"):
         agent._session_set_config_option(103, dict(
@@ -1237,6 +1244,64 @@ def test_paseo_steer_config_is_durable_and_idempotent(tmp_path, monkeypatch):
             value=json.dumps(dict(clientMessageId="msg-2",
                                   content=[dict(type="text", text="Stale steer")])),
         ))
+
+
+@pytest.mark.parametrize("change", ["text", "image", "legacy", "malformed_meta"])
+def test_paseo_captured_message_is_not_an_editable_queue_item(tmp_path, monkeypatch, change):
+    from cortex_runtime.acp.protocol import RpcError
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    agent, transport, environ = _agent_for_language_tests(tmp_path, monkeypatch)
+    environ["CORTEX_PASEO_QUESTION_UI"] = "1"
+    project = tmp_path / "project"
+    project.mkdir()
+    session_id = agent._session_new(dict(cwd=str(project), mcpServers=[]))["sessionId"]
+    store = agent._store_for(str(project))
+    task = bootstrap_task(store, SourceEvent(origin="test", event_id=str(uuid.uuid4())),
+                          "Inspect", "owner-1")
+    session = agent.sessions[session_id]
+    session["task_id"], session["owner_epoch"] = task.task_id, task.owner_epoch
+    # Keep the first item pending in Cortex, not in Paseo's composer queue.
+    session["active"] = threading.Event()
+    acp_sessions.bind_task(store, session_id, task.task_id)
+    TaskMachine(store).create(task.task_id, "Inspect")
+    with store.connection() as db:
+        db.execute("INSERT INTO task_orchestration (task_id,state,updated_at,requirement_revision) "
+                   "VALUES (?,?,?,0)", (task.task_id, "running", "now"))
+        db.commit()
+    content = [dict(type="text", text="Original"),
+               dict(type="image", data="eA==", mimeType="image/png")]
+
+    def submit(request_id, blocks):
+        agent._queue_paseo_message(request_id, session_id, session, json.dumps(dict(
+            clientMessageId="captured-1", content=blocks)))
+
+    submit(101, content)
+    # Object key order is not a content change.
+    submit(102, [dict(reversed(list(block.items()))) for block in content])
+    changed = [dict(block) for block in content]
+    if change == "text":
+        changed[0]["text"] = "Edited"
+    elif change == "image":
+        changed[1]["data"] = "eQ=="  # Same text/placeholder, different image bytes.
+    else:
+        with store.connection() as db:
+            db.execute("UPDATE source_events SET meta_json=? WHERE origin=? AND event_id=?",
+                       (None if change == "legacy" else "{", f"paseo-steer:{session_id}", "captured-1"))
+            db.commit()
+    with pytest.raises(RpcError, match="already captured and cannot be edited"):
+        submit(103, changed)
+    assert [r["id"] for r in transport.responses if r.get("id") in (101, 102, 103)] == [101, 102]
+    assert session["queued_messages"] == [(f"paseo-steer:{session_id}", "captured-1", "Original\n[image: image/png]")]
+    with store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM source_events WHERE task_id=? AND origin=?",
+                          (task.task_id, f"paseo-steer:{session_id}")).fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM source_blocks WHERE task_id=? AND kind='image'",
+                          (task.task_id,)).fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM runtime_events WHERE task_id=? AND type='USER_STEERING'",
+                          (task.task_id,)).fetchone()[0] == 1
+        assert db.execute("SELECT requirement_revision FROM task_orchestration WHERE task_id=?",
+                          (task.task_id,)).fetchone()[0] == 1
 
 
 def test_paseo_queued_message_after_loaded_turn_recovers_owner_epoch(tmp_path, monkeypatch):

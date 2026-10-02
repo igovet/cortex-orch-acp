@@ -35,6 +35,48 @@ def record_session_skills(store, *, task_id: str, attempt_id: str, session_ref: 
         )
 
 
+def bind_session_skill_generation(store, *, channel_id: str, task_id: str,
+                                  attempt_id: str, generation_id: str, session_ref: str) -> None:
+    """Bind only the launch's own live channel to its observed session.
+
+    Issuance precedes session/new, so the generation cannot be supplied at
+    issue time. Replacements use fresh channels; compaction may advance the
+    generation of the same session, but never move a channel across sessions.
+    """
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            changed = db.execute(
+                "UPDATE trusted_channels SET context_generation_id=? "
+                "WHERE channel_id=? AND task_id=? AND COALESCE(attempt_id,'')=? "
+                "AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?) "
+                "AND (context_generation_id IS NULL OR context_generation_id IN "
+                "(SELECT id FROM context_generations WHERE engine_session_ref=?)) "
+                "AND EXISTS (SELECT 1 FROM context_generations g WHERE g.id=? "
+                "AND g.task_id=trusted_channels.task_id AND g.recipient=trusted_channels.role "
+                "AND g.engine_session_ref=? AND NOT EXISTS (SELECT 1 FROM context_generations newer "
+                "WHERE newer.engine_session_ref=g.engine_session_ref AND newer.sequence>g.sequence))",
+                (generation_id, channel_id, task_id, attempt_id, store._now(), session_ref,
+                 generation_id, session_ref),
+            ).rowcount
+            if changed != 1:
+                raise StoreError("session_skill_binding_invalid")
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+
+
+def revoke_session_skills(store, session_ref: str) -> None:
+    """Remove reads before termination, even when process exit is uncertain."""
+    try:
+        with store.connection() as db:
+            db.execute("DELETE FROM session_skill_paths WHERE session_ref=?", (session_ref,))
+    except sqlite3.OperationalError as error:
+        if "no such table: session_skill_paths" not in str(error):
+            raise
+
+
 def _read_regular_nofollow(base: str, real: str) -> str:
     if not _within(real, base) or not real.endswith(os.sep + "SKILL.md"):
         raise ValueError("skill path escaped its base")
@@ -75,18 +117,33 @@ def _read_regular_nofollow(base: str, real: str) -> str:
 
 
 def read_session_skill(store, channel, listed_path: str) -> dict:
-    """Resolve one exact listed path through the channel's engine session."""
-    generation_id = getattr(channel, "context_generation_id", None)
-    if not generation_id:
-        raise StoreError("unknown_skill", "skill", "unbound session", "a path listed in this session")
+    """Resolve the live persisted binding, not an MCP server's cached context.
+
+    tools/list can resolve the channel before session/new finishes. Its
+    cached context then has no generation, and also outlives compactions.
+    Only the current trusted row may select the session catalog.
+    """
+    if (store is None or channel is None
+            or not getattr(channel, "task_id", None)
+            or not getattr(channel, "attempt_id", None)
+            or not getattr(channel, "channel_id", None)
+            or not getattr(channel, "role", None)):
+        raise StoreError("unknown_skill", "skill", "unbound session", "a bound session channel")
     try:
         with store.connection() as db:
             row = db.execute(
-                "SELECT s.real_path, s.base_path, s.title FROM context_generations g "
+                "SELECT s.real_path, s.base_path, s.title FROM trusted_channels c "
+                "JOIN context_generations g ON g.id=c.context_generation_id "
                 "JOIN session_skill_paths s ON s.session_ref=g.engine_session_ref "
                 "AND s.task_id=g.task_id AND s.attempt_id=? "
-                "WHERE g.id=? AND g.task_id=? AND s.listed_path=?",
-                (channel.attempt_id or "", generation_id, channel.task_id, listed_path),
+                "WHERE c.channel_id=? AND c.task_id=? AND c.role=? AND g.recipient=c.role "
+                "AND COALESCE(c.attempt_id,'')=s.attempt_id AND g.task_id=c.task_id "
+                "AND s.listed_path=? AND c.revoked_at IS NULL "
+                "AND (c.expires_at IS NULL OR c.expires_at>?) "
+                "AND NOT EXISTS (SELECT 1 FROM context_generations newer "
+                "WHERE newer.engine_session_ref=g.engine_session_ref AND newer.sequence>g.sequence)",
+                (channel.attempt_id or "", channel.channel_id, channel.task_id, channel.role,
+                 listed_path, store._now()),
             ).fetchone()
     except sqlite3.OperationalError as error:
         if "no such table: session_skill_paths" not in str(error):

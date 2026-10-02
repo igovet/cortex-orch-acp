@@ -1062,11 +1062,17 @@ class EngineSessionManagerAdapter:
             self._record_process_identity(record, session_id, task_id, attempt_id, launch)
             self._record_effective_context(record, task_id, attempt_id, launch)
             self._record_route_audit(record, task_id, attempt_id, launch)
-            self._open_generation(
-                manager, record, session_id, task_id, attempt_id, launch,
-                instructions=instructions,
-                cause="session_replacement" if replacement else "session_open",
-            )
+            try:
+                self._open_generation(
+                    manager, record, session_id, task_id, attempt_id, launch,
+                    instructions=instructions,
+                    cause="session_replacement" if replacement else "session_open",
+                )
+            except BaseException:
+                # A revoked/mismatched channel must not leave a newly opened
+                # engine or its skill snapshot live after binding fails.
+                self.terminate_owned(attempt_id)
+                raise
             self._bind_resource(manager, session_id, task_id, attempt_id, workspace_binding_id, workspace_root, launch)
             if not launch.get("assignment_id"):
                 # EXT-01 #2: only the coordinator's own session ever
@@ -2091,6 +2097,9 @@ class EngineSessionManagerAdapter:
             # OpenCode: what the model receives is the agent prompt its
             # process started with (no session/new _meta at all).
             meta = {"opencodeAgentPrompt": launched_prompt}
+        # A reconstructed payload is useful for the instruction ledger, but
+        # cannot authorize paths unless the manager observed sending it.
+        skill_meta = meta
         if meta is None:
             meta = _session_new_meta_for(record.engine, version, instructions, role=recipient,
                                          project_root=getattr(manager, "_workspace_root", None),
@@ -2110,19 +2119,25 @@ class EngineSessionManagerAdapter:
                 )
             except Exception:
                 pass
-        from .session_skills import record_session_skills
+        from .session_skills import bind_session_skill_generation, record_session_skills
 
         record_session_skills(
             self._store, task_id=task_id, attempt_id=attempt_id, session_ref=session_id,
             project_root=getattr(manager, "_workspace_root", None), environ=self._environ,
-            sent_meta=meta,
+            sent_meta=skill_meta,
         )
+        if launch.get("channel_id"):
+            bind_session_skill_generation(
+                self._store, channel_id=launch["channel_id"], task_id=task_id,
+                attempt_id=attempt_id, generation_id=generation["id"], session_ref=session_id,
+            )
         with self._lock:
             self._session_meta[session_id] = dict(
                 task_id=task_id, attempt_id=attempt_id, engine=record.engine, version=version,
                 recipient=recipient, assignment_ref=assignment_ref, tier=tier.tier,
                 instructions=instructions, connection_id=record.id, instruction_bundle_id=bundle.bundle_id,
                 model=self._launch_model(launch),
+                channel_id=launch.get("channel_id"),
             )
             self._pending_generation[session_id] = generation
 
@@ -2573,6 +2588,17 @@ class EngineSessionManagerAdapter:
             # termination reconciliation.
             workspace_locks = getattr(self, "_workspace_locks", None)
             workspace_lock = workspace_locks.get(attempt_id) if workspace_locks is not None else None
+        if self._store is not None:
+            from .session_skills import revoke_session_skills
+
+            skill_session = session_id
+            if skill_session is None:
+                from ..recovery import registry as recovery_registry
+
+                process_row = recovery_registry.lookup_process(self._store, attempt_id)
+                skill_session = process_row["engine_session_ref"] if process_row is not None else None
+            if skill_session is not None:
+                revoke_session_skills(self._store, skill_session)
         if manager is not None:
             manager.shutdown(grace=2.0)
             exited = None
@@ -2732,6 +2758,13 @@ class EngineSessionManagerAdapter:
             assignment_ref=meta["assignment_ref"],
         )
         if generation is not None:
+            if meta.get("channel_id"):
+                from .session_skills import bind_session_skill_generation
+
+                bind_session_skill_generation(
+                    self._store, channel_id=meta["channel_id"], task_id=meta["task_id"],
+                    attempt_id=meta["attempt_id"], generation_id=generation["id"], session_ref=session_ref,
+                )
             with self._lock:
                 self._pending_generation[session_ref] = generation
             manager.invalidate_generation(session_ref, generation["id"])

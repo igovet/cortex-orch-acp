@@ -7,6 +7,7 @@
     "test:qualification-binding": "node --experimental-strip-types server/qualification-binding.test.ts",
     "test:activation": "node --experimental-strip-types server/plugin-activation.test.ts",
     "test:steer": "node --experimental-strip-types server/provider-steer.test.ts",
+    "test:native-queue": "node --experimental-strip-types server/installed-native-queue.test.ts",
     "test:diff": "node --experimental-strip-types client/worker-panel-diff.test.ts",
     "test:status": "node --experimental-strip-types client/worker-panel-status.test.ts",
     "test:display": "node --experimental-strip-types client/worker-display.test.ts",

@@ -286,3 +286,36 @@ def test_cancel_before_launch_never_spawns_a_process(tmp_path, monkeypatch):
             "SELECT 1 FROM capacity_reservations WHERE task_id=? AND attempt_id=?", (task_id, attempt_id),
         ).fetchone()
     assert row is None, "a pre-launch cancellation must never even reserve capacity"
+
+
+def test_skill_generation_binding_failure_stops_process_and_revokes_snapshot(tmp_path, monkeypatch):
+    from cortex_runtime.contracts import StoreError
+
+    store, task_id = _task(tmp_path)
+    adapter, connection_id = _fake_adapter(store, tmp_path)
+    skill = tmp_path / ".agents/skills/demo/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: demo\n---\nBody.\n", encoding="utf-8")
+    pids = []
+    original = adapter._open_generation
+
+    def fail_binding(manager, *args, **kwargs):
+        pids.append(manager._process.process.pid)
+        original(manager, *args, **kwargs)
+        # A binding refusal after snapshotting uses the same cleanup path.
+        raise StoreError("session_skill_binding_invalid")
+
+    monkeypatch.setattr(adapter, "_open_generation", fail_binding)
+    with pytest.raises(StoreError, match="session_skill_binding_invalid"):
+        adapter.open("shared_project_root", dict(task_id=task_id, attempt_id="xa_skill_fault"),
+                     "instructions")
+    assert pids and _pid_gone(pids[0])
+    assert not adapter._managers
+    assert not adapter._sessions
+    assert not adapter._reservations
+    assert capacity.count_active(store, connection_id) == 0
+    row = _reservation_row(store, task_id, "xa_skill_fault")
+    assert row["state"] == "released"
+    assert row["release_observation"] == "process_exited"
+    with store.connection() as db:
+        assert db.execute("SELECT COUNT(*) FROM session_skill_paths").fetchone()[0] == 0

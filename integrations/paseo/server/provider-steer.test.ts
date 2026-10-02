@@ -77,7 +77,19 @@ async function paseoSteer(wrapped: any, input: any, expectedTurnId: string) {
   assert.ok(!sent.some((item) => item.type === "session.interrupt"));
   assert.ok(seen.some((event) => event.type === "timeline.item" &&
     event.item.type === "user_message" && event.item.text === "Change the title"));
-  assert.ok(!seen.some((event) => event.type === "session.notice"));
+  const help = seen.filter((event) => event.type === "session.notice");
+  assert.equal(help.length, 1);
+  assert.match(help[0].notice.title, /not an editable draft/);
+  assert.match(help[0].notice.description, /Ctrl\/Cmd\+Enter/);
+  assert.match(help[0].notice.description, /pencil.*above the composer/);
+  assert.match(help[0].notice.description, /follow-up/);
+  assert.ok(seen.indexOf(help[0]) > seen.findIndex((event) => event.type === "session.prompt_result"));
+  await wrapped.send({ ...prompt, prompt: { ...prompt.prompt, clientMessageId: "message-2" } });
+  assert.equal(seen.filter((event) => event.type === "session.notice").length, 1);
+  emit({ type: "session.closed", sessionId: "s" });
+  await wrapped.send({ ...prompt, prompt: { ...prompt.prompt, clientMessageId: "message-3" } });
+  assert.equal(seen.filter((event) => event.type === "session.notice").length, 2);
+  await wrapped.close();
   assert.ok(!seen.some((event) => event.type === "request.completed"));
 }
 
@@ -97,7 +109,7 @@ async function paseoSteer(wrapped: any, input: any, expectedTurnId: string) {
   emit({ type: "session.turn", sessionId: "s", turnId: "acp:ending", state: "completed" });
   finish();
   assert.deepEqual(await steered, { disposition: "steered" });
-  assert.ok(!seen.some((event) => event.type === "session.notice"));
+  assert.equal(seen.filter((event) => event.type === "session.notice").length, 1);
 }
 
 // Cortex refuses the capture: Paseo displays the send error itself. The
@@ -153,7 +165,7 @@ async function paseoSteer(wrapped: any, input: any, expectedTurnId: string) {
   });
   assert.ok(seen.some((event) => event.type === "timeline.item" &&
     event.item.type === "user_message" && event.item.text === "See attached\n[image attached]"));
-  assert.ok(!seen.some((event) => event.type === "session.notice"));
+  assert.equal(seen.filter((event) => event.type === "session.notice").length, 1);
 }
 
 // An uploaded file is carried as a resource_link content block, addressed

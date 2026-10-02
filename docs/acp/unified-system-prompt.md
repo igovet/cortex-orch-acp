@@ -97,6 +97,26 @@ matching catalog snapshot cannot use the path form. Native catalogs are disabled
 for the unified prompt, so Cortex's listing and this explicit read route form
 the supported skill-discovery flow.
 
+Channel issuance happens before the engine session exists. After session open,
+`EngineSessionManagerAdapter._open_generation` snapshots the catalog from
+observed sent metadata and binds the launch's exact channel/task/attempt to its
+generation. Codex grants use `cortexBaseInstructions`, Claude uses
+`systemPrompt`, and OpenCode uses the observed process launch prompt.
+Reconstructed metadata is not sufficient to grant skill paths. Prompt listing
+and snapshot enumeration use the same adapter environment, including `HOME`
+and `CODEX_HOME`; a changed catalog/environment that no longer matches the
+sent section yields no grant.
+
+Reads select the current persisted channel binding, since an MCP server may
+cache its channel context during `tools/list` before session open completes.
+Only the newest generation of that bound session is eligible. Compaction
+advances the channel's generation without re-enumerating the catalog or granting
+late-added paths. Termination removes that session's snapshots even if process
+exit is unconfirmed. A channel cannot be rebound to a different engine session;
+worker route fallback and coordinator recovery issue fresh channels and receive
+their own catalogs. Cross-task/attempt grants, revoked or expired channels and
+superseded persisted generations fail closed.
+
 When `codebase-memory-mcp` is attached and Cortex can resolve the project
 root to a known indexed-project name, the prompt names that project so workers
 can use it directly instead of repeating `list_projects`. If resolution fails or

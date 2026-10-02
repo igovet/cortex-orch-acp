@@ -23,7 +23,7 @@ For creation, revision, and import, the intended source of truth is:
 └── SKILL.md
 ```
 
-Keep the skill directory, frontmatter name, and referenced paths consistent. Add supporting references or scripts only when needed and keep them inside the skill directory. A real Codex project can discover skills below `.agents/skills`; current Codex documentation describes scanning from the working directory through the repository root. Claude Code discovers project skills below `.claude/skills`. Cortex's Claude adapter enables native skills, and the guarded link exposes the same project directory to Claude:
+Keep the skill directory, frontmatter name, and referenced paths consistent. Add supporting references or scripts only when needed and keep them inside the skill directory. A real Codex project can discover skills below `.agents/skills`; current Codex documentation describes scanning from the working directory through the repository root. Claude Code discovers project skills below `.claude/skills`. With the default unified prompt, Cortex lists these skills and reads their exact session-listed paths through MCP `read_skill`; the engines' native catalogs are disabled. When the unified prompt is disabled, Claude's native skill discovery is enabled. The guarded link exposes the same project directory to either discovery path:
 
 ```text
 .claude/skills/<name> -> ../../.agents/skills/<name>
