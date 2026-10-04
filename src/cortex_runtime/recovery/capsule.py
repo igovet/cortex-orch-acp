@@ -501,6 +501,94 @@ def _assignment_state(db, task_id: str, assignment_ref: str, worker_key: str) ->
     return result
 
 
+def _assignment_profile(db, task_id: str, attempt_id: str) -> tuple[str | None, str | None]:
+    """``(role_id, stage)`` of this worker attempt's node, resolved exactly as
+    ``delegation.mcp_tools.assignment_profile`` resolves them for the same
+    channel's ``tools/list`` (same join, newest node revision first), or
+    ``(None, None)`` when the attempt has no node."""
+    row = db.execute(
+        "SELECT n.role, n.stage FROM delegation_provisioning p JOIN runtime_nodes n "
+        "ON n.task_id=p.task_id AND n.assignment_ref=p.idempotency_key "
+        "WHERE p.task_id=? AND p.attempt_id=? ORDER BY n.revision DESC LIMIT 1",
+        (task_id, attempt_id),
+    ).fetchone()
+    return (row["role"], row["stage"]) if row is not None else (None, None)
+
+
+def _offered_tool_names(role_kind: str, role_id: str | None, stage: str | None) -> list[str] | None:
+    """The tool names this recipient's channel advertises, or ``None`` when
+    they cannot be derived.
+
+    Built from the same two sources ``server.Server.dispatch`` lists for
+    ``tools/list`` -- the channeled base tools plus
+    ``delegation.mcp_tools.tool_definitions`` narrowed by the same
+    ``(role kind, role id, stage)`` -- so the capsule never names a tool the
+    channel does not offer (a read-only role, a review stage and the
+    consultant used to be told they held project_write, outside_write,
+    outside_command and project_delete).
+    """
+    from ..delegation.mcp_tools import tool_definitions
+    from ..portable.roles import PortableError
+
+    try:
+        role_tools = {entry["name"] for entry in tool_definitions(role_kind, role_id=role_id, stage=stage)}
+    except (StoreError, PortableError):
+        return None
+    return sorted(set(channeled_base_tool_names()) | role_tools)
+
+
+# What a worker must know about where it runs, stated per grant. Each variant
+# follows the tools the channel really offers (``_offered_tool_names``, which
+# mirrors the gateway's refusals), so the text never grants what the gateway
+# refuses, and no variant says a refused action may be reached another way.
+_ENVIRONMENT_RUNS_AS_USER = (
+    "You run as the user: their tools, virtualenvs and network; the whole machine is readable. Follow the "
+    "project's agent instruction files (AGENTS.md and the docs they point to). "
+)
+_ENVIRONMENT_BACKGROUND = (
+    "Never end your turn to wait for a background job (its notification cannot reach you); wait inside the "
+    "turn by checking its output. "
+)
+
+
+def _worker_environment(role_id: str | None, stage: str | None, offered: list[str] | None) -> str:
+    if role_id is None or offered is None:
+        return (
+            "The runtime could not resolve this assignment's role, stage or offered tools, so this capsule "
+            "states no write grant; the runtime decides every call. Never reach a refused action another way: "
+            "say exactly what you need through ask_question, or report it as a blocker."
+        )
+    if "project_read" not in offered:
+        # The senior consultant: consultation packet and retained reports only.
+        return (
+            "You work only from your consultation packet and retained reports: this role has no project "
+            "reads, no commands and no writes. Never reach a refused action another way: name what is "
+            "missing in your report."
+        )
+    if "project_write" not in offered:
+        reason = "a review stage" if stage == "review" else "a read-only role"
+        return (
+            _ENVIRONMENT_RUNS_AS_USER
+            + f"This assignment is read-only ({reason}): the runtime grants it no writes, inside or outside "
+            "the project, so create, change and delete nothing. "
+            + _ENVIRONMENT_BACKGROUND
+            + "Never reach a refused action another way: say exactly what you need through ask_question, or "
+            "report it as a blocker."
+        )
+    return (
+        _ENVIRONMENT_RUNS_AS_USER
+        + "Your declared scope is the work area agreed with the other workers for coordination: make your "
+        "changes there. The runtime does not wall off the rest of the project (only paths the user protected "
+        "are refused), so before changing a project path outside your declared scope, ask for it with "
+        "access_request. Anything outside the project needs an explicit permission request the user accepts: "
+        "outside_write for a file, outside_command for a command that changes things outside; a refusal is "
+        "final. Deleting a project file asks the user too. "
+        + _ENVIRONMENT_BACKGROUND
+        + "Never reach a refused action another way: say exactly what you need through access_request or "
+        "ask_question, or report it as a blocker."
+    )
+
+
 def _section_pipeline_and_assignments(db, task_id: str, recipient: dict) -> dict:
     section: dict = {}
     task = db.execute('SELECT state,revision,review_cycle,goal,blocker FROM runtime_tasks WHERE task_id=?',(task_id,)).fetchone()
@@ -508,22 +596,12 @@ def _section_pipeline_and_assignments(db, task_id: str, recipient: dict) -> dict
         from ..orchestration.policy import denied_paths
         section['runtime'] = dict(task)
         section['runtime']['denied_write_paths'] = denied_paths(db,task_id)
-        # Native tools work, bounded by the engine jail; a stale False made
-        # workers refuse to count their own shell checks.
-        section['runtime']['native_tools_enabled'] = True
+        # No durable record says which native engine tools a session has (it
+        # differs by engine), so the capsule states nothing about them.
         if recipient['role'] != 'coordinator':
-            # What a worker must know about where it runs, so nothing in it
-            # reads as a wall: a read-only path outside the project or a lost
-            # background notification used to stop work.
-            section['runtime']['environment'] = (
-                "You run as the user: their tools, virtualenvs, network, the whole machine readable. Follow "
-                "the project's agent instruction files (AGENTS.md and the docs they point to). You may change "
-                "anything in the project. Outside it the filesystem is read-only: write there with outside_write, "
-                "run commands that change things outside with outside_command; the user confirms each, so a "
-                "read-only error outside the project means use them, not give up. Deleting asks the user too. "
-                "Never end your turn to wait for a background job (its notification cannot reach you); wait "
-                "inside the turn by checking its output. If something fails, find another way or say exactly "
-                "what you need.")
+            role_id, stage = _assignment_profile(db, task_id, recipient['attempt_id'])
+            section['runtime']['environment'] = _worker_environment(
+                role_id, stage, _offered_tool_names('worker', role_id, stage))
         sql = 'SELECT task_id,node_id,role,stage,objective,dependencies_json,scope_json,status,assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=?'
         values = [task_id,task['revision']]
         if recipient['role'] != 'coordinator':
@@ -805,7 +883,6 @@ def _section_newer_events(db, task_id: str, recipient: dict) -> dict:
 
 
 def _section_role_and_tool_access(db, task_id: str, recipient: dict) -> dict:
-    from ..delegation import contracts as delegation_contracts
     from ..portable.roles import load_role, PortableError
 
     if recipient["role"] == "coordinator":
@@ -840,18 +917,16 @@ def _section_role_and_tool_access(db, task_id: str, recipient: dict) -> dict:
     else:
         section["role_source"] = _unavailable("role_id_not_recorded_for_this_assignment")
     section["instruction_delivery"] = provisioning["instruction_delivery"] if provisioning is not None else None
-    try:
-        # A worker's trusted MCP server advertises the base Cortex tools and
-        # the role-scoped delegation tools together.  Keep this derived list
-        # identical to the server's ``tools/list`` surface; listing only the
-        # delegation schemas made a recovered worker believe that
-        # create_draft/write_report/read_report and the other base operations
-        # were unavailable even though the channel exposed them.
-        base_tools = set(channeled_base_tool_names())
-        role_tools = set(delegation_contracts.schemas_for(recipient["role"]))
-        section["allowed_mcp_tools"] = sorted(base_tools | role_tools)
-    except StoreError:
-        section["allowed_mcp_tools"] = _unavailable("unknown_role_kind")
+    # The channel's own ``tools/list`` surface: the base Cortex tools plus the
+    # role-scoped delegation tools, narrowed by role and stage exactly as the
+    # server narrows them. Listing only the delegation schemas once made a
+    # recovered worker believe create_draft/write_report/read_report were
+    # unavailable; listing every schema made read-only roles believe they
+    # could write.
+    role_id_for_tools, stage = (None, None) if recipient["role"] == "coordinator" else _assignment_profile(
+        db, task_id, recipient["attempt_id"])
+    offered = _offered_tool_names(recipient["role"], role_id_for_tools, stage)
+    section["allowed_mcp_tools"] = offered if offered is not None else _unavailable("offered_tools_unresolved")
     # T022: compaction-support tier/owner and current context-generation
     # sequence for this recipient's engine session, when one has already
     # been recorded (delegation.generations) -- trivially available here

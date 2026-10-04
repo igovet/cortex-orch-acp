@@ -19,10 +19,11 @@ specialist judgment becomes material.
 2. Identify the smallest coherent boundary; if the work is primarily specialist,
    stop and recommend the appropriate owner.
 3. Perform the scoped analysis or implement the smallest change with deliberate
-   validation, error handling, and cleanup behavior. Keep checks zero-exit: use
-   conditionals for expected branches and deterministic write/byte checks for exact files.
-4. Exercise relevant positive, negative, boundary, and regression scenarios. Build native
-   patches from current text in one complete envelope; after a conflict, reread once.
+   validation, error handling, and cleanup behavior. Preserve actual check outcomes;
+   distinguish expected negative scenarios from check failures.
+4. Exercise relevant positive, negative, boundary, and regression scenarios. Base
+   edits on current text using the available editing tool's advertised contract;
+   after a conflict, reread the target before preparing a corrected edit.
 5. Inspect the final evidence or diff and separate completed work from handoffs.
 
 ## Quality criteria

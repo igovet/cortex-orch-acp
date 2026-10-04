@@ -5,14 +5,16 @@ description: Prevent guessed, incomplete and replayed tool calls during explicit
 
 # Tool discipline
 
-Use this skill only during selected Cortex work.
-
 Before a call, name the concrete fact, state change or acceptance condition it must
 resolve. Reuse retained results while relevant state is unchanged. A timeout, quiet
 worker or desire to reconfirm does not justify another call.
 
-Runtime owns all delegation. Your engine's own tools work inside a sandbox: the
-project is read-only except your assignment scope, and native subagents are disabled.
+Runtime owns all delegation; native subagents are disabled. Follow the runtime's
+role-specific access and tool offerings. For writing workers, declared scope is
+the agreed work area coordinating parallel writers, not an enforced project
+write boundary. Reserve additional project paths through `access_request` before
+changing them; private storage and user-protected paths remain unavailable.
+Outside-project work requires a permission request accepted by the user.
 Use the `cortex` MCP server for plans, results, questions, retained reports, drafts,
 conditional `read_skill` calls, and scoped project operations. A worker runs a
 reportable check with Cortex MCP `command_run` (or its advertised approved
@@ -30,10 +32,6 @@ overlong text without silently truncating requirements or weakening verification
 Do not copy argument contracts into
 skills, infer synonymous fields, discover requirements by causing errors, or inspect
 runtime internals instead of advertised operations.
-
-Code-mode is not Node.js or a browser. Use only its advertised globals; do not
-assume crypto, process, require or filesystem APIs exist. Prepare literal values
-without speculative runtime helpers before invoking a tool.
 
 Batch independent reads when useful and inspect every result. Keep dependent reads,
 mutations, approvals and retries sequential. A wrapper must expose the full nested

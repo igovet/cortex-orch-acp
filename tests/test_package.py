@@ -1,6 +1,5 @@
 from pathlib import Path
 import json
-import tomllib
 import pytest
 
 from cortex_package import (
@@ -14,15 +13,16 @@ from cortex_package import (
 )
 from generate_agent_profiles import (
     check as check_agent_profiles,
-    expected_agent_references,
-    expected_profiles,
+    expected_skills,
     expected_worker_references,
 )
 
 
 def test_stamped_package_and_profiles():
     assert validate().startswith('1.0.0+sha256.')
-    assert len(list((PLUGIN/'agents').glob('*.toml')))==23
+    assert len(list((PLUGIN/'skills').glob('worker-*/SKILL.md')))==23
+    assert 'agents' not in PAYLOAD_ENTRIES
+    assert not (PLUGIN/'agents').exists()
     payload=json.loads((PLUGIN/'runtime-payload.json').read_text())['files']
     assert all((PLUGIN/path).is_file() for path in payload)
     expected_runtime={
@@ -69,18 +69,17 @@ def test_paseo_replay_transport_is_packaged():
 
 def test_acp_profiles_keep_roles_and_use_mcp_task_documents():
     check_agent_profiles()
-    assert len(expected_profiles()) == 23
-    assert len(expected_agent_references()) == 3
+    assert len(expected_skills()) == 23
     assert len(expected_worker_references()) == 69
-    for path,body in expected_profiles().items():
+    for path,body in expected_skills().items():
         assert path.read_bytes() == body
-        instructions=tomllib.loads(body.decode())['developer_instructions']
+        instructions=body.decode().split('---\n',2)[2].lstrip().removesuffix('\n<!-- END OF COMPLETE CORTEX WORKER SKILL -->\n')
         assert len(instructions)<12900
         assert 'structured result' in instructions
         assert 'bounded report' in instructions
         assert 'runtime' in instructions.lower()
         assert '.codex/plugins/' not in instructions
-        if path.stem=='senior-consultant':
+        if path.parent.name=='worker-senior-consultant':
             assert 'Do not run commands, tests or project checks' in instructions
         else:
             assert '## Specialist workflow' in instructions
@@ -182,7 +181,7 @@ def test_markdown_local_links():
     import re
     paths=[ROOT/'README.md',ROOT/'SECURITY.md',ROOT/'PRIVACY.md',
            *(ROOT/'docs').rglob('*.md'),
-           *list((PLUGIN/'skills').rglob('*.md')),*list((PLUGIN/'agents').glob('*.toml'))]
+           *list((PLUGIN/'skills').rglob('*.md'))]
     for path in paths:
         for link in re.findall(r'\]\(([^)]+)\)',path.read_text()):
             if '://' in link or link.startswith('#'):continue
@@ -245,8 +244,10 @@ def test_completion_requires_runtime_review_and_verification():
 
 
 def test_shared_worker_protocol_routes_rare_interactive_procedure():
-    protocol=(PLUGIN/'agent-sources/worker-protocol.md').read_text()
-    assert 'interactive-resources' in protocol
+    from cortex_runtime.portable.roles import composed_instructions, load_role
+    # Situational routing is appended by the runtime, not copied into templates.
+    protocol=composed_instructions(load_role('worker-general'))
+    assert '`interactive-resources` -- before starting or using a browser, device, port or server session' in protocol
     reference=(PLUGIN/'agent-sources/references/interactive-resources.md').read_text()
     assert 'select, create or reuse only owned resources' in reference
 
@@ -265,26 +266,26 @@ def test_acp_instruction_boundaries_cover_observed_failures():
 
 
 def test_packaged_skills_deliver_profiles_and_progressive_references():
-    from generate_agent_profiles import (
-        expected_agent_references,
-        expected_skills,
-        expected_worker_references,
-    )
+    from generate_agent_profiles import SPECIALIZED, sections
     skills=expected_skills()
-    agent_references=expected_agent_references()
     references=expected_worker_references()
     assert len(skills)==23
-    assert len(agent_references)==3
     assert len(references)==69
-    assert all(path.read_bytes()==body for path,body in agent_references.items())
     assert all(path.read_bytes()==body for path,body in references.items())
+    profiles=json.loads((PLUGIN/'profiles.json').read_text())['profiles']
+    source_root=PLUGIN/'agent-sources'
     for path,body in skills.items():
         assert path.read_bytes()==body
         name=path.parent.name.removeprefix('worker-')
-        profile=tomllib.loads((PLUGIN/'agents'/f'{name}.toml').read_text())
+        profile=next(p for p in profiles if Path(p['source']).stem==name)
+        template='consultant-protocol.md' if name=='senior-consultant' else 'worker-protocol.md'
+        prompt=(source_root/template).read_text().replace('{{Default report template}}',profile['report_template'])
+        values=sections((source_root/profile['source']).read_text())
+        for key in SPECIALIZED:
+            prompt=prompt.replace('{{'+key+'}}',values[key])
         skill_body=body.decode().split('---\n',2)[2].lstrip()
         profile_body=skill_body.removesuffix('\n<!-- END OF COMPLETE CORTEX WORKER SKILL -->\n')
-        assert profile_body==profile['developer_instructions']
+        assert profile_body==prompt.rstrip()+'\n'
 
 
 

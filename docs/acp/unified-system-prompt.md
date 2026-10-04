@@ -46,7 +46,12 @@ safety, communication and context, then the project's own skills, and finally
 a runtime-generated environment section (working directory, whether it is a Git
 repository, platform, UTC date). The prompt names no engine or product. Tool
 argument contracts stay in each tool's advertised schema; role duties stay in
-the role instructions that follow the prompt.
+the role instructions that follow the prompt. Refusal routing is role-aware:
+workers use `access_request` first for additional project paths and the question
+tool for decisions reserved to the user; scope/replan requests are for changes
+to the plan itself. Coordinators plan refused work for a worker, ask the user
+when only the user can decide, or report a blocker. These prompt directions do
+not change tool authority or make a refused operation available.
 
 Both engines' native skill catalogs are switched off, so Cortex lists the
 skills either engine would have found by itself, for every engine. Where each
@@ -122,6 +127,16 @@ root to a known indexed-project name, the prompt names that project so workers
 can use it directly instead of repeating `list_projects`. If resolution fails or
 the named project is unavailable, workers use the normal project-list fallback;
 no project identity is guessed.
+
+The senior-consultant prompt is a separate worker variant: it is limited to the
+consultation packet and retained reports, and does not advertise code-index or
+project-source investigation. No external MCP servers are attached to consultant
+sessions; `project_read`, `project_git` and `command_run` are not offered, and
+project-source calls through those gateway routes are refused with
+`gateway_read_denied`. Claude's consultant profile disallows native file/search/edit
+tools. Codex native reads remain available and may run without a permission
+request inside the read-only engine jail, so this is not a complete native-source
+access boundary.
 
 Workers are told to work without narration, including before the first tool and after tool results. The runtime also discards worker prose at tool boundaries from the public worker card and its replay history, retaining only the post-tool terminal response; underlying engine events remain available for evidence. Coordinator text still streams because it is the user's task view, except
 that the runtime withholds the coordinator's text after its own accepted user

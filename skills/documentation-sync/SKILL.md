@@ -11,12 +11,13 @@ description: Update affected project knowledge after verified changes while pres
 | --- | --- |
 | Coordinator | Assess documentation impact and assign affected paths with the implementation or as independent work |
 | Assigned implementing worker or technical writer | Apply this skill, confirm source-backed facts and update only affected documentation |
-| Independent reviewer when warranted | Check material documentation changes against source, commands and links |
+| Runtime's mandatory independent review | Check material documentation claims against source, commands and links |
 
 The coordinator may inspect bounded project source, report evidence and public
 artifacts read-only to reconcile cited revisions and decide scope. Workers own
 project edits and checks; the coordinator does not rerun project checks. A stale
-or absent index does not automatically require harvest.
+or absent index does not automatically require harvest. The coordinator source-read
+restriction in knowledge-harvest applies only to harvests, not ordinary work.
 
 The worker assigned the affected documentation applies this skill. The
 coordinator does not read another role's `SKILL.md`.
@@ -49,7 +50,8 @@ unresolved.
 
 ## Verification and completion
 
-- Scale independent checking to actual impact; no server stage or publication kind exists.
+- The runtime's mandatory review checks material claims; list them in your report.
+  Do not add a reviewer assignment to the plan; no special publication kind exists.
 - A supported no-impact conclusion can use existing evidence without a token edit or extra worker.
 - Missing inspection is not proof of no impact. State unverified facts and unrun checks.
 - Required updates and their verification must finish before task completion.

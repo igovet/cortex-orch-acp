@@ -52,3 +52,46 @@ def test_harvest_request_does_not_require_a_prior_task_or_goal():
         text = acp_messages.render("harvest_requested", language, scope="")
         assert "prior" not in text.lower()
         assert "goal" not in text.lower()
+
+
+def test_harvest_review_is_runtime_owned_and_census_has_one_body():
+    from cortex_runtime.portable.roles import load_role
+
+    text = load_role("knowledge-harvest").body_portable
+    assert "For harvests only" in text
+    assert "`technical-writer`" in text
+    assert "technical_writer" not in text
+    assert "index-driven documentation routing" not in text
+    assert "worker's source-backed review" not in text
+    assert "runtime's mandatory review checks material claims" in text
+    assert "advertised question\nroute directly to the user" in text
+    assert "load skill `coordinator-communication`" not in text
+    assert "assign a separate reviewer" not in text
+    assert text.count("# Feature census and completeness contract") == 1
+    reference = (REPO_ROOT / "skills/knowledge-harvest/references/feature-census.md").read_text()
+    assert "../SKILL.md#feature-census-and-completeness-contract" in reference
+    assert "## Coverage matrix" not in reference
+    sync = load_role("documentation-sync").body_portable
+    assert "runtime's mandatory review checks material claims" in sync
+    assert "Independent reviewer when warranted" not in sync
+
+
+def test_profile_generation_preserves_the_single_canonical_harvest_body(tmp_path):
+    import shutil
+    from generate_agent_profiles import check, write
+
+    plugin = tmp_path / "plugin"
+    plugin.mkdir()
+    shutil.copytree(REPO_ROOT / "agent-sources", plugin / "agent-sources")
+    shutil.copyfile(REPO_ROOT / "profiles.json", plugin / "profiles.json")
+    harvest = plugin / "skills/knowledge-harvest"
+    shutil.copytree(REPO_ROOT / "skills/knowledge-harvest", harvest)
+    before = {path.relative_to(harvest): path.read_bytes()
+              for path in harvest.rglob("*") if path.is_file()}
+    write(plugin)
+    check(plugin)
+    after = {path.relative_to(harvest): path.read_bytes()
+             for path in harvest.rglob("*") if path.is_file()}
+    assert before == after
+    assert len(list((plugin / "skills").glob("worker-*/SKILL.md"))) == 23
+    assert not (plugin / "agents").exists()

@@ -221,6 +221,28 @@ def test_only_workers_are_told_to_work_without_narration():
     assert "Work without narration" not in coordinator and "@@" not in worker + coordinator
 
 
+def test_refused_calls_route_workers_to_access_request_before_scope_or_replan():
+    worker = cortex_system_prompt("worker", None, environ={})
+    coordinator = cortex_system_prompt("coordinator", None, environ={})
+
+    def refusal(text):
+        return next(line for line in text.splitlines() if "is a decision, not a glitch" in line)
+
+    for text in (worker, coordinator):
+        line = refusal(text)
+        assert "Do not retry it and do not reach the same effect another way" in line
+        assert "@@" not in text
+    worker_line, coordinator_line = refusal(worker), refusal(coordinator)
+    # A worker asks through its assignment-local route first; scope_request
+    # and replan_request stop every worker and are only for a changed plan.
+    assert worker_line.index("`access_request`") < worker_line.index("scope or replan request")
+    assert "only when the plan itself must change" in worker_line
+    assert "runtime's scope request" not in worker_line
+    # The coordinator has no access_request and changes nothing itself.
+    assert "access_request" not in coordinator_line
+    assert "plan it for a worker" in coordinator_line
+
+
 def test_only_the_coordinator_is_told_to_write_nothing_after_its_question():
     worker = cortex_system_prompt("worker", None, environ={})
     coordinator = cortex_system_prompt("coordinator", None, environ={})

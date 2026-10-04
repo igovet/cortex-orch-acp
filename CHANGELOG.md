@@ -2,6 +2,16 @@
 
 ## 1.0.0 (unreleased)
 
+Corrected role, tool-surface and permission documentation: declared writer scope
+is a coordination work area, not a gateway boundary; Auto access mode's
+no-card approval and writable jail scratch/state residuals are explicit. Documented
+the consultant's packet/report tool boundary and Codex native-read gap, and removed
+references to redundant `agents/*.toml` profiles (23 canonical role instructions
+remain). Aligned the runtime-reserved build-verification profile with the runtime
+read-only role set and removed repository-specific worktree guidance from shipped
+worker instructions.
+
+
 Persisted Cortex sessions in Paseo now reopen without reapplying cached model,
 mode, effort or settings. A removed or denied saved model no longer prevents
 read-only history loading; new and explicit configuration choices remain validated.

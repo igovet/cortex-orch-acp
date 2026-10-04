@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import json
 import os
-import tomllib
 from generate_agent_profiles import check as check_agent_profiles
 from paseo_integrity import payload_digest as paseo_payload_digest
 
@@ -18,7 +17,7 @@ BASE = '1.0.0'
 # tests, docs and development scripts into the package identity and make
 # it change for reasons that have nothing to do with what runs.
 PAYLOAD_ENTRIES = (
-    'src', 'skills', 'agents', 'agent-sources', 'assets', 'policy', 'report-templates', 'integrations',
+    'src', 'skills', 'agent-sources', 'assets', 'policy', 'report-templates', 'integrations',
     'package-identity.json', 'pinned-dependencies.json', 'profiles.json',
     'runtime-payload.json',
 )
@@ -150,15 +149,12 @@ def validate(plugin=PLUGIN):
         if integrity.get('payload_sha256') != paseo_plugin_payload_digest(paseo_root):
             raise ValueError('stale Paseo plugin integrity stamp')
     profiles=json.loads((plugin/'profiles.json').read_text())['profiles']
-    agents=list((plugin/'agents').glob('*.toml'))
+    skills=list((plugin/'skills').glob('worker-*/SKILL.md'))
     expected_profile_count=23
-    if len(profiles)!=expected_profile_count or len(agents)!=expected_profile_count or len({p['name'] for p in profiles})!=expected_profile_count:
+    if len(profiles)!=expected_profile_count or len(skills)!=expected_profile_count or len({p['name'] for p in profiles})!=expected_profile_count:
         raise ValueError('profile count')
     for profile in profiles:
-        parsed=tomllib.loads((plugin/'agents'/profile['filename']).read_text())
-        if parsed['name']!=profile['name'] or not parsed.get('developer_instructions'):
-            raise ValueError('profile definition')
-        instructions=parsed['developer_instructions']
+        instructions=(plugin/'skills'/('worker-'+Path(profile['source']).stem)/'SKILL.md').read_text()
         if '## Attached worker guidance' in instructions or '../skills/' in instructions or '.codex/plugins/' in instructions:
             raise ValueError('profiles must not contain copied skill bundles or installation paths')
         if '`context-compaction`' not in instructions:

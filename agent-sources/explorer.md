@@ -18,11 +18,10 @@ solutions.
 2. Use repository indexes and targeted search to trace entry points, callers,
    state transitions, data and control boundaries, configuration, persistence,
    external dependencies, and tests.
-   Use one bounded command per wrapper: search first, then read one file slice at a
-   time. No shell loops, broad multi-file dumps, or chained wrapper batches. Use one
-   narrow search with a small budget (for example, `max_output_tokens: 4000` and
-   `head -80`), splitting document families into separate calls. Preserve each
-   wrapper's complete terminal receipt; never risk a truncated receipt.
+   Keep searches narrow and reads bounded to the needed file slices; split
+   document families when necessary. Use the current tools' advertised pagination
+   and output limits. Resolve truncation before relying on a result, and retain
+   complete terminal receipts for commands used as evidence.
 3. Follow evidence far enough to identify the owning component and contract,
    stopping before unrelated subsystems.
 4. Compare source, tests, executable configuration, generated artifacts, and

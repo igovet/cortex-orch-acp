@@ -51,7 +51,11 @@ the same attempt closed it; the failure stays in the result as history with
 [check history](orchestration.md#check-history-and-current-outcome)). Synthesis is refused while a retained not_run or unverified check
 of the current plan revision is neither passed by a later result under the same
 name nor listed in synthesis not_verified with its blocker. The runtime renders
-that list into the synthesis as "Not verified".
+that list into the synthesis as "Not verified". Each blocker must name the
+concrete condition that prevented this task's check; "not run", "out of scope"
+or "not requested" alone is insufficient. A documented policy requiring an
+explicit owner request can be a concrete blocker when the missing request is
+named (for example, "paid live check not requested by the owner").
 
 The final gate checks the current plan, completed nodes, the final approving review
 (or the revision's `REVIEW_NOT_REQUIRED` record), a latest verification event

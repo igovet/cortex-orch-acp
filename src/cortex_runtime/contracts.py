@@ -36,7 +36,6 @@ def tool(name, description, properties, required, read=False):
     properties.setdefault("redact_values",dict(type="array",maxItems=32,uniqueItems=True,
         items=string("Exact credential value only; never requirements, restrictions or ordinary prose.",16_000),
         description="Optional literal credentials to redact in newly captured native user messages. Omit otherwise; all other text is preserved."))
-    description += " Before opening a project store, the runtime performs a one-way fail-closed transfer of any recognized legacy <project_root>/.codex/cortex database and published task tree into <project_root>/.cortex when the corresponding destination content is absent. Conflicts or unsafe storage fail without compatibility reads, duplicate writes, or fallback routing. Coordinator operations attempt pending native source capture and return explicit completeness; unavailable new sources do not deny archived reads. An accepted mutation delivery replay skips capture, preserves the current binding state rather than reapplying historical state, and leaves pending source for the next fresh coordinator operation. Each result includes the host-verified binding receipt and source revision. Workers never capture another thread input."
     return dict(name=name, title=name.replace("_", " ").capitalize(), description=description,
                 inputSchema=dict(type="object", properties=properties, required=required,
                                  additionalProperties=False),
@@ -72,11 +71,11 @@ TOOLS = [
     tool("create_draft",
          "Create an owned Markdown draft and return its exact marker, placeholder list and complete initial Markdown. "
          "Fill the draft using draft_write, preserving required_first_line and replacing all replaceable_markers. "
-         "Use read_draft only to recover an existing edited draft. Runtime alone publishes pipeline editions. "
+         "Use read_draft only to recover an existing edited draft. The runtime alone creates and publishes pipeline editions. "
          "Omit request_key for a new draft; after an uncertain response recover it from list_reports own_drafts. "
          "An explicit request_key supports exact retries.", {
              "template": string(
-                 "Select the document headings. Only the bound coordinator may select pipeline for its current pipeline edition; a worker selecting pipeline is rejected before a draft is created. Workers select their assigned report class. Every other value creates an ordinary report; synthesis is a worker-authored artifact, not an additional coordinator completion step.",
+                 "Select the document headings. Workers select their assigned report class. pipeline is runtime-owned: a request for it from any channel, coordinator included, is refused with runtime_owned_operation before a draft is created. Every other value creates an ordinary report; synthesis is a worker-authored artifact, not an additional coordinator completion step.",
                  14, enum=["general", "planning", "investigation", "implementation", "verification", "documentation", "synthesis", "pipeline"]),
              "request_key": dict(KEY, description=
                  "Optional explicit idempotency key. Omit for new drafts; the server generates a fresh identity. "
@@ -119,7 +118,7 @@ TOOLS = [
          "and may read selected report opening decision briefs when a consequential choice needs evidence. Workers select and read only reports required by "
          "their assignment.", {
              "cursor": string("Exact opaque next_cursor from the preceding catalogue page.", 256),
-             "changes_after": dict(type="integer",minimum=0,maximum=2**53-1,description="Return bounded task change metadata and allowlisted hook observations after this sequence; default zero. Continue with changes_next when non-null. Observations carry explicit hook provenance, actor scope and known command status, never raw output. Unknown fields remain null; changed_paths_complete exposes omitted path detail. Changes require coordinator interpretation, not mandatory revalidation."),
+             "changes_after": dict(type="integer",minimum=0,maximum=2**53-1,description="Return bounded task change metadata (sequence, kind, reference and created_at) after this sequence; default zero. Continue with changes_next when non-null. Changes require coordinator interpretation, not mandatory revalidation."),
              "drafts_after": dict(DRAFT,description="Continue the own unfinished draft listing after drafts_next. Draft discovery is restricted to this exact calling thread."),
              "limit": integer("Entries per page; default 25.", 100),
          }, [], read=True),
@@ -262,12 +261,14 @@ ERROR_HELP = {
     "invalid_source_revision": "Use an existing requirements source revision actually used by the report.",
     "acceptance_refused": "The task is not ready for acceptance. Read correction for the exact missing evidence or pending event; an identical retry cannot resolve it.",
     "check_evidence_required": "A passed check needs a completed zero-exit command_run or outside_command receipt, or a completed shell command of this attempt. A cited failed check needs a matching nonzero receipt or failed tool call. Run the check, or mark it not_run or unverified with a concrete blocker.",
-    "check_blocker_required": "A not_run or unverified check needs the concrete blocker that made it impossible. Run the check instead when you can; \"not run\" or \"out of scope\" is not a blocker.",
+    "check_blocker_required": "A not_run or unverified check needs the concrete blocker that made it impossible. Run the check instead when you can; \"not run\" or \"out of scope\" alone is not a blocker. A documented project policy that requires an explicit owner request which was not given is one: name the policy and the missing request.",
     "check_blocker_unexpected": "Only not_run and unverified checks carry a blocker. Remove it from passed and failed checks.",
     "synthesis_gaps_undisclosed": "Every retained not_run or unverified worker check must be verified (replan_request) or listed by its exact name in not_verified with its concrete blocker. Nothing was recorded.",
     "synthesis_blocker_required": "Every not_verified item needs a concrete, nonblank blocker. Verify the item or state what prevented verification; nothing was recorded.",
     "gateway_path_not_found": "The requested project path does not exist. No file was changed.",
     "gateway_command_denied": "This channel cannot execute commands. Coordinators answer informational questions using project reads; execution belongs to scoped workers for requested work.",
+    "gateway_read_denied": "The senior consultant works only from its consultation packet and retained reports: project source reads are refused. Read the reports named in the packet; nothing was read.",
+    "runtime_owned_operation": "This operation is runtime-owned (task creation, governance or a pipeline draft); no channel may perform it. Nothing was created; select an ordinary report template for create_draft.",
     "gateway_read_failure": "The requested project path could not be read. No file was changed.",
     "request_key_conflict": "This request_key was already used for a different request. Reuse a key only to retry the identical call; give any different request a new key.",
     "plan_not_expected": "A plan is accepted only while the task is planning. Read task_get_context for the current state: a plan is already running, so wait for its results or, from a worker, use replan_request.",
@@ -293,7 +294,7 @@ ERROR_HELP = {
     "skill_link_collision": "A regular file or directory already occupies .claude/skills/<name>; it is never replaced or removed by project_skill_link. Move its content into .agents/skills/<name> and ask the user to remove it. Nothing was changed.",
     "skill_link_occupied": "A symlink with a different target occupies .claude/skills/<name> (received is its exact text). To replace it, call link again with replace_symlink_target set to that exact text; the user confirms first. Nothing was changed.",
     "skill_link_conflict": "replace_symlink_target does not match the link now at .claude/skills/<name> (it changed, or the text is wrong). Nothing was replaced; use the exact current text from the latest refusal.",
-    "read_only_scope_not_writable": "A read-only role (architect, code-reviewer, explorer, planner, security-auditor, accessibility-auditor, senior-consultant, ux-designer) cannot create or change files, and this scope names a path that does not exist yet. Nothing was accepted. Give that task only existing paths to read, have it return the file content in its report, and add a dependent task for a writing role (for example technical-writer) that creates the file.",
+    "read_only_scope_not_writable": "A read-only role (architect, code-reviewer, database-architect, explorer, performance-engineer, planner, security-auditor, accessibility-auditor, senior-consultant, ux-designer) cannot create or change files, and this scope names a path that does not exist yet. Nothing was accepted. Give that task only existing paths to read, have it return the file content in its report, and add a dependent task for a writing role (for example technical-writer) that creates the file.",
     "skill_link_not_managed": "unlink removes only the exact managed link ../../.agents/skills/<name>. The entry there is something else and was kept.",
     "skill_link_replace_not_confirmed": "The user did not confirm replacing that link, so it was kept. Do not retry it; continue without replacing it.",
     "gateway_write_conflict": "The file changed since you read it, or expected_sha256 is wrong. Read it again with project_read and pass its current sha256 (\"absent\" only for a new file). Nothing was written.",

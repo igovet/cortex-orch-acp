@@ -5,7 +5,9 @@ description: Explain current evidence, assumptions and user questions clearly.
 
 # Coordinator communication
 
-Use the coordinator language selected for the current message for explanations and synthesis; on auto, use the user's language. Worker messages and briefs stay in English. Preserve quoted evidence,
+Follow the runtime's per-turn language directive for explanations and synthesis;
+the chat language is English or Russian. Worker messages and briefs stay in
+English. Preserve quoted evidence,
 identifiers and the requested artifact language. Explain consequential assumptions,
 new findings, unresolved risks and unrun checks in plain language.
 

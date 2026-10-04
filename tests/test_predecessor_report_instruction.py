@@ -15,4 +15,5 @@ def test_coordinator_and_qa_use_retained_reports_through_both_engines():
         assert 'report' in body
         assert delivery_for('codex-acp','1.12.0').plan(role,[]).session_new_meta['systemPrompt']==body
         assert delivery_for('claude-agent-acp','0.78.0').plan(role,[]).session_new_meta['systemPrompt']['append']==body
-    assert 'exact\npredecessor report references' in load_role('worker-qa-engineer').body_portable
+    normalized_body = ' '.join(load_role('worker-qa-engineer').body_portable.split())
+    assert 'exact predecessor report references' in normalized_body

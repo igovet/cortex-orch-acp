@@ -107,6 +107,62 @@ def test_no_channel_is_offered_a_tool_the_gateway_always_refuses(kind, role_id, 
     assert (names & writes == writes) if may_write else not names & writes
     may_run = kind == "worker" and "consultant" not in role_id
     assert ("command_run" in names) == may_run
+    # The senior consultant works from its packet and retained reports only.
+    reads_source = not (kind == "worker" and "consultant" in role_id)
+    assert ({"project_read", "project_git"} <= names) == reads_source
+    assert bool(names & {"project_read", "project_git"}) == reads_source
+
+
+def test_write_paths_state_the_real_work_area_not_an_enforced_scope():
+    """Writers hold the whole project (gateway._authority); the declared scope
+    coordinates writers. No write tool may claim it is enforced."""
+    from cortex_runtime.orchestration.gateway import SCHEMAS, WORK_AREA
+    for name in ("project_write", "project_mkdir", "project_delete"):
+        description = SCHEMAS[name]["properties"]["path"]["description"]
+        assert "assignment scope" not in description, name
+        assert WORK_AREA in description and "not an enforced boundary" in description, name
+    tools = mcp_tools.tool_definitions("worker", role_id="worker-backend-dev", stage="execution")
+    (link,) = [t for t in tools if t["name"] == "project_skill_link"]
+    assert "no particular declared scope is required" in link["description"]
+    assert "whole-project" not in link["description"]
+
+
+def test_base_tool_descriptions_carry_no_plugin_era_residue():
+    import json
+    advertised = json.dumps([dict(name=t["name"], description=t["description"], inputSchema=t["inputSchema"])
+                             for t in channeled_base_tools()])
+    for phrase in (".codex/cortex", "CODEX_HOME", "hook", "native source capture"):
+        assert phrase not in advertised, phrase
+    (draft,) = [t for t in channeled_base_tools() if t["name"] == "create_draft"]
+    template = draft["inputSchema"]["properties"]["template"]["description"]
+    # The server refuses a pipeline draft from every channel, coordinator included.
+    assert "Only the bound coordinator" not in template
+    assert "runtime_owned_operation" in template and "coordinator included" in template
+    assert "The runtime alone creates and publishes pipeline editions" in draft["description"]
+    # redact_values is still consumed by the store (Store._call), so it stays.
+    assert "redact_values" in draft["inputSchema"]["properties"]
+
+
+def test_blocker_descriptions_accept_a_documented_owner_request_policy():
+    from cortex_runtime.contracts import ERROR_HELP
+    from cortex_runtime.orchestration.contracts import RESULT
+    synthesis = COORDINATOR["synthesis_submit"]["properties"]["not_verified"]["items"]["properties"]["blocker"]["description"]
+    worker = RESULT["properties"]["checks"]["items"]["properties"]["blocker"]["description"]
+    for text in (synthesis, worker):
+        assert '"not requested" alone is not a blocker' in text
+        assert "documented project policy that requires an explicit owner request which was not given" in text
+        assert "paid live check not requested by the owner" in text
+    assert "alone is not a blocker" in ERROR_HELP["check_blocker_required"]
+
+
+def test_worker_question_schema_never_names_skill_proposal():
+    import json
+    (tool,) = [t for t in mcp_tools.tool_definitions("worker", role_id="worker-backend-dev", stage="execution")
+               if t["name"] == "ask_question"]
+    assert "skill_proposal" not in json.dumps(tool)
+    (coordinator,) = [t for t in mcp_tools.tool_definitions("coordinator") if t["name"] == "user_question_request"]
+    assert "skill_proposal" in coordinator["inputSchema"]["properties"]
+    assert {"required": ["skill_proposal"]} in coordinator["inputSchema"]["then"]["not"]["anyOf"]
 
 
 @pytest.mark.parametrize("kind,role_id,stage", [("coordinator", None, None)])
@@ -138,15 +194,17 @@ def test_skill_proposal_guidance_matches_the_enforced_action_pairs():
     schema = COORDINATOR["user_question_request"]["properties"]["skill_proposal"]["description"]
     advertised = tool["description"]
     root = Path(__file__).resolve().parents[1]
-    surfaces = [
-        schema, advertised,
-        (root / "skills/skill-management/SKILL.md").read_text(encoding="utf-8"),
-        (root / "docs/project/decisions.md").read_text(encoding="utf-8"),
-    ]
+    skill = (root / "skills/skill-management/SKILL.md").read_text(encoding="utf-8")
+    guidance = " ".join(skill.split())
+    assert "Follow the live schema for the proposal fields, evidence bounds" in guidance
+    assert "action-matched approval/decline choices; do not invent approval labels" in guidance
+    assert "An arbitrary first option never approves" in guidance
     for action, accepted in skill_proposals._SAFE_OPTION_PAIRS.items():
         for approval, decline in accepted:
             exact_pair = f"[{approval}, {decline}]"
-            assert all(exact_pair in surface for surface in surfaces), (action, exact_pair)
+            assert exact_pair in schema, (action, exact_pair)
+            assert exact_pair in advertised, (action, exact_pair)
+            assert exact_pair not in skill, (action, exact_pair)
 
 
 def test_verdict_is_offered_exactly_where_it_is_accepted():

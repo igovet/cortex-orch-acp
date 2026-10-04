@@ -1,52 +1,45 @@
 ---
 name: context-compaction
-description: Restore coordinator and specialist context after compaction or restart. For the initial skill read, emit the complete command result with text(result), preserving output and exit_code or a running session_id.
+description: Restore coordinator and specialist context after compaction or restart.
 ---
 
 # Context recovery
 
-Use this skill after summarization, compaction, reset, restart or terminal worker
-recovery. The recovery summary is an index into durable state, not a replacement for
-the original request, pipeline or evidence.
-Reload the next needed live tool declaration; remembered field names and values
-are not authoritative. Prefer its declared defaults.
+Use this skill after context loss. A recovery summary points into durable state;
+it does not replace the original request, assignment or evidence. Reload the
+next needed live tool declaration before calling it; remembered arguments are
+not authoritative.
 
 ## Coordinator
 
-Resume the same ACP session and task when available. Recover the current pipeline and reread the
-original request, later user messages, attachment routes and as many bounded evidence
-pages as needed to restore exact requirements and make the next decision. Restore the user-facing language from the user's own prose and any explicit
-response-language preference before replying; an English recovery summary does not
-change it.
+1. Call `task_get_context` to recover the current task, requirements, plan
+   revision, results and unresolved decisions in the same session.
+2. Read the current pipeline with `read_report`, following bounded cursors for
+   the original goal, decisions and evidence needed for the next action.
+3. Use `list_sources` and needed source reads to recover exact user requirements
+   and attachment references. Read relevant immutable reports by exact reference.
 
-Restore the current advisory governance from public response metadata, not an old
-replayed operation receipt or a remembered mode. Read its rationale report when
-needed, then apply its depth to remaining assignments and checks. Unavailable
-governance is diagnostic; user requirements and observed risk still govern work.
-The coordinator owns the causal model across specialist handoffs; preserve separate
-implementation and independent verification responsibilities.
-
-Reconstruct active and cancelled conditions, decisions, assignments, resource owners,
-open actions, required checks, worker handles, source revisions, artifact revisions
-and report pointers. Reconcile active workers before overlapping work. Apply queued
-steering and decide whether change signals invalidate prior evidence.
-Restore ownership before project work: original user sources, attachments and bounded
-evidence pages may be reread by the coordinator, while project reads and checks go to
-the worker that owns them. Repeat a project check for missing or contradictory
-evidence, changed requirements or source/artifact revisions, or changed worker state.
+Follow the runtime's per-turn language directive (English or Russian), not the
+language of a recovery summary. Worker messages and briefs stay in English.
+The coordinator may read bounded project files or code-index results for a direct
+answer, orientation or evidence reconciliation, consistent with the orchestrator.
+Harvest-specific source discovery remains worker-owned. Project edits and checks
+belong to workers; the runtime owns scheduling, review and verification. Do not
+recreate workers, manage engine handles or replay uncertain external effects.
 
 ## Worker
 
-Resume English-only reasoning and communication immediately; the coordinator's
-user-facing language does not apply to workers.
-Restore the runtime-delivered role instructions, exact assignment, model and effort, source
-revision, owned resources, artifact state, command receipts, report pointers and any
-unpublished draft. Reread the assignment, clarifications and evidence required for
-correctness. Inspect current state before mutation and preserve the same ownership
-when continuation is possible.
+1. Read `read_capsule` first to recover the exact assignment, role instructions,
+   requirements, declared work area, retained checks, report references and drafts.
+2. Read the assignment's relevant immutable reports and clarifications through
+   bounded pages. Use `list_reports` only when a needed reference is missing.
+3. If your role writes, inspect current target state before editing and preserve
+   unrelated changes. Reuse retained command receipts rather than rerunning
+   unchanged checks. Consultants recover only their packet and retained reports;
+   do not inspect project source or perform checks.
 
-Use `list_reports` only when a required saved reference was lost and cannot be
-recovered from the pipeline or assignment. Follow bounded cursors for needed content.
-Do not create a duplicate task or infer new scope from unrelated reports. If a source
-or attachment cannot be reopened, record that gap explicitly and ask the coordinator
-for the missing input.
+Resume English-only communication. Recovery does not grant new scope or access.
+Use the advertised worker question route to the user for missing material input,
+and the access-request route for additional project paths. Report unavailable
+sources or attachments explicitly; do not infer their contents or create a
+replacement task. Retain owned draft identities and acknowledged publications.

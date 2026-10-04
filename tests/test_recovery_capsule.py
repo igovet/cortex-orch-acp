@@ -148,6 +148,97 @@ def test_worker_capsule_allowed_tools_match_worker_tools_list_surface(tmp_path):
     assert {"create_draft", "write_report", "read_report", "result_submit"} <= expected
 
 
+def _set_node_profile(store, assignment_ref, *, role, stage):
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("UPDATE runtime_nodes SET role=?, stage=? WHERE assignment_ref=?", (role, stage, assignment_ref))
+        db.commit()
+
+
+@pytest.mark.parametrize("role,stage,grant", [
+    ("worker-backend-dev", "execution", "writer"),
+    ("worker-backend-dev", "review", "read_only"),
+    ("worker-architect", "execution", "read_only"),
+    ("worker-code-reviewer", "review", "read_only"),
+    ("worker-senior-consultant", "execution", "reports_only"),
+])
+def test_worker_capsule_tools_and_environment_follow_the_offered_tools_list(tmp_path, role, stage, grant):
+    """allowed_mcp_tools is the channel's own tools/list for its role and stage,
+    and the environment text grants exactly what those tools allow."""
+    from cortex_runtime.channeled_tools import channeled_base_tool_names
+
+    store, task_id, coordinator = _task(tmp_path)
+    delegated = _delegate(store, coordinator)
+    worker = _provision_worker(store, task_id, coordinator, delegated["assignment_ref"])
+    _set_node_profile(store, delegated["assignment_ref"], role=role, stage=stage)
+    cap = build_capsule(
+        store, task_id, dict(role="worker", assignment_ref=delegated["assignment_ref"], attempt_id="xa_test1"),
+    )
+
+    # The exact surface server.Server.dispatch advertises for tools/list.
+    role_id, node_stage = mcp_tools.assignment_profile(store, worker)
+    assert (role_id, node_stage) == (role, stage)
+    advertised = set(channeled_base_tool_names()) | {
+        entry["name"] for entry in mcp_tools.tool_definitions("worker", role_id=role_id, stage=node_stage)}
+    allowed = set(cap["sections"]["role_and_tool_access"]["allowed_mcp_tools"])
+    assert allowed == advertised
+
+    runtime = cap["sections"]["pipeline_and_assignments"]["runtime"]
+    environment = runtime["environment"]
+    assert "native_tools_enabled" not in runtime
+    assert "You may change anything" not in environment
+    assert "find another way" not in environment
+    assert "Never reach a refused action another way" in environment
+    if grant == "writer":
+        assert mcp_tools._WRITE_TOOLS <= allowed
+        assert "declared scope is the work area agreed with the other workers for coordination" in environment
+        assert "Anything outside the project needs an explicit permission request the user accepts" in environment
+        assert "access_request" in environment
+    else:
+        assert not mcp_tools._WRITE_TOOLS & allowed
+        for granted in ("outside_write", "outside_command", "declared scope", "access_request"):
+            assert granted not in environment
+    if grant == "read_only":
+        assert "create, change and delete nothing" in environment
+        assert ("(a review stage)" in environment) == (stage == "review")
+    if grant == "reports_only":
+        assert not {"command_run", "project_read", "project_git"} & allowed
+        assert "no project reads, no commands and no writes" in environment
+        assert "whole machine is readable" not in environment
+    rendered = render_capsule(cap)
+    assert "You may change anything" not in rendered and "native_tools_enabled" not in rendered
+
+
+def test_coordinator_capsule_lists_only_its_offered_tools_and_no_worker_environment(tmp_path):
+    from cortex_runtime.channeled_tools import channeled_base_tool_names
+
+    store, task_id, coordinator = _task(tmp_path)
+    _delegate(store, coordinator)
+    cap = build_capsule(store, task_id, dict(role="coordinator"))
+    advertised = set(channeled_base_tool_names()) | {entry["name"] for entry in mcp_tools.tool_definitions("coordinator")}
+    allowed = set(cap["sections"]["role_and_tool_access"]["allowed_mcp_tools"])
+    assert allowed == advertised
+    assert not (mcp_tools._WRITE_TOOLS | {"command_run", "access_request"}) & allowed
+    runtime = cap["sections"]["pipeline_and_assignments"]["runtime"]
+    assert "environment" not in runtime and "native_tools_enabled" not in runtime
+
+
+def test_worker_capsule_without_a_node_states_no_write_grant(tmp_path):
+    store, task_id, coordinator = _task(tmp_path)
+    delegated = _delegate(store, coordinator)
+    _provision_worker(store, task_id, coordinator, delegated["assignment_ref"])
+    with store.connection() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("DELETE FROM runtime_nodes WHERE assignment_ref=?", (delegated["assignment_ref"],))
+        db.commit()
+    cap = build_capsule(
+        store, task_id, dict(role="worker", assignment_ref=delegated["assignment_ref"], attempt_id="xa_test1"),
+    )
+    environment = cap["sections"]["pipeline_and_assignments"]["runtime"]["environment"]
+    assert "states no write grant" in environment
+    assert "outside_write" not in environment and "find another way" not in environment
+
+
 def test_unknown_task_refused(tmp_path):
     store, task_id, coordinator = _task(tmp_path)
     with pytest.raises(StoreError, match="unknown_task"):

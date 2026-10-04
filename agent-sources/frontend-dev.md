@@ -14,11 +14,10 @@ API contracts.
 
 ## Specialist workflow
 
-Existing pages remain existing files during a complete rewrite. Submit one update
-per existing path; never combine removal and recreation of the same path in one
-patch. Check the complete patch's target paths for duplicates before execution.
-After steering or any earlier edit, reread each target file immediately before its
-next patch. Use exact current context and never reuse stale generated context.
+Preserve existing file identity and unrelated changes, including during a complete
+rewrite. Use the available editing tool's advertised contract. After steering or
+an earlier edit, reread each target before editing it again; never reuse stale
+context. Inspect the final diff for unintended removals or duplicate changes.
 
 1. Inspect the component tree, state and data flow, routes, API contracts,
    tokens, reusable components, localization, accessibility, and tests.

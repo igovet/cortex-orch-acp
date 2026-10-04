@@ -156,16 +156,23 @@ host is bound read-only -- is instead a private, writable, per-run directory
 backed by the process's own scratch, never the host's shared one; `HOME` and
 `TMPDIR`/`TMP`/`TEMP` are that same private scratch. The project mount follows
 the engine's existing launch-time jail grant: writing workers can have the
-whole project writable even when their runtime-declared assignment scope is
-narrower. The Cortex gateway still checks every write against declared scope,
-owner policy and path safety. An accepted access request extends only runtime
-declared scope and writer reservations; it does not remount or widen the OS
-jail. `.cortex` is hidden (for a task bound to a linked worktree, the jail root is that worktree
+whole project writable even when their runtime-declared assignment work area is
+narrower. That declared area coordinates parallel writers; it is not a gateway
+write boundary. The gateway enforces assignment/role authority, user-protected
+paths, private-path restrictions and path safety, but does not compare ordinary
+writes with the declared work area. An `access_request` reserves additional
+work for coordination; it does not remount or widen the OS jail. The engine
+jail also leaves the host's real `/tmp` writable and the engine state directory
+writable apart from protected session-configuration files, so these locations
+are residual write surfaces, not denied by the project gateway. `.cortex` is hidden (for a task bound to a linked worktree, the jail root is that worktree
 and the main repository's shared `.cortex` is masked too) and `.codex`,
 `.claude` are read-only; `.git` is read-only except the
 repository data git needs for a writing worker (see
 [Git and tool state in the project](#git-and-tool-state-in-the-project)). The coordinator, reviewers and
-read-only roles get no writable scope. The engine's state directory (`CODEX_HOME`
+read-only roles get no project write grant. Database-architect and
+performance-engineer are also read-only roles, as is the runtime-reserved
+build-verification profile (not dispatched; the runtime executes verification).
+The engine's state directory (`CODEX_HOME`
 or `CLAUDE_CONFIG_DIR`, the owner's real one for a native account) stays writable
 except the files and directories that configure later sessions (settings, hooks,
 instructions, skills, agents, commands, rules); absent ones are first created
@@ -359,11 +366,15 @@ the owner. See [retention maintenance](docs/acp/packaging-and-onboarding.md#rete
 ### Access mode (Guarded and Auto)
 
 Each task has an access mode (`configuration.access_mode`). **Guarded** is the
-default and the behaviour described above: the runtime asks the user on a
+default and the behavior described above: the runtime asks the user on a
 permission card before native deletion of declared `rm` invocations (including
 direct `rm`, `sudo rm`, `xargs rm`, and similar forms), before `project_delete`,
 and before every `outside_write` and `outside_command`; no answer, a timeout, a
-disconnect or a refusal means the action does not happen. Non-`rm` commands such
+disconnect or a refusal means the action does not happen. In **Auto**, these
+consent-gated operations are auto-approved without a per-action user card (even
+when no client is connected). That behavior does not satisfy the owner decision
+that outside-project effects require a permission card the user accepts; it is
+a known policy gap, not an enforced consent boundary. Non-`rm` commands such
 as `git clean`, `git commit`, `docker`, `python`, and `pytest` continue without
 a permission card in Guarded mode. Workers run in the engine mode that routes
 each mutating tool call through `session/request_permission` (Claude `default`,

@@ -204,7 +204,72 @@ def test_every_read_skill_target_in_shipped_instructions_is_advertised():
     for role, paths in paths_by_role.items():
         for path in paths:
             for skill_id in target_pattern.findall(path.read_text()):
-                target_role = (
-                    "coordinator" if skill_id == "coordinator-communication" else role
-                )
-                assert skill_id in role_enums[target_role], (target_role, path, skill_id)
+                assert skill_id in role_enums[role], (role, path, skill_id)
+
+
+def test_worker_protocol_does_not_reload_inlined_skills_and_respects_role_access():
+    for role_id in ("worker-backend-dev", "worker-explorer",
+                    "worker-database-architect", "worker-performance-engineer"):
+        body = " ".join(load_role(role_id).body_portable.split())
+        assert "through the advertised skill reader" not in body
+        assert "If your role writes, read relevant project instructions" in body
+        assert "If your role writes, verify every behavior" in body
+        assert "For writing roles, run the checks" in body
+        assert "Read-only roles change nothing" in body
+        assert "only authorized non-mutating checks" in body
+        assert "use `access_request` first" in body
+        assert "only when the plan itself must change" in body
+        assert "advertised `ask_question` route to the user" in body
+        assert "only when the assignment needs that check and project rules do not already decide it" in body
+    for role_id in ("worker-database-architect", "worker-performance-engineer"):
+        assert "role is read-only" in load_role(role_id).body_portable
+
+
+def test_every_coordinator_reference_link_resolves_through_the_advertised_reader():
+    import re
+    from types import SimpleNamespace
+
+    body = load_role("orchestrator").body_portable
+    references = re.findall(r"\]\(references/([a-z-]+)\.md\)", body)
+    assert "verification-coverage" in references
+    channel = SimpleNamespace(role="coordinator")
+    schema = _enumerate_skills({"properties": {"skill": {"type": "string"}}},
+                               "coordinator", None)
+    advertised = schema["properties"]["skill"]["anyOf"][0]["enum"]
+    for reference_id in references:
+        assert reference_id in advertised
+        assert _shared_read_skill(None, channel, {"skill": reference_id})["body"].strip()
+
+
+def test_portable_verification_guidance_uses_target_policy_not_cortex_development():
+    for reference_id in ("verification-coverage", "live-qualification"):
+        text = read_reference(reference_id, role_kind="coordinator")
+        assert "TARGET project" in text
+        assert "explicit owner request" in text
+        assert "paid live check not requested by the owner" in text
+        for residue in ("Paseo", "~/.paseo", "integrations/paseo",
+                        "--i-authorize-paid-call", "--approval-ref", "deep coordinator"):
+            assert residue not in text
+    local = (REPO_ROOT / "docs/project/verification.md").read_text()
+    for rule in ("~/.paseo-dev", "~/.config/Paseo-dev", "Heavy models",
+                 "--i-authorize-paid-call", "--approval-ref", "owner-selected route",
+                 "npm --prefix integrations/paseo", "paid live check not requested by the owner"):
+        assert rule in local
+
+
+def test_recovery_routes_and_shared_access_wording_do_not_drift():
+    recovery = load_role("context-compaction").body_portable
+    coordinator, worker = recovery.split("## Coordinator", 1)[1].split("## Worker", 1)
+    assert coordinator.index("task_get_context") < coordinator.index("read_report") < coordinator.index("list_sources")
+    assert "read_capsule" in worker
+    assert "may read bounded project files" in coordinator
+    assert "runtime's per-turn language directive" in coordinator
+    for residue in ("advisory governance", "worker handles", "session_id", "text(result)",
+                    "ask the coordinator", "code-mode"):
+        assert residue not in recovery
+    discipline = load_role("tool-discipline").body_portable
+    assert "agreed work area" in discipline
+    assert "permission request accepted by the user" in discipline
+    assert "project is read-only except your assignment scope" not in discipline
+    assert "Use this skill only during selected Cortex work" not in discipline
+    assert "Code-mode" not in discipline

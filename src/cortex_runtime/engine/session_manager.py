@@ -21,7 +21,7 @@ from . import stub_handlers
 from .client import EngineClient, EngineProtocolError, EngineTransportClosed
 from .correlation import CorrelationTables
 from .fs_bridge import FsBridge, FsBridgeError
-from .mcp_bridge import build_mcp_servers, host_mcp_servers
+from .mcp_bridge import build_mcp_servers, host_mcp_servers, is_consultant_role
 from .opencode_tool_calls import CodeModeToolCalls
 from .permissions import DuplicateEnginePermissionRequestId, PermissionBridge
 from .process import EngineProcess
@@ -239,6 +239,7 @@ class EngineSessionManager:
         coordinator_refusal_notifier=None,
         host_mcp_servers=None,
         mcp_role: str | None = None,
+        mcp_role_id: str | None = None,
         broker_mcp=False,
         jail=None,
         engine_instructions: str | None = None,
@@ -300,6 +301,10 @@ class EngineSessionManager:
         if mcp_role not in (None, "coordinator", "worker"):
             raise ValueError("mcp_role must be coordinator or worker.")
         self._mcp_role = mcp_role
+        # The worker profile id, when known. The senior consultant is offered
+        # no external MCP server and no native tool approvals (see
+        # engine.mcp_bridge.receives_external_mcp and PermissionBridge).
+        self._mcp_role_id = mcp_role_id
         # T024: optional sink -- see ``engine.terminal_bridge.TerminalBridge``
         # and ``delegation.live_adapters``'s real binding of this to
         # ``recovery.large_output_store``; ``None`` (default) never persists.
@@ -463,6 +468,7 @@ class EngineSessionManager:
                 host_permission_requester=self._host_permission_requester,
                 call_timeout=max(self._call_timeout, DEFAULT_MANUAL_PERMISSION_TIMEOUT),
                 coordinator_refusal_notifier=self._coordinator_refusal_notifier,
+                native_tools_refused=is_consultant_role(self._mcp_role_id),
             )
             self._fs_bridge = FsBridge()
             self._terminal_bridge = TerminalBridge(persist_sink=self._terminal_output_persist)
@@ -485,7 +491,8 @@ class EngineSessionManager:
                         "An OpenCode session needs its role prompt at launch (engine_instructions).")
         from .unified_system_prompt import CODE_INDEX_SERVER, attached_servers_section, code_index_project_name
 
-        servers = host_mcp_servers(self._host_mcp_servers, role=self._mcp_role, engine=self._record.engine)
+        servers = host_mcp_servers(self._host_mcp_servers, role=self._mcp_role, engine=self._record.engine,
+                                    role_id=self._mcp_role_id)
         note = attached_servers_section(
             servers, self._workspace_root, role=self._mcp_role or "worker",
             code_index_project=(code_index_project_name(self._workspace_root)
@@ -783,7 +790,8 @@ class EngineSessionManager:
         # refuses one called "cortex").
         # Use the verified connection record's engine identity; model labels
         # and host display provider names are not admission authorities.
-        external_servers = host_mcp_servers(self._host_mcp_servers, role=self._mcp_role, engine=self._record.engine)
+        external_servers = host_mcp_servers(self._host_mcp_servers, role=self._mcp_role, engine=self._record.engine,
+                                    role_id=self._mcp_role_id)
         if external_servers and (self._process is None or self._channel_credentials is None):
             raise _fail('external_mcp_gateway_required','External servers require a trusted runtime gateway.')
         params["mcpServers"] = list(params["mcpServers"]) + [

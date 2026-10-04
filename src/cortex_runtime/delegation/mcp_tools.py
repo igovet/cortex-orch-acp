@@ -499,11 +499,11 @@ _OPERATION_DESCRIPTIONS = dict(
                  "constraints with origins (including answered user questions), own assignments/pipeline, confirmed publications/checks, open/"
                  "uncertain actions, newer events, role/tool access, and continuation intent.",
     read_large_output="Page through an output too large to return inline (a command_run or project_git result), by its large_output_id, byte offset and limit.",
-    project_read="Read a project file (UTF-8 text, paged by offset/limit; returns its sha256 for a later write or delete) or list a directory. Read-only and always available.",
+    project_read="Read a project file (UTF-8 text, paged by offset/limit; returns its sha256 for a later write or delete) or list a directory. Read-only.",
     project_git="Read-only git evidence for the project: `status`, or the full working-tree `diff` against HEAD including edits that were already there. Large output is retained; page it with read_large_output.",
     project_write="Create or replace one project file with complete UTF-8 content. Pass the file's current sha256 from project_read, or \"absent\" for a new file; a mismatch changes nothing. Only for a worker whose assignment may write; paths the user protected are refused.",
     project_mkdir="Create one new project directory; its parent must already exist. Only for a worker whose assignment may write.",
-    project_skill_link="Expose a project skill to Claude: link makes .claude/skills/<name> the relative symlink ../../.agents/skills/<name> (Git keeps it as a symlink); unlink removes only that exact link. The only write .claude accepts; the returned git field says whether the project's .gitignore would drop the link or skill. Replacing a different existing link needs its exact text and the user's confirmation. Only for a worker whose assignment may write.",
+    project_skill_link="Expose a project skill to Claude: link makes .claude/skills/<name> the relative symlink ../../.agents/skills/<name> (Git keeps it as a symlink); unlink removes only that exact link. The only write .claude accepts; the returned git field says whether the project's .gitignore would drop the link or skill. Replacing a different existing link needs its exact text and the user's confirmation. Every worker whose assignment may write can use it; no particular declared scope is required, and a path the user protected refuses it.",
     project_delete="Delete one existing regular project file (never a directory), identified by its current sha256. The user confirms every deletion first. Only for a worker whose assignment may write.",
     command_run="Run one command (argv, no shell) in the project root inside the sandbox, as the owner, with their toolchain. Returns argv, exit_code, a tool_call_ref (the evidence a passed result_submit check must cite) and the retained output (read_large_output). Not available to coordinators or consultants.",
     outside_command="Run one command (argv, no shell) outside the sandbox as the user, for work the sandbox cannot do (a global install, a change in HOME). The user confirms it first on a permission card; a refusal means it did not run. Only for a worker whose assignment may write.",
@@ -555,7 +555,9 @@ def _offered(name: str, role_kind: str, role_id: str | None, stage: str | None) 
         return True
     if name in _WRITE_TOOLS and (stage == "review" or role_id in READ_ONLY):
         return False
-    if name == "command_run" and "consultant" in role_id:
+    # The senior consultant works only from its consultation packet and
+    # retained reports: no commands and no project source reads.
+    if "consultant" in role_id and name in {"command_run", "project_read", "project_git"}:
         return False
     return True
 

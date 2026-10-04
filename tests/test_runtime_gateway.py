@@ -269,3 +269,101 @@ def test_missing_path_is_read_failure_not_uncertain_publication(context):
         dispatch(store, channel, 'project_read', {'path': 'absent/notes.md'})
     assert error.value.field == 'path'
     assert 'does not exist' in error.value.correction
+
+
+def _role_worker(tmp_path,role):
+    from runtime_scenarios import provision_fixture
+    store=Store(tmp_path/'.cortex',project_root=tmp_path)
+    boot=bootstrap_task(store,SourceEvent(origin='gateway-role',event_id=role),'Implement','owner')
+    coordinator=resolve_channel(store,boot.channel_id,boot.secret)
+    worker,_=provision_fixture(store,coordinator,key=role,role=role)
+    return store,worker,tmp_path
+
+
+def test_consultant_reads_no_project_source_and_runs_nothing(tmp_path):
+    """The senior consultant works from its consultation packet and retained
+    reports only: no project source reads, no commands, no writes."""
+    store,worker,root=_role_worker(tmp_path,'senior-consultant')
+    (root/'hello').write_text('hello')
+    outside=root.parent/('consultant-'+root.name)
+    for name,args,error in [
+        ('project_read',dict(path='hello'),'gateway_read_denied'),
+        ('project_git',dict(kind='status',request_key='git'),'gateway_read_denied'),
+        ('command_run',dict(argv=['true'],request_key='run'),'gateway_command_denied'),
+        ('project_write',dict(path='hello',content='bad',expected_sha256='absent',request_key='w'),'gateway_scope_denied'),
+        ('outside_write',dict(path=str(outside),content='x',request_key='o'),'gateway_scope_denied')]:
+        with pytest.raises(StoreError,match=error): dispatch(store,worker,name,args)
+    assert (root/'hello').read_text()=='hello' and not outside.exists()
+
+
+@pytest.mark.parametrize('role',['database-architect','performance-engineer','build-verification'])
+def test_read_only_specialists_hold_no_write_grant(tmp_path,role):
+    """Their profiles declare them read-only; the gateway agrees."""
+    if role == 'build-verification':
+        # Reserved roles cannot be planned. Exercise defense in depth on a
+        # real channel without enabling dispatch of the reserved profile.
+        store,worker,root=_role_worker(tmp_path,'backend-dev')
+        with store.connection() as db:
+            db.execute('UPDATE runtime_nodes SET role=? WHERE assignment_ref IN '
+                       '(SELECT idempotency_key FROM delegation_provisioning WHERE attempt_id=?)',
+                       ('worker-build-verification',worker.attempt_id))
+    else:
+        store,worker,root=_role_worker(tmp_path,role)
+    (root/'hello').write_text('hello')
+    outside=root.parent/(role+'-'+root.name)
+    assert dispatch(store,worker,'project_read',dict(path='hello'))['content']=='hello'
+    for name,args in [('project_write',dict(path='hello',content='bad',expected_sha256='absent',request_key='w')),
+                      ('outside_write',dict(path=str(outside),content='x',request_key='o'))]:
+        with pytest.raises(StoreError,match='gateway_scope_denied'): dispatch(store,worker,name,args)
+    assert (root/'hello').read_text()=='hello' and not outside.exists()
+    names={t['name'] for t in mcp_tools.tool_definitions('worker',role_id='worker-'+role,stage='execution')}
+    assert not names & {'project_write','project_mkdir','project_delete','project_skill_link','outside_write','outside_command'}
+    assert {'project_read','command_run'} <= names
+
+    if role == 'build-verification':
+        result=dispatch(store,worker,'command_run',dict(
+            argv=['python3','-B','-c',
+                  "from pathlib import Path; p=Path('hello'); assert p.read_text()=='hello'; "
+                  "p.write_text('bad')"],request_key='readonly-command'))
+        assert result['complete'] and result['exit_code'] != 0
+        assert (root/'hello').read_text()=='hello'
+
+
+@pytest.mark.parametrize('answer',['allow','deny',None])
+@pytest.mark.parametrize('operation',['outside_write','outside_command'])
+def test_outside_actions_happen_only_after_the_user_allows_them(tmp_path,tmp_path_factory,operation,answer):
+    """Outside the project nothing happens until the user selects allow on a
+    permission card; a refusal, or no client to ask, refuses the action."""
+    import threading,time
+    from cortex_runtime.orchestration import consent
+    store,worker,_=_role_worker(tmp_path,'backend-dev')
+    target=tmp_path_factory.mktemp('outside')/'made.txt'
+    args=(dict(path=str(target),content='x',request_key='o') if operation=='outside_write'
+          else dict(argv=['touch',str(target)],cwd=str(target.parent),request_key='o'))
+    cards=[]
+    def requester(_session,params,_timeout):
+        cards.append(params)
+        return {'outcome':{'outcome':'selected','optionId':answer}}
+    # Guarded mode: the user's client is asked; None is no live client at all.
+    runtime=SimpleNamespace(_store=store,permission_requester_for_task=lambda task_id: requester if answer else None)
+    outcome={}
+    def run():
+        try: outcome['result']=dispatch(store,worker,operation,args)
+        except StoreError as error: outcome['error']=str(error)
+    thread=threading.Thread(target=run);thread.start()
+    deadline=time.monotonic()+20
+    while thread.is_alive() and time.monotonic()<deadline:
+        consent.relay(runtime,worker.task_id,'en');time.sleep(0.05)
+    thread.join(5)
+    assert not thread.is_alive()
+    with store.connection() as db:
+        rows=[tuple(row) for row in db.execute('SELECT kind,status FROM consent_requests WHERE task_id=?',(worker.task_id,))]
+    if answer=='allow':
+        assert 'result' in outcome and target.exists(),outcome
+        assert rows==[(operation,'approved')]
+        assert cards and cards[0]['toolCall']['rawInput']['kind']==operation
+    else:
+        assert outcome=={'error':'outside_action_not_confirmed'}
+        assert not target.exists()
+        assert rows==[(operation,'denied')]
+        assert len(cards)==(1 if answer else 0)

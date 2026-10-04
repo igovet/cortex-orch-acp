@@ -28,10 +28,9 @@ or retry argument variations after an indexing error.
 
 An indexer can reject an otherwise valid linked worktree. Treat that failed single
 attempt as unavailable for the exact workspace, record the returned error, and use
-bounded repository-native reads for the concrete question. The installed
-codebase-memory-mcp 0.10.8 rejected a readable `.paseo/worktrees/` root containing
-source files while accepting comparable linked worktrees; no Cortex-side argument
-workaround was observed. Follow the live schema for tool arguments: this guidance
+bounded repository-native reads for the concrete question. A readable linked
+worktree can still be rejected by an indexer; do not assume another worktree's
+successful index covers it. Follow the live schema for tool arguments: this guidance
 only determines when an index attempt is appropriate.
 
 Use the smallest operation that answers the question: `search_graph` for definitions,

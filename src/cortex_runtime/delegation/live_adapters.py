@@ -284,7 +284,7 @@ def _effort_within(effort: str | None, offered) -> str | None:
 
 def _session_new_meta_for(
     engine: str, version: str, instructions: str | None, *, role: str = "worker", project_root: str | None = None,
-    effort: str | None = None, environ: dict[str, str] | None = None,
+    effort: str | None = None, environ: dict[str, str] | None = None, role_id: str | None = None,
 ):
     """The ``session/new`` ``_meta`` payload this engine's own qualified
     delivery mechanism builds for ``instructions``, or ``None``.
@@ -305,6 +305,11 @@ def _session_new_meta_for(
             return claude_native_subagent_restriction_meta(role=role, effort=effort)
         return None
     unified_base_prompt = unified_base_prompt_enabled(environ)
+    from ..engine.mcp_bridge import is_consultant_role
+
+    # ``role_id`` (the worker profile) selects the senior consultant's base
+    # prompt, which names its packet and reports instead of a code index.
+    consultant = role == "worker" and is_consultant_role(role_id)
     logging.getLogger(__name__).info(
         "Cortex unified base prompt %s for engine session metadata",
         "enabled" if unified_base_prompt else "disabled",
@@ -324,7 +329,7 @@ def _session_new_meta_for(
         if unified_base_prompt:
             from ..engine.unified_system_prompt import cortex_system_prompt
 
-            base_prompt = cortex_system_prompt(role, project_root, environ=environ)
+            base_prompt = cortex_system_prompt(role, project_root, environ=environ, consultant=consultant)
         return build_claude_session_new_meta(
             instructions, role=role, effort=effort, base_prompt=base_prompt,
             native_skills=not unified_base_prompt,
@@ -346,7 +351,7 @@ def _session_new_meta_for(
         if unified_base_prompt:
             from ..engine.unified_system_prompt import cortex_system_prompt
 
-            base_instructions = cortex_system_prompt(role, project_root, environ=environ)
+            base_instructions = cortex_system_prompt(role, project_root, environ=environ, consultant=consultant)
         meta = {**meta, **build_codex_session_new_meta(
             instructions, base_instructions=base_instructions)}
     if engine == "codex-acp" and version == "1.12.0" and meta is not None:
@@ -1001,14 +1006,22 @@ class EngineSessionManagerAdapter:
             recipient = "worker" if launch.get("assignment_id") else "coordinator"
             if "mcp_role" not in manager_kwargs:
                 manager_kwargs["mcp_role"] = recipient
+            if "mcp_role_id" not in manager_kwargs:
+                # The worker profile decides per-role attachment: the senior
+                # consultant gets no external MCP server (code index included)
+                # and no native tool approvals (engine.mcp_bridge
+                # .receives_external_mcp, engine.permissions.PermissionBridge).
+                manager_kwargs["mcp_role_id"] = launch.get("role_id")
             if record.engine == "opencode" and "engine_instructions" not in manager_kwargs:
                 # OpenCode v2 takes its role prompt at process launch
                 # only (engine.instruction_delivery_registry
                 # .OpenCodeAgentPromptDelivery); session/new gets no _meta.
+                from ..engine.mcp_bridge import is_consultant_role
                 from ..engine.opencode_adapter_acp import build_agent_prompt
 
                 manager_kwargs["engine_instructions"] = build_agent_prompt(
-                    instructions, role=recipient, project_root=workspace_root, environ=self._environ)
+                    instructions, role=recipient, project_root=workspace_root, environ=self._environ,
+                    consultant=recipient == "worker" and is_consultant_role(launch.get("role_id")))
             if "jail" not in manager_kwargs and self._store is not None and channel_credentials is not None:
                 manager_kwargs["jail"] = _jail_for(self._store, channel_credentials)
             manager = EngineSessionManager(
@@ -1024,6 +1037,7 @@ class EngineSessionManagerAdapter:
             session_new_meta = _session_new_meta_for(
                 record.engine, _pinned_version_for(record.engine, record), instructions, role=recipient,
                 project_root=workspace_root, effort=_sdk_effort_for(record, launch), environ=self._environ,
+                role_id=launch.get("role_id"),
             )
             session_id = manager.create_session(
                 task_id, launch.get("assignment_id") or attempt_id, session_new_meta=session_new_meta,
@@ -2103,7 +2117,8 @@ class EngineSessionManagerAdapter:
         if meta is None:
             meta = _session_new_meta_for(record.engine, version, instructions, role=recipient,
                                          project_root=getattr(manager, "_workspace_root", None),
-                                         effort=_sdk_effort_for(record, launch), environ=self._environ)
+                                         effort=_sdk_effort_for(record, launch), environ=self._environ,
+                                         role_id=launch.get("role_id"))
         if meta is not None:
             import json
 

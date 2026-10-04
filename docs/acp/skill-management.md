@@ -43,7 +43,7 @@ Inspect existing project skills before creating or replacing one. A name collisi
 
 After writing and checking `.agents/skills/<name>/SKILL.md`, use the advertised `project_skill_link` operation. Do not write inside `.claude` with a generic file, directory, or command tool. The operation verifies that the skill is a real project directory with a regular `SKILL.md`, and creates only the exact relative link above. It refuses files and directories at the destination. A different existing symlink requires the exact observed target and user confirmation before replacement; failures or uncertain outcomes must be reported without claiming Claude exposure.
 
-The operation currently requires a writing assignment with whole-project scope `.`. The user command does not silently grant that scope. The coordinator must plan it explicitly; when the current assignment is narrower or the link operation is unavailable, stop and use the runtime's structured scope/replanning path. Do not work around the boundary.
+The operation requires a writing assignment, but no particular declared scope: writing workers receive whole-project write authority for coordination, subject to private-path restrictions and user-protected paths. The declared scope is the agreed work area, not an enforced gateway boundary. The user command does not itself grant writing authority. If a path outside the agreed work area needs to be changed, reserve it with `access_request`; if the assignment lacks writing authority, use the runtime's structured planning path. Do not work around a refusal.
 
 ## Proposed skills from repeated work
 

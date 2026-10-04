@@ -7,7 +7,14 @@ Commands below are copied exactly from `AGENTS.md`, `README.md`,
 
 Plan a real check for every changed surface before work starts; the
 [orchestrator reference](../../skills/orchestrator/references/verification-coverage.md)
-sets out GUI, installation, runtime and documentation coverage. Close every
+sets out portable GUI, installation, runtime and documentation coverage using
+the target project's own policy. For this Cortex checkout, UI/plugin changes use
+the type-check and applicable `npm --prefix integrations/paseo run test:*` scripts
+below; rendered checks require an owner-requested `desktop` run. Installation or
+packaging changes need the documented real install in a disposable environment.
+Runtime/protocol changes use focused tests and the no-paid smoke harness where
+applicable. The Cortex-specific live policy and isolation rules remain below
+and in `AGENTS.md`, not in portable coordinator guidance. Close every
 check that can be performed in the authorized environment. An unrun or
 unverified check needs a concrete blocker, and synthesis discloses it.
 

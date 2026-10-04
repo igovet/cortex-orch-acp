@@ -22,6 +22,14 @@ anything at launch, and writes only JSON-RPC lines to stdout (every log
 goes to stderr) — see `tests/test_acp_entrypoint_packaging.py` and
 `tests/test_acp_stdout_purity.py`.
 
+Worker role instructions are maintained in canonical `skills/worker-*/SKILL.md`
+sources and composed with shared protocol text. The package no longer includes
+redundant `agents/*.toml` worker profiles or generated copies under
+`agents/references/`; `profiles.json` maps role entries to Markdown sources, and
+`python3 -B scripts/generate_agent_profiles.py check` validates generated
+instruction artifacts. The 23 role instructions remain; the duplicate TOML
+serialization format does not.
+
 ### What was Codex-plugin-harness-era and was removed (T033)
 
 The Codex plugin/gateway harness was a separate, older way to run Cortex —

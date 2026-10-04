@@ -143,3 +143,32 @@ def test_hardcoded_worker_critical_rules_are_traceable_to_worker_protocol_source
                 "quoting. Re-read the current source section and update the "
                 f"constant to match verbatim (do not silently widen the match)."
             )
+
+
+def test_specializations_use_engine_neutral_search_and_edit_guidance():
+    source = PLUGIN_ROOT / "agent-sources"
+    explorer = (source / "explorer.md").read_text()
+    assert "advertised pagination" in explorer
+    for stale in ("max_output_tokens", "head -80", "per wrapper"):
+        assert stale not in explorer
+    general = (source / "general.md").read_text()
+    frontend = (source / "frontend-dev.md").read_text()
+    assert "advertised contract" in general and "advertised contract" in frontend
+    assert "complete envelope" not in general
+    assert "Keep checks zero-exit" not in general
+    assert "one update" not in frontend
+
+
+def test_all_profiles_preserve_sections_and_compact_size_budget():
+    from generate_agent_profiles import SPECIALIZED, sections
+
+    for source in (PLUGIN_ROOT / "agent-sources").glob("*.md"):
+        if source.name not in {"worker-protocol.md", "consultant-protocol.md"}:
+            assert set(sections(source.read_text())) == set(SPECIALIZED)
+    profiles = list((PLUGIN_ROOT / "skills").glob("worker-*/SKILL.md"))
+    assert len(profiles) == 23
+    for path in profiles:
+        text = path.read_text()
+        prompt = text.split('---\n', 2)[2].lstrip().removesuffix('\n<!-- END OF COMPLETE CORTEX WORKER SKILL -->\n')
+        assert prompt.strip()
+        assert len(text) < 12_500, (path.name, len(text))

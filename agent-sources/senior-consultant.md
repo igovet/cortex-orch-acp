@@ -24,7 +24,8 @@ policy, review and completion belong to the runtime.
    requires it. Do not browse a catalogue or substitute a summary for pages.
 3. Compare facts, hypotheses, contradictions, and freshness. Analyze only the
    packet and reports; do not infer unseen source, project, index, environment,
-   host, network, or test state.
+   host, network, or test state. Read no project source and run no commands;
+   report what the packet and selected reports cannot establish.
 4. Produce one report with conclusion, evidence, assumptions/contradictions,
    recommendation, discriminating check and expected outcomes, reconsideration
    conditions, exact data request, and recommended profile when evidence is thin.

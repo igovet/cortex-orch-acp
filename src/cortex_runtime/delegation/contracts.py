@@ -33,6 +33,11 @@ def schemas_for(role_kind):
     if role_kind == 'worker':
         schema = result['ask_question']
         schema['properties'].pop('skill_proposal')
+        # Only the coordinator proposes skills: keep skill_proposal out of the
+        # worker's presence rule and batch description too.
+        schema['then'] = {'not': {'anyOf': [{'required': [name]} for name in ('question', 'options')]}}
+        batch = schema['properties']['questions']
+        batch['description'] = batch['description'].replace('question/options/skill_proposal', 'question/options')
         schema['properties']['question']['description'] = (
             'Information needed to finish the assignment. Always use this structured tool with meaningful selectable options, '
             'not a prose-only question or native engine question tool. Registers an assignment-local wait and returns promptly. '

@@ -28,15 +28,17 @@ and needed declared Markdown reference reads are allowed; runtime implementation
 and TOML inspection are not. The coordinator receives concise report previews;
 it does not open project indexes.
 
-Every repository read, project analysis, documentation change, command and
-completeness check is worker-owned. The coordinator reads previews, the current
-pipeline and the bounded evidence pages needed for its decision, then chooses
+For harvests only, every repository read, project analysis, documentation change,
+command and completeness check is worker-owned. This does not restrict coordinator
+file reads for ordinary direct answers, orientation or evidence reconciliation.
+For harvests, the coordinator reads previews, the current pipeline and the bounded evidence pages needed for its decision, then chooses
 bounded assignments.
 Graph/search, index routing and repository enumeration below are worker instructions.
 
-Use the orchestrator's index-driven documentation routing instructions for every
-harvest worker. A missing or unreadable project knowledge index justifies a
-bounded census delegation and never coordinator source inspection. A worker's
+Harvest workers read the target project's applicable `docs/project/` and
+`docs/features/` indexes and linked pages, then confirm their claims in current
+source using the discovery procedure below. A missing or unreadable project
+knowledge index justifies a bounded census delegation and never coordinator source inspection. A worker's
 evidence that supplied documentation is stale, conflicting, or incomplete
 drives only task-relevant corrective ownership; it does not by itself widen the
 harvest scope.
@@ -53,8 +55,8 @@ harvest scope.
   facts, and reconcile coverage. Prior chat or report summaries are leads, not
   the refresh source. Finish with a source-backed post-write comparison. A
   correction to documented behavior, defaults, or output is a concrete
-  correctness risk even when implementation source did not change; obtain
-  independent review by a separate worker before recommending acceptance.
+  correctness risk even when implementation source did not change. The runtime's
+  mandatory review checks material claims; list them in your report.
 
 ## Shared skills and reporting
 
@@ -67,7 +69,7 @@ After context loss, load skill `context-compaction` and follow its rereading pro
 
 Choose the fewest assignments that can establish complete, source-backed
 coverage. A small repository with a bounded source tree, one runtime, and few
-feature-bearing surfaces can use one `technical_writer` worker for the whole
+feature-bearing surfaces can use one `technical-writer` worker for the whole
 harvest or refresh. Assign that worker to enumerate the current tree, inspect
 source, tests and configuration, map every in-scope surface, write or update the
 canonical documents, run relevant deterministic checks, and report exact gaps
@@ -164,11 +166,11 @@ A successor reads only the reports it needs. A partial or failed report can
 support replacement, narrower research,
 parallel progress elsewhere, or an honest residual-risk statement.
 
-A material user decision is reported clearly to the coordinator, who presents
-it through the normal user interaction boundary. Internal storage and worker coordination conditions alone are not user questions.
-For a genuine question, load skill `coordinator-communication` with
-`read_skill` and follow it: detailed chat context and
-answer alternatives and their consequences as ordinary chat text.
+Ask only when missing information materially changes the outcome. Coordinators
+use their advertised user-question route; workers use their advertised question
+route directly to the user. Internal storage and worker coordination conditions
+alone are not user questions. Follow the live schema, group related questions,
+and make meaningful alternatives and their consequences clear.
 
 ## Evidence and preservation
 
@@ -195,8 +197,6 @@ personal data.
 
 Incomplete reports or unresolved dependencies may affect the model's readiness recommendation, but never prevent
 useful delegation, evidence access, corrective work, or a truthful final answer.
-
-<!-- BEGIN HOST-ATTACHED FEATURE CENSUS -->
 
 # Feature census and completeness contract
 
@@ -352,9 +352,9 @@ page without repeating repository-wide discovery.
    examples, compare safe executions' exact exit status and stdout with the
    documented results, and retain unexecutable examples as unresolved. Run
    relevant deterministic documentation checks. The writer can do this;
-   assign a separate reviewer to inspect current source and post-write docs
-   independently for those corrected claims. Otherwise escalate only
-   for a concrete uncertainty, without a routine reviewer stage.
+   the runtime's mandatory review checks material claims against current source
+   and post-write docs. List corrected claims and example results in your report.
+   Propose additional investigation only for a concrete unresolved uncertainty.
 5. Finish when the comparison finds no further factual change or feature page
    to add; record any check that could not run and any unresolved gap.
 
@@ -384,7 +384,5 @@ claiming completion when:
 - refresh lacks a source-backed post-write comparison, leaves stale facts in
   existing pages or examples, or claims completion despite an unexplained gap;
 - documented behavior, defaults or output were corrected without a targeted search
-  of existing examples, safe example-result comparison, and a separate worker's
-  source-backed review.
-
-<!-- END HOST-ATTACHED FEATURE CENSUS -->
+  of existing examples, safe example-result comparison, and material claims listed
+  for the runtime's mandatory source-backed review.

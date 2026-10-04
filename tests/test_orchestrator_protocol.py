@@ -51,3 +51,29 @@ def test_harvest_activation_is_explicit_and_does_not_bypass_runtime_review():
     assert recognize([dict(type='text',text='/harvest-refresh')])[0]==HARVEST_REFRESH
     text=(ROOT/'skills/knowledge-harvest/SKILL.md').read_text()
     assert 'explicit' in text.lower()
+
+
+def test_reconciliation_is_exclusive_and_language_is_runtime_selected():
+    text = load_role('orchestrator').body_portable
+    assert "Choose exactly one next action" in text
+    assert "do not synthesize" in text
+    assert "Otherwise, request a structured user question" in text
+    assert "missing information\n  materially changes the outcome" in text
+    assert "Otherwise, submit synthesis" in text
+    for name in ('orchestrator', 'coordinator-communication', 'context-compaction'):
+        body = load_role(name).body_portable
+        assert "runtime's per-turn language directive" in body
+        assert "on auto" not in body
+    assert "interactive-resources" not in text
+    assert "code-and-evidence" not in text
+
+
+def test_routing_guidance_defers_argument_and_receipt_contracts_to_live_schemas():
+    routing = (ROOT / 'skills/orchestrator/references/worker-routing.md').read_text()
+    assert "Consult `list_route_options`" in routing
+    assert "live schema and the plan schema" in routing
+    assert "explicitly requests that model family" in routing
+    for duplicate in ("affinity_not_eligible", "standard_work_kinds",
+                      "flagship.request_names", "ignored:owner_preferred",
+                      "pending_dispatch:user_request", "ignored:tier_mismatch"):
+        assert duplicate not in routing

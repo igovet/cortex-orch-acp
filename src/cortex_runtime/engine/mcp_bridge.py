@@ -40,6 +40,28 @@ def allowed_mcp_servers(role: str) -> tuple[str, ...]:
     return ("cortex",)
 
 
+def is_consultant_role(role_id: str | None) -> bool:
+    """Whether ``role_id`` (a profile id or its short alias) names the senior
+    consultant."""
+    if not isinstance(role_id, str) or not role_id:
+        return False
+    from ..portable.roles import CONSULTANT_ROLE_ID, WORKER_ALIASES
+
+    return WORKER_ALIASES.get(role_id, role_id) == CONSULTANT_ROLE_ID
+
+
+def receives_external_mcp(role_id: str | None) -> bool:
+    """Whether a session for ``role_id`` may be offered any external MCP
+    server (the registry's or the client's).
+
+    The senior consultant works only from its consultation packet and the
+    retained reports it reads through ``cortex``; an attached code index or
+    any other external server would let it read project source around that
+    boundary, so it is offered none. Every other role keeps the registry and
+    role/engine filters of :func:`host_mcp_servers`."""
+    return not is_consultant_role(role_id)
+
+
 #: Claude Code's per-tool MCP ``_meta`` key that keeps a tool's schema in the
 #: prompt instead of deferring it behind ``ToolSearch`` (read by the bundled
 #: CLI of the installed claude-agent-acp 0.81.x; its ACP layer drops a
@@ -107,7 +129,8 @@ def coordinator_tools(entry) -> list[str]:
     return list(entry.get("read_only_tools") or ()) if tools is None else list(tools)
 
 
-def host_mcp_servers(servers, *, role: str | None = None, engine: str | None = None) -> list[dict[str, object]]:
+def host_mcp_servers(servers, *, role: str | None = None, engine: str | None = None,
+                     role_id: str | None = None) -> list[dict[str, object]]:
     """The client's own MCP servers, as they must look on the wire to an
     engine.
 
@@ -119,6 +142,8 @@ def host_mcp_servers(servers, *, role: str | None = None, engine: str | None = N
     launch it, and a half-entry is worth an omission, not a crash), and any
     entry calling itself ``cortex``, which would shadow this runtime's own
     server and hand a client's process the coordinator's channel name.
+    ``role_id`` (the worker profile, when known) can withhold every server:
+    see :func:`receives_external_mcp`.
 
     Entries are copied, not referenced, and nothing here is ever written to
     storage or a log: a client's ``env``/``headers`` values are its
@@ -128,6 +153,8 @@ def host_mcp_servers(servers, *, role: str | None = None, engine: str | None = N
     forwarded: list[dict[str, object]] = []
     if role is not None and role not in _ROLES:
         raise ValueError(f"role must be one of {_ROLES!r}.")
+    if not receives_external_mcp(role_id):
+        return forwarded
     for entry in servers or ():
         if not isinstance(entry, dict):
             continue

@@ -316,12 +316,17 @@ def test_concurrent_complete_submissions_have_exactly_one_winner(planning):
 
 def test_all_23_profiles_require_structured_questions_and_preserve_free_text():
     from pathlib import Path
-    import tomllib
     root = Path(__file__).resolve().parents[1]
     profiles = json.loads((root / 'profiles.json').read_text())['profiles']
     assert len(profiles) == 23
     for profile in profiles:
-        body = tomllib.loads((root / 'agents' / profile['filename']).read_text())['developer_instructions']
-        assert 'structured question' in body
-        assert 'meaningful selectable' in ' '.join(body.split())
+        body = (root / 'skills' / ('worker-' + Path(profile['source']).stem) / 'SKILL.md').read_text()
+        normalized = ' '.join(body.split())
+        if profile['name'] == 'senior_consultant':
+            assert 'advertised structured question tool' in normalized
+        else:
+            assert 'advertised `ask_question` route to the user' in normalized
+        assert 'never a prose-only question' in normalized
+        assert 'native engine question tool' in normalized
+        assert 'meaningful selectable' in normalized
         assert 'free text' in body

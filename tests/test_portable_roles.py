@@ -122,3 +122,14 @@ def test_known_location_handoff_guidance_is_delivered_to_workers_and_coordinator
     assert "Read a relevant documentation index and do broad discovery only when" in worker
     assert "For each task objective, include a short `Known locations` block only when you" in coordinator
     assert "do not investigate further merely to produce hints" in coordinator
+
+
+def test_consultant_receives_reporting_but_no_source_discovery_skill():
+    delivered = roles.composed_instructions(roles.load_role("worker-senior-consultant"))
+    assert "### Skill `report-publication`" in delivered
+    assert "### Skill `content-safety`" in delivered
+    for skill_id in roles.CONSULTANT_EXCLUDED_NAMED_SKILLS:
+        assert f"### Skill `{skill_id}`" not in delivered
+        assert f"`{skill_id}` --" not in delivered
+    worker = roles.composed_instructions(roles.load_role("worker-backend-dev"))
+    assert "### Skill `code-and-evidence`" in worker

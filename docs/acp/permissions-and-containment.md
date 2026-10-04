@@ -5,6 +5,7 @@ bounds its native tools; drafts, commands claimed as checks and external MCP cal
 go through a channel-bound gateway.
 A plan proposes scopes; it cannot grant privileges, choose a model or create a
 session. Coordinator and consultant are read-only. Reviewers cannot edit source.
+Database-architect and performance-engineer are read-only specialists too.
 
 ## Native engines
 
@@ -16,14 +17,17 @@ private), while `/var/tmp` is a private, writable, per-run directory instead
 of the host's (which can be read-only or absent under the read-only host
 bind); `HOME` and `TMPDIR`/`TMP`/`TEMP` are a private per-process scratch. See
 [SECURITY.md](../../SECURITY.md#tool-access-and-containment). The project is
-read-only except the
-assignment's scopes (none for the coordinator, reviewers and read-only roles);
+read-only for the coordinator, reviewers and read-only roles. Writing workers
+receive a whole-project writable mount; their declared scopes coordinate parallel
+work but do not restrict the gateway's project write paths.
 `.cortex` is hidden and `.codex`, `.claude` are read-only; `.git` is
 read-only except what git itself needs for a writing worker (see
 [Git and tool state](#git-and-tool-state)); HOME is read-only apart from its
 tool caches. The engine's own state directory stays writable except its session
 configuration (settings, hooks, instructions, skills, agents, commands, rules),
 which is read-only and created neutral when absent; installed plugins are hidden.
+The host's real `/tmp` and the engine state directory are residual writable
+surfaces; the project gateway does not mediate their native writes.
 A revoked or expired channel terminates the process. Engines therefore keep their
 native tools, `AGENTS.md`/`CLAUDE.md` loading and skills.
 
@@ -53,8 +57,8 @@ receives `strictMcpConfig: true`, empty `plugins`, disabled hooks, and
 disallowed `Agent`, `Task`, `Workflow` and agent-team tools. A session with role
 instructions also receives the [unified system prompt](unified-system-prompt.md)
 in place of Claude Code's preset, with `skills: []` and attribution and git
-instructions switched off. Every role receives the same options; roles differ
-only in their jail scopes.
+instructions switched off. The native adapter options are shared, while role-
+specific prompts and offered Cortex tools differ.
 
 The optional OpenCode v2 engine runs in the same jail with three additions
 (`engine_jail(isolate_processes=, masked=, data_files=)`):
@@ -111,11 +115,11 @@ Guarded.
 | | Guarded (default) | Auto |
 | --- | --- | --- |
 | Native deletion reported to the bridge | permission card | runtime selects the offered allow option |
-| `project_delete`, `outside_write`, `outside_command`, replacing a different link with `project_skill_link` (`orchestration.consent`) | permission card | runtime allows |
+| `project_delete`, `outside_write`, `outside_command`, replacing a different link with `project_skill_link` (`orchestration.consent`) | permission card | auto-approved without a per-action card |
 | No client connected | refused | allowed |
 | Worker engine mode | floor: Claude `default`, Codex `agent` | most permissive offered: Claude `bypassPermissions` → `acceptEdits` → `default`; Codex `agent-full-access` → `agent` |
 | Coordinator engine mode | floor | floor |
-| Jail, `.cortex`/`.git` protection, gateway scopes and role rules, subagent ban, stale-binding refusal, external MCP allowlist | enforced | enforced |
+| Jail, `.cortex`/`.git` protection, gateway role/policy/path checks (not declared-scope write checks), subagent ban, stale-binding refusal, external MCP allowlist | enforced | enforced |
 
 Both approval paths reach one choke point,
 `OrchestratingRuntime.permission_requester_for_task`; in Auto it returns
@@ -142,9 +146,13 @@ rendering and an Auto run against a paid engine have not been observed live.
 Before each operation the gateway checks task state, ownership epoch, channel
 revocation/expiry and the current running assignment in SQLite. Rights are derived
 from that assignment, never from model-provided role, task or capability fields.
-An operation cannot expand its scope. Steering revokes old worker channels before
-its text is delivered to a model. Scope/replan/escalation requests are proposals;
-the replacement plan is validated again.
+Writing workers receive project-wide gateway write authority, except private and
+user-protected paths; a declared assignment scope is a coordination work area,
+not an enforced project-path boundary. Writers reserve additional paths with
+`access_request` before changing them so parallel assignments remain coordinated.
+Read-only roles and review stages have no project write grant. Steering revokes
+old worker channels before its text is delivered to a model. Scope/replan/escalation
+requests are proposals; the replacement plan is validated again.
 
 `project_read` is cursor-bounded. UTF-8 regular files return text and a SHA-256; a
 non-UTF-8 regular file returns only its SHA-256, byte size and `binary: true`.
@@ -168,9 +176,10 @@ symlink, `.claude/skills/<name>` -> `../../.agents/skills/<name>`, so Claude
 Code (which loads project skills only from `.claude/skills`) sees a skill kept
 in the shared `.agents/skills` directory.
 
-- Who: a worker whose assignment may write (the whole-project grant). The
-  coordinator, consultants, reviewers and read-only roles are refused and are
-  not offered the tool. A user deny-write path matching the link refuses it.
+- Who: any worker whose assignment may write; no particular declared scope is
+  required because writers receive whole-project authority. The coordinator,
+  consultants, reviewers and read-only roles are refused and are not offered the
+  tool. A user-protected path matching the link refuses it.
 - `name`: 1-64 lowercase letters, digits and single hyphens
   (`skill_link_name_invalid`); it is never a path.
 - `link` requires `.agents`, `.agents/skills` and `.agents/skills/<name>` to be
@@ -204,8 +213,9 @@ Covered by `tests/test_project_skill_links.py`.
 
 `command_run` requires Linux bubblewrap. It runs as the owner (read-only real
 HOME with its tool caches writable, credential-free environment, shared network)
-and mounts the project read-only except the grant: the whole project for a
-writing worker, nothing for reviewers and read-only roles. `.cortex`, `.codex`
+and mounts the project read-only except for writing workers, who receive the
+whole project writable regardless of their narrower declared coordination work
+area; reviewers and read-only roles receive no writable project paths. `.cortex`, `.codex`
 and `.claude` are masked, including nested ones; the project's `.git` is visible
 (see below). A command runs until it exits unless it sets `timeout_seconds`, and
 is killed when authority is revoked. There is no unsandboxed fallback.

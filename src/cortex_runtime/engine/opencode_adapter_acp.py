@@ -410,7 +410,8 @@ def project_rules(project_root: str | None) -> str:
     return "## Project rules (follow them)\n\n" + "\n\n".join(parts) if parts else ""
 
 
-def build_agent_prompt(instructions: str, *, role: str, project_root: str | None, environ=None) -> str:
+def build_agent_prompt(instructions: str, *, role: str, project_root: str | None, environ=None,
+                       consultant: bool = False) -> str:
     """The whole text the ``cortex`` agent runs with: Cortex's unified base
     prompt (unless ``CORTEX_UNIFIED_BASE_PROMPT=0``), how MCP tools are reached
     here, the role instructions and the project's own rules."""
@@ -423,7 +424,7 @@ def build_agent_prompt(instructions: str, *, role: str, project_root: str | None
         raise ValueError("instructions must be a non-empty string")
     parts = []
     if unified_base_prompt_enabled(environ):
-        parts.append(cortex_system_prompt(role, project_root, environ=environ).rstrip())
+        parts.append(cortex_system_prompt(role, project_root, environ=environ, consultant=consultant).rstrip())
     parts += [CODE_MODE_NOTE, instructions.strip(), project_rules(project_root)]
     return "\n\n".join(part for part in parts if part) + "\n"
 

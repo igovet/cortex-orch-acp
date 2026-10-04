@@ -49,17 +49,24 @@ def timeout(description):
     return dict(type='integer', description=description, minimum=1)
 
 
+# What a write tool's path may name (gateway._authority): a writing worker holds
+# the whole project; the plan's declared scope coordinates writers only.
+WORK_AREA = ("A writing worker may change any project path except private storage and paths the user protected. "
+             "The assignment's declared scope is the agreed work area that coordinates parallel writers, not an "
+             "enforced boundary: reserve any other path with access_request before changing it.")
+
+
 SCHEMAS = {
     'project_git': obj(dict(kind=dict(type='string',enum=['status','diff'],description='Read-only project status or complete working-tree diff against HEAD, including pre-existing edits. Returns an exact retained output for read_large_output. Untracked file content is read through project_read.'),request_key=text('Unique observation identity; retries return the same retained snapshot.',128))),
-    'project_delete': obj(dict(path=text('Existing project-relative regular file inside the assignment scope. Binary files are supported; no directory recursion. Root .gitignore deletion retains only the required /.cortex/ rule and returns deleted: false.',512),
+    'project_delete': obj(dict(path=text('Existing project-relative regular file. '+WORK_AREA+' Binary files are supported; no directory recursion. Root .gitignore deletion retains only the required /.cortex/ rule and returns deleted: false.',512),
                                expected_sha256=text('Lowercase hex SHA-256 of the file raw bytes as they are now (project_read returns it as sha256). A mismatch refuses the deletion.',64),
                                request_key=text('Unique action identity.',128))),
-    'project_mkdir': obj(dict(path=text('New project-relative directory within the assignment scope. Parent must exist.',512),
+    'project_mkdir': obj(dict(path=text('New project-relative directory; its parent must exist. '+WORK_AREA,512),
                               request_key=text('Unique action identity.',128))),
     'project_read': obj(dict(path=text('Project-relative regular file or directory; \'.\' is the project root. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write. UTF-8 files return text and SHA-256; non-UTF-8 files return only SHA-256, byte size and binary: true.',512),
                              offset=integer('UTF-8 character offset for file reads.',1000000000),
                              limit=integer('Maximum characters or directory entries; response supplies the next offset.',65536)), required=['path']),
-    'project_write': obj(dict(path=text('Project-relative file inside this assignment scope. Symlinks are rejected.',512),
+    'project_write': obj(dict(path=text('Project-relative file; symlinks are rejected. '+WORK_AREA,512),
                               content=text('Complete new UTF-8 file content. Root .gitignore writes retain a final /.cortex/ rule; returned hash describes the protected bytes.',1000000),
                               expected_sha256=text('Lowercase hex SHA-256 of the file as it is now (project_read returns it as sha256), or the literal string "absent" to create a new file. A mismatch refuses the write and changes nothing.',64),
                               request_key=text('Unique action identity. Exact retries reuse the retained result.',128))),
@@ -367,6 +374,12 @@ def dispatch(store,channel,operation,args):
         scopes,owner=_authority(db,channel)
         # The task's working tree: its session's worktree, else the project.
         root=task_workspace.task_root(db,channel.task_id)
+        role=db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',(channel.attempt_id,)).fetchone() if channel.attempt_id else None
+        consultant=bool(role and 'consultant' in role['role_id'])
+        if consultant and operation in {'project_read','project_git'}:
+            # The senior consultant works only from its consultation packet
+            # and retained reports, never from the project's source.
+            raise StoreError('gateway_read_denied')
         if operation=='project_read':
             try: return _read(root,args)
             except FileNotFoundError as error:
@@ -388,8 +401,9 @@ def dispatch(store,channel,operation,args):
                 raise StoreError('gateway_scope_denied')
         if operation=='project_skill_link':
             # The one .claude write: a skill link, never a generic grant
-            # (skill_links). It needs the whole-project write grant, and a
-            # user deny-write path covering the link refuses it.
+            # (skill_links). Every writing worker holds the whole-project
+            # grant (_authority); read-only roles and reviews hold none, and
+            # a user deny-write path covering the link refuses it.
             from .skill_links import check_name, link_path
             if args['action']=='unlink' and 'replace_symlink_target' in args:
                 raise StoreError('invalid_arguments','replace_symlink_target',args['replace_symlink_target'][:40],
@@ -399,8 +413,7 @@ def dispatch(store,channel,operation,args):
                 raise StoreError('gateway_scope_denied')
         if operation in {'outside_write','outside_command'} and not scopes:
             raise StoreError('gateway_scope_denied')  # writing workers only
-        role=db.execute('SELECT role_id FROM delegation_provisioning WHERE attempt_id=?',(channel.attempt_id,)).fetchone() if channel.attempt_id else None
-        if operation=='command_run' and (channel.role=='coordinator' or (role and 'consultant' in role['role_id'])):
+        if operation=='command_run' and (channel.role=='coordinator' or consultant):
             raise StoreError('gateway_command_denied')
         row=db.execute('SELECT * FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?',
                         (channel.task_id,channel.channel_id,key)).fetchone()

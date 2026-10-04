@@ -58,17 +58,14 @@ _BODY = """\
 - If a tool you need is not in your list, look it up with the engine's tool search when one exists before concluding it is unavailable.
 - Run independent reads and searches together; keep dependent steps, edits, approvals and other mutations sequential.
 - Treat shell command text as code: quote arguments, never expose a secret through command output, and avoid blocking waits longer than a minute.
-- A refused tool call, a permission denial or a read-only error is a decision, not a glitch. Do not retry it and do not reach the same effect another way (another tool, a shell command, a copy or a temporary file). If your assignment needs what was refused, ask for it with the runtime's scope request or report it as a blocker.
+- A refused tool call, a permission denial or a read-only error is a decision, not a glitch. Do not retry it and do not reach the same effect another way (another tool, a shell command, a copy or a temporary file). @@ROLE_REFUSAL@@
 
 # Cortex skills
 
 - Cortex skills are procedures the runtime keeps for you, read with `read_skill` on the `cortex` server. The engine's own skill loaders, if any, are not part of this session; project and user skills, when there are any, are listed under Project and user skills below.
 - The skills that apply to almost every session are already included in full in your role instructions; follow them from your first action and do not re-read them. The other skills are conditional. Before an action that matches a listed trigger, call the `read_skill` tool from the `cortex` MCP server with that exact skill id and follow its returned body. For example, read `documentation-sync` before assessing documentation impact for a plan or updating affected docs; read `interactive-resources` before using a browser or server session. Do not read a conditional skill when its trigger has not arisen. Reading a matching skill is part of the work, not an optional extra.
 
-# Finding code
-
-- When a code index MCP server is attached (for example `codebase-memory-mcp`), use it first for structural questions: definitions, callers, dependencies, impact and architecture. Then read the exact snippets it points to. Follow the `code-and-evidence` skill for the exact procedure when your role instructions include it.
-- Use an available text-search tool for literal strings, configuration and documentation, or when the index does not cover the code. Prefer a fast search tool when one is available.
+@@ROLE_FINDING_CODE@@
 
 # Changing the project
 
@@ -509,6 +506,51 @@ _ROLE_COMMUNICATION = {
 }
 
 
+#: What to do after a refused call. A worker first asks through its own
+#: assignment-local routes; ``scope_request`` and ``replan_request`` stop every
+#: worker and use up one of the three re-plans, so they are only for a plan
+#: that must change. The coordinator has no ``access_request``: it changes
+#: nothing itself, so it plans the work for a worker or asks the user.
+_ROLE_REFUSAL = {
+    "coordinator": (
+        "If the task needs what was refused, plan it for a worker, ask the user through the runtime's question "
+        "tool when only the user can decide, or report it as a blocker."
+    ),
+    "worker": (
+        "If your assignment needs what was refused, first ask through the runtime: `access_request` for "
+        "additional project paths (an assignment-local wait that the runtime or the user decides) or the question "
+        "tool for a decision only the user can make; otherwise report it as a blocker. Use the scope or replan "
+        "request only when the plan itself must change: it stops every worker and uses up a re-plan."
+    ),
+}
+
+
+#: How a session finds what it works from. The senior consultant works only
+#: from its consultation packet and retained reports (owner decision): it is
+#: attached no code index or other external MCP server and offered no project
+#: reads or commands, so its variant names those materials instead.
+_FINDING_CODE = "\n".join((
+    '# Finding code',
+    '',
+    '- When a code index MCP server is attached (for example `codebase-memory-mcp`), use it first for structural questions: definitions, callers, dependencies, impact and architecture. Then read the exact snippets it points to. Follow the `code-and-evidence` skill for the exact procedure when your role instructions include it.',
+    '- Use an available text-search tool for literal strings, configuration and documentation, or when the index does not cover the code. Prefer a fast search tool when one is available.',
+))
+_CONSULTANT_WORKING_MATERIAL = (
+    "# Working material\n\n"
+    "- You work only from your consultation packet and the retained reports you read with `read_report` "
+    "on the `cortex` server. This session has no code index, no project source reads and no commands.\n"
+    "- Do not read or search project files with any engine-native tool that may remain. When the packet "
+    "and reports lack a fact you need, name the missing evidence in your report instead of reaching it "
+    "another way."
+)
+_CONSULTANT_CORTEX_TOOLS = (
+    "The `cortex` MCP server is the runtime's channel: use its `read_report` for the retained reports your "
+    "consultation packet names, `read_skill` for conditional Cortex skills, draft/publication tools for your "
+    "report, and the result tool. This role is offered no external MCP server, no project reads and no "
+    "`command_run`; engine-native tools are not a way around that boundary."
+)
+
+
 def environment_section(workspace_root: str | None, *, today: datetime.date | None = None) -> str:
     """The session facts an engine used to add on its own, now from the runtime."""
     today = today or datetime.datetime.now(datetime.timezone.utc).date()
@@ -522,13 +564,22 @@ def environment_section(workspace_root: str | None, *, today: datetime.date | No
 
 
 def cortex_system_prompt(role: str, workspace_root: str | None, *, today: datetime.date | None = None,
-                         environ=None) -> str:
-    """The shared base prompt for one ``coordinator`` or ``worker`` session."""
+                         environ=None, consultant: bool = False) -> str:
+    """The shared base prompt for one ``coordinator`` or ``worker`` session.
+
+    ``consultant`` selects the senior consultant's worker variant: its tool
+    and working-material sections name the consultation packet and retained
+    reports instead of a code index or project search."""
     if role not in _ROLES:
         raise ValueError("role must be 'coordinator' or 'worker'")
+    if consultant and role != "worker":
+        raise ValueError("only a worker session can be the senior consultant")
+    tools = _CONSULTANT_CORTEX_TOOLS if consultant else _ROLE_CORTEX_TOOLS[role]
+    finding = _CONSULTANT_WORKING_MATERIAL if consultant else _FINDING_CODE
     return "\n\n".join(part for part in (
         "# Cortex session\n\n" + _INTRO[role],
-        _BODY.replace("@@ROLE_CORTEX_TOOLS@@", _ROLE_CORTEX_TOOLS[role]).replace(
+        _BODY.replace("@@ROLE_CORTEX_TOOLS@@", tools).replace("@@ROLE_FINDING_CODE@@", finding).replace(
+            "@@ROLE_REFUSAL@@", _ROLE_REFUSAL[role]).replace(
             "@@ROLE_COMMUNICATION@@\n", _ROLE_COMMUNICATION[role] + "\n" if _ROLE_COMMUNICATION[role] else ""
         ).strip(),
         project_skills_section(workspace_root, environ),

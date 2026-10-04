@@ -11,7 +11,7 @@ Apply this workflow only to a user request delivered through the exact /skill-ma
 
 The coordinator reads this skill, interprets the request, and proposes a bounded plan through Cortex's advertised planning tools. The runtime owns dispatch, scopes, permissions, user confirmations, independent review, verification, and completion. A skill instruction grants no tool authority; follow the current advertised schemas and use an existing worker role that fits the content.
 
-Keep user intent separate from runtime authority. `/skill-management` authorizes only the requested skill work; it does not widen a worker's paths. The `project_skill_link` operation requires an assignment with whole-project write scope (`.`), which the coordinator must plan explicitly. If that scope or the operation is unavailable, use the runtime's planning or scope-request path and never edit `.claude` through a generic file or command tool.
+Keep user intent separate from runtime authority. `/skill-management` authorizes only the requested skill work. Declared scope is the agreed work area coordinating writers, not an enforced project write boundary. Reserve additional project paths through `access_request` before changing them. Any writing worker can use `project_skill_link`; no particular declared scope is required, and user-protected paths remain unavailable. Outside-project work requires a permission request accepted by the user. Never edit `.claude` through a generic file or command tool.
 
 ## Create or revise
 
@@ -31,7 +31,7 @@ Keep user intent separate from runtime authority. `/skill-management` authorizes
 
 ## Project layout, links, and review
 
-Use the available project operations and stay within the worker's assignment. Write the completed skill under .agents/skills/<name>/. After verifying its SKILL.md exists, use the advertised project_skill_link operation to expose that same directory at .claude/skills/<name>. This guarded operation requires whole-project write scope; if it is unavailable or refuses the scope, stop and ask the coordinator to re-plan instead of creating the link manually. The operation creates the repository-relative link; do not write .claude manually or replace a file or directory there. If a different link occupies the destination, follow the operation's confirmation and conflict result exactly. A failed link leaves Claude exposure unresolved; report it instead of claiming both engines can see the skill.
+Use the available project operations and stay within the worker's assignment. Write the completed skill under .agents/skills/<name>/. After verifying its SKILL.md exists, use the advertised project_skill_link operation to expose that same directory at .claude/skills/<name>. No particular declared scope is required for this guarded operation. If it is unavailable or refused, report the blocker through the advertised request route; never create the link manually. Use a scope or replan request only when the plan itself must change. The operation creates the repository-relative link; do not write .claude manually or replace a file or directory there. If a different link occupies the destination, follow the operation's confirmation and conflict result exactly. A failed link leaves Claude exposure unresolved; report it instead of claiming both engines can see the skill.
 
 Validate the skill name/directory match, frontmatter, relative resource references, and every adopted source file. Run focused project checks when available. Do not claim that an engine loaded or used the new skill without a real observation. Finish with a reviewable report listing changed paths, source URL and exact revision for imports, retained license/attribution, checks and outcomes, and the resulting Claude link state.
 
@@ -39,11 +39,13 @@ Validate the skill name/directory match, frontmatter, relative resource referenc
 
 When retained reports show the same procedure repeated in separate cases, you may propose one reusable project skill. Do not create it automatically, and never propose one merely because skill files or directories exist in the project. Propose only while planning or reconciling, at a point where the question does not interrupt running workers (for example after verified work, instead of synthesis), and at most once per task.
 
-1. In your message, explain the repeated cases, what the skill would do, and its benefit, in the user's language.
-2. Ask with user_question_request carrying skill_proposal: the skill name, action create (no .agents/skills/<name> yet) or update (existing skill), the purpose, and 2 to 5 distinct retained report ids, each with a one-line case. Send exactly one accepted action-matched pair, approval first:
-   - create: [Create the skill, Not now]; [Создать навык, Не сейчас]; [Approve creating the skill, Decline creating the skill]; [Одобрить создание навыка, Отклонить создание навыка]
-   - update: [Update the skill, Not now]; [Обновить навык, Не сейчас]; [Approve updating the skill, Decline updating the skill]; [Одобрить обновление навыка, Отклонить обновление навыка]
-3. The runtime checks the evidence and current skill state, refuses a duplicate (an open proposal for the name, or the same name and action the user already answered), shows the user its own evidence list, and records the decision from the exact answer. Only an exact listed pair is accepted: answer 1 selects that pair's approval label, answer 2 selects its decline label, and any other answer is unclear. An arbitrary first option never approves.
+1. In your message, explain the repeated cases, what the skill would do, and its benefit, in the language selected by the runtime's per-turn directive.
+2. Ask with user_question_request carrying skill_proposal and the retained cases
+   supporting it. Follow the live schema for the proposal fields, evidence bounds
+   and action-matched approval/decline choices; do not invent approval labels.
+3. The runtime validates the evidence and current skill state, presents its
+   evidence list and records the user's decision. An arbitrary first option never
+   approves. A refusal or unclear answer grants no authority.
 4. After approval, the next planning turn carries the /skill-management request the approval stands for. Follow this workflow exactly as for the explicit command.
 5. After a decline or an unclear answer, leave the project unchanged for that skill and do not propose it again. The user can still run /skill-management <request>.
 

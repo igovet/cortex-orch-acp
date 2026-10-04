@@ -23,6 +23,8 @@ NATIVE_QUESTION_TOOLS = frozenset({'AskUserQuestion', 'request_user_input', 'exp
 COORDINATOR_EDIT_REFUSAL_REASON = 'Native subagents are disabled. Do the work in this session.'
 COORDINATOR_MUTATION_REFUSAL_REASON = COORDINATOR_EDIT_REFUSAL_REASON
 COORDINATOR_PRIVATE_OR_CHECK_REFUSAL_REASON = COORDINATOR_EDIT_REFUSAL_REASON
+#: How Claude names a tool of the Cortex MCP server in a permission request.
+CORTEX_MCP_TOOL_PREFIX = 'mcp__cortex__'
 
 _DELETION_KINDS = frozenset({"delete", "move"})
 _DELETION_COMMAND = re.compile(
@@ -127,9 +129,11 @@ class DuplicateEnginePermissionRequestId(Exception):
 class PermissionBridge:
     def __init__(
         self, *, correlation, bindings, logs=None, host_permission_requester=None, call_timeout=30.0,
-        coordinator_refusal_notifier=None,
+        coordinator_refusal_notifier=None, native_tools_refused=False,
     ):
         self._correlation = correlation
+        # The senior consultant: refuse every native action that asks.
+        self._native_tools_refused = bool(native_tools_refused)
         self._bindings = bindings
         self._logs = logs
         self._host_permission_requester = host_permission_requester
@@ -273,6 +277,15 @@ class PermissionBridge:
             self._observe('native_question_denied', engine_session_id=engine_session_id)
             self._notify_refusal(engine_session_id, 'Use the advertised Cortex structured question tool with meaningful options or a related-question batch.')
             return dict(CANCELLED_OUTCOME)
+        # The senior consultant works only from its consultation packet and
+        # retained reports: every native action that reaches this fence is
+        # refused, deletions included. Only its own Cortex MCP calls pass;
+        # the gateway re-checks those. A native tool the engine runs without
+        # asking never reaches this fence.
+        if self._native_tools_refused and not (isinstance(name, str) and name.startswith(CORTEX_MCP_TOOL_PREFIX)):
+            self._observe('consultant_native_tool_denied', engine_session_id=engine_session_id)
+            option=_auto_reject_option_id(params)
+            return dict(outcome=dict(outcome='selected',optionId=option)) if option is not None else dict(CANCELLED_OUTCOME)
         if name not in SUBAGENT_TOOLS and is_deletion(params):
             return self._confirm_deletion(engine_session_id, binding, params, action_ref)
         if name not in SUBAGENT_TOOLS:
