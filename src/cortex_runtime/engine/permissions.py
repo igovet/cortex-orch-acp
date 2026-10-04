@@ -19,6 +19,7 @@ CANCELLED_OUTCOME = {'outcome': {'outcome': 'cancelled'}}
 SUBAGENT_TOOLS = frozenset({'Agent','Task','Workflow','TeamCreate','TeamDelete','SendMessage',
                             'ScheduleWakeup','Monitor','CronCreate','CronDelete','CronList','RemoteTrigger',
                             'spawn_agent','send_input','close_agent','resume_agent'})
+NATIVE_QUESTION_TOOLS = frozenset({'AskUserQuestion', 'request_user_input', 'experimental_request_user_input'})
 COORDINATOR_EDIT_REFUSAL_REASON = 'Native subagents are disabled. Do the work in this session.'
 COORDINATOR_MUTATION_REFUSAL_REASON = COORDINATOR_EDIT_REFUSAL_REASON
 COORDINATOR_PRIVATE_OR_CHECK_REFUSAL_REASON = COORDINATOR_EDIT_REFUSAL_REASON
@@ -268,6 +269,10 @@ class PermissionBridge:
         meta=call.get('_meta') if isinstance(call.get('_meta'),dict) else {}
         claude=meta.get('claudeCode') if isinstance(meta.get('claudeCode'),dict) else {}
         name=call.get('name') or claude.get('toolName')
+        if name in NATIVE_QUESTION_TOOLS:
+            self._observe('native_question_denied', engine_session_id=engine_session_id)
+            self._notify_refusal(engine_session_id, 'Use the advertised Cortex structured question tool with meaningful options or a related-question batch.')
+            return dict(CANCELLED_OUTCOME)
         if name not in SUBAGENT_TOOLS and is_deletion(params):
             return self._confirm_deletion(engine_session_id, binding, params, action_ref)
         if name not in SUBAGENT_TOOLS:

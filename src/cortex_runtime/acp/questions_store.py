@@ -127,7 +127,7 @@ def list_open(store, task_id: str) -> list[PendingQuestion]:
     return [PendingQuestion._from_row(row) for row in rows]
 
 
-def answer(store, question_id: str, text: str, source: str) -> bool:
+def answer(store, question_id: str, text: str, source: str, *, session_id: str | None = None) -> bool:
     """Resolve ``question_id`` with ``text`` (``source`` in {"text",
     "elicitation"}). Returns ``True`` iff this call actually transitioned a
     still-``open`` row (``False`` -- and no mutation -- for an already
@@ -140,15 +140,13 @@ def answer(store, question_id: str, text: str, source: str) -> bool:
             if row is None or row["status"] != "open":
                 db.commit()
                 return False
-            db.execute(
-                "UPDATE pending_questions SET status='answered', answer_text=?, answer_source=?, answered_at=? WHERE id=?",
-                (text, source, _now(), question_id),
-            )
+            from ..orchestration.worker_waits import answer_tx
+            answered = answer_tx(db, question_id, text, source, session_id=session_id)
             db.commit()
         except BaseException:
             db.rollback()
             raise
-    return True
+    return answered
 
 
 # A worker/reviewer-visible answered-question record is addressed as

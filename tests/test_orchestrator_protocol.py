@@ -15,7 +15,7 @@ def test_coordinator_has_proposals_and_questions_but_no_lifecycle_or_route_contr
     assert set(node['properties'])=={'id','role','objective','dependencies','scope','complexity','model','model_reason'}
     assert 'model' in node['required'] and 'auto' in node['properties']['model']['description']
     assert node['additionalProperties'] is False
-    assert 'question' in tools['user_question_request']['inputSchema']['required']
+    assert tools['user_question_request']['inputSchema']['else']['required'] == ['question', 'options']
 
 
 def test_instruction_sources_do_not_recreate_retired_model_authority():

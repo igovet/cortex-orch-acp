@@ -467,7 +467,8 @@ def _walk(root: str, budget: dict, deadline: float, records: list, *, parent_fd=
                     continue
                 kind = _classify(entry)
                 listed = budget.get("listed")
-                if listed is not None and relpath not in (listed[1] if kind == "d" else listed[0]):
+                # Observe the runtime-store ignore boundary even when it ignores itself.
+                if listed is not None and relpath != ".gitignore" and relpath not in (listed[1] if kind == "d" else listed[0]):
                     continue  # git-ignored: a database, a volume, build output...
                 budget["files"] += 1
                 if listed is None and budget["files"] > _MAX_FILES:

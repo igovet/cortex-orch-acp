@@ -58,3 +58,27 @@ open, corrupt cards and child exits before/during/after the ACP load response.
 It also checks staging count/byte boundaries and UTF-8 fragmentation. This is
 transport/bridge evidence, not GUI evidence. Actual Paseo GUI reopening is
 **NOT RUN** by this implementation worker.
+
+## Structured related questions
+
+The provider maps runtime-marked question batches into the installed Paseo
+`QuestionFormCard`: one paginated form with unique member-ID headers, real
+choice labels and a separate custom-answer field. It submits all header-keyed
+answers through `cortex_question_answer` and waits for the durable config ACK
+before retiring the permission card without granting an action. Partial or
+rejected answers stay pending; exact retries retain their delivery key and
+payload. A cancelled form remains unanswered and can be presented on recovery.
+Single-question choice/custom-answer behavior is preserved. Modern single
+questions also use the acknowledged config route; legacy cards without an exact
+question ID retain their native option route. Scalar displayed ordinal labels
+are mapped explicitly to their source choices, never stripped from custom text.
+
+`npm --prefix integrations/paseo run test:steer` includes scalar and batch
+question transport regressions. For read-only, no-paid installed component
+structure and state coverage, run
+`npm --prefix integrations/paseo run test:installed-questions -- /absolute/path/to/installed/Metro/index.js`.
+The test executes only the actual question helper/component with React Native
+stand-ins; it is not pixel rendering or Desktop live qualification. Current
+Paseo 0.10.3 supports one paginated all-member submission (not simultaneous
+fields). Its helper trims custom text at the UI boundary; the provider does not
+strip ordinal-looking text or reinterpret arbitrary custom answers.

@@ -253,6 +253,10 @@ class Server:
             observe('tools/call','unknown_tool')
             raise ProtocolError(-32602,'Unknown tool. Call tools/list and use an advertised name; do not reconstruct retired names.')
         try:
+            if name in MUTATING_TOOLS and channel.role == 'worker':
+                from .orchestration.worker_waits import check_mutation
+                with self.store.connection() as db:
+                    check_mutation(db, channel)
             validate(name,params.get('arguments',{}))
             data=self._dispatch_channeled(name,params)
             if name == 'read_report':

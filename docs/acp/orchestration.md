@@ -8,7 +8,7 @@ and its automated evidence limits.
 
 ## Plan submission and coordinator polling
 
-The advertised `plan_submit` contract requires both `plan.tasks` and
+The advertised `plan_submit` contract requires `plan.tasks` to contain 1–64 items and
 `plan.verification` to contain 1–16 items; empty arrays are rejected. A
 verification command is required for every plan, including an investigation-only
 or trivial plan, because runtime verification still runs when no project change
@@ -23,6 +23,13 @@ MCP schema as TypeScript, the required count and meaning are repeated in the
 array's own description because it may omit JSON Schema item/count constraints
 and nested item descriptions. A count-validation correction repeats that field
 description, including the no-documentation fallback.
+
+Each task objective is bounded to 1–8000 Unicode code points. The objective
+property description repeats this bound for description-only host rendering.
+Measure the complete value before submission; concisely rewrite overlong text
+without dropping requirements or silently truncating it. Rejection retains no
+accepted plan or worker reservation. Codex and Claude receive the same channel
+MCP schema; this does not guarantee model compliance.
 
 After accepting a plan, `plan_submit` tells the coordinator that workers are
 dispatched after the current turn ends and to end the turn rather than poll.
@@ -375,19 +382,68 @@ calls are counted on a single aggregate card, and failures keep their own card
 for another 50 calls. User questions and permission requests are never folded. See
 [bounded ACP event projections](observability.md#bounded-acp-event-projections).
 
-Engine processes run in the engine jail, where their native tools write only the
-assignment scope; native subagents are disabled. The runtime gateway
-checks current channel authority and assignment scope before each operation,
+Engine processes run in the engine jail, whose launch-time writable project
+mount for a writing worker can be broader than its runtime-declared assignment
+scope; native subagents are disabled. The runtime gateway checks current
+channel authority and declared assignment scope before each operation,
 contains commands and external MCP servers with bubblewrap, and retains exact
-receipts. See [permissions and containment](permissions-and-containment.md).
+receipts. Worker access requests extend declared writer reservations only, not
+the OS jail. See [permissions and containment](permissions-and-containment.md).
 
-Steering fences existing workers before replanning. A scope, replan or escalation
-request enters `RECOVERING`; the coordinator ends that turn and does not submit a
-plan until the runtime has stopped workers and asks for the replacement plan. Worker questions persist an
-exact pending question and pause execution; only a real matching answer resumes
-it. Every answered question, with its question text, the user's verbatim answer,
-ids, timestamps and answering session, is visible to later workers and the
-reviewer through `list_sources`/`read_source` and the recovery capsule's
+## Worker questions and additional access
+
+The worker-only `ask_question` route registers an assignment-local wait and
+returns promptly. The worker ends its turn without publishing an incomplete
+result. Once a real answer is recorded, the runtime sends it as the next prompt
+to the same assignment, attempt and retained healthy engine session. Sibling
+assignments can continue; the coordinator is not restarted and need not submit a
+replacement plan for this normal flow. A declined, expired or text-only host
+delivery leaves the wait open. Multiple open worker questions require explicit
+selection. Stop, cancellation, replan, ownership changes or loss of the owning
+session can cancel or orphan a wait; a lost process may require replacement
+rather than seamless continuation.
+
+A recovered, current-epoch worker channel can lack retained engine-session
+metadata. Ordinary tools remain available under their normal authority checks.
+Its question then uses the existing task-global `WAITING_USER` fallback and
+resumes the saved execution/review phase after an exact answer; it does not
+register an assignment-local wait or promise same-session continuation.
+Access requests still require a retained session for their decision continuation.
+
+Without active node waits, the execution/review scheduler skips question delivery
+and access reconciliation, reusing its single-snapshot context and cheap change
+fingerprint. Periodic idle passes remain write-free. A current running node
+conservatively reserves its declared paths even before an assignment binding
+exists; stale unbound revisions do not hold those paths indefinitely.
+
+The worker-only `access_request` route asks to add exact project-relative paths
+to the worker's declared assignment scope. The runtime grants the complete
+request automatically only when all paths pass safety and role checks, queued
+and applied owner deny-write restrictions, and current writer-reservation
+checks. Existing grants and plan scope remain unchanged; no partial grant occurs.
+A path-policy denial or active-writer conflict becomes a local wait for safe
+revalidation or a user decision, and the result is delivered in the same healthy
+session. Requesting access neither writes a file nor makes user text an
+authorization. After denial, the worker can use an allowed alternative or
+submit the existing scope/replan request if the task decomposition must change.
+
+These declared-scope extensions coordinate runtime writers; they do not
+dynamically remount or widen the OS jail. In the current launch boundary,
+ordinary writing workers already have whole-project write authority, and
+native-tool actions remain subject to existing jail, role and owner-policy
+boundaries. The logical wait fences Cortex gateway writes, command starts and
+publication while active, but is not a universal freeze of arbitrary native
+edits. See [permissions and containment](permissions-and-containment.md).
+
+Steering fences existing workers before replanning. A coordinator scope, replan
+or escalation request enters `RECOVERING`; the coordinator ends that turn and
+does not submit a plan until the runtime has stopped workers and requests a
+replacement plan. Worker questions and additional-path access requests instead
+create assignment-local waits: they park only the requesting worker and do not
+require coordinator replanning. See [worker questions and additional access](#worker-questions-and-additional-access).
+Every answered worker question, with its question text, the user's verbatim
+answer, ids, timestamps and answering session, is visible to later workers and
+the reviewer through `list_sources`/`read_source` and the recovery capsule's
 constraints (see [input history](input-history-and-replay.md#answered-questions)).
 Lost workers are retried at most twice after confirmed absence, and uncertain
 action receipts prevent replay. A worker whose route itself failed (an

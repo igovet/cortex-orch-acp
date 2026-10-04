@@ -57,9 +57,10 @@ assert.equal(question.request.input.questions[0].allowOther, true);
 // A typed answer reaches Cortex first, shows in the chat, then retires the card.
 await answer("permission:q1", "Neither, do C");
 assert.deepEqual(sent.map((input) => input.type), ["session.configure", "session.permission"]);
-assert.deepEqual(sent[0].changes.settings, {
-  [QUESTION_ANSWER_CONFIG_ID]: JSON.stringify({ questionId: "pq_1", answer: "Neither, do C" }),
-});
+const scalarPayload = JSON.parse(sent[0].changes.settings[QUESTION_ANSWER_CONFIG_ID]);
+assert.equal(scalarPayload.questionId, "pq_1");
+assert.equal(scalarPayload.answer, "Neither, do C");
+assert.ok(scalarPayload.requestKey);
 assert.deepEqual(sent[1].response, { behavior: "deny" });
 assert.ok(seen.some((event) => event.type === "timeline.item" && event.item.type === "user_message"
   && event.item.text === "Neither, do C"));
@@ -69,7 +70,9 @@ assert.ok(!seen.some((event) => event.type?.startsWith("request.")));
 sent.length = 0;
 card("permission:q2", "pq_2");
 await answer("permission:q2", "2. Finish");
-assert.deepEqual(sent.map((input) => [input.type, input.response?.selectedActionId]), [["session.permission", "cortex-question-2"]]);
+assert.deepEqual(sent.map((input) => input.type), ["session.configure", "session.permission"]);
+assert.equal(JSON.parse(sent[0].changes.settings[QUESTION_ANSWER_CONFIG_ID]).answer, "Finish");
+assert.deepEqual(sent[1].response, { behavior: "deny" });
 
 // A refused answer leaves the card open for another try.
 sent.length = 0;
@@ -81,4 +84,18 @@ failConfigure = false;
 await answer("permission:q3", "Other text");
 assert.deepEqual(sent.map((input) => input.type), ["session.configure", "session.configure", "session.permission"]);
 assert.deepEqual(sent[2].response, { behavior: "deny" });
+assert.equal(sent[0].changes.settings[QUESTION_ANSWER_CONFIG_ID], sent[1].changes.settings[QUESTION_ANSWER_CONFIG_ID]);
+const cardCount = seen.filter((event) => event.type === "session.permission").length;
+card("permission:q3-replay", "pq_3");
+assert.equal(seen.filter((event) => event.type === "session.permission").length, cardCount);
+await answer("permission:q3", "Other text");
+assert.equal(seen.filter((event) => event.type === "timeline.item" && event.item.text === "Other text").length, 1);
+// Numeric custom text remains exact, never becomes an ordinal.
+card("permission:q4", "pq_4");
+await answer("permission:q4", "2");
+assert.equal(JSON.parse(sent.filter((input) => input.type === "session.configure").at(-1).changes.settings[QUESTION_ANSWER_CONFIG_ID]).answer, "2");
+card("permission:q5", "pq_5");
+await wrapped.send({ type: "session.permission", sessionId: "s", permissionId: "permission:q5",
+  response: { behavior: "allow", selectedActionId: "cortex-question-1" } } as any);
+assert.equal(JSON.parse(sent.filter((input) => input.type === "session.configure").at(-1).changes.settings[QUESTION_ANSWER_CONFIG_ID]).answer, "Approve");
 console.log("ok");

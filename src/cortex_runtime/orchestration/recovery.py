@@ -86,6 +86,8 @@ def retry_lost(runtime,task_id,node):
                 raise StoreError('lost_worker_action_outcome_unknown')
             db.execute('UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND attempt_id=? AND revoked_at IS NULL',
                         (now(),task_id,provision['attempt_id']))
+        from .worker_waits import cancel_tx
+        cancel_tx(db, task_id, 'recovered_replacement', assignment_ref=assignment, status='orphaned')
         changed=db.execute("UPDATE runtime_nodes SET status='pending',assignment_ref=NULL WHERE task_id=? AND assignment_ref=? AND result_json IS NULL",
                            (task_id,assignment)).rowcount
         if changed!=1:

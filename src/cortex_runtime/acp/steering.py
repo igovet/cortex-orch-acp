@@ -302,6 +302,8 @@ def mark_stopped(store, task_id: str, *, source: str = "cortex_stop_command", se
                 transition(db, task_id, "PLANNING")
                 task = db.execute("SELECT state,revision FROM runtime_tasks WHERE task_id=?", (task_id,)).fetchone()
             db.execute("INSERT INTO task_stopped (task_id, stopped_at) VALUES (?,?)", (task_id, _now()))
+            from ..orchestration.worker_waits import cancel_tx
+            cancel_tx(db, task_id, 'task_stopped')
             # Commit provenance with the stop marker, before process teardown.
             # ACP identifies the client transport, not the human/UI action.
             delegation_events.append_event_tx(

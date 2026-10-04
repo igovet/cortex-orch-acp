@@ -1249,12 +1249,11 @@ def record_user_message_answer_event(
                     "UPDATE source_events SET ledger_state='recorded' WHERE origin=? AND event_id=? AND ledger_state IS NULL",
                     (ledger_origin, ledger_event_id),
                 )
-            cursor = db.execute(
-                "UPDATE pending_questions SET status='answered', answer_text=?, answer_source=?, answered_at=datetime('now') "
-                "WHERE id=? AND task_id=? AND status='open'",
-                (answer_text, answer_source, question_id, task_id),
-            )
-            if cursor.rowcount == 0:
+            from ..orchestration.worker_waits import answer_tx
+            question = db.execute('SELECT task_id FROM pending_questions WHERE id=?', (question_id,)).fetchone()
+            answered = bool(question and question['task_id'] == task_id) and answer_tx(
+                db, question_id, answer_text, answer_source, session_id=origin)
+            if not answered:
                 db.execute(
                     "INSERT INTO pending_question_late_answers (question_id, task_id, answer_text, answer_source, received_at) "
                     "VALUES (?,?,?,?,datetime('now'))",
@@ -1268,7 +1267,7 @@ def record_user_message_answer_event(
         except BaseException:
             db.rollback()
             raise
-    return event, cursor.rowcount == 1
+    return event, answered
 
 
 def find_unrecorded_source_events(store, task_id: str) -> list[dict]:

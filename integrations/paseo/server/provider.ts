@@ -1,3 +1,4 @@
+import { batchAnswers, batchForm, parseQuestionBatch, type QuestionBatch } from "../shared/question-batch.ts";
 import { ReplayController } from "./replay-connector.ts";
 import { ReplaySpool } from "./replay-spool.mjs";
 import { isHiddenOperation } from "../shared/timeline-visibility.ts";
@@ -668,12 +669,26 @@ function cortexCommand(): CommandArgv {
  * Paseo's stock ACP bridge labels every `session/request_permission` as a
  * tool permission. Cortex marks only its ask_user requests with the stable
  * name/input marker below; this provider changes that one presentation field
- * to `question`. `send()` remains delegated to the stock ACP bridge, so the
- * selectedActionId is returned to the exact Cortex ACP session unchanged.
+ * to the installed question form. Exact-ID answers use acknowledged session
+ * config; legacy cards keep their native selectedActionId route.
  */
 /** Config id Cortex reads a card's typed "Other..." answer from. */
 export const QUESTION_ANSWER_CONFIG_ID = "cortex_question_answer";
 const ANSWER_REQUEST_PREFIX = "cortex-question-answer:";
+type QuestionFormState = {
+  batch: Omit<QuestionBatch, "batchId"> & { batchId?: string };
+  scalarOptions?: Array<{ id: string; label: string; answer: string }>;
+  permissionId: string;
+  permissions: Set<string>;
+  retired: Set<string>;
+  retiring: Map<string, Promise<void>>;
+  submissions: Map<string, string>;
+  committed?: string;
+  echoed?: boolean;
+  presented?: boolean;
+  pendingDigest?: string;
+  pending?: Promise<void>;
+};
 
 /** The typed text of a card answer that picked none of its options. */
 export function typedAnswer(
@@ -898,6 +913,10 @@ export function wrapCortexConnection(
     Array<{ id: string; label: string }>
   >();
   const questionIds = new Map<string, string>();
+  // Session/question-bound forms retain exact submission receipts through retries.
+  const batches = new Map<string, QuestionFormState>();
+  const batchPermissions = new Map<string, string>();
+  const permissionKey = (sessionId: string, permissionId: string) => JSON.stringify([sessionId, permissionId]);
   // Our own configure requests: their completion is ours to await,
   // never Paseo's to see.
   const answerRequests = new Map<string, { resolve: () => void; reject: (error: Error) => void }>();
@@ -948,6 +967,18 @@ export function wrapCortexConnection(
       item: { type: "user_message", id: `cortex-question-answer:${questionId}`, text: answer },
     } as ProviderEvent));
     await connection.send({ ...input, response: { behavior: "deny" } });
+  }
+  async function retireForm(sessionId: string, state: QuestionFormState) {
+    for (const permissionId of state.permissions) {
+      if (state.retired.has(permissionId)) continue;
+      let pending = state.retiring.get(permissionId);
+      if (!pending) {
+        pending = connection.send({ type: "session.permission", sessionId, permissionId, response: { behavior: "deny" } })
+          .then(() => { state.retired.add(permissionId); });
+        state.retiring.set(permissionId, pending);
+      }
+      try { await pending; } finally { state.retiring.delete(permissionId); }
+    }
   }
   async function sendQueuedMessage(
     input: Extract<Parameters<typeof connection.send>[0], { type: "session.prompt" }>,
@@ -1025,6 +1056,76 @@ export function wrapCortexConnection(
       if (steer && input.type === "session.prompt" && input.prompt.delivery === "steer") {
         return sendQueuedMessage(input) as ReturnType<typeof connection.send>;
       }
+      if (input.type === "session.permission") {
+        const key = batchPermissions.get(permissionKey(input.sessionId, input.permissionId));
+        const state = key ? batches.get(key) : undefined;
+        const respondingPermissionId = input.permissionId;
+        if (!state && [...batches.values()].some((batch) => batch.permissionId === respondingPermissionId)) {
+          throw new Error("Cortex batch response belongs to another session");
+        }
+        if (state) {
+          if (input.response.behavior !== "allow") {
+            if (state.pending) throw new Error("Cortex batch submission is awaiting acknowledgment");
+            state.presented = false;
+            return retireForm(input.sessionId, state) as ReturnType<typeof connection.send>;
+          }
+          const permissionInput = input;
+          let submitted: unknown = input.response.updatedInput?.answers;
+          if (state.scalarOptions) {
+            if (input.response.selectedActionId !== undefined) {
+              const selectedId = input.response.selectedActionId;
+              const selected = state.scalarOptions.find((option) => option.id === selectedId);
+              if (!selected || submitted !== undefined) throw new Error("Invalid Cortex single-question selection");
+              submitted = { Cortex: selected.label };
+            }
+            if (!submitted || typeof submitted !== "object" || Array.isArray(submitted)
+              || Object.keys(submitted).length !== 1 || !Object.hasOwn(submitted, "Cortex")) {
+              throw new Error("Answer the displayed Cortex question before submitting");
+            }
+            const text = (submitted as Record<string, unknown>).Cortex;
+            const mapped = state.scalarOptions.find((option) => option.label === text)?.answer ?? text;
+            submitted = { [state.batch.questionId]: mapped };
+          }
+          const answers = batchAnswers(state.batch, submitted);
+          const digest = JSON.stringify(answers);
+          if (state.pending) {
+            if (state.pendingDigest !== digest) throw new Error("Conflicting Cortex batch submission in flight");
+            return state.pending as ReturnType<typeof connection.send>;
+          }
+          if (state.committed && state.committed !== digest) throw new Error("Cortex batch already submitted with different answers");
+          let payload = state.submissions.get(digest);
+          if (!payload) {
+            payload = JSON.stringify(state.batch.batchId
+              ? { batchId: state.batch.batchId, answers, requestKey: randomUUID() }
+              : { questionId: answers[0].questionId, answer: answers[0].answer, requestKey: randomUUID() });
+            state.submissions.set(digest, payload);
+          }
+          const submission = (async () => {
+            if (!state.committed) {
+              const requestId = `${ANSWER_REQUEST_PREFIX}${randomUUID()}`;
+              const delivered = new Promise<void>((resolve, reject) => answerRequests.set(requestId, { resolve, reject }));
+              try {
+                await connection.send({ type: "session.configure", sessionId: input.sessionId, requestId,
+                  changes: { settings: { [QUESTION_ANSWER_CONFIG_ID]: payload! } } });
+                await delivered;
+              } finally { answerRequests.delete(requestId); }
+              state.committed = digest;
+            }
+            if (!state.echoed) {
+              state.echoed = true;
+              for (const answer of answers) listeners.forEach((listener) => listener({
+                type: "timeline.item", sessionId: permissionInput.sessionId,
+                item: { type: "user_message", id: `cortex-question-answer:${answer.questionId}`, text: answer.answer },
+              } as ProviderEvent));
+            }
+            await retireForm(permissionInput.sessionId, state);
+          })();
+          state.pendingDigest = digest;
+          state.pending = submission;
+          void submission.then(() => { state.pending = undefined; }, () => { state.pending = undefined; });
+          return submission as ReturnType<typeof connection.send>;
+        }
+      }
       if (
         input.type === "session.permission" &&
         input.response.behavior === "allow" &&
@@ -1077,8 +1178,11 @@ export function wrapCortexConnection(
       return result;
     },
     close() {
+      batches.clear();
+      batchPermissions.clear();
       questionActions.clear();
       questionIds.clear();
+      for (const pending of answerRequests.values()) pending.reject(new Error("Cortex connection closed before answer acknowledgment"));
       answerRequests.clear();
       queueRequests.clear();
       activeTurns.clear();
@@ -1138,6 +1242,40 @@ export function wrapCortexConnection(
           event.type === "session.permission" &&
           isCortexQuestionRequest(event.request)
         ) {
+          if (event.request.input?.batchId !== undefined) {
+            const batch = parseQuestionBatch(event.request.input);
+            const expectedActions = batch.questions.flatMap((member) => member.options.map((label, index) => ({
+              id: `cortex-batch:${member.questionId}:${index + 1}`, label,
+            })));
+            const actions = event.request.actions ?? [];
+            if (actions.length !== expectedActions.length || actions.some((action, index) =>
+              action.id !== expectedActions[index].id || action.label !== expectedActions[index].label)) {
+              throw new Error("Invalid Cortex question batch options");
+            }
+            const key = JSON.stringify([event.sessionId, batch.batchId]);
+            const existing = batches.get(key);
+            if (existing && JSON.stringify(existing.batch) !== JSON.stringify(batch)) {
+              throw new Error("Conflicting Cortex question batch replay");
+            }
+            batchPermissions.set(permissionKey(event.sessionId, event.request.id), key);
+            if (existing) {
+              existing.permissionId = event.request.id;
+              existing.permissions.add(event.request.id);
+              existing.retired.delete(event.request.id);
+              if (existing.committed) {
+                void retireForm(event.sessionId, existing).catch(() => listener({
+                  type: "session.notice", sessionId: event.sessionId,
+                  notice: { id: "cortex-question-retire-failed", severity: "error", title: "Answer already saved",
+                    description: "Cortex saved the answer, but the question card could not be cleared. Reload this session to recover." },
+                }));
+                return;
+              }
+              if (existing.presented) return;
+              existing.presented = true;
+            } else batches.set(key, { batch, permissionId: event.request.id, permissions: new Set([event.request.id]), retired: new Set(), retiring: new Map(), submissions: new Map(), presented: true });
+            listener({ ...event, request: { ...event.request, kind: "question", input: batchForm(batch), metadata: {} } });
+            return;
+          }
           const actions = event.request.actions ?? [];
           // Paseo sends the visible answer string back in
           // updatedInput.answers. Prefixing the ordinal makes that value
@@ -1146,6 +1284,37 @@ export function wrapCortexConnection(
             id: action.id,
             label: `${index + 1}. ${action.label}`,
           }));
+          const scalarId = event.request.input?.questionId;
+          if (typeof scalarId === "string" && /^pq_[a-zA-Z0-9]+$/.test(scalarId)) {
+            const scalarOptions = displayActions.map((option, index) => ({ id: option.id, label: option.label, answer: actions[index].label }));
+            const question = typeof event.request.input?.question === "string"
+              ? event.request.input.question : event.request.title ?? "Choose an option";
+            const batch = { questionId: scalarId, questions: [{ questionId: scalarId, question, options: actions.map((action) => action.label) }] };
+            const key = JSON.stringify([event.sessionId, scalarId]);
+            const existing = batches.get(key);
+            if (existing && JSON.stringify(existing.batch) !== JSON.stringify(batch)) throw new Error("Conflicting Cortex question replay");
+            batchPermissions.set(permissionKey(event.sessionId, event.request.id), key);
+            if (existing) {
+              existing.permissionId = event.request.id;
+              existing.permissions.add(event.request.id);
+              existing.retired.delete(event.request.id);
+              if (existing.committed) {
+                void retireForm(event.sessionId, existing).catch(() => listener({
+                  type: "session.notice", sessionId: event.sessionId,
+                  notice: { id: "cortex-question-retire-failed", severity: "error", title: "Answer already saved",
+                    description: "Cortex saved the answer, but the question card could not be cleared. Reload this session to recover." },
+                }));
+                return;
+              }
+              if (existing.presented) return;
+              existing.presented = true;
+            } else batches.set(key, { batch, scalarOptions, permissionId: event.request.id, permissions: new Set([event.request.id]), retired: new Set(), retiring: new Map(), submissions: new Map(), presented: true });
+            listener({ ...event, request: { ...event.request, kind: "question", metadata: {}, input: { questions: [{
+              question, header: "Cortex", options: displayActions.map((option) => ({ label: option.label })),
+              multiSelect: false, allowOther: true,
+            }] } } });
+            return;
+          }
           questionActions.set(event.request.id, displayActions);
           if (typeof event.request.input?.questionId === "string") {
             questionIds.set(event.request.id, event.request.input.questionId);

@@ -380,6 +380,13 @@ def _binding_endpoint(home: Path) -> tuple[str, str]:
 
 def _run_binding(args) -> int:
     process = None
+    diagnostic = None
+    stage = 'input-validation'
+    codes = {'binding_endpoint_refused', 'binding_endpoint_drift', 'binding_host_refused',
+             'binding_host_drift', 'binding_storage_refused', 'binding_storage_drift',
+             'binding_invalid_input', 'binding_timeout', 'binding_output_overflow',
+             'binding_anonymous_connection_refused', 'binding_anonymous_host_or_storage_refused',
+             'binding_host_or_storage_refused', 'binding_refused'}
     try:
         root = Path(__file__).resolve().parents[1]
         home = Path.home() / '.paseo-dev'
@@ -391,6 +398,7 @@ def _run_binding(args) -> int:
                 or any(project == p or project.is_relative_to(p) or p.is_relative_to(project)
                        for p in (root, home, Path.home() / '.paseo'))):
             raise ValueError('binding_invalid_input')
+        stage = 'endpoint-provenance'
         url, endpoint_digest = _binding_endpoint(home)
         env = isolated_environment(home)
         for key in list(env):
@@ -399,8 +407,10 @@ def _run_binding(args) -> int:
         env['PYTHONDONTWRITEBYTECODE'] = '1'
         argv = ['node', '--experimental-strip-types', str(root / 'integrations/paseo/server/qualification-binding.ts'),
                 url, args.agent, args.workspace, str(project), str(args.timeout), sys.executable, str(root)]
+        stage = 'helper-spawn'
         process = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                    start_new_session=True)
+        stage = 'helper-output'
         # Bounded pipe read: do not capture an unlimited downstream body.
         import time
         deadline = time.monotonic() + args.timeout
@@ -426,24 +436,90 @@ def _run_binding(args) -> int:
             except (ValueError, UnicodeDecodeError):
                 failure = {}
             code = failure.get('error') if isinstance(failure, dict) else None
-            if code in {'binding_endpoint_refused', 'binding_endpoint_drift', 'binding_host_refused',
-                        'binding_host_drift', 'binding_storage_refused', 'binding_storage_drift',
-                        'binding_invalid_input', 'binding_timeout', 'binding_anonymous_connection_refused',
-                        'binding_anonymous_host_or_storage_refused'}:
+            # Local process observations remain useful even when no safe child
+            # diagnostic exists (including import failures before main runs).
+            diagnostic = {'stage': stage, 'reason': 'subprocess_terminated' if status < 0 else 'subprocess_failed'}
+            if isinstance(code, str) and code in codes:
+                # Never forward arbitrary child output, paths or exception text.
+                detail = failure.get('diagnostic')
+                reasons = {'inspection_invalid_binding', 'inspection_binding_mismatch', 'unsafe_storage',
+                           'inspection_uncheckpointed_wal', 'legacy_storage_migration_required', 'unsupported_storage',
+                           'inspection_unsafe_parameter', 'inspection_evidence_overflow', 'inspection_snapshot_changed',
+                           'inspection_invalid_cursor', 'inspection_busy', 'inspection_refused'}
+                child_reasons = {'spawn_failed', 'subprocess_failed', 'subprocess_terminated',
+                                 'timeout', 'output_overflow', 'invalid_output'}
+                if (status == 1 and code == 'binding_storage_refused' and failure.get('available') is False
+                        and set(failure) == {'available', 'error', 'diagnostic'}
+                        and isinstance(detail, dict) and set(detail) == {'stage', 'reason'}
+                        and isinstance(detail.get('stage'), str)
+                        and detail.get('stage') in {'task-discovery', 'endpoint-provenance'}
+                        and isinstance(detail.get('reason'), str)
+                        and (detail['reason'] in child_reasons
+                             or (detail['stage'] == 'task-discovery' and detail['reason'] in reasons))
+                        # Node's complete canonical output also excludes duplicate/escaped keys.
+                        and output == (json.dumps(failure, separators=(',', ':')) + '\n').encode()):
+                    diagnostic = detail
+                elif (status == 1 and set(failure) == {'available', 'error'}
+                      and failure.get('available') is False
+                      and output == (json.dumps(failure, separators=(',', ':')) + '\n').encode()):
+                    # A complete safe helper error is already discriminating.
+                    diagnostic = None
                 raise ValueError(code)
             raise ValueError('binding_host_or_storage_refused')
+        # Zero exit is not evidence of a complete exact binding. Validate the
+        # fixed helper envelope before adding wrapper provenance or forwarding.
+        result = json.loads(output)
+        if not _valid_binding_output(result, output, args):
+            raise ValueError('binding_refused')
+        stage = 'endpoint-recheck'
         if _binding_endpoint(home) != (url, endpoint_digest):
             raise ValueError('binding_endpoint_drift')
-        result = json.loads(output)
         result['endpoint_sha256'] = endpoint_digest
         print(json.dumps(result, sort_keys=True))
         return 0
     except Exception as error:
         if process is not None:
             _terminate_process_group(process, timeout=1)
-        code = str(error) if isinstance(error, ValueError) and str(error).startswith('binding_') else 'binding_refused'
-        print(json.dumps({'available': False, 'error': code}))
+        code = str(error) if isinstance(error, ValueError) and str(error) in codes else 'binding_refused'
+        if diagnostic is None:
+            reason = ('timeout' if code == 'binding_timeout' or isinstance(error, subprocess.TimeoutExpired)
+                      else 'output_overflow' if code == 'binding_output_overflow'
+                      else 'metadata_unavailable' if stage in {'endpoint-provenance', 'endpoint-recheck'} and isinstance(error, OSError)
+                      else 'path_unavailable' if stage == 'input-validation' and isinstance(error, OSError)
+                      else 'spawn_failed' if stage == 'helper-spawn'
+                      else 'invalid_output' if stage == 'helper-output' and code == 'binding_refused'
+                      else None)
+            if reason:
+                diagnostic = {'stage': stage, 'reason': reason}
+        result = {'available': False, 'error': code}
+        if diagnostic is not None:
+            result['diagnostic'] = diagnostic
+        print(json.dumps(result))
         return 1
+
+
+def _valid_binding_output(result, output, args) -> bool:
+    if (not isinstance(result, dict)
+            or set(result) != {'available', 'host', 'binding', 'binding_sha256', 'provenance'}
+            or result['available'] is not True
+            or result['provenance'] != 'single-agent-api/refetch + guarded-immutable-session-task-current-owner'
+            or output != (json.dumps(result, separators=(',', ':'), ensure_ascii=False) + '\n').encode()):
+        return False
+    host, binding = result['host'], result['binding']
+    if (not isinstance(host, dict) or not isinstance(binding, dict)
+            or set(host) != {'agent_id', 'workspace_id', 'project_root', 'session_id', 'wrapper_sha256'}
+            or set(binding) != {'owner_epoch', 'project_root', 'session_id', 'task_id'}
+            or host['agent_id'] != args.agent or host['workspace_id'] != args.workspace
+            or host['project_root'] != args.project or binding['project_root'] != args.project
+            or not isinstance(host['session_id'], str) or not re.fullmatch(r'acps_[0-9a-f]{12}', host['session_id'])
+            or binding['session_id'] != host['session_id']
+            or not isinstance(binding['task_id'], str) or not re.fullmatch(r't_[0-9a-f]{12}', binding['task_id'])
+            or type(binding['owner_epoch']) is not int or not 1 <= binding['owner_epoch'] <= 9007199254740991
+            or any(not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value)
+                   for value in (host['wrapper_sha256'], result['binding_sha256']))):
+        return False
+    canonical = json.dumps(binding, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()
+    return hashlib.sha256(canonical).hexdigest() == result['binding_sha256']
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { qualifyBinding } from "./qualification-binding.ts";
+import { qualifyBinding, inspectionRefusalReason, childFailureReason, bindingErrorCode } from "./qualification-binding.ts";
 const agent = "11111111-1111-1111-1111-111111111111";
 const session = "acps_aaaaaaaaaaaa";
 const input = { agent, workspace: "owned", project: "/tmp/owned" };
@@ -69,3 +69,39 @@ for (const bad of [{...input, agent: "1111"}, {...input, workspace: ""},
   }), /binding_invalid_input/); cases++;
 }
 console.log(`qualification-binding: ${cases} cases passed; zero engines/enumeration`);
+
+for (const reason of ["inspection_busy", "inspection_uncheckpointed_wal", "unsafe_storage",
+  "inspection_binding_mismatch", "legacy_storage_migration_required", "unsupported_storage",
+  "inspection_invalid_binding", "inspection_unsafe_parameter", "inspection_evidence_overflow",
+  "inspection_snapshot_changed", "inspection_invalid_cursor", "inspection_refused"]) {
+  const stdout = '{"available": false, "error": "' + reason + '"}\n';
+  assert.equal(inspectionRefusalReason(1, stdout), reason);
+  for (const code of [0, 2, null, "1", "ETIMEDOUT", "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"]) {
+    assert.equal(inspectionRefusalReason(code, stdout), null);
+  }
+  assert.equal(inspectionRefusalReason(1, stdout, true), null);
+}
+for (const stdout of [
+  "", "not JSON", '{"available": false, "error": "private sentinel"}\n',
+  '{"available": true, "error": "inspection_busy"}\n',
+  '{"available": false, "error": "inspection_busy", "private": "sentinel"}\n',
+  '{"available": false, "error": "inspection_busy", "error": "inspection_busy"}\n',
+  '{"available": false, "\\u0065rror": "inspection_busy"}\n',
+  '{"available": false, "error": "inspection_busy"}',
+  '{"available": false, "error": "inspection_busy"}\nextra',
+  '{"available": false, "error": "inspection_busy"}\n{"available": false}',
+  '{"available": false, "error": ',
+]) assert.equal(inspectionRefusalReason(1, stdout), null);
+console.log("inspection refusal diagnostics: complete allowlisted exit-1 only; malformed/ambiguous/terminated output withheld");
+for (const [code, signal, killed, reason] of [
+  ["ENOENT", null, false, "spawn_failed"], ["EACCES", null, false, "spawn_failed"],
+  [7, null, false, "subprocess_failed"], ["private secret sentinel", null, false, "subprocess_failed"],
+  [null, "SIGTERM", false, "subprocess_terminated"], [null, "SIGTERM", true, "timeout"],
+  ["ERR_CHILD_PROCESS_STDIO_MAXBUFFER", "SIGTERM", true, "output_overflow"],
+] as const) assert.equal(childFailureReason(code, signal, killed), reason);
+console.log("child diagnostics: bounded process-metadata classification only");
+assert.equal(bindingErrorCode(new Error("binding_endpoint_refused")), "binding_endpoint_refused");
+for (const value of [new Error("binding_private_secret_sentinel"), new Error("private secret sentinel"),
+  { message: "binding_endpoint_refused" }, null]) {
+  assert.equal(bindingErrorCode(value), "binding_anonymous_host_or_storage_refused");
+}

@@ -43,10 +43,24 @@ When a code index is available, use it before native search or file reads for co
 discovery, following the code-and-evidence guidance.
 If needed information is absent, report a question rather than inventing it.
 
+If information needed to finish the assignment is missing, use the worker's
+advertised structured question route, never a prose-only question or native engine
+question tool. Offer meaningful selectable answers and group related questions in
+one request; preserve custom free text. Use the live schema for the exact form.
+The runtime parks only this assignment, then delivers
+a real user answer as the next prompt in the same healthy session. End the
+question turn without submitting an incomplete result. If additional declared
+paths are needed, use the worker's advertised access-request route; runtime
+policy and current writer reservations determine whether they can be granted or
+need a user decision. A request is not authorization. After denial, use an
+allowed alternative or, when the plan itself must change, the existing scope or
+replan request. Tool arguments and bounds are defined only by live schemas.
+
 If your evidence shows the assignment or its plan is wrong, obsolete or cannot
 succeed as decomposed, submit the advertised replan request with that evidence
 instead of completing a plan that no longer fits the goal. Use the scope request
-when only the granted scope blocks completion.
+when a new decomposition or replacement assignment scope is needed, not as a
+substitute for a worker's access request.
 ## Recovery
 
 After context loss, read the `context-compaction` guidance and recover the exact

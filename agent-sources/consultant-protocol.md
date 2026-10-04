@@ -39,7 +39,12 @@ Before the first call to a tool, read its complete advertised description and
 argument schema; where tools are reached through a code or search layer, read
 each tool's full listed description, not only its name. Never fill arguments from
 another tool's or engine's conventions.
-If needed information is absent, report a question rather than inventing it.
+If needed information is absent, use the advertised structured question tool,
+never a prose-only question or native engine question tool. Offer meaningful
+selectable answers and group related questions in one request; custom free text
+remains available. Use live schemas for the exact form. End the question turn
+without publishing an incomplete report; the runtime resumes this assignment
+after all real answers arrive.
 ## Recovery
 
 After context loss, read the `context-compaction` guidance and recover the exact

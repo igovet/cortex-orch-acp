@@ -59,7 +59,8 @@ TRANSITIONS = {
     'REVIEWING': {'EXECUTING', 'VERIFYING', 'WAITING_USER'},
     'VERIFYING': {'RECONCILING', 'PLANNING'},
     'RECONCILING': {'COMPLETED', 'WAITING_USER'},
-    'WAITING_USER': {'PLANNING', 'RECONCILING'},
+    # Sessionless recovered workers use the task-global question fallback.
+    'WAITING_USER': {'PLANNING', 'RECONCILING', 'EXECUTING', 'REVIEWING'},
     'RECOVERING': {'PLANNING', 'EXECUTING', 'REVIEWING', 'VERIFYING', 'RECONCILING'},
     'BLOCKED': {'RECOVERING'},
     'FAILED': set(), 'CANCELLED': set(), 'COMPLETED': set(),
@@ -602,7 +603,14 @@ class TaskMachine:
                 }
                 for node in nodes
             ]
+            from .worker_waits import projection
+            from .access import context as access_context
+            waits = projection(db, task_id)
             for node in value_nodes:
+                node['access'] = access_context(db, node)
+                node['wait'] = next((w for w in reversed(waits)
+                                     if w['assignment_ref'] == node['assignment_ref']
+                                     and w['status'] in {'open', 'ready', 'resuming'}), None)
                 for key in ('dependencies_json', 'scope_json', 'result_json'):
                     node.pop(key)
 
@@ -800,6 +808,8 @@ class TaskMachine:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT state FROM runtime_tasks WHERE task_id=?', (task_id,)).fetchone()
             if row and row['state'] not in TERMINAL:
+                from .worker_waits import cancel_tx
+                cancel_tx(db, task_id, 'task_cancelled')
                 transition(db, task_id, 'CANCELLED')
             db.commit()
 
@@ -837,21 +847,8 @@ class TaskMachine:
                  and set(json.loads(n['dependencies_json'])) <= completed]
         if not ready:
             return task, []
-        # Only this task's own in-flight workers hold a write scope or a
-        # worker slot; no other task -- live, blocked or long dead -- can
-        # keep this one from starting. An earlier revision's
-        # node still marked 'running' holds scope only while its worker
-        # is not yet released; a stale marker alone never blocks a new plan.
-        active_nodes = db.execute("""SELECT n.scope_json, n.role, n.stage FROM runtime_nodes n WHERE n.task_id=? AND (
-            (n.status='running' AND (n.revision=? OR NOT EXISTS (
-                SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='WORKER_RELEASED'
-                AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref)))
-            OR (n.assignment_ref IS NOT NULL AND EXISTS (
-                SELECT 1 FROM delegation_provisioning p WHERE p.idempotency_key=n.assignment_ref
-            ) AND NOT EXISTS (
-                SELECT 1 FROM runtime_events e WHERE e.task_id=n.task_id AND e.type='WORKER_RELEASED'
-                AND json_extract(e.payload_json,'$.assignment_ref')=n.assignment_ref
-            )))""", (task_id, task['revision'])).fetchall()
+        from .access import holdings, effective_scope, absolute_scope, pending
+        active_nodes = holdings(db)
         # Start first what unblocks the longest remaining dependency chain;
         # ties keep plan (rowid) order. Graph structure only, no model call.
         dependents = {}
@@ -872,12 +869,13 @@ class TaskMachine:
         # Import lazily: gateway imports this module for shared state helpers.
         from .gateway import READ_ONLY
         occupied = [
-            json.loads(n['scope_json']) for n in active_nodes
+            absolute_scope(db, n['task_id'], effective_scope(db, n)) for n in active_nodes
             if n['stage'] != 'review' and n['role'] not in READ_ONLY
         ]
+        occupied.extend(absolute_scope(db, w['task_id'], w['paths']) for w in pending(db))
         selected = []
         for candidate in ready:
-            scope = json.loads(candidate['scope_json'])
+            scope = absolute_scope(db, task_id, effective_scope(db, candidate))
             read_only = candidate['stage'] == 'review' or candidate['role'] in READ_ONLY
             if not read_only and any(overlaps(a,b) for grant in occupied for a in grant for b in scope):
                 continue
@@ -1088,7 +1086,8 @@ class TaskMachine:
                 original={n['id'] for n in tasks}
                 implementations=[n for n in db.execute("SELECT * FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='execution' ORDER BY rowid",
                                                        (task_id,task['revision'])).fetchall() if n['node_id'] in original]
-                targets,fallback=targeted_fixes(tasks,{n['node_id']: json.loads(n['scope_json']) for n in implementations},
+                from .access import effective_scope
+                targets,fallback=targeted_fixes(tasks,{n['node_id']: effective_scope(db, n) for n in implementations},
                                                 review['result'].get('findings'),review['result'].get('report_ref'))
                 keys={n['node_id']: f"_fix_{task['review_cycle']}_{n['node_id']}" for n in implementations}
                 parents={task['id']: task['dependencies'] for task in tasks}
@@ -1105,7 +1104,7 @@ class TaskMachine:
                         continue
                     db.execute('INSERT INTO runtime_nodes VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                                (task_id,task['revision'],keys[node_id],implementation['role'],objective,
-                                encoded(dependencies),implementation['scope_json'],'execution','pending',None,None))
+                                encoded(dependencies),encoded(effective_scope(db, implementation)),'execution','pending',None,None))
                     fixes.append(keys[node_id])
                 event(db,task_id,'REVIEW_CHANGES_REQUESTED',dict(review=review['node_id'],fixes=fixes,
                                                                   targeted=targets is not None,fallback=fallback))

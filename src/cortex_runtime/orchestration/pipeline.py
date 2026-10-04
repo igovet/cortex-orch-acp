@@ -26,7 +26,9 @@ def _recorded_route_summary(store, task_id, assignment_ref):
 
 def publish(store, channel, context):
     state = context['state']
-    key = f"runtime-pipeline:{channel.channel_id}:{context['revision']}:{context['review_cycle']}:{state}"
+    waits = [node.get('wait', {}).get('event_id') for node in context['nodes'] if node.get('wait')]
+    wait_key = ':wait:' + ','.join(map(str, waits)) if waits else ''
+    key = f"runtime-pipeline:{channel.channel_id}:{context['revision']}:{context['review_cycle']}:{state}" + wait_key
     draft = store.call('create_draft', dict(template='pipeline', request_key=key),
                        channel.principal_thread_id, channel.parent_principal_thread_id, trusted=True)
     path = Path(draft['draft_path'])
@@ -38,10 +40,20 @@ def publish(store, channel, context):
         for node in context['nodes']:
             result = node['result'] or {}
             route = _recorded_route_summary(store, context["task_id"], node.get("assignment_ref"))
+            wait = node.get('wait')
+            wait_label = {'open': 'waiting for answer', 'ready': 'answer ready',
+                          'resuming': 'answer continuation in progress'}.get(wait['status']) if wait else None
+            if wait and wait.get('kind') == 'access':
+                wait_label = {'open': 'waiting for access decision', 'ready': 'access decision ready',
+                              'resuming': 'access continuation in progress'}.get(wait['status'])
             rows.append(f"- {node['node_id']} ({node['role']}): {node['status']}; "
                         f"dependencies: {', '.join(node['dependencies']) or 'none'}; "
                         f"report: {result.get('report_ref', 'not published')}"
-                        + (f"; routing: {route}" if route else ""))
+                        + (f"; routing: {route}" if route else "")
+                        + (f"; {wait_label}" if wait_label else ""))
+            if node.get('access', {}).get('declared_scope_revision'):
+                rows.append('  - Runtime declared scope: ' + ', '.join(node['access']['effective_declared_scope'])
+                            + '; enforcement: already project writable (no sandbox remount).')
         waiver = context.get('review_not_required')
         if waiver:
             reference = ('the project as observed before the planned work' if waiver['reference'] == 'execution_baseline'

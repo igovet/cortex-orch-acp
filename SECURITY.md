@@ -1,5 +1,15 @@
 # Security policy
 
+## Paseo dependency findings (2026-10-04)
+
+The plugin lockfile retains GHSA-vfj7-8cjw-p6xm in `braces@3.0.3`,
+propagated through React Native's Metro/Jest tooling. Its 15 high-severity npm
+package entries describe one advisory, not 15 proven exploitable defects.
+No patched braces release was published at this inspection. Installation and
+regression passes do not clear a nonzero audit, and `devDependencies` is not
+a security boundary. See the [dependency disposition](docs/acp/paseo-dependency-audit.md)
+for exact paths, artifact-test limits and the next upstream-fix decision.
+
 ## Current ACP boundary (1.0.0)
 
 Cortex is an incoming ACP stdio agent. It launches Codex and Claude ACP engines,
@@ -43,6 +53,15 @@ This is a display boundary only: it does not cancel engine actions, rewrite
 history, or grant authority. Ambiguous late pre-question text may also be omitted;
 see [question display ordering](docs/acp/orchestration.md#plan-submission-and-coordinator-polling).
 
+Successful runtime recovery clears the exhausted planning-cycle counter, not
+question identities or answer receipts. Only the normal exact-answer transition
+can resume a waiting question; dismissal does not reset the cycle. The renewed
+cycle still requires a valid structured proposal within three engine prompts.
+A controller defect that previously reused the exhausted planning counter for
+a recovery answer is fixed and has a focused no-paid regression. This repairs
+the recovery transition only; it does not establish why a model produced no
+proposal in a separate three-prompt run, nor qualify Desktop batch/worker UI.
+
 The worker result schema requires exactly one owned report form: an explicit
 `report_ref` for an already published report, or inline `report: {title, markdown}`.
 When a draft was published through `write_report`, its returned `report_id` is
@@ -76,14 +95,20 @@ task-closure question is required. The runtime records the source and unfinished
 work, fences assignments and owned sessions, and uses terminal `CANCELLED`, not
 verified `COMPLETED`. A model claim that the user wants to finish is not an
 authorization or a passing review/verification receipt.
-For a free-text Paseo question, the instructional action used to expose the
-card is not an answer; only typed text or a later user message closes the
-pending question.
+Paseo's structured question path is role-neutral across coordinator, worker and runtime fallback requests. For grouped questions it uses one paginated form and submits the complete set together; incomplete submissions are rejected. The "Other..." field and a chat reply are valid free-text answers. Dismissing or cancelling the form does not create an answer, and a declined or timed-out host elicitation leaves the durable question pending. Where an ACP host lacks the structured UI, Cortex can only fall back to a text prompt; it does not enforce that a model asks every question or that every host renders options. A free-text legacy card's instructional action is not an answer.
 Plan verification commands execute as literal argv without a shell. Submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses, so a plan cannot defer that syntax error until verification. Structural validation does not prove semantic correctness of a plan, review or implementation.
 
 Worker briefs preserve the assignment objective, scope and dependency report references. The original task goal and review git evidence are shortened only when needed to fit the provisioning limit, and every shortened field identifies the worker-readable capsule or git-output source. These references use tools already available to the worker and do not change its assignment authority. A recovery capsule whose critical sections exceed their byte budget is compacted deterministically, never refused: each truncated field carries its sha256, size, a fenced preview with its original trust label and the tool that returns the full text (`read_source` for user messages and answers). Each trimmed list names its omitted entries, so recovery never silently loses required context.
 
 A worker `passed` check is accepted only with an exact same-attempt `command_run` or user-confirmed `outside_command` receipt for one completed, nontrivial operation, complete untruncated output and exit code 0. Engine-native shell calls and file reads do not verify checks. Insufficient evidence stays `unverified`; observed nonzero exits stay `failed`. Earlier reports are not rewritten, and older evidence is marked weak when projected under the current rule. Check run history is retained; a failure closes only on a later exact verified rerun that remains the latest result for that command.\n\nTransport state is distinct from task outcome. A plugin disconnect records available session/task/attempt identities and history completeness; restart recovery reads persisted state and leaves actions with unknown outcomes unresolved. Until reload recovery is qualified for the deployed version, update the plugin between active tasks. A host SIGKILL without SIGTERM cannot be recorded, and native engine actions cannot be represented by the retained command receipt mechanism.
+
+On stdin EOF, the ACP process joins its reader after EOF is observed and before
+runtime teardown, so disconnect recording and cancellation are not abandoned
+with the daemon reader thread. This does not provide a SIGKILL guarantee or
+resolve unknown action outcomes.
+On a failed stdout write, it likewise joins the writer's disconnect callback
+before joining prompt workers or tearing down the runtime, without joining a
+reader blocked on still-open stdin. SIGTERM records the disconnect synchronously.
 
 For `result_submit`, a model-supplied `checks[].command` on a completed check
 is descriptive, never evidence. Only the runtime derives `closed_by` from real
@@ -129,9 +154,13 @@ path on both sides of the jail), while `/var/tmp` -- which has no such
 interop use, and can be a read-only mount or absent entirely once the whole
 host is bound read-only -- is instead a private, writable, per-run directory
 backed by the process's own scratch, never the host's shared one; `HOME` and
-`TMPDIR`/`TMP`/`TEMP` are that same private scratch. The project is read-only
-except the assignment's scopes, `.cortex` is
-hidden (for a task bound to a linked worktree, the jail root is that worktree
+`TMPDIR`/`TMP`/`TEMP` are that same private scratch. The project mount follows
+the engine's existing launch-time jail grant: writing workers can have the
+whole project writable even when their runtime-declared assignment scope is
+narrower. The Cortex gateway still checks every write against declared scope,
+owner policy and path safety. An accepted access request extends only runtime
+declared scope and writer reservations; it does not remount or widen the OS
+jail. `.cortex` is hidden (for a task bound to a linked worktree, the jail root is that worktree
 and the main repository's shared `.cortex` is masked too) and `.codex`,
 `.claude` are read-only; `.git` is read-only except the
 repository data git needs for a writing worker (see
@@ -259,11 +288,14 @@ unmounted. The full `/etc` tree and user home are never added by that grant. A
 read grant cannot overlay the project or unmask its private store. Native account
 MCP entries are disabled. Server-initiated sampling/elicitation is refused.
 
-File writes use scope checks, no-follow descriptors, expected-content hashes and
-atomic replacement. Commands run under Linux `bwrap`: project read-only by default,
-only granted files/directories writable (the whole project for a writing worker),
-private `.cortex`, `.codex` and `.claude` paths masked, and the project's `.git`
-visible as described below. A worker's `command_run` runs as the owner: their user and
+Cortex gateway file writes use declared-scope checks, no-follow descriptors,
+expected-content hashes and atomic replacement. Commands run under Linux
+`bwrap`: the project is read-only by default and launch-time grants make the
+whole project writable for a writing worker; that jail grant is broader than
+the worker's runtime-declared assignment scope. Additional access requests
+update only the declared-scope writer reservations after runtime validation,
+not the OS jail. Private `.cortex`, `.codex` and `.claude` paths are masked,
+and the project's `.git` is visible as described below. A worker's `command_run` runs as the owner: their user and
 group names resolve, their real HOME is mounted read-only (so its dotfiles and
 credentials are readable by the command), the runtime's environment is passed on
 except `CORTEX_*` and credential-like variables (token, secret, password, API key,
@@ -275,7 +307,11 @@ servers and automatic verification get no HOME, network or inherited environment
 unless explicitly granted. Hardlinked writable
 files are rejected. Draft writes require the exact owned unpublished draft ID.
 File actions and command starts recheck authority at the transaction boundary; running
-commands and external servers are terminated on observed revocation. This does not
+commands and external servers are terminated on observed revocation.
+Missing continuation-session metadata on a recovered channel does not revoke its
+ordinary tool authority or bypass epoch, assignment, role or wait checks.
+Questions without that binding use task-global recovery, never a fabricated
+same-session wait; access continuation still requires the exact retained session. This does not
 claim protection against a separate hostile process running as the same OS user and
 racing filesystem changes.
 
@@ -507,6 +543,20 @@ report publication. A report submitted inline with `result_submit` is published
 through the same owned-draft and `write_report` checks under delivery keys derived
 from the channel and the result's request key, before any result is recorded; it
 grants no other authority. Delivery keys retain exact receipts; conflicting reuse fails.
+Plan objective bounds are enforced before plan persistence and exposed in both
+JSON Schema and the advertised property description. Length counts Unicode code
+points, not encoded bytes or UTF-16 units. Preflight guidance never raises bounds,
+silently truncates requirements or grants authority.
+Submission guidance requires a complete report and valid argument serialization;
+the owned-draft route is an alternative transport, not an acceptance bypass.
+Missing reports remain rejected. An engine-side JSON parse failure is not a
+runtime submission receipt and never establishes publication or completion.
+In one retained Claude review session, some attempts omitted both report forms
+and subsequent malformed JSON calls failed before Cortex dispatch; later valid
+submissions were received. This session-specific evidence does not show a
+general acceptance defect or guarantee future model compliance. Prepare the
+complete report and structured arguments before submitting; correct input
+serialization/schema errors rather than treating tool output as accepted.
 Report hashing opens each component without following symlinks and verifies the
 file identity before and after reading. Completion rechecks report digests,
 completed nodes, the last independent review verdict, all configured verification
@@ -577,4 +627,33 @@ latest-task fallback, unrelated enumeration, report-body reads, initialization,
 migration, checkpoint or lifecycle writes occur. Observation is not an ownership
 lease, engine confirmation, disconnect/resource-release receipt or acceptance.
 Timeout/output/identity/storage/auth refusals expose safe codes, not exception
-text or raw logs. See [the binding procedure](docs/acp/dev-paseo-environment.md#read-only-dev-binding).
+text or raw logs. Failures may expose only fixed allowlisted diagnostic stages/reasons:
+local missing metadata, spawn, deadline/output and subprocess observations, or a
+complete canonical exit-1 task-inspector reason at `stage=task-discovery`.
+Unknown, malformed, duplicate/escaped, truncated or terminated output supplies no
+child-authored reason; local process observations remain distinguishable without
+copying the output. Unknown exception codes are redacted, not accepted by prefix.
+Zero exit requires a complete canonical exact-identity/digest binding envelope;
+missing evidence or extra fields never become success. Diagnostics never return a binding or authorize another read, retry,
+checkpoint or migration; earlier generic refusals cannot be retrospectively
+attributed to busy storage or any other condition. See [the binding procedure](docs/acp/dev-paseo-environment.md#read-only-dev-binding).
+
+## Runtime store ignore protection
+
+Cortex protects the task project root `.gitignore` through the normal safe-file
+writer, preserving digest checks, live write authority and user deny-write paths.
+It appends a final `/.cortex/` directory rule so earlier negations cannot expose
+store contents. Consented deletion of that ignore file retains the required rule.
+Command completion reconciles a changed ignore file (also after a nonzero exit);
+a failed repair cannot produce a successful command receipt. Fresh writable
+worker result submission reconciles observed ignore-file changes before publication,
+recreating a removed file. When a complete baseline is unavailable it ensures
+the rule conservatively, creating the file if absent. Unchanged observed tasks
+do not create an ignore file. Read-only roles and replayed results do not repair files.
+
+Native edits are not intercepted per call: protection is restored at submission,
+not continuously during a native turn. An interrupted native turn that never
+submits may leave an unsafe ignore file. Neither ignoring nor this guard removes
+already tracked store content, prevents a deliberate `git add -f`, or undoes a
+commit made before reconciliation. The guard never untracks, deletes store data,
+stages or commits files. See [permissions](docs/acp/permissions-and-containment.md#runtime-store-ignore-protection).

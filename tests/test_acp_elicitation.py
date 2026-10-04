@@ -241,7 +241,7 @@ def _ask_user_then_accept_router(question="Which environment?", options=None, ob
         if not phase["asked"]:
             phase["asked"] = True
             args = dict(question=question, request_key="ask1")
-            if options is not None: args["options"] = options
+            args["options"] = options if options is not None else ["staging", "production"]
             mcp_tools.dispatch(store, channel, "user_question_request", args)
         else:
             context = mcp_tools.dispatch(store, channel, "task_get_context", {})
@@ -313,7 +313,7 @@ def test_elicitation_not_advertised_uses_text_fallback(tmp_path):
         assert final["result"]["stopReason"] == "end_turn"
         # Never an outbound elicitation/create request.
         assert not any(m.get("method") == "elicitation/create" for m in harness.stdout.lines)
-        chunk = harness.wait_for(lambda m: m.get("params", {}).get("update", {}).get("content", {}).get("text") == "Which environment?")
+        chunk = harness.wait_for(lambda m: m.get("params", {}).get("update", {}).get("content", {}).get("text", "").startswith("Which environment?"))
         assert chunk is not None
 
         with harness.store.connection() as db:
@@ -472,7 +472,7 @@ def test_a_late_click_on_a_stale_card_never_answers_the_question_now_waiting():
     agent = Agent.__new__(Agent)
     agent._store_for = lambda project: "store"
     original = agent_module.acp_questions_store.answer
-    agent_module.acp_questions_store.answer = lambda store, qid, value, source: recorded.append((qid, value)) or False
+    agent_module.acp_questions_store.answer = lambda store, qid, value, source, **kwargs: recorded.append((qid, value)) or False
     try:
         stale = type("Q", (), dict(id="pq_first", task_id="t_1", options=["A", "B"]))()
         agent._run_late_answer("s1", session, stale, "2")
@@ -493,7 +493,7 @@ def test_a_long_markdown_question_goes_to_the_chat_and_the_card_keeps_the_short_
     assert body.startswith("**План**") and title is None
 
 
-def test_a_typed_other_answer_on_a_paseo_card_answers_its_question(monkeypatch):
+def test_a_typed_other_answer_on_a_paseo_card_answers_its_question(monkeypatch, tmp_path):
     """Paseo's "Other..." field: the bridge can only pick a card option, so
     the provider carries the typed text as a config value."""
     import contextlib
@@ -501,19 +501,29 @@ def test_a_typed_other_answer_on_a_paseo_card_answers_its_question(monkeypatch):
     import cortex_runtime.acp.agent as agent_module
 
     delivered, transcript, late, responses = [], [], [], []
-    question = type("Q", (), dict(id="pq_1", task_id="t_1", options=["A", "B"]))()
-    session = {"lock": _threading.Lock(), "active": _threading.Event(), "project": "/p", "task_id": "t_1",
-               "question_waiter": ("pq_1", lambda text: delivered.append(text) or True)}
+    from cortex_runtime.bootstrap import bootstrap_task
+    from cortex_runtime.portable.identity import SourceEvent
+    store = Store(tmp_path / '.cortex', project_root=tmp_path)
+    task = bootstrap_task(store, SourceEvent(origin='typed', event_id='one'), 'Test', 'owner')
+    from cortex_runtime.acp import sessions
+    from cortex_runtime.acp.agent import _current_owner_epoch_obj
+    sessions.create_session(store, 's1', str(tmp_path), {}, {}, [])
+    sessions.bind_task(store, 's1', task.task_id)
+    with store.connection() as db: owner = _current_owner_epoch_obj(db, task.task_id)
+    question = agent_module.acp_questions_store.create_if_absent(
+        store, task.task_id, 'typed', 'Which?', options=['A', 'B'])
+    session = {"lock": _threading.Lock(), "active": _threading.Event(), "project": "/p", "task_id": task.task_id,
+               "owner_epoch": owner, "question_waiter": (question.id, lambda text: delivered.append(text) or True)}
     agent = Agent.__new__(Agent)
     agent.environ = {"CORTEX_PASEO_QUESTION_UI": "1"}
     agent.sessions = {"s1": session}
-    agent._store_for = lambda project: "store"
+    agent._store_for = lambda project: store
     agent._history_lock = lambda session_id: contextlib.nullcontext()
     agent._config_options_for_session = lambda session, store: []
     agent._run_late_answer = lambda *args: late.append(args)
+    agent._record_card_answer_history = lambda store, sid, answers: transcript.extend(
+        (sid, 'user_message', a['answer']) for a in answers)
     agent.transport = type("T", (), dict(send_response=lambda self, body: responses.append(body) or True))()
-    monkeypatch.setattr(agent_module.acp_questions_store, "get",
-                        lambda store, qid: question if qid == "pq_1" else None)
     monkeypatch.setattr(agent_module.acp_replay_store, "append_host_transcript",
                         lambda store, sid, kind, text, *a, **k: transcript.append((sid, kind, text)))
 
@@ -522,29 +532,30 @@ def test_a_typed_other_answer_on_a_paseo_card_answers_its_question(monkeypatch):
             sessionId="s1", configId=_PaseoQuestionElicitor.ANSWER_CONFIG_ID, value=json.dumps(value)))
 
     # The turn waits on this card: the text is its answer, and the chat keeps it.
-    answer(dict(questionId="pq_1", answer="Neither, do C"))
-    assert delivered == ["Neither, do C"] and late == []
-    assert transcript == [("s1", "user_message", "Neither, do C")]
-    assert responses[-1]["result"] == {"configOptions": []}
-    # The turn no longer waits on it: answered as a late card choice would be.
-    session["question_waiter"] = None
-    answer(dict(questionId="pq_1", answer="Later text"), 2)
+    answer(dict(questionId=question.id, answer="Neither, do C"))
     for _ in range(50):
         if late: break
         time.sleep(0.01)
-    assert late and late[0][2] is question and late[0][3] == "Later text"
+    assert delivered == [] and late[0][-1] is True
+    assert agent_module.acp_questions_store.get(store, question.id).answer_text == "Neither, do C"
+    assert transcript == [("s1", "user_message", "Neither, do C")]
+    assert responses[-1]["result"] == {"configOptions": []}
+    # Closed cards cannot be acknowledged as fresh answers.
+    from cortex_runtime.acp.protocol import RpcError
+    with pytest.raises(RpcError):
+        answer(dict(questionId=question.id, answer="Later text"), 2)
     # Another task's question, or no text, is refused and never recorded.
     from cortex_runtime.acp.protocol import RpcError
     for bad in (dict(questionId="pq_other", answer="x"), dict(questionId="pq_1", answer="  ")):
         with pytest.raises(RpcError):
             answer(bad, 3)
-    assert len(transcript) == 2
+    assert len(transcript) == 1
     # Outside Paseo the id is an ordinary (unknown) config option.
     agent.environ = {}
     agent._apply_config_selection = lambda *args: (False, [], RpcError(-32602, "unknown"))
     agent.transport.send_notification = lambda body: True
     answer(dict(questionId="pq_1", answer="x"), 4)
-    assert len(transcript) == 2
+    assert len(transcript) == 1
 
 
 def test_the_paseo_provider_sends_typed_answers_under_the_id_cortex_reads():

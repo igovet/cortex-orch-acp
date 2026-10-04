@@ -507,7 +507,7 @@ def _make_runtime(store, router, **kwargs):
             if channel and channel.role=='coordinator' and outcome.stop_reason==StopReason.END_TURN:
                 from cortex_runtime.orchestration.state import TaskMachine
                 if TaskMachine(store).context(channel.task_id)['state']=='PLANNING':
-                    mcp_tools.dispatch(store,channel,'user_question_request',dict(question='Next input?',request_key='generation-question-'+str(index)))
+                    mcp_tools.dispatch(store,channel,'user_question_request',dict(question='Next input?',options=['Continue', 'Finish'],request_key='generation-question-'+str(index)))
             return outcome
         return turn
     engine = GenerationAwareSessionRuntime(store, router, engine=kwargs.pop("engine", "codex-acp"), version=kwargs.pop("version", "1.12.0"))

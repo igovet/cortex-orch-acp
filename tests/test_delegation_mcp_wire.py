@@ -219,3 +219,55 @@ def test_result_submit_accepts_descriptive_command_without_trusting_fake_receipt
     retained = TaskMachine(store).context(task)['nodes'][0]['result']['checks'][0]
     assert 'command' not in retained
     assert retained['evidence_gap']
+
+
+def test_plan_objective_wire_description_rejection_and_corrected_submission(tmp_path):
+    from copy import deepcopy
+    from cortex_runtime.delegation.contracts import schemas_for
+    from cortex_runtime.delegation.mcp_tools import tool_definitions
+    from cortex_runtime.engine.mcp_bridge import always_load
+    from cortex_runtime.orchestration.state import TaskMachine
+
+    project, store, task, channel, secret = _bootstrap(tmp_path)
+    machine = TaskMachine(store)
+    machine.create(task, 'Build a page.')
+    tools = _call(project, channel, secret, _init_and('tools/list', {}), tmp_path)[-1]['result']['tools']
+    entry = next(t for t in tools if t['name'] == 'plan_submit')
+    generated = next(t for t in tool_definitions('coordinator') if t['name'] == 'plan_submit')
+    # Both adapters consume this shared channel MCP surface. Claude's loading
+    # annotation changes no schema; Codex can render property comments only.
+    assert entry['inputSchema'] == generated['inputSchema'] == schemas_for('coordinator')['plan_submit']
+    assert always_load(generated)['inputSchema'] == entry['inputSchema']
+    assert entry['_meta']['anthropic/alwaysLoad'] is True
+    prop = entry['inputSchema']['properties']['plan']['properties']['tasks']['items']['properties']['objective']
+    assert (prop['minLength'], prop['maxLength']) == (1, 8000)
+    assert '1 to 8000 Unicode code points' in prop['description']
+    assert 'UTF-8 bytes or UTF-16 code units' in prop['description']
+    assert 'never silently truncate' in prop['description']
+    args = dict(plan=dict(tasks=[dict(id='A', role='backend-dev', objective='😀' * 8001,
+                                     dependencies=[], scope=['src/**'], model='auto')],
+                          verification=[['true']]), request_key='objective-boundary')
+    before = machine.context(task)
+    with store.connection() as db:
+        requests = db.execute('SELECT COUNT(*) FROM runtime_requests').fetchone()[0]
+    rejected = _call(project, channel, secret, _init_and('tools/call',
+                     dict(name='plan_submit', arguments=args)), tmp_path)[-1]
+    diagnostic = json.dumps(rejected)
+    assert 'invalid_arguments' in diagnostic and '8001 Unicode characters' in diagnostic
+    assert 'arguments.plan.tasks[0].objective' in diagnostic
+    assert 'verify its character count' in diagnostic
+    assert machine.context(task) == before
+    with store.connection() as db:
+        assert db.execute('SELECT COUNT(*) FROM runtime_requests').fetchone()[0] == requests
+        assert db.execute('SELECT COUNT(*) FROM runtime_nodes').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM delegation_provisioning').fetchone()[0] == 0
+    corrected = deepcopy(args)
+    corrected['plan']['tasks'][0]['objective'] = '😀' * 8000
+    request = dict(name='plan_submit', arguments=corrected)
+    accepted = _data(_call(project, channel, secret, _init_and('tools/call', request), tmp_path))
+    assert accepted == _data(_call(project, channel, secret, _init_and('tools/call', request), tmp_path))
+    assert machine.context(task)['state'] == 'PLAN_READY'
+    assert machine.context(task)['nodes'][0]['objective'] == '😀' * 8000
+    with store.connection() as db:
+        assert db.execute('SELECT COUNT(*) FROM runtime_nodes').fetchone()[0] == 1
+        assert db.execute('SELECT COUNT(*) FROM delegation_provisioning').fetchone()[0] == 0

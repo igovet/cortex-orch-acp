@@ -524,12 +524,28 @@ def _section_pipeline_and_assignments(db, task_id: str, recipient: dict) -> dict
                 "Never end your turn to wait for a background job (its notification cannot reach you); wait "
                 "inside the turn by checking its output. If something fails, find another way or say exactly "
                 "what you need.")
-        sql = 'SELECT node_id,role,objective,dependencies_json,scope_json,status,assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=?'
+        sql = 'SELECT task_id,node_id,role,stage,objective,dependencies_json,scope_json,status,assignment_ref FROM runtime_nodes WHERE task_id=? AND revision=?'
         values = [task_id,task['revision']]
         if recipient['role'] != 'coordinator':
             sql += ' AND assignment_ref=?'
             values.append(recipient['assignment_ref'])
         section['runtime']['nodes'] = [dict(row) for row in db.execute(sql+' ORDER BY node_id',values)]
+        from ..orchestration.access import context as access_context
+        for node in section['runtime']['nodes']:
+            node['access'] = access_context(db, node)
+        from ..orchestration.worker_waits import projection
+        waits = projection(db, task_id, assignment_ref=None if recipient['role'] == 'coordinator'
+                           else recipient['assignment_ref'])
+        active = [w for w in waits if w['status'] in {'open', 'ready', 'resuming'}]
+        terminal = [w for w in waits if w['status'] not in {'open', 'ready', 'resuming'}]
+        # Question/answer bodies already live in the bounded source sections.
+        # Retain all active bindings and only a bounded tail of past deliveries.
+        keys = ('wait_id', 'question_id', 'batch_id', 'question_ids', 'answer_refs', 'assignment_ref', 'attempt_id', 'channel_id',
+                'owner_epoch', 'engine_session_ref', 'revision', 'status', 'delivery_id',
+                'answer_ref', 'reason', 'event_id', 'kind', 'request_id', 'paths', 'access_decision')
+        section['runtime']['worker_waits'] = [
+            {key: w[key] for key in keys if key in w} for w in active + terminal[-8:]]
+        section['runtime']['worker_waits_omitted'] = max(0, len(terminal) - 8)
     if recipient["role"] == "coordinator":
         section["current_pipeline"] = _pipeline_ref(db, task_id)
         rows = db.execute(
@@ -684,7 +700,15 @@ def _pending_questions(db, task_id: str, assignment_ref: str | None = None) -> l
         query += " AND assignment_ref=?"
         params.append(assignment_ref)
     rows = db.execute(query, params).fetchall()
-    return [dict(id=r["id"], assignment_ref=r["assignment_ref"], text=r["text"], created_at=r["created_at"]) for r in rows]
+    from ..orchestration.question_batches import find_tx
+    result = []
+    for row in rows:
+        question = dict(id=row['id'], assignment_ref=row['assignment_ref'], text=row['text'], created_at=row['created_at'])
+        batch = find_tx(db, task_id, question_id=row['id'])
+        if batch:
+            question.update(batch_id=batch['batch_id'], question_ids=batch['question_ids'])
+        result.append(question)
+    return result
 
 
 def _capacity_ambiguous(db, task_id: str, attempt_id: str | None = None) -> list[dict]:

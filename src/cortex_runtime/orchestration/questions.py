@@ -3,8 +3,7 @@ import hashlib
 import json
 
 from ..contracts import StoreError
-from ..portable.identity import new_id
-from .state import encoded, event, now, transition
+from .state import encoded, event, transition
 
 
 # Only an unambiguous, complete owner answer closes unfinished work. In
@@ -43,6 +42,11 @@ def is_force_finish_answer(value, question=None):
 def request(store, channel, args):
     if args.get('skill_proposal') is not None and channel.role != 'coordinator':
         raise StoreError('skill_proposal_not_allowed', 'skill_proposal', channel.role, 'the coordinator')
+    if channel.role == 'worker':
+        from .worker_waits import request as worker_request
+        return worker_request(store, channel, args)
+    from .question_batches import forms, create_tx
+    question_forms = forms(args)
     digest = hashlib.sha256(encoded(args).encode()).hexdigest()
     with store.connection() as db:
         db.execute('BEGIN IMMEDIATE')
@@ -65,25 +69,19 @@ def request(store, channel, args):
             revision=db.execute('SELECT revision FROM runtime_tasks WHERE task_id=?',(channel.task_id,)).fetchone()[0]
             resume_state='PLANNING'
             details=dict(after_verification=True,revision=revision)
-        if channel.role=='worker':
-            from .gateway import _authority
-            _authority(db,channel)
-            resume_state='PLANNING'
-            db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')",(channel.task_id,))
-            db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",(now(),channel.task_id))
         if args.get('skill_proposal') is not None:
             # A proposal is checked before the question exists and retained
             # with it; nothing here touches the project.
             from .skill_proposals import validate
             details['skill_proposal'] = validate(db, store.project_root, channel, args)
-        question_id = new_id('pq_')
-        db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at) VALUES(?,?,?,?,?,'open',?)",
-                   (question_id, channel.task_id, f'runtime:{channel.channel_id}:{args["request_key"]}',
-                    args['question'], encoded(args.get('options')) if args.get('options') else None, now()))
+        saved = create_tx(db, channel.task_id, channel.channel_id, args['request_key'], question_forms,
+                          owner_epoch=getattr(channel, 'owner_epoch', None))
         event(db, channel.task_id, 'USER_QUESTION_REQUESTED',
-              dict(question_id=question_id, question=args['question'], options=args.get('options'), resume_state=resume_state, **details), channel.channel_id)
+              dict(**saved, resume_state=resume_state, **details), channel.channel_id)
         transition(db, channel.task_id, 'WAITING_USER')
-        receipt = dict(question_id=question_id, state='WAITING_USER')
+        receipt = dict(question_id=saved['question_id'], state='WAITING_USER')
+        if 'batch_id' in saved:
+            receipt.update(batch_id=saved['batch_id'], question_ids=[q['question_id'] for q in saved['questions']])
         if channel.role == 'coordinator':
             # Only the coordinator's text before the call reaches the user.
             receipt['next'] = QUESTION_RECEIPT_NEXT
@@ -113,9 +111,14 @@ def resume_answered(store, task_id):
             raise StoreError('runtime_question_missing')
         saved = json.loads(row['payload_json'])
         answer = db.execute('SELECT status,answer_text,answer_source FROM pending_questions WHERE task_id=? AND id=?', (task_id, saved['question_id'])).fetchone()
+        if saved.get('batch_id'):
+            from .question_batches import find_tx, completed_tx
+            batch = find_tx(db, task_id, batch_id=saved['batch_id'])
+            if not batch or not completed_tx(db, batch):
+                return False
         if not answer or answer['status'] != 'answered':
             return False
-        if answer['answer_source'] in {'text', 'elicitation'} and is_force_finish_answer(answer['answer_text'], saved['question']):
+        if not saved.get('batch_id') and answer['answer_source'] in {'text', 'elicitation'} and is_force_finish_answer(answer['answer_text'], saved['question']):
             # Leave WAITING_USER in place until stop_task atomically records
             # the stop marker and fences workers. A crash here is retryable.
             received = db.execute(

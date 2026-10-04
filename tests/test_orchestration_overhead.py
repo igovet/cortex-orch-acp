@@ -115,7 +115,7 @@ def _task(tmp_path, goal):
 
 
 def _legacy_context(machine, task_id):
-    """Reference projection from before context reads shared one snapshot."""
+    """Multi-read reference, including the current default wait/access fields."""
     from cortex_runtime.delegation.evidence import annotate_checks
     from cortex_runtime.orchestration.policy import denied_paths
     from cortex_runtime.orchestration.skill_proposals import task_proposals
@@ -190,6 +190,15 @@ def _legacy_context(machine, task_id):
             "dependencies": json.loads(node["dependencies_json"]),
             "scope": json.loads(node["scope_json"]),
             "result": json.loads(node["result_json"] or "null"),
+            # This fixture has no wait/access events. The new public fields
+            # must retain their defaults without altering the old projection.
+            "wait": None,
+            "access": {
+                "declared_scope_revision": 0,
+                "effective_declared_scope": json.loads(node["scope_json"]),
+                "enforcement": "already_project_writable",
+                "last_request": None,
+            },
         }
         for node in nodes
     ]
@@ -261,6 +270,8 @@ def test_context_matches_legacy_projection_in_one_read_transaction(
     assert connections == 1
     normalized = [statement.lstrip().upper() for statement in statements]
     assert normalized.count("BEGIN") == 1
+    assert not any(statement.startswith(("BEGIN IMMEDIATE", "INSERT", "UPDATE", "DELETE"))
+                   for statement in normalized)
     assert sum(
         statement.startswith(
             "SELECT IDEMPOTENCY_KEY,ATTEMPT_ID FROM DELEGATION_PROVISIONING"

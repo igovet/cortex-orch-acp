@@ -216,9 +216,14 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             else:
                 from .policy import resume_planning
                 resume_planning(runtime._store,task_id)
+                # Recovery returns to PLANNING, not the question's
+                # RECOVERING resume phase. Its exhausted prompt count must
+                # not block the newly answered decision before an engine turn.
+                prompted.pop(('PLANNING', context['revision']), None)
             context=machine.context(task_id)
             continue
-        publication_key = (context['revision'], context['review_cycle'], state)
+        publication_key = (context['revision'], context['review_cycle'], state,
+                           tuple(n['wait']['event_id'] for n in context['nodes'] if n.get('wait')))
         if publication_key not in published_states:
             from .pipeline import publish
             publish(runtime._store, channel, context)
@@ -404,6 +409,12 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             machine.move(task_id, 'EXECUTING')
             continue
         if state in {'EXECUTING', 'REVIEWING'}:
+            # The context already carries active waits. Keep the ordinary
+            # idle path free of question delivery and access reconciliation.
+            question_delivery_active = False
+            if any(n.get('wait') for n in context['nodes']):
+                question_delivery_active = runtime._service_worker_questions(
+                    task_id, session_id, emit_update, language, host_elicitor)
             runtime._terminate_completed_workers(task_id)
             if any(n['status'] == 'pending' for n in context['nodes']):
                 # A worker slot whose engine is gone must not keep the rest
@@ -469,6 +480,34 @@ def run(runtime, task_id, session_id, channel, session_ref, content, emit_update
             # connection closes; that is not a lost worker to retry here.
             if cancel_event.is_set() or _transport_lost(runtime, task_id):
                 return _stop_turn(runtime, task_id, machine, emit_tool_call, emit_update, language)
+            open_waits = [n['wait'] for n in nodes
+                          if n.get('wait') and n['wait']['status'] == 'open']
+            if running and open_waits:
+                waiting = {w['assignment_ref'] for w in open_waits}
+                # A terminal failure event may precede the node's retry projection.
+                # It is not active work that should hold a text-only question turn.
+                with runtime._store.connection() as db:
+                    failed_refs = {row[0] for row in db.execute(
+                        "SELECT n.assignment_ref FROM runtime_nodes n "
+                        "JOIN delegation_provisioning p ON p.idempotency_key=n.assignment_ref AND p.task_id=n.task_id "
+                        "JOIN task_events e ON e.task_id=n.task_id AND e.assignment_ref IN (p.idempotency_key,p.attempt_id) "
+                        "WHERE n.task_id=? AND n.revision=? AND e.event_type='assignment_failed' AND e.superseded=0",
+                        (task_id, context['revision']),
+                    )}
+                live = [n for n in nodes if n['status'] == 'running' and n['assignment_ref'] not in failed_refs]
+                with runtime._lock:
+                    in_turn = bool(runtime._worker_turns_in_flight & waiting)
+                    presented = all(w['wait_id'] in runtime._worker_question_deliveries
+                                    and runtime._worker_question_deliveries[w['wait_id']].done()
+                                    for w in open_waits)
+                if (live and all(n['assignment_ref'] in waiting for n in live)
+                        and presented and not question_delivery_active and not in_turn
+                        and not any(w.get('kind') == 'access' and w.get('reason') == 'active_writer_conflict'
+                                    for w in open_waits)):
+                    # Text-only/declined/timed-out host: end only the host turn.
+                    # Retained runners, sessions and reservations wait for an exact answer.
+                    runtime._set_state(task_id, 'waiting_for_user', wait_reason='worker_question')
+                    return StopReason.END_TURN
             if any(n['status'] == 'failed' for n in nodes):
                 # Wait only for nodes still working; a finished node's session
                 # teardown must never hold the task (it hung here once).

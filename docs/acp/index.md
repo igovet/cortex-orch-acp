@@ -5,6 +5,7 @@ Cortex is an incoming ACP v1 stdio agent at `src/cortex_acp.py`. It runs its own
 ## Start and configure
 
 - [Paseo installation, onboarding and diagnostics](packaging-and-onboarding.md)
+- [Paseo dependency audit and unpatched advisory disposition](./paseo-dependency-audit.md)
 - [Configuration reference and Paseo settings UI](../configuration.md): supported management surfaces, JSON/SQLite storage, connections, defaults and policy ceilings, routing, MCP servers, file locations and precedence
 - [Zed Custom Agent setup](zed-custom-agent.md)
 - [codeg recipe and current limits](codeg-custom-agent.md)

@@ -27,10 +27,17 @@ def schemas_for(role_kind):
     if role_kind not in {'coordinator','worker'}:
         raise StoreError('unknown_role_kind','role_kind',role_kind)
     extra = (COORDINATOR | {'read_diagnostics': obj({}), 'list_route_options': obj({})}) if role_kind == 'coordinator' else (
-        WORKER | {'ask_question': obj(dict(question=text('Information needed to finish the assignment.',4000),
-                                           request_key=text('Unique request delivery key.',128)))})
+        WORKER | {'ask_question': COORDINATOR['user_question_request']})
     from ..orchestration.gateway import SCHEMAS
-    return copy.deepcopy(SHARED | extra | SCHEMAS)
+    result = copy.deepcopy(SHARED | extra | SCHEMAS)
+    if role_kind == 'worker':
+        schema = result['ask_question']
+        schema['properties'].pop('skill_proposal')
+        schema['properties']['question']['description'] = (
+            'Information needed to finish the assignment. Always use this structured tool with meaningful selectable options, '
+            'not a prose-only question or native engine question tool. Registers an assignment-local wait and returns promptly. '
+            'End this turn without publishing an incomplete result; all real answers arrive in the same healthy session.')
+    return result
 
 
 def validate(role_kind, operation, args):

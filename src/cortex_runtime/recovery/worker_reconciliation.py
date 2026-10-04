@@ -208,6 +208,8 @@ def _write_recovery_failure_if_still_lost(
             if result_row is not None:
                 db.commit()
                 return "already_published_late"
+            from ..orchestration.worker_waits import cancel_tx
+            cancel_tx(db, task_id, 'recovery_worker_lost', assignment_ref=assignment_ref, status='orphaned')
             _mark_graph_attempt_failed_tx(db, task_id, assignment_ref, "recovery_worker_lost")
             delegation_events.append_event_tx(
                 db, task_id, "assignment_failed", f"recovery_worker_lost:{assignment_ref}",

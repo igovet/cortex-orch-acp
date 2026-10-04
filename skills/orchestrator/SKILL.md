@@ -62,7 +62,16 @@ not-verified items each state their concrete blocker. If the results show the
 plan no longer fits the goal,
 submit the advertised replan request with that evidence instead of a synthesis.
 A model response does not mark the task complete.
-If information is missing, request a user question through the advertised API.
+If information is missing, always request a structured user question through the
+advertised API, never only in prose or a native engine question tool. Offer
+meaningful selectable answers and group related questions in one request; custom
+free text remains available. Use live schemas for the exact form.
+Worker questions and additional-path access requests are assignment-local waits:
+the runtime delivers a real answer or access decision to the retained healthy
+worker session without requiring a replacement plan. Do not describe these as
+coordinator questions or use `scope_request` as an access grant; the runtime
+alone validates policy, declared scope and writer conflicts. Use the live tool
+schemas for all arguments.
 
 Use the live tool descriptions and schemas. The runtime provides all technical
 identities; do not invent identifiers or infer private state from prose.

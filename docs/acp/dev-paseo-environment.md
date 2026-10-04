@@ -301,6 +301,74 @@ those facts afresh. Fixtures/exported metadata do not explain or fix the unknown
 cause of an earlier short live run, or prove engine, cycle, disconnect or resource
 closure. CLI is never rendered UI evidence.
 
+### Diagnose a refused binding without bypassing it
+
+Every failure keeps `available=false`, exit 1 and no binding.
+When the guarded task inspector itself returns a complete, canonical exit-1
+refusal, an additional `diagnostic` contains only `stage=task-discovery` and
+an allowlisted `reason` (for example `inspection_busy`,
+`inspection_uncheckpointed_wal`, `unsafe_storage`,
+`legacy_storage_migration_required` or `inspection_binding_mismatch`).
+That inspector diagnostic retains `error=binding_storage_refused`. Endpoint
+recheck/Python child failures can retain the same outer code but now identify
+`stage=endpoint-provenance` versus `task-discovery`, with only fixed local
+reasons (`spawn_failed`, `subprocess_failed`, `subprocess_terminated`,
+`timeout`, `output_overflow`, `invalid_output`). These are process observations,
+not decoded exception messages or proof of a storage condition.
+
+The wrapper separately identifies missing/inaccessible metadata at
+`endpoint-provenance` or `endpoint-recheck` (`metadata_unavailable`), unavailable
+input paths at `input-validation` (`path_unavailable`), helper startup at
+`helper-spawn` (`spawn_failed`), and bounded child supervision at `helper-output`.
+For example, missing PID metadata returns `binding_refused` plus
+`stage=endpoint-provenance, reason=metadata_unavailable`; it does not establish
+whether a daemon is stopped. A helper import failure before its main handler
+can only establish `helper-output/subprocess_failed`, not its private cause.
+
+Unknown, malformed, ambiguous, truncated or terminated output supplies no
+child-authored reason; the wrapper may still report its own safe process/output
+observation. Unknown exception codes remain generic. No exception text, paths, stdout/stderr
+bodies, host logs or binding are exposed. This diagnoses a new observation;
+it cannot recover the cause of an earlier generic refusal.
+Zero child exit is not success by itself: the wrapper requires the complete
+canonical envelope, exact identities and binding digest before forwarding it.
+
+Before any dependent live qualification, run the no-paid binding/task-inspection
+fixture commands in [verification](../project/verification.md#fresh-process-isolated-targeted-launcher)
+under explicitly authorized scratch/dependency access. Passing fixtures prove
+helper behavior, not the old host/storage condition or a live identity.
+
+For a later explicitly authorized observation (not an offline diagnostic task):
+1. Confirm current installed CLI/bridge isolation and supported read-only commands
+   as required above, and validate the checkout artifact. `binding --help` and
+   fixture checks do not access a daemon or establish readiness.
+2. Obtain scoped read grants for dev endpoint provenance and a NEW owned
+   disposable target. With that authority, use
+   `python3 -B scripts/cortex_paseo_dev.py -- status --json` to observe readiness
+   of the already-running isolated dev daemon, retaining exit/completeness and
+   safe identities only. Do not auto-start it; any startup needs a separate
+   bounded setup decision that cannot resume unauthorized paid work.
+3. Once exact owned agent/workspace/project identities are supported by that
+   run, execute the guarded `binding` command above once. Retain its complete
+   receipt and diagnostics; only a valid returned binding permits the bound
+   metadata inspector. Stop on refusal, incomplete evidence or drift. Do not
+   reuse consumed historical target consent or substitute another reader.
+
+A later guarded observation requires explicit read authority and a justified
+changed condition, not a retry for reassurance or an alternate SQLite reader:
+- Busy locks or nonempty WAL: let the normal runtime connection lifecycle
+  produce a checkpointed snapshot; never force a checkpoint or bypass the lock.
+- Unsafe/legacy/unsupported storage: stop and obtain a scoped setup/repair
+  decision; the inspector never changes modes, migrates or initializes.
+- Binding mismatch: establish the correct exact owned host/session/task through
+  supported observations. Never substitute a newer task or fabricate ownership.
+- Generic refusal: the underlying condition remains unknown. Request narrowly
+  scoped retained diagnostics/access rather than inferring sandbox, version,
+  corruption or contention.
+
+Do not repeatedly poll a refused target, restart a paid scenario just to get a
+different error, or accept a missing reason as success.
+
 ## Later ten-minute CLI recipe (not current authorization)
 
 Before the timed phase, finish static source/package/profile checks, targeted

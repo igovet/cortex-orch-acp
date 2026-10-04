@@ -33,9 +33,15 @@ async function compileClientLikePaseo(): Promise<string> {
       "@tanstack/react-query", "react", "react/jsx-runtime", "react-native", "zod",
     ],
     treeShaking: true,
+    metafile: true,
     write: false,
     logLevel: "silent",
   });
+  // React Native's Metro/Jest tooling is installed for compatibility checks,
+  // not shipped in this client artifact. Keep vulnerable glob walkers out.
+  for (const input of Object.keys(result.metafile!.inputs)) {
+    assert.doesNotMatch(input, /node_modules\/(?:braces|micromatch|metro(?:-[^/]+)?|@jest\/[^/]+|jest-[^/]+)\//);
+  }
   const code = result.outputFiles[0].text.replaceAll("get: () => from[key]", "value: from[key]");
   return `(function(require) {\nconst module = { exports: {} };\nconst exports = module.exports;\n${code}\nreturn module.exports;\n})`;
 }

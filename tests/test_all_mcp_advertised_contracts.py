@@ -81,6 +81,8 @@ def test_every_advertised_tool_uses_its_current_validator_and_read_classificatio
         assert schema["additionalProperties"] is False
         assert entry["annotations"]["readOnlyHint"] == (name in READ_NAMES)
         args = {key: _sample(schema["properties"][key]) for key in schema["required"]}
+        if name in {"user_question_request", "ask_question"}:
+            args.update(question="Which target?", options=["Small target", "Large target"])
         if name == "result_submit":
             args["report"] = {"title": "Result", "markdown": "# Result\n\nObserved.\n"}
         assert not list(Draft202012Validator(schema).iter_errors(args)), name

@@ -305,9 +305,9 @@ class ProductionOrchestratingRuntime:
             source_origin=source_origin, source_event_id=source_event_id,
         )
 
-    def answer_question(self, task_id, session_id, question, text, emit_update, cancel_event, *, project_root, emit_tool_call=None):
+    def answer_question(self, task_id, session_id, question, text, emit_update, cancel_event, *, project_root, emit_tool_call=None, recorded=False):
         runtime = self._runtime_for_project(project_root)
-        return runtime.answer_question(task_id, session_id, question, text, emit_update, cancel_event, emit_tool_call=emit_tool_call)
+        return runtime.answer_question(task_id, session_id, question, text, emit_update, cancel_event, emit_tool_call=emit_tool_call, recorded=recorded)
 
     def list_open_questions(self, task_id, *, project_root):
         runtime = self._runtime_for_project(project_root)

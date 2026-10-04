@@ -16,5 +16,13 @@ report id. An uncertain delivery is
 retried only according to the operation's idempotency contract. A later attempt publishes a new report rather
 than rewriting a published result.
 
+Before the first submission, preflight all required and conditional requirements
+in the current tool declaration, including publication evidence. A conclusion or
+verdict alone is not the immutable report. Pass structured arguments rather than
+hand-concatenating report prose into JSON. After a JSON parse failure, fix the
+serialization before retrying; if inline serialization repeatedly fails, use the
+advertised owned-draft publication route and its acknowledged report identity.
+This is transport guidance, not permission to omit evidence or relax validation.
+
 Runtime state controls review, verification and completion. A final chat message
 is visible communication and does not replace the structured result.

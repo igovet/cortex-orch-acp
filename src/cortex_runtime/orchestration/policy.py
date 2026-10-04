@@ -188,6 +188,8 @@ def propose_replan(store,channel,operation,args):
             validate_scope(args['scope']);validate_grants(db,channel.task_id,args['scope'])
         if replans_since_user_input(db,channel.task_id)>=REPLAN_LIMIT: raise StoreError('replan_limit_requires_user_input')
         transition(db,channel.task_id,'RECOVERING')
+        from .worker_waits import cancel_tx
+        cancel_tx(db, channel.task_id, 'replanning')
         db.execute("UPDATE runtime_nodes SET status='cancelled' WHERE task_id=? AND status IN ('pending','running')",(channel.task_id,))
         db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND role='worker' AND revoked_at IS NULL",(now(),channel.task_id))
         revision=db.execute('SELECT revision FROM runtime_tasks WHERE task_id=?',(channel.task_id,)).fetchone()[0]

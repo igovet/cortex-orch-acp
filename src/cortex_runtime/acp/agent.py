@@ -255,6 +255,10 @@ class _RealHostElicitor:
     def __init__(self, host_requester: HostRequester, *, timeout: float = 30.0) -> None:
         self._host_requester = host_requester
         self._timeout = timeout
+        self._question_cancelled = lambda: False
+
+    def set_question_cancelled(self, cancelled):
+        self._question_cancelled = cancelled
 
     def elicit(self, session_id: str, question: str, options: list[str] | None) -> str | None:
         answer_schema: dict = {"type": "string"}
@@ -271,7 +275,8 @@ class _RealHostElicitor:
             sessionId=session_id,
         )
         try:
-            result = self._host_requester.request("elicitation/create", params, timeout=self._timeout)
+            result = self._host_requester.request("elicitation/create", params, timeout=self._timeout,
+                                                  cancelled=self._question_cancelled)
         except (HostRequestTimeout, HostRequestClosed, HostRequestError):
             return None
         except Exception:
@@ -311,6 +316,9 @@ class _PaseoQuestionElicitor:
         self._cancel_event = cancel_event
         self._register = register
         self._question_id = None
+
+    def set_question_cancelled(self, cancelled):
+        self._question_cancelled = cancelled
 
     def set_question_id(self, question_id: str) -> None:
         self._question_id = question_id
@@ -368,7 +376,8 @@ class _PaseoQuestionElicitor:
             result = self._host_requester.request(
                 "session/request_permission", params,
                 timeout=max(self._timeout, self.QUESTION_TIMEOUT_SECONDS),
-                cancelled=lambda: bool(typed) or (self._cancel_event is not None and self._cancel_event.is_set()),
+                cancelled=lambda: bool(typed) or (self._cancel_event is not None and self._cancel_event.is_set())
+                or getattr(self, "_question_cancelled", lambda: False)(),
                 # A Submit that arrives after this wait ended is still this
                 # question's answer (see Agent._on_late_host_response).
                 id_suffix=f"q.{self._question_id}" if self._question_id else None,
@@ -390,6 +399,34 @@ class _PaseoQuestionElicitor:
         if not isinstance(outcome, dict) or outcome.get("outcome") != "selected":
             return None
         return option_ids.get(outcome.get("optionId")) if choices else None
+
+    def elicit_batch(self, session_id, batch):
+        del session_id
+        members = [dict(questionId=q['question_id'], question=q['question'], options=q['options'])
+                   for q in batch['questions']]
+        tool_id = f"cortex-question-batch:{batch['batch_id']}"
+        params = dict(
+            sessionId=self._session_id,
+            toolCall=dict(toolCallId=tool_id, kind='other', title='Answer related questions',
+                          rawInput=dict(__cortex_question=True, batchId=batch['batch_id'],
+                                        questionId=batch['question_id'], questions=members)),
+            options=[dict(optionId=f"cortex-batch:{q['questionId']}:{i}", name=label, kind='allow_once')
+                     for q in members for i, label in enumerate(q['options'], 1)],
+            _meta=dict(cortexQuestion=True),
+        )
+        try:
+            self._host_requester.request(
+                'session/request_permission', params,
+                timeout=max(self._timeout, self.QUESTION_TIMEOUT_SECONDS),
+                cancelled=lambda: (self._cancel_event is not None and self._cancel_event.is_set())
+                or getattr(self, '_question_cancelled', lambda: False)(),
+            )
+            # ACP itself returns only one option. That cannot answer a batch.
+            # Only the validated complete config submission resolves it.
+        except (HostRequestTimeout, HostRequestClosed, HostRequestError):
+            pass
+        finally:
+            self._close_card(tool_id)
 
     def _close_card(self, tool_call_id):
         """Best effort: mark the card's tool call finished so the host can
@@ -573,16 +610,22 @@ class Agent:
             store = self._store_for(session["project"])
             question = acp_questions_store.get(store, question_id)
             if question is not None and question.task_id == session["task_id"]:
+                # A free-text card's sole action is instructional, not an answer.
+                # Invalid/stale option ids are not user-provided answer text either.
+                if not question.options or not 1 <= int(choice) <= len(question.options):
+                    return
                 threading.Thread(target=self._run_late_answer, name="acp-late-answer",
                                  args=(session_id, session, question, choice), daemon=True).start()
                 return
         observe(self.environ, "session/request_permission", "late_answer_unmatched")
 
-    def _run_late_answer(self, session_id, session, question, choice):
+    def _run_late_answer(self, session_id, session, question, choice, recorded=False):
         cancel_event = threading.Event()
         with session["lock"]:
             waiter = session.get("question_waiter")
             if session["active"] is not None:
+                if recorded:
+                    return  # the durable status wakes the existing waiter/runner
                 # A turn is running: hand it the answer if it waits on this
                 # very question's card, else record it durably (a no-op for
                 # a question already answered) for that turn to pick up.
@@ -593,7 +636,7 @@ class Agent:
                     options = question.options or []
                     index = int(choice) if choice.strip().isdigit() else 0
                     value = options[index - 1] if 1 <= index <= len(options) else choice
-                    if acp_questions_store.answer(store, question.id, value, "elicitation"):
+                    if acp_questions_store.answer(store, question.id, value, "elicitation", session_id=session_id):
                         # Same runtime record every other answer path writes,
                         # so workers see which session answered.
                         from ..delegation import events as delegation_events
@@ -609,7 +652,7 @@ class Agent:
             session["background"] = True
         try:
             answer_method, answer_kwargs = self._runtime_call_kwargs(
-                "answer_question", project_root=session["project"],
+                "answer_question", project_root=session["project"], recorded=recorded,
                 emit_tool_call=self._make_emit_tool_call(session_id, cancel_event),
             )
             if answer_method is None:
@@ -1419,10 +1462,37 @@ class Agent:
                 # typed into this session is that question's answer, and the
                 # running turn carries on with it.
                 waiter = session.get("question_waiter")
-                if waiter is not None and text and waiter[1](text):
-                    self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result("end_turn")))
-                    return
-                background = session["active"] if session.get("background") else None
+                if text and (recognized is None or recognized[0] == acp_commands.CORTEX_ANSWER):
+                    store = self._store_for(session["project"])
+                    questions = acp_questions_store.list_open(store, session["task_id"]) if session.get("task_id") else []
+                    chosen, answer = None, text
+                    if recognized is not None:
+                        parsed = acp_commands.parse_answer_argument(recognized[1])
+                        if not parsed or not 1 <= parsed[0] <= len(questions):
+                            raise RpcError(-32602, "Use /cortex-answer <question-number> <answer text>.")
+                        chosen, answer = questions[parsed[0] - 1], parsed[1]
+                    elif len(questions) > 1:
+                        raise RpcError(-32602, "Multiple questions are open; use /cortex-answer <question-number> <answer text>.")
+                    elif questions:
+                        chosen = questions[0]
+                    if chosen is not None and chosen.assignment_ref:
+                        # Bind before delivery; do not let the singleton visible card
+                        # select a different worker when several questions are durable.
+                        with self._history_lock(session_id):
+                            acp_replay_store.append_host_transcript(store, session_id, "user_message", answer)
+                        if waiter is not None and waiter[0] == chosen.id:
+                            waiter[1](answer)
+                        else:
+                            threading.Thread(target=self._run_late_answer, name="acp-worker-answer",
+                                             args=(session_id, session, chosen, answer), daemon=True).start()
+                        self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result("end_turn")))
+                        return
+                    if waiter is not None and text and recognized is None and waiter[1](text):
+                        self.transport.send_response(protocol.result_response(request_id, protocol.prompt_result("end_turn")))
+                        return
+                terminal_command = recognized is not None and recognized[0] in (
+                    acp_commands.CORTEX_STOP, acp_commands.CORTEX_FINISH)
+                background = session["active"] if session.get("background") or terminal_command else None
                 if background is None:
                     raise RpcError(-32602, "A prompt is already in flight for this session.")
                 if recognized is None or recognized[0] not in (
@@ -2795,6 +2865,12 @@ class Agent:
         any config id) and then retires the card. The text answers that
         question exactly as a message typed into the chat would."""
         try:
+            batch_payload = json.loads(value)
+        except (ValueError, TypeError):
+            raise RpcError(-32602, 'Invalid question answer.') from None
+        if isinstance(batch_payload, dict) and 'batchId' in batch_payload:
+            return self._answer_question_batch_card(request_id, session_id, session, batch_payload)
+        try:
             payload = json.loads(value)
             question_id, text = payload["questionId"], payload["answer"]
         except (ValueError, TypeError, KeyError):
@@ -2805,20 +2881,86 @@ class Agent:
         question = acp_questions_store.get(store, question_id)
         if question is None or question.task_id != session.get("task_id"):
             raise RpcError(-32602, "Unknown question.")
-        with self._history_lock(session_id):
-            acp_replay_store.append_host_transcript(store, session_id, "user_message", text)
-        with session["lock"]:
-            waiter = session.get("question_waiter")
-            delivered = (session["active"] is not None and waiter is not None
-                         and waiter[0] == question_id and waiter[1](text))
-        if not delivered:
-            # The turn no longer waits on this card: answer it as a late
-            # card choice would be.
-            threading.Thread(target=self._run_late_answer, name="acp-late-answer",
-                             args=(session_id, session, question, text), daemon=True).start()
+        from ..orchestration.question_batches import answer_single
+        if set(payload) not in ({'questionId','answer'}, {'questionId','answer','requestKey'}):
+            raise RpcError(-32602, 'Unknown question answer fields.')
+        owner = self._question_answer_owner(session_id, session, store)
+        try:
+            receipt = answer_single(store, question.task_id, question.id, text,
+                                    payload.get('requestKey', 'single-card:' + question.id),
+                                    session_id=session_id, owner_epoch=owner.epoch)
+        except StoreError as error:
+            raise RpcError(-32602, 'Question answer refused.', data={'reason': str(error)}) from None
+        self._record_card_answer_history(store, session_id, [dict(questionId=question.id, answer=text)])
+        if not receipt['replayed'] or self._card_answer_needs_continuation(store, question):
+            threading.Thread(target=self._run_late_answer, name='acp-late-answer',
+                             args=(session_id, session, question, text, True), daemon=True).start()
         with session["lock"]:
             options = self._config_options_for_session(session, store)
         self.transport.send_response(protocol.result_response(request_id, protocol.set_config_option_response(options)))
+
+    def _answer_question_batch_card(self, request_id, session_id, session, payload):
+        from ..orchestration import question_batches
+        if set(payload) != {'batchId', 'answers', 'requestKey'} or not isinstance(payload['batchId'], str):
+            raise RpcError(-32602, 'A batch answer needs batchId, answers and requestKey.')
+        task_id = session.get('task_id')
+        if not task_id:
+            raise RpcError(-32602, 'Unknown question task.')
+        store = self._store_for(session['project'])
+        owner = self._question_answer_owner(session_id, session, store)
+        try:
+            receipt = question_batches.answer(
+                store, task_id, payload['batchId'], payload['answers'], payload['requestKey'],
+                session_id=session_id, owner_epoch=owner.epoch)
+        except StoreError as error:
+            raise RpcError(-32602, 'Batch answer refused.', data={'reason': str(error)}) from None
+        self._record_card_answer_history(store, session_id, payload['answers'])
+        question = acp_questions_store.get(store, receipt['question_ids'][0])
+        if not receipt['replayed'] or self._card_answer_needs_continuation(store, question):
+            threading.Thread(target=self._run_late_answer, name='acp-batch-answer',
+                             args=(session_id, session, question, question.answer_text, True), daemon=True).start()
+        with session['lock']:
+            options = self._config_options_for_session(session, store)
+        self.transport.send_response(protocol.result_response(request_id, protocol.set_config_option_response(options)))
+
+    def _question_answer_owner(self, session_id, session, store):
+        task_id = session.get('task_id')
+        with store.connection() as db:
+            owner = _current_owner_epoch_obj(db, task_id)
+        if owner is not None and session.get('owner_epoch') != owner:
+            with session['lock']:
+                active = session['active']
+            epoch = getattr(self.runtime, 'active_session_owner_epoch', lambda *_: None)(
+                session['project'], task_id, session_id)
+            if active is not None and not active.is_set() and epoch == owner.epoch:
+                session['owner_epoch'] = owner
+        if owner is None or session.get('owner_epoch') != owner:
+            raise RpcError(-32602, 'This session no longer owns the task.')
+        return owner
+
+    def _record_card_answer_history(self, store, session_id, answers):
+        # Repair display history on an exact retry after interruption. The
+        # durable answer receipt already prevents repeated state changes.
+        with self._history_lock(session_id):
+            for item in answers:
+                message_id = 'question-answer:' + item['questionId']
+                with store.connection() as db:
+                    exists = db.execute('SELECT 1 FROM host_transcript WHERE session_id=? AND message_id=?',
+                                        (session_id, message_id)).fetchone()
+                if not exists:
+                    acp_replay_store.append_host_transcript(store, session_id, 'user_message', item['answer'],
+                                                           message_id=message_id)
+
+    def _card_answer_needs_continuation(self, store, question):
+        from ..orchestration.worker_waits import projection
+        from ..orchestration.question_batches import find_tx
+        with store.connection() as db:
+            task = db.execute('SELECT state FROM runtime_tasks WHERE task_id=?', (question.task_id,)).fetchone()
+            if task and task['state'] == 'WAITING_USER':
+                return True
+            batch = find_tx(db, question.task_id, question_id=question.id)
+            return any(w['status'] == 'ready' for w in projection(
+                db, question.task_id, question_id=batch['question_id'] if batch else question.id))
 
     def _session_set_mode(self, request_id, params):
         """The standard ACP mode switch sets the user's access mode
@@ -3174,9 +3316,14 @@ def main(argv=None, runtime=None, environ=None):
     if reason == "signal":
         agent._handle_eof("sigterm")
     if reason in ("writer_closed", "signal"):
+        if reason == "writer_closed":
+            # The writer-closed event precedes its disconnect callback.
+            # Join that thread before workers or runtime teardown can race it.
+            transport.stop_writer()
         agent.join_workers()
         agent.shutdown_runtime()
-        transport.stop_writer()
+        if reason == "signal":
+            transport.stop_writer()
         # If stdin is still open, the reader thread may be permanently
         # blocked in `readline()` with no way for this process to make it
         # return (only the peer closing its write end can do that, and
@@ -3191,6 +3338,10 @@ def main(argv=None, runtime=None, environ=None):
         # failed) sidesteps that finalization sequence entirely rather
         # than trying to force an impossible clean join.
         os._exit(0)
+    # The EOF event precedes the reader's disconnect callback. Wait for
+    # that callback to finish recording/cancelling before tearing down the
+    # runtime or letting interpreter shutdown abandon the daemon thread.
+    transport.join_reader()
     agent.join_workers()
     agent.shutdown_runtime()
     transport.stop_writer()

@@ -616,7 +616,7 @@ def test_claimed_events_survive_a_prompt_exception_and_are_delivered_once(tmp_pa
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("simulated engine.prompt() failure")
-        mcp_tools.dispatch(store,channel,"user_question_request",dict(question="Next?",request_key="next"))
+        mcp_tools.dispatch(store,channel,"user_question_request",dict(question="Next?",options=["Continue", "Finish"],request_key="next"))
         return PromptOutcome(StopReason.END_TURN, "Accepted.")
 
     def router(store, channel, session_ref, launch, instructions):

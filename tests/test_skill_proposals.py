@@ -92,8 +92,8 @@ def test_proposal_is_a_durable_question_with_runtime_retained_evidence(project):
 
 
 @pytest.mark.parametrize('change, code', [
-    (dict(options=['Yes']), 'skill_proposal_options'),
-    (dict(options=['Yes', ' yes ']), 'skill_proposal_options'),
+    (dict(options=['Yes']), 'invalid_arguments'),
+    (dict(options=['Yes', ' yes ']), 'question_options_invalid'),
     (dict(name='Bad_Name'), 'skill_link_name_invalid'),
 ])
 def test_invalid_proposals_ask_nothing(project, change, code):

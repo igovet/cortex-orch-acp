@@ -256,7 +256,8 @@ def test_wrapper_bounds_child_stdout_and_deadline_and_stops_owned_helper(bound, 
         return child
     monkeypatch.setattr(wrapper.subprocess, 'Popen', popen)
     assert wrapper._run_binding(argparse.Namespace(agent=AGENT, workspace='owned', project=str(project), timeout=1)) == 1
-    assert json.loads(capsys.readouterr().out) == {'available':False, 'error':code}
+    assert json.loads(capsys.readouterr().out) == {'available':False, 'error':code,
+        'diagnostic': {'stage': 'helper-output', 'reason': 'output_overflow' if behavior == 'overflow' else 'timeout'}}
     assert len(owned) == 1 and owned[0].poll() is not None
     owned[0].stdout.close()
 
@@ -346,3 +347,285 @@ def test_epoch_injection_failure_is_reported_without_crashing_or_mutating(wire):
     assert line(process) == {'hello': 1, 'fetch_agent_request': 2}
     assert process.poll() is None
     assert files(project) == before
+
+
+@pytest.mark.parametrize('condition,reason', [
+    ('busy', 'inspection_busy'), ('wal', 'inspection_uncheckpointed_wal'),
+    ('legacy', 'legacy_storage_migration_required'), ('mode', 'unsafe_storage'),
+    ('owner', 'inspection_binding_mismatch'), ('unsupported', 'unsupported_storage'),
+])
+def test_wrapper_preserves_guarded_inspector_refusal_without_binding(wire, condition, reason):
+    project, home, env, start = wire
+    process = start('ok')
+    lock = None
+    if condition == 'busy':
+        lock = (project / '.cortex/.access.lock').open('rb')
+        fcntl.flock(lock, fcntl.LOCK_SH)
+    elif condition == 'wal':
+        wal = project / '.cortex/cortex.sqlite3-wal'
+        wal.write_bytes(b'owned-fixture-uncheckpointed')
+        wal.chmod(0o600)
+    elif condition == 'mode':
+        (project / '.cortex/cortex.sqlite3').chmod(0o644)
+    else:
+        from cortex_runtime.store import Store
+        store = Store(project / '.cortex', initialize=False, project_root=project)
+        with store.connection() as db:
+            if condition == 'owner':
+                db.execute('DELETE FROM task_owners')
+            else:
+                db.execute('PRAGMA user_version=' + ('11' if condition == 'legacy' else '99'))
+    before = files(project)
+    try:
+        inspector = subprocess.run([sys.executable, '-B', str(ROOT/'scripts/cortex_inspect_task.py'),
+                                    '--discover', '--project', str(project), '--session', 'acps_aaaaaaaaaaaa'],
+                                   env=env, capture_output=True, text=True, timeout=10)
+        assert inspector.returncode == 1
+        assert json.loads(inspector.stdout) == {'available': False, 'error': reason}
+        assert files(project) == before
+        result = subprocess.run([sys.executable, '-B', str(ROOT/'scripts/cortex_paseo_dev.py'),
+                                 'binding', '--agent', AGENT, '--workspace', 'workspace-owned',
+                                 '--project', str(project), '--timeout', '10'],
+                                env=env, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 1
+        assert json.loads(result.stdout) == {
+            'available': False, 'error': 'binding_storage_refused',
+            'diagnostic': {'stage': 'task-discovery', 'reason': reason},
+        }
+        assert files(project) == before
+        process.stdin.write('counts\n'); process.stdin.flush()
+        assert line(process) == {'hello': 1, 'fetch_agent_request': 1}
+    finally:
+        if lock:
+            lock.close()
+
+
+@pytest.mark.parametrize('change', ['valid', 'reason', 'stage', 'extra', 'duplicate', 'escaped', 'truncated', 'signal'])
+def test_wrapper_only_forwards_complete_allowlisted_refusal_diagnostic(bound, monkeypatch, capsys, change):
+    import argparse
+    import cortex_paseo_dev as wrapper
+    project, store, sid, task, epoch = bound
+    monkeypatch.setattr(wrapper, '_binding_endpoint', lambda home: ('ws://127.0.0.1:1/ws', 'a'*64))
+    body = {'available': False, 'error': 'binding_storage_refused',
+            'diagnostic': {'stage': 'task-discovery', 'reason': 'inspection_busy'}}
+    if change == 'reason': body['diagnostic']['reason'] = 'private sentinel'
+    if change == 'stage': body['diagnostic']['stage'] = 'private sentinel'
+    if change == 'extra': body['diagnostic']['private'] = 'sentinel'
+    payload = json.dumps(body, separators=(',', ':')) + '\n'
+    if change == 'duplicate': payload = payload.replace('"available":false', '"available":false,"available":false')
+    if change == 'escaped': payload = payload.replace('"reason"', '"\\u0072eason"')
+    if change == 'truncated': payload = payload[:-10]
+    real_popen = subprocess.Popen
+    children = []
+    def popen(argv, **kwargs):
+        code = 'import os,signal; os.write(1,' + repr(payload.encode()) + '); '
+        code += ('os.kill(os.getpid(),signal.SIGTERM)' if change == 'signal' else 'raise SystemExit(1)')
+        child = real_popen([sys.executable, '-B', '-c', code], **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(wrapper.subprocess, 'Popen', popen)
+    before = files(project)
+    assert wrapper._run_binding(argparse.Namespace(agent=AGENT, workspace='owned',
+                                                   project=str(project), timeout=2)) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result['available'] is False and 'binding' not in result
+    if change == 'valid':
+        assert result == body
+    else:
+        assert result['diagnostic'] == {'stage': 'helper-output',
+            'reason': 'subprocess_terminated' if change == 'signal' else 'subprocess_failed'}
+        assert 'private' not in json.dumps(result)
+    assert files(project) == before
+    assert len(children) == 1 and children[0].poll() is not None
+    children[0].stdout.close()
+
+
+def test_missing_owned_endpoint_metadata_is_diagnosed_without_spawn(wire):
+    project, home, env, start = wire
+    before = files(home), files(project)
+    result = subprocess.run([sys.executable, '-B', str(ROOT/'scripts/cortex_paseo_dev.py'),
+                             'binding', '--agent', AGENT, '--workspace', 'workspace-owned',
+                             '--project', str(project), '--timeout', '2'],
+                            env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 1
+    assert json.loads(result.stdout) == {'available': False, 'error': 'binding_refused',
+                                        'diagnostic': {'stage': 'endpoint-provenance',
+                                                       'reason': 'metadata_unavailable'}}
+    assert (files(home), files(project)) == before
+
+
+@pytest.mark.parametrize('behavior,stage,reason', [
+    ('spawn', 'helper-spawn', 'spawn_failed'),
+    ('runtime', 'helper-output', 'subprocess_failed'),
+    ('signal', 'helper-output', 'subprocess_terminated'),
+    ('invalid', 'helper-output', 'invalid_output'),
+    ('incomplete', 'helper-output', 'invalid_output'),
+    ('empty', 'helper-output', 'invalid_output'),
+])
+def test_wrapper_local_failure_diagnostics_never_expose_child_text(bound, monkeypatch, capsys,
+                                                                behavior, stage, reason):
+    import argparse
+    import cortex_paseo_dev as wrapper
+    project, store, sid, task, epoch = bound
+    monkeypatch.setattr(wrapper, '_binding_endpoint', lambda home: ('ws://127.0.0.1:1/ws', 'a'*64))
+    real_popen = subprocess.Popen
+    children = []
+    def popen(argv, **kwargs):
+        if behavior == 'spawn':
+            raise FileNotFoundError('private secret sentinel')
+        body = {'runtime': 'import sys; sys.stderr.write("private secret sentinel"); sys.exit(7)',
+                'signal': 'import os,signal; os.kill(os.getpid(),signal.SIGTERM)',
+                'invalid': 'print("private secret sentinel")',
+                'incomplete': 'print("{}")', 'empty': 'pass'}[behavior]
+        child = real_popen([sys.executable, '-B', '-c', body], **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(wrapper.subprocess, 'Popen', popen)
+    before = files(project)
+    assert wrapper._run_binding(argparse.Namespace(agent=AGENT, workspace='owned',
+                                                   project=str(project), timeout=2)) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result['available'] is False and 'binding' not in result
+    assert result['diagnostic'] == {'stage': stage, 'reason': reason}
+    assert 'private' not in json.dumps(result) and 'secret' not in json.dumps(result)
+    assert files(project) == before
+    for child in children:
+        assert child.poll() is not None
+        child.stdout.close()
+
+
+def test_stopped_owned_fake_endpoint_refuses_without_binding(wire):
+    project, home, env, start = wire
+    process = start('ok')
+    process.terminate(); process.communicate(timeout=10)
+    assert process.returncode == 0
+    before = files(project), files(home)
+    result = subprocess.run([sys.executable, '-B', str(ROOT/'scripts/cortex_paseo_dev.py'),
+                             'binding', '--agent', AGENT, '--workspace', 'workspace-owned',
+                             '--project', str(project), '--timeout', '2'],
+                            env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 1
+    assert json.loads(result.stdout)['error'] in ('binding_anonymous_connection_refused', 'binding_timeout')
+    assert json.loads(result.stdout)['available'] is False and 'binding' not in json.loads(result.stdout)
+    assert (files(project), files(home)) == before
+
+
+@pytest.mark.parametrize('stage', ['endpoint-provenance', 'task-discovery'])
+@pytest.mark.parametrize('behavior,reason', [('runtime', 'subprocess_failed'),
+    ('signal', 'subprocess_terminated'), ('invalid', 'invalid_output'),
+    ('malicious', 'subprocess_failed'), ('overflow', 'output_overflow')])
+def test_real_helper_python_boundary_retains_only_local_safe_process_reason(wire, tmp_path,
+        monkeypatch, capsys, stage, behavior, reason):
+    import argparse
+    import cortex_paseo_dev as wrapper
+    project, home, env, start = wire
+    process = start('ok')
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('PYTHONPATH', env['PYTHONPATH'])
+    shim = tmp_path/'owned-python'
+    payload = json.dumps({'available': False, 'error': 'private secret sentinel'}) + '\n'
+    body = {'runtime': 'sys.stderr.write("private secret sentinel"); sys.exit(7)',
+            'signal': 'os.kill(os.getpid(),signal.SIGTERM)',
+            'invalid': 'print("private secret sentinel")',
+            'malicious': 'sys.stdout.write(' + repr(payload) + '); sys.exit(1)',
+            'overflow': 'os.write(1,b"x"*20000)'}[behavior]
+    # Change only the owned helper's Python child; production helper, endpoint
+    # gate and wrapper remain executable, with no success-producing substitute.
+    shim.write_text('#!' + sys.executable + '\nimport os,sys,signal\n'
+                    + 'endpoint = "-c" in sys.argv\n'
+                    + 'if endpoint == ' + repr(stage == 'endpoint-provenance') + ':\n    ' + body + '\n'
+                    + 'else:\n    os.execv(' + repr(sys.executable) + ', [' + repr(sys.executable) + '] + sys.argv[1:])\n')
+    shim.chmod(0o700)
+    real_popen = subprocess.Popen
+    children = []
+    def popen(argv, **kwargs):
+        assert argv[0] == 'node' and argv[-2] == sys.executable
+        argv = [*argv]; argv[-2] = str(shim)
+        child = real_popen(argv, **kwargs); children.append(child); return child
+    monkeypatch.setattr(wrapper.subprocess, 'Popen', popen)
+    before = files(project), files(home)
+    assert wrapper._run_binding(argparse.Namespace(agent=AGENT, workspace='workspace-owned',
+                                                   project=str(project), timeout=5)) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result == {'available': False, 'error': 'binding_storage_refused',
+                      'diagnostic': {'stage': stage, 'reason': reason}}
+    assert (files(project), files(home)) == before
+    for child in children:
+        assert child.poll() is not None
+        child.stdout.close()
+    process.stdin.write('counts\n'); process.stdin.flush()
+    assert line(process) == ({} if stage == 'endpoint-provenance' else {'hello': 1, 'fetch_agent_request': 1})
+
+
+@pytest.mark.parametrize('change', ['ok', 'endpoint-missing', 'identity', 'digest', 'epoch', 'extra', 'duplicate',
+                                    'escaped', 'truncated', 'error'])
+def test_zero_exit_requires_complete_canonical_exact_binding(bound, monkeypatch, capsys, change):
+    import argparse
+    import hashlib
+    import cortex_paseo_dev as wrapper
+    project, store, sid, task, epoch = bound
+    calls = []
+    def endpoint(home):
+        calls.append(home)
+        if change == 'endpoint-missing' and len(calls) == 2:
+            raise FileNotFoundError('private secret sentinel')
+        return 'ws://127.0.0.1:1/ws', 'a'*64
+    monkeypatch.setattr(wrapper, '_binding_endpoint', endpoint)
+    binding = dict(owner_epoch=epoch, project_root=str(project), session_id=sid, task_id=task)
+    result = {'available': True,
+              'host': dict(agent_id=AGENT, workspace_id='owned', project_root=str(project),
+                           session_id=sid, wrapper_sha256='a'*64),
+              'binding': binding,
+              'binding_sha256': hashlib.sha256(json.dumps(binding, separators=(',', ':')).encode()).hexdigest(),
+              'provenance': 'single-agent-api/refetch + guarded-immutable-session-task-current-owner'}
+    if change == 'identity': result['host']['agent_id'] = '22222222-2222-2222-2222-222222222222'
+    if change == 'digest': result['binding_sha256'] = 'b'*64
+    if change == 'epoch': binding['owner_epoch'] = True
+    if change == 'extra': result['private'] = 'secret sentinel'
+    if change == 'error': result = {'available': False, 'error': 'binding_storage_refused'}
+    payload = json.dumps(result, separators=(',', ':')) + '\n'
+    if change == 'duplicate': payload = payload.replace('"available":true', '"available":true,"available":true')
+    if change == 'escaped': payload = payload.replace('"available"', '"\\u0061vailable"')
+    if change == 'truncated': payload = payload[:-1]
+    real_popen = subprocess.Popen
+    children = []
+    def popen(argv, **kwargs):
+        child = real_popen([sys.executable, '-B', '-c', 'import os; os.write(1,' + repr(payload.encode()) + ')'], **kwargs)
+        children.append(child); return child
+    monkeypatch.setattr(wrapper.subprocess, 'Popen', popen)
+    before = files(project)
+    assert wrapper._run_binding(argparse.Namespace(agent=AGENT, workspace='owned',
+        project=str(project), timeout=2)) == (0 if change == 'ok' else 1)
+    observed = json.loads(capsys.readouterr().out)
+    if change == 'ok': assert observed == dict(result, endpoint_sha256='a'*64)
+    elif change == 'endpoint-missing':
+        assert observed == {'available': False, 'error': 'binding_refused',
+                            'diagnostic': {'stage': 'endpoint-recheck', 'reason': 'metadata_unavailable'}}
+    else:
+        assert observed == {'available': False, 'error': 'binding_refused',
+                            'diagnostic': {'stage': 'helper-output', 'reason': 'invalid_output'}}
+    assert files(project) == before
+    for child in children:
+        assert child.poll() is not None
+        child.stdout.close()
+
+
+def test_unknown_exception_code_is_not_forwarded(bound, monkeypatch, capsys):
+    import argparse
+    import cortex_paseo_dev as wrapper
+    project, store, sid, task, epoch = bound
+    def refused(home): raise ValueError('binding_private_secret_sentinel')
+    monkeypatch.setattr(wrapper, '_binding_endpoint', refused)
+    assert wrapper._run_binding(argparse.Namespace(agent=AGENT, workspace='owned',
+                                                   project=str(project), timeout=2)) == 1
+    assert json.loads(capsys.readouterr().out) == {'available': False, 'error': 'binding_refused'}
+
+
+def test_unavailable_fresh_input_path_refuses_before_endpoint_read(tmp_path, monkeypatch, capsys):
+    import argparse
+    import cortex_paseo_dev as wrapper
+    monkeypatch.setattr(wrapper, '_binding_endpoint', lambda home: pytest.fail('endpoint before input validation'))
+    assert wrapper._run_binding(argparse.Namespace(agent=AGENT, workspace='owned',
+        project=str(tmp_path/'absent-project'), timeout=2)) == 1
+    assert json.loads(capsys.readouterr().out) == {'available': False, 'error': 'binding_refused',
+        'diagnostic': {'stage': 'input-validation', 'reason': 'path_unavailable'}}

@@ -128,7 +128,12 @@ def test_worker_channel_migrated_forward_by_recovery_still_delegates(tmp_path):
         db.commit()
 
     server = server_for(tmp_path, worker_channel_id, worker_secret)
-    ok(call(server, "ask_question", dict(request_key="k1", question="q")))
+    question = dict(request_key="k1", question="Which verification should run next?")
+    # Migrated authority does not exempt the worker from question validation.
+    rejected = error(call(server, "ask_question", question), "invalid_arguments")
+    assert rejected["write_state"] == "rejected"
+    ok(call(server, "ask_question", dict(
+        **question, options=["Run security tests", "Run question contract tests"])))
 
 
 # ---------------------------------------------------------------------------

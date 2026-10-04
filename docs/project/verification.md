@@ -147,7 +147,53 @@ python3 -B scripts/cortex_acp_smoke.py --fixture-connection
 
 The second mode supplies only an isolated fake identity with explicit version-2 eligibility in temporary XDG settings; it verifies selector exposure, not migration of owner data or paid execution.
 
+## Question and submission regressions
+
+For changes to question continuation, recovery, or report submission, run the
+focused runtime checks before package/profile checks:
+
+```
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_question_recovery_continuation.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_delegation_mcp_wire.py tests/test_delegation_mcp_tools.py tests/test_delegation_evidence.py
+```
+
+Plan objective preflight and rejection boundaries use:
+
+```
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q tests/test_delegation_contracts.py tests/test_delegation_mcp_wire.py tests/test_advertised_tool_contracts.py tests/test_all_mcp_advertised_contracts.py
+```
+
+The supplemental historical `python3 -B scripts/check_docs.py` invocation failed
+because that script does not exist; it was an invalid supplemental command,
+not a failed product-doc validator and not a passing check. Use the existing
+`tests/test_project_docs.py` and `tests/test_package.py` with the targeted command
+above, plus source-backed link/command inspection for affected pages. The
+catalog tests alone do not validate every documentation link or command.
+
+The recovery test verifies exact option/custom answers, renewed bounded planning,
+exactly-once answer consumption and continued rejection when no proposal arrives.
+The submission tests cover required report forms, publication references,
+argument validation and retained safe diagnostics. They cannot establish that a
+live model serializes correctly or complies with the schema.
+
+The earlier isolated Desktop question run is partial, not an overall pass: a
+coordinator form rendered and its answer mapped, but the task then stopped with
+`structured_proposal_missing`; batch and worker scenarios were not reached.
+A later controller repair fixes a recovery-counter defect, but does not turn
+that historical run into a pass. Repeat only under an explicitly requested,
+isolated Desktop qualification and record actual rendered outcomes separately.
+The actual Desktop owner-selected route was `codex-acp/gpt-6-luna`; do not
+substitute another route. Package identity and the full executable scenario
+must be handed to the Desktop QA owner after final stamping.
+
 ## Paseo plugin (`integrations/paseo/`)
+
+Dependency security checks are separate from installation/test success. Run
+`npm --prefix integrations/paseo audit --json` and retain its nonzero exit when
+findings remain. The [dated dependency disposition](../acp/paseo-dependency-audit.md)
+records the unpatched braces advisory and why a forced React Native upgrade is
+not a verified fix. The client-bundle regression checks generated-artifact inputs,
+not the installed host's dependency security.
 
 **Before any testing:** Install dev dependencies and verify type-check:
 
@@ -160,7 +206,8 @@ npm --prefix integrations/paseo run typecheck
 
 ```
 npm --prefix integrations/paseo run test:activation # server/plugin-activation.test.ts
-npm --prefix integrations/paseo run test:steer      # server/provider-steer.test.ts
+npm --prefix integrations/paseo run test:steer      # steer and scalar/batch question transport regressions
+npm --prefix integrations/paseo run test:installed-questions -- /absolute/path/to/installed/Metro/index.js # installed question helper/component structure and state (no pixel rendering)
 npm --prefix integrations/paseo run test:diff      # client/worker-panel-diff.test.ts
 npm --prefix integrations/paseo run test:status    # client/worker-panel-status.test.ts
 npm --prefix integrations/paseo run test:replay    # server/replay.test.ts
@@ -261,7 +308,16 @@ fall back to ambient dependencies. Child failure exits propagate unchanged.
 Binding regression commands use the same launcher with explicit
 `tests/test_qualification_binding.py`, `tests/test_task_inspection.py` and
 `tests/test_cortex_test_isolated.py`. The fake-wire matrix creates NEW fixtures
-and supervises owned children; it is not a live daemon/paid result. Also use
+and supervises owned children; it is not a live daemon/paid result. The binding
+regressions discriminate busy locks, WAL, legacy/unsupported/private storage and
+missing ownership without accepting a binding, and verify allowlisted diagnostics
+against malformed, duplicated, escaped, truncated and terminated child output.
+They also exercise missing owned endpoint metadata, a stopped owned loopback
+fixture, wrapper spawn/import-like process failures, the real TypeScript/Python
+child boundary (including overflow and malicious diagnostics), unknown exception
+code redaction, and zero-exit incomplete or mismatched binding envelopes.
+Run `tests/test_cortex_paseo_dev.py` with the same launcher for neighboring helper
+behavior. These checks cannot establish the cause of an earlier generic live refusal. Also use
 `npm --prefix integrations/paseo run test:qualification-binding` for the TS contract.
 See [binding provenance and limits](../acp/dev-paseo-environment.md#read-only-dev-binding).
 After all edits, sequentially stamp, validate, check profiles, run isolated

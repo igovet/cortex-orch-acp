@@ -16,7 +16,8 @@ export function isCortexQuestionRequest(request: {
     Array.isArray(actionIds) &&
     actionIds.length > 0 &&
     actionIds.every(
-      (id) => typeof id === "string" && id.startsWith(CORTEX_QUESTION_OPTION_PREFIX),
+      (id) => typeof id === "string" && (id.startsWith(CORTEX_QUESTION_OPTION_PREFIX) ||
+          (typeof request.input?.batchId === "string" && id.startsWith("cortex-batch:"))),
     );
   return markedByInput && markedByOptions;
 }

@@ -302,3 +302,42 @@ peers and installed startup/configuration surfaces. It cannot prove a GUI client
 rendered a permission choice or that a paid model obeyed its advertised tools.
 See [implementation status](runtime-rewrite-status.md),
 [security](../../SECURITY.md).
+
+## Runtime store ignore protection
+
+Gateway `project_write` of the task root `.gitignore` preserves supplied entries
+and appends a final `/.cortex/` rule unless it is already the last line. This
+directory exclusion defeats preceding negations, including descendant rules.
+Returned hashes describe the actual protected bytes; stale expected hashes
+still refuse writes. A confirmed `project_delete` of the root ignore file
+replaces it with only the required rule and returns `deleted: false`.
+
+`command_run` and consent-backed `outside_command` compare that task root ignore
+file before and after execution and repair changes before returning a receipt,
+including nonzero command exits. Repair failure makes the receipt incomplete
+with `gitignore_guard_failed`; revoked authority never authorizes a repair.
+Before a fresh writable worker `result_submit` publishes its report, the runtime
+reconciles observed root ignore-file changes, recreating removed files.
+The revision manifest includes root `.gitignore` even if it ignores itself.
+Without a complete start/current manifest the runtime conservatively ensures
+the rule, creating `.gitignore` if missing; unchanged observed tasks do not
+create an ignore file. Read-only roles and already recorded result replays do not mutate it.
+This uses the current task root, not an arbitrary outside command target.
+
+All repairs recheck live gateway authority and deny-write paths and use the
+normal no-follow, regular-single-link, digest-checked atomic writer. An unsafe
+file, incompatible encoding, denied path or conflicting write blocks repair;
+no bypass grants access. Other entries and file permissions remain unchanged.
+
+Installed hosts have no universal native pre-action hook. Native Edit/Write,
+patches and shell edits are reconciled at result submission, not immediately
+after each action. Interrupted turns without submission can leave an unsafe
+ignore file. A command or native action can stage/commit before reconciliation;
+Git ignores do not protect already tracked content or explicit `git add -f`.
+The guard never deletes runtime data, untracks entries, stages or commits.
+
+Focused no-paid checks:
+
+```bash
+python3 -B -m pytest -q tests/test_gitignore_guard.py tests/test_situational_skill_gate.py tests/test_command_run_arguments.py
+```

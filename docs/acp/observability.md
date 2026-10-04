@@ -441,6 +441,12 @@ unsafe paths, unsupported/legacy storage, more than 10,000 metadata rows,
 over 32 MiB of source JSON per inspected stream or 4 MiB of projected metadata,
 busy access locks and nonempty WALs refuse instead of yielding a truncated
 success. The reader never creates files, checkpoints WAL, migrates or repairs.
+The dev binding wrapper can retain a complete exit-1 inspector's allowlisted
+refusal reason as `diagnostic` while still returning no binding. It also reports
+bounded local endpoint/spawn/subprocess/output stages without forwarding private
+exception text or treating a zero child exit as complete binding evidence; see
+[refusal diagnosis](dev-paseo-environment.md#diagnose-a-refused-binding-without-bypassing-it).
+A historical generic refusal does not establish busy storage, WAL or any other cause.
 Wait for a checkpointed snapshot through the normal runtime connection lifecycle
 and re-observe; do not stop a completed task to manufacture timestamps.
 

@@ -115,3 +115,33 @@ def test_plan_accepts_exact_routes_whose_model_ids_hold_slashes_and_commas():
     for route in ('opencode/a b', 'opencode/', 'unknown-acp/model'):
         args=deepcopy(PLAN); args['plan']['tasks'][0].update(model=route, model_reason='x')
         with pytest.raises(StoreError,match='invalid_arguments'): dc.validate('coordinator','plan_submit',args)
+
+
+@pytest.mark.parametrize('unit', ['x', 'Ж', '😀', 'e\u0301'])
+def test_plan_objective_counts_unicode_code_points_at_exact_boundary(unit):
+    from jsonschema import Draft202012Validator
+    args = deepcopy(PLAN)
+    objective = (unit * 8000)[:8000]
+    args['plan']['tasks'][0]['objective'] = objective
+    schema = dc.schemas_for('coordinator')['plan_submit']
+    assert len(objective) == 8000
+    assert not list(Draft202012Validator(schema).iter_errors(args))
+    assert dc.validate('coordinator', 'plan_submit', args) == args
+    args['plan']['tasks'][0]['objective'] += '😀'
+    assert list(Draft202012Validator(schema).iter_errors(args))
+    with pytest.raises(StoreError) as error:
+        dc.validate('coordinator', 'plan_submit', args)
+    assert (error.value.field, error.value.received, error.value.expected) == (
+        'arguments.plan.tasks[0].objective', '8001 Unicode characters',
+        'between 1 and 8000 characters')
+    assert 'Rewrite arguments.plan.tasks[0].objective' in error.value.correction
+    assert 'verify its character count' in error.value.correction
+
+
+def test_shared_preflight_uses_live_contract_without_numeric_copies():
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[1] / 'skills/tool-discipline/SKILL.md').read_text()
+    assert 'required and conditional fields against the live schema' in text
+    assert 'Measure bounded strings in its counting unit' in text
+    assert 'without silently truncating requirements or weakening verification' in text
+    assert '8000' not in text

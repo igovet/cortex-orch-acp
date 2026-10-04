@@ -17,7 +17,8 @@ the task, owner epoch and attempt.
 
 The advertised `result_submit` JSON schema expresses this exclusive choice and
 the check-field combinations: `not_run`/`unverified` require `blocker`, while
-`passed`/`failed` omit `blocker` and `command`. A new result needs a fresh
+`passed`/`failed` omit `blocker`; an optional `command` is descriptive only and
+never replaces receipt evidence. A new result needs a fresh
 `request_key`; retry an uncertain delivery only with identical arguments.
 The worker copies `write_report.report_id` into `result_submit.report_ref`, not
 the draft id or a command receipt. New rejected `result_submit` calls attempt
@@ -42,6 +43,25 @@ changed report under the same request key is a `request_key_conflict`. A report 
 a fabricated reference or a changed retry payload is rejected. `read_report` takes
 that same exact identifier in its `report_id` field. Tool argument contracts live
 in schemas, not profile prose. There is no legacy `publish_result` operation.
+
+Before any proposal or result, inspect the live schema, including conditional
+requirements, and measure bounded text in its stated counting unit. Plan task
+objectives advertise their Unicode code-point bounds in the property description
+as well as JSON Schema, through the shared Cortex MCP surface for Codex and
+Claude. An overlong objective is rejected before plan persistence; rewrite it
+concisely without dropping requirements, never silently truncate it. Correct a
+deterministic rejected input only as the live declaration permits; uncertain
+delivery still requires the identical key and payload. This is prevention
+guidance, not proof that a live model follows it.
+
+Before the first submission, prepare a complete report form even though the
+unconditional required-field list cannot require both alternatives. A summary
+and verdict are not a report. Pass structured arguments; hand-concatenating
+Markdown into JSON can fail in the engine before Cortex receives a tool call.
+After a JSON parse error, correct serialization rather than repeating the same
+malformed input. For repeated inline serialization failures, use the existing
+owned-draft route and submit its acknowledged report identity. This guidance
+does not repair arbitrary model output or establish live model compliance.
 
 Publication retains exact task/report/attempt identity. Runtime projection can
 recover an interrupted result submission from its durable publication event; absent

@@ -357,7 +357,7 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
                 if scenario in {'worker_question','replan','scope','escalation'} and not questions:
                     questions.append('pending')
                     if scenario=='worker_question':
-                        mcp_tools.dispatch(store,channel,'ask_question',dict(question='Which target?',request_key='worker-q'))
+                        mcp_tools.dispatch(store,channel,'ask_question',dict(question='Which target?',options=['Small target', 'Large target'],request_key='worker-q'))
                     else:
                         operation={'replan':'replan_request','scope':'scope_request','escalation':'escalation_request'}[scenario]
                         args=dict(reason='Additional evidence requires a new plan.',request_key='change')
@@ -507,7 +507,13 @@ def test_composed_runtime_executes_plan_review_verification_synthesis(tmp_path, 
     if scenario in {'success', 'fix', 'elicitation', 'text_question', 'worker_question', 'replan', 'scope', 'escalation', 'result_recovery', 'result_correction'}:
         assert context['state'] == 'COMPLETED', context
         expected = ['coordinator','worker','worker','worker','worker','coordinator'] if scenario == 'fix' else ['coordinator','worker','worker','coordinator']
-        if scenario in {'worker_question','replan','scope','escalation'}:
+        if scenario == 'worker_question':
+            expected.insert(2, 'worker')  # answer turn, not a new coordinator plan
+            from cortex_runtime.orchestration.worker_waits import list_waits
+            [wait] = list_waits(store, task.task_id)
+            assert wait['status'] == 'resumed'
+            assert engine.prompt_calls.count(wait['engine_session_ref']) == 2
+        elif scenario in {'replan','scope','escalation'}:
             expected=['coordinator','worker']+expected
         elif questions:
             expected.insert(0, 'coordinator')
@@ -1084,7 +1090,7 @@ def test_a_decision_left_after_verification_keeps_the_task_open_until_the_user_a
         db.commit()
     state.move(channel.task_id, 'REVIEWING'); state.move(channel.task_id, 'VERIFYING')
     assert state.record_verification(channel.task_id, [ok], digest)
-    request(state.store, channel, dict(question='Anything else?', options=['Finish'], request_key='q2'))
+    request(state.store, channel, dict(question='Anything else?', options=['Finish', 'Continue'], request_key='q2'))
     assert answer(state.store, pending(state.store, channel.task_id)['question_id'], 'Finish', 'text')
     assert resume_answered(state.store, channel.task_id)
     assert state.submit_answer(channel, 'Done as approved.', 'close')['state'] == 'ANSWER_READY'
@@ -1526,7 +1532,11 @@ def test_scheduler_runs_at_most_four_workers_per_session_and_the_rest_wait(machi
     other = bootstrap_task(state.store, SourceEvent(origin='test', event_id='two'), 'Second chat', 'owner')
     state.create(other.task_id, 'Second chat')
     other_channel = SimpleNamespace(task_id=other.task_id, channel_id='coordinator', role='coordinator')
-    state.submit_plan(other_channel, plan(6), 'other'); state.move(other.task_id, 'EXECUTING')
+    other_plan = plan(6)
+    # Capacity is session-local; writable workspace reservations are not.
+    for node in other_plan['tasks']:
+        node['scope'] = ['other/' + scope for scope in node['scope']]
+    state.submit_plan(other_channel, other_plan, 'other'); state.move(other.task_id, 'EXECUTING')
     assert len(state.claim_ready(other.task_id, 'coordinator')) == 4
     with state.store.connection() as db:
         statuses = [row[0] for row in db.execute(

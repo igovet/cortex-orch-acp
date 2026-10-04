@@ -1197,6 +1197,9 @@ class OrchestratingRuntime:
         # once per attempt.
         self._terminated_attempts: set[str] = set()
         self._executor = ThreadPoolExecutor(max_workers=worker_pool_size, thread_name_prefix="cortex-worker")
+        # One visible question at a time; never occupy the scheduler or worker pool.
+        self._question_executors = {}
+        self._worker_question_deliveries = {}
         # T035 FINDING-13 #2: assignment refs whose *worker* engine turn is
         # in flight right now, in this process. A worker that is actually
         # running is real work with no MEANINGFUL event of its own until it
@@ -1620,6 +1623,8 @@ class OrchestratingRuntime:
             # aborts every queued open and terminates every owned process
             # with a confirmed/ambiguous release.
             shutdown()
+        for executor in self._question_executors.values():
+            executor.shutdown(wait=False, cancel_futures=True)
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def transport_lost(self, task_id: str) -> bool:
@@ -2475,6 +2480,7 @@ class OrchestratingRuntime:
     def answer_question(
         self, task_id: str, session_id: str, question: questions_store.PendingQuestion, text: str,
         emit_update: Callable[[str], bool], cancel_event: threading.Event, *,
+        recorded: bool = False,
         emit_tool_call: Callable[[Mapping[str, Any]], bool] | None = None,
         emit_display_update: Callable[[Mapping[str, Any]], bool] | None = None,
     ) -> StopReason:
@@ -2494,8 +2500,11 @@ class OrchestratingRuntime:
             language = self._resolve_language(task_id, content_hint=text)
             emit_update(acp_messages.render("task_stopped", language))
             return StopReason.END_TURN
-        answer_text = _question_answer_value(question, text)
-        if not questions_store.answer(self._store, question.id, answer_text, "text"):
+        answer_text = text if recorded else _question_answer_value(question, text)
+        latest = questions_store.get(self._store, question.id)
+        already_recorded = (recorded and latest is not None and latest.task_id == task_id
+                            and latest.status == 'answered' and latest.answer_text == answer_text)
+        if not already_recorded and not questions_store.answer(self._store, question.id, answer_text, "text", session_id=session_id):
             # Resolved/superseded/cancelled between the caller's own
             # list_open() read and this call (a genuine race, or a stale
             # /cortex-answer against an already-answered question) -- a
@@ -2503,6 +2512,16 @@ class OrchestratingRuntime:
             questions_store.record_late_answer(self._store, question.id, task_id, text, "text")
             language = self._resolve_language(task_id, content_hint=text)
             emit_update(acp_messages.render("question_answer_unknown_index", language))
+            return StopReason.END_TURN
+        with self._lock:
+            active = task_id in self._active_cancel_events
+        if active and question.assignment_ref:
+            delegation_events.append_event(
+                self._store, task_id, "progress", f"question_answered:{question.id}",
+                dict(kind="question_answered", question_id=question.id,
+                     answer_text=answer_text, session_id=session_id), origin="runtime",
+            )
+            self._notify()
             return StopReason.END_TURN
         channel, session_ref = self._ensure_coordinator(task_id)
         language = self._resolve_language(task_id, content_hint=text)
@@ -4224,15 +4243,24 @@ class OrchestratingRuntime:
         if question is None or question.task_id != task_id:
             raise StoreError('runtime_question_missing')
         decision["question_id"] = question.id
-        if question.status != "open":
+        if question.status != "open" and not decision.get('batch_id'):
             # The terminal decision was inspected before this row was
             # answered, so create_if_absent can observe the answer winning
             # the race. Continue so the caller re-checks the durable state;
             # otherwise it would incorrectly park an answered question in
             # waiting_for_user. Cancellation/supersession remains terminal.
             return question.status == "answered"
+        if decision.get('batch_id'):
+            return self._handle_question_batch(task_id, session_id, emit_update, language, decision, elicitor)
         shown_body = False
         if elicitor is not None:
+            set_cancelled = getattr(elicitor, "set_question_cancelled", None)
+            if set_cancelled is not None:
+                def question_cancelled():
+                    latest = questions_store.get(self._store, question.id)
+                    return (self.transport_lost(task_id) or acp_steering.is_stopped(self._store, task_id)
+                            or latest is None or latest.status != "open")
+                set_cancelled(question_cancelled)
             if hasattr(elicitor, "set_question_id"):
                 elicitor.set_question_id(question.id)
             card_text = decision["question"]
@@ -4250,7 +4278,7 @@ class OrchestratingRuntime:
             except Exception:
                 answer_text = None
             if answer_text is not None:
-                if questions_store.answer(self._store, question.id, answer_text, "elicitation"):
+                if questions_store.answer(self._store, question.id, answer_text, "elicitation", session_id=session_id):
                     delegation_events.append_event(
                         self._store, task_id, "progress", f"question_answered:{question.id}",
                         dict(kind="question_answered", question_id=question.id, answer_text=answer_text,
@@ -4271,6 +4299,9 @@ class OrchestratingRuntime:
                         origin=session_id,
                     )
                     return True
+        latest = questions_store.get(self._store, question.id)
+        if latest is None or latest.status != "open":
+            return latest is not None and latest.status == "answered"
         # Hosts without ACP elicitation still need to see the choices. Keep
         # this as one ordinary text update so the next user prompt can answer
         # the same durable pending question through the normal text path.
@@ -4984,11 +5015,13 @@ class OrchestratingRuntime:
         # always terminates: the number of authorized routes is finite).
         # ``_MAX_FALLBACK_HOPS`` is only a defensive hard ceiling, never
         # expected to bind in practice.
-        # One extra iteration is reserved for the bounded same-session
-        # completion follow-up.  It does not add a fallback hop: the
-        # engine-failure branch still gates replacements on ``_hop`` being
-        # below ``_MAX_FALLBACK_HOPS``.
-        for _hop in range(self._MAX_FALLBACK_HOPS + 2):
+        # Human-answer turns, completion follow-ups and route fallback hops
+        # have independent accounting. A human wait never exhausts a retry budget.
+        fallback_hops = 0
+        turn_sequence = 0
+        answer_delivery = None
+        while True:
+            turn_sequence += 1
             try:
                 # A fallback opens a new attempt. Rebuild its bounded catalog
                 # against current project docs while keeping the assignment
@@ -5043,7 +5076,7 @@ class OrchestratingRuntime:
                 # increment it for every tool boundary, including hidden
                 # Cortex/provider calls that are intentionally omitted from
                 # the worker panel.
-                worker_message_turn_id = f"{getattr(result, 'attempt_id', None) or result.engine_session_ref}:turn:{_hop}"
+                worker_message_turn_id = f"{getattr(result, 'attempt_id', None) or result.engine_session_ref}:turn:{turn_sequence}"
                 worker_message_segment = 0
                 worker_message_block_sequence = 0
                 worker_stream_redactor = StreamingRedactor(max_chars=4000)
@@ -5320,6 +5353,17 @@ class OrchestratingRuntime:
                         self._worker_turns_in_flight.discard(assignment_ref)
                         self._worker_recoveries_in_flight.discard(assignment_ref)
                     return
+                if answer_delivery is not None:
+                    from ..orchestration import worker_waits
+                    with self._store.connection() as db:
+                        db.execute('BEGIN IMMEDIATE')
+                        if not worker_waits.valid(db, answer_delivery):
+                            worker_waits.cancel_tx(db, task_id, 'continuation_authority_lost',
+                                                  assignment_ref=assignment_ref)
+                            db.commit()
+                            with self._lock:
+                                self._worker_turns_in_flight.discard(assignment_ref)
+                            return
                 worker_outcome = None
                 try:
                     worker_outcome = self._engine.prompt(
@@ -5458,6 +5502,30 @@ class OrchestratingRuntime:
                                    if summary and not has_final_response else None),
                             result_payload=pending_result,
                         )
+                from ..orchestration import worker_waits
+                if answer_delivery is not None:
+                    worker_waits.finish(
+                        self._store, task_id, answer_delivery['wait_id'], answer_delivery['delivery_id'],
+                        stop_reason=outcome.stop_reason.value,
+                    )
+                    answer_delivery = None
+                waits = worker_waits.list_waits(self._store, task_id, assignment_ref=assignment_ref)
+                if (outcome.stop_reason == StopReason.END_TURN and not pending_result
+                        and any(w['status'] in {'open', 'ready'} for w in waits)):
+                    self._finalize_generation_delivery(
+                        result.engine_session_ref, generation_delivery_id,
+                        failure_kind=None, stop_reason=outcome.stop_reason,
+                    )
+                    generation_delivery_id = None
+                    continuation = self._park_worker_for_answer(
+                        task_id, assignment_ref, result.engine_session_ref, cancel_event)
+                    if continuation is None:
+                        with self._lock:
+                            self._worker_turns_in_flight.discard(assignment_ref)
+                        return
+                    answer_delivery, answer = continuation
+                    recovery_prompt = worker_waits.answer_prompt(answer_delivery, answer)
+                    continue
                 # A normal END_TURN is not itself a worker failure.  Give a
                 # worker which left no question, result, or owned published
                 # report one bounded, same-session request to complete its
@@ -5496,7 +5564,9 @@ class OrchestratingRuntime:
                             "verification before handing off. Then create a truthful Cortex report "
                             "and publish the result through the advertised tools, including any "
                             "remaining gaps or unrun checks. If you need information to proceed, "
-                            "use ask_question for the delegating coordinator. Do not claim work "
+                            "use ask_question for missing user information and end the question turn "
+                            "as its receipt instructs. The runtime delivers the answer in this same "
+                            "healthy session. Do not claim work "
                             "or checks you did not perform, or repeat unrelated work."
                         )
                         continue
@@ -5568,6 +5638,11 @@ class OrchestratingRuntime:
                 # task with no fallback policy at all, still gets the
                 # ordinary assignment_failed and is never silently retried
                 # on the same route.
+                if answer_delivery is not None:
+                    from ..orchestration import worker_waits
+                    worker_waits.finish(self._store, task_id, answer_delivery['wait_id'],
+                                        answer_delivery['delivery_id'], failure_kind=failure.kind)
+                    answer_delivery = None
                 self._finalize_generation_delivery(result.engine_session_ref, generation_delivery_id, failure_kind=failure.kind, stop_reason=None)
                 # T028: classify this failure before ever considering
                 # fallback -- only a genuine ENGINE_FAILURE classification
@@ -5599,7 +5674,7 @@ class OrchestratingRuntime:
                 workspace_binding_id = getattr(result, "workspace_binding_id", None)
                 config_revision = getattr(result, "config_revision", None)
                 if (
-                    old_attempt_id is not None and _hop < self._MAX_FALLBACK_HOPS
+                    old_attempt_id is not None and fallback_hops < self._MAX_FALLBACK_HOPS
                     and failure_classification.is_fallback_eligible(failure_class)
                 ):
                     from ..portable.roles import load_role
@@ -5636,6 +5711,7 @@ class OrchestratingRuntime:
                 # canonical instructions/capsule path a first-time worker
                 # prompt uses (T021/T022), never a retried in-flight prompt
                 # against the dead session.
+                fallback_hops += 1
                 self._worker_sessions[(task_id, assignment_ref)] = new_session_ref
                 from types import SimpleNamespace
 
@@ -5652,6 +5728,11 @@ class OrchestratingRuntime:
                     self._worker_recoveries_in_flight.discard(assignment_ref)
                 if self._shutting_down.is_set():
                     return
+                if answer_delivery is not None:
+                    from ..orchestration import worker_waits
+                    worker_waits.finish(self._store, task_id, answer_delivery['wait_id'],
+                                        answer_delivery['delivery_id'], failure_kind="unexpected_exception")
+                    answer_delivery = None
                 failure = _describe_failure(error)
                 self._mark_work_attempt_failed(task_id, assignment_ref, failure["error"], f"work-failed:{assignment_ref}:exception")
                 delegation_events.append_event(
@@ -5699,6 +5780,90 @@ class OrchestratingRuntime:
             )
 
 
+    def _handle_question_batch(self, task_id, session_id, emit_update, language, decision, elicitor):
+        from ..orchestration import question_batches
+        with self._store.connection() as db:
+            batch = question_batches.find_tx(db, task_id, batch_id=decision['batch_id'])
+            if not batch:
+                raise StoreError('runtime_question_missing')
+            if question_batches.completed_tx(db, batch):
+                return True
+        def finished():
+            return (self.transport_lost(task_id) or acp_steering.is_stopped(self._store, task_id)
+                    or any(questions_store.get(self._store, q['question_id']).status in {'cancelled','superseded'}
+                           for q in batch['questions'])
+                    or all(questions_store.get(self._store, q['question_id']).status == 'answered'
+                           for q in batch['questions']))
+        if elicitor is not None and hasattr(elicitor, 'elicit_batch'):
+            if hasattr(elicitor, 'set_question_cancelled'):
+                elicitor.set_question_cancelled(finished)
+            # The supported Paseo config transport commits the complete set;
+            # a decline/timeout is never a fabricated answer.
+            elicitor.elicit_batch(session_id, batch)
+        else:
+            # A host with only one-question forms remains usable; the wait is
+            # still one group and no partial response resumes the requester.
+            for q in batch['questions']:
+                self._handle_ask_user(task_id, session_id, emit_update, language, dict(q), elicitor)
+        with self._store.connection() as db:
+            return bool(question_batches.completed_tx(db, batch))
+
+
+    def _service_worker_questions(self, task_id, session_id, emit_update, language, elicitor):
+        from ..orchestration import worker_waits
+        from ..orchestration.access import reconcile
+        reconcile(self._store, task_id)
+        waits = worker_waits.list_waits(self._store, task_id)
+        with self._lock:
+            executor = self._question_executors.get(session_id)
+            for wait in waits:
+                if wait['status'] != 'open' or wait['wait_id'] in self._worker_question_deliveries:
+                    continue
+                if executor is None:
+                    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cortex-question")
+                    self._question_executors[session_id] = executor
+                future = executor.submit(
+                    self._handle_ask_user, task_id, session_id, emit_update, language,
+                    {k: wait[k] for k in ('question_id','question','options','batch_id','questions') if k in wait}, elicitor,
+                )
+                self._worker_question_deliveries[wait['wait_id']] = future
+            # Unanswered cards that timed out/declined keep their durable wait.
+            return any(not self._worker_question_deliveries[w['wait_id']].done()
+                       for w in waits if w['wait_id'] in self._worker_question_deliveries)
+
+    def _park_worker_for_answer(self, task_id, assignment_ref, session_ref, cancel_event):
+        from ..orchestration import worker_waits
+        from ..orchestration.limits import assignment_current
+        with self._lock:
+            self._worker_turns_in_flight.discard(assignment_ref)
+            feed = self._worker_card_emitter(task_id, assignment_ref)
+        with self._store.connection() as db:
+            initial_wait = worker_waits.current(db, task_id, assignment_ref)
+        entry = ("Waiting for the access decision." if initial_wait and initial_wait.get('kind') == 'access'
+                 else "Waiting for the user's answer.")
+        self._emit_worker_card(feed, assignment_ref, status="in_progress", entry=entry)
+        while (not cancel_event.is_set() and not self.transport_lost(task_id)
+               and assignment_current(self._store, task_id, assignment_ref)):
+            from ..orchestration.access import reconcile
+            reconcile(self._store, task_id)
+            with self._store.connection() as db:
+                wait = worker_waits.current(db, task_id, assignment_ref)
+            lookup = getattr(self._engine, 'lookup_owned', None)
+            if wait and (lookup is None or lookup(wait['attempt_id']) != 'alive'):
+                raise EngineTurnFailed('worker_wait_session_unavailable')
+            continuation = worker_waits.claim(self._store, task_id, assignment_ref, session_ref)
+            if continuation is not None:
+                entry = ("Continuing with the access decision." if continuation[0].get('kind') == 'access'
+                         else "Continuing with the user's answer.")
+                self._emit_worker_card(feed, assignment_ref, status="in_progress", entry=entry)
+                return continuation
+            waits = worker_waits.list_waits(self._store, task_id, assignment_ref=assignment_ref)
+            if not any(w['status'] in {'open', 'ready'} for w in waits):
+                return None
+            with self._cond:
+                self._cond.wait(timeout=.2)
+        return None
+
     def _assignment_already_reported(self, task_id: str, assignment_ref: str) -> bool:
         """Whether this assignment already has a terminal event of its own.
 
@@ -5745,6 +5910,9 @@ class OrchestratingRuntime:
         with self._store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                from ..orchestration.worker_waits import current
+                if current(db, task_id, assignment_ref):
+                    return "waiting"
                 refs = [assignment_ref]
                 attempt_row = db.execute(
                     "SELECT attempt_id FROM delegation_provisioning "
@@ -5915,6 +6083,9 @@ class OrchestratingRuntime:
         with self._store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                from ..orchestration.worker_waits import current
+                if current(db, task_id, assignment_ref):
+                    return
                 # Both refs: a worker publishes through its own channel, so
                 # its result/question carries the *attempt's* ref, while
                 # the runtime's own events for the same assignment carry

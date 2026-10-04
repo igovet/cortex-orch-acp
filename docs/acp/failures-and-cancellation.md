@@ -134,6 +134,16 @@ updates are retained and replayed if the client disconnected before seeing them.
 
 ## 4. Disconnect
 
+The transport's reader EOF event signals that input ended, not that its
+disconnect callback finished. On the stdin-EOF path, `acp.agent.main` joins
+the reader before joining prompt workers and shutting down the runtime.
+This preserves recording/cancellation before process exit even when the EOF
+callback is still running. The writer-closed event likewise precedes its
+disconnect callback; on that path, `main` joins the writer before joining
+prompt workers and shutting down the runtime. SIGTERM runs its disconnect
+callback synchronously on the main thread. SIGTERM and writer-close must not
+join a reader blocked on still-open stdin.
+
 `acp.agent.Agent._handle_eof`/`handle_writer_closed` (host transport EOF or
 writer-closed) already invalidate every session's `cancel_event` and close
 the connection's `HostRequester` (resolving every pending host round trip —

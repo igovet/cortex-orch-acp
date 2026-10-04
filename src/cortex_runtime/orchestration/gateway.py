@@ -51,7 +51,7 @@ def timeout(description):
 
 SCHEMAS = {
     'project_git': obj(dict(kind=dict(type='string',enum=['status','diff'],description='Read-only project status or complete working-tree diff against HEAD, including pre-existing edits. Returns an exact retained output for read_large_output. Untracked file content is read through project_read.'),request_key=text('Unique observation identity; retries return the same retained snapshot.',128))),
-    'project_delete': obj(dict(path=text('Existing project-relative regular file inside the assignment scope. Binary files are supported; no directory recursion.',512),
+    'project_delete': obj(dict(path=text('Existing project-relative regular file inside the assignment scope. Binary files are supported; no directory recursion. Root .gitignore deletion retains only the required /.cortex/ rule and returns deleted: false.',512),
                                expected_sha256=text('Lowercase hex SHA-256 of the file raw bytes as they are now (project_read returns it as sha256). A mismatch refuses the deletion.',64),
                                request_key=text('Unique action identity.',128))),
     'project_mkdir': obj(dict(path=text('New project-relative directory within the assignment scope. Parent must exist.',512),
@@ -60,7 +60,7 @@ SCHEMAS = {
                              offset=integer('UTF-8 character offset for file reads.',1000000000),
                              limit=integer('Maximum characters or directory entries; response supplies the next offset.',65536)), required=['path']),
     'project_write': obj(dict(path=text('Project-relative file inside this assignment scope. Symlinks are rejected.',512),
-                              content=text('Complete new UTF-8 file content.',1000000),
+                              content=text('Complete new UTF-8 file content. Root .gitignore writes retain a final /.cortex/ rule; returned hash describes the protected bytes.',1000000),
                               expected_sha256=text('Lowercase hex SHA-256 of the file as it is now (project_read returns it as sha256), or the literal string "absent" to create a new file. A mismatch refuses the write and changes nothing.',64),
                               request_key=text('Unique action identity. Exact retries reuse the retained result.',128))),
     'project_skill_link': obj(dict(action=dict(type='string',enum=['link','unlink'],description='link: make .claude/skills/<name> the relative symlink ../../.agents/skills/<name>, creating .claude/skills when absent; an exact existing link is left unchanged. unlink: remove only that exact link (the skill in .agents/skills stays).'),
@@ -202,7 +202,9 @@ def _read(root, args):
 
 
 def _write(root,args):
-    data = args['content'].encode('utf-8')
+    from .ignore_guard import protected_content
+    content = protected_content(args['content']) if _parts(args['path']) == ('.gitignore',) else args['content']
+    data = content.encode('utf-8')
     with _parent(root,args['path']) as (parent,leaf):
         mode = 0o600
         try:
@@ -234,6 +236,8 @@ def _write(root,args):
 def _command(store,channel,root,scopes,args,ref,owner,effects):
     from .sandbox import as_owner, gateway_command, with_umask
     from . import ssh_askpass
+    from .ignore_guard import snapshot, enforce
+    ignore_before = snapshot(root) if scopes else None
     with tempfile.TemporaryDirectory(prefix='cortex-command-') as scratch, tempfile.TemporaryFile() as output, \
             tempfile.TemporaryDirectory(prefix='cortex-askpass-') as askpass_dir:
         # The whole host read-only, as the worker's own jailed shell sees it.
@@ -281,6 +285,12 @@ def _command(store,channel,root,scopes,args,ref,owner,effects):
                 code=proc.wait()
         output.seek(0)
         data=output.read()
+    if scopes:
+        try:
+            if snapshot(root) != ignore_before:
+                enforce(store, channel)
+        except (StoreError, OSError, UnicodeError):
+            failure = failure or 'gitignore_guard_failed'
     if planted:
         # Removed again: git configuration, hooks or a repository pointer the
         # command created would otherwise run code later, outside the sandbox.
@@ -316,6 +326,8 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
         raise StoreError('outside_action_not_confirmed','operation',operation,'the user allowing it',
                          'The user did not allow this action; do the work another way or explain what you need.')
     effects['possible']=True
+    from .ignore_guard import snapshot, enforce
+    ignore_before = snapshot(root) if operation == 'outside_command' else None
     if operation=='outside_write':
         data=args['content'].encode('utf-8')
         temporary=resolved.with_name(resolved.name+'.cortex-'+uuid.uuid4().hex)
@@ -333,6 +345,11 @@ def _outside(store,channel,root,operation,args,ref,owner,effects):
         except OSError as error:
             code,failure=None,f'not_started:{error.strerror}'
         output.seek(0); data=output.read()
+    try:
+        if snapshot(root) != ignore_before:
+            enforce(store, channel)
+    except (StoreError, OSError, UnicodeError):
+        failure = failure or 'gitignore_guard_failed'
     from ..recovery.large_output_store import persist_output
     retained=persist_output(store,task_id=channel.task_id,owner_scope=owner,source_kind='terminal',
                             source_ref=ref,data=data,exit_code=code,failure=failure)
@@ -360,6 +377,9 @@ def dispatch(store,channel,operation,args):
                 raise StoreError('gateway_read_failure', 'path', args['path'],
                     'a readable regular file or directory',
                     'The project read failed; no mutation was attempted. Check the path, file type and read access.') from error
+        from .worker_waits import check_mutation
+        if operation != 'project_git':
+            check_mutation(db, channel)
         if operation in {'project_write','project_mkdir','project_delete'}:
             # A private path is refused before anything else (a deletion
             # there once asked the user to confirm what was then refused).
@@ -441,9 +461,14 @@ def dispatch(store,channel,operation,args):
                     observed=_file_sha256(root,args['path'])
                     if observed!=args['expected_sha256']:
                         raise StoreError('gateway_write_conflict')
-                    with _parent(root,args['path']) as (parent,leaf):
-                        os.unlink(leaf,dir_fd=parent); os.fsync(parent)
-                    result=dict(deleted=True)
+                    if _parts(args['path']) == ('.gitignore',):
+                        result = _write(root, dict(args, content=''))
+                        result['deleted'] = False
+                        result['gitignore_guard'] = True
+                    else:
+                        with _parent(root,args['path']) as (parent,leaf):
+                            os.unlink(leaf,dir_fd=parent); os.fsync(parent)
+                        result=dict(deleted=True)
                 elif operation=='project_mkdir':
                     with _parent(root,args['path']) as (parent,leaf):
                         os.mkdir(leaf,0o755,dir_fd=parent)

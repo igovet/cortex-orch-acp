@@ -24,7 +24,10 @@ output is not a Cortex command receipt. External MCP servers such as
 Use only tools available to this host and role. Read the complete live declaration
 before first use and reload it after context loss; a name or recovery summary is
 insufficient. Use minimal requests with declared defaults and observed identifiers.
-Check supplied keys and values before dispatch. Do not copy argument contracts into
+Preflight keys, required and conditional fields against the live schema and
+property descriptions. Measure bounded strings in its counting unit; rewrite
+overlong text without silently truncating requirements or weakening verification.
+Do not copy argument contracts into
 skills, infer synonymous fields, discover requirements by causing errors, or inspect
 runtime internals instead of advertised operations.
 

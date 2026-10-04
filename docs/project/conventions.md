@@ -11,9 +11,11 @@ the pipeline is newest edition first. SQLite is the durable index and in-memory
 state is only a cache.
 
 The runtime owns orchestration, dependency scheduling, review, verification and
-completion. Models submit proposals and results. Tool contracts belong in the
-advertised schemas. The replacement implementation is not yet release qualified;
-see `docs/acp/runtime-rewrite-status.md` for exact gaps.
+completion. Models submit proposals and results. Worker questions and additional
+path access requests park only their assignment; a real user answer or validated
+access decision continues in the same healthy session. Tool contracts belong in
+the advertised schemas. The replacement implementation is not yet release
+qualified; see `docs/acp/runtime-rewrite-status.md` for exact gaps.
 
 Workers receive an explicit assignment, a bounded context packet and only the
 reports required for that assignment. A worker may implement, verify and

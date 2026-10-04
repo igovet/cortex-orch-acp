@@ -122,3 +122,16 @@ symlink support, `tmux` presence) whose logic is also covered by unconditional
 tests; they are not the sole coverage of any mandatory case.
 
 Settings-only routing/install behavior is covered by tests/test_no_hardcoded_model_names.py, tests/test_model_settings_template.py, tests/test_settings_only_routing.py and tests/test_model_settings_integration.py; profile deletion is covered by integration and typed form/API tests. No-paid tests do not establish production migration, installed desktop reachability or a paid route. Migration tests use disposable fixtures; live checks remain gated by explicit owner consent and an owner-selected supported route.
+
+### Project runtime store ignore invariant
+
+`python3 -B -m pytest -q tests/test_gitignore_guard.py tests/test_situational_skill_gate.py tests/test_command_run_arguments.py`
+checks Git effective ignore semantics, digest/replay/no-follow and authority
+protections, native result boundaries, consented deletion, and command completion.
+These are isolated no-paid runtime tests, not Desktop or native-model evidence.
+See [ignore boundary limits](permissions-and-containment.md#runtime-store-ignore-protection).
+
+After changes to the observed-change/submission boundary, also run
+`python3 -B -m pytest -q tests/test_artifact_revision.py` and
+`python3 -B -m pytest -q tests/test_runtime_task_machine.py` to verify revision
+coverage and unchanged-task review behavior.

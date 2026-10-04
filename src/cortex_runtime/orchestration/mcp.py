@@ -99,6 +99,9 @@ def dispatch(store, channel, operation, args):
     if operation == 'user_question_request':
         from .questions import request
         return request(store, channel, args)
+    if operation == 'access_request':
+        from .access import request
+        return request(store, channel, args)
     if operation in {'replan_request','scope_request','escalation_request'}:
         from .policy import propose_replan
         return propose_replan(store,channel,operation,args)
@@ -140,6 +143,8 @@ def dispatch(store, channel, operation, args):
             from .skill_gate import enforce as enforce_situational_skills
             enforce_situational_skills(store, channel, stage=node['stage'],
                                        role_ids=(node['role'], role_id['role_id'] if role_id else None))
+            from .ignore_guard import reconcile_submission as enforce_gitignore
+            enforce_gitignore(store, channel)
         # An inline report's body lives in its published file; the request
         # retains and digests its SHA-256 (a changed body still conflicts).
         request = inline_report_form(args)

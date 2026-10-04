@@ -2937,6 +2937,9 @@ class EngineSessionManagerAdapter:
         "it as a blocker."
     )
 
+    _WORKER_WAIT_GRACE_SECONDS = 30.0
+    _WORKER_WAIT_CANCEL_SECONDS = 30.0
+
     def prompt(
         self, session_ref: str, message: str, cancel_event: threading.Event, *,
         on_delta: Callable[[str], bool] | None = None,
@@ -3010,6 +3013,10 @@ class EngineSessionManagerAdapter:
         # MCP call may legitimately run for hours in silence, and nudging
         # would cancel it. Silence only counts while nothing is running.
         _open_tools: set = set()
+        _parked = threading.Event()
+        _park_unconfirmed = threading.Event()
+        _park_started = [None]
+        _wait_started = [None]
 
         def _watch_for_cancel() -> None:
             while not _stop_watch.is_set():
@@ -3018,6 +3025,32 @@ class EngineSessionManagerAdapter:
                         _cancel_sent.set()
                         manager.cancel(session_ref)
                     return
+                # Human waits acknowledge immediately. An uncooperative question
+                # turn gets a cancellation nudge after a grace period, never a Stop.
+                wait = None
+                if self._store is not None and task_id and attempt_id:
+                    from ..orchestration import worker_waits
+                    with self._store.connection() as db:
+                        provision = db.execute(
+                            'SELECT idempotency_key FROM delegation_provisioning WHERE task_id=? AND attempt_id=?',
+                            (task_id, attempt_id),
+                        ).fetchone()
+                        if provision:
+                            wait = worker_waits.current(db, task_id, provision[0])
+                if wait and wait['status'] in {'open', 'ready'}:
+                    _wait_started[0] = _wait_started[0] or time.monotonic()
+                    if not _parked.is_set() and time.monotonic() - _wait_started[0] >= self._WORKER_WAIT_GRACE_SECONDS:
+                        _parked.set()
+                        _park_started[0] = time.monotonic()
+                        manager.cancel(session_ref)
+                    elif (_parked.is_set() and time.monotonic() - _park_started[0] >= self._WORKER_WAIT_CANCEL_SECONDS):
+                        _park_unconfirmed.set()
+                        # No observed turn end: this session cannot be reused.
+                        # Terminate only this owned manager, then normal recovery
+                        # requires observed absence and reconciles action receipts.
+                        manager.shutdown()
+                        return
+                    continue
                 if (not _nudged.is_set() and not _open_tools
                         and time.monotonic() - _last_event[0] >= _stall_limit[0]):
                     _nudged.set()
@@ -3032,6 +3065,7 @@ class EngineSessionManagerAdapter:
             while True:
                 _last_event[0] = time.monotonic()
                 _open_tools.clear()
+                saw_turn_end = False
                 for event in manager.prompt_turn(session_ref, turn_message, prompt_blocks=turn_blocks):
                     _last_event[0] = time.monotonic()
                     if not instruction_delivery_observed and self._store is not None:
@@ -3167,7 +3201,16 @@ class EngineSessionManagerAdapter:
                         # decides the durable outcome, never this adapter.
                         raise EngineTurnFailed(event.error_message or "engine_error")
                     elif event.kind == EngineEventKind.TURN_END:
+                        saw_turn_end = True
                         stop_reason = event.stop_reason or StopReason.END_TURN
+                if _park_unconfirmed.is_set() or (_parked.is_set() and not saw_turn_end):
+                    raise EngineTurnFailed("worker_wait_cancel_unconfirmed")
+                if (_parked.is_set() and not cancel_event.is_set()
+                        and stop_reason == StopReason.CANCELLED):
+                    # Only a real cancelled TURN_END proves the old turn finished.
+                    # A poisoned/failed manager raises instead and cannot continue.
+                    stop_reason = StopReason.END_TURN
+                    break
                 if (_nudged.is_set() and not cancel_event.is_set()
                         and stop_reason == StopReason.CANCELLED):
                     # The engine answered the nudge's cancel, so it is alive:

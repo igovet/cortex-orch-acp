@@ -144,3 +144,11 @@ def test_a_deletion_runs_only_when_the_user_allows_it(tmp_path,answer,expected):
     params=dict(PARAMS,toolCall=dict(toolCallId='tc-9',name='Bash',kind='execute',rawInput=dict(command='rm src/probe.test.ts')))
     assert call(bridge,params)=={'outcome':{'outcome':'selected','optionId':expected}}
     assert asked and 'Removal blocked pending confirmation: rm src/probe.test.ts' in asked[0][0] and asked[0][1]>=600
+
+
+@pytest.mark.parametrize('name', ['AskUserQuestion', 'request_user_input', 'experimental_request_user_input'])
+def test_native_questions_must_use_the_channel_bound_runtime_tool(tmp_path, name):
+    bindings = BindingRegistry(); bindings.bind(_binding(tmp_path)); host = []
+    bridge = _bridge(bindings=bindings, host_permission_requester=lambda *a: host.append(a))
+    assert call(bridge, dict(PARAMS, toolCall=dict(name=name))) == {'outcome': {'outcome': 'cancelled'}}
+    assert host == []

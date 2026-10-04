@@ -20,6 +20,26 @@ Only an answer recorded against that exact question resumes the requesting
 phase. Exact retries preserve the original question identity; changed deliveries
 with the same key fail.
 
+After three planning prompts without a structured proposal, the runtime asks a
+recovery question with `structured_proposal_missing`. A recorded answer resumes
+`RECOVERING`; after owned-work termination is confirmed, recovery returns to
+`PLANNING` with a fresh three-prompt cycle. This also applies when elicitation
+answers synchronously within the same host turn. Clearing the wrong phase's
+counter previously caused immediate reblocking without any new engine prompt.
+Dismissal, absent answers and unconfirmed worker termination do not grant a new
+planning turn. The limit is unchanged, and a renewed cycle without a proposal
+still blocks; successful answer mapping alone is not successful orchestration.
+The no-paid regression is `tests/test_question_recovery_continuation.py`; it
+covers option/custom recovery answers, actual plan continuation, exactly-once
+answer consumption and the unchanged no-proposal/decline bound. Earlier live
+evidence must be read in two parts: the original scalar answer was followed by
+three successful engine turns but no accepted structured proposal; the later
+recovery answers were blocked by the exhausted-counter defect and did not start
+a new engine turn. The repair addresses the latter controller defect only.
+A successful answer mapping is not proof of a plan, and the historical Desktop
+scenario remains partial until a new requested live run reaches its remaining
+acceptance cases.
+
 The coordinator writes the details (the proposed plan, the evidence, what each
 choice leads to) once, as its chat message before the question call. The
 question itself is one short line with short answer options. The receipt tells
@@ -49,26 +69,13 @@ shows its own evidence list, and derives an approve, decline or unclear decision
 from the exact answer. Persisted unsafe labels fail closed after restart; see
 [project skill management](skill-management.md#proposed-skills-from-repeated-work).
 
-In Paseo the question is a card with its options and an "Other..." field for
-an answer of the user's own. Paseo's stock ACP bridge can answer a card only
-with one of its options, so the Cortex provider
-(`integrations/paseo/server/provider.ts`) sends the typed text to Cortex as the
-`cortex_question_answer` config value, with the question id. Paseo's bridge
-forwards any config id. Cortex accepts that id only when it runs under the
-Paseo provider, and only for an existing question of the session's own task.
-The text answers the question exactly as a message typed into the chat would,
-and is kept in the chat history. Once Cortex has accepted it, the provider
-retires the card as declined; Cortex ignores that late decline. If Cortex
-refuses the text, the card stays open.
-For a free-text question with no supplied options, Cortex sends one instructional
-card action so Paseo still renders the question and its "Other..." field. That
-action is not an answer: selecting it leaves the durable question open. The user
-must type an answer under "Other..." or reply in chat.
+The question contract is role-neutral: structured questions emitted from coordinator, worker, and runtime fallback paths use the same provider handling. The runtime request carries the question text and any answer options; a supported client can render them as a structured form. Paseo uses its installed `QuestionFormCard` with choice labels and an "Other..." field. Related questions can be carried in one batch and displayed in one **paginated** form; the user navigates among members and must answer every member before one all-member submission. This does not mean every field is simultaneously visible.
 
-An ordinary prompt answers the single open question. Multiple open questions
-require the existing explicit `/cortex-answer` selection. A cancelled or
-superseded question cannot be revived by a late reply. Answered questions are
-included in the structured task context for the next coordinator turn.
+Paseo's provider binds a response to the exact question/session (and, for a batch, each member identity) and sends it to Cortex through the `cortex_question_answer` session-config route. It waits for Cortex's durable acknowledgement before echoing answers or retiring the native card; it retires with deny, never grants an option action. Partial, foreign, conflicting, or rejected answers do not complete the question. Retries preserve the delivery key and payload. On rejection the form remains recoverable; after a successful answer, replay does not add duplicate answer history. A chat reply is also an answer through the normal runtime route.
+
+The "Other..." field permits a custom answer for each question. Paseo trims custom text at its UI boundary; the provider does not reinterpret ordinal-looking custom text as an option number. Dismissing/cancelling a form does not invent an answer, and the open question can be presented again during recovery. For legacy scalar cards lacking an exact question identity, the provider retains the native option path. A free-text legacy question may use an instructional card action to expose "Other..."; selecting that action is not an answer and leaves the durable wait open.
+
+A task-global coordinator question still needs an exact answer to its pending question; multiple independently open questions require explicit `/cortex-answer` selection. Worker assignment-local questions resume the matching assignment/session when its bound channel permits; a recovered channel without retained session metadata uses task-global recovery instead, without promising same-session continuation. Cancelled or superseded questions cannot be revived by late replies. Other ACP hosts may lack structured forms and receive question/options as chat text: neither the runtime nor plugin can force every model to ask a question or every host to render a UI form. See [Paseo structured-question tests](../project/verification.md#paseo-plugin-integrationspaseo).
 
 `/cortex-stop` persists cancellation before process cleanup. Cancellation is
 idempotent, fences late runtime results and prevents completion. Engine process
@@ -151,12 +158,35 @@ plugin notice block because Paseo does not expose a safe single-channel outcome
 for it. An explicit Stop
 (`session/cancel`) or `/cortex-stop` remains an interruption: the former
 moves the task to RECOVERING and fences unfinished work; the latter
-permanently cancels it. Worker questions enter the persisted question protocol;
-scope, replan and escalation requests share a bound of three accepted requests since
-the user last spoke; a follow-up message or a question answer restores it. Each enters
-`RECOVERING`; the coordinator ends its turn and waits for the runtime to stop workers
-and request the replacement plan before submitting it. See
-[qualification status](runtime-rewrite-status.md).
+permanently cancels it. Worker questions are assignment-local persisted waits.
+The worker ends its tool turn without an incomplete result; after a real answer,
+the runtime resumes that same assignment and attempt with the next prompt in the
+same healthy engine session. Sibling work can continue. The worker is not
+reprovisioned and the coordinator does not need to submit a replacement plan for
+this ordinary question flow. Multiple open worker questions require explicit
+selection; decline, timeout or a text-only host response leaves the wait open.
+Stop, cancellation, replan or loss of the owning session can cancel or orphan a
+wait; process-loss recovery may replace the worker rather than continue its old
+session. These worker waits are distinct from the coordinator's task-global
+`WAITING_USER` question described above. If a recovered worker channel has no
+retained engine-session binding, ordinary tools still use their normal authority
+checks and its question uses task-global `WAITING_USER` recovery instead.
+The exact answer resumes the saved execution/review phase, without a guarantee
+of continuing the original session. Access-decision continuation still requires
+a retained session binding.
+
+Workers may also request additional exact project paths needed for their
+assignment. Safe requests are granted only after runtime validation against role,
+owner deny-write policy, path safety and current workspace writer reservations;
+a multi-path request is granted all-or-none. A contested or disallowed request
+parks only that worker for a user decision or revalidation, delivered through
+the same healthy-session continuation. A request itself performs no write and
+user text does not override policy. After denial the worker can use an allowed
+alternative or request a replacement decomposition through the existing
+scope/replan flow. This does not dynamically widen the operating-system jail:
+ordinary writers already have whole-project write authority in the current
+launch boundary, while the runtime's declared reservations coordinate writers.
+See [orchestration](orchestration.md#worker-questions-and-additional-access).
 
 The coordinator uses the language selected for the submitted message, including
 when reports and context are English. Workers receive an English communication

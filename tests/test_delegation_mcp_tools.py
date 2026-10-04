@@ -205,7 +205,7 @@ def test_dispatch_refuses_a_handler_result_that_would_leak_technical_metadata(tm
 
     monkeypatch.setitem(mcp_tools._WORKER_HANDLERS, "ask_question", leaking_handler)
     with pytest.raises(StoreError) as excinfo:
-        mcp_tools.dispatch(store, worker, "ask_question", dict(question="leak?", request_key="k"))
+        mcp_tools.dispatch(store, worker, "ask_question", dict(question="leak?", options=["Reveal", "Keep private"], request_key="k"))
     assert str(excinfo.value) == "internal_leak"
 
 

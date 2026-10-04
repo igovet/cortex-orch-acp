@@ -598,10 +598,16 @@ main(runtime=Runtime())
 '''
 
 
-@pytest.mark.parametrize("how, trigger", [("signal", "sigterm"), ("eof", "stdin_eof")])
+@pytest.mark.parametrize("how, trigger", [
+    ("signal", "sigterm"), ("eof", "stdin_eof"), ("writer_closed", "writer_closed"),
+])
 def test_the_disconnect_record_names_what_the_process_observed(tmp_path, how, trigger):
-    """Which of SIGTERM or stdin EOF ended the connection is kept on the
+    """Which of SIGTERM, stdin EOF or writer close ended the connection is kept on the
     durable record, so a live reload can be diagnosed from saved state."""
+    _assert_disconnect_trigger(tmp_path, how, trigger)
+
+
+def _assert_disconnect_trigger(tmp_path, how, trigger, child_script=_TRIGGER_CHILD):
     import os
     import signal
     import subprocess
@@ -615,7 +621,7 @@ def test_the_disconnect_record_names_what_the_process_observed(tmp_path, how, tr
     out.mkdir()
     env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(home / "config"), XDG_STATE_HOME=str(home / "state"),
                PYTHONPATH=str(Path(__file__).resolve().parents[1] / "src"), PYTHONDONTWRITEBYTECODE="1")
-    child = subprocess.Popen([sys.executable, "-B", "-c", _TRIGGER_CHILD, str(out)], env=env,
+    child = subprocess.Popen([sys.executable, "-B", "-c", child_script, str(out)], env=env,
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
         def call(request_id, method, params):
@@ -631,23 +637,92 @@ def test_the_disconnect_record_names_what_the_process_observed(tmp_path, how, tr
         call(2, "session/new", dict(cwd=str(project), mcpServers=[]))
         if how == "signal":
             child.send_signal(signal.SIGTERM)
+        elif how == "writer_closed":
+            # Keep stdin open: only a real failed stdout write should end
+            # the connection, and joining the blocked reader would wedge it.
+            child.stdout.close()
+            child.stdin.write((json.dumps(dict(jsonrpc="2.0", id=3, method="initialize",
+                                               params=dict(protocolVersion=1, clientCapabilities={}))) + "\n").encode())
+            child.stdin.flush()
         else:
             child.stdin.close()
-        child.wait(timeout=20)
+        assert child.wait(timeout=20) == 0
     finally:
         if child.poll() is None:
             child.kill()
+            child.wait(timeout=5)
     assert (out / "trigger").read_text() == trigger
 
 
-def test_the_runtime_keeps_the_trigger_on_the_host_disconnected_record(tmp_path):
+# Hold the disconnect callback after opening the trigger file but before writing it.
+# Joining its transport thread must finish that callback before runtime shutdown.
+_ORDERED_TRIGGER_CHILD = _TRIGGER_CHILD.replace(
+    "main(runtime=Runtime())",
+    '''
+import threading
+from cortex_runtime.acp.transport import StdioTransport
+
+entered = threading.Event()
+release = threading.Event()
+completed = threading.Event()
+original_wait = StdioTransport.wait_for_shutdown_signal
+original_join = StdioTransport.join_reader
+original_stop = StdioTransport.stop_writer
+
+def wait(self, timeout=None):
+    reason = original_wait(self, timeout)
+    if reason in ("reader_eof", "writer_closed"):
+        assert entered.wait(5), "disconnect callback did not enter"
+    return reason
+
+def join(self, timeout=None):
+    release.set()
+    return original_join(self, timeout)
+
+def stop(self):
+    release.set()
+    return original_stop(self)
+
+StdioTransport.wait_for_shutdown_signal = wait
+StdioTransport.join_reader = join
+StdioTransport.stop_writer = stop
+
+class OrderedRuntime(Runtime):
+    def disconnect(self, session_id, trigger=None):
+        with (out / "trigger").open("w") as stream:
+            entered.set()
+            if threading.current_thread() is not threading.main_thread():
+                assert release.wait(5), "transport thread was not joined before shutdown"
+            stream.write(str(trigger))
+        completed.set()
+        return True
+
+    def shutdown(self):
+        (out / "shutdown_order").write_text(str(completed.is_set()))
+        release.set()
+
+main(runtime=OrderedRuntime())
+''',
+)
+
+
+@pytest.mark.parametrize("how, trigger", [
+    ("signal", "sigterm"), ("eof", "stdin_eof"), ("writer_closed", "writer_closed"),
+])
+def test_disconnect_callback_finishes_before_runtime_shutdown(tmp_path, how, trigger):
+    _assert_disconnect_trigger(tmp_path, how, trigger, _ORDERED_TRIGGER_CHILD)
+    assert (tmp_path / "out" / "shutdown_order").read_text() == "True"
+
+
+@pytest.mark.parametrize("trigger", ["sigterm", "stdin_eof", "writer_closed"])
+def test_the_runtime_keeps_the_trigger_on_the_host_disconnected_record(tmp_path, trigger):
     store, task_id = _task(tmp_path)
     runtime, _engine, turn, _outcome = _start_with_blocking_worker(store, task_id)
-    runtime.disconnect_session(SESSION, trigger="sigterm")
+    runtime.disconnect_session(SESSION, trigger=trigger)
     turn.join(20)
     runtime.shutdown()
     [record] = _disconnect_records(store, task_id)
-    assert record["trigger"] == "sigterm"
+    assert record["trigger"] == trigger
 
 
 def _dead_process_identity():

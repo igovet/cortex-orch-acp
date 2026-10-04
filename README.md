@@ -55,8 +55,13 @@ See [route authorization](docs/acp/routing-and-fallback.md#pre-dispatch-enforcem
 Initial host model/provider echoes preserve the configured native effort/mode;
 they are not parameter resets. [Bound task inspection](docs/acp/observability.md#bound-task-inspection)
 provides paged, read-only lifecycle metadata and native confirmation references.
-The [dev binding exporter](docs/acp/dev-paseo-environment.md#read-only-dev-binding) can observe one explicitly owned host agent and its guarded session/task/current-owner binding; it never starts a daemon or engine. It does not qualify a live run or replace independent review and verification.
+The [dev binding exporter](docs/acp/dev-paseo-environment.md#read-only-dev-binding) can observe one explicitly owned host agent and its guarded session/task/current-owner binding; it never starts a daemon or engine. It does not qualify a live run or replace independent review and verification. Failures retain bounded local stage/process diagnostics and complete allowlisted inspector reasons without returning a binding. Missing endpoint metadata, helper startup/output failures and storage refusals remain distinct; earlier generic errors cannot identify their historical cause. Zero child exit alone is not complete binding evidence.
 Targeted tests can use the [fresh-process isolated launcher](docs/project/verification.md#fresh-process-isolated-targeted-launcher) with an explicitly authorized existing dependency path.
+
+Before `plan_submit`, inspect the live schema and measure complete bounded fields.
+The objective property description exposes its Unicode code-point limit even
+when a host renders only descriptions; rewrite overlong text without dropping
+requirements. Rejection does not accept a plan or start workers.
 
 For `result_submit`, send exactly one of an inline `report` or the `report_id`
 returned by this worker's `write_report` as `report_ref`. The advertised schema
@@ -65,18 +70,34 @@ only a code and safe field path for diagnostics, not the submitted content.
 Review workers must send a verdict (`APPROVE`, `REQUEST_CHANGES` or `BLOCK`;
 lowercase forms normalize). A supplied `command` on a passed or failed check is
 descriptive only; it never replaces the same-attempt `tool_call_ref` evidence.
+Prepare the complete report before the first submission; a summary or verdict
+alone is insufficient. Pass structured arguments, not hand-concatenated JSON.
+If inline JSON serialization repeatedly fails, use the owned-draft publication
+route and submit its acknowledged report identity. This guidance does not
+guarantee model compliance; see [publication rules](docs/acp/publications-and-consistency.md).
 A worker whose own changes pair documentation (`docs/**.md`, `README.md`,
 `SECURITY.md`) with source or other behavior files must have read
 `documentation-sync` through Cortex `read_skill` first; otherwise the result is
 refused with `situational_skill_required` and nothing is recorded.
 
-Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Worker briefs keep objectives, scope and dependency report references complete; long task goals and review evidence use marked previews with links to the full source. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts. The runtime runs them once after review, each until it exits, so the project's whole suite belongs there; workers run only the tests covering their own change. A worker check is marked passed only when its exact same-attempt `command_run` or user-confirmed `outside_command` receipt proves a complete, nontrivial command exited 0. Engine shell calls, reads and incomplete output cannot verify a check; older reports remain intact and weak historic evidence is marked separately when read.
+Cortex is an ACP v1 stdio agent. Its runtime coordinates Codex and Claude ACP workers in the project you opened, and owns task scheduling, review, verification, and completion. Task records and Markdown reports are stored in that project’s `.cortex/` directory. Workers can ask assignment-local questions and request additional exact paths: the runtime parks only that worker and resumes its same healthy session after a real answer or validated access decision, without a replacement plan. A recovered channel without retained session metadata keeps its ordinary tools; questions use task-global recovery instead of promising same-session continuation. Access requests do not override policy or widen the OS jail; see [orchestration](docs/acp/orchestration.md#worker-questions-and-additional-access). Worker briefs keep objectives, scope and dependency report references complete; long task goals and review evidence use marked previews with links to the full source. Plan verification commands are literal argv from documented project commands or scripts; shell syntax is rejected before work starts. The runtime runs them once after review, each until it exits, so the project's whole suite belongs there; workers run only the tests covering their own change. A worker check is marked passed only when its exact same-attempt `command_run` or user-confirmed `outside_command` receipt proves a complete, nontrivial command exited 0. Engine shell calls, reads and incomplete output cannot verify a check; older reports remain intact and weak historic evidence is marked separately when read.
 
 To close a task immediately at your own decision, send `/cortex-finish` with no arguments, even while a Paseo turn is active. Cortex stops its owned work and records the closure as terminal `CANCELLED`, **not** verified `COMPLETED`; unfinished review, checks, and synthesis are not claimed as passed. An explicit close-as-is answer to a task-closure question has the same effect. See [completion and lifecycle](docs/acp/completion-and-lifecycle.md).
 
-Paseo questions without preset choices still show a card: type the answer under
-"Other..." or reply in chat. The instructional card action does not answer the
-question. See [questions and steering](docs/acp/steering-and-questions.md).
+Questions from coordinator, worker, or runtime fallback flows use the same structured question contract: the runtime supplies choices when available, and Paseo presents an answer form with an "Other..." field. Related questions can be grouped into one paginated form and submitted together; every member must be answered. Free-text answers and chat replies remain available, and dismissing a form does not answer or close the pending question. Hosts without the required structured-question UI may present the prompt and choices as chat text instead. This is a runtime/UI contract, not proof that a model will always recognize when it should ask or that every ACP host renders a form. See [questions and steering](docs/acp/steering-and-questions.md).
+
+A real answer to a runtime recovery question starts a fresh bounded planning
+cycle, including when answered within the same host turn. The three-prompt
+limit still applies; an answer does not manufacture a missing model proposal.
+A repaired recovery-counter defect had previously caused follow-up recovery
+answers to reblock without another engine prompt; a focused regression now
+checks that an answered recovery can continue into a scripted plan. This does
+not explain or prevent a model from failing to submit a proposal within its
+three prompts, and it is not evidence that every live task will complete.
+A prior isolated Desktop run remains partial: its coordinator question rendered
+and its answer mapped, but the task stopped at `structured_proposal_missing`;
+batch and worker scenarios were not reached. See
+[question recovery verification](docs/project/verification.md#question-and-submission-regressions).
 
 ACP timeline updates use bounded display projections to avoid repeatedly sending growing worker transcripts. Worker cards keep a 20-action, 4 KiB tail for generic clients; per-update and field size limits and a fixed per-card event budget (forward-only status transitions plus at most 8 progress updates, one per 30 s, so at most 13 updates per worker whatever its size) bound host event volume. Coordinator cards send changed fields only, suppress no-op updates, omit an identical MCP text mirror, and reference repeated identical outputs; unchanged context polls return a compact receipt. Coordinator and engine tool cards also have a per-task total budget: the first 150 distinct calls (or 4 MiB of card updates) get their own card with at most 10 updates each; later calls are counted on one aggregate card, sent at most 20 times per task; and up to 50 failed calls past the budget keep their own cards. The budget persists across turns and restarts, and `session/load` replays older journals within the same bound. In the scale test, 1,500 coordinator calls over four turns and a restart sent 324 card updates and 187,517 bytes, against 312 updates for 500 calls. In the recorded scale test, repeated polls were 481–483 bytes, and each Paseo worker card sent 3 updates and 16,959 bytes for 10-, 60- and 300-tool workloads. These limits reduce emitted event volume; they do not cap durable task history or guarantee constant total daemon memory. See [ACP observability and resource limits](docs/acp/observability.md#bounded-acp-event-projections).
 
@@ -140,6 +161,11 @@ contract, not proof that either model complies in a live turn. See the
 
 ### Paseo
 
+The plugin lockfile currently retains an unpatched `braces` advisory propagated
+through React Native tooling (15 npm package entries, one advisory). See the
+[dependency disposition](docs/acp/paseo-dependency-audit.md); passing plugin tests
+or listing packages as dev dependencies does not mean a clean security audit.
+
 If rendering fails in a plugin panel, the composer popover, or a timeline card, Paseo shows a themed fallback for that surface with reopen guidance. If the thrown value cannot safely provide text, the fallback uses `unknown error`.
 
 When reopening a persisted Cortex session, Paseo uses the configuration restored by Cortex instead of reapplying cached composer selections. New-session selections and explicit later configuration requests remain validated.
@@ -160,6 +186,8 @@ paseo plugin install github:igovet/cortex-orch-acp:integrations/paseo --ref dev
 
 
 Apply plugin updates between active tasks until session recovery has been qualified for the version being deployed. A transport disconnect preserves task state and recovery reconciles saved Cortex state, but a host `SIGKILL` without `SIGTERM` cannot be recorded, and native engine actions do not have retained command receipts.
+
+On stdin EOF or a failed stdout write, Cortex waits for the corresponding reader or writer disconnect callback to finish before shutting down the runtime; observing the transport event alone does not prove the disconnect record is complete. A failed stdout write does not wait for a reader blocked on still-open stdin.
 
 Update an installed Git plugin:
 
@@ -216,3 +244,10 @@ Quota-window model applicability is also settings-only: configure exact per-engi
 A crashed brokered Cortex MCP server is now detected separately from engine completion; an indeterminate channel loss cannot authorize route fallback or a same-session publication follow-up through closed tools. A replacement relay discards old readiness/tool evidence and cannot clear the known loss until its own complete `tools/list` is observed; delayed old replies and exits are fenced. Non-JSON replies and non-UTF-8 filenames no longer terminate stdio response serialization. These are implemented protections with no-paid regression coverage, not attribution of a particular production incident or proof of deployment. See [failure boundaries](docs/acp/failures-and-cancellation.md).
 
 Paseo's native composer queue is distinct from Cortex's captured steering. In default `steer` mode, Enter delivers immediately, so that chat bubble has no Edit icon. Use Ctrl/Cmd+Enter while Cortex works, then the **pencil on the queued chip above the composer** to edit before delivery; Edit then clear text/attachments cancels the draft. Cortex explains this after the first successful busy-turn send and refuses changed payloads reusing an already-captured message id; send a new correction instead. Edit overwrites an existing draft; native enqueue trims surrounding whitespace. Installed 0.10.2 helper tests cover edit/resubmit and consumed identities, not rendered GUI, complete attachment restoration or reload persistence. No simulated Cortex Cancel/Edit controls were added; see [the ownership boundary](docs/acp/steering-and-questions.md#native-composer-queue-versus-captured-steering).
+
+## Runtime store ignore protection
+
+Root `.gitignore` writes through Cortex keep a final `/.cortex/` rule,
+including after negations. Command edits are reconciled at completion and
+native edits before a fresh writable worker result is published; there is no
+universal native pre-action hook. See [the boundary and tracked-file limits](docs/acp/permissions-and-containment.md#runtime-store-ignore-protection).

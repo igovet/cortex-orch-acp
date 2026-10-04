@@ -54,7 +54,7 @@ def obj(properties, required=None):
 
 
 NODE = obj(dict(id=text('Unique plan node name: a letter, then letters, digits, \'_\' or \'-\', at most 64 characters.', 64), role=text('Specialist role. Runtime resolves its profile and route.', 80),
-                objective=text('One bounded implementation or investigation objective. After all proposed tasks the runtime automatically adds independent code review whenever it observes that the project changed, and final verification; do not duplicate those stages in this plan, and ask a worker only for tests covering its change, never the project\'s whole suite, which final verification runs. Put any scope note or rationale here: a task has no other free-text field.'),
+                objective=text('Required: 1 to 8000 Unicode code points (not UTF-8 bytes or UTF-16 code units). Measure the complete objective before submission; overlong input is rejected without accepting the plan. Rewrite concisely without dropping requirements; never silently truncate. One bounded implementation or investigation objective. After all proposed tasks the runtime automatically adds independent code review whenever it observes that the project changed, and final verification; do not duplicate those stages in this plan, and ask a worker only for tests covering its change, never the project\'s whole suite, which final verification runs. Put any scope note or rationale here: a task has no other free-text field.'),
                 dependencies=array(text('Predecessor node name.', 64),
                                    'Names (the id values) of predecessor tasks in this same plan.'),
                 scope=array(text('Requested project-relative path or glob; \'.\' is the whole project. Never absolute, never containing \'..\' or a backslash, and never inside .cortex or .git. Under .claude/.codex only the exact project notes session-history.md and lessons-learned.md are allowed; create missing notes with project_write. Runtime policy decides access.', 512),
@@ -99,7 +99,7 @@ COORDINATOR = {
         required=['text']),
     'user_question_request': obj(dict(question=text('One short line naming the decision, e.g. "Approve the plan above?". Put the details, evidence and each option\'s consequences in your message text before this call, not here. Write them exactly once: every message you write, including text before a tool call, is shown to the user in full and never collapsed. After this call end the turn at once and write nothing more: not restating, rewriting, shortening or summarizing anything already shown, at any length.', 4000),
                                      options=array(text('One short answer the user can pick, e.g. "Approve the plan" or "Do it in a separate task".', 1000),
-                                                  'Short answers the user can pick between.', maximum=8),
+                                                  '2 to 8 distinct meaningful answers to this question. Never an instructional placeholder or Other; custom free text remains available separately.', maximum=8, minimum=2),
                                      request_key=text('Unique question delivery key. Exact retries preserve question identity.', 128),
                                      skill_proposal=obj(dict(
                                          name=text('Lowercase kebab-case skill directory name under .agents/skills, 1-64 characters.', 64),
@@ -113,6 +113,23 @@ COORDINATOR = {
                                          required=['name', 'action', 'purpose', 'evidence'])),
                                  required=['question', 'request_key']),
 }
+QUESTION_FORM = obj(dict(
+    question=text('One self-contained short question shown in the structured user UI.', 4000),
+    options=array(text('One meaningful selectable answer, not a placeholder or Other.', 1000),
+                  'Distinct meaningful selectable answers; custom free text is separate.', maximum=8, minimum=2)))
+QUESTION_BATCH = array(QUESTION_FORM,
+    'Related questions shown together in one UI when supported, otherwise individually. Each item contains question and options. '
+    'Supply questions instead of question/options/skill_proposal. All answers are required before continuation.', maximum=8, minimum=2)
+_question_schema = COORDINATOR['user_question_request']
+_question_schema['properties']['questions'] = QUESTION_BATCH
+_question_schema['required'] = ['request_key']
+_question_schema.update({
+    'if': {'required': ['questions']},
+    'then': {'not': {'anyOf': [{'required': [name]} for name in ('question','options','skill_proposal')]}},
+    'else': {'required': ['question','options']},
+})
+
+
 _PROPOSAL = COORDINATOR['user_question_request']['properties']['skill_proposal']
 _PROPOSAL['description'] = (
     'Optional. Only to propose a reusable project skill after retained reports show the same procedure repeated. '
@@ -182,6 +199,12 @@ COORDINATOR.update(REQUESTS)
 RESULT['properties']['checks']['description'] = 'Automated command checks, up to 20; [] when no command ran and no check was blocked. Each item needs name and outcome (passed, failed, not_run, unverified). A passed check needs tool_call_ref copied from an exit-0 command_run or confirmed outside_command of this attempt; command argv alone never verifies it. A failed check may cite its nonzero receipt. not_run or unverified require a concrete blocker; command argv is retained only for these gap checks and may identify the exact blocked command. A supplied command on passed/failed is ignored as evidence; the runtime derives the command from the receipt. Do not send closed_by: the runtime calculates it. These are not qualitative review remarks: read files and inspected code belong in the report body, not checks.'
 COORDINATOR['synthesis_submit']['properties']['not_verified']['description'] = ('Every item this task changed but could not verify, each with its concrete blocker; [] or omit when everything was verified. Every retained not_run or unverified worker check must appear here by its exact name unless closed as follows: a gap with a non-empty declared command closes only by a verified command_run whose argv exactly matches that command; a gap without a command may close by a verified same-name pass in its own node or a later fix of that node. A same-name pass alone never closes a gap with a declared command, and same-name passes from unrelated nodes do not close command-less gaps. Prefer verifying a gap (replan_request) over listing it.')
 WORKER = {'result_submit': RESULT, **REQUESTS}
+WORKER['access_request'] = obj(dict(
+    paths=array(text('Exact canonical project-relative file or directory path, not a glob or whole-project shorthand. No traversal, private storage, links or unsafe file types.', 512),
+                'Additional exact project-relative paths needed by this assignment. Runtime validates safety, policy and live writer reservations.', maximum=16, minimum=1),
+    reason=text('Assignment-specific justification. Evidence of need, not authorization.', 4000),
+    request_key=text('Stable delivery identity. Exact retries return the original acknowledgement.', 128)))
+WORKER['access_request']['properties']['reason']['pattern'] = r'[\s\S]*\S[\s\S]*'
 
 
 def _received_fields(schema, value):
@@ -260,6 +283,10 @@ def _collect(schema, value, field, violations):
                 expected='exactly one of report_ref or report',
                 correction='Send report={title, markdown} inline, or copy report_id from this worker\'s write_report into report_ref; omit the other field.',
             ))
+        elif 'questions' in conditional.get('required', ()):
+            violations.append(dict(field=field, received='mixed or incomplete question form',
+                                   expected='question and options, or questions, never both',
+                                   correction='Supply one question with 2 to 8 meaningful options, or 2 to 8 related question/options objects.'))
         else:  # checks[].blocker/command combinations
             if 'required' in branch:
                 violations.append(dict(field=f'{field}.blocker', received='missing',
