@@ -6,8 +6,8 @@ The runtime reserves dependency-ready scopes and runs at most four workers in
 one chat session across all engines, roles and connections. Excess dependency-
 ready nodes remain pending until a worker slot is free. A connection's
 `max_concurrent_sessions` limit (default 4, configurable from 1 through 64) can
-further lower the session's worker capacity on that connection; coordinator
-reservations have a separate per-connection limit. Overlapping write scopes are
+further lower the session's worker capacity on that connection; coordinators
+are never limited and never take a worker slot. Overlapping write scopes are
 serialized, while review-stage nodes and READ_ONLY roles do not participate in
 scope-overlap conflicts. A finished worker keeps its session slot until its
 engine is confirmed gone and the reservation is released or safely reclaimed.

@@ -21,10 +21,14 @@ Worker limits, in order of precedence:
    limit: every worker is its own engine process, so no engine process is
    shared that would need one.
 
-Coordinator reservations are not workers: they never count towards either
-worker limit, and keep their own per-connection count (a coordinator holds its
-reservation for the whole task lifetime, so counting it against worker capacity
-silently took a worker slot away).
+Coordinator reservations are not workers and are never limited (owner rule,
+2026-10-04): a coordinator always gets its reservation, whatever the
+connection's ``max_concurrent_sessions`` or how many other chat sessions'
+coordinators are open. A coordinator holds its reservation for the whole task
+lifetime -- an accepted task whose chat stays open keeps its engine -- so any
+per-connection coordinator count queued every new chat behind finished ones.
+The row is still recorded so its engine process is tracked, reaped and
+released like a worker's.
 
 Capacity is released only on a *confirmed* observation
 (:func:`release_confirmed`); an unconfirmed termination attempt (timeout, no
@@ -71,9 +75,8 @@ def reserve(
     later release instead of over-subscribing). A worker is refused when its
     session (``task_id``) already has ``session_limit`` active worker
     reservations on any connection, or ``limit`` of them on
-    ``connection_id``. A coordinator is refused when ``connection_id``
-    already has ``limit`` active coordinator reservations. Reservations of
-    the other kind never count.
+    ``connection_id``. A coordinator is never refused: neither limit applies
+    to it, and coordinator reservations never count towards worker limits.
     """
     if kind not in ("coordinator", "worker"):
         raise ValueError(f"unknown capacity reservation kind {kind!r}")
@@ -93,12 +96,7 @@ def reserve(
                 ).fetchone()["n"]
                 full = in_session >= session_limit or on_connection >= limit
             else:
-                active = db.execute(
-                    "SELECT COUNT(*) AS n FROM capacity_reservations "
-                    "WHERE connection_id=? AND kind=? AND state IN ('reserved','ambiguous')",
-                    (connection_id, kind),
-                ).fetchone()["n"]
-                full = active >= limit
+                full = False
             if full:
                 db.commit()
                 return None

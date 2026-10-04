@@ -5,8 +5,6 @@ capacity, an unconfirmed (timeout_alive) termination stays ambiguous."""
 from __future__ import annotations
 
 import dataclasses
-import threading
-import time
 import uuid
 
 from cortex_runtime.bootstrap import bootstrap_task
@@ -42,41 +40,30 @@ def test_confirmed_process_exit_releases_capacity(tmp_path):
         lambda t: record, lambda t: str(tmp_path), environ=environ, call_timeout=10.0,
         store=store,
     )
-    session_ref = adapter.open("shared_project_root", dict(task_id=task_id, attempt_id="xa_worker1"), "instructions")
+    session_ref = adapter.open("shared_project_root", dict(task_id=task_id, attempt_id="co_first"), "instructions")
     assert session_ref.startswith("es_")
     assert capacity.count_active(store, connection_id) == 1
-    # A second attempt on the same connection queues (blocks) instead of
-    # failing while the first reservation is still held (limit=1).
-    results = []
-    thread = threading.Thread(target=lambda: results.append(
-        adapter.open("shared_project_root", dict(task_id=task_id, attempt_id="xa_worker2"), "instructions")
-    ))
-    thread.start()
-    time.sleep(0.3)  # several backoff ticks
-    assert not results  # still queued, never returned
+    # Coordinators are never limited: a second one on the same connection
+    # opens at once although the connection's limit is 1.
+    second_ref = adapter.open("shared_project_root", dict(task_id=task_id, attempt_id="co_second"), "instructions")
+    assert second_ref.startswith("es_")
+    assert capacity.count_active(store, connection_id) == 2
     with store.connection() as db:
         queued = db.execute(
-            "SELECT 1 FROM task_events WHERE task_id=? AND dedup_key='capacity_queued:xa_worker2'", (task_id,),
+            "SELECT 1 FROM task_events WHERE task_id=? AND dedup_key LIKE 'capacity_queued:%'", (task_id,),
         ).fetchone()
-    assert queued is not None  # queued once, no failure spam
+    assert queued is None
 
-    adapter.terminate_owned("xa_worker1")  # real SIGTERM/reap of the fake engine subprocess -- notifies the queued open
-    thread.join(timeout=30)  # generous upper bound; returns as soon as the queued open() actually completes
-    assert results and results[0].startswith("es_")  # worker2 proceeded once capacity freed
-    adapter.terminate_owned("xa_worker2")
+    adapter.terminate_owned("co_first")  # real SIGTERM/reap of the fake engine subprocess
+    adapter.terminate_owned("co_second")
     with store.connection() as db:
         row = db.execute(
-            "SELECT state, release_observation FROM capacity_reservations WHERE task_id=? AND attempt_id='xa_worker1'",
+            "SELECT state, release_observation FROM capacity_reservations WHERE task_id=? AND attempt_id='co_first'",
             (task_id,),
         ).fetchone()
     assert row["state"] == "released"
     assert row["release_observation"] == "process_exited"
     assert capacity.count_active(store, connection_id) == 0
-
-    # Capacity is now reusable.
-    session_ref2 = adapter.open("shared_project_root", dict(task_id=task_id, attempt_id="xa_worker3"), "instructions")
-    assert session_ref2.startswith("es_")
-    adapter.terminate_owned("xa_worker3")
 
 
 def test_unconfirmed_termination_stays_ambiguous_and_holds_capacity(tmp_path):

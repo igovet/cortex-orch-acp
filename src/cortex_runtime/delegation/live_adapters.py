@@ -2298,7 +2298,7 @@ class EngineSessionManagerAdapter:
         passes); when omitted, only this adapter's explicit ``capacity_limit``
         or the default applies. A worker also waits while its session
         already runs ``MAX_WORKERS_PER_SESSION`` workers on any connection.
-        Only reservations of this open's own kind count, so a coordinator
+        A coordinator is never limited, so its reserve never waits, and it
         never takes a worker slot. A refused reserve first reclaims the
         session's slots whose holders are observed gone."""
         from . import capacity as delegation_capacity
@@ -2329,18 +2329,15 @@ class EngineSessionManagerAdapter:
                     f"Attempt {attempt_id} is queued: this session already runs "
                     f"{delegation_capacity.MAX_WORKERS_PER_SESSION} workers, or connection "
                     f"{connection_id!r} is at its own limit."
-                    if kind == "worker" else
-                    f"Attempt {attempt_id} is queued: connection {connection_id!r} capacity is full."
                 )
                 delegation_events.append_event(
                     self._store, task_id, "progress", f"capacity_queued:{attempt_id}",
                     dict(note=note), origin="runtime",
                 )
                 queued_note_recorded = True
-            # No coordinator-starvation fast-fail: coordinator reservations
-            # (held for a task's lifetime) are counted apart from workers,
-            # so a queued worker only ever waits for another worker's
-            # release, the bounded queue deadline, or cancellation.
+            # Only a worker ever gets here (a coordinator is never limited),
+            # and it only waits for another worker's release, the bounded
+            # queue deadline, or cancellation.
             if time.monotonic() > deadline:
                 # Slots held by sessions still observed alive are real work
                 # that will release them: keep waiting another period. Seven
@@ -2358,8 +2355,7 @@ class EngineSessionManagerAdapter:
 
     def _capacity_held_by_live_sessions(self, connection_id: str, kind: str, task_id: str | None = None) -> bool:
         """True when every active reservation the queued open waits behind
-        (a worker: its session's workers; a coordinator: the connection's
-        coordinators) is ``reserved`` by a session :meth:`lookup_owned`
+        (its session's workers) is ``reserved`` by a session :meth:`lookup_owned`
         observes alive. An ambiguous reservation or a holder not observed
         alive (absent, unknown) is not progress to wait for."""
         from . import capacity as delegation_capacity

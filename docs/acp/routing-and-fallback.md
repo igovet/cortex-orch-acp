@@ -155,8 +155,9 @@ session (the ACP session and task it drives), counting reservations across all
 engines and connections. The connection's `max_concurrent_sessions` limit
 (default 4, configurable from 1 through 64) can further restrict that session's
 workers on that connection; it cannot raise the session cap or combine capacity
-across sessions. Coordinator reservations remain separate and are counted per
-connection. When capacity is full, a worker waits; the scheduler leaves excess
+across sessions. Coordinator reservations are recorded but never limited: any
+number of chat sessions' coordinators run at once on one connection, and they
+never take a worker slot. When capacity is full, a worker waits; the scheduler leaves excess
 ready nodes `pending` instead of claiming them as running.
 Only `PolicyCeiling.limits['attempts']` is enforced anywhere in this task
 (both pre-dispatch, via `authorize_dispatch`, and pre-fallback, via

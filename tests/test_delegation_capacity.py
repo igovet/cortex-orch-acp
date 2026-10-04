@@ -51,15 +51,15 @@ def test_coordinator_reservations_never_consume_worker_capacity(tmp_path):
         capacity.reserve(store, connection_id, task_id, f"co_{i}", "coordinator", limit=2) for i in range(2)
     ]
     assert all(coordinators)
-    # Coordinators are at their own limit ...
-    assert capacity.reserve(store, connection_id, task_id, "co_over", "coordinator", limit=2) is None
-    # ... yet the full worker limit is still available.
+    # Coordinators are never limited ...
+    assert capacity.reserve(store, connection_id, task_id, "co_over", "coordinator", limit=2) is not None
+    # ... and the full worker limit is still available.
     workers = [capacity.reserve(store, connection_id, task_id, f"xa_{i}", "worker", limit=2) for i in range(2)]
     assert all(workers)
     assert capacity.reserve(store, connection_id, task_id, "xa_over", "worker", limit=2) is None
-    assert capacity.count_active(store, connection_id) == 4
+    assert capacity.count_active(store, connection_id) == 5
     assert capacity.count_active(store, connection_id, "worker") == 2
-    assert capacity.count_active(store, connection_id, "coordinator") == 2
+    assert capacity.count_active(store, connection_id, "coordinator") == 3
 
     # Releasing a coordinator never frees a worker slot.
     capacity.release_confirmed(store, coordinators[0])
@@ -76,11 +76,11 @@ def test_ambiguous_worker_still_counts_against_worker_limit(tmp_path):
     capacity.mark_ambiguous(store, worker, "timeout_alive")
     assert capacity.reserve(store, connection_id, task_id, "xa_2", "worker", limit=1) is None
     # A coordinator on the same connection is unaffected by the worker's
-    # ambiguous row, and an ambiguous coordinator keeps its own slot.
+    # ambiguous row, and an ambiguous coordinator never blocks another.
     coordinator = capacity.reserve(store, connection_id, task_id, "co_1", "coordinator", limit=1)
     assert coordinator is not None
     capacity.mark_ambiguous(store, coordinator, "timeout_alive")
-    assert capacity.reserve(store, connection_id, task_id, "co_2", "coordinator", limit=1) is None
+    assert capacity.reserve(store, connection_id, task_id, "co_2", "coordinator", limit=1) is not None
     assert capacity.count_active(store, connection_id, "worker") == 1
 
 
@@ -374,6 +374,21 @@ def test_each_session_gets_its_own_four_worker_slots(tmp_path):
         assert capacity.count_session_workers(store, task_id) == 4
     # Coordinators are not workers: a session's coordinator is unaffected.
     assert capacity.reserve(store, "cn_shared", first, "co_first", "coordinator") is not None
+
+
+def test_coordinators_of_any_number_of_sessions_are_never_queued(tmp_path):
+    """Live (2026-10-04): three accepted tasks whose chats stayed open and
+    one running task held all four coordinator slots of a connection, so a
+    new chat sat in ``provisioning`` with no visible progress. Coordinators
+    have no limit; only workers within one session do."""
+    store, first = _task(tmp_path)
+    tasks = [first] + [_another_task(store) for _ in range(7)]
+    for i, task_id in enumerate(tasks):
+        assert capacity.reserve(store, "cn_shared", task_id, f"co_{i}", "coordinator", limit=1) is not None
+    assert capacity.count_active(store, "cn_shared", "coordinator") == 8
+    # Workers keep their own per-session limit regardless.
+    assert capacity.reserve(store, "cn_shared", first, "xa_1", "worker", limit=1) is not None
+    assert capacity.reserve(store, "cn_shared", first, "xa_2", "worker", limit=1) is None
 
 
 def test_concurrent_reserves_in_one_session_never_exceed_four(tmp_path):
