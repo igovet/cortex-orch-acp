@@ -36,10 +36,6 @@ specialist judgment becomes material.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact inspected and changed paths, observable
+Report exact inspected and changed paths, observable
 behavior, consequential decisions, contradictions, uncertainty, residual risk,
-and the next owner or action. Give each command with cwd and exit code, or state
-the concrete reason no command ran.
+and the next owner or action.

@@ -35,10 +35,7 @@ and unbounded subsystem ownership.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact changed paths by layer, end-to-end
+Report exact changed paths by layer, end-to-end
 behavior, interface and data effects, permission and error decisions, environment
 gaps, contradictions, uncertainty, rollout risk, and residual risk. List commands
 with cwd and exit codes, or explain non-execution.

@@ -329,13 +329,15 @@ def test_read_only_specialists_hold_no_write_grant(tmp_path,role):
         assert (root/'hello').read_text()=='hello'
 
 
-@pytest.mark.parametrize('answer',['allow','deny',None])
+@pytest.mark.parametrize('answer',['allow','deny','timeout',None])
 @pytest.mark.parametrize('operation',['outside_write','outside_command'])
-def test_outside_actions_happen_only_after_the_user_allows_them(tmp_path,tmp_path_factory,operation,answer):
-    """Outside the project nothing happens until the user selects allow on a
-    permission card; a refusal, or no client to ask, refuses the action."""
+@pytest.mark.parametrize('mode',['guarded','auto'])
+def test_outside_actions_follow_the_tasks_access_mode(tmp_path,tmp_path_factory,operation,answer,mode):
+    """Guarded requires a live allow; Auto approves without asking a host."""
     import threading,time
+    from cortex_runtime.configuration import access_mode
     from cortex_runtime.orchestration import consent
+    from test_access_mode import _runtime
     store,worker,_=_role_worker(tmp_path,'backend-dev')
     target=tmp_path_factory.mktemp('outside')/'made.txt'
     args=(dict(path=str(target),content='x',request_key='o') if operation=='outside_write'
@@ -343,9 +345,10 @@ def test_outside_actions_happen_only_after_the_user_allows_them(tmp_path,tmp_pat
     cards=[]
     def requester(_session,params,_timeout):
         cards.append(params)
+        if answer=='timeout': raise TimeoutError('no answer')
         return {'outcome':{'outcome':'selected','optionId':answer}}
-    # Guarded mode: the user's client is asked; None is no live client at all.
-    runtime=SimpleNamespace(_store=store,permission_requester_for_task=lambda task_id: requester if answer else None)
+    access_mode.switch(store,worker.task_id,mode,origin='acp_set_mode')
+    runtime=_runtime(store,{worker.task_id:requester} if answer else {})
     outcome={}
     def run():
         try: outcome['result']=dispatch(store,worker,operation,args)
@@ -358,12 +361,15 @@ def test_outside_actions_happen_only_after_the_user_allows_them(tmp_path,tmp_pat
     assert not thread.is_alive()
     with store.connection() as db:
         rows=[tuple(row) for row in db.execute('SELECT kind,status FROM consent_requests WHERE task_id=?',(worker.task_id,))]
-    if answer=='allow':
+    if mode=='auto' or answer=='allow':
         assert 'result' in outcome and target.exists(),outcome
         assert rows==[(operation,'approved')]
-        assert cards and cards[0]['toolCall']['rawInput']['kind']==operation
+        if mode=='auto': assert cards==[]
+        else: assert cards and cards[0]['toolCall']['rawInput']['kind']==operation
     else:
         assert outcome=={'error':'outside_action_not_confirmed'}
         assert not target.exists()
         assert rows==[(operation,'denied')]
         assert len(cards)==(1 if answer else 0)
+    assert [row['kind'] for row in access_mode.history(store,worker.task_id)]==(
+        ['switched','auto_approved'] if mode=='auto' else ['switched'])

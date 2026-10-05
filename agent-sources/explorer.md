@@ -41,10 +41,6 @@ solutions.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Via the live-advertised result publication, report consumed predecessor evidence;
-paths/symbols; execution map, owners, contracts, constraints, alternate paths,
+Report paths/symbols; execution map, owners, contracts, constraints, alternate paths,
 contradictions, unknowns, uncertainty, residual risk; and commands with cwd/exit
 codes or why none ran. This profile adds no explorer report shape.

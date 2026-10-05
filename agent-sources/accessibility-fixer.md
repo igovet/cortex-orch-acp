@@ -36,10 +36,7 @@ cross-layer contracts without explicit ownership.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact changed paths, remediated findings,
+Report exact changed paths, remediated findings,
 criterion-mapped evidence, rendered and assistive-technology outcomes,
 untested combinations, contradictions, uncertainty, and residual risk. Give
 exact commands with cwd and exit codes, or the reason verification was not run.

@@ -8,7 +8,7 @@ import pytest
 
 from cortex_runtime.channeled_tools import channeled_base_tool_names, channeled_base_tools
 from cortex_runtime.delegation import mcp_tools
-from cortex_runtime.engine.unified_system_prompt import cortex_system_prompt
+from cortex_runtime.engine.unified_system_prompt import cortex_system_prompt, prompt_access_class
 from cortex_runtime.orchestration.contracts import READ_ONLY
 from cortex_runtime.portable.roles import (
     EXAMPLE_REFERENCE_IDS,
@@ -226,3 +226,82 @@ def test_consultant_has_no_project_source_or_command_tools():
         "outside_command",
     }
     assert not consultant_tools & prohibited, sorted(consultant_tools & prohibited)
+
+
+@pytest.mark.parametrize("native_tools", [False, True])
+def test_every_profile_selects_its_declared_base_prompt_block(native_tools):
+    import json
+    from cortex_runtime.engine.unified_system_prompt import prompt_access_class
+
+    profiles = json.loads((ROOT / "profiles.json").read_text())["profiles"]
+    for profile in profiles:
+        role_id = "worker-" + Path(profile["source"]).stem
+        access_class = profile["access_class"]
+        assert prompt_access_class("worker", role_id) == access_class
+        text = cortex_system_prompt("worker", None, environ={}, access_class=access_class,
+                                    native_tools=native_tools)
+        assert "@@" not in text
+        assert ("# Changing the project" in text) == (access_class == "write")
+        assert ("# Working material" in text) == (access_class == "consultant")
+        assert ("engine's native shell" in text) == (native_tools and access_class != "consultant")
+
+
+@pytest.mark.parametrize("role_kind,role_id,expected,excluded", [
+    ("coordinator", "orchestrator", {"knowledge-harvest-scope", "skill-management"},
+     {"knowledge-harvest", "skill-authoring", "tool-discipline-worker"}),
+    ("worker", "worker-backend-dev", {"knowledge-harvest", "skill-authoring", "tool-discipline-worker"},
+     {"knowledge-harvest-scope", "skill-management"}),
+    ("worker", "worker-explorer", {"knowledge-harvest", "skill-authoring", "tool-discipline-worker"},
+     {"knowledge-harvest-scope", "skill-management"}),
+    ("worker", "worker-senior-consultant", set(),
+     {"knowledge-harvest", "knowledge-harvest-scope", "skill-authoring", "skill-management", "tool-discipline-worker"}),
+])
+def test_split_skill_delivery_enum_and_reader_agree(monkeypatch, role_kind, role_id, expected, excluded):
+    from types import SimpleNamespace
+    from cortex_runtime.contracts import StoreError
+
+    schema = mcp_tools._enumerate_skills({"properties": {"skill": {"type": "string"}}}, role_kind, role_id)
+    ids = set(schema["properties"]["skill"]["anyOf"][0]["enum"])
+    assert expected <= ids
+    assert not ids & excluded
+    channel = SimpleNamespace(role=role_kind, attempt_id=None)
+    monkeypatch.setattr(mcp_tools, "_own_role_id", lambda store, channel: role_id)
+    for skill_id in expected:
+        assert mcp_tools._shared_read_skill(None, channel, {"skill": skill_id})["body"].strip()
+    for skill_id in excluded:
+        with pytest.raises(StoreError, match="unknown_skill"):
+            mcp_tools._shared_read_skill(None, channel, {"skill": skill_id})
+    rendered = composed_instructions(load_role(role_id))
+    assert ("### Skill `tool-discipline-worker`" in rendered) == ("tool-discipline-worker" in expected)
+    assert ("`skill-authoring` --" in rendered) == ("skill-authoring" in expected)
+    assert ("`knowledge-harvest-scope` --" in rendered) == ("knowledge-harvest-scope" in expected)
+
+
+def test_s3_rendered_size_ceilings_and_shared_report_ownership():
+    import json
+    profiles = json.loads((ROOT / "profiles.json").read_text())["profiles"]
+    assert len(profiles) == 23
+    for role_id in ROLE_IDS:
+        kind = "coordinator" if role_id == "orchestrator" else "worker"
+        role = composed_instructions(load_role(role_id))
+        base = cortex_system_prompt(kind, None, today=date(2026, 10, 4), environ={}, access_class=prompt_access_class(kind, role_id))
+        budget = 18_500 if kind == "coordinator" else 17_000 if role_id == "worker-senior-consultant" else 25_800
+        assert len(role) + len(base) <= budget, (role_id, len(role) + len(base))
+    for profile in profiles:
+        if profile["access_class"] != "consultant":
+            body = (ROOT / "agent-sources" / profile["source"]).read_text()
+            assert "If the coordinator supplies a profile-appropriate report example" not in body
+            assert "Report consumed predecessor evidence" not in body
+            rendered = load_role("worker-" + Path(profile["source"]).stem).body_portable
+            assert rendered.count("Include consumed") == 1
+            assert "exact commands with cwd and exit codes" in rendered
+
+
+def test_instruction_layers_do_not_copy_publication_or_proposal_arguments():
+    sources = [ROOT / "skills/skill-management/SKILL.md",
+               ROOT / "agent-sources/references/report-publication.md"]
+    forbidden = ("skill_proposal", "report_ref", "request_key", "tool_call_ref",
+                 "report={", "checks[", "routing_receipt")
+    for path in sources:
+        body = path.read_text()
+        assert not any(field in body for field in forbidden), path

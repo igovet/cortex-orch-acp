@@ -108,18 +108,16 @@ def test_skill_management_guidance_is_coordinator_only_and_covers_import_review(
 
     body = _shared_read_skill(
         None, SimpleNamespace(role="coordinator"), {"skill": "skill-management"})
-    assert "CORTEX-SOURCE.md" in body["body"]
-    assert "immutable revision" in body["body"]
-    assert "SHA-256" in body["body"]
-    assert "untrusted source data" in body["body"]
-    assert "project_skill_link" in body["body"]
+    authoring = _shared_read_skill(None, SimpleNamespace(role="worker", attempt_id=None),
+                                  {"skill": "skill-authoring"})["body"]
+    for phrase in ("CORTEX-SOURCE.md", "immutable revision", "SHA-256", "untrusted source data"):
+        assert phrase in authoring
+    assert "project_skill_link" in authoring
+    assert "No particular declared scope is required" in authoring
     assert "Do not create it automatically" in body["body"]
-    assert "no particular declared scope is required" in body["body"]
-    assert "agreed work area coordinating writers" in body["body"]
-    assert "permission request accepted by the user" in body["body"]
-    assert "whole-project write scope" not in body["body"]
-    assert "user_question_request carrying skill_proposal" in body["body"]
-    assert "Follow the live schema" in body["body"]
+    assert "skill-authoring" in body["body"]
+    assert "Follow its live schema" in body["body"]
+    assert "skill_proposal" not in body["body"]
     assert "[Create the skill, Not now]" not in body["body"]
     assert "[Update the skill, Not now]" not in body["body"]
     assert "ask the coordinator" not in body["body"]

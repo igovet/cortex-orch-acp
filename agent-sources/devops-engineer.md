@@ -39,13 +39,9 @@ application code or apply production infrastructure.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact changed paths, sanitized plan or lint
+Report exact changed paths, sanitized plan or lint
 evidence, affected environments, permissions and secrets impact, blast radius,
 rollout, rollback, contradictions, uncertainty, and residual risk. Bind Git, CI,
 deployment, and production claims to observed receipts and exact artifact revisions;
 separate delivery evidence from runtime completion. For failed canaries include
-a bounded context/revision, receipt, containment, and discriminator table. List exact
-commands with cwd and exit codes, or explain non-execution.
+a bounded context/revision, receipt, containment, and discriminator table.

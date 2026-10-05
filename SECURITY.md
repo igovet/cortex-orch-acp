@@ -146,11 +146,12 @@ native tools remain jail-bounded. In Claude Cortex sessions, adapter-level
 Skill alternatives so scoped Cortex MCP tools provide the corresponding workflow
 and command receipts; native subagents remain excluded. The jail remains a
 backstop for tools the engine still exposes. Effective exclusion in a real
-Claude 0.81.2 turn still requires a new owner-authorized live check. The host is mounted read-only with
-`/run/user` hidden (its session bus could start unconfined processes); `/tmp`
-stays the host's real, writable, real path deliberately (a screenshot the owner
-points at, a file the process leaves for the owner both need the same real
-path on both sides of the jail), while `/var/tmp` -- which has no such
+Claude 0.81.2 turn still requires a new owner-authorized live check. The host is mounted read-only, but `/run/user` remains visible inside the
+engine jail (including session-bus, audio, display and keyring sockets); this
+is an accepted exposure, not a permission boundary. `/tmp` is explicitly bound
+as the host's real, writable path (a screenshot the owner points at, a file the
+process leaves for the owner both need the same real path on both sides of the
+jail), while `/var/tmp` -- which has no such
 interop use, and can be a read-only mount or absent entirely once the whole
 host is bound read-only -- is instead a private, writable, per-run directory
 backed by the process's own scratch, never the host's shared one; `HOME` and
@@ -372,9 +373,9 @@ direct `rm`, `sudo rm`, `xargs rm`, and similar forms), before `project_delete`,
 and before every `outside_write` and `outside_command`; no answer, a timeout, a
 disconnect or a refusal means the action does not happen. In **Auto**, these
 consent-gated operations are auto-approved without a per-action user card (even
-when no client is connected). That behavior does not satisfy the owner decision
-that outside-project effects require a permission card the user accepts; it is
-a known policy gap, not an enforced consent boundary. Non-`rm` commands such
+when no client is connected). The owner-selected Auto behavior is to permit outside-project effects without
+a permission card. Guarded mode continues to require explicit accepted consent
+and refuses when consent is absent or fails. Non-`rm` commands such
 as `git clean`, `git commit`, `docker`, `python`, and `pytest` continue without
 a permission card in Guarded mode. Workers run in the engine mode that routes
 each mutating tool call through `session/request_permission` (Claude `default`,

@@ -46,9 +46,12 @@ Mark each task's complexity from the work, not the role: `high` for cross-cuttin
 root-cause analysis, production incidents, concurrency, security or data-loss risk;
 `low` for a narrow lookup or mechanical change; omit it otherwise. It sets how
 strong, and how costly, the worker's model is; overrating it wastes the plan.
-Follow the live plan schema for route recommendations; they are hints, never
-routing authority. Use the live route menu when a specific recommendation is
-useful; the runtime derives effort and enforces policy.
+Follow the live plan schema for route recommendations. A recommendation alone
+is advisory; however, an exact eligible flagship route explicitly requested by
+the user for this task can select that route for the covered node. Confirm the
+request and matching route against the live menu and schema; never infer consent
+from a model-authored paraphrase. The runtime still validates and schedules the
+node and applies policy.
 Take verification commands from the project's own documentation
 (docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json
 scripts) and copy them exactly, with the documented interpreter path and its

@@ -40,6 +40,23 @@ parts of both native prompts contradicted the runtime contract.
 
 ## What the prompt says
 
+The unified base prompt composes four distinct role blocks over shared authority
+and safety rules: coordinator, writing worker, read-only worker and consultant. Worker selection uses the runtime `READ_ONLY`
+contract, tested for exact equality with `profiles.json` access classes, with
+consultant aliases resolved separately. Coordinators receive no file-edit or
+worker command-receipt obligations; read-only workers receive only non-mutating
+check guidance; consultants evaluate the packet and retained reports.
+
+Native-tool guidance is emitted only when the launch adapter enables those
+tools: Claude's gateway-alternative policy disables native shell/file/search
+and omits that guidance, while Codex and OpenCode retain it. This changes prompt
+construction, not tool authority, sandbox permissions or routing. The
+consultant's prohibition on using remaining native tools appears only where
+those tools remain enabled. Consultant route selection follows normal policy;
+Codex native read tools cannot be disabled in the current adapter, so safe reads
+may expose source despite the prompt's reports-only boundary. Defaults on the standalone renderer preserve
+ordinary writing-worker callers; runtime launch seams supply the actual policy.
+
 A role-specific introduction (coordinator or worker), then sections on
 authority, tools, Cortex skills, finding code, changing the project, evidence,
 safety, communication and context, then the project's own skills, and finally

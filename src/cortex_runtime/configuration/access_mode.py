@@ -6,8 +6,8 @@ answer on a permission card, and workers run with the engine mode that keeps
 every mutating tool call visible to ``engine.permissions.PermissionBridge``
 (``configuration.policy.WORKER_MODE_FLOOR``).
 
-Auto answers those cards itself: the runtime selects the engine's own
-one-shot allow option instead of asking (see :func:`auto_approve`, used by
+Auto answers approval cards itself, including outside-project writes and commands:
+the runtime selects the engine's own one-shot allow option instead of asking (see :func:`auto_approve`, used by
 ``acp.orchestrating_runtime.OrchestratingRuntime.permission_requester_for_task``,
 the one requester both approval paths reach), and a worker opened while the
 task is in Auto runs with the most permissive engine mode its session
@@ -40,7 +40,7 @@ MODES = (GUARDED, AUTO)
 LABELS = {GUARDED: "Guarded mode", AUTO: "Auto mode"}
 DESCRIPTIONS = {
     GUARDED: "Asks you before a deletion, a write outside the project or a command outside the sandbox.",
-    AUTO: "Allows every action without asking. Sandbox, .git/.cortex protection and MCP checks still apply.",
+    AUTO: "Allows actions without asking, including outside-project writes and commands. Sandbox, .git/.cortex protection and MCP checks still apply.",
 }
 
 #: Where a switch may come from: the user's own client controls. Nothing a

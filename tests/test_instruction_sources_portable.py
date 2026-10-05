@@ -32,6 +32,7 @@ _SHARED_SKILL_DIRS = (
     "orchestrator", "cortex-control", "coordinator-communication",
     "content-safety", "tool-discipline", "knowledge-harvest",
     "documentation-sync", "context-compaction", "skill-management",
+    "tool-discipline-worker", "skill-authoring", "knowledge-harvest-scope",
 )
 
 
@@ -55,14 +56,14 @@ def test_scanned_file_set_is_nonempty():
 
 
 def test_all_t001_specializations_load():
-    """23 workers + orchestrator + 8 shared skills all load as portable roles."""
+    """23 workers + orchestrator + 11 shared skills all load as portable roles."""
     all_roles = roles.load_all_roles()
     worker_roles = [r for r in all_roles.values() if r.kind == "worker"]
     coordinator_roles = [r for r in all_roles.values() if r.kind == "coordinator"]
     shared_roles = [r for r in all_roles.values() if r.kind == "shared"]
     assert len(worker_roles) == 23
     assert len(coordinator_roles) == 1
-    assert len(shared_roles) == 8
+    assert len(shared_roles) == 11
     for role in all_roles.values():
         assert role.body_portable.strip()
         assert role.sha256
@@ -132,7 +133,10 @@ def test_hardcoded_worker_critical_rules_are_traceable_to_worker_protocol_source
     not new policy, and must stay in sync if that source is edited."""
     for name, rules in _hardcoded_critical_rules_constants().items():
         source_path = _HARDCODED_CRITICAL_RULES_SOURCES[name]
-        source_text = _normalize_whitespace(source_path.read_text(encoding="utf-8"))
+        source_body = source_path.read_text(encoding="utf-8")
+        source_body = source_body.replace("{{Evidence and verification}}",
+                                          (PLUGIN_ROOT / "agent-sources/verification-write.md").read_text().strip())
+        source_text = _normalize_whitespace(source_body)
         for rule in rules:
             normalized_rule = _normalize_whitespace(rule)
             assert normalized_rule in source_text, (
@@ -160,10 +164,10 @@ def test_specializations_use_engine_neutral_search_and_edit_guidance():
 
 
 def test_all_profiles_preserve_sections_and_compact_size_budget():
-    from generate_agent_profiles import SPECIALIZED, sections
+    from generate_agent_profiles import SPECIALIZED, VERIFICATION_SOURCES, sections
 
     for source in (PLUGIN_ROOT / "agent-sources").glob("*.md"):
-        if source.name not in {"worker-protocol.md", "consultant-protocol.md"}:
+        if source.name not in {"worker-protocol.md", "consultant-protocol.md", *VERIFICATION_SOURCES.values()}:
             assert set(sections(source.read_text())) == set(SPECIALIZED)
     profiles = list((PLUGIN_ROOT / "skills").glob("worker-*/SKILL.md"))
     assert len(profiles) == 23

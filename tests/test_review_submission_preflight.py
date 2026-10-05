@@ -24,8 +24,15 @@ def test_submission_guidance_preflights_report_presence_and_json_transport():
     assert 'draft_write' in tool['description']
     protocol = (Path(__file__).resolve().parents[1] /
                 'agent-sources/references/report-publication.md').read_text()
-    assert 'required and conditional requirements' in protocol
-    assert 'JSON parse failure' in protocol
+    assert "as the live tool descriptions specify" in protocol
+    assert "retry and serialization guidance" in protocol
+    assert "A conclusion or verdict alone is not a report" in protocol
+    from cortex_runtime.portable.roles import composed_instructions, load_role
+    delivered = composed_instructions(load_role('worker-code-reviewer'))
+    assert 'required and conditional fields against the live schema' in delivered
+    assert protocol.strip() in delivered
+    assert 'Pass a structured argument object' in tool['description']
+    assert 'retry an uncertain call only with the identical key and payload' in tool['description']
 
 
 @pytest.mark.parametrize('report_form', ['inline', 'reference'])

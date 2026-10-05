@@ -36,10 +36,7 @@ operations, and unapproved database architecture.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, changed files, behavior and contract effects,
+Report changed files, behavior and contract effects,
 authorization and persistence decisions, exact commands with cwd and exit
 codes, untested paths, contradictions, uncertainty, operational risk, and the
 next owner. Explain any required check not executed.

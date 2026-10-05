@@ -6300,14 +6300,15 @@ class OrchestratingRuntime:
         or needs an ``engine_session_id``, only the ``task_id`` that lookup
         already produced.
 
-        In the task's Auto access mode (``configuration.access_mode``) the
-        runtime answers instead of the user: the returned callable selects
+        In the task's Auto access mode (``configuration.access_mode``)
+        the runtime answers instead of the user: the returned callable selects
         the request's own allow option without asking any host, so it is
         returned even when no connection is live. Every caller of this
         method is a user-approval prompt (a native deletion via
-        ``engine.permissions``, and ``orchestration.consent``'s outside
-        write/command and project deletion); refusals that are not the
-        user's to give -- a native subagent, a stale binding, a gateway
+        ``engine.permissions``, and ``orchestration.consent``'s project
+        deletion, outside-project write/command and skill-link replacement);
+        refusals that are not the user's to give -- a native subagent,
+        a stale binding, a gateway
         scope or role rule -- are decided before any requester is reached
         and are unchanged by the mode."""
         if configuration_access_mode.current(self._store, task_id) == configuration_access_mode.AUTO:

@@ -196,8 +196,15 @@ def test_skill_proposal_guidance_matches_the_enforced_action_pairs():
     root = Path(__file__).resolve().parents[1]
     skill = (root / "skills/skill-management/SKILL.md").read_text(encoding="utf-8")
     guidance = " ".join(skill.split())
-    assert "Follow the live schema for the proposal fields, evidence bounds" in guidance
-    assert "action-matched approval/decline choices; do not invent approval labels" in guidance
+    assert "Follow its live schema and approval semantics; do not invent approval labels" in guidance
+    proposal = tool["inputSchema"]["properties"]["skill_proposal"]
+    assert proposal == COORDINATOR["user_question_request"]["properties"]["skill_proposal"]
+    assert set(proposal["required"]) == {"name", "action", "purpose", "evidence"}
+    evidence = proposal["properties"]["evidence"]
+    assert "distinct retained report" in evidence["description"]
+    assert evidence["minItems"] < evidence["maxItems"]
+    assert "minItems" not in skill and "maxItems" not in skill
+    assert "accepted action-matched pair" in schema and "accepted action-matched pair" in advertised
     assert "An arbitrary first option never approves" in guidance
     for action, accepted in skill_proposals._SAFE_OPTION_PAIRS.items():
         for approval, decline in accepted:

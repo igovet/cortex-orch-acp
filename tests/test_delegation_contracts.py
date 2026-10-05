@@ -145,3 +145,8 @@ def test_shared_preflight_uses_live_contract_without_numeric_copies():
     assert 'Measure bounded strings in its counting unit' in text
     assert 'without silently truncating requirements or weakening verification' in text
     assert '8000' not in text
+    from cortex_runtime.portable.roles import composed_instructions, load_role
+    for role_id in ('orchestrator', 'worker-frontend-dev', 'worker-code-reviewer',
+                    'worker-senior-consultant'):
+        delivered = composed_instructions(load_role(role_id))
+        assert text.split('# Tool discipline', 1)[1].strip() in delivered, role_id

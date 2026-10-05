@@ -213,12 +213,15 @@ def test_worker_protocol_does_not_reload_inlined_skills_and_respects_role_access
         body = " ".join(load_role(role_id).body_portable.split())
         assert "through the advertised skill reader" not in body
         assert "If your role writes, read relevant project instructions" in body
-        assert "If your role writes, verify every behavior" in body
-        assert "For writing roles, run the checks" in body
-        assert "Read-only roles change nothing" in body
-        assert "only authorized non-mutating checks" in body
-        assert "use `access_request` first" in body
-        assert "only when the plan itself must change" in body
+        composed = " ".join(composed_instructions(load_role(role_id)).split())
+        if role_id == "worker-backend-dev":
+            assert "Verify every behavior your assignment changes" in body
+            assert "Run the checks that exercise" in body
+        else:
+            assert "Change nothing; run only authorized non-mutating checks" in body
+            assert "only authorized non-mutating checks" in body
+        assert "reserve them through `access_request`" in composed
+        assert "only when the plan itself must change" in composed
         assert "advertised `ask_question` route to the user" in body
         assert "only when the assignment needs that check and project rules do not already decide it" in body
     for role_id in ("worker-database-architect", "worker-performance-engineer"):
@@ -268,8 +271,10 @@ def test_recovery_routes_and_shared_access_wording_do_not_drift():
                     "ask the coordinator", "code-mode"):
         assert residue not in recovery
     discipline = load_role("tool-discipline").body_portable
-    assert "agreed work area" in discipline
-    assert "permission request accepted by the user" in discipline
+    worker_discipline = load_role("tool-discipline-worker").body_portable
+    assert "parallel writers" in worker_discipline
+    assert "advertised permission route" in worker_discipline
+    assert "command_run" not in discipline
     assert "project is read-only except your assignment scope" not in discipline
     assert "Use this skill only during selected Cortex work" not in discipline
     assert "Code-mode" not in discipline

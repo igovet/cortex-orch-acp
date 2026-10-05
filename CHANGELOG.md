@@ -2,14 +2,15 @@
 
 ## 1.0.0 (unreleased)
 
-Corrected role, tool-surface and permission documentation: declared writer scope
-is a coordination work area, not a gateway boundary; Auto access mode's
-no-card approval and writable jail scratch/state residuals are explicit. Documented
-the consultant's packet/report tool boundary and Codex native-read gap, and removed
-references to redundant `agents/*.toml` profiles (23 canonical role instructions
-remain). Aligned the runtime-reserved build-verification profile with the runtime
-read-only role set and removed repository-specific worktree guidance from shipped
-worker instructions.
+Updated prompt and access documentation for the four-role unified base prompt,
+profile `access_class`, class-selected verification guidance, skill-layer splits
+and shorter shared worker report protocol. Clarified that Auto intentionally
+permits outside-project writes/commands without a card while Guarded requires
+accepted consent; documented accepted jail exposure of host `/tmp`, engine state
+directories and `/run/user`. The consultant remains normally routed; Codex native
+safe reads may reach source despite the reports-only prompt/tool boundary. Also
+aligned routing-hint, code-index, review-reuse and host inactivity-nudge guidance
+with current behavior.
 
 
 Persisted Cortex sessions in Paseo now reopen without reapplying cached model,

@@ -65,7 +65,7 @@ def test_session_new_meta_for_pinned_engines_builds_a_payload():
     assert _session_new_meta_for('codex-acp','1.12.0','Be helpful.') == {
         'systemPrompt':'Be helpful.','cortexRole':'worker','cortexBaseInstructions':base,'cortexNativeContext':False}
     assert _session_new_meta_for('claude-agent-acp','0.78.0','Be helpful.') == dict(
-        systemPrompt=base.rstrip()+'\n\nBe helpful.',claudeCode=dict(options=UNIFIED))
+        systemPrompt=cortex_system_prompt('worker', None, native_tools=False).rstrip()+'\n\nBe helpful.',claudeCode=dict(options=UNIFIED))
     assert _session_new_meta_for('claude-agent-acp','0.11.0','Be helpful.') is None
     for text in [None,'']:
         assert _session_new_meta_for('claude-agent-acp','0.78.0',text) == dict(claudeCode=dict(options=GATEWAY_ONLY))
@@ -228,5 +228,11 @@ def test_each_pinned_adapter_gets_its_own_session_new_meta(tmp_path):
     assert meta_codex["systemPrompt"] == "You are a backend developer." and meta_codex["cortexRole"] == "coordinator"
     assert meta_codex["cortexNativeContext"] is False
     assert meta_codex["cortexBaseInstructions"].startswith("# Cortex session\n\nYou are the Cortex coordinator")
-    # Both engines receive the same unified text ahead of the same role text.
-    assert dumped['_meta']['systemPrompt'] == meta_codex["cortexBaseInstructions"].rstrip() + "\n\n" + meta_codex["systemPrompt"]
+    # Role text is identical; native guidance follows the adapter's tool policy.
+    from cortex_runtime.engine.unified_system_prompt import cortex_system_prompt
+    assert dumped['_meta']['systemPrompt'] == cortex_system_prompt(
+        "coordinator", str(tmp_path), environ=environ, native_tools=False
+    ).rstrip() + "\n\n" + meta_codex["systemPrompt"]
+    assert meta_codex["cortexBaseInstructions"] == cortex_system_prompt(
+        "coordinator", str(tmp_path), environ=environ_codex, native_tools=True
+    )

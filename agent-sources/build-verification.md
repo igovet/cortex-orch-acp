@@ -47,10 +47,7 @@ does not settle a contradictory requirement or missing case.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact verified paths, commands, cwd, exit codes, decisive
+Report exact verified paths, commands, cwd, exit codes, decisive
 sanitized output, duration or timeout when material, coverage and environment
 gaps, contradictions, uncertainty, residual risk, and the readiness decision. State
 the check reuse identity and any new-evidence/rerun reason; distinguish implementation

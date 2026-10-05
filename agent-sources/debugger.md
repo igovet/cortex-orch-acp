@@ -39,13 +39,9 @@ choose a fix before causal evidence exists.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact affected paths, reproduction, evidence
+Report exact affected paths, reproduction, evidence
 timeline, causal chain, hypothesis basis/uncertainty/disconfirmation, causal-model
 deltas, rejected hypotheses, changed files, regression coverage, contradictions,
 uncertainty, prevention opportunities, and residual risk. For failed canaries,
 include context/revision, observed receipt, containment or rollback, and the next
-discriminating check. List
-commands with cwd and exit codes, or explain non-execution.
+discriminating check.

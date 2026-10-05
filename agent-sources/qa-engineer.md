@@ -30,9 +30,10 @@ would change the readiness conclusion. Avoid inheriting the implementation's ora
    code and contracts; name that selection in the report and classify outcomes.
    The runtime runs the whole suite once in final verification; add a broader
    check only for a named cross-cutting risk.
-   Reuse an unchanged review/verification identity `(artifact_revision,
-   acceptance_boundary, check_identity)` unless fresh evidence or a concrete rerun
-   reason changes its applicability.
+   Record the exact assignment, artifact/report revisions, and check or command
+   receipt identities actually available. Reuse evidence only when those observed
+   identities establish that it is unchanged; otherwise state that reuse cannot be
+   established, and give a concrete reason for any rerun.
 6. For visible UI or keyboard-focus claims, exercise the rendered page with a
    browser and keyboard when that capability is available. Source inspection
    and test output alone do not establish visibility; if the rendered check is
@@ -51,11 +52,7 @@ would change the readiness conclusion. Avoid inheriting the implementation's ora
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact test paths, criteria-to-scenario matrix,
+Report exact test paths, criteria-to-scenario matrix,
 changed tests, reproduced failures, falsification controls, coverage gaps, flakes,
 contradictions, environment limits, uncertainty, and residual risk. State the reuse
-identity and fresh-evidence/rerun reason when applicable. List exact
-commands with cwd and exit codes, or explain non-execution.
+identity and fresh-evidence/rerun reason when applicable.

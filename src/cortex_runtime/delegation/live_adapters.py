@@ -327,9 +327,11 @@ def _session_new_meta_for(
 
         base_prompt = None
         if unified_base_prompt:
-            from ..engine.unified_system_prompt import cortex_system_prompt
+            from ..engine.unified_system_prompt import cortex_system_prompt, prompt_access_class
 
-            base_prompt = cortex_system_prompt(role, project_root, environ=environ, consultant=consultant)
+            base_prompt = cortex_system_prompt(
+                role, project_root, environ=environ, consultant=consultant,
+                access_class=prompt_access_class(role, role_id), native_tools=False)
         return build_claude_session_new_meta(
             instructions, role=role, effort=effort, base_prompt=base_prompt,
             native_skills=not unified_base_prompt,
@@ -349,9 +351,11 @@ def _session_new_meta_for(
 
         base_instructions = None
         if unified_base_prompt:
-            from ..engine.unified_system_prompt import cortex_system_prompt
+            from ..engine.unified_system_prompt import cortex_system_prompt, prompt_access_class
 
-            base_instructions = cortex_system_prompt(role, project_root, environ=environ, consultant=consultant)
+            base_instructions = cortex_system_prompt(
+                role, project_root, environ=environ, consultant=consultant,
+                access_class=prompt_access_class(role, role_id), native_tools=True)
         meta = {**meta, **build_codex_session_new_meta(
             instructions, base_instructions=base_instructions)}
     if engine == "codex-acp" and version == "1.12.0" and meta is not None:
@@ -1021,7 +1025,8 @@ class EngineSessionManagerAdapter:
 
                 manager_kwargs["engine_instructions"] = build_agent_prompt(
                     instructions, role=recipient, project_root=workspace_root, environ=self._environ,
-                    consultant=recipient == "worker" and is_consultant_role(launch.get("role_id")))
+                    consultant=recipient == "worker" and is_consultant_role(launch.get("role_id")),
+                    role_id=launch.get("role_id"))
             if "jail" not in manager_kwargs and self._store is not None and channel_credentials is not None:
                 manager_kwargs["jail"] = _jail_for(self._store, channel_credentials)
             manager = EngineSessionManager(

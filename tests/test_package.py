@@ -15,6 +15,7 @@ from generate_agent_profiles import (
     check as check_agent_profiles,
     expected_skills,
     expected_worker_references,
+    VERIFICATION_SOURCES,
 )
 
 
@@ -146,8 +147,11 @@ def test_paseo_integrity_digest_ignores_local_dependency_tree(tmp_path):
 def test_worker_protocol_describes_evidence_without_native_authority():
     worker=(PLUGIN/'agent-sources/worker-protocol.md').read_text()
     assert 'These role instructions are delivered' in worker
-    assert 'Unrun, failed, truncated and unverifiable checks remain explicit.' in worker
-    assert 'Discover tools through their live schemas' in worker
+    for access_class in ('write', 'read_only'):
+        verification=(PLUGIN/'agent-sources'/VERIFICATION_SOURCES[access_class]).read_text()
+        assert 'Unrun, failed, truncated and unverifiable checks remain explicit.' in verification
+    discipline=(PLUGIN/'skills/tool-discipline/SKILL.md').read_text()
+    assert "Read each tool's complete live description and schema" in discipline
     assert 'request_key' not in worker
 
 
@@ -280,6 +284,8 @@ def test_packaged_skills_deliver_profiles_and_progressive_references():
         profile=next(p for p in profiles if Path(p['source']).stem==name)
         template='consultant-protocol.md' if name=='senior-consultant' else 'worker-protocol.md'
         prompt=(source_root/template).read_text().replace('{{Default report template}}',profile['report_template'])
+        prompt=prompt.replace('{{Evidence and verification}}',
+                              (source_root/VERIFICATION_SOURCES[profile['access_class']]).read_text().strip())
         values=sections((source_root/profile['source']).read_text())
         for key in SPECIALIZED:
             prompt=prompt.replace('{{'+key+'}}',values[key])

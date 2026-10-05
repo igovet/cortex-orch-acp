@@ -10,12 +10,12 @@ Database-architect and performance-engineer are read-only specialists too.
 ## Native engines
 
 Every channel-bound engine process runs in the engine jail
-(`orchestration.sandbox.engine_jail`, Linux `bwrap`). The host is read-only with
-`/run/user` hidden; `/tmp` stays the host's real, writable `/tmp` (an
-interop path the owner and the process both use, deliberately not
-private), while `/var/tmp` is a private, writable, per-run directory instead
-of the host's (which can be read-only or absent under the read-only host
-bind); `HOME` and `TMPDIR`/`TMP`/`TEMP` are a private per-process scratch. See
+(`orchestration.sandbox.engine_jail`, Linux `bwrap`). The host is mounted read-only, except the host's real `/tmp`, which is
+explicitly writable for owner/process interoperability. `/run/user` remains
+visible inside the engine jail, including user-session sockets; it is not an
+isolation boundary. `/var/tmp` is instead a private, writable, per-run
+directory, and `HOME` and `TMPDIR`/`TMP`/`TEMP` use private per-process
+scratch. See
 [SECURITY.md](../../SECURITY.md#tool-access-and-containment). The project is
 read-only for the coordinator, reviewers and read-only roles. Writing workers
 receive a whole-project writable mount; their declared scopes coordinate parallel
@@ -26,8 +26,10 @@ read-only except what git itself needs for a writing worker (see
 tool caches. The engine's own state directory stays writable except its session
 configuration (settings, hooks, instructions, skills, agents, commands, rules),
 which is read-only and created neutral when absent; installed plugins are hidden.
-The host's real `/tmp` and the engine state directory are residual writable
-surfaces; the project gateway does not mediate their native writes.
+The host's real `/tmp` and the engine state directory are intentionally
+writable surfaces; the project gateway does not mediate native writes there.
+This boundary, including visibility of `/run/user`, is an accepted owner
+decision, not a claim that those paths are permission-card protected.
 A revoked or expired channel terminates the process. Engines therefore keep their
 native tools, `AGENTS.md`/`CLAUDE.md` loading and skills.
 
@@ -115,7 +117,8 @@ Guarded.
 | | Guarded (default) | Auto |
 | --- | --- | --- |
 | Native deletion reported to the bridge | permission card | runtime selects the offered allow option |
-| `project_delete`, `outside_write`, `outside_command`, replacing a different link with `project_skill_link` (`orchestration.consent`) | permission card | auto-approved without a per-action card |
+| `project_delete` and replacing a different link with `project_skill_link` (`orchestration.consent`) | permission card | auto-approved without a per-action card |
+| `outside_write` and `outside_command` | permission card; no allow means refused | auto-approved without a per-action card, including with no connected client (owner-selected behavior) |
 | No client connected | refused | allowed |
 | Worker engine mode | floor: Claude `default`, Codex `agent` | most permissive offered: Claude `bypassPermissions` → `acceptEdits` → `default`; Codex `agent-full-access` → `agent` |
 | Coordinator engine mode | floor | floor |
@@ -125,7 +128,10 @@ Both approval paths reach one choke point,
 `OrchestratingRuntime.permission_requester_for_task`; in Auto it returns
 `access_mode.auto_approve` instead of the connection's host requester. Every
 refusal that is not the user's to give is decided before that point and is
-unchanged. The worker mode is chosen in
+unchanged. In particular, Auto's no-card approval of outside-project writes
+and commands is a deliberate owner choice; Guarded continues to require an
+accepted permission-card response and fails closed if it is absent, denied,
+malformed, cancelled or times out. The worker mode is chosen in
 `EngineSessionManagerAdapter._apply_worker_mode_floor` and confirmed over the
 wire exactly like the floor (confirm-or-fail). With Claude
 `bypassPermissions`, the engine no longer sends permission requests, so the

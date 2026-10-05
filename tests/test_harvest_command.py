@@ -58,8 +58,9 @@ def test_harvest_review_is_runtime_owned_and_census_has_one_body():
     from cortex_runtime.portable.roles import load_role
 
     text = load_role("knowledge-harvest").body_portable
-    assert "For harvests only" in text
-    assert "`technical-writer`" in text
+    scope = load_role("knowledge-harvest-scope").body_portable
+    assert "For harvests only" in scope
+    assert "`technical-writer`" in scope
     assert "technical_writer" not in text
     assert "index-driven documentation routing" not in text
     assert "worker's source-backed review" not in text

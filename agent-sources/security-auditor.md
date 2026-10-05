@@ -34,10 +34,6 @@ persist, evade, use credentials, modify code, or attack a system.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, severity, exact path and line, preconditions,
+Report severity, exact path and line, preconditions,
 attack or failure path, impact, sanitized proof, remediation, compensating
-controls, contradictions, uncertainty, and residual risk. List commands with
-cwd and exit codes, or explain non-execution.
+controls, contradictions, uncertainty, and residual risk.

@@ -6,7 +6,8 @@
       "description": "Accessibility auditor for WCAG conformance, keyboard navigation, and assistive-technology risks.",
       "select_when": "Accessibility conformance or assistive-technology behavior needs independent inspection or verification.",
       "avoid_when": "Known accessibility defects need source remediation.",
-      "report_template": "verification"
+      "report_template": "verification",
+      "access_class": "read_only"
     },
     {
       "name": "accessibility_fixer",
@@ -14,7 +15,8 @@
       "description": "Accessibility remediation specialist for semantic UI, keyboard, focus, contrast, responsive, and assistive-technology fixes.",
       "select_when": "Accepted accessibility findings require bounded production UI and test changes.",
       "avoid_when": "The task is an independent accessibility audit with no source changes.",
-      "report_template": "implementation"
+      "report_template": "implementation",
+      "access_class": "write"
     },
     {
       "name": "architect",
@@ -22,7 +24,8 @@
       "description": "System architect for component boundaries, data flow, API contracts, and architecture decisions.",
       "select_when": "System boundaries, cross-cutting contracts, compatibility, or consequential design choices must be decided.",
       "avoid_when": "The design is already settled and remaining work is bounded implementation.",
-      "report_template": "planning"
+      "report_template": "planning",
+      "access_class": "read_only"
     },
     {
       "name": "backend_dev",
@@ -30,7 +33,8 @@
       "description": "Backend implementation specialist for APIs, business logic, persistence, and server-side tests.",
       "select_when": "A bounded server, API, service, business-logic, or persistence change must be implemented.",
       "avoid_when": "The task is browser-only, mobile-only, infrastructure-only, or still needs root-cause discovery.",
-      "report_template": "implementation"
+      "report_template": "implementation",
+      "access_class": "write"
     },
     {
       "name": "build_verification",
@@ -38,7 +42,8 @@
       "description": "Build and test verifier for exact command outcomes and release-readiness proof.",
       "select_when": "Independent build, test, packaging, installation, or release-readiness evidence is required.",
       "avoid_when": "A failing check must be diagnosed or repaired.",
-      "report_template": "verification"
+      "report_template": "verification",
+      "access_class": "read_only"
     },
     {
       "name": "code_reviewer",
@@ -46,7 +51,8 @@
       "description": "Code reviewer for correctness, regressions, security, performance, and missing tests.",
       "select_when": "A completed or proposed change needs independent defect-focused review.",
       "avoid_when": "The primary need is implementation, planning, or broad repository discovery.",
-      "report_template": "verification"
+      "report_template": "verification",
+      "access_class": "read_only"
     },
     {
       "name": "data_engineer",
@@ -54,7 +60,8 @@
       "description": "Data engineering specialist for ETL, migrations, validation, rollbacks, and data integrity.",
       "select_when": "Data movement, transformation, backfill, migration execution, or integrity validation must be implemented.",
       "avoid_when": "Only database schema design is needed, with no data-operation implementation.",
-      "report_template": "implementation"
+      "report_template": "implementation",
+      "access_class": "write"
     },
     {
       "name": "database_architect",
@@ -62,7 +69,8 @@
       "description": "Database architect for schemas, indexes, migrations, query plans, and compatibility risks.",
       "select_when": "Schema, index, query-plan, migration, locking, or rollback design needs specialist review.",
       "avoid_when": "The approved design only needs migration or data-pipeline implementation.",
-      "report_template": "planning"
+      "report_template": "planning",
+      "access_class": "read_only"
     },
     {
       "name": "debugger",
@@ -70,7 +78,8 @@
       "description": "Debugging specialist for reproducing failures, proving root cause, implementing focused fixes, and verifying regressions.",
       "select_when": "A failure must be reproduced and its root cause proven before a focused repair.",
       "avoid_when": "The desired behavior and implementation path are already known.",
-      "report_template": "investigation"
+      "report_template": "investigation",
+      "access_class": "write"
     },
     {
       "name": "devops_engineer",
@@ -78,7 +87,8 @@
       "description": "Infrastructure specialist for CI/CD, containers, deployment safety, and operational diagnostics.",
       "select_when": "Infrastructure, delivery, deployment, runtime configuration, or operational automation must change.",
       "avoid_when": "The task is application implementation without delivery or runtime ownership.",
-      "report_template": "implementation"
+      "report_template": "implementation",
+      "access_class": "write"
     },
     {
       "name": "explorer",
@@ -86,7 +96,8 @@
       "description": "Codebase investigator for execution paths, ownership, dependencies, and relevant files.",
       "select_when": "Repository facts, execution paths, ownership, dependencies, or affected surfaces are not yet known.",
       "avoid_when": "The task requires design decisions or source changes.",
-      "report_template": "investigation"
+      "report_template": "investigation",
+      "access_class": "read_only"
     },
     {
       "name": "frontend_dev",
@@ -94,7 +105,8 @@
       "description": "Frontend implementation specialist for components, state, styling, browser behavior, and UI tests.",
       "select_when": "A browser UI, component, client state, styling, or frontend test change must be implemented.",
       "avoid_when": "The task spans material server ownership or is only interaction design.",
-      "report_template": "implementation"
+      "report_template": "implementation",
+      "access_class": "write"
     },
     {
       "name": "fullstack_dev",
@@ -102,7 +114,8 @@
       "description": "Cross-layer implementation specialist for cohesive backend and frontend changes with end-to-end validation.",
       "select_when": "One coherent change spans both browser-facing and server-facing contracts.",
       "avoid_when": "The work can be cleanly owned by one narrower frontend or backend specialist.",
-      "report_template": "implementation"
+      "report_template": "implementation",
+      "access_class": "write"
     },
     {
       "name": "general",
@@ -110,7 +123,8 @@
       "description": "General-purpose agent for bounded research, analysis, or implementation when no specialty fits.",
       "select_when": "The work is bounded but no specialist profile has a justified fit.",
       "avoid_when": "A narrower specialist clearly owns the task.",
-      "report_template": "general"
+      "report_template": "general",
+      "access_class": "write"
     },
     {
       "name": "mobile_dev",
@@ -118,7 +132,8 @@
       "description": "Mobile implementation specialist for iOS, Android, React Native, Flutter, native APIs, and platform tests.",
       "select_when": "An iOS, Android, React Native, Flutter, or native mobile change must be implemented.",
       "avoid_when": "The task is browser web UI or a platform-neutral backend.",
-      "report_template": "implementation"
+      "report_template": "implementation",
+      "access_class": "write"
     },
     {
       "name": "performance_engineer",
@@ -126,7 +141,8 @@
       "description": "Performance analyst for bottlenecks, query plans, resource usage, and safe optimization trade-offs.",
       "select_when": "Performance claims require measurement, profiling, bottleneck proof, or optimization-risk analysis.",
       "avoid_when": "The bottleneck is already proven and only an approved implementation remains.",
-      "report_template": "verification"
+      "report_template": "verification",
+      "access_class": "read_only"
     },
     {
       "name": "planner",
@@ -134,7 +150,8 @@
       "description": "Planning specialist for work breakdown, dependencies, risks and verification.",
       "select_when": "A work breakdown or dependency analysis will help the coordinator.",
       "avoid_when": "The task is a simple bounded execution step or requires editing project files immediately.",
-      "report_template": "planning"
+      "report_template": "planning",
+      "access_class": "read_only"
     },
     {
       "name": "qa_engineer",
@@ -142,7 +159,8 @@
       "description": "QA specialist for acceptance coverage, automated tests, reproduction scenarios, and quality-risk evidence.",
       "select_when": "Acceptance coverage, regression tests, reproduction scenarios, or quality evidence must be created.",
       "avoid_when": "Only a non-mutating final command run or source-code review is needed.",
-      "report_template": "verification"
+      "report_template": "verification",
+      "access_class": "write"
     },
     {
       "name": "refactorer",
@@ -150,7 +168,8 @@
       "description": "Refactoring specialist for safe structural improvements that preserve public behavior and contracts.",
       "select_when": "The explicit goal is behavior-preserving structural improvement with regression proof.",
       "avoid_when": "New behavior, unresolved defects, or architecture decisions dominate the task.",
-      "report_template": "implementation"
+      "report_template": "implementation",
+      "access_class": "write"
     },
     {
       "name": "security_auditor",
@@ -158,7 +177,8 @@
       "description": "Security auditor for authentication, authorization, secrets, cryptography, dependencies, and data-protection risks.",
       "select_when": "Trust boundaries, authorization, secrets, crypto, dependencies, or protected data need defensive review.",
       "avoid_when": "The task is to implement a known security fix rather than audit it.",
-      "report_template": "verification"
+      "report_template": "verification",
+      "access_class": "read_only"
     },
     {
       "name": "senior_consultant",
@@ -166,7 +186,8 @@
       "description": "Bounded senior consultant for coordinator-requested decisions using selected published reports only.",
       "select_when": "One difficult, ambiguous, or contradictory coordinator decision needs a focused report-only consultation.",
       "avoid_when": "The question needs fresh project investigation, implementation, verification, acceptance, or plan ownership.",
-      "report_template": "general"
+      "report_template": "general",
+      "access_class": "consultant"
     },
     {
       "name": "technical_writer",
@@ -174,7 +195,8 @@
       "description": "Documentation specialist for project knowledge, feature docs, ADRs, and evidence-backed developer guidance.",
       "select_when": "Verified behavior, architecture, commands, decisions, or ownership must be synchronized into durable docs.",
       "avoid_when": "Facts are unverified or production code changes are still required.",
-      "report_template": "documentation"
+      "report_template": "documentation",
+      "access_class": "write"
     },
     {
       "name": "ux_designer",
@@ -182,7 +204,8 @@
       "description": "UX designer for accessible layouts, component hierarchy, interaction flows, and responsive behavior.",
       "select_when": "User flow, hierarchy, interaction states, responsive behavior, or implementation-ready UX rules are needed.",
       "avoid_when": "The design is settled and production frontend code must be written.",
-      "report_template": "planning"
+      "report_template": "planning",
+      "access_class": "read_only"
     }
   ]
 }

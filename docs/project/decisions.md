@@ -1,3 +1,30 @@
+## 2026-10-05 accepted access and prompt boundaries
+
+The owner selected the following behavior and limitations for Cortex 1.0.0:
+
+- **Outside-project actions:** Auto intentionally permits `outside_write` and
+  `outside_command` without a permission question/card, even if no client is
+  connected. Guarded requires explicit accepted permission-card consent and
+  fails closed if approval is denied, absent, cancelled, malformed or times out.
+  This is a deliberate Auto-mode choice, not a residual policy mismatch.
+- **Engine jail exposure:** The engine sandbox may write to the host's real
+  `/tmp` and engine state directories (except protected session-configuration
+  entries); `/run/user` remains visible inside the jail. These are accepted
+  limitations and are not mediated by the project gateway. `/var/tmp` remains
+  per-run scratch-backed; other documented jail and gateway constraints remain.
+- **Senior consultant:** Route selection follows normal policy and may use
+  Codex or Claude. Codex native read tools cannot be disabled with the current
+  adapter, so safe reads such as `cat`, `rg` and `ls` may reach project source
+  without a permission card. This is accepted as a limitation of the
+  reports-only prompt and Cortex-tool boundary; the consultant is not forced to
+  Claude.
+
+These choices are documented in [ACP permissions and containment](../acp/permissions-and-containment.md),
+[roles and delegation](../acp/roles-and-delegation.md) and [security policy](../../SECURITY.md).
+They do not claim broader host enforcement or complete technical isolation.
+
+---
+
 ## 2026-09-30 quota applicability uses exact owner settings
 
 `routing.quota_windows` maps supported engines to unique exact window-label rules with shared (`null`) or exact-model-list applicability. No model-family substring table remains in executable quota logic. Unmapped evidence conservatively applies to all models; unknown values stay unknown. Menu/automatic routing/reset lookup consume the same effective settings. Installation data preserves canonical old scoped-window behavior for the retained configured identities without granting routes or assuming provider capability. API v1/policy v2 and explicit profile snapshots carry the optional field; no runtime template merge, profile rewrite, or production adoption occurs. See [contract and migration](../configuration.md#exact-quota-window-associations).

@@ -1,4 +1,4 @@
-"""One Cortex system prompt, handed identically to every engine.
+"""One Cortex system prompt, specialized by role and available native tools.
 
 Each engine ships its own base prompt written for its own product: Claude
 Code's (terminal markdown, native skills invoked by ``/name``, file memory
@@ -43,7 +43,7 @@ _INTRO = {
     ),
 }
 
-_BODY = """\
+_COMMON_BODY = """\
 # Authority
 
 - The runtime owns the task lifecycle, scheduling, scope, permissions, model routes, independent review, verification and completion. A model turn never completes a task by itself.
@@ -55,9 +55,9 @@ _BODY = """\
 
 - @@ROLE_CORTEX_TOOLS@@
 - Before the first call to any tool, read its full advertised description and argument schema. Never fill arguments from another tool's or engine's conventions, and never guess a value the schema does not explain.
-- If a tool you need is not in your list, look it up with the engine's tool search when one exists before concluding it is unavailable.
+@@NATIVE_TOOLS@@
 - Run independent reads and searches together; keep dependent steps, edits, approvals and other mutations sequential.
-- Treat shell command text as code: quote arguments, never expose a secret through command output, and avoid blocking waits longer than a minute.
+@@ROLE_COMMANDS@@
 - A refused tool call, a permission denial or a read-only error is a decision, not a glitch. Do not retry it and do not reach the same effect another way (another tool, a shell command, a copy or a temporary file). @@ROLE_REFUSAL@@
 
 # Cortex skills
@@ -67,18 +67,11 @@ _BODY = """\
 
 @@ROLE_FINDING_CODE@@
 
-# Changing the project
-
-- Change only what the assignment and granted scope cover. Follow the surrounding code's conventions, naming and comment density, and make the smallest coherent change.
-- Keep other people's changes: never revert, overwrite or clean up work you did not make.
-- Do not push, open pull requests, rewrite history or touch remote systems unless the assignment asks for it.
-- Do not add attribution trailers or tool signatures to commits, files or messages.
-- Do not write memory, notes or state outside the project and the runtime's own tools; the runtime keeps what later sessions need.
-- Do not create subagents, background agents, worktrees, scheduled jobs or notifications. Delegation belongs to the runtime.
+@@ROLE_WORK@@
 
 # Evidence and honesty
 
-- Verify what you change with the checks that exercise it, and report their real outcomes with the exact command, working directory and exit code. Workers run reportable checks through Cortex MCP `command_run` (or its advertised approved outside-command route) and cite its receipt for a passed `result_submit` check; native shell output alone is not a verified check receipt.
+@@ROLE_EVIDENCE@@
 - Keep unrun, failed, truncated and unverifiable checks explicit, with their concrete blocker. A successful tool response or model turn is not proof that the project works.
 - Distinguish what you observed from what you infer. If information you need is missing, ask through the runtime's question tool instead of inventing it.
 
@@ -469,25 +462,60 @@ def with_attached_servers(meta: dict, servers, workspace_root: str | None = None
 #: so its role instructions govern it; its one rule here closes the turn after
 #: a user question, where a full rewrite of the details was observed
 #: (r_5c2679466a0e) and the runtime now withholds such text.
-_ROLE_CORTEX_TOOLS = {
-    "coordinator": (
-        "Tools have three sources. The `cortex` MCP server is the runtime's channel: use its `read_report` for retained reports, "
-        "`read_skill` for conditional Cortex skills, draft/publication tools for reports, and role-appropriate "
-        "question, proposal and result tools. Workers run checks through `command_run`, whose receipts support "
-        "passed results. Use its scoped project tools when supplied for project reads. External MCP servers "
-        "(for example `codebase-memory-mcp`) provide their own domain tools, not Cortex lifecycle operations. "
-        "The engine's native shell, file and search tools are local workspace aids where permitted; they do not "
-        "publish Cortex reports, submit results or produce a `command_run` receipt."
-    ),
-    "worker": (
-        "Tools have three sources. The `cortex` MCP server is the runtime's channel: use its `read_report` for retained reports, "
-        "`read_skill` for conditional Cortex skills, draft/publication tools for reports, `command_run` for "
-        "worker checks whose receipts support passed results, and role-appropriate question, proposal and result "
-        "tools. Use its scoped project tools when supplied for project reads and edits. External MCP servers "
-        "(for example `codebase-memory-mcp`) provide their own domain tools, not Cortex lifecycle operations. "
-        "The engine's native shell, file and search tools are local workspace aids where permitted; they do not "
-        "publish Cortex reports, submit results or produce a `command_run` receipt."
-    ),
+_CORTEX_TOOLS = (
+    "The `cortex` MCP server is the runtime's channel: use its `read_report` for retained reports, "
+    "`read_skill` for conditional Cortex skills, draft/publication tools for reports, and role-appropriate "
+    "question, proposal and result tools. External MCP servers (for example `codebase-memory-mcp`) "
+    "provide their own domain tools, not Cortex lifecycle operations."
+)
+_NATIVE_TOOLS = (
+    "- If a tool you need is not in your list, look it up with the engine's tool search when one exists "
+    "before concluding it is unavailable.\n"
+    "- The engine's native shell, file and search tools are local workspace aids where permitted; "
+    "they do not publish Cortex reports or submit results."
+)
+_WORKER_COMMANDS = (
+    "- Treat shell command text as code: quote arguments, never expose a secret through command output, "
+    "and avoid blocking waits longer than a minute."
+)
+_WORKER_EVIDENCE = (
+    "- Run reportable checks through Cortex MCP `command_run` (or its advertised approved outside-command "
+    "route), report the exact command, working directory and exit code, and cite its receipt for a passed "
+    "`result_submit` check."
+)
+_PRESERVATION = """\
+- Keep other people's changes: never revert, overwrite or clean up work you did not make.
+- Do not push, open pull requests, rewrite history or touch remote systems unless the assignment asks for it.
+- Do not add attribution trailers or tool signatures to commits, files or messages.
+- Do not write memory, notes or state outside the project and the runtime's own tools; the runtime keeps what later sessions need.
+- Do not create subagents, background agents, worktrees, scheduled jobs or notifications. Delegation belongs to the runtime."""
+
+# Four role blocks share authority and safety, not mutation/check instructions.
+_ROLE_BLOCKS = {
+    "coordinator": {
+        "tools": _CORTEX_TOOLS + " Use scoped project tools when supplied for project reads.",
+        "work": "# Project boundaries\n\n- You do not change the project or run commands; plan that work for workers.\n" + _PRESERVATION,
+        "evidence": "- Reconcile retained worker reports and runtime verification evidence; do not infer a passing check from absent evidence.",
+        "commands": "",
+    },
+    "write": {
+        "tools": _CORTEX_TOOLS + " Use scoped project tools for project reads and edits, and `command_run` for worker checks.",
+        "work": "# Changing the project\n\n- Change only what the assignment and granted scope cover. Follow the surrounding code's conventions, naming and comment density, and make the smallest coherent change.\n" + _PRESERVATION,
+        "evidence": "- Verify what you change with the checks that exercise it.\n" + _WORKER_EVIDENCE,
+        "commands": _WORKER_COMMANDS,
+    },
+    "read_only": {
+        "tools": _CORTEX_TOOLS + " Use scoped project tools for project reads, and `command_run` only for authorized non-mutating checks.",
+        "work": "# Project boundaries\n\n- Your assignment is read-only: do not create or change project files.\n" + _PRESERVATION,
+        "evidence": "- Run only authorized non-mutating checks needed as evidence for the assignment.\n" + _WORKER_EVIDENCE,
+        "commands": _WORKER_COMMANDS,
+    },
+    "consultant": {
+        "tools": "The `cortex` MCP server is the runtime's channel: use `read_report` for retained reports, `read_skill` for conditional Cortex skills, draft/publication tools for your report, and the result tool. This role is offered no external MCP server, project reads or commands.",
+        "work": "# Project boundaries\n\n- Consult from the packet and retained reports only; do not create or change project files.\n" + _PRESERVATION,
+        "evidence": "- Evaluate the supplied evidence; name missing evidence in your report instead of running checks or inventing results.",
+        "commands": "",
+    },
 }
 
 _ROLE_COMMUNICATION = {
@@ -539,15 +567,8 @@ _CONSULTANT_WORKING_MATERIAL = (
     "# Working material\n\n"
     "- You work only from your consultation packet and the retained reports you read with `read_report` "
     "on the `cortex` server. This session has no code index, no project source reads and no commands.\n"
-    "- Do not read or search project files with any engine-native tool that may remain. When the packet "
-    "and reports lack a fact you need, name the missing evidence in your report instead of reaching it "
-    "another way."
-)
-_CONSULTANT_CORTEX_TOOLS = (
-    "The `cortex` MCP server is the runtime's channel: use its `read_report` for the retained reports your "
-    "consultation packet names, `read_skill` for conditional Cortex skills, draft/publication tools for your "
-    "report, and the result tool. This role is offered no external MCP server, no project reads and no "
-    "`command_run`; engine-native tools are not a way around that boundary."
+    "- When the packet and reports lack a fact you need, name the missing evidence in your report "
+    "instead of reaching it another way."
 )
 
 
@@ -563,22 +584,53 @@ def environment_section(workspace_root: str | None, *, today: datetime.date | No
     return "\n".join(lines)
 
 
-def cortex_system_prompt(role: str, workspace_root: str | None, *, today: datetime.date | None = None,
-                         environ=None, consultant: bool = False) -> str:
-    """The shared base prompt for one ``coordinator`` or ``worker`` session.
+def prompt_access_class(role: str, role_id: str | None) -> str:
+    """Select from the runtime contract, tested against profiles.json access_class."""
+    from ..orchestration.contracts import READ_ONLY
+    from ..portable.roles import resolve_role
+    from .mcp_bridge import is_consultant_role
 
-    ``consultant`` selects the senior consultant's worker variant: its tool
-    and working-material sections name the consultation packet and retained
-    reports instead of a code index or project search."""
+    if role != "worker" or not role_id:
+        return "write"
+    if is_consultant_role(role_id):
+        return "consultant"
+    return "read_only" if resolve_role(role_id) in READ_ONLY else "write"
+
+
+def cortex_system_prompt(role: str, workspace_root: str | None, *, today: datetime.date | None = None,
+                         environ=None, consultant: bool = False, access_class: str = "write",
+                         native_tools: bool = True) -> str:
+    """Render coordinator, write, read-only or consultant guidance.
+
+    ``consultant`` remains a compatibility selector. Launch seams supply the
+    profile's access class and the adapter's observed native-tool capability;
+    defaults preserve ordinary worker callers outside those seams.
+    """
     if role not in _ROLES:
         raise ValueError("role must be 'coordinator' or 'worker'")
+    if access_class not in {"write", "read_only", "consultant"}:
+        raise ValueError("access_class must be 'write', 'read_only' or 'consultant'")
+    consultant = consultant or access_class == "consultant"
     if consultant and role != "worker":
         raise ValueError("only a worker session can be the senior consultant")
-    tools = _CONSULTANT_CORTEX_TOOLS if consultant else _ROLE_CORTEX_TOOLS[role]
+    block = _ROLE_BLOCKS["coordinator" if role == "coordinator" else
+                         "consultant" if consultant else access_class]
+    native = _NATIVE_TOOLS if native_tools and not consultant else ""
+    if native_tools and role == "worker" and not consultant:
+        native += "\n- Native shell output alone is not a verified check receipt."
+    if native_tools and consultant:
+        native = "- Do not read or search project files with any engine-native tool that may remain; it is not a way around the consultation boundary."
+    body = _COMMON_BODY
+    for marker, value in {
+        "ROLE_CORTEX_TOOLS": block["tools"], "ROLE_WORK": block["work"],
+        "ROLE_EVIDENCE": block["evidence"], "ROLE_COMMANDS": block["commands"],
+        "NATIVE_TOOLS": native,
+    }.items():
+        body = body.replace("@@" + marker + "@@", value)
     finding = _CONSULTANT_WORKING_MATERIAL if consultant else _FINDING_CODE
     return "\n\n".join(part for part in (
         "# Cortex session\n\n" + _INTRO[role],
-        _BODY.replace("@@ROLE_CORTEX_TOOLS@@", tools).replace("@@ROLE_FINDING_CODE@@", finding).replace(
+        body.replace("@@ROLE_FINDING_CODE@@", finding).replace(
             "@@ROLE_REFUSAL@@", _ROLE_REFUSAL[role]).replace(
             "@@ROLE_COMMUNICATION@@\n", _ROLE_COMMUNICATION[role] + "\n" if _ROLE_COMMUNICATION[role] else ""
         ).strip(),

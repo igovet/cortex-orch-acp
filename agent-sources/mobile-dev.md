@@ -35,10 +35,7 @@ in the accepted contract.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact changed paths, visible and lifecycle
+Report exact changed paths, visible and lifecycle
 behavior, permissions and data effects, tested platforms and device versions,
 contradictions, uncertainty, unverified hardware or signing risk. List commands
 with cwd and exit codes, or explain non-execution.

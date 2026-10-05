@@ -12,3 +12,5 @@ This Cortex skill adapts the workflow guidance in Anthropic's `skill-creator` sk
 - Cortex-specific changes: runtime-owned planning and permissions, coordinator-only guidance, exact-revision provenance for imports, untrusted-source handling, the guarded relative Claude link, no automatic skill creation, and no assumed subagents, paid evals, browser, or upstream helper scripts.
 
 The reference URL for this skill is deliberately pinned above; later upstream changes do not silently alter this adaptation.
+
+The authoring workflow now lives in [skill-authoring](../skill-authoring/SKILL.md); its source provenance is retained there as well.

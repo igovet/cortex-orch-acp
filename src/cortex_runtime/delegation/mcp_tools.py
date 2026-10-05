@@ -308,8 +308,8 @@ def _shared_read_skill(store, channel: ChannelContext, args: Mapping[str, Any]) 
 
 def _read_skill_body(store, channel: ChannelContext, args: Mapping[str, Any]) -> dict:
     from ..portable.roles import (
-        COORDINATOR_ONLY_SHARED_ROLE_IDS, COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS,
-        SHARED_ROLE_IDS, WORKER_REFERENCE_IDS, load_role, read_reference,
+        COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS,
+        WORKER_REFERENCE_IDS, load_role, read_reference, shared_skill_ids,
     )
 
     requested = args.get("skill")
@@ -324,8 +324,7 @@ def _read_skill_body(store, channel: ChannelContext, args: Mapping[str, Any]) ->
     role_kind = "coordinator" if channel is not None and channel.role == "coordinator" else "worker"
     references = (COORDINATOR_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS if role_kind == "coordinator"
                   else WORKER_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS)
-    allowed_shared = (SHARED_ROLE_IDS if role_kind == "coordinator"
-                      else SHARED_ROLE_IDS - COORDINATOR_ONLY_SHARED_ROLE_IDS)
+    allowed_shared = shared_skill_ids(role_kind, _own_role_id(store, channel))
     if skill_id in references:
         return dict(skill=skill_id, title=skill_id.replace("-", " ").capitalize(),
                     body=read_reference(skill_id, role_kind=role_kind))
@@ -583,13 +582,11 @@ def _enumerate_skills(schema: dict, role_kind: str, role_id: str | None) -> dict
     """Describe role-scoped ids; path grants are checked per session at read."""
     from ..acp.orchestrating_runtime import COORDINATOR_ROLE_ID
     from ..portable.roles import (
-        COORDINATOR_ONLY_SHARED_ROLE_IDS, COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS,
-        SHARED_ROLE_IDS, WORKER_REFERENCE_IDS, situational_skill_triggers,
+        COORDINATOR_REFERENCE_IDS, EXAMPLE_REFERENCE_IDS,
+        WORKER_REFERENCE_IDS, shared_skill_ids, situational_skill_triggers,
     )
 
-    ids = set(SHARED_ROLE_IDS) | EXAMPLE_REFERENCE_IDS
-    if role_kind != "coordinator":
-        ids -= COORDINATOR_ONLY_SHARED_ROLE_IDS
+    ids = set(shared_skill_ids(role_kind, role_id)) | EXAMPLE_REFERENCE_IDS
     ids |= COORDINATOR_REFERENCE_IDS if role_kind == "coordinator" else WORKER_REFERENCE_IDS
     own = COORDINATOR_ROLE_ID if role_kind == "coordinator" else role_id
     if own:

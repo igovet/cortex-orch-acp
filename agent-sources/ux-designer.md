@@ -35,10 +35,7 @@ or turn personal taste into product requirements.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact evidence paths, user-flow evidence,
+Report exact evidence paths, user-flow evidence,
 hierarchy, state matrix, interaction rules, responsive and accessibility
 requirements, rationale, open questions, contradictions, uncertainty, and
-residual risk. List review commands with cwd and exit codes, or explain non-execution.
+residual risk.

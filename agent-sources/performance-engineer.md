@@ -34,10 +34,6 @@ do not edit code or run unsafe, production, or cost-bearing experiments.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact affected paths, workload, environment,
+Report exact affected paths, workload, environment,
 baseline and profile measurements, supported and rejected hypotheses, confidence,
 expected benefit, trade-offs, contradictions, uncertainty, and residual risk.
-List commands with cwd and exit codes, or explain non-execution.

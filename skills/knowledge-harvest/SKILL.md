@@ -21,27 +21,11 @@ verification or operating path. Publish it in the target project's canonical
 `docs/project/` and `docs/features/` entry points below; these remain visible
 across sessions through the project files, not through a prior task's chat.
 
-Harvest workers read this complete skill with `read_skill`,
-including its feature-census guidance below. Its inventory, coverage, page-content
-and validation rules apply before census/planning work. Exact advertised SKILL.md
-and needed declared Markdown reference reads are allowed; runtime implementation
-and TOML inspection are not. The coordinator receives concise report previews;
-it does not open project indexes.
-
-For harvests only, every repository read, project analysis, documentation change,
-command and completeness check is worker-owned. This does not restrict coordinator
-file reads for ordinary direct answers, orientation or evidence reconciliation.
-For harvests, the coordinator reads previews, the current pipeline and the bounded evidence pages needed for its decision, then chooses
-bounded assignments.
-Graph/search, index routing and repository enumeration below are worker instructions.
-
-Harvest workers read the target project's applicable `docs/project/` and
-`docs/features/` indexes and linked pages, then confirm their claims in current
-source using the discovery procedure below. A missing or unreadable project
-knowledge index justifies a bounded census delegation and never coordinator source inspection. A worker's
-evidence that supplied documentation is stale, conflicting, or incomplete
-drives only task-relevant corrective ownership; it does not by itself widen the
-harvest scope.
+Read the target project's applicable `docs/project/` and `docs/features/`
+indexes and linked pages, then confirm claims in current source. Missing or
+unreadable indexes require a source-backed census. Stale or conflicting knowledge
+does not by itself widen the assigned scope. Coordinator scope assessment lives
+in `knowledge-harvest-scope`; workers own all harvest repository work.
 
 ## Modes
 
@@ -65,62 +49,16 @@ profile supply the report requirements. Load a declared example only for an assi
 content question; do not read `cortex-control` with `read_skill` merely for ordinary reporting.
 After context loss, load skill `context-compaction` and follow its rereading procedure.
 
-## Scale the assignment to the repository
+## Post-write evidence
 
-Choose the fewest assignments that can establish complete, source-backed
-coverage. A small repository with a bounded source tree, one runtime, and few
-feature-bearing surfaces can use one `technical-writer` worker for the whole
-harvest or refresh. Assign that worker to enumerate the current tree, inspect
-source, tests and configuration, map every in-scope surface, write or update the
-canonical documents, run relevant deterministic checks, and report exact gaps
-and outcomes. This is one cohesive assignment, not a sequence of planner,
-explorer, architect, writer, reviewer and verifier handoffs. Its self-checks
-are evidence of what ran, not independent review.
-
-For a broad or coupled repository, partition only when the source tree or
-ownership makes one assignment impractical. Delegate bounded `explorer`
-domains where independent discovery reduces uncertainty; use `planner` for a
-real scope or dependency problem and `architect` for a consequential boundary
-decision. Give exactly one writer ownership of shared `docs/project/` and
-`docs/features/index.md`; other writers may own disjoint feature pages. A
-worker needing earlier evidence receives only the relevant finalized reports.
-
-After writing, compare the current source inventory with the coverage matrix,
-feature pages, links and checks. For each correction to a documented behavior,
-default, or output (including one found against unchanged source), inventory
-every relevant occurrence across the target repository's documentation,
-including otherwise unchanged pages, commands, flags, example inputs and
-expected output. Confirm each claim in current source and correct stale examples.
-Inventory every affected executable example across those pages;
-run safe examples against the current source and compare exact exit status and
-stdout with their documented expectations. Mark examples that cannot safely
-run or whose output cannot be verified as unresolved, naming the reason.
-The writing worker may perform this comparison and repair bounded gaps. The runtime supplies an independent reviewer for these changed documentation claims. The reviewer checks
-current source and post-write documentation, including the complete relevant example inventory
-and observed results, without relying on the writer's claim that a search was
-clean. Propose additional specialist investigation for a concrete unresolved risk, such as ambiguous feature boundaries, conflicting source evidence, unexplained
-surfaces, consequential safety behavior, or checks the writer cannot run or
-interpret. Do not repeat a check on an unchanged revision without a reason. A small refresh
-may use one writing assignment; independent review and command verification remain
-mandatory runtime stages. Report unresolved gaps honestly. Models propose
-adaptations; the runtime owns scheduling, review and completion.
-
-## Relationship to the final documentation stage
-
-A harvest or harvest-refresh is documentation-impacting by definition. Its
-documentation delegations serve as the dedicated documentation-sync worker or
-workers for `docs/project/`, `docs/features/`, and any affected public
-documentation. After the final writing or corrective delegation, the
-coordinator assesses the worker's source comparison and checks and submits a
-synthesis grounded in retained evidence. The runtime requires independent review
-and automatic verification before completion. It may follow bounded report cursors for facts needed by
-that decision, while documentation indexes and project files remain worker-owned.
-Missing specialist interpretation requires a bounded worker check.
-
-Do not use a task-level `documentation not required` outcome for a completed
-harvest, because documentation is the requested artifact. Public documents
-that the worker reports as unaffected should remain unchanged rather than
-receiving meaningless edits.
+Compare the source inventory with the coverage matrix, pages, links and checks.
+For corrected behavior, defaults or outputs, inspect all relevant documentation
+occurrences and executable examples, including otherwise unchanged pages.
+Run safe examples and compare exact exit status and stdout with expectations;
+retain unsafe or unverifiable examples as unresolved with concrete reasons.
+Report material corrected claims for the runtime's independent source-backed
+review. A harvest is documentation-impacting; never claim documentation not
+required. Preserve unaffected pages instead of making token edits.
 
 ## Output structure
 

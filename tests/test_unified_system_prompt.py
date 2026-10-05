@@ -22,7 +22,7 @@ def test_prompt_is_role_specific_engine_neutral_and_carries_the_environment(tmp_
         assert f"- Working directory: {tmp_path}" in text and "- Git repository: yes" in text
         assert "- Date (UTC): 2026-09-28" in text
         assert "`read_skill`" in text and "code index" in text
-        assert "Tools have three sources" in text
+        assert "runtime's channel" in text
         assert "`cortex` MCP server" in text and "`codebase-memory-mcp`" in text
         assert "native shell, file and search tools" in text
         # Project rule file names are named; engines and products are not.
@@ -33,11 +33,11 @@ def test_prompt_is_role_specific_engine_neutral_and_carries_the_environment(tmp_
 
 
 @pytest.mark.parametrize("role", ["coordinator", "worker"])
-def test_both_engines_receive_the_same_prompt_before_the_same_role_text(tmp_path, role):
+def test_both_engines_receive_policy_specific_prompt_before_the_same_role_text(tmp_path, role):
     claude = _session_new_meta_for("claude-agent-acp", "0.78.0", "Role text.", role=role, project_root=str(tmp_path))
     codex = _session_new_meta_for("codex-acp", "1.13.0", "Role text.", role=role, project_root=str(tmp_path))
     assert codex["systemPrompt"] == "Role text." and codex["cortexNativeContext"] is False
-    assert claude["systemPrompt"] == codex["cortexBaseInstructions"].rstrip() + "\n\nRole text."
+    assert claude["systemPrompt"] == cortex_system_prompt(role, str(tmp_path), native_tools=False).rstrip() + "\n\nRole text."
     assert codex["cortexBaseInstructions"] == cortex_system_prompt(role, str(tmp_path))
 
 
@@ -207,7 +207,7 @@ def test_role_specific_cortex_tool_guidance_keeps_worker_permissions_out_of_coor
     coordinator = cortex_system_prompt("coordinator", None, environ={})
     assert "`command_run` for worker checks" in worker
     assert "project reads and edits" in worker
-    assert "Workers run checks through `command_run`" in coordinator
+    assert "command_run" not in coordinator
     assert "project reads and edits" not in coordinator
     assert "@@" not in worker + coordinator
 
@@ -217,7 +217,7 @@ def test_only_workers_are_told_to_work_without_narration():
     coordinator = cortex_system_prompt("coordinator", None, environ={})
     assert "Work without narration" in worker and "write one final message" in worker
     assert "including before the first tool and after a tool result" in worker
-    assert "native shell output alone is not a verified check receipt" in worker
+    assert "Native shell output alone is not a verified check receipt" in worker
     assert "Work without narration" not in coordinator and "@@" not in worker + coordinator
 
 
@@ -287,3 +287,71 @@ def test_partial_code_index_grant_keeps_resolved_project_name():
     assert "The index project for this workspace is `workspace-project`; use it directly." in section
     assert "`search_code` on `codebase-memory-mcp`" in section
     assert "`project_read` on `cortex` for a known file" in section
+
+
+@pytest.mark.parametrize("access_class", ["write", "read_only", "consultant"])
+@pytest.mark.parametrize("native_tools", [False, True])
+def test_four_role_blocks_gate_native_guidance(access_class, native_tools):
+    text = cortex_system_prompt("worker", None, environ={}, access_class=access_class,
+                                native_tools=native_tools)
+    assert ("engine's native shell" in text) == (native_tools and access_class != "consultant")
+    assert ("engine's tool search" in text) == (native_tools and access_class != "consultant")
+    assert "@@" not in text
+    if access_class == "write":
+        assert "# Changing the project" in text and "project reads and edits" in text
+        assert "Verify what you change" in text
+    else:
+        assert "# Changing the project" not in text and "project reads and edits" not in text
+    if access_class == "read_only":
+        assert "do not create or change project files" in text
+        assert "authorized non-mutating checks" in text
+    if access_class == "consultant":
+        assert "# Working material" in text and "# Finding code" not in text
+        assert "command_run" not in text
+        assert ("any engine-native tool" in text) is native_tools
+
+
+@pytest.mark.parametrize("native_tools", [False, True])
+def test_coordinator_block_has_no_worker_command_or_edit_obligations(native_tools):
+    text = cortex_system_prompt("coordinator", None, environ={}, native_tools=native_tools)
+    for rule in ("command_run", "Treat shell command text", "Verify what you change",
+                 "project reads and edits", "# Changing the project"):
+        assert rule not in text
+    assert ("engine's native shell" in text) is native_tools
+
+
+@pytest.mark.parametrize("engine,version,key,native", [
+    ("claude-agent-acp", "0.78.0", "systemPrompt", False),
+    ("codex-acp", "1.13.0", "cortexBaseInstructions", True),
+])
+@pytest.mark.parametrize("role_id,access_class", [
+    ("worker-refactorer", "write"), ("worker-code-reviewer", "read_only"),
+    ("code-reviewer", "read_only"), ("senior-consultant", "consultant"),
+])
+def test_session_metadata_selects_access_class_and_native_policy(tmp_path, engine, version, key,
+                                                                native, role_id, access_class):
+    meta = _session_new_meta_for(engine, version, "Role text.", role="worker",
+                                role_id=role_id, project_root=str(tmp_path), environ={})
+    base = cortex_system_prompt("worker", str(tmp_path), environ={}, access_class=access_class,
+                                native_tools=native)
+    assert meta[key] == (base.rstrip() + "\n\nRole text." if not native else base)
+
+
+def test_invalid_access_class_fails_and_consultant_keyword_keeps_compatibility():
+    with pytest.raises(ValueError):
+        cortex_system_prompt("worker", None, access_class="unknown")
+    assert cortex_system_prompt("worker", None, environ={}, consultant=True) == cortex_system_prompt(
+        "worker", None, environ={}, access_class="consultant")
+
+
+@pytest.mark.parametrize("role_id,access_class", [
+    ("worker-refactorer", "write"), ("worker-code-reviewer", "read_only"),
+    ("senior-consultant", "consultant"),
+])
+def test_opencode_agent_prompt_selects_all_access_classes(tmp_path, role_id, access_class):
+    from cortex_runtime.engine.opencode_adapter_acp import build_agent_prompt
+
+    text = build_agent_prompt("Role text.", role="worker", role_id=role_id,
+                              project_root=str(tmp_path), environ={})
+    base = cortex_system_prompt("worker", str(tmp_path), environ={}, access_class=access_class)
+    assert text.startswith(base.rstrip())

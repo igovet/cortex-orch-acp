@@ -42,16 +42,16 @@ _CATALOG: dict[str, dict[str, str]] = {
               "копии, без проверенной интеграции и без аудита. Поручите эту работу воркеру.",
     },
     "harvest_requested": {
-        "en": "The user explicitly requested a knowledge harvest{scope}. Read `knowledge-harvest` "
+        "en": "The user explicitly requested a knowledge harvest{scope}. Read `knowledge-harvest-scope` "
               "with `read_skill` and carry it out for this task; this is the explicit request that "
               "skill requires, not an inference from anything said earlier.",
-        "ru": "Пользователь явно запросил сбор знаний{scope}. Прочитай `knowledge-harvest` через "
+        "ru": "Пользователь явно запросил сбор знаний{scope}. Прочитай `knowledge-harvest-scope` через "
               "`read_skill` и выполни его для этой задачи: это и есть явный запрос, которого требует "
               "этот скилл, а не вывод из сказанного ранее.",
     },
     "harvest_refresh_requested": {
-        "en": "The user explicitly requested a documentation refresh{scope}. Read `knowledge-harvest` with `read_skill` and update the project's source-backed documentation for this task; this is an explicit request, not an inference.",
-        "ru": "Пользователь явно запросил обновление документации{scope}. Прочитай `knowledge-harvest` через `read_skill` и обнови подтверждённую источниками документацию проекта для этой задачи: это явный запрос, а не вывод.",
+        "en": "The user explicitly requested a documentation refresh{scope}. Read `knowledge-harvest-scope` with `read_skill` and update the project's source-backed documentation for this task; this is an explicit request, not an inference.",
+        "ru": "Пользователь явно запросил обновление документации{scope}. Прочитай `knowledge-harvest-scope` через `read_skill` и обнови подтверждённую источниками документацию проекта для этой задачи: это явный запрос, а не вывод.",
     },
     "worker_interrupted_notice": {
         "en": "Interrupted when the host connection closed; no result yet. "

@@ -6,8 +6,10 @@ Cortex automatically selects worker engine, model, and effort from the runtime's
 current model catalog, task tier, work kind, routing policy and each engine's
 observed subscription plan usage; how often an engine was chosen before is not
 an input. The model may submit a routing recommendation in
-its plan; only the runtime decides and dispatches. A plan hint never grants a
-route or raises effort/tier beyond runtime policy. `list_route_options` is a
+its plan. A recommendation alone is advisory, but an exact eligible flagship
+route explicitly requested by the user can select that route for the covered
+node. The runtime validates the request against current policy and dispatches;
+no hint bypasses eligibility or raises effort/tier beyond policy. `list_route_options` is a
 read-only snapshot for coordinators; dispatch validates current eligibility
 again.
 

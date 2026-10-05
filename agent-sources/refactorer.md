@@ -35,10 +35,6 @@ changes disguised as cleanup.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact changed paths, structural rationale,
+Report exact changed paths, structural rationale,
 removed complexity, preserved contracts, characterization evidence,
-contradictions, uncertainty, and remaining equivalence risk. List commands with
-cwd and exit codes, or explain why verification was not run.
+contradictions, uncertainty, and remaining equivalence risk.

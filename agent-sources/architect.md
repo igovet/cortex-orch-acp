@@ -36,10 +36,7 @@ edit project artifacts, or ratify a preferred design without comparison.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact evidence paths, current and proposed
+Report exact evidence paths, current and proposed
 boundaries, interfaces, data flow, failure behavior, alternatives, trade-offs,
 validation needs, contradictions, uncertainty, and residual risk. List commands
 with cwd and exit codes, or explain the non-execution decision.

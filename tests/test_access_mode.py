@@ -135,7 +135,8 @@ def test_auto_answers_without_any_host_and_audits_without_the_command(tmp_path):
     assert "s3cret" not in stored and "rm -rf" not in stored
 
 
-def test_consent_card_is_allowed_by_the_runtime_in_auto_and_refused_without_a_host_in_guarded(tmp_path):
+@pytest.mark.parametrize("kind", ["outside_write", "outside_command", "project_delete", "project_skill_link"])
+def test_consent_without_host_is_denied_in_guarded_and_approved_in_auto(tmp_path, kind):
     store, task_id = _store_and_task(tmp_path)
     runtime = _runtime(store)
     channel = SimpleNamespace(task_id=task_id, attempt_id="xa_1")
@@ -143,7 +144,7 @@ def test_consent_card_is_allowed_by_the_runtime_in_auto_and_refused_without_a_ho
     def ask():
         outcome = {}
         thread = threading.Thread(target=lambda: outcome.setdefault(
-            "allowed", consent.request(store, channel, "outside_write", "/tmp/x", timeout=10)))
+            "allowed", consent.request(store, channel, kind, "/tmp/x", timeout=10)))
         thread.start()
         deadline = time.monotonic() + 5
         while thread.is_alive() and time.monotonic() < deadline:
@@ -155,6 +156,60 @@ def test_consent_card_is_allowed_by_the_runtime_in_auto_and_refused_without_a_ho
     assert ask() is False  # Guarded, nobody to ask: refused, as before
     access_mode.switch(store, task_id, "auto", origin="acp_config_option")
     assert ask() is True
+    audit = [row for row in access_mode.history(store, task_id) if row["kind"] != "switched"]
+    assert [row["kind"] for row in audit] == ["auto_approved"]
+
+
+@pytest.mark.parametrize("mode", ["guarded", "auto"])
+@pytest.mark.parametrize("kind", ["outside_write", "outside_command"])
+@pytest.mark.parametrize("answer", ["allow", "deny", "cancelled", "missing", "malformed", "timeout"])
+def test_outside_consent_uses_host_only_in_guarded(tmp_path, mode, kind, answer):
+    store, task_id = _store_and_task(tmp_path)
+    access_mode.switch(store, task_id, mode, origin="acp_set_mode")
+    asked = []
+
+    def host(_session, params, _timeout):
+        asked.append(params)
+        if answer == "timeout":
+            raise TimeoutError("no answer")
+        if answer == "missing":
+            return None
+        if answer == "malformed":
+            return {"outcome": "allow"}
+        if answer == "cancelled":
+            return {"outcome": {"outcome": "cancelled"}}
+        return {"outcome": {"outcome": "selected", "optionId": answer}}
+
+    runtime = _runtime(store, {task_id: host})
+    with store.connection() as db:
+        consent._ensure(db)
+        db.execute("INSERT INTO consent_requests VALUES(?,?,?,?,?,?,?,NULL)",
+                   ("cr_test", task_id, "xa_1", kind, "/outside/target", "pending", "now"))
+        db.commit()
+    row, = consent._claim_pending(store, task_id)
+    consent._ask(runtime, task_id, row, "en")
+    if mode == "auto":
+        assert asked == []
+    else:
+        assert len(asked) == 1
+        assert asked[0]["toolCall"]["rawInput"]["kind"] == kind
+        assert asked[0]["toolCall"]["toolCallId"] == "cortex-consent:cr_test"
+        assert [option["kind"] for option in asked[0]["options"]] == ["allow_once", "reject_once"]
+    with store.connection() as db:
+        assert db.execute("SELECT status FROM consent_requests").fetchone()[0] == (
+            "approved" if mode == "auto" or answer == "allow" else "denied")
+    assert [row["kind"] for row in access_mode.history(store, task_id)] == (
+        ["switched", "auto_approved"] if mode == "auto" else ["switched"])
+
+
+@pytest.mark.parametrize("kind", ["outside_write", "outside_command"])
+def test_unanswered_outside_consent_expires_denied(tmp_path, kind):
+    store, task_id = _store_and_task(tmp_path)
+    access_mode.switch(store, task_id, "guarded", origin="acp_set_mode")
+    channel = SimpleNamespace(task_id=task_id, attempt_id="xa_1")
+    assert consent.request(store, channel, kind, "/outside/target", timeout=0.01) is False
+    with store.connection() as db:
+        assert db.execute("SELECT status FROM consent_requests").fetchone()[0] == "denied"
 
 
 # -- invariants that are not the user's to give --------------------------------

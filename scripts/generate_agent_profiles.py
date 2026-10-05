@@ -16,6 +16,11 @@ WORKER_REFERENCES = (
     "interactive-resources.md",
     "report-publication.md",
 )
+VERIFICATION_SOURCES = {
+    "write": "verification-write.md",
+    "read_only": "verification-read-only.md",
+    "consultant": "verification-consultant.md",
+}
 SPECIALIZED = (
     "Profile title",
     "Role and responsibility",
@@ -47,14 +52,19 @@ def expected_skills(plugin: Path = PLUGIN) -> dict[Path, bytes]:
     profiles = json.loads((plugin / "profiles.json").read_text())["profiles"]
     rendered: dict[Path, bytes] = {}
     for profile in profiles:
+        access_class = profile.get("access_class")
+        if access_class not in VERIFICATION_SOURCES:
+            raise ValueError(f"invalid access class for {profile['name']}")
         source = profile["source"]
         report_template = profile["report_template"]
         if report_template not in {"general", "planning", "investigation", "implementation", "verification", "documentation", "synthesis"}:
             raise ValueError(f"invalid report template for {profile['name']}")
         values = sections((source_root / source).read_text())
         selected_template = ((source_root / "consultant-protocol.md").read_text()
-                             if profile["name"] == "senior_consultant" else template)
+                             if access_class == "consultant" else template)
         prompt = selected_template.replace("{{Default report template}}", report_template)
+        prompt = prompt.replace("{{Evidence and verification}}",
+                               (source_root / VERIFICATION_SOURCES[access_class]).read_text().strip())
         for key in SPECIALIZED:
             prompt = prompt.replace("{{" + key + "}}", values[key])
         if "{{" in prompt or "}}" in prompt:

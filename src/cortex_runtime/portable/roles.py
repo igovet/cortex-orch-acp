@@ -53,6 +53,9 @@ SHARED_ROLE_IDS = frozenset({
     "documentation-sync",
     "context-compaction",
     "skill-management",
+    "skill-authoring",
+    "knowledge-harvest-scope",
+    "tool-discipline-worker",
 })
 #: Shared skills restricted to the coordinator: a worker or the consultant
 #: (also a "worker"-kind channel) may never see or read these by
@@ -68,7 +71,24 @@ COORDINATOR_ONLY_SHARED_ROLE_IDS = frozenset({
     "cortex-control",
     "coordinator-communication",
     "skill-management",
+    "knowledge-harvest-scope",
 })
+
+# Procedures delivered only to project workers, never coordinator sessions.
+WORKER_ONLY_SHARED_ROLE_IDS = frozenset({
+    "tool-discipline-worker", "skill-authoring", "knowledge-harvest",
+})
+
+
+def shared_skill_ids(role_kind: str, role_id: str | None = None) -> frozenset[str]:
+    """One allowlist for delivery, read_skill authorization and its schema."""
+    if role_kind == "coordinator":
+        return SHARED_ROLE_IDS - WORKER_ONLY_SHARED_ROLE_IDS
+    ids = SHARED_ROLE_IDS - COORDINATOR_ONLY_SHARED_ROLE_IDS
+    if role_id == CONSULTANT_ROLE_ID:
+        ids -= WORKER_ONLY_SHARED_ROLE_IDS
+    return ids
+
 
 # Worker-profile short names (skills/worker-* suffixes, one per specialist)
 # accepted as aliases for their skill id ("worker-" + stem). Hand-maintained;
@@ -101,8 +121,8 @@ WORKER_ALIASES: dict[str, str] = {
 }
 
 
-# These rules are restated verbatim from worker-protocol.md's unmarked
-# "Assignment contract" section (not new policy) and applied to every
+# These rules are restated verbatim from worker-protocol.md and its
+# class-selected verification sources (not new policy) and applied to every
 # worker role uniformly. The compact-source ceiling is checked against
 # skills/worker-*/SKILL.md; see tests/test_instruction_sources_portable.py.
 # See docs/acp/roles-and-delegation.md for critical-rule delivery.
@@ -355,11 +375,11 @@ def load_role(role_hint: object) -> RoleInstructionSet:
 #: retention command; workers get its report examples through `index`.
 NAMED_SKILLS: dict[str, tuple[str, ...]] = {
     "coordinator": ("tool-discipline", "coordinator-communication", "content-safety",
-                    "context-compaction", "documentation-sync", "knowledge-harvest",
+                    "context-compaction", "documentation-sync", "knowledge-harvest-scope",
                     "cortex-control", "skill-management"),
-    "worker": ("tool-discipline", "content-safety", "report-publication", "code-and-evidence",
+    "worker": ("tool-discipline", "tool-discipline-worker", "content-safety", "report-publication", "code-and-evidence",
                "interactive-resources", "index", "context-compaction", "documentation-sync",
-               "knowledge-harvest"),
+               "knowledge-harvest", "skill-authoring"),
     "shared": (),
 }
 
@@ -375,6 +395,7 @@ NAMED_SKILLS: dict[str, tuple[str, ...]] = {
 CONSULTANT_ROLE_ID = "worker-senior-consultant"
 CONSULTANT_EXCLUDED_NAMED_SKILLS = frozenset({
     "code-and-evidence", "interactive-resources", "documentation-sync", "knowledge-harvest",
+    "tool-discipline-worker", "skill-authoring",
 })
 
 
@@ -390,6 +411,8 @@ _SKILL_TRIGGERS = {
     "coordinator-communication": "you write to the user and the wording matters",
     "documentation-sync": "before assessing documentation impact for a plan or updating docs affected by a behavior or contract change",
     "knowledge-harvest": "before collecting what a codebase already knows into project knowledge",
+    "knowledge-harvest-scope": "before scoping an explicit harvest or harvest-refresh request",
+    "skill-authoring": "before creating, revising or importing an authorized project skill",
     "skill-management": "the user invoked /skill-management or approved a skill proposal, or retained reports repeat a procedure",
     "cortex-control": "the user asks about /cortex-clear chat retention or the manual retention CLI",
     "report-publication": "you draft and publish your report and result",
@@ -409,7 +432,7 @@ _SKILL_TRIGGERS = {
 #: coordinator; the situational skills stay one ``read_skill`` call away.
 INLINED_SKILLS: dict[str, tuple[str, ...]] = {
     "coordinator": ("tool-discipline", "content-safety", "coordinator-communication"),
-    "worker": ("tool-discipline", "content-safety", "report-publication", "code-and-evidence"),
+    "worker": ("tool-discipline", "tool-discipline-worker", "content-safety", "report-publication", "code-and-evidence"),
     "shared": (),
 }
 
@@ -420,7 +443,8 @@ def situational_skill_triggers(role_kind: str, role_id: str | None = None) -> tu
     Keep the prompt list and the read_skill tool catalogue identical. Inlined
     procedures are intentionally absent: they do not require another read.
     """
-    loadable = NAMED_SKILLS.get(role_kind, ())
+    allowed = shared_skill_ids(role_kind, role_id) | WORKER_REFERENCE_IDS | COORDINATOR_REFERENCE_IDS | EXAMPLE_REFERENCE_IDS
+    loadable = tuple(skill_id for skill_id in NAMED_SKILLS.get(role_kind, ()) if skill_id in allowed)
     if role_id == CONSULTANT_ROLE_ID:
         loadable = tuple(skill_id for skill_id in loadable
                          if skill_id not in CONSULTANT_EXCLUDED_NAMED_SKILLS)

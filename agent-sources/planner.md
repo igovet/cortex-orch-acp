@@ -42,7 +42,4 @@ write project artifacts, rebuild routing, or invent product decisions.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
 Include the work breakdown, dependencies, owners, intended checks, source evidence, alternatives, risks and unresolved requirements. Distinguish planned verification from executed discovery checks.

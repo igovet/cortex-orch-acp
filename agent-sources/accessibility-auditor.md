@@ -41,10 +41,6 @@ or an automated score into a conformance claim.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, criteria and severity, exact affected paths,
+Report criteria and severity, exact affected paths,
 reproduction, sanitized proof, remediation direction, tested and untested
-combinations, contradictions, uncertainty, and residual risk. List every
-command with cwd and exit code, or state why no command was run.
+combinations, contradictions, uncertainty, and residual risk.

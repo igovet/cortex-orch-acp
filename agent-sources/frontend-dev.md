@@ -41,10 +41,7 @@ context. Inspect the final diff for unintended removals or duplicate changes.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact changed paths, visible and state behavior,
+Report exact changed paths, visible and state behavior,
 design-system reuse, accessibility decisions, browser or render evidence,
 contradictions, validation gaps, uncertainty, and residual risk. List commands
 with cwd and exit codes, or explain non-execution.

@@ -411,12 +411,12 @@ def project_rules(project_root: str | None) -> str:
 
 
 def build_agent_prompt(instructions: str, *, role: str, project_root: str | None, environ=None,
-                       consultant: bool = False) -> str:
+                       consultant: bool = False, role_id: str | None = None) -> str:
     """The whole text the ``cortex`` agent runs with: Cortex's unified base
     prompt (unless ``CORTEX_UNIFIED_BASE_PROMPT=0``), how MCP tools are reached
     here, the role instructions and the project's own rules."""
     from ..delegation.live_adapters import unified_base_prompt_enabled
-    from .unified_system_prompt import cortex_system_prompt
+    from .unified_system_prompt import cortex_system_prompt, prompt_access_class
 
     if role not in ("coordinator", "worker"):
         raise ValueError("role must be 'coordinator' or 'worker'")
@@ -424,7 +424,9 @@ def build_agent_prompt(instructions: str, *, role: str, project_root: str | None
         raise ValueError("instructions must be a non-empty string")
     parts = []
     if unified_base_prompt_enabled(environ):
-        parts.append(cortex_system_prompt(role, project_root, environ=environ, consultant=consultant).rstrip())
+        parts.append(cortex_system_prompt(
+            role, project_root, environ=environ, consultant=consultant,
+            access_class=prompt_access_class(role, role_id), native_tools=True).rstrip())
     parts += [CODE_MODE_NOTE, instructions.strip(), project_rules(project_root)]
     return "\n\n".join(part for part in parts if part) + "\n"
 

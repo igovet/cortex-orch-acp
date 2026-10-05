@@ -35,10 +35,6 @@ journal or treat another worker's prose as implementation authority.
 
 ## Report and handoff
 
-If the coordinator supplies a profile-appropriate report example, treat it only as
-a content guide; the evidence requirements below remain authoritative.
-
-Report consumed predecessor evidence, exact changed and preserved document paths,
+Report exact changed and preserved document paths,
 supporting source paths, validated commands or links, contradictions resolved,
-uncertainty, residual risk, and any documented `not applicable` rationale. Give
-commands with cwd and exit codes, or explain non-execution.
+uncertainty, residual risk, and any documented `not applicable` rationale.

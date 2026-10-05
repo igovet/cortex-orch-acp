@@ -19,6 +19,8 @@ from __future__ import annotations
 import threading
 import uuid
 
+import pytest
+
 from cortex_runtime.acp.orchestrating_runtime import OrchestratingRuntime, PromptOutcome
 from cortex_runtime.portable.engine_contract import StopReason
 from cortex_runtime.store import Store
@@ -61,6 +63,51 @@ def _delegate_and_wait_router(on_worker_prompt):
 class _Harness2(_Harness):
     """Same real Agent/pipe harness as the elicitation tests, but able to
     reach into the runtime this fix threads real requesters into."""
+
+
+@pytest.mark.parametrize("kind", ["outside_write", "outside_command"])
+@pytest.mark.parametrize("mode,answer", [("guarded", "allow"), ("guarded", "deny"), ("auto", None)])
+def test_outside_consent_requests_host_only_in_guarded_over_real_acp_connection(tmp_path, kind, mode, answer):
+    from cortex_runtime.configuration import access_mode
+    from cortex_runtime.orchestration import consent
+
+    observed = {}
+
+    def on_worker_prompt(store, channel, session_ref, call_index):
+        if call_index >= 1:
+            return PromptOutcome(StopReason.END_TURN, "Done.")
+        access_mode.switch(store, channel.task_id, mode, origin="acp_set_mode")
+        with store.connection() as db:
+            consent._ensure(db)
+            db.execute("INSERT INTO consent_requests VALUES(?,?,?,?,?,?,?,NULL)",
+                       ("cr_wire", channel.task_id, channel.attempt_id, kind, "/outside/target", "pending", "now"))
+            db.commit()
+        row, = consent._claim_pending(store, channel.task_id)
+        consent._ask(harness.runtime, channel.task_id, row, "en")
+        with store.connection() as db:
+            observed["status"] = db.execute("SELECT status FROM consent_requests WHERE id='cr_wire'").fetchone()[0]
+        return PromptOutcome(StopReason.END_TURN, "Done.")
+
+    harness = _Harness2(tmp_path, _delegate_and_wait_router(on_worker_prompt))
+    harness.start()
+    try:
+        session_id = _initialize_and_new_session(harness, _project(tmp_path), elicitation_form=None)
+        prompt_id = harness.send("session/prompt", dict(
+            sessionId=session_id, prompt=[dict(type="text", text="Do it.")]))
+        if mode == "guarded":
+            request = harness.wait_for(lambda m: m.get("method") == "session/request_permission")
+            assert request["params"]["sessionId"] == session_id
+            assert request["params"]["toolCall"]["toolCallId"] == "cortex-consent:cr_wire"
+            assert request["params"]["toolCall"]["rawInput"]["kind"] == kind
+            harness.send_raw(dict(jsonrpc="2.0", id=request["id"],
+                                  result={"outcome": {"outcome": "selected", "optionId": answer}}))
+        assert harness.response_for(prompt_id)["result"]["stopReason"] == "end_turn"
+        assert observed["status"] == ("approved" if mode == "auto" or answer == "allow" else "denied")
+        if mode == "auto":
+            with harness.stdout._lock:
+                assert not any(m.get("method") == "session/request_permission" for m in harness.stdout.lines)
+    finally:
+        harness.stop()
 
 
 def test_permission_request_round_trips_over_the_real_connection_and_client_answer_is_honored(tmp_path):
