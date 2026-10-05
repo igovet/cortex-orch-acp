@@ -22,16 +22,16 @@ def test_public_asset_preserves_exact_baseline_tiers_efforts_and_coordinator():
     assert template["coordinator"] == {"engine": "claude-agent-acp", "model": "opus[1m]",
                                        "parameters": {"thought_level": "medium"}}
     assert template["language"] == "ru"
-    # Complete portable production default snapshot, saved 2026-10-05 14:45 UTC.
+    # Complete portable production default snapshot, saved 2026-10-05 20:31 UTC.
     canonical = json.dumps(template, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    assert hashlib.sha256(canonical.encode()).hexdigest() == "a9a7d7c1504efb4f0a7bc713f985d2a68d5ca80c561f9ad918c07137be217bb4"
+    assert hashlib.sha256(canonical.encode()).hexdigest() == "2619571993bb7dbd2c79d31f34df5de43cb42893b28f2828215fa618607dac6b"
     expected = {
         ("claude-agent-acp", "default"): ("deep",),
         ("claude-agent-acp", "opus[1m]"): ("flagship", "deep"),
         ("claude-agent-acp", "claude-fable-5-1[1m]"): ("flagship",),
         ("claude-agent-acp", "claude-sonnet-5"): ("standard",),
         ("codex-acp", "gpt-6.1-sol"): ("deep", "standard"),
-        ("codex-acp", "gpt-6-astra"): ("flagship", "deep"),
+        ("codex-acp", "gpt-6-astra"): ("flagship",),
         ("codex-acp", "gpt-6-luna"): ("light",),
     }
     assert {(e, m) for e, models in routing["enabled"].items() for m in models} == set(expected)
